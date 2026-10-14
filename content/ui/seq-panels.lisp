@@ -58,6 +58,12 @@
 (export seq-hide-samples-sidebar
         seq-hide-mixer-panel
         seq-hide-fx-panel
+        seq-hide-patcher-mixer-panel
+        seq-hide-patcher-lower-panel
+        seq-patcher-layout?
+        seq-sidebar-toggle-on?
+        seq-mixer-toggle-on?
+        seq-lower-toggle-on?
         seq-hide-patch-macros-panel
         seq-toggle-patch-macros-panel
         seq-toggle-samples-sidebar
@@ -134,21 +140,70 @@
 
 (bind-key "C-x m" "seq-toggle-patch-macros-panel")
 
+(def seq-patcher-layout? ()
+  (or (= eseq.seq-step-tabs/seq-layout-mode :instrument-patcher)
+      (= eseq.seq-step-tabs/seq-layout-mode :instrument-patcher-source)
+      (= eseq.seq-step-tabs/seq-layout-mode :instrument-patcher-learn)))
+
+(def seq-hide-patcher-mixer-panel ()
+  (if eseq.seq-core-state/patcher-mixer-visible
+    (do
+      (set! eseq.seq-core-state/patcher-mixer-visible false)
+      (eseq.seq-layout/refresh-current-layout))
+    nil))
+
+(def seq-hide-patcher-lower-panel ()
+  (if eseq.seq-core-state/patcher-lower-visible
+    (do
+      (set! eseq.seq-core-state/patcher-lower-visible false)
+      (eseq.seq-layout/refresh-current-layout))
+    nil))
+
+;; The transport's three panel toggles keep their positions but, while a
+;; patcher layout is up, drive the patcher's own panels: the sidebar icon the
+;; macro sidebar, the other two the bottom bar's mixer strip and instrument
+;; panel (docs/patcher-workspace-spec.md §2.1). The `-on?` readers are what
+;; the icons highlight from.
+(def seq-sidebar-toggle-on? ()
+  (if (seq-patcher-layout?)
+    eseq.seq-core-state/patch-macros-panel-visible
+    eseq.seq-core-state/samples-sidebar-visible))
+
+(def seq-mixer-toggle-on? ()
+  (if (seq-patcher-layout?)
+    eseq.seq-core-state/patcher-mixer-visible
+    eseq.seq-core-state/mixer-panel-visible))
+
+(def seq-lower-toggle-on? ()
+  (if (seq-patcher-layout?)
+    eseq.seq-core-state/patcher-lower-visible
+    eseq.seq-core-state/lower-panel-visible))
+
 (def seq-toggle-samples-sidebar ()
-  (do
-    (set! eseq.seq-core-state/samples-sidebar-visible (not eseq.seq-core-state/samples-sidebar-visible))
-    (eseq.seq-layout/refresh-current-layout)))
+  (if (seq-patcher-layout?)
+    (seq-toggle-patch-macros-panel)
+    (do
+      (set! eseq.seq-core-state/samples-sidebar-visible (not eseq.seq-core-state/samples-sidebar-visible))
+      (eseq.seq-layout/refresh-current-layout))))
 
 (def seq-toggle-mixer-panel ()
-  (do
-    (sync-step-panel-buffer-from-current-window)
-    (set! eseq.seq-core-state/mixer-panel-visible (not eseq.seq-core-state/mixer-panel-visible))
-    (eseq.seq-layout/refresh-current-layout)))
+  (if (seq-patcher-layout?)
+    (do
+      (set! eseq.seq-core-state/patcher-mixer-visible (not eseq.seq-core-state/patcher-mixer-visible))
+      (eseq.seq-layout/refresh-current-layout))
+    (do
+      (sync-step-panel-buffer-from-current-window)
+      (set! eseq.seq-core-state/mixer-panel-visible (not eseq.seq-core-state/mixer-panel-visible))
+      (eseq.seq-layout/refresh-current-layout))))
 
 (def seq-toggle-fx-panel ()
-  (do
-    (set! eseq.seq-core-state/lower-panel-visible (not eseq.seq-core-state/lower-panel-visible))
-    (eseq.seq-layout/refresh-current-layout)))
+  (if (seq-patcher-layout?)
+    (do
+      (set! eseq.seq-core-state/patcher-lower-visible (not eseq.seq-core-state/patcher-lower-visible))
+      (eseq.seq-layout/refresh-current-layout))
+    (do
+      (set! eseq.seq-core-state/lower-panel-visible (not eseq.seq-core-state/lower-panel-visible))
+      (eseq.seq-layout/refresh-current-layout))))
 
 (def seq-restore-instrument-patcher-layout ()
   (do

@@ -50,6 +50,10 @@ pub(crate) struct CaptureArgs {
     /// keystrokes sent to the editor after the script settles, before the
     /// frame (palette and minibuffer states can only be reached by typing).
     keystrokes: Vec<KeyEvent>,
+    /// `--compile-patch PATH`: compile the visible patcher editing PATH the
+    /// way the live preview does, and publish its cable shapes and failed
+    /// node (docs/patcher-tensor-cables-spec.md §4) before the frame.
+    compile_patch: Option<PathBuf>,
 }
 
 impl CaptureArgs {
@@ -82,6 +86,7 @@ impl CaptureArgs {
         let mut edit_frames = 0;
         let mut noui = false;
         let mut keystrokes = Vec::new();
+        let mut compile_patch = None;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -115,6 +120,8 @@ impl CaptureArgs {
                         .map(|ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
                 ),
                 "--keys" => keystrokes.extend(parse_capture_keys(&next_arg(&mut args, "--keys")?)?),
+                "--compile-patch" => compile_patch =
+                    Some(absolute_path(&cwd, PathBuf::from(next_arg(&mut args, "--compile-patch")?))),
                 "-h" | "--help" => return Err(Self::usage()),
                 other => {
                     return Err(format!(
@@ -150,11 +157,12 @@ impl CaptureArgs {
             edit_frames,
             noui,
             keystrokes,
+            compile_patch,
         }))
     }
 
     fn usage() -> String {
-        "usage: metal_seq capture --script PATH [--project SAVED_PROJECT_JSON] [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH] [--scroll-frames N --scroll-x CELLS --scroll-y CELLS] [--all-panels] [--edit-frames N] [--noui] [--type TEXT] [--keys 'DOWN*3 RET']"
+        "usage: metal_seq capture --script PATH [--project SAVED_PROJECT_JSON] [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH] [--scroll-frames N --scroll-x CELLS --scroll-y CELLS] [--all-panels] [--edit-frames N] [--noui] [--type TEXT] [--keys 'DOWN*3 RET'] [--compile-patch PATCH_PATH]"
             .to_string()
     }
 }
@@ -1522,6 +1530,25 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         frame = build_render_frame(&mut editor, columns, rows);
     }
     if apply_capture_click_widgets(&mut editor, columns, rows)? {
+        frame = build_render_frame(&mut editor, columns, rows);
+    }
+    if let Some(path) = &args.compile_patch {
+        // The live loop compiles a patcher revision on a worker and publishes
+        // its shapes when it lands; headless capture waits for that result.
+        let request = editor.capture_patcher_preview_request(path)?;
+        let intent = request.intent();
+        let outcome = super::edit_sessions::spawn_preview_compile(
+            super::edit_sessions::PreviewSource::Patch(request),
+            48_000,
+            path.parent().map(Path::to_path_buf),
+            intent,
+        )
+        .recv_timeout(std::time::Duration::from_secs(300))
+        .map_err(|error| format!("--compile-patch: preview compile did not finish: {error}"))?;
+        if let Err(error) = &outcome.result {
+            eprintln!("--compile-patch: compile failed (shapes before the error are shown): {error}");
+        }
+        super::edit_sessions::publish_preview_shapes(outcome.shapes, path);
         frame = build_render_frame(&mut editor, columns, rows);
     }
     if !args.keystrokes.is_empty() {

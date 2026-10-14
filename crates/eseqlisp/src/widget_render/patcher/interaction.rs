@@ -37,6 +37,7 @@ use super::state::{
     AlignmentAxis, AlignmentSnapState, PatcherClipboard, PatcherClipboardConnection,
     PatcherClipboardNode, PatcherDragState, PatcherInteractionState, PatcherMacroEdit,
     PatcherPanState, active_patcher_patch, active_patcher_view_key, allocate_created_connection,
+    breadcrumb_overlay_enabled,
     allocate_created_node_avoiding, bring_nodes_to_front, connection_id_from_ports,
     debug_log_edit_event, delete_connection_edit_or_mark_deleted, ensure_source_node_edit,
     get_patcher_interaction_state, get_patcher_pan_state, macro_signatures_with_visual_edits,
@@ -166,6 +167,7 @@ pub(super) fn handle_patcher_pointer_down(
     let key = patcher_state_key(node);
     let mut state = get_patcher_interaction_state(key);
     if state.active_macro.is_some()
+        && breadcrumb_overlay_enabled(node)
         && rect_contains(patcher_back_button_rect(node.rect), local_col, local_row)
     {
         navigate_patcher_to_root(key, &mut state);
@@ -1013,6 +1015,7 @@ pub(super) fn handle_patcher_pointer_moved(
         (local_col, local_row),
     ));
     state.hover_back_button = state.active_macro.is_some()
+        && breadcrumb_overlay_enabled(node)
         && rect_contains(patcher_back_button_rect(node.rect), local_col, local_row);
     let ordered_nodes = ordered_patch_nodes(&patch, &state, &_view_key);
     state.hovered_node = hit_patcher_node(
@@ -1187,6 +1190,7 @@ pub(super) fn handle_patcher_double_click(
     };
     let mut state = get_patcher_interaction_state(key);
     if state.active_macro.is_some()
+        && breadcrumb_overlay_enabled(node)
         && rect_contains(patcher_breadcrumb_rect(node.rect), local_col, local_row)
     {
         navigate_patcher_to_root(key, &mut state);
@@ -1625,7 +1629,7 @@ pub(super) fn paste_patcher_clipboard(
     true
 }
 
-fn navigate_patcher_to_root(key: u64, state: &mut PatcherInteractionState) {
+pub(super) fn navigate_patcher_to_root(key: u64, state: &mut PatcherInteractionState) {
     state.active_macro = None;
     state.selected_nodes.clear();
     state.touched_nodes.clear();

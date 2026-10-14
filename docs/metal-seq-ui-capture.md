@@ -179,6 +179,30 @@ Keep durable visual fixtures in `crates/sequencer/ui/capture-fixtures/`. Layout
 tests should still assert finite, nonzero widget rectangles; PNG capture adds the
 visual review needed for spacing, typography, hierarchy, and clipping.
 
+## Patcher compile shapes
+
+A patcher draws tensor cables and the failed node's error border
+from its latest preview compile (`docs/patcher-tensor-cables-spec.md`). The live
+loop compiles on a worker; capture does not, unless `--compile-patch PATH` names
+the visible patcher's `:path`. Capture then runs the same preview compile with
+the pinned compiler, waits for it, and publishes its shapes before the frame. A
+failed compile is reported on stderr and still publishes the shapes before the
+error plus the failed node.
+
+```lisp
+;; $SCRATCH/cap-patch.lisp
+(capture-project (track :sampler :name "T1"))
+(def capture-after-sync ()
+  (effect-buffer "*patch*" (patcher :intent :effect :width :fill :height :fill
+                                    :initial-zoom 1.0 :path "/abs/patch/dsp.lisp")))
+```
+
+```sh
+cargo run -q -p sequencer --bin metal_seq -- capture --script $SCRATCH/cap-patch.lisp \
+  --buffer '*patch*' --compile-patch /abs/patch/dsp.lisp \
+  --width 700 --height 1100 --out $SCRATCH/patch.png
+```
+
 ## Bus and group routing
 
 `(group 0 1)` inside `capture-project` groups the named zero-based track indices

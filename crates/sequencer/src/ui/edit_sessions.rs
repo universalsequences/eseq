@@ -127,6 +127,22 @@ pub(super) struct InstrumentEditSession {
     /// Sample paths use content hashes, so deriving UI text from the filename
     /// would expose an implementation detail instead of the sample's name.
     pub(super) learn_target_name: Option<String>,
+    /// The run mode on disk; a toolbar change differs until Save writes it.
+    pub(super) persisted_run_mode: CustomInstrumentRunMode,
+    /// Where Save writes when it is not `path`: a draft saved from the
+    /// toolbar keeps its patcher on the draft dir (`path`) and carries on as
+    /// an `EditExisting` session over its new home here
+    /// (docs/patcher-workspace-spec.md §4).
+    pub(super) save_path: Option<PathBuf>,
+    /// That draft's dir, deleted when the editor closes.
+    pub(super) saved_draft_dir: Option<PathBuf>,
+    /// The release this session's Saves amend (spec §5.2); `None` until the
+    /// first Save of a versioned instrument cuts one.
+    /// `Some(0)`: a new instrument's unversioned files, saved this session.
+    pub(super) working_release: Option<u32>,
+    /// The project was saved since `working_release` was cut, so a project
+    /// file may pin it: the next Save cuts another.
+    pub(super) project_saved_since_release: bool,
 }
 
 impl InstrumentEditSession {
@@ -156,6 +172,11 @@ impl InstrumentEditSession {
             fork_restore: None,
             learn_target_path: None,
             learn_target_name: None,
+            persisted_run_mode: run_mode,
+            save_path: None,
+            saved_draft_dir: None,
+            working_release: None,
+            project_saved_since_release: false,
         }
     }
 
@@ -170,6 +191,7 @@ impl InstrumentEditSession {
         original_track: usize,
         surface: EditorSurface,
     ) -> Self {
+        let run_mode = CustomInstrumentRunMode::Instrument;
         Self {
             name,
             path,
@@ -180,7 +202,7 @@ impl InstrumentEditSession {
             last_valid_layout: None,
             visible_revision_valid: true,
             preview_generation: 0,
-            run_mode: CustomInstrumentRunMode::Instrument,
+            run_mode,
             surface,
             mode: InstrumentEditMode::CreateDraft {
                 temp_dir,
@@ -190,6 +212,48 @@ impl InstrumentEditSession {
             fork_restore: None,
             learn_target_path: None,
             learn_target_name: None,
+            persisted_run_mode: run_mode,
+            save_path: None,
+            saved_draft_dir: None,
+            working_release: None,
+            project_saved_since_release: false,
+        }
+    }
+}
+
+impl InstrumentEditSession {
+    /// Where Save writes the source.
+    pub(super) fn save_target(&self) -> &Path {
+        self.save_path.as_deref().unwrap_or(&self.path)
+    }
+
+    /// Unsaved changes, for the toolbar. A draft always has them; otherwise
+    /// the evaluated patch or its run mode differs from what was saved.
+    /// Moving boxes alone does not count (the layout is written on Save).
+    pub(super) fn is_dirty(&self) -> bool {
+        match &self.mode {
+            InstrumentEditMode::CreateDraft { .. } => true,
+            InstrumentEditMode::EditExisting { persisted_source } => {
+                self.last_valid_source != *persisted_source
+                    || self.run_mode != self.persisted_run_mode
+            }
+        }
+    }
+}
+
+impl EffectEditSession {
+    /// Where Save writes the source.
+    pub(super) fn save_target(&self) -> &Path {
+        self.save_path.as_deref().unwrap_or(&self.path)
+    }
+
+    /// Like [`InstrumentEditSession::is_dirty`].
+    pub(super) fn is_dirty(&self) -> bool {
+        match &self.mode {
+            EffectEditMode::CreateDraft { .. } => true,
+            EffectEditMode::EditExisting { persisted_source } => {
+                self.last_valid_source != *persisted_source
+            }
         }
     }
 }
@@ -198,7 +262,7 @@ pub(super) struct PendingInstrumentPreview {
     pub(super) generation: u64,
     /// Layout changes made after this revision was submitted win on completion.
     pub(super) layout: Option<String>,
-    pub(super) receiver: std::sync::mpsc::Receiver<Result<CompiledPreview, String>>,
+    pub(super) receiver: std::sync::mpsc::Receiver<PreviewCompileOutcome>,
 }
 
 pub(super) struct PendingInstrumentCancelRestore {
@@ -437,6 +501,10 @@ pub(super) struct EffectEditSession {
     pub(super) mode: EffectEditMode,
     /// `Some` only for drafts produced by forking a live edit session.
     pub(super) fork_restore: Option<ForkRestore>,
+    /// Like the instrument session's: where Save writes once a draft was
+    /// saved from the toolbar, and that draft's dir, deleted on close.
+    pub(super) save_path: Option<PathBuf>,
+    pub(super) saved_draft_dir: Option<PathBuf>,
 }
 
 impl EffectEditSession {
@@ -460,6 +528,8 @@ impl EffectEditSession {
             surface,
             mode: EffectEditMode::EditExisting { persisted_source },
             fork_restore: None,
+            save_path: None,
+            saved_draft_dir: None,
         }
     }
 
@@ -484,6 +554,8 @@ impl EffectEditSession {
             surface,
             mode: EffectEditMode::CreateDraft { temp_dir },
             fork_restore: None,
+            save_path: None,
+            saved_draft_dir: None,
         }
     }
 }
@@ -492,7 +564,7 @@ pub(super) struct PendingEffectPreview {
     pub(super) generation: u64,
     /// Layout changes made after this revision was submitted win on completion.
     pub(super) layout: Option<String>,
-    pub(super) receiver: std::sync::mpsc::Receiver<Result<CompiledPreview, String>>,
+    pub(super) receiver: std::sync::mpsc::Receiver<PreviewCompileOutcome>,
 }
 
 pub(super) enum PreviewSource {
@@ -504,6 +576,39 @@ pub(super) struct CompiledPreview {
     pub(super) source: String,
     pub(super) layout: Option<String>,
     pub(super) result: sequencer::lisp_host::CompileResult,
+}
+
+/// What the preview worker sends back: the compile result plus, for a patcher
+/// revision, the compiler's binding shapes for the patch editor
+/// (docs/patcher-tensor-cables-spec.md §4).
+pub(super) struct PreviewCompileOutcome {
+    pub(super) result: Result<CompiledPreview, String>,
+    /// `None` when the revision is not a patcher emission or the compiler
+    /// reported nothing (it never ran, crashed, or predates shape reports);
+    /// the patcher then keeps showing the previous result.
+    pub(super) shapes: Option<PreviewCompileShapes>,
+}
+
+pub(super) struct PreviewCompileShapes {
+    pub(super) bindings: eseqlisp::widget_render::patcher::PatcherEmissionBindings,
+    pub(super) shapes: sequencer::lisp_host::DGenBindingShapes,
+    pub(super) failed: Option<eseqlisp::widget_render::patcher::FailedForm>,
+}
+
+impl PreviewCompileShapes {
+    /// Hand the result to the patcher editing `path` (UI thread).
+    pub(super) fn publish(self, path: &Path) {
+        eseqlisp::widget_render::patcher::set_compile_shapes_for_path(
+            path, &self.bindings, self.shapes, self.failed,
+        );
+    }
+}
+
+/// Publish a completed preview's shapes for the session's patcher.
+pub(super) fn publish_preview_shapes(shapes: Option<PreviewCompileShapes>, path: &Path) {
+    if let Some(shapes) = shapes {
+        shapes.publish(path);
+    }
 }
 
 pub(super) fn preview_source_from_payload(
@@ -534,38 +639,74 @@ pub(super) fn spawn_preview_compile(
     sample_rate: u32,
     asset_base: Option<PathBuf>,
     intent: eseqlisp::widget_render::patcher::PatcherIntent,
-) -> std::sync::mpsc::Receiver<Result<CompiledPreview, String>> {
+) -> std::sync::mpsc::Receiver<PreviewCompileOutcome> {
     let (tx, rx) = std::sync::mpsc::channel();
     let worker_tx = tx.clone();
     let spawn = std::thread::Builder::new()
         .name("patch-preview".to_string())
         .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
         .spawn(move || {
+            let mut bindings = None;
+            let mut compile_source_for_report = None;
             let result = (|| {
                 let (source, compile_source, layout) = match input {
                     PreviewSource::Source { source, compile_source, layout } =>
                         (source, compile_source, layout),
                     PreviewSource::Patch(request) => {
                         let prepared = request.prepare()?;
+                        bindings = Some(prepared.bindings);
                         (prepared.source, prepared.compile_source, Some(prepared.layout))
                     }
                 };
-                let compile = match intent {
-                    eseqlisp::widget_render::patcher::PatcherIntent::Instrument =>
-                        sequencer::lisp_host::compile_and_load_instrument_with_origin,
-                    eseqlisp::widget_render::patcher::PatcherIntent::Effect =>
-                        sequencer::lisp_host::compile_and_load_with_origin,
+                use eseqlisp::widget_render::patcher::PatcherIntent;
+                use sequencer::lisp_host::{DGenCompileKind, DGenSourceOrigin};
+                let (kind, compiled) = match intent {
+                    PatcherIntent::Instrument => (
+                        DGenCompileKind::Instrument,
+                        sequencer::lisp_host::compile_and_load_instrument_with_origin(
+                            &compile_source, sample_rate, asset_base.as_deref(),
+                            DGenSourceOrigin::Draft,
+                        ),
+                    ),
+                    PatcherIntent::Effect => (
+                        DGenCompileKind::Effect,
+                        sequencer::lisp_host::compile_and_load_with_origin(
+                            &compile_source, sample_rate, asset_base.as_deref(),
+                            DGenSourceOrigin::Draft,
+                        ),
+                    ),
                 };
-                let result = compile(
-                    &compile_source, sample_rate, asset_base.as_deref(),
-                    sequencer::lisp_host::DGenSourceOrigin::Draft,
-                )?;
+                if compiled.is_err() {
+                    compile_source_for_report = Some((kind, compile_source));
+                }
+                let result = compiled?;
                 Ok(CompiledPreview { source, layout, result })
             })();
-            let _ = worker_tx.send(result);
+            let shapes = bindings.and_then(|bindings| match &result {
+                Ok(compiled) => Some(PreviewCompileShapes {
+                    bindings,
+                    shapes: compiled.result.manifest.binding_shapes.clone(),
+                    failed: None,
+                }),
+                Err(_) => {
+                    let (kind, compile_source) = compile_source_for_report?;
+                    let report = sequencer::lisp_host::dgen_compile_failure_report(
+                        kind, &compile_source, sample_rate,
+                    )?;
+                    Some(PreviewCompileShapes {
+                        bindings,
+                        shapes: report.binding_shapes,
+                        failed: report.failed_form,
+                    })
+                }
+            });
+            let _ = worker_tx.send(PreviewCompileOutcome { result, shapes });
         });
     if let Err(error) = spawn {
-        let _ = tx.send(Err(format!("Failed to start patch preview worker: {error}")));
+        let _ = tx.send(PreviewCompileOutcome {
+            result: Err(format!("Failed to start patch preview worker: {error}")),
+            shapes: None,
+        });
     }
     rx
 }
@@ -605,7 +746,9 @@ mod preview_tests {
             // The VM remains exclusively owned and usable by the UI while the
             // worker prepares and compiles its independent revision.
             editor.runtime_mut().eval_str("(def still-responsive 42)").unwrap();
-            let compiled = receiver.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+            let outcome = receiver.recv_timeout(Duration::from_secs(30)).unwrap();
+            assert!(outcome.shapes.is_some(), "a patcher revision reports its compile shapes");
+            let compiled = outcome.result.unwrap();
             assert!(compiled.source.contains("0.5"));
             assert!(compiled.layout.is_some());
             assert_eq!(compiled.result.manifest.n_outputs, 1);
@@ -613,6 +756,54 @@ mod preview_tests {
                 "(def signal (* (in 1) 0.5))\n(out signal 1)", "preview must not save the source");
             assert!(preview_source_from_payload(&editor, &payload, &dir.path().join("another.lisp")).is_err());
         }
+    }
+
+    /// A failing patch preview locates its error at the node (opt-in: needs a
+    /// shape-reporting compiler in `ESEQ_DGENLISP_TOOL`).
+    #[test]
+    fn failed_patch_preview_marks_the_failed_node_with_the_shape_reporting_compiler() {
+        use eseqlisp::widget_render::patcher::{self, PatcherIntent};
+        if !std::env::var_os("ESEQ_DGENLISP_TOOL").is_some_and(|tool| Path::new(&tool).exists()) {
+            eprintln!("skipping: ESEQ_DGENLISP_TOOL not set");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("effect.lisp");
+        std::fs::write(
+            &path,
+            "(def lanes (iota 8))\n(def ph (phasor (* lanes 110)))\n\
+             (def bad (reshape ph 4))\n(out (sum bad) 1)\n(out (in 1) 2)",
+        )
+        .unwrap();
+        let mut editor = Editor::new(Runtime::new(), eseqlisp::editor::EditorConfig::default());
+        editor.set_layout_viewport(80, 30);
+        let escaped = escape_lisp_string(&path.to_string_lossy());
+        editor.runtime_mut().eval_str(&format!(
+            "(effect-buffer \"*preview*\" (patcher :intent :effect \
+             :deferred-preview true :width :fill :height :fill :path \"{escaped}\"))",
+        )).unwrap();
+        editor.refresh_runtime_side_effects();
+        let id = editor.buffers.iter().find(|buffer| buffer.name == "*preview*").unwrap().id;
+        editor.set_active_buffer(id);
+        editor.update_tile_rects(80, 30);
+        editor.sync_layout_to_active_leaf();
+        let payload = editor.runtime_mut().eval_str(&format!(
+            "(dict :status :changed :path \"{escaped}\")",
+        )).unwrap().unwrap();
+        let input = preview_source_from_payload(&editor, &payload, &path).unwrap();
+        let outcome = spawn_preview_compile(input, 44_100, None, PatcherIntent::Effect)
+            .recv_timeout(Duration::from_secs(60))
+            .unwrap();
+        assert!(outcome.result.is_err(), "reshape without @shape must fail");
+        publish_preview_shapes(outcome.shapes, &path);
+        let failed = patcher::failed_compile_node(&path, None).expect("failed node located");
+        assert_eq!(failed.node_id, "bad");
+        assert_eq!(
+            patcher::node_output_shape(&path, "ph").map(|shape| shape.shape),
+            Some(vec![8]),
+            "shapes before the error survive"
+        );
+        assert_eq!(patcher::node_output_shape(&path, "bad"), None);
     }
 }
 

@@ -26,6 +26,7 @@ fn live_scene_transpose_reaches_synth_and_preserves_held_note_identity() {
         modulators: vec![], mod_outputs: vec![], amp_output_channel: None, probes: vec![], mod_destinations: vec![],
         n_inputs: 4, n_outputs: 1, tensors: vec![], tensor_init_data: vec![],
         voice_cell_id: None,
+        binding_shapes: Default::default(),
     };
     let lib = crate::lisp_host::test_loaded_dgen_lib();
     let engine_id = app.editor.engine_registry.upsert(crate::app::EngineDescriptor {

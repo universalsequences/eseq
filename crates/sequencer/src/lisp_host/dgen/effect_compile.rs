@@ -713,6 +713,7 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     dir: &Path,
     dylib_name: &str,
 ) -> Result<String, String> {
+    let source_for_report = effective_source;
     let (compiler_source, latency_samples) = super::effect_latency::prepare(
         effective_source, sample_rate, kind == DGenCompileKind::Effect,
     )?;
@@ -729,6 +730,10 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     let src_path = dir.join(format!("{dylib_name}.lisp"));
     std::fs::write(&src_path, &effective_source)
         .map_err(|e| format!("Failed to write source: {e}"))?;
+    // A shared output dir (the uncached compile paths) can hold a previous
+    // run's report under a reused name; never attribute it to this compile.
+    let shapes_report_path = super::compile_report::shapes_report_path(dir, dylib_name);
+    let _ = std::fs::remove_file(&shapes_report_path);
 
     // The stage is mandatory on every host. In particular, omitting this on
     // Linux makes DGenLisp silently select /usr/bin/clang and destroys the
@@ -762,10 +767,22 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let error = format!("{}{}", stderr, stdout);
+        let mut error = format!("{}{}", stderr, stdout);
+        // A compiler crash (a Swift trap) prints nothing; an empty error
+        // reaches the editor as no message at all, so say what happened.
+        if error.trim().is_empty() {
+            error = describe_silent_dgenlisp_failure(&output.status);
+        }
         log_dgenlisp_compile_failure(source_name, &src_path, &error, &effective_source);
+        // Shapes before the error + the failed form, for the patch editor
+        // (spec §4). Keyed by the source this function was handed — what
+        // `dgen_compile_failure_report` recomputes from the caller's source.
+        if let Some(report) = super::compile_report::read_shapes_report(dir, dylib_name) {
+            super::compile_report::record_failed_compile_report(source_for_report, report);
+        }
         return Err(error);
     }
+    super::compile_report::forget_failed_compile_report(source_for_report);
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let manifest = super::effect_latency::annotate_manifest(&stdout, latency_samples)?;
@@ -775,6 +792,27 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
         .map_err(|e| format!("Failed to write host manifest: {e}"))?;
     log_dgenlisp_compile_manifest(source_name, &src_path, &manifest);
     Ok(manifest)
+}
+
+/// The error for a DGenLisp run that failed without printing anything.
+fn describe_silent_dgenlisp_failure(status: &std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return format!(
+                "DGenLisp crashed (signal {signal}) without an error message; this is a compiler bug"
+            );
+        }
+    }
+    match status.code() {
+        Some(code) if code > 128 => format!(
+            "DGenLisp crashed (signal {}) without an error message; this is a compiler bug",
+            code - 128
+        ),
+        Some(code) => format!("DGenLisp failed (exit {code}) without an error message"),
+        None => "DGenLisp failed without an error message".to_string(),
+    }
 }
 
 // ── Parse manifest ──
@@ -844,5 +882,22 @@ mod hoist_tests {
         let source =
             "; comment survives\n(param xyz @min 0 @max 1)\n(def sig (in 1))\n(out sig 1)\n";
         assert_eq!(hoist_defmacro_params(source), source);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod silent_failure_tests {
+    use super::describe_silent_dgenlisp_failure;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn a_silent_compiler_crash_still_explains_itself() {
+        // Killed by SIGTRAP (a Swift trap), and the shell's 128+5 spelling.
+        let trapped = describe_silent_dgenlisp_failure(&std::process::ExitStatus::from_raw(5));
+        assert!(trapped.contains("crashed (signal 5)"), "{trapped}");
+        let exited = describe_silent_dgenlisp_failure(&std::process::ExitStatus::from_raw(133 << 8));
+        assert!(exited.contains("crashed (signal 5)"), "{exited}");
+        let plain = describe_silent_dgenlisp_failure(&std::process::ExitStatus::from_raw(1 << 8));
+        assert!(plain.contains("exit 1"), "{plain}");
     }
 }

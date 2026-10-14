@@ -215,7 +215,10 @@ fn learn_field(view: &mut LearnView, name: &str, value: &Value) -> Result<(), St
     Ok(())
 }
 
-/// The `editor` kind's fields a fixture seeds: the open macro view and the
+/// The `editor` kind's fields a fixture seeds: the session the patch toolbar
+/// shows (`mode`, `surface`, `buffer`, `run-mode`, `error`, `title`,
+/// `release`, `dirty`), the inspector's selection (`selected-node-ids`,
+/// `selected-node-texts`), the open macro view and the
 /// macro sidebar (macros as dicts `:name :calls`, a library one's also
 /// `:used`; assets `:reference :tier`; the selected asset `:reference` and,
 /// each optional, `:tensor-kind :shape :sets :wave-names :waves-per-set
@@ -236,6 +239,19 @@ fn editor_field(
     };
     match name {
         "open-macro" => view.open_macro = text(name, value)?,
+        // The patch toolbar's session (docs/patcher-workspace-spec.md §3).
+        "mode" => view.mode = text(name, value)?,
+        "surface" => view.surface = text(name, value)?,
+        "buffer" => view.buffer = text(name, value)?,
+        "run-mode" => view.run_mode = text(name, value)?,
+        "error" => view.error = text(name, value)?,
+        "title" => view.title = text(name, value)?,
+        "release" => view.release = number(name, value)? as i64,
+        "dirty" => view.dirty = flag(name, value)?,
+        "selected-node-ids" => view.selected_node_ids = rows(name, value, text)?,
+        "selected-node-texts" => view.selected_node_texts = rows(name, value, text)?,
+        "selected-node-shapes" => view.selected_node_shapes = rows(name, value, text)?,
+        "selected-cable" => view.selected_cable = rows(name, value, text)?,
         "patch-macros" => sidebar.patch_macros = rows(name, value, editor_macro)?,
         "library-macros" => sidebar.library_macros = rows(name, value, editor_macro)?,
         "assets" => {

@@ -322,6 +322,11 @@ pub struct Theme {
     pub patcher_error: Color,
     pub patcher_cable: Color,
     pub patcher_feedback_cable: Color,
+    /// A multichannel (tensor) cable: drawn dashed and thicker, Max-mc style
+    /// (docs/patcher-tensor-cables-spec.md §5).
+    pub patcher_tensor_cable: Color,
+    /// The second colour a multichannel cable's stroke alternates with.
+    pub patcher_tensor_cable_alt: Color,
     pub patcher_marquee_fill: Color,
     pub patcher_marquee_border: Color,
     pub patcher_node_bg: Color,
@@ -1145,6 +1150,16 @@ theme_slots!(
         patcher_feedback_cable,
         PATCHER_FEEDBACK_CABLE,
         Color::rgba(1.0, 0.59, 0.04, 0.88)
+    ),
+    (
+        patcher_tensor_cable,
+        PATCHER_TENSOR_CABLE,
+        Color::rgba(0.47, 0.80, 0.96, 1.0)
+    ),
+    (
+        patcher_tensor_cable_alt,
+        PATCHER_TENSOR_CABLE_ALT,
+        Color::rgba(0.13, 0.19, 0.22, 1.0)
     ),
     (
         patcher_marquee_fill,

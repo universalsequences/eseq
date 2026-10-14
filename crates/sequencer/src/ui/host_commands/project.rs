@@ -305,6 +305,12 @@ pub(super) fn handle(
             editor.handle_host_event(HostEvent::Status("New project".to_string()));
         }
         "save-project" => {
+            // The project about to be written may pin the release the open
+            // instrument editor is amending: its next Save cuts a new one
+            // (docs/patcher-workspace-spec.md §5.2).
+            if let Some(session) = ctx.sessions.instrument_edit_session.as_mut() {
+                session.project_saved_since_release = true;
+            }
             let _ = current_track_for_app(&mut app, &current_track);
             pull_named_scratch_buffer_into_project(&editor, &mut app);
             let requested_name = if let Value::Map(ref map) = payload {

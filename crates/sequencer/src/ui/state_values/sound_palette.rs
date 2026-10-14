@@ -1408,6 +1408,7 @@ mod rack_glyph_tests {
             tensors: Vec::new(),
             tensor_init_data: Vec::new(),
             voice_cell_id: None,
+            binding_shapes: Default::default(),
         }
     }
 

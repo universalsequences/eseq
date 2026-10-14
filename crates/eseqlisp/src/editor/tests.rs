@@ -5955,6 +5955,60 @@ fn real_patcher_lisp_right_click_opens_context_menu() {
     );
 }
 
+/// `(patcher-breadcrumb path)` lists the segments a toolbar renders, and
+/// `(patcher-breadcrumb-pop! depth path)` leaves the macro view from them.
+#[test]
+fn patcher_breadcrumb_natives_list_segments_and_pop_to_root() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    let path = std::env::temp_dir().join(format!(
+        "eseqlisp-breadcrumb-native-{}.lisp",
+        std::process::id()
+    ));
+    let lisp_path = path.to_string_lossy().replace('\\', "/");
+    let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+    crate::widget_render::patcher::open_macro_view_for_path_for_test(&path, Some("ap"));
+    let mut eval = |source: String| editor.runtime.eval_str(&source).unwrap();
+    let strings = |value: Option<Value>| -> Vec<String> {
+        let Some(Value::List(items)) = value else {
+            panic!("expected a list, got {value:?}");
+        };
+        items
+            .iter()
+            .map(|item| match &*item.borrow() {
+                Value::String(text) => text.clone(),
+                other => panic!("expected a string segment, got {other:?}"),
+            })
+            .collect()
+    };
+
+    assert_eq!(
+        strings(eval(format!("(patcher-breadcrumb \"{lisp_path}\")"))),
+        vec!["root".to_string(), file_name.clone(), "ap".to_string()]
+    );
+    assert_eq!(
+        eval(format!("(patcher-breadcrumb-pop! 2 \"{lisp_path}\")")),
+        Some(Value::Bool(false)),
+        "the last segment is the current view"
+    );
+    assert_eq!(
+        eval(format!("(patcher-breadcrumb-pop! 0 \"{lisp_path}\")")),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(
+        strings(eval(format!("(patcher-breadcrumb \"{lisp_path}\")"))),
+        vec!["root".to_string(), file_name]
+    );
+    assert_eq!(
+        strings(eval("(patcher-breadcrumb \"/no/such/dsp.lisp\")".to_string())),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        eval("(patcher-set-breadcrumb-overlay! false)".to_string()),
+        Some(Value::Bool(false))
+    );
+    eval("(patcher-set-breadcrumb-overlay! true)".to_string());
+}
+
 /// The REAL ui/patcher.lisp menu offers Insert Probe / Insert Scope on a
 /// cable and the other view on a probe node, and every probe command it
 /// names is a patcher command.
@@ -18226,4 +18280,63 @@ fn removed_natives_fail_with_their_hint_and_stay_out_of_completion() {
     let _ = runtime.eval_str("(old-native 1)");
     let status = runtime.take_status_message().unwrap_or_default();
     assert!(status.contains("old-native was removed; use new-native"), "{status}");
+}
+
+#[test]
+fn held_button_shows_pressed_until_drag_off_and_still_clicks_on_mouse_down() {
+    use crate::widget_render::button_press::{press_amount, press_held, reset_press_state};
+    fn find_button(node: &crate::layout::LayoutNode) -> Option<crate::layout::LayoutNode> {
+        if node.widget_type == "button" {
+            return Some(node.clone());
+        }
+        node.children.iter().find_map(find_button)
+    }
+    reset_press_state();
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def clicks (state 0))
+            (effect
+              (box :width 30 :height 6
+                (button :text (if (> clicks 0) "Again" "Go") :width 10
+                  :on-click |e| (set! clicks (+ clicks 1)))))
+            "#,
+        )
+        .expect("build button");
+    editor.refresh_runtime_side_effects();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(30, 8);
+    let button = find_button(&editor.widget_layout().expect("layout")).expect("button");
+    let (col, row) = (button.rect.col + 2.0, button.rect.row + 0.5);
+    let send = |editor: &mut Editor, kind: MouseEventKind, col: f32, row: f32| {
+        editor.handle_mouse_precise(mouse_event(kind, col as u16, row as u16), 0, 0, 30, 8, col, row);
+    };
+    let pressed_now = |editor: &Editor| {
+        let button = find_button(&editor.widget_layout().expect("layout")).expect("button");
+        // Far past any fade: only a held, pointer-inside press reads 1.0.
+        press_amount(&button, 1.0e6)
+    };
+
+    send(&mut editor, MouseEventKind::Down(MouseButton::Left), col, row);
+    assert_eq!(editor.runtime_mut().eval_str("clicks"), Ok(Some(Value::Number(1.0))));
+    assert_eq!(pressed_now(&editor), 1.0, "the re-rendered button shows the press");
+
+    send(&mut editor, MouseEventKind::Drag(MouseButton::Left), 28.0, 7.5);
+    assert!(press_held());
+    assert_eq!(pressed_now(&editor), 0.0, "dragging off un-presses");
+
+    send(&mut editor, MouseEventKind::Drag(MouseButton::Left), col, row);
+    assert_eq!(pressed_now(&editor), 1.0, "dragging back re-presses");
+
+    send(&mut editor, MouseEventKind::Drag(MouseButton::Left), 28.0, 7.5);
+    send(&mut editor, MouseEventKind::Up(MouseButton::Left), 28.0, 7.5);
+    assert!(!press_held());
+    assert_eq!(pressed_now(&editor), 0.0);
+    assert_eq!(
+        editor.runtime_mut().eval_str("clicks"),
+        Ok(Some(Value::Number(1.0))),
+        "release (inside or out) never adds a click"
+    );
 }

@@ -146,6 +146,29 @@
 ;; Widget :key props auto-qualify against this module (hazard a), so the
 ;; hand-rolled "patch-macros-" prefix is redundant and dropped; no Rust
 ;; assertion looks these keys up.
+;; The browser's magnifier (ui/browser.lisp `mag-glass`); that file is a
+;; render root, so the sidebar keeps its own copy.
+(defwidget macro-search-glass
+  :width 2 :height 2
+  :paint-margin 0.4
+  :shader
+  (let (
+      (__cx -0.05) (__cy 0.08) (__r 0.5)
+      (__lens (- (sqrt (+ (* (- x __cx) (- x __cx))
+                          (* (- y __cy) (- y __cy)))) __r))
+      (__ring (- (abs __lens) 0.07))
+      (__px (- x 0.35)) (__py (- y 0.385))
+      (__cos 0.866) (__sin 0.5)
+      (__rx (+ (* __cos __px) (* __sin __py)))
+      (__ry (- (* __cos __py) (* __sin __px)))
+      (__hx (- __rx (clamp __rx 0.0 0.4)))
+      (__handle (- (sqrt (+ (* __hx __hx) (* __ry __ry))) 0.08))
+      (__shape (min __ring __handle)))
+    (sdf/layer
+      (sdf/fill __shape
+        (material
+          :color :search-icon)))))
+
 (def search-row ()
   (box :width :fill :padding 0.25
     (text-input
@@ -155,7 +178,8 @@
       :placeholder "Search macros and assets..."
       :on-change (lambda (v) (set! macro-sidebar.filter v))
       :height 1.5
-      :font-size 11)))
+      :font-size 11
+      (macro-search-glass))))
 
 (def empty-message ()
   (box :width :fill :padding 0.5 :align :center

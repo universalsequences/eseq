@@ -1671,14 +1671,64 @@ pub(super) fn patcher_breadcrumb(
     path: &std::path::Path,
     interaction_state: &PatcherInteractionState,
 ) -> String {
+    patcher_breadcrumb_segments(path, interaction_state.active_macro.as_deref()).join(" / ")
+}
+
+/// The breadcrumb as segments: `root`, the file name, then the open macro
+/// view when there is one. Segments 0 and 1 both name the root view.
+pub(super) fn patcher_breadcrumb_segments(
+    path: &std::path::Path,
+    active_macro: Option<&str>,
+) -> Vec<String> {
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("dsp.lisp");
-    match interaction_state.active_macro.as_deref() {
-        Some(name) => format!("root / {file_name} / {name}"),
-        None => format!("root / {file_name}"),
+    let mut segments = vec!["root".to_string(), file_name.to_string()];
+    if let Some(name) = active_macro {
+        segments.push(name.to_string());
     }
+    segments
+}
+
+thread_local! {
+    /// Whether patchers draw the breadcrumb and macro back button over their
+    /// canvas. A host that renders the breadcrumb itself (the patch toolbar,
+    /// docs/patcher-workspace-spec.md §3) turns this off; a patcher's own
+    /// `:breadcrumb-overlay` prop overrides it.
+    static BREADCRUMB_OVERLAY: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// The path and state key of the patcher rendered most recently: the
+    /// target of the breadcrumb natives when they are given no path.
+    static LAST_RENDERED_PATCHER: RefCell<Option<(String, u64)>> = const { RefCell::new(None) };
+}
+
+pub(super) fn set_breadcrumb_overlay_enabled(enabled: bool) {
+    if BREADCRUMB_OVERLAY.with(|flag| flag.replace(enabled)) != enabled {
+        bump_widget_state_generation();
+    }
+}
+
+/// The canvas breadcrumb + back button are drawn and hit-tested for `node`.
+pub(super) fn breadcrumb_overlay_enabled(node: &LayoutNode) -> bool {
+    match node.props.get("breadcrumb-overlay") {
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(Value::Nil) => false,
+        _ => BREADCRUMB_OVERLAY.with(std::cell::Cell::get),
+    }
+}
+
+pub(super) fn record_rendered_patcher(path: &Path, key: u64) {
+    let path = path.to_string_lossy();
+    LAST_RENDERED_PATCHER.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if cell.as_ref().is_none_or(|(p, k)| *k != key || *p != path) {
+            *cell = Some((path.into_owned(), key));
+        }
+    });
+}
+
+pub(super) fn last_rendered_patcher() -> Option<(String, u64)> {
+    LAST_RENDERED_PATCHER.with(|cell| cell.borrow().clone())
 }
 
 fn expand_node_for_autocomplete(node: &mut PatchNode, edit: &PatcherTextEdit) {
@@ -2815,7 +2865,13 @@ pub(super) fn node_from_editor_text(
     let shape = editor_node_port_shape(&op, kind, macro_signatures);
     let param = editor_param_node_info(&op, trimmed, &inline_args);
     let args = match kind {
+        // An operator with no signal inlets (`in`, `ext`) takes its typed
+        // arguments as creation arguments, not as inline values for inlets.
         NodeKind::In => inline_args
+            .into_iter()
+            .map(ArgValue::Literal)
+            .collect::<Vec<_>>(),
+        NodeKind::Builtin if shape.input_count == 0 && !inline_args.is_empty() => inline_args
             .into_iter()
             .map(ArgValue::Literal)
             .collect::<Vec<_>>(),

@@ -152,6 +152,8 @@ pub(crate) struct FrameDiffState {
     /// The selected file-backed tensor's `@file` reference, presented as
     /// `editor.selected-asset` for the sidebar's asset inspector.
     pub(crate) prev_editor_selected_asset: Option<String>,
+    pub(crate) prev_editor_selected_nodes: Vec<(String, String)>,
+    pub(crate) prev_editor_selected_shapes: (Vec<String>, Vec<String>),
     pub(crate) prev_playing: bool,
     pub(crate) prev_bpm: u32,
     pub(crate) prev_playhead: u32,

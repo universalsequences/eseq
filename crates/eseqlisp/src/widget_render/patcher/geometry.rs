@@ -11,7 +11,7 @@ use super::metrics::{
     CABLE_HIT_RADIUS_CELLS, CABLE_TARGET_RADIUS_CELLS, MIN_ZOOM, NODE_RESIZE_HANDLE_HIT_SIZE_CELLS,
     NODE_TEXT_COL_OFFSET, PATCH_ORIGIN_COL_OFFSET, PATCH_ORIGIN_ROW_OFFSET,
     PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
-    VIEW_PADDING_X, VIEW_PADDING_Y,
+    SEGMENTED_CABLE_DRAG_EXTRA_RANGE_CELLS, SEGMENTED_CABLE_DRAG_PADDING_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
 };
 use super::model::{
     ArgValue, CableEndpoint, InputPortRef, InputPresentation, OutputPortRef, Patch,
@@ -643,7 +643,7 @@ pub(super) fn hit_patcher_cable(
                     super::super::cable::distance_to_segmented_cable_px(
                         start,
                         end,
-                        origin.1 + segment.segment_row * zoom,
+                        segmented_cable_row_px(start, end, origin.1, segment.segment_row, zoom),
                         SEGMENTED_CABLE_CORNER_RADIUS_CELLS * zoom,
                         (local_col, local_row),
                     )
@@ -694,6 +694,28 @@ pub(super) fn connection_cable_edit_points(
     }
 }
 
+/// Screen row of a segmented cable's horizontal run. The authored row is an
+/// absolute model row, so moving either endpoint node can leave it outside the
+/// span between the ports (the run then sits above the outlet or below the
+/// inlet and the cable doubles back on itself). Clamp it into the same range a
+/// segment drag allows, so the cable reroutes as nodes move; the authored row is
+/// kept, and takes over again once the nodes move back around it.
+pub(super) fn segmented_cable_row_px(
+    start: (f32, f32),
+    end: (f32, f32),
+    origin_row: f32,
+    segment_row: f32,
+    zoom: f32,
+) -> f32 {
+    super::super::cable::segment_row_for_drag(
+        start,
+        end,
+        origin_row + segment_row * zoom,
+        SEGMENTED_CABLE_DRAG_PADDING_CELLS * zoom,
+        SEGMENTED_CABLE_DRAG_EXTRA_RANGE_CELLS * zoom,
+    )
+}
+
 pub(super) fn hit_patcher_segmented_cable_horizontal_segment(
     patch: &Patch,
     rect: Rect,
@@ -732,7 +754,7 @@ pub(super) fn hit_patcher_segmented_cable_horizontal_segment(
             super::super::cable::segmented_horizontal_segment_hit(
                 start,
                 end,
-                origin.1 + segment.segment_row * zoom,
+                segmented_cable_row_px(start, end, origin.1, segment.segment_row, zoom),
                 SEGMENTED_CABLE_CORNER_RADIUS_CELLS * zoom,
                 CABLE_HIT_RADIUS_CELLS * zoom,
                 (local_col, local_row),

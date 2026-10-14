@@ -78,6 +78,18 @@ pub(crate) struct PatchCableInstance {
     /// Solid style only: live signal level (0..1) at the start and end plug.
     /// The plug's hole glows with it, like a jack LED.
     pub plug_levels: [f32; 2],
+    /// Solid style only: colour of the plug at `end` (the input), so an
+    /// occupied input still reads as an input. Alpha 0 = the cable colour.
+    pub end_plug_color: [f32; 4],
+    /// Two-colour stroke pattern `[primary, alternate, _, _]` in framebuffer
+    /// pixels along the cable from `start`; `primary == 0` = one colour (and
+    /// the shader skips the arc-length work). Full float4s here and in
+    /// `alt_color` keep the struct a multiple of 16 bytes: MSL aligns the
+    /// struct to its `float4 color`, so its array stride must match this
+    /// `repr(C)` size exactly.
+    pub dash_px: [f32; 4],
+    /// The alternate run's colour (patcher style, dashed cables only).
+    pub alt_color: [f32; 4],
 }
 
 /// The dedicated patch editor's cable: a near-white core inside a darkened,
@@ -132,6 +144,7 @@ pub(crate) fn solid_cable_instance(
     plug_radius_px: f32,
     plug_levels: [f32; 2],
     color: [f32; 4],
+    end_plug_color: [f32; 4],
     vp_w: f32,
     vp_h: f32,
 ) -> Option<PatchCableInstance> {
@@ -178,6 +191,9 @@ pub(crate) fn solid_cable_instance(
         style: PATCH_CABLE_STYLE_SOLID,
         plug_radius_px,
         plug_levels,
+        end_plug_color,
+        dash_px: [0.0; 4],
+        alt_color: [0.0; 4],
     })
 }
 

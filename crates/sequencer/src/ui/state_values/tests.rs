@@ -3321,143 +3321,501 @@ use panel_kinds_seed::*;
         )));
     }
 
-    #[test]
-    fn metal_seq_browser_new_instrument_editor_uses_finalize_copy() {
-        let mut editor = browser_editor_on_instrument_tab();
-        set_kind_field(&mut editor, "editor", "mode", Value::String("new-instrument".to_string()));
-        seed_value("current-track", Value::Number(2.0));
+    /// The patch toolbar's widget tree for `fields` seeded on the `editor`
+    /// kind (docs/patcher-workspace-spec.md §3).
+    fn patch_toolbar_tree(editor: &mut Editor, fields: &[(&str, Value)]) -> Value {
+        if !collect_tile_buffer_names(editor).contains(&"*patch-toolbar*".to_string()) {
+            editor.create_scratch_buffer(
+                "*instrument-patcher:test*",
+                "",
+                eseqlisp::BufferMode::ESeqLisp,
+            );
+            editor
+                .runtime_mut()
+                .eval_str(r#"(eseq.seq-layout/apply-instrument-patcher-layout "*instrument-patcher:test*")"#)
+                .expect("apply instrument patcher layout");
+        }
+        for (field, value) in fields {
+            set_kind_field(editor, "editor", field, value.clone());
+        }
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
-        let browser = editor
+        editor
             .buffers
             .iter()
-            .find(|buffer| buffer.name == "*samples*")
-            .expect("browser lisp should create the *samples* buffer");
-        let tree = browser
+            .find(|buffer| buffer.name == "*patch-toolbar*")
+            .expect("toolbar lisp should create the *patch-toolbar* buffer")
             .widget_tree
             .as_ref()
-            .expect("browser widget tree")
-            .clone();
-        assert!(value_contains_string(&tree, "Mode"));
-        assert!(value_contains_string(&tree, "Instrument"));
-        assert!(value_contains_string(&tree, "Free Patch"));
-        assert!(value_contains_string(&tree, "Save as"));
-        assert!(value_contains_string(&tree, "Finalize"));
-        assert!(
-            !value_contains_string(&tree, "Save & Add"),
-            "new instrument editor should use finalization copy"
-        );
+            .expect("toolbar widget tree")
+            .clone()
+    }
 
-        let layout = editor
+    /// The inspector's widget tree for the patcher selection `nodes`
+    /// (`(id, box text)`), as the host publishes it.
+    fn patch_inspector_tree(editor: &mut Editor, nodes: &[(&str, &str)]) -> Value {
+        patch_toolbar_tree(editor, &[("mode", Value::String("edit-instrument".into()))]);
+        let strings = |values: Vec<&str>| {
+            Value::List(
+                values
+                    .into_iter()
+                    .map(|v| Rc::new(RefCell::new(Value::String(v.to_string()))))
+                    .collect(),
+            )
+        };
+        set_kind_field(editor, "editor", "selected-node-ids", strings(nodes.iter().map(|n| n.0).collect()));
+        set_kind_field(editor, "editor", "selected-node-texts", strings(nodes.iter().map(|n| n.1).collect()));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*patch-inspector*")
+            .expect("inspector lisp should create the *patch-inspector* buffer")
+            .widget_tree
+            .as_ref()
+            .expect("inspector widget tree")
+            .clone()
+    }
+
+    #[test]
+    fn metal_seq_patch_inspector_shows_a_param_boxs_text_and_attributes() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let tree = patch_inspector_tree(&mut editor, &[]);
+        assert!(value_contains_string(&tree, "No nodes selected"));
+
+        let tree = patch_inspector_tree(
+            &mut editor,
+            &[("n1", "param attack @group amp @default 5 @min 0 @max 1000 @unit ms")],
+        );
+        for text in ["param", "Attributes", "@group", "@default", "@min", "@max", "@unit", "1000", "ms"] {
+            assert!(value_contains_string(&tree, text), "inspector should show {text}");
+        }
+
+        let tree = patch_inspector_tree(&mut editor, &[("n3", "5")]);
+        for text in ["constant", "5"] {
+            assert!(value_contains_string(&tree, text), "a number box shows {text}");
+        }
+        assert!(!value_contains_string(&tree, "Attributes"));
+
+        let tree = patch_inspector_tree(&mut editor, &[("n2", "phasor 440")]);
+        for text in ["phasor", "Inlets", "Outlets"] {
+            assert!(value_contains_string(&tree, text), "inspector should show {text}");
+        }
+    }
+
+    #[test]
+    fn metal_seq_patch_inspector_shows_a_selected_cables_shape_and_ends() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let strings = |values: &[&str]| {
+            Value::List(
+                values
+                    .iter()
+                    .map(|v| Rc::new(RefCell::new(Value::String(v.to_string()))))
+                    .collect(),
+            )
+        };
+        patch_inspector_tree(&mut editor, &[]);
+        set_kind_field(
+            &mut editor,
+            "editor",
+            "selected-cable",
+            strings(&["signal-tensor|[8]|8 lanes", "phasor · outlet 1", "cos · inlet 1"]),
+        );
+        let tree = patch_inspector_tree(&mut editor, &[]);
+        for text in ["Cable", "signal-tensor", "[8]", "8 lanes", "phasor · outlet 1", "cos · inlet 1"] {
+            assert!(value_contains_string(&tree, text), "cable inspector should show {text}");
+        }
+        assert!(!value_contains_string(&tree, "No nodes selected"));
+    }
+
+    #[test]
+    fn metal_seq_patch_inspector_shows_a_nodes_compiled_output_shape() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let strings = |values: &[&str]| {
+            Value::List(
+                values
+                    .iter()
+                    .map(|v| Rc::new(RefCell::new(Value::String(v.to_string()))))
+                    .collect(),
+            )
+        };
+        set_kind_field(&mut editor, "editor", "selected-node-shapes", strings(&["signal-tensor|[8 1]|8 lanes"]));
+        let tree = patch_inspector_tree(&mut editor, &[("n1", "phasor")]);
+        assert!(value_contains_string(&tree, "output"));
+        for text in ["signal-tensor", "[8 1]", "8 lanes"] {
+            assert!(value_contains_string(&tree, text), "node output should show {text}");
+        }
+    }
+
+    #[test]
+    fn metal_seq_patch_inspector_marks_attributes_that_differ_across_boxes() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let tree = patch_inspector_tree(
+            &mut editor,
+            &[
+                ("n1", "param attack @group amp @min 0"),
+                ("n2", "param decay @group amp @min 1"),
+            ],
+        );
+        assert!(value_contains_string(&tree, "2 boxes"));
+        assert!(value_contains_string(&tree, "amp"), "a shared value shows");
+        assert!(value_contains_string(&tree, "mixed"), "a differing value reads mixed");
+        assert!(!value_contains_string(&tree, "text"), "box text is edited on the canvas");
+    }
+
+    #[test]
+    fn metal_seq_patch_inspector_attribute_write_rewrites_each_selected_box() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        patch_inspector_tree(
+            &mut editor,
+            &[("n1", "param attack @min 0"), ("n2", "param decay @min 1 @max 9")],
+        );
+        let rewritten = editor
             .runtime_mut()
-            .layout_snapshot_for_tree_with_viewport(&tree, Some((28.0, 13.0)))
-            .expect("new instrument editor sidebar should lay out");
-        for label in ["Mode", "Instrument", "Free Patch", "Finalize"] {
-            let node = find_layout_text_containing(&layout, label)
-                .unwrap_or_else(|| panic!("expected visible editor text: {label}"));
+            .eval_str(
+                r#"(map (lambda (text) (patcher-node-set-attr text "@min" "-1")) (list "param attack @min 0" "param decay @min 1 @max 9"))"#,
+            )
+            .expect("rewrite")
+            .expect("value");
+        assert!(value_contains_string(&rewritten, "param attack @min -1"), "{rewritten:?}");
+        assert!(value_contains_string(&rewritten, "param decay @min -1 @max 9"));
+        // No patcher is open in this harness: the write is a no-op, not an error.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(r#"(eseq.patch-inspector/set-attribute! "@min" "-1")"#)
+                .expect("set attribute"),
+            Some(Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn metal_seq_patch_toolbar_draft_instrument_offers_run_mode_save_and_done() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let tree = patch_toolbar_tree(
+            &mut editor,
+            &[
+                ("mode", Value::String("new-instrument".into())),
+                ("buffer", Value::String("*instrument-patcher:draft*".into())),
+                ("dirty", Value::Bool(true)),
+            ],
+        );
+        for text in ["untitled instrument", "Instrument", "Free", "Save", "Done"] {
+            assert!(value_contains_string(&tree, text), "draft toolbar should show {text}");
+        }
+        for text in ["Finalize", "Save as…", "Code"] {
             assert!(
-                node.rect.width.is_finite()
-                    && node.rect.height.is_finite()
-                    && node.rect.width > 0.0
-                    && node.rect.height > 0.0,
-                "editor text should have a finite nonzero rect for {label}: {:?}",
-                node.rect
+                !value_contains_string(&tree, text),
+                "a draft has no {text}: nothing saved to fork or eject yet"
             );
         }
     }
 
     #[test]
-    fn metal_seq_browser_new_effect_editor_uses_finalize_controls() {
-        let mut editor = browser_editor_on_instrument_tab();
-        set_kind_field(&mut editor, "editor", "mode", Value::String("new-effect".to_string()));
-        seed_value("current-track", Value::Number(2.0));
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        let browser = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*samples*")
-            .expect("browser lisp should create the *samples* buffer");
-        let tree = browser
-            .widget_tree
-            .as_ref()
-            .expect("browser widget tree")
-            .clone();
-        assert!(value_contains_string(&tree, "Draft patch"));
-        assert!(value_contains_string(&tree, "track "));
-        assert!(value_contains_string(&tree, "Save as"));
-        assert!(value_contains_string(&tree, "effect-name"));
-        assert!(value_contains_string(&tree, "Save & Add"));
-        assert!(
-            !value_contains_string(&tree, "Search samples"),
-            "new effect editor should replace the sample browser chrome"
+    fn metal_seq_patch_toolbar_existing_instrument_shows_title_release_and_save_as() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let tree = patch_toolbar_tree(
+            &mut editor,
+            &[
+                ("mode", Value::String("edit-instrument".into())),
+                ("buffer", Value::String("*instrument-patcher:binaural*".into())),
+                ("surface", Value::String("patch".into())),
+                ("title", Value::String("binauralfree".into())),
+                ("release", Value::Number(3.0)),
+            ],
         );
+        for text in ["binauralfree", "v3", "Save as…", "Patch", "Code", "Done"] {
+            assert!(value_contains_string(&tree, text), "existing toolbar should show {text}");
+        }
+        assert!(!value_contains_string(&tree, "Fork"), "Save as… replaces Fork");
+    }
 
-        let layout = editor
+    #[test]
+    fn metal_seq_patch_toolbar_release_menu_lists_releases_and_offers_restore() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let ints = |values: &[f64]| {
+            Value::List(
+                values
+                    .iter()
+                    .map(|v| Rc::new(RefCell::new(Value::Number(*v))))
+                    .collect(),
+            )
+        };
+        patch_toolbar_tree(
+            &mut editor,
+            &[
+                ("mode", Value::String("edit-instrument".into())),
+                ("title", Value::String("binauralfree".into())),
+                ("release", Value::Number(3.0)),
+                ("releases", ints(&[1.0, 2.0, 3.0])),
+                ("release-tracks", ints(&[2.0, 0.0, 1.0])),
+            ],
+        );
+        editor
             .runtime_mut()
-            .layout_snapshot_for_tree_with_viewport(&tree, Some((28.0, 13.0)))
-            .expect("new effect editor sidebar should lay out");
-        for label in ["Draft patch", "Save as", "Save & Add"] {
-            let node = find_layout_text_containing(&layout, label)
-                .unwrap_or_else(|| panic!("expected visible editor text: {label}"));
-            assert!(
-                node.rect.width.is_finite()
-                    && node.rect.height.is_finite()
-                    && node.rect.width > 0.0
-                    && node.rect.height > 0.0,
-                "editor text should have a finite nonzero rect for {label}: {:?}",
-                node.rect
-            );
+            .eval_str(r#"(let ((m eseq.patch-toolbar/release-menu)) (set! m.open true))"#)
+            .expect("open release menu");
+        let tree = patch_toolbar_tree(&mut editor, &[]);
+        for text in ["v3 ▾", "Restore v1  ·  2 tracks", "Restore v2", "v3  (open)  ·  1 track"] {
+            assert!(value_contains_string(&tree, text), "release menu should show {text}");
         }
-    }
-
-    /// Fork belongs next to the finalize button exactly when the primary
-    /// button overwrites a shared definition (docs/instrument-fork-spec.md
-    /// §3.5), and nowhere else.
-    #[test]
-    fn metal_seq_browser_edit_modes_offer_fork_next_to_save() {
-        for mode in ["edit-instrument", "edit-effect"] {
-            let mut editor = browser_editor_on_instrument_tab();
-            set_kind_field(&mut editor, "editor", "mode", Value::String(mode.to_string()));
-            editor.runtime_mut().run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
-            let tree = editor
-                .buffers
-                .iter()
-                .find(|buffer| buffer.name == "*samples*")
-                .expect("browser lisp should create the *samples* buffer")
-                .widget_tree
-                .as_ref()
-                .expect("browser widget tree")
-                .clone();
-            assert!(
-                value_contains_string(&tree, "Fork"),
-                "{mode} should offer Fork beside the clobbering Save button"
-            );
-            assert!(value_contains_string(&tree, "Save"));
-        }
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(host-command "editor-restore-release" (dict :release 1))"#)
+            .expect("restore");
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(
+            command,
+            eseqlisp::host::HostCommand::Custom { name, .. } if name == "editor-restore-release"
+        )));
     }
 
     #[test]
-    fn metal_seq_browser_new_instrument_editor_has_nothing_to_fork() {
-        let mut editor = browser_editor_on_instrument_tab();
-        set_kind_field(&mut editor, "editor", "mode", Value::String("new-instrument".to_string()));
+    fn metal_seq_patch_toolbar_shows_a_back_arrow_inside_a_macro() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let tree = patch_toolbar_tree(
+            &mut editor,
+            &[("mode", Value::String("edit-instrument".into())), ("open-macro", Value::String(String::new()))],
+        );
+        assert!(!value_contains_string(&tree, "‹"), "no way back from the root");
+        let tree = patch_toolbar_tree(&mut editor, &[("open-macro", Value::String("myfm".into()))]);
+        assert!(value_contains_string(&tree, "‹"), "inside a macro the toolbar offers back");
+    }
+
+    #[test]
+    fn metal_seq_patch_toolbar_naming_modal_lays_out_over_the_frame() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        patch_toolbar_tree(
+            &mut editor,
+            &[
+                ("mode", Value::String("new-instrument".into())),
+                ("buffer", Value::String("*instrument-patcher:draft*".into())),
+                ("dirty", Value::Bool(true)),
+            ],
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.patch-toolbar/save!)")
+            .expect("save");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
-        let tree = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*samples*")
-            .expect("browser lisp should create the *samples* buffer")
-            .widget_tree
-            .as_ref()
-            .expect("browser widget tree")
-            .clone();
+        let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        assert!(editor.switch_active_tile_to_buffer_named("*patch-toolbar*"));
+        let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        let layout = editor.widget_layout().expect("toolbar layout");
+        let title = find_layout_text_containing(&layout, "Cancel")
+            .expect("the naming modal's buttons lay out");
+        // The toolbar tile is a few rows tall; the modal lays out over the
+        // frame, far below it (a box root used to drop it entirely).
         assert!(
-            !value_contains_string(&tree, "Fork"),
-            "a draft has no source to fork from"
+            title.rect.height > 0.0 && title.rect.row > 10.0,
+            "the modal centres on the frame, outside the toolbar: {:?}",
+            title.rect
         );
-        assert!(value_contains_string(&tree, "Finalize"));
+    }
+
+    #[test]
+    fn metal_seq_patch_toolbar_save_as_opens_the_naming_modal_on_the_forked_draft() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        patch_toolbar_tree(
+            &mut editor,
+            &[
+                ("mode", Value::String("edit-instrument".into())),
+                ("buffer", Value::String("*instrument-patcher:binauralfree*".into())),
+                ("title", Value::String("binauralfree".into())),
+            ],
+        );
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.patch-toolbar/save-as!)")
+            .expect("save as");
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(
+            command,
+            eseqlisp::host::HostCommand::Custom { name, .. } if name == "editor-save-as"
+        )));
+        // The host forks into a draft session (fork-editor-session).
+        let tree = patch_toolbar_tree(
+            &mut editor,
+            &[
+                ("mode", Value::String("new-instrument".into())),
+                ("buffer", Value::String("*instrument-patcher:new-instrument*".into())),
+                ("dirty", Value::Bool(true)),
+            ],
+        );
+        for text in ["instrument name", "Cancel"] {
+            assert!(value_contains_string(&tree, text), "Save as… should ask the fork's name: {text}");
+        }
+    }
+
+    #[test]
+    fn metal_seq_patch_toolbar_save_as_on_a_draft_asks_its_name_at_once() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        patch_toolbar_tree(
+            &mut editor,
+            &[
+                ("mode", Value::String("new-instrument".into())),
+                ("buffer", Value::String("*instrument-patcher:new-instrument*".into())),
+                ("dirty", Value::Bool(true)),
+            ],
+        );
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.patch-toolbar/save-as!)")
+            .expect("save as");
+        assert!(
+            !editor.drain_host_commands().iter().any(|command| matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "editor-save-as"
+            )),
+            "a draft has nothing to fork: the host's editor-save-as ignores it"
+        );
+        let tree = patch_toolbar_tree(&mut editor, &[]);
+        for text in ["instrument name", "Cancel"] {
+            assert!(value_contains_string(&tree, text), "Save as… on a draft is its first Save: {text}");
+        }
+    }
+
+    #[test]
+    fn metal_seq_patch_toolbar_save_on_a_saved_patch_saves_at_once() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        patch_toolbar_tree(
+            &mut editor,
+            &[
+                ("mode", Value::String("edit-instrument".into())),
+                ("title", Value::String("binauralfree".into())),
+                ("release", Value::Number(3.0)),
+            ],
+        );
+        editor.drain_host_commands();
+        editor.runtime_mut().eval_str("(eseq.patch-toolbar/save!)").expect("save");
+        assert!(
+            editor.drain_host_commands().iter().any(|command| matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "editor-save"
+            )),
+            "a saved patch has nothing to ask: Save writes at once (the host toasts what it did)"
+        );
+        let tree = patch_toolbar_tree(&mut editor, &[]);
+        assert!(!value_contains_string(&tree, "instrument name"), "no modal for a saved patch");
+    }
+
+    #[test]
+    fn metal_seq_patch_toolbar_draft_effect_has_no_run_mode() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let tree = patch_toolbar_tree(
+            &mut editor,
+            &[
+                ("mode", Value::String("new-effect".into())),
+                ("buffer", Value::String("*effect-patcher:draft*".into())),
+            ],
+        );
+        assert!(value_contains_string(&tree, "untitled effect"));
+        assert!(!value_contains_string(&tree, "Free"), "run mode is an instrument's");
+    }
+
+    #[test]
+    fn metal_seq_patch_toolbar_macro_action_replaces_save() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let tree = patch_toolbar_tree(
+            &mut editor,
+            &[
+                ("mode", Value::String("edit-instrument".into())),
+                ("active-macro", Value::String("simp".into())),
+                ("active-macro-action", Value::String("save-to-library".into())),
+            ],
+        );
+        assert!(value_contains_string(&tree, "Save Macro to Library"));
+        assert!(!value_contains_string(&tree, "Save as…"));
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.patch-toolbar/save!)")
+            .expect("save");
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(
+            command,
+            eseqlisp::host::HostCommand::Custom { name, .. } if name == "save-active-editor-macro"
+        )));
+    }
+
+    #[test]
+    fn metal_seq_patch_toolbar_save_and_done_queue_host_commands() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        patch_toolbar_tree(
+            &mut editor,
+            &[
+                ("mode", Value::String("new-instrument".into())),
+                ("buffer", Value::String("*instrument-patcher:draft*".into())),
+                ("dirty", Value::Bool(true)),
+            ],
+        );
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.patch-toolbar/save!)")
+            .expect("save");
+        assert!(
+            !editor.drain_host_commands().iter().any(|command| matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "editor-save"
+            )),
+            "a draft's Save asks for a name before it writes"
+        );
+        let tree = patch_toolbar_tree(&mut editor, &[]);
+        for text in ["Save instrument", "instrument name", "Cancel", "Save"] {
+            assert!(value_contains_string(&tree, text), "naming modal should show {text}");
+        }
+        editor
+            .runtime_mut()
+            .eval_str(r#"(do (let ((v eseq.patch-toolbar/patch-toolbar)) (set! v.name "pad")) (eseq.patch-toolbar/commit-name!))"#)
+            .expect("commit name");
+        let commands = editor.drain_host_commands();
+        let saved = commands.iter().find_map(|command| match command {
+            eseqlisp::host::HostCommand::Custom { name, payload } if name == "editor-save" => {
+                Some(payload.clone())
+            }
+            _ => None,
+        });
+        match saved {
+            Some(Value::Map(map)) => assert_eq!(
+                &*map.get("name").expect("name").borrow(),
+                &Value::String("pad".into())
+            ),
+            other => panic!("expected editor-save with the typed name, got {other:?}"),
+        }
+
+        // Unsaved changes: Done asks before it leaves.
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.patch-toolbar/done!)")
+            .expect("done");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert!(
+            !editor.drain_host_commands().iter().any(|command| matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "editor-done"
+            )),
+            "Done must not leave with unsaved changes unconfirmed"
+        );
+        let tree = patch_toolbar_tree(&mut editor, &[]);
+        for text in ["Unsaved changes", "Discard", "Keep editing"] {
+            assert!(value_contains_string(&tree, text), "Done should ask: {text}");
+        }
+
+        // Clean: Done leaves straight away.
+        let tree = patch_toolbar_tree(&mut editor, &[("dirty", Value::Bool(false))]);
+        assert!(value_contains_string(&tree, "Done"));
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.patch-toolbar/done!)")
+            .expect("done");
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(
+            command,
+            eseqlisp::host::HostCommand::Custom { name, .. } if name == "editor-done"
+        )));
     }
 
     #[test]
@@ -3549,101 +3907,11 @@ use panel_kinds_seed::*;
     }
 
     #[test]
-    fn metal_seq_browser_editor_macro_action_replaces_finalize_controls() {
-        let mut editor = browser_editor_on_instrument_tab();
-        set_kind_field(&mut editor, "editor", "mode", Value::String("new-instrument".to_string()));
-        set_kind_field(&mut editor, "editor", "active-macro", Value::String("simp".to_string()));
-        set_kind_field(&mut editor, "editor", "active-macro-action", Value::String("save-to-library".to_string()));
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        let browser = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*samples*")
-            .expect("browser lisp should create the *samples* buffer");
-        let tree = browser
-            .widget_tree
-            .as_ref()
-            .expect("browser widget tree")
-            .clone();
-        assert!(value_contains_string(&tree, "Defmacro"));
-        assert!(value_contains_string(&tree, "Current macro"));
-        assert!(value_contains_string(&tree, "simp"));
-        assert!(value_contains_string(&tree, "Save Macro to Library"));
-        assert!(
-            !value_contains_string(&tree, "Finalize"),
-            "macro action panel should replace the normal new-instrument finalize control"
-        );
-
-        let layout = editor
-            .runtime_mut()
-            .layout_snapshot_for_tree_with_viewport(&tree, Some((28.0, 13.0)))
-            .expect("macro action editor sidebar should lay out");
-        for label in ["Defmacro", "Current macro", "simp", "Save Macro to Library"] {
-            let node = find_layout_text_containing(&layout, label)
-                .unwrap_or_else(|| panic!("expected visible macro editor text: {label}"));
-            assert!(
-                node.rect.width.is_finite()
-                    && node.rect.height.is_finite()
-                    && node.rect.width > 0.0
-                    && node.rect.height > 0.0,
-                "macro editor text should have a finite nonzero rect for {label}: {:?}",
-                node.rect
-            );
-        }
-    }
-
-    #[test]
-    fn metal_seq_browser_explicit_refresh_updates_inactive_samples_editor_panel() {
-        let mut editor = browser_editor_on_instrument_tab();
-        // The shared helper presents *samples*; this test specifically covers
-        // the explicit refresh of an inactive browser, so switch away again.
-        let other_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name != "*samples*")
-            .expect("a non-browser buffer")
-            .id;
-        editor.set_active_buffer(other_id);
-        let browser_idx = editor
-            .buffers
-            .iter()
-            .position(|buffer| buffer.name == "*samples*")
-            .expect("browser lisp should create the *samples* buffer");
-        assert_ne!(
-            editor.active_buffer_idx(),
-            browser_idx,
-            "test setup should exercise the inactive-buffer refresh path"
-        );
-
-        set_kind_field(&mut editor, "editor", "mode", Value::String("new-effect".to_string()));
-        seed_value("current-track", Value::Number(2.0));
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.browser/refresh-buffer)")
-            .expect("explicit sidebar refresh should render the samples buffer");
-        editor.refresh_runtime_side_effects();
-
-        let browser = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*samples*")
-            .expect("browser lisp should create the *samples* buffer");
-        let tree = browser.widget_tree.as_ref().expect("browser widget tree");
-        assert!(value_contains_string(tree, "effect-name"));
-        assert!(value_contains_string(tree, "Save & Add"));
-        assert!(
-            !value_contains_string(tree, "Search samples"),
-            "explicit refresh should replace stale sample browser content"
-        );
-    }
-
-    #[test]
-    fn metal_seq_browser_editor_compile_status_spinner_is_visible_and_animating() {
-        let mut editor = browser_editor_on_instrument_tab();
+    fn metal_seq_patch_toolbar_compile_status_spinner_is_visible_and_animating() {
+        let mut editor = full_grid_editor_for_scroll_tests();
         let tree = editor
             .runtime_mut()
-            .eval_str(r#"(eseq.browser/editor-status-row "Preview compiling..." :gray)"#)
+            .eval_str(r#"(eseq.patch-toolbar/status-row "Compiling…" :gray)"#)
             .expect("build compile status row")
             .expect("compile status row should return a widget tree");
         let layout = editor
@@ -3653,7 +3921,7 @@ use panel_kinds_seed::*;
         fn find_editor_spinner(
             node: &eseqlisp::layout::LayoutNode,
         ) -> Option<&eseqlisp::layout::LayoutNode> {
-            if node.widget_type.contains("editor-spinner") {
+            if node.widget_type.contains("compile-spinner") {
                 return Some(node);
             }
             node.children.iter().find_map(find_editor_spinner)
@@ -19089,7 +19357,7 @@ use panel_kinds_seed::*;
     }
 
     #[test]
-    fn metal_seq_instrument_patcher_layout_uses_transport_patcher_and_fixed_side_panels() {
+    fn metal_seq_instrument_patcher_layout_uses_toolbar_canvas_and_bottom_bar() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.create_scratch_buffer(
             "*instrument-patcher:test*",
@@ -19102,6 +19370,12 @@ use panel_kinds_seed::*;
             .eval_str(r#"(eseq.seq-layout/apply-instrument-patcher-layout "*instrument-patcher:test*")"#)
             .expect("apply instrument patcher layout");
         editor.refresh_runtime_side_effects();
+
+        let buffers = collect_tile_buffer_names(&editor);
+        assert!(
+            !buffers.contains(&"*samples*".to_string()),
+            "save lives in the toolbar now, so *samples* leaves the patcher layout: {buffers:?}"
+        );
 
         let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
         let tile = |name: &str| {
@@ -19113,45 +19387,51 @@ use panel_kinds_seed::*;
         };
 
         let transport = tile("*transport*").rect;
+        let toolbar = tile("*patch-toolbar*").rect;
         let patcher = tile("*instrument-patcher:test*").rect;
         let macros = tile("*patch-macros*").rect;
-        let samples = tile("*samples*").rect;
         let mixer = tile("*patch-mixer*").rect;
         let fx = tile("*fx*").rect;
+        let inspector = tile("*patch-inspector*").rect;
+        assert!(
+            (inspector.row - fx.row).abs() <= 0.1 && inspector.col > fx.col && inspector.width >= 30.0,
+            "the inspector sits right of the instrument panel; fx={fx:?} inspector={inspector:?}"
+        );
 
         assert!(
-            transport.row < patcher.row && patcher.row + patcher.height <= samples.row,
-            "patcher mode should stack transport, patcher, then bottom bar; transport={transport:?} patcher={patcher:?} samples={samples:?}"
+            transport.row < toolbar.row
+                && toolbar.row + toolbar.height <= patcher.row
+                && patcher.row + patcher.height <= fx.row,
+            "patcher mode should stack transport, toolbar, canvas, then bottom bar; transport={transport:?} toolbar={toolbar:?} patcher={patcher:?} fx={fx:?}"
         );
         assert!(
-            (macros.row - patcher.row).abs() <= 0.1
+            (toolbar.col - patcher.col).abs() <= 0.1
+                && (toolbar.width - patcher.width).abs() <= 0.5
+                && (toolbar.height - 2.6).abs() < 0.5,
+            "the toolbar spans the canvas column at its fixed height; toolbar={toolbar:?} patcher={patcher:?}"
+        );
+        assert!(
+            (macros.row - toolbar.row).abs() <= 0.1
                 && macros.col < patcher.col
                 && macros.width >= 21.0
-                && macros.width <= 27.0,
-            "macro sidebar should sit left of the patcher canvas at its fixed width; macros={macros:?} patcher={patcher:?}"
+                && macros.width <= 27.0
+                && macros.height > patcher.height,
+            "the macro sidebar keeps its full height left of toolbar + canvas; macros={macros:?} toolbar={toolbar:?} patcher={patcher:?}"
         );
         assert!(
-            patcher.height > samples.height * 4.0,
-            "patcher should dominate the viewport; patcher={patcher:?} bottom={samples:?}"
+            (mixer.height - 11.5).abs() < 0.75 && (fx.height - 11.5).abs() < 0.75,
+            "bottom bar panels should all use the regular fx-panel height; mixer={mixer:?} fx={fx:?}"
         );
         assert!(
-            (samples.height - 11.5).abs() < 0.75
-                && (mixer.height - 11.5).abs() < 0.75
-                && (fx.height - 11.5).abs() < 0.75,
-            "bottom bar panels should all use the regular fx-panel height; samples={samples:?} mixer={mixer:?} fx={fx:?}"
-        );
-        assert!(
-            (samples.width - 28.0).abs() <= 1.0
-                && (mixer.width - 10.0).abs() <= 1.0
-                && fx.width > mixer.width
-                && (samples.row - mixer.row).abs() <= 0.1
+            (mixer.width - 10.0).abs() <= 1.0
+                && fx.width > mixer.width * 4.0
                 && (mixer.row - fx.row).abs() <= 0.1,
-            "samples and patch-mixer should use their fixed widths while fx fills the remaining bottom bar; samples={samples:?} mixer={mixer:?} fx={fx:?}"
+            "patch-mixer keeps its fixed width while fx fills the rest of the bottom bar; mixer={mixer:?} fx={fx:?}"
         );
     }
 
     #[test]
-    fn metal_seq_samples_sidebar_toggle_hides_patcher_samples_tile() {
+    fn metal_seq_panel_toggles_drive_patcher_panels_in_patcher_layout() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.create_scratch_buffer(
             "*instrument-patcher:test*",
@@ -19163,35 +19443,44 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(r#"(eseq.seq-layout/apply-instrument-patcher-layout "*instrument-patcher:test*")"#)
             .expect("apply instrument patcher layout");
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.seq-panels/seq-toggle-samples-sidebar)")
-            .expect("hide samples sidebar");
+        for toggle in [
+            "(eseq.seq-panels/seq-toggle-samples-sidebar)",
+            "(eseq.seq-panels/seq-toggle-mixer-panel)",
+        ] {
+            editor.runtime_mut().eval_str(toggle).expect("toggle panel");
+        }
         editor.refresh_runtime_side_effects();
 
-        let hidden_buffers = collect_tile_buffer_names(&editor);
-        assert!(
-            !hidden_buffers.contains(&"*samples*".to_string()),
-            "hidden samples sidebar should be removed from patcher layout: {hidden_buffers:?}"
-        );
-
-        let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
-        let tile = |name: &str| {
-            frame
-                .tiles
-                .iter()
-                .find(|tile| tile.frame.buffer_name == name)
-                .unwrap_or_else(|| panic!("expected tile for {name}"))
-        };
-
-        let mixer = tile("*patch-mixer*").rect;
-        let fx = tile("*fx*").rect;
-        assert!(
-            (mixer.row - fx.row).abs() <= 0.1
-                && (mixer.height - fx.height).abs() <= 0.75
-                && mixer.width > 0.0
-                && fx.width > 0.0,
-            "with samples hidden, patch-mixer/fx should remain visible in the patcher bottom bar; mixer={mixer:?} fx={fx:?}"
+        let buffers = collect_tile_buffer_names(&editor);
+        for hidden in ["*patch-macros*", "*patch-mixer*"] {
+            assert!(
+                !buffers.contains(&hidden.to_string()),
+                "the transport toggles hide the patcher's own panels: {hidden} in {buffers:?}"
+            );
+        }
+        for shown in ["*patch-toolbar*", "*fx*", "*instrument-patcher:test*"] {
+            assert!(
+                buffers.contains(&shown.to_string()),
+                "no toggle hides the toolbar, and the instrument panel has its own: {shown} in {buffers:?}"
+            );
+        }
+        for flag in [
+            "eseq.seq-core-state/samples-sidebar-visible",
+            "eseq.seq-core-state/mixer-panel-visible",
+        ] {
+            assert_eq!(
+                editor.runtime_mut().eval_str(flag).unwrap(),
+                Some(Value::Bool(true)),
+                "patcher toggles must leave the sequencer's panel flag {flag} alone"
+            );
+        }
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.seq-panels/seq-sidebar-toggle-on?)")
+                .unwrap(),
+            Some(Value::Bool(false)),
+            "the sidebar icon highlights from the macro sidebar while patching"
         );
     }
 

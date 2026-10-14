@@ -2157,6 +2157,16 @@ impl Editor {
     ) {
         self.last_pointer_screen = Some((precise_col, precise_row));
 
+        // A held button's pressed look ends on any left-up, including the
+        // many early returns below that never reach the widget layer.
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+            && crate::widget_render::button_press::end_press(
+                crate::widget_render::sdf_widget::current_sdf_time_fallback_seconds(),
+            )
+        {
+            self.mark_needs_redraw();
+        }
+
         // The toast floats above every tile and modal.
         if self.handle_toast_mouse(mouse, precise_col, precise_row) {
             return;
@@ -7407,6 +7417,13 @@ impl Editor {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.last_mouse_precise = Some((precise_col, precise_row));
                 self.active_leaf_mut().active_widget_gesture = None;
+                // A press whose mouse-up was lost fades out; the button under
+                // this press (if any) starts its own from its mouse_event.
+                if crate::widget_render::button_press::end_press(
+                    crate::widget_render::sdf_widget::current_sdf_time_fallback_seconds(),
+                ) {
+                    self.mark_needs_redraw();
+                }
                 crate::widget_render::set_drop_hover_target(None);
                 self.pointer_drag_started_on_slider = false;
                 self.last_slider_drag_widget_id = None;
@@ -7513,6 +7530,19 @@ impl Editor {
                 self.active_leaf_mut().last_widget_click = None;
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if widgets_visible && crate::widget_render::button_press::press_held() {
+                    // Dragging off a held button un-presses it; back on re-presses.
+                    let hit = crate::ui::hit::to_local(precise_col, precise_row, content_col, content_row)
+                        .and_then(|(local_col, local_row)| {
+                            self.hover_node_at_local(local_col, local_row)
+                        });
+                    if crate::widget_render::button_press::pointer_over(
+                        hit.as_ref(),
+                        crate::widget_render::sdf_widget::current_sdf_time_fallback_seconds(),
+                    ) {
+                        self.mark_needs_redraw();
+                    }
+                }
                 if widgets_visible {
                     let previous = self
                         .last_mouse_precise
@@ -7589,6 +7619,11 @@ impl Editor {
                 self.last_mouse_precise = Some((precise_col, precise_row));
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if crate::widget_render::button_press::end_press(
+                    crate::widget_render::sdf_widget::current_sdf_time_fallback_seconds(),
+                ) {
+                    self.mark_needs_redraw();
+                }
                 if text_visible {
                     self.finish_text_drag();
                 }

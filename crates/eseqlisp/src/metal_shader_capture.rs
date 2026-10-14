@@ -213,6 +213,38 @@ impl MetalCaptureRenderer {
     /// top-left — the same shape [`crate::shader_capture::CaptureRenderer`]
     /// returns.
     pub fn render(&self, scene: &str) -> Result<Vec<u8>, String> {
+        self.render_with(|encoder| self.encode_scene(scene, encoder))
+    }
+
+    /// Render `cables` through the production patch-cable pipeline, on the
+    /// scene canvas and clear. For shader tests that need geometry the fixed
+    /// `patch-cable` scene (and its goldens) does not carry.
+    pub(crate) fn render_patch_cables(
+        &self,
+        cables: &[crate::ui::gpu_geometry::PatchCableInstance],
+    ) -> Result<Vec<u8>, String> {
+        self.render_with(|encoder| {
+            let buffer = self.buffer(cables)?;
+            let pipeline =
+                self.pipeline(PATCH_CABLE_SHADER_SRC, "patch_cable_vert", "patch_cable_frag")?;
+            unsafe {
+                encoder.setRenderPipelineState(&pipeline);
+                encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
+                encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                    MTLPrimitiveType::Triangle,
+                    0,
+                    6,
+                    cables.len(),
+                );
+            }
+            Ok(())
+        })
+    }
+
+    fn render_with(
+        &self,
+        encode: impl FnOnce(&ProtocolObject<dyn MTLRenderCommandEncoder>) -> Result<(), String>,
+    ) -> Result<Vec<u8>, String> {
         let target_desc = MTLTextureDescriptor::new();
         unsafe {
             target_desc.setPixelFormat(FORMAT);
@@ -241,7 +273,7 @@ impl MetalCaptureRenderer {
             .renderCommandEncoderWithDescriptor(&pass)
             .ok_or_else(|| "render encoder creation failed".to_string())?;
 
-        self.encode_scene(scene, &encoder)?;
+        encode(&encoder)?;
 
         encoder.endEncoding();
         command_buffer.commit();
@@ -460,4 +492,34 @@ pub fn write_capture(
         ),
     )
     .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture_scenes::two_colour_cable_tests::{self, PatchCableInstance};
+
+    fn render(cables: &[PatchCableInstance]) -> Option<Vec<u8>> {
+        let renderer = MetalCaptureRenderer::new()?;
+        Some(renderer.render_patch_cables(cables).expect("render cables"))
+    }
+
+    #[test]
+    fn two_colour_bezier_cable_alternates_without_gaps() {
+        two_colour_cable_tests::bezier_two_colour(render);
+    }
+
+    #[test]
+    fn two_colour_segmented_cable_alternates_on_every_leg() {
+        two_colour_cable_tests::segmented_two_colour(render);
+    }
+
+    #[test]
+    fn patch_cable_instance_size_matches_the_msl_stride() {
+        // MSL aligns `PatchCableInstance` to its `float4 color` (16 bytes),
+        // so its array stride is the packed size rounded up to 16. The
+        // padded `dash_px` and `alt_color` float4s keep the two equal.
+        assert_eq!(std::mem::size_of::<PatchCableInstance>() % 16, 0);
+        assert_eq!(std::mem::size_of::<PatchCableInstance>(), 160);
+    }
 }

@@ -760,6 +760,9 @@ fn patch_cable_draw_instance_from_primitive(
             style: PATCH_CABLE_STYLE_PATCHER,
             plug_radius_px: 0.0,
             plug_levels: [0.0, 0.0],
+            end_plug_color: [0.0; 4],
+            dash_px: [cable.dash_px[0], cable.dash_px[1], 0.0, 0.0],
+            alt_color: cable.alt_color.to_rgba(),
         },
         clip,
     })
@@ -777,6 +780,9 @@ pub(crate) enum ModPatchPortDirection {
 pub(crate) struct ModPatchPort {
     pub direction: ModPatchPortDirection,
     pub track: usize,
+    /// Cable identity: `:source` when the port sets one (a track with several
+    /// mod outputs), else the track. In ports list it in `connected-sources`.
+    pub source: usize,
     pub dest_kind: String,
     pub dest: usize,
     pub input: usize,
@@ -837,6 +843,7 @@ pub(crate) fn collect_mod_patch_port(
             out.push(ModPatchPort {
                 direction,
                 track: track.unwrap_or(track_or_dest),
+                source: layout_node_usize_prop(node, "source").unwrap_or(track.unwrap_or(track_or_dest)),
                 dest_kind,
                 dest: dest.unwrap_or(track_or_dest),
                 input: layout_node_usize_prop(node, "input").unwrap_or(0),
@@ -933,7 +940,7 @@ pub(crate) fn build_mod_patch_cables(
     for port in ports {
         if port.direction == ModPatchPortDirection::Out && port.active {
             outputs.insert(
-                port.track,
+                port.source,
                 (port.center_px, port.clip, port.radius_px, port.level),
             );
         }
@@ -946,8 +953,13 @@ pub(crate) fn build_mod_patch_cables(
     let base_color = crate::theme::MOD_CABLE();
     let selected_color = crate::theme::MOD_CABLE_SELECTED();
     let preview_color = crate::theme::MOD_CABLE_PREVIEW();
+    // An occupied input keeps the input colour under its plug, so it never
+    // reads as one of the strip's outputs.
+    let input_plug_color = crate::theme::MOD_PORT_INPUT();
     let lane_color = crate::theme::MOD_CABLE_LANE_TINT();
     let radius_px = widget_render::ui_design_px(SOLID_CABLE_RADIUS_DESIGN_PX);
+    // Selected cables draw last, over every other cable.
+    let mut selected_cables = Vec::new();
     for port in ports {
         if port.direction != ModPatchPortDirection::In {
             continue;
@@ -983,13 +995,15 @@ pub(crate) fn build_mod_patch_cables(
                 plug_radius_px,
                 plug_levels,
                 color,
+                Some(input_plug_color),
                 cable_clip,
-                &mut cables,
+                if is_selected { &mut selected_cables } else { &mut cables },
                 vp_w,
                 vp_h,
             );
         }
     }
+    cables.append(&mut selected_cables);
     if let Some(source_port) = ports
         .iter()
         .find(|port| port.direction == ModPatchPortDirection::Out && port.active && port.pending)
@@ -1001,6 +1015,7 @@ pub(crate) fn build_mod_patch_cables(
             source_port.radius_px,
             [source_port.level, 0.0],
             preview_color,
+            None,
             source_port.clip,
             &mut cables,
             vp_w,
@@ -1095,6 +1110,7 @@ fn push_solid_mod_patch_cable(
     plug_radius_px: f32,
     plug_levels: [f32; 2],
     color: Color,
+    end_plug_color: Option<Color>,
     clip: ScissorRect,
     cables: &mut Vec<PatchCableDrawInstance>,
     vp_w: f32,
@@ -1106,6 +1122,7 @@ fn push_solid_mod_patch_cable(
         plug_radius_px,
         plug_levels,
         color.to_rgba(),
+        end_plug_color.map_or([0.0; 4], Color::to_rgba),
         vp_w,
         vp_h,
     ) {
@@ -2269,6 +2286,51 @@ pub(crate) fn offset_primitive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mod_port(direction: ModPatchPortDirection, source: usize, center: (f32, f32)) -> ModPatchPort {
+        ModPatchPort {
+            direction,
+            track: source,
+            source,
+            dest_kind: "track".into(),
+            dest: 9,
+            input: 0,
+            active: true,
+            pending: false,
+            center_px: center,
+            level: 0.0,
+            radius_px: 6.0,
+            clip: ScissorRect { x: 0, y: 0, width: 800, height: 600 },
+            connected_sources: Vec::new(),
+            selected_sources: Vec::new(),
+        }
+    }
+
+    /// The selected cable draws over the others, and every cable's input end
+    /// keeps the input colour so an occupied input never reads as an output.
+    #[test]
+    fn selected_mod_cable_draws_last_and_input_plugs_keep_the_input_colour() {
+        let mut input = mod_port(ModPatchPortDirection::In, 9, (400.0, 300.0));
+        input.connected_sources = vec![1, 2, 3];
+        input.selected_sources = vec![1];
+        let ports = vec![
+            mod_port(ModPatchPortDirection::Out, 1, (100.0, 100.0)),
+            mod_port(ModPatchPortDirection::Out, 2, (150.0, 100.0)),
+            mod_port(ModPatchPortDirection::Out, 3, (200.0, 100.0)),
+            input,
+        ];
+        let cables = build_mod_patch_cables(&ports, 800.0, 600.0, (-1.0e6, -1.0e6));
+        assert_eq!(cables.len(), 3);
+        let starts: Vec<_> = cables.iter().map(|cable| cable.instance.start).collect();
+        assert_eq!(starts.last(), Some(&[100.0, 100.0]), "selected cable is drawn last");
+        assert_eq!(
+            cables.last().unwrap().instance.color,
+            crate::theme::MOD_CABLE_SELECTED().to_rgba()
+        );
+        for cable in &cables {
+            assert_eq!(cable.instance.end_plug_color, crate::theme::MOD_PORT_INPUT().to_rgba());
+        }
+    }
 
     /// Glyph quads must start on whole device pixels: the atlas is already
     /// rasterized at device size, so a fractional origin only makes the

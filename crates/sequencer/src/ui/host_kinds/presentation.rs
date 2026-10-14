@@ -506,6 +506,23 @@ impl PresentedState {
                 text(&view.active_macro_action),
             );
             pusher.push(editor, f::EDITOR_OPEN_MACRO, text(&view.open_macro));
+            pusher.push(editor, f::EDITOR_TITLE, text(&view.title));
+            pusher.push(editor, f::EDITOR_RELEASE, Value::Number(view.release as f64));
+            pusher.push(editor, f::EDITOR_DIRTY, Value::Bool(view.dirty));
+            pusher.push(editor, f::EDITOR_SELECTED_NODE_IDS, strings(&view.selected_node_ids));
+            pusher.push(editor, f::EDITOR_SELECTED_NODE_TEXTS, strings(&view.selected_node_texts));
+            pusher.push(editor, f::EDITOR_SELECTED_NODE_SHAPES, strings(&view.selected_node_shapes));
+            pusher.push(editor, f::EDITOR_SELECTED_CABLE, strings(&view.selected_cable));
+            let ints = |values: &[i64]| {
+                Value::List(
+                    values
+                        .iter()
+                        .map(|v| std::rc::Rc::new(std::cell::RefCell::new(number(*v as f64))))
+                        .collect(),
+                )
+            };
+            pusher.push(editor, f::EDITOR_RELEASES, ints(&view.releases));
+            pusher.push(editor, f::EDITOR_RELEASE_TRACKS, ints(&view.release_tracks));
         }
         let generation = presented(|p| p.editor_sidebar.generation());
         if !moved(&mut self.seen.editor_sidebar, generation, &mut self.pushes) {

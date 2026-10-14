@@ -137,13 +137,6 @@
     (lambda () (eseq.seq-panels/seq-hide-mixer-panel))
     min-width max-width min-height max-height))
 
-;; Patch-editor bottom bar variant of the mixer panel: a single compact
-;; channel strip for the current track (see patch-mixer-strip in mixer.lisp).
-(def patch-mixer-panel-layout-spec (min-width max-width min-height max-height)
-  (collapsible-panel-layout-spec "*patch-mixer*"
-    (lambda () (eseq.seq-panels/seq-hide-mixer-panel))
-    min-width max-width min-height max-height))
-
 (def fx-panel-layout-spec (min-width max-width min-height max-height)
   (collapsible-panel-layout-spec "*fx*"
     (lambda () (eseq.seq-panels/seq-hide-fx-panel))
@@ -240,33 +233,66 @@
 ;; instrument preview isn't padded out by a taller neighbor.
 (def patcher-bottom-bar-panel-height eseq.seq-step-tabs/lower-fx-layout-height)
 
+;; The patcher's bottom bar: the track's channel strip and *fx* (the
+;; instrument panel, which takes its natural width, then the inspector filling
+;; the rest; docs/patcher-workspace-spec.md §2). *samples* is not here: save,
+;; run mode and the rest live in the always-visible *patch-toolbar*, so no
+;; panel toggle can hide them. Its own flags, not the sequencer's (§2.1).
+;; *patch-mixer* is a single compact channel strip for the current track (see
+;; patch-mixer-strip in mixer.lisp).
+(def patch-mixer-panel-layout-spec (min-width max-width min-height max-height)
+  (collapsible-panel-layout-spec "*patch-mixer*"
+    (lambda () (eseq.seq-panels/seq-hide-patcher-mixer-panel))
+    min-width max-width min-height max-height))
+
+(def patcher-fx-panel-layout-spec (min-height max-height)
+  (collapsible-panel-layout-spec "*fx*"
+    (lambda () (eseq.seq-panels/seq-hide-patcher-lower-panel))
+    nil nil min-height max-height))
+
+;; The inspector (ui/patch-inspector.lisp) rides with *fx*: the lower toggle
+;; shows or hides both.
+(def patch-inspector-tile-spec (h)
+  (list :buf "*patch-inspector*" :hide-status true
+    :border-radius (eseq.seq-core-state/radius buffer-radius)
+    :border-width border-width
+    :background-color :buffer-bg
+    :min-width 30 :min-height h :max-height h))
+
+(def patcher-lower-layout-spec (h)
+  (list :cols :gap tile-gap :remember "patcher-fx-inspector-split"
+    0.65 (patcher-fx-panel-layout-spec h h)
+    0.35 (patch-inspector-tile-spec h)))
+
 (def patcher-bottom-bar-layout-spec ()
   (let ((h patcher-bottom-bar-panel-height))
-    (if (and eseq.seq-core-state/samples-sidebar-visible eseq.seq-core-state/mixer-panel-visible eseq.seq-core-state/lower-panel-visible)
+    (if (and eseq.seq-core-state/patcher-mixer-visible eseq.seq-core-state/patcher-lower-visible)
       (list :cols :gap tile-gap
-        0.30 (samples-panel-layout-spec 28 28 h h)
-        0.15 (patch-mixer-panel-layout-spec 10 10 h h)
-        0.55 (fx-panel-layout-spec nil nil h h))
-      (if (and eseq.seq-core-state/samples-sidebar-visible eseq.seq-core-state/mixer-panel-visible)
-        (list :cols :gap tile-gap
-          0.6 (samples-panel-layout-spec 28 28 h h)
-          0.4 (patch-mixer-panel-layout-spec 10 10 h h))
-      (if eseq.seq-core-state/samples-sidebar-visible
-        (if eseq.seq-core-state/lower-panel-visible
-          (list :cols :gap tile-gap
-            0.5 (samples-panel-layout-spec 28 28 h h)
-            0.5 (fx-panel-layout-spec nil nil h h))
-          (samples-panel-layout-spec 28 28 h h))
-        (if eseq.seq-core-state/mixer-panel-visible
-          (if eseq.seq-core-state/lower-panel-visible
-            (list :cols :gap tile-gap
-              0.4 (patch-mixer-panel-layout-spec 10 10 h h)
-              0.6 (fx-panel-layout-spec nil nil h h))
-            (patch-mixer-panel-layout-spec 15 15 h h))
-          (fx-panel-layout-spec nil nil h h)))))))
+        0.08 (patch-mixer-panel-layout-spec 10 10 h h)
+        0.92 (patcher-lower-layout-spec h))
+      (if eseq.seq-core-state/patcher-mixer-visible
+        (patch-mixer-panel-layout-spec 15 15 h h)
+        (patcher-lower-layout-spec h)))))
 
 (def patcher-bottom-bar-visible? ()
-  (or eseq.seq-core-state/samples-sidebar-visible eseq.seq-core-state/mixer-panel-visible eseq.seq-core-state/lower-panel-visible))
+  (or eseq.seq-core-state/patcher-mixer-visible eseq.seq-core-state/patcher-lower-visible))
+
+;; The patch toolbar (ui/patch-toolbar.lisp): a fixed-height row over the
+;; canvas side only, so the macro sidebar keeps its full height. Never hidden
+;; by a panel toggle (docs/patcher-workspace-spec.md §3).
+(defcustom patch-toolbar-height 2.6
+  :type :number :min 1.8 :max 5 :step 0.1
+  :doc "Height (cells) of the patch editor's toolbar.")
+
+(def patch-toolbar-tile-spec ()
+  ;; Like *transport*: borderless, no fill of its own (the window shows).
+  (list :buf "*patch-toolbar*" :hide-status true :borderless true
+    :min-height patch-toolbar-height :max-height patch-toolbar-height))
+
+(def with-patch-toolbar (canvas-area)
+  (list :rows :gap tile-gap
+    0.06 (patch-toolbar-tile-spec)
+    0.94 canvas-area))
 
 ;; Macro sidebar to the left of the patch editor: defmacros in the patch +
 ;; the saved macro library (see ui/patch-macros.lisp).
@@ -285,8 +311,8 @@
   (if eseq.seq-core-state/patch-macros-panel-visible
     (list :cols :gap tile-gap
       0.15 (patch-macros-panel-layout-spec)
-      0.85 (patcher-canvas-layout-spec patcher-buffer))
-    (patcher-canvas-layout-spec patcher-buffer)))
+      0.85 (with-patch-toolbar (patcher-canvas-layout-spec patcher-buffer)))
+    (with-patch-toolbar (patcher-canvas-layout-spec patcher-buffer))))
 
 (def instrument-patcher-layout-spec (patcher-buffer)
   (if (patcher-bottom-bar-visible?)
@@ -297,15 +323,19 @@
     (with-transport (patcher-main-layout-spec patcher-buffer))))
 
 (def instrument-patcher-source-layout-spec (patcher-buffer source-buffer)
-  (let ((main-layout
+  (let ((source-tile (list :buf source-buffer :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-height 20))
+        (main-layout
           (if eseq.seq-core-state/patch-macros-panel-visible
             (list :cols :gap tile-gap
               0.14 (patch-macros-panel-layout-spec)
-              0.53 (patcher-canvas-layout-spec patcher-buffer)
-              0.33 (list :buf source-buffer :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-height 20))
-            (list :cols :gap tile-gap
-              0.62 (patcher-canvas-layout-spec patcher-buffer)
-              0.38 (list :buf source-buffer :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-height 20)))))
+              0.86 (with-patch-toolbar
+                     (list :cols :gap tile-gap
+                       0.62 (patcher-canvas-layout-spec patcher-buffer)
+                       0.38 source-tile)))
+            (with-patch-toolbar
+              (list :cols :gap tile-gap
+                0.62 (patcher-canvas-layout-spec patcher-buffer)
+                0.38 source-tile)))))
     (if (patcher-bottom-bar-visible?)
       (with-transport
         (list :rows :gap tile-gap
@@ -318,9 +348,10 @@
 ;; or routing pointer input through the other one.
 (def instrument-patcher-learn-layout-spec (patcher-buffer learn-buffer)
   (let ((patcher-and-learn
-          (list :cols :gap tile-gap :remember (str "instrument-patcher-learn:" patcher-buffer)
-            0.68 (patcher-canvas-layout-spec patcher-buffer)
-            0.32 (patch-learn-buffer-layout-spec learn-buffer)))
+          (with-patch-toolbar
+            (list :cols :gap tile-gap :remember (str "instrument-patcher-learn:" patcher-buffer)
+              0.68 (patcher-canvas-layout-spec patcher-buffer)
+              0.32 (patch-learn-buffer-layout-spec learn-buffer))))
         (main-layout
           (if eseq.seq-core-state/patch-macros-panel-visible
             (list :cols :gap tile-gap

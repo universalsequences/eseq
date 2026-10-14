@@ -404,6 +404,15 @@ impl EngineRegistry {
         }
     }
 
+    /// Rename engine `engine_id` (an instrument whose Save cut a release
+    /// now answers to the pinned id), keeping its compiled state.
+    pub fn rename(&mut self, engine_id: usize, name: &str) {
+        if let Some(mut entry) = self.engines.get(engine_id).cloned() {
+            name.clone_into(&mut entry.name);
+            self.replace_at(engine_id, entry);
+        }
+    }
+
     pub fn upsert(&mut self, entry: EngineDescriptor) -> usize {
         let descriptor =
             crate::lisp_host::instrument_descriptor_from_manifest(&entry.name, &entry.manifest);
@@ -452,6 +461,7 @@ mod engine_registry_tests {
             tensors: Vec::new(),
             tensor_init_data: Vec::new(),
             voice_cell_id: None,
+            binding_shapes: Default::default(),
         }
     }
 

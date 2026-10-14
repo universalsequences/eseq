@@ -820,13 +820,30 @@ pub(super) fn parse_editor_node_text(text: &str) -> Result<(String, Vec<String>)
         }
         return Err("node text must start with a symbolic operator".to_string());
     };
-    Ok((
-        op.to_string(),
-        positional_args(items, 1)
-            .into_iter()
+    Ok((op.to_string(), positional_arg_texts(items, 1)))
+}
+
+/// Positional arguments as text, a bracketed vector literal (`[4 1]`, which
+/// lexes as `[4`, `1]`) kept together as one argument: a typed tensor shape is
+/// a single slot, not one per element.
+fn positional_arg_texts(items: &[Expression], start: usize) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut idx = start;
+    while idx < items.len() {
+        if is_attribute_key(&items[idx]) {
+            idx += attribute_span_len(items, idx);
+            continue;
+        }
+        let len = attribute_value_len(items, idx).max(1);
+        let text = items[idx..idx + len]
+            .iter()
             .map(format_patch_literal)
-            .collect(),
-    ))
+            .collect::<Vec<_>>()
+            .join(" ");
+        args.push(text.replace("[ ", "[").replace(" ]", "]"));
+        idx += len;
+    }
+    args
 }
 
 pub(super) fn is_numeric_literal(text: &str) -> bool {

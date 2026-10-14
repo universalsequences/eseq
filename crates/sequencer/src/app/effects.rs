@@ -848,6 +848,12 @@ impl App {
         }
     }
 
+    /// Point engine `engine_id` at instrument id `name` (a release Save just
+    /// cut), so a project save pins the track to it.
+    pub fn rename_instrument_engine(&mut self, engine_id: usize, name: &str) {
+        self.editor.engine_registry.rename(engine_id, name);
+    }
+
     pub fn replace_current_custom_instrument_sync(
         &mut self,
         name: &str,
@@ -5515,6 +5521,7 @@ mod tests {
             tensors: Vec::new(),
             tensor_init_data: Vec::new(),
             voice_cell_id: None,
+            binding_shapes: Default::default(),
         }
     }
 

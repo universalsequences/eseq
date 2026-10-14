@@ -1326,19 +1326,19 @@
       (samples-sidebar-icon
         :on-click |x y r| (eseq.seq-panels/seq-toggle-samples-sidebar)
         :style transport-icon-style
-        :active (if eseq.seq-core-state/samples-sidebar-visible 1 0)))
+        :active (if (eseq.seq-panels/seq-sidebar-toggle-on?) 1 0)))
     
     (subtree :key "transport-mixer-panel-button"
       (mix-panel-icon
         :on-click |x y r| (eseq.seq-panels/seq-toggle-mixer-panel)
         :style transport-icon-style
-        :active (if eseq.seq-core-state/mixer-panel-visible 1 0)))
+        :active (if (eseq.seq-panels/seq-mixer-toggle-on?) 1 0)))
     
     (subtree :key "transport-fx-panel-button"
       (fx-panel-icon
         :on-click |x y r| (eseq.seq-panels/seq-toggle-fx-panel)
         :style transport-icon-style
-        :active (if eseq.seq-core-state/lower-panel-visible 1 0)))))
+        :active (if (eseq.seq-panels/seq-lower-toggle-on?) 1 0)))))
 
 ;; Session and arrangement are app views, not tabs in the main buffer: the
 ;; pair sits at the titlebar's right end.

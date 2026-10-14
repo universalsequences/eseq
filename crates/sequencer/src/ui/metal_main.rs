@@ -43,6 +43,7 @@ use natives::*;
 use piano_roll::*;
 use presented::{
     editor_error, present_agent, present_editor, present_editor_closed, present_editor_open,
+    present_editor_releases, present_editor_saved,
     present_editor_sidebar, present_export, present_learn, present_learn_error, present_retro,
     present_settings,
 };

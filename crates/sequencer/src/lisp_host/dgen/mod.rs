@@ -5,6 +5,7 @@ instrument/effect storage. Everything is surfaced through the
 `lisp_host` façade re-exports; nothing imports these modules directly.
 */
 
+pub mod compile_report;
 pub mod dgen_audit;
 pub mod dgen_ffi;
 // The rustfft-backed host-services table. Wired up off Apple only (Apple ships

@@ -412,6 +412,9 @@ struct PatchCableInstance {
     float style;
     float plug_radius_px;
     packed_float2 plug_levels;
+    packed_float4 end_plug_color;
+    packed_float4 dash_px;
+    packed_float4 alt_color;
 };
 
 struct PatchCableVaryings {
@@ -429,6 +432,9 @@ struct PatchCableVaryings {
     float style;
     float plug_radius_px;
     float2 plug_levels;
+    float4 end_plug_color;
+    float2 dash_px;
+    float4 alt_color;
 };
 
 float2 patch_cable_quad_corner(uint vid) {
@@ -465,6 +471,9 @@ vertex PatchCableVaryings patch_cable_vert(
     out.style = cable.style;
     out.plug_radius_px = cable.plug_radius_px;
     out.plug_levels = float2(cable.plug_levels);
+    out.end_plug_color = float4(cable.end_plug_color);
+    out.dash_px = float4(cable.dash_px).xy;
+    out.alt_color = float4(cable.alt_color);
     return out;
 }
 
@@ -620,21 +629,209 @@ float patch_cable_segmented_distance(
         corner_radius);
 }
 
+// Dashed cables need the arc length from `start` at the closest point, not
+// just the distance. These variants walk the same geometry as the plain
+// distance functions above, accumulating length piece by piece; solid cables
+// never call them, so they pay nothing for dashes.
+struct PatchCableArcProbe {
+    float best;
+    float best_s;
+    float acc;
+};
+
+void patch_cable_probe_segment(thread PatchCableArcProbe &probe, float2 p, float2 a, float2 b) {
+    float2 v = b - a;
+    float len_sq = dot(v, v);
+    float len = sqrt(len_sq);
+    float t = len_sq < 0.00001 ? 0.0 : clamp(dot(p - a, v) / len_sq, 0.0, 1.0);
+    float d = length(p - (a + t * v));
+    if (d < probe.best) {
+        probe.best = d;
+        probe.best_s = probe.acc + t * len;
+    }
+    probe.acc += len;
+}
+
+void patch_cable_probe_arc(
+    thread PatchCableArcProbe &probe,
+    float2 p,
+    float2 center,
+    float radius,
+    float2 corner,
+    float2 from)
+{
+    float d = patch_cable_arc_distance(p, center, radius, corner);
+    if (d < probe.best) {
+        float2 a = from - center;
+        float2 b = p - center;
+        float denom = max(length(a) * length(b), 0.0001);
+        float angle = acos(clamp(dot(a, b) / denom, -1.0, 1.0));
+        probe.best = d;
+        probe.best_s = probe.acc + min(angle, M_PI_2_F) * radius;
+    }
+    probe.acc += M_PI_2_F * radius;
+}
+
+float2 patch_cable_curve_distance_arc(float2 p, float2 p0, float2 p1, float2 p2, float2 p3)
+{
+    PatchCableArcProbe probe = { 1.0e6, 0.0, 0.0 };
+    float2 seg_start = p0;
+    for (int i = 0; i < 24; i++) {
+        float2 seg_end = patch_cable_bezier(p0, p1, p2, p3, float(i + 1) / 24.0);
+        patch_cable_probe_segment(probe, p, seg_start, seg_end);
+        seg_start = seg_end;
+    }
+    return float2(probe.best, probe.best_s);
+}
+
+float2 patch_cable_segmented_distance_arc_y_up(
+    float2 p,
+    float2 start,
+    float2 end,
+    float segment_y,
+    float corner_radius)
+{
+    PatchCableArcProbe probe = { 1.0e6, 0.0, 0.0 };
+    bool needs_five = end.y > segment_y;
+    if (!needs_five) {
+        bool going_down1 = start.y > segment_y;
+        bool going_right = end.x > start.x;
+        bool going_down2 = end.y < segment_y;
+        float2 corner1 = float2(start.x, segment_y);
+        float2 corner2 = float2(end.x, segment_y);
+        float2 corner1_center;
+        float2 corner2_center;
+        if (going_down1) {
+            corner1_center = going_right
+                ? float2(start.x + corner_radius, segment_y + corner_radius)
+                : float2(start.x - corner_radius, segment_y + corner_radius);
+        } else {
+            corner1_center = going_right
+                ? float2(start.x + corner_radius, segment_y - corner_radius)
+                : float2(start.x - corner_radius, segment_y - corner_radius);
+        }
+        if (going_down2) {
+            corner2_center = going_right
+                ? float2(end.x - corner_radius, segment_y - corner_radius)
+                : float2(end.x + corner_radius, segment_y - corner_radius);
+        } else {
+            corner2_center = going_right
+                ? float2(end.x - corner_radius, segment_y + corner_radius)
+                : float2(end.x + corner_radius, segment_y + corner_radius);
+        }
+        float2 seg1_end = float2(start.x, going_down1 ? segment_y + corner_radius : segment_y - corner_radius);
+        float2 seg3_start = float2(end.x, going_down2 ? segment_y - corner_radius : segment_y + corner_radius);
+        float2 seg2_start = float2(going_right ? start.x + corner_radius : start.x - corner_radius, segment_y);
+        float2 seg2_end = float2(going_right ? end.x - corner_radius : end.x + corner_radius, segment_y);
+        patch_cable_probe_segment(probe, p, start, seg1_end);
+        patch_cable_probe_arc(probe, p, corner1_center, corner_radius, corner1, seg1_end);
+        patch_cable_probe_segment(probe, p, seg2_start, seg2_end);
+        patch_cable_probe_arc(probe, p, corner2_center, corner_radius, corner2, seg2_end);
+        patch_cable_probe_segment(probe, p, seg3_start, end);
+        return float2(probe.best, probe.best_s);
+    }
+
+    bool going_right = end.x > start.x;
+    float clearance = corner_radius * 2.0;
+    float turnaround_y = end.y + clearance;
+    float turnaround_x = end.x - clearance;
+    bool seg4_going_right = end.x > turnaround_x;
+    float2 corner1 = float2(start.x, segment_y);
+    float2 corner1_center = going_right
+        ? float2(start.x + corner_radius, segment_y + corner_radius)
+        : float2(start.x - corner_radius, segment_y + corner_radius);
+    float2 seg1_end = float2(start.x, segment_y + corner_radius);
+    float2 corner2 = float2(turnaround_x, segment_y);
+    float2 corner2_center = going_right
+        ? float2(turnaround_x - corner_radius, segment_y + corner_radius)
+        : float2(turnaround_x + corner_radius, segment_y + corner_radius);
+    float2 seg2_start = float2(going_right ? start.x + corner_radius : start.x - corner_radius, segment_y);
+    float2 seg2_end = float2(going_right ? turnaround_x - corner_radius : turnaround_x + corner_radius, segment_y);
+    float2 corner3 = float2(turnaround_x, turnaround_y);
+    float2 corner3_center = seg4_going_right
+        ? float2(turnaround_x + corner_radius, turnaround_y - corner_radius)
+        : float2(turnaround_x - corner_radius, turnaround_y - corner_radius);
+    float2 seg3_start = float2(turnaround_x, segment_y + corner_radius);
+    float2 seg3_end = float2(turnaround_x, turnaround_y - corner_radius);
+    float2 corner4 = float2(end.x, turnaround_y);
+    float2 corner4_center = seg4_going_right
+        ? float2(end.x - corner_radius, turnaround_y - corner_radius)
+        : float2(end.x + corner_radius, turnaround_y - corner_radius);
+    float2 seg4_start = float2(seg4_going_right ? turnaround_x + corner_radius : turnaround_x - corner_radius, turnaround_y);
+    float2 seg4_end = float2(seg4_going_right ? end.x - corner_radius : end.x + corner_radius, turnaround_y);
+    float2 seg5_start = float2(end.x, turnaround_y - corner_radius);
+    patch_cable_probe_segment(probe, p, start, seg1_end);
+    patch_cable_probe_arc(probe, p, corner1_center, corner_radius, corner1, seg1_end);
+    patch_cable_probe_segment(probe, p, seg2_start, seg2_end);
+    patch_cable_probe_arc(probe, p, corner2_center, corner_radius, corner2, seg2_end);
+    patch_cable_probe_segment(probe, p, seg3_start, seg3_end);
+    patch_cable_probe_arc(probe, p, corner3_center, corner_radius, corner3, seg3_end);
+    patch_cable_probe_segment(probe, p, seg4_start, seg4_end);
+    patch_cable_probe_arc(probe, p, corner4_center, corner_radius, corner4, seg4_end);
+    patch_cable_probe_segment(probe, p, seg5_start, end);
+    return float2(probe.best, probe.best_s);
+}
+
+float2 patch_cable_segmented_distance_arc(
+    float2 p,
+    float2 start,
+    float2 end,
+    float segment_y_px,
+    float corner_radius)
+{
+    return patch_cable_segmented_distance_arc_y_up(
+        float2(p.x, -p.y),
+        float2(start.x, -start.y),
+        float2(end.x, -end.y),
+        -segment_y_px,
+        corner_radius);
+}
+
 fragment float4 patch_cable_frag(PatchCableVaryings in [[stage_in]])
 {
-    float min_dist_to_line = in.is_segmented > 0.5
-        ? patch_cable_segmented_distance(
-            in.pixel_pos,
-            in.start,
-            in.end,
-            in.segment_y_px,
-            in.corner_radius_px)
-        : patch_cable_curve_distance(
-            in.pixel_pos,
-            in.start,
-            in.control1,
-            in.control2,
-            in.end);
+    bool dashed = in.dash_px.x > 0.0 && in.dash_px.y > 0.0;
+    float min_dist_to_line;
+    // Dashed (multichannel) cables: 1 inside a primary-colour run, 0 inside
+    // an alternate-colour run. The stroke itself never breaks.
+    float primary = 1.0;
+    if (dashed) {
+        float2 probe = in.is_segmented > 0.5
+            ? patch_cable_segmented_distance_arc(
+                in.pixel_pos,
+                in.start,
+                in.end,
+                in.segment_y_px,
+                in.corner_radius_px)
+            : patch_cable_curve_distance_arc(
+                in.pixel_pos,
+                in.start,
+                in.control1,
+                in.control2,
+                in.end);
+        // Signed arc distance to the nearest seam: positive inside a primary
+        // run. A pixel-wide ramp keeps the seam antialiased.
+        float period = in.dash_px.x + in.dash_px.y;
+        float u = probe.y - period * floor(probe.y / period);
+        float seam = u <= in.dash_px.x
+            ? min(u, in.dash_px.x - u)
+            : -min(u - in.dash_px.x, period - u);
+        primary = smoothstep(-0.75, 0.75, seam);
+        min_dist_to_line = probe.x;
+    } else {
+        min_dist_to_line = in.is_segmented > 0.5
+            ? patch_cable_segmented_distance(
+                in.pixel_pos,
+                in.start,
+                in.end,
+                in.segment_y_px,
+                in.corner_radius_px)
+            : patch_cable_curve_distance(
+                in.pixel_pos,
+                in.start,
+                in.control1,
+                in.control2,
+                in.end);
+    }
 
     float sdf = min_dist_to_line - in.radius_px;
     bool solid = in.style > 0.5;
@@ -642,10 +839,12 @@ fragment float4 patch_cable_frag(PatchCableVaryings in [[stage_in]])
     // centre like a jack, unioned into the body so they share one rim.
     float plug_dist = 1.0e6;
     float plug_level = 0.0;
+    bool at_end_plug = false;
     if (solid && in.plug_radius_px > 0.0) {
         float start_dist = length(in.pixel_pos - in.start);
         float end_dist = length(in.pixel_pos - in.end);
         plug_dist = min(start_dist, end_dist);
+        at_end_plug = end_dist <= start_dist;
         plug_level = start_dist < end_dist ? in.plug_levels.x : in.plug_levels.y;
         sdf = min(sdf, plug_dist - in.plug_radius_px);
     }
@@ -661,13 +860,18 @@ fragment float4 patch_cable_frag(PatchCableVaryings in [[stage_in]])
         // strip colour.
         float rim_width = max(in.radius_px * 0.34, 0.75);
         float rim_blend = smoothstep(-rim_width - derivative, -rim_width + derivative, sdf);
-        float3 rim_color = in.color.rgb * 0.42;
-        float3 cable_color = mix(in.color.rgb, rim_color, rim_blend);
+        // The input end's plug takes the input port's colour.
+        float end_plug = (at_end_plug && in.end_plug_color.a > 0.0)
+            ? 1.0 - smoothstep(in.plug_radius_px - derivative, in.plug_radius_px + derivative, plug_dist)
+            : 0.0;
+        float3 base_color = mix(in.color.rgb, in.end_plug_color.rgb, end_plug);
+        float3 rim_color = base_color * 0.42;
+        float3 cable_color = mix(base_color, rim_color, rim_blend);
         float hole_radius = in.plug_radius_px * 0.40;
         float hole_blend = 1.0 - smoothstep(hole_radius - derivative, hole_radius + derivative, plug_dist);
         // The hole is a jack LED: dark at rest, glowing past the cable's
         // own colour toward white with the port's live signal.
-        float3 lit_color = mix(in.color.rgb, float3(1.0, 1.0, 1.0), 0.45);
+        float3 lit_color = mix(base_color, float3(1.0, 1.0, 1.0), 0.45);
         float3 hole_color = mix(float3(0.04, 0.045, 0.05), lit_color, clamp(plug_level, 0.0, 1.0));
         cable_color = mix(cable_color, hole_color, hole_blend);
         return float4(cable_color, in.color.a * alpha);
@@ -678,13 +882,19 @@ fragment float4 patch_cable_frag(PatchCableVaryings in [[stage_in]])
         max(core_radius - derivative, 0.0),
         core_radius + derivative,
         min_dist_to_line);
-    float3 edge_color = in.color.rgb * 0.58;
-    float3 core_color = mix(in.color.rgb, float3(1.0, 1.0, 1.0), 0.78);
+    float4 base = dashed ? mix(in.alt_color, in.color, primary) : in.color;
+    float3 edge_color = base.rgb * 0.58;
+    // A dashed (multichannel) cable keeps more of its own colours in the
+    // core, so the two-colour stroke reads at a glance rather than as white.
+    // Only the primary dashes get the highlight: the alternate dashes keep
+    // their theme colour, so a dark alternate (Max mc style) stays dark.
+    float core_whiten = dashed ? 0.35 * primary : 0.78;
+    float3 core_color = mix(base.rgb, float3(1.0, 1.0, 1.0), core_whiten);
     float3 cable_color = mix(edge_color, core_color, core_blend);
     float edge_alpha_scale = 0.62;
     float alpha_scale = mix(edge_alpha_scale, 1.0, core_blend);
 
-    return float4(cable_color, in.color.a * alpha * alpha_scale);
+    return float4(cable_color, base.a * alpha * alpha_scale);
 }
 "#;
 
@@ -8804,6 +9014,9 @@ fragment float4 live_spectrogram_frag(
                 style: PATCH_CABLE_STYLE_PATCHER,
                 plug_radius_px: 0.0,
                 plug_levels: [0.0, 0.0],
+                end_plug_color: [0.0; 4],
+                dash_px: [cable.dash_px[0], cable.dash_px[1], 0.0, 0.0],
+                alt_color: cable.alt_color.to_rgba(),
             },
             clip,
         })
@@ -8819,6 +9032,7 @@ fragment float4 live_spectrogram_frag(
     struct ModPatchPort {
         direction: ModPatchPortDirection,
         track: usize,
+        source: usize,
         dest_kind: String,
         dest: usize,
         input: usize,
@@ -8878,6 +9092,8 @@ fragment float4 live_spectrogram_frag(
                     out.push(ModPatchPort {
                         direction,
                         track: track.unwrap_or(track_or_dest),
+                        source: layout_node_usize_prop(node, "source")
+                            .unwrap_or(track.unwrap_or(track_or_dest)),
                         dest_kind,
                         dest: dest.unwrap_or(track_or_dest),
                         input: layout_node_usize_prop(node, "input").unwrap_or(0),
@@ -8977,7 +9193,7 @@ fragment float4 live_spectrogram_frag(
         for port in ports {
             if port.direction == ModPatchPortDirection::Out && port.active {
                 outputs.insert(
-                    port.track,
+                    port.source,
                     (port.center_px, port.clip, port.radius_px, port.level),
                 );
             }
@@ -8990,8 +9206,13 @@ fragment float4 live_spectrogram_frag(
         let base_color = crate::theme::MOD_CABLE();
         let selected_color = crate::theme::MOD_CABLE_SELECTED();
         let preview_color = crate::theme::MOD_CABLE_PREVIEW();
+    // An occupied input keeps the input colour under its plug, so it never
+    // reads as one of the strip's outputs.
+    let input_plug_color = crate::theme::MOD_PORT_INPUT();
         let lane_color = crate::theme::MOD_CABLE_LANE_TINT();
         let radius_px = widget_render::ui_design_px(SOLID_CABLE_RADIUS_DESIGN_PX);
+    // Selected cables draw last, over every other cable.
+    let mut selected_cables = Vec::new();
         for port in ports {
             if port.direction != ModPatchPortDirection::In {
                 continue;
@@ -9027,13 +9248,15 @@ fragment float4 live_spectrogram_frag(
                     plug_radius_px,
                     plug_levels,
                     color,
+                    Some(input_plug_color),
                     cable_clip,
-                    &mut cables,
+                    if is_selected { &mut selected_cables } else { &mut cables },
                     vp_w,
                     vp_h,
                 );
             }
         }
+        cables.append(&mut selected_cables);
         if let Some(source_port) = ports.iter().find(|port| {
             port.direction == ModPatchPortDirection::Out && port.active && port.pending
         }) {
@@ -9045,6 +9268,7 @@ fragment float4 live_spectrogram_frag(
                 source_port.radius_px,
                 [source_port.level, 0.0],
                 preview_color,
+                None,
                 source_port.clip,
                 &mut cables,
                 vp_w,
@@ -9158,6 +9382,7 @@ fragment float4 live_spectrogram_frag(
         plug_radius_px: f32,
         plug_levels: [f32; 2],
         color: Color,
+        end_plug_color: Option<Color>,
         clip: ScissorRect,
         cables: &mut Vec<PatchCableDrawInstance>,
         vp_w: f32,
@@ -9169,6 +9394,7 @@ fragment float4 live_spectrogram_frag(
             plug_radius_px,
             plug_levels,
             color.to_rgba(),
+            end_plug_color.map_or([0.0; 4], Color::to_rgba),
             vp_w,
             vp_h,
         ) {
@@ -11185,6 +11411,83 @@ fragment float4 live_spectrogram_frag(
                     text_scroll_top: 0, text_cell_width_scale: 1.0, text_cell_height_scale: 1.0,
                 },
             }] }
+        }
+
+        /// Compile shapes arrive outside any widget event (a preview worker
+        /// completes); publishing them must repaint the patcher's cables even
+        /// though the frame's layout and content keys have not moved: the
+        /// publish bumps the shared widget-state generation, which keys both
+        /// the per-widget primitive cache and the retained tile scene.
+        #[test]
+        fn publishing_compile_shapes_repaints_patcher_cables_from_retained_scenes() {
+            use crate::ui::backend::{StatusIndicator, TileFrame};
+            use crate::widget_render::patcher::{
+                BindingShape, BindingShapeKind, PatcherPreviewRequest,
+                clear_compile_shapes_for_path, set_compile_shapes_for_path,
+            };
+            let dir = std::env::temp_dir()
+                .join(format!("eseq-tensor-cable-repaint-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("dsp.lisp");
+            std::fs::write(
+                &path,
+                "(def lanes (iota 8))\n(def osc (phasor lanes))\n(def mixed (sum osc))\n(out mixed 1 @name audio)\n",
+            )
+            .unwrap();
+            let (width, height) = (640, 640);
+            let mut backend = unwrap_backend(MetalBackend::new_capture(width, height), "backend");
+            unwrap_backend(backend.initialize_graphics(1.0), "graphics");
+            let (cell_w, cell_h) = backend.cell_dimensions();
+            let area = Rect { col: 0.0, row: 0.0,
+                width: width as f32 / cell_w, height: height as f32 / cell_h };
+            let mut patcher = layout_node("patcher", HashMap::from([
+                ("path".into(), Value::String(path.to_string_lossy().into())),
+                ("intent".into(), Value::Keyword("instrument".into())),
+            ]));
+            patcher.widget_id = 98500;
+            patcher.rect = area;
+            let tiled = TiledRenderFrame { completion: None, toast: None, titlebar_tile: None, palette: None, tiles: vec![TileFrame {
+                tile_id: 1, rect: area, body_rect: area, tabs: vec![], is_active: true,
+                show_status: false, show_border: false, border_width_px: 0.0,
+                border_radius_px: 0.0, background_color: None, background_color_name: None,
+                inspect_overlay: None,
+                frame: RenderFrame {
+                    lines: vec![], cursor: None, buffer_name: "tensor-cables".into(), dirty: false,
+                    status_cells: vec![], status_indicator: StatusIndicator { toggle_cols: None },
+                    completion: None, text_cache_key: 1, widget_layout_cache_key: 1,
+                    widget_content_cache_key: 1, dirty_widget_ids: vec![],
+                    widget_layout: Some(std::sync::Arc::new(patcher.clone())), focused_widget_id: None,
+                    widget_scroll_top: 0.0, widget_scroll_left: 0.0, widget_layout_scroll_left: 0.0,
+                    text_scroll_top: 0, text_cell_width_scale: 1.0, text_cell_height_scale: 1.0,
+                },
+            }] };
+            let target = unwrap_backend(backend.create_tiled_capture_target(width, height), "target");
+            unwrap_backend(backend.render_tiled_capture(&tiled, &target), "plain cables");
+            unwrap_backend(backend.render_tiled_capture(&tiled, &target), "warm plain cables");
+            let plain = target.rgba();
+
+            let prepared = PatcherPreviewRequest::capture(&patcher).unwrap().prepare().unwrap();
+            let tensor = BindingShape { kind: BindingShapeKind::SignalTensor, shape: vec![8], elements: None };
+            set_compile_shapes_for_path(
+                &path,
+                &prepared.bindings,
+                HashMap::from([("lanes".to_string(), tensor.clone()), ("osc".to_string(), tensor)]),
+                None,
+            );
+            unwrap_backend(backend.render_tiled_capture(&tiled, &target), "after publish");
+            let tensor_pixels = target.rgba();
+            let changed = |a: &[u8], b: &[u8]| {
+                a.chunks_exact(4).zip(b.chunks_exact(4)).filter(|(a, b)| a != b).count()
+            };
+            assert!(
+                changed(&tensor_pixels, &plain) > 300,
+                "publishing shapes must repaint the cables (thicker, two-colour): {} pixels changed",
+                changed(&tensor_pixels, &plain)
+            );
+            clear_compile_shapes_for_path(&path);
+            unwrap_backend(backend.render_tiled_capture(&tiled, &target), "after clear");
+            assert_eq!(changed(&target.rgba(), &plain), 0, "clearing shapes repaints plain cables");
+            let _ = std::fs::remove_dir_all(&dir);
         }
 
         fn change_control_values(tiled: &mut TiledRenderFrame, index: usize) {

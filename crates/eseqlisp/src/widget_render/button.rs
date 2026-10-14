@@ -145,6 +145,51 @@ fn button_shadow(props: &HashMap<String, Value>) -> Color {
     resolve_named_color(props, "shadow-color", theme::BUTTON_SHADOW())
 }
 
+fn button_is_disabled(props: &HashMap<String, Value>) -> bool {
+    matches!(props.get("disabled"), Some(Value::Bool(true)))
+}
+
+/// Pressed bezels shrink this much (fraction of each dimension) at full press.
+const PRESSED_SCALE_INSET: f32 = 0.03;
+
+/// The fill a button shows at `amount` (0 = idle, 1 = held). Filled accent
+/// buttons darken like a native default button; the grey kinds brighten on
+/// a dark fill and darken on a light one, so the press always reads as a
+/// change in the bezel's own direction. A transparent fill gains a faint
+/// ghost backing so the press is still visible.
+fn pressed_background(bg: Color, variant: ButtonVariant, amount: f32) -> Color {
+    let amount = amount.clamp(0.0, 1.0);
+    if amount <= 0.0 {
+        return bg;
+    }
+    let base = if bg.a < 0.05 {
+        let ghost = theme::BUTTON_GHOST_BG();
+        Color::rgba(ghost.r, ghost.g, ghost.b, bg.a)
+    } else {
+        bg
+    };
+    let target = match variant {
+        ButtonVariant::Primary | ButtonVariant::Danger => base.mix(Color::BLACK, 0.18),
+        ButtonVariant::Secondary | ButtonVariant::Ghost if base.luma() < 0.5 => {
+            base.mix(Color::WHITE, 0.12)
+        }
+        ButtonVariant::Secondary | ButtonVariant::Ghost => base.mix(Color::BLACK, 0.10),
+    };
+    let mut pressed = base.mix(target, amount);
+    pressed.a = base.a + (base.a.max(0.6) - base.a) * amount;
+    pressed
+}
+
+fn pressed_rect(rect: Rect, amount: f32) -> Rect {
+    let inset = PRESSED_SCALE_INSET * amount.clamp(0.0, 1.0) * 0.5;
+    Rect {
+        row: rect.row + rect.height * inset,
+        col: rect.col + rect.width * inset,
+        width: rect.width * (1.0 - inset * 2.0),
+        height: rect.height * (1.0 - inset * 2.0),
+    }
+}
+
 pub(super) fn icon_name_value(value: &str) -> Option<f32> {
     match value {
         "plus" | "new" => Some(0.0),
@@ -893,8 +938,14 @@ impl WidgetDefinition for ButtonWidget {
         if node.widget_type == "badge" {
             return MouseEventOutcome::Ignore;
         }
-        if matches!(node.props.get("disabled"), Some(Value::Bool(true))) {
+        if button_is_disabled(&node.props) {
             return MouseEventOutcome::Consume;
+        }
+        if matches!(mouse_kind, MouseEventKind::Down(MouseButton::Left)) {
+            super::button_press::begin_press(
+                node,
+                super::sdf_widget::current_sdf_time_fallback_seconds(),
+            );
         }
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left)
@@ -963,6 +1014,18 @@ impl WidgetDefinition for ButtonWidget {
         })
     }
 
+    fn wants_animation_frames(&self, node: &LayoutNode) -> bool {
+        node.widget_type == "button"
+            && super::button_press::press_animating(
+                node,
+                super::sdf_widget::current_sdf_time_fallback_seconds(),
+            )
+    }
+
+    fn animation_frame_policy(&self) -> super::AnimationFramePolicy {
+        super::AnimationFramePolicy::RuntimeState
+    }
+
     fn fragment_shader(
         &self,
         widget_type: &str,
@@ -982,11 +1045,17 @@ impl WidgetDefinition for ButtonWidget {
         viewport: super::WidgetViewport,
     ) -> Vec<GpuPrimitive> {
         let mut prims = Vec::new();
-        let bg = variant_bg(&node.props);
+        let press = if node.widget_type == "button" && !button_is_disabled(&node.props) {
+            super::button_press::paint_press_amount(node, viewport.time_seconds)
+        } else {
+            0.0
+        };
+        let bg = pressed_background(variant_bg(&node.props), variant(&node.props), press);
         if bg.a > 0.0 {
-            let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
-            let px_w = node.rect.width * viewport.cell_w;
-            let px_h = node.rect.height * viewport.cell_h;
+            let surface_rect = pressed_rect(node.rect, press);
+            let (ndc_min, ndc_max) = ndc_bounds(surface_rect, viewport);
+            let px_w = surface_rect.width * viewport.cell_w;
+            let px_h = surface_rect.height * viewport.cell_h;
             let corner_radius_px = get_f32_prop(&node.props, "corner-radius", 9.0).max(0.0);
             prims.push(GpuPrimitive::WidgetInstance {
                 widget_type: "button".to_string(),
@@ -1013,7 +1082,7 @@ impl WidgetDefinition for ButtonWidget {
                     color_b: button_border(&node.props).to_rgba(),
                     color_c: button_highlight(&node.props).to_rgba(),
                     color_d: button_shadow(&node.props).to_rgba(),
-                    corner_radius: normalized_corner_radius(node.rect, viewport, corner_radius_px),
+                    corner_radius: normalized_corner_radius(surface_rect, viewport, corner_radius_px),
                     pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
                 },
                 is_background: true,
@@ -1697,5 +1766,256 @@ mod tests {
         props.insert("active".into(), Value::Bool(true));
         let color = variant_fg(&props);
         assert_eq!([color.r, color.g, color.b, color.a], [0.8, 0.9, 1.0, 1.0]);
+    }
+
+    // ── Press feedback ─────────────────────────────────────────────────────
+
+    use super::super::button_press::{
+        RELEASE_SECONDS, begin_press, end_press, paint_press_amount, pointer_over,
+        press_amount, press_animating, press_held, reset_press_state,
+    };
+
+    fn surface_fill(node: &LayoutNode, time_seconds: f32) -> [f32; 4] {
+        let viewport = super::super::WidgetViewport { time_seconds, ..test_viewport() };
+        ButtonWidget
+            .build_primitives("button", node, viewport)
+            .into_iter()
+            .find_map(|primitive| match primitive {
+                GpuPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "button" =>
+                {
+                    Some(instance.color_a)
+                }
+                _ => None,
+            })
+            .expect("button surface")
+    }
+
+    fn press_down(node: &LayoutNode) -> MouseEventOutcome {
+        ButtonWidget.mouse_event(
+            node,
+            MouseEventKind::Down(MouseButton::Left),
+            1.0,
+            1.0,
+            None,
+            None,
+            KeyModifiers::empty(),
+            1.0,
+            1.0,
+        )
+    }
+
+    #[test]
+    fn press_state_tracks_hold_drag_out_and_back_in() {
+        reset_press_state();
+        let node = test_button_node(HashMap::new());
+        let elsewhere = LayoutNode {
+            widget_id: 2,
+            rect: Rect { row: 20.0, col: 4.0, width: 8.0, height: 3.0 },
+            ..test_button_node(HashMap::new())
+        };
+
+        begin_press(&node, 10.0);
+        assert!(press_held());
+        assert_eq!(press_amount(&node, 10.0), 1.0, "down presses the button");
+        assert_eq!(press_amount(&node, 99.0), 1.0, "a held press does not fade");
+        assert_eq!(press_amount(&elsewhere, 10.0), 0.0);
+
+        assert!(pointer_over(Some(&elsewhere), 11.0), "drag-off changes the look");
+        assert!(!pointer_over(None, 11.01), "still outside: no change");
+        let fading = press_amount(&node, 11.0 + RELEASE_SECONDS * 0.5);
+        assert!(fading > 0.0 && fading < 1.0, "drag-off eases out, got {fading}");
+        assert_eq!(press_amount(&node, 11.0 + RELEASE_SECONDS), 0.0);
+
+        assert!(pointer_over(Some(&node), 12.0), "drag back on re-presses");
+        assert_eq!(press_amount(&node, 12.0 + RELEASE_SECONDS), 1.0);
+        assert!(!press_animating(&node, 12.0), "a re-pressed button is static");
+    }
+
+    #[test]
+    fn release_animates_then_settles_idle() {
+        reset_press_state();
+        let node = test_button_node(HashMap::new());
+        begin_press(&node, 5.0);
+        assert!(!press_animating(&node, 5.0), "holding a press needs no frames");
+
+        assert!(end_press(5.5), "release starts the fade");
+        assert!(!press_held());
+        assert!(!end_press(5.6), "a second mouse-up is a no-op");
+        assert!(press_animating(&node, 5.5));
+        let early = press_amount(&node, 5.5 + RELEASE_SECONDS * 0.25);
+        let late = press_amount(&node, 5.5 + RELEASE_SECONDS * 0.75);
+        assert!(1.0 > early && early > late && late > 0.0, "{early} -> {late}");
+
+        // Frames continue until a paint lands on the settled look.
+        let settled = 5.5 + RELEASE_SECONDS;
+        assert!(press_animating(&node, settled));
+        assert_eq!(paint_press_amount(&node, settled), 0.0);
+        assert!(!press_animating(&node, settled), "the settled paint ends the frames");
+    }
+
+    #[test]
+    fn unpainted_release_stops_requesting_frames_after_grace() {
+        reset_press_state();
+        let node = test_button_node(HashMap::new());
+        begin_press(&node, 1.0);
+        end_press(1.0);
+        assert!(press_animating(&node, 1.0 + RELEASE_SECONDS));
+        assert!(!press_animating(&node, 1.0 + 1.0), "a culled button cannot pin frames");
+    }
+
+    #[test]
+    fn release_outside_does_not_animate_twice() {
+        reset_press_state();
+        let node = test_button_node(HashMap::new());
+        begin_press(&node, 1.0);
+        pointer_over(None, 1.0);
+        assert!(!end_press(1.5), "already un-pressed by the drag-off");
+        assert_eq!(press_amount(&node, 1.5), 0.0);
+    }
+
+    #[test]
+    fn press_follows_a_rerendered_button_at_the_same_rect() {
+        reset_press_state();
+        let node = test_button_node(HashMap::new());
+        begin_press(&node, 1.0);
+        // on-click re-rendered the subtree and minted a fresh id.
+        let rerendered = LayoutNode { widget_id: 77, ..test_button_node(HashMap::new()) };
+        assert_eq!(press_amount(&rerendered, 1.0), 1.0);
+        assert!(!pointer_over(Some(&rerendered), 1.0), "still on the same button");
+        assert_eq!(press_amount(&rerendered, 1.0), 1.0);
+    }
+
+    #[test]
+    fn disabled_and_badge_buttons_ignore_presses() {
+        reset_press_state();
+        let disabled = test_button_node(HashMap::from([
+            ("disabled".to_string(), Value::Bool(true)),
+            ("on-click".to_string(), Value::Symbol("go".to_string())),
+        ]));
+        assert!(matches!(press_down(&disabled), MouseEventOutcome::Consume));
+        assert!(!press_held());
+        assert_eq!(press_amount(&disabled, 0.0), 0.0);
+
+        let mut badge = test_button_node(HashMap::new());
+        badge.widget_type = "badge".to_string();
+        assert!(matches!(press_down(&badge), MouseEventOutcome::Ignore));
+        assert!(!press_held());
+    }
+
+    #[test]
+    fn pressing_keeps_click_on_mouse_down() {
+        reset_press_state();
+        let node = test_button_node(HashMap::from([(
+            "on-click".to_string(),
+            Value::Symbol("go".to_string()),
+        )]));
+        let MouseEventOutcome::Dispatch(event) = press_down(&node) else {
+            panic!("down still dispatches the click");
+        };
+        assert!(matches!(event, WidgetEvent::Activate(_)));
+        assert!(press_held());
+        let up = ButtonWidget.mouse_event(
+            &node,
+            MouseEventKind::Up(MouseButton::Left),
+            1.0,
+            1.0,
+            None,
+            None,
+            KeyModifiers::empty(),
+            1.0,
+            1.0,
+        );
+        assert!(matches!(up, MouseEventOutcome::Ignore), "mouse-up never clicks");
+    }
+
+    #[test]
+    fn pressed_fill_differs_from_normal_for_every_variant() {
+        for variant in ["primary", "secondary", "ghost", "danger"] {
+            reset_press_state();
+            let node = test_button_node(HashMap::from([(
+                "variant".to_string(),
+                Value::Keyword(variant.to_string()),
+            )]));
+            let normal = surface_fill(&node, 0.0);
+            press_down(&node);
+            let pressed = surface_fill(&node, 0.0);
+            assert_ne!(normal, pressed, "{variant} must show a pressed fill");
+            let base = Color::rgba(normal[0], normal[1], normal[2], normal[3]);
+            let pressed = Color::rgba(pressed[0], pressed[1], pressed[2], pressed[3]);
+            if matches!(variant, "primary" | "danger") {
+                assert!(pressed.luma() < base.luma(), "{variant} darkens when pressed");
+            }
+        }
+    }
+
+    #[test]
+    fn transparent_button_gains_a_visible_pressed_fill() {
+        reset_press_state();
+        let node = test_button_node(HashMap::from([(
+            "background-color".to_string(),
+            color_value(0.0, 0.0, 0.0, 0.0),
+        )]));
+        let viewport = test_viewport();
+        assert!(
+            !ButtonWidget
+                .build_primitives("button", &node, viewport)
+                .iter()
+                .any(|p| matches!(p, GpuPrimitive::WidgetInstance { widget_type, .. } if widget_type == "button")),
+            "an idle transparent button draws no bezel"
+        );
+        press_down(&node);
+        assert!(surface_fill(&node, 0.0)[3] > 0.0);
+    }
+
+    #[test]
+    fn pressed_bezel_shrinks_slightly_and_stays_centered() {
+        let rect = Rect { row: 2.0, col: 4.0, width: 20.0, height: 3.0 };
+        let pressed = pressed_rect(rect, 1.0);
+        assert!((pressed.width / rect.width - (1.0 - PRESSED_SCALE_INSET)).abs() < 1e-5);
+        assert!((pressed.col + pressed.width * 0.5 - (rect.col + rect.width * 0.5)).abs() < 1e-5);
+        assert!((pressed.row + pressed.height * 0.5 - (rect.row + rect.height * 0.5)).abs() < 1e-5);
+        assert_eq!(pressed_rect(rect, 0.0), rect);
+    }
+
+    #[test]
+    fn only_a_releasing_button_requests_animation_frames() {
+        reset_press_state();
+        let mut node = test_button_node(HashMap::new());
+        crate::widget_render::cache_layout_animation_hints(&mut node);
+        assert!(!ButtonWidget.wants_animation_frames(&node));
+        assert!(!crate::widget_render::layout_wants_animation_frames(&node), "idle");
+
+        let now = crate::widget_render::sdf_widget::current_sdf_time_fallback_seconds();
+        begin_press(&node, now);
+        assert!(!crate::widget_render::layout_wants_animation_frames(&node), "held");
+
+        end_press(now);
+        assert!(crate::widget_render::layout_wants_animation_frames(&node), "releasing");
+        assert_eq!(
+            crate::widget_render::active_animation_widget_ids(&node),
+            vec![node.widget_id]
+        );
+    }
+
+    #[test]
+    fn primitive_cache_key_tracks_the_release_fade() {
+        reset_press_state();
+        let node = test_button_node(HashMap::new());
+        begin_press(&node, 1.0);
+        end_press(1.0);
+        let at = |t: f32| {
+            let viewport = super::super::WidgetViewport { time_seconds: t, ..test_viewport() };
+            super::super::widget_primitives_for_node(&node, viewport)
+                .into_iter()
+                .find_map(|primitive| match primitive {
+                    GpuPrimitive::WidgetInstance { instance, .. } => Some(instance.color_a),
+                    _ => None,
+                })
+                .expect("surface")
+        };
+        let mid = at(1.0 + RELEASE_SECONDS * 0.5);
+        let start = at(1.0);
+        assert_ne!(start, mid, "a cached frame must not be reused mid-fade");
     }
 }

@@ -1481,7 +1481,7 @@ fn modified_unix_ms(metadata: &std::fs::Metadata) -> Option<u128> {
         .map(|duration| duration.as_millis())
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let digest = hasher.finalize();

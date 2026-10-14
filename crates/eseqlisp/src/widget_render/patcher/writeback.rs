@@ -2860,6 +2860,15 @@ fn normalize_created_node_inline_args(
     ) {
         return;
     }
+    // No signal inlets (`ext`): the typed arguments are creation arguments
+    // and stay exactly as written.
+    if kind == NodeKind::Builtin
+        && super::project::dgenlisp_operator_port_shapes()
+            .get(&op)
+            .is_some_and(|shape| shape.input_count == 0)
+    {
+        return;
+    }
     let required_input_count = created_node_required_input_count(&op, kind, macro_arities);
     let inline_args = positional_args(items, 1)
         .into_iter()

@@ -2,7 +2,7 @@
 (module eseq.application-menus)
 (import eseq.menus :as menus)
 (import eseq.seq-core-state)
-(import eseq.kinds :refer (tracks buses selection browser project transport))
+(import eseq.kinds :refer (tracks buses selection browser project transport editor))
 (export application-menu-items install-default-menus)
 
 (def commands-enabled? () (not (get (native-menu-context) :blocked)))
@@ -121,10 +121,16 @@
 (def request-new-project () :doc "Start a new, empty project, asking to save first." :command "New Project" :pinned true :icon :project :shortcut "s-n"
   :group "File"
   (host-command "project-new-request" (dict)))
-(def save-project () :doc "Save the project." :command "Save" :pinned true :icon :save :shortcut "s-s" :group "File"
-  (eseq.transport/file-menu-save))
-(def save-project-as () :doc "Save the project under a new name." :command "Save As…" :icon :save :shortcut "S-s-s" :group "File"
-  (eseq.transport/file-menu-save-as))
+;; While the patch editor is open, Save and Save As are the patch's (its
+;; toolbar's actions, docs/patcher-workspace-spec.md §4), as in Max.
+(def save-project () :doc "Save the project, or the patch while the patch editor is open." :command "Save" :pinned true :icon :save :shortcut "s-s" :group "File"
+  (if (= editor.mode "")
+    (eseq.transport/file-menu-save)
+    (eseq.patch-toolbar/save!)))
+(def save-project-as () :doc "Save the project under a new name, or the patch as a new instrument while the patch editor is open." :command "Save As…" :icon :save :shortcut "S-s-s" :group "File"
+  (if (= editor.mode "")
+    (eseq.transport/file-menu-save-as)
+    (eseq.patch-toolbar/save-as!)))
 (def open-project () :doc "Open a saved project." :command "Open Project…" :pinned true :icon :folder :shortcut "s-o" :group "File"
   (eseq.transport/file-menu-open-project))
 (def import-samples () :doc "Copy sample files into the library." :command "Import Samples…" :icon :download :group "File"

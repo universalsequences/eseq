@@ -194,6 +194,10 @@ struct PatchCableInstance {
     @location(5) params: vec4<f32>,
     // style, plug_radius_px, plug_levels.xy
     @location(6) style: vec4<f32>,
+    @location(7) end_plug_color: vec4<f32>,
+    // dash on, dash off (px), unused, unused; 0 = solid
+    @location(8) dash_px: vec4<f32>,
+    @location(9) alt_color: vec4<f32>,
 };
 
 struct PatchCableVaryings {
@@ -204,6 +208,9 @@ struct PatchCableVaryings {
     @location(3) @interpolate(flat) color: vec4<f32>,
     @location(4) @interpolate(flat) params: vec4<f32>,
     @location(5) @interpolate(flat) style: vec4<f32>,
+    @location(6) @interpolate(flat) end_plug_color: vec4<f32>,
+    @location(7) @interpolate(flat) dash_px: vec2<f32>,
+    @location(8) @interpolate(flat) alt_color: vec4<f32>,
 };
 
 fn patch_cable_quad_corner(vid: u32) -> vec2<f32> {
@@ -232,6 +239,9 @@ fn patch_cable_vert(
     out.color = cable.color;
     out.params = cable.params;
     out.style = cable.style;
+    out.end_plug_color = cable.end_plug_color;
+    out.dash_px = cable.dash_px.xy;
+    out.alt_color = cable.alt_color;
     return out;
 }
 
@@ -395,6 +405,182 @@ fn patch_cable_segmented_distance(
         corner_radius);
 }
 
+// Dashed cables need the arc length from `start` at the closest point, not
+// just the distance. These variants walk the same geometry as the plain
+// distance functions above, accumulating length piece by piece; solid cables
+// never call them, so they pay nothing for dashes.
+struct PatchCableArcProbe {
+    best: f32,
+    best_s: f32,
+    acc: f32,
+};
+
+const PATCH_CABLE_HALF_PI: f32 = 1.5707964;
+
+fn patch_cable_probe_segment(probe: ptr<function, PatchCableArcProbe>, p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) {
+    let v = b - a;
+    let len_sq = dot(v, v);
+    let len = sqrt(len_sq);
+    var t = 0.0;
+    if (len_sq >= 0.00001) {
+        t = clamp(dot(p - a, v) / len_sq, 0.0, 1.0);
+    }
+    let d = length(p - (a + t * v));
+    if (d < (*probe).best) {
+        (*probe).best = d;
+        (*probe).best_s = (*probe).acc + t * len;
+    }
+    (*probe).acc += len;
+}
+
+fn patch_cable_probe_arc(
+    probe: ptr<function, PatchCableArcProbe>,
+    p: vec2<f32>,
+    center: vec2<f32>,
+    radius: f32,
+    corner: vec2<f32>,
+    from_point: vec2<f32>,
+) {
+    let d = patch_cable_arc_distance(p, center, radius, corner);
+    if (d < (*probe).best) {
+        let a = from_point - center;
+        let b = p - center;
+        let denom = max(length(a) * length(b), 0.0001);
+        let angle = acos(clamp(dot(a, b) / denom, -1.0, 1.0));
+        (*probe).best = d;
+        (*probe).best_s = (*probe).acc + min(angle, PATCH_CABLE_HALF_PI) * radius;
+    }
+    (*probe).acc += PATCH_CABLE_HALF_PI * radius;
+}
+
+fn patch_cable_curve_distance_arc(
+    p: vec2<f32>,
+    p0: vec2<f32>,
+    p1: vec2<f32>,
+    p2: vec2<f32>,
+    p3: vec2<f32>,
+) -> vec2<f32> {
+    var probe = PatchCableArcProbe(1.0e6, 0.0, 0.0);
+    var seg_start = p0;
+    for (var i = 0; i < 24; i++) {
+        let seg_end = patch_cable_bezier(p0, p1, p2, p3, f32(i + 1) / 24.0);
+        patch_cable_probe_segment(&probe, p, seg_start, seg_end);
+        seg_start = seg_end;
+    }
+    return vec2<f32>(probe.best, probe.best_s);
+}
+
+fn patch_cable_segmented_distance_arc_y_up(
+    p: vec2<f32>,
+    start: vec2<f32>,
+    end: vec2<f32>,
+    segment_y: f32,
+    corner_radius: f32,
+) -> vec2<f32> {
+    var probe = PatchCableArcProbe(1.0e6, 0.0, 0.0);
+    let needs_five = end.y > segment_y;
+    if (!needs_five) {
+        let going_down1 = start.y > segment_y;
+        let going_right = end.x > start.x;
+        let going_down2 = end.y < segment_y;
+        let corner1 = vec2<f32>(start.x, segment_y);
+        let corner2 = vec2<f32>(end.x, segment_y);
+        var corner1_center: vec2<f32>;
+        var corner2_center: vec2<f32>;
+        if (going_down1) {
+            corner1_center = select(
+                vec2<f32>(start.x - corner_radius, segment_y + corner_radius),
+                vec2<f32>(start.x + corner_radius, segment_y + corner_radius),
+                going_right);
+        } else {
+            corner1_center = select(
+                vec2<f32>(start.x - corner_radius, segment_y - corner_radius),
+                vec2<f32>(start.x + corner_radius, segment_y - corner_radius),
+                going_right);
+        }
+        if (going_down2) {
+            corner2_center = select(
+                vec2<f32>(end.x + corner_radius, segment_y - corner_radius),
+                vec2<f32>(end.x - corner_radius, segment_y - corner_radius),
+                going_right);
+        } else {
+            corner2_center = select(
+                vec2<f32>(end.x + corner_radius, segment_y + corner_radius),
+                vec2<f32>(end.x - corner_radius, segment_y + corner_radius),
+                going_right);
+        }
+        let seg1_end = vec2<f32>(start.x, select(segment_y - corner_radius, segment_y + corner_radius, going_down1));
+        let seg3_start = vec2<f32>(end.x, select(segment_y + corner_radius, segment_y - corner_radius, going_down2));
+        let seg2_start = vec2<f32>(select(start.x - corner_radius, start.x + corner_radius, going_right), segment_y);
+        let seg2_end = vec2<f32>(select(end.x + corner_radius, end.x - corner_radius, going_right), segment_y);
+        patch_cable_probe_segment(&probe, p, start, seg1_end);
+        patch_cable_probe_arc(&probe, p, corner1_center, corner_radius, corner1, seg1_end);
+        patch_cable_probe_segment(&probe, p, seg2_start, seg2_end);
+        patch_cable_probe_arc(&probe, p, corner2_center, corner_radius, corner2, seg2_end);
+        patch_cable_probe_segment(&probe, p, seg3_start, end);
+        return vec2<f32>(probe.best, probe.best_s);
+    }
+
+    let going_right = end.x > start.x;
+    let clearance = corner_radius * 2.0;
+    let turnaround_y = end.y + clearance;
+    let turnaround_x = end.x - clearance;
+    let seg4_going_right = end.x > turnaround_x;
+    let corner1 = vec2<f32>(start.x, segment_y);
+    let corner1_center = select(
+        vec2<f32>(start.x - corner_radius, segment_y + corner_radius),
+        vec2<f32>(start.x + corner_radius, segment_y + corner_radius),
+        going_right);
+    let seg1_end = vec2<f32>(start.x, segment_y + corner_radius);
+    let corner2 = vec2<f32>(turnaround_x, segment_y);
+    let corner2_center = select(
+        vec2<f32>(turnaround_x + corner_radius, segment_y + corner_radius),
+        vec2<f32>(turnaround_x - corner_radius, segment_y + corner_radius),
+        going_right);
+    let seg2_start = vec2<f32>(select(start.x - corner_radius, start.x + corner_radius, going_right), segment_y);
+    let seg2_end = vec2<f32>(select(turnaround_x + corner_radius, turnaround_x - corner_radius, going_right), segment_y);
+    let corner3 = vec2<f32>(turnaround_x, turnaround_y);
+    let corner3_center = select(
+        vec2<f32>(turnaround_x - corner_radius, turnaround_y - corner_radius),
+        vec2<f32>(turnaround_x + corner_radius, turnaround_y - corner_radius),
+        seg4_going_right);
+    let seg3_start = vec2<f32>(turnaround_x, segment_y + corner_radius);
+    let seg3_end = vec2<f32>(turnaround_x, turnaround_y - corner_radius);
+    let corner4 = vec2<f32>(end.x, turnaround_y);
+    let corner4_center = select(
+        vec2<f32>(end.x + corner_radius, turnaround_y - corner_radius),
+        vec2<f32>(end.x - corner_radius, turnaround_y - corner_radius),
+        seg4_going_right);
+    let seg4_start = vec2<f32>(select(turnaround_x - corner_radius, turnaround_x + corner_radius, seg4_going_right), turnaround_y);
+    let seg4_end = vec2<f32>(select(end.x + corner_radius, end.x - corner_radius, seg4_going_right), turnaround_y);
+    let seg5_start = vec2<f32>(end.x, turnaround_y - corner_radius);
+    patch_cable_probe_segment(&probe, p, start, seg1_end);
+    patch_cable_probe_arc(&probe, p, corner1_center, corner_radius, corner1, seg1_end);
+    patch_cable_probe_segment(&probe, p, seg2_start, seg2_end);
+    patch_cable_probe_arc(&probe, p, corner2_center, corner_radius, corner2, seg2_end);
+    patch_cable_probe_segment(&probe, p, seg3_start, seg3_end);
+    patch_cable_probe_arc(&probe, p, corner3_center, corner_radius, corner3, seg3_end);
+    patch_cable_probe_segment(&probe, p, seg4_start, seg4_end);
+    patch_cable_probe_arc(&probe, p, corner4_center, corner_radius, corner4, seg4_end);
+    patch_cable_probe_segment(&probe, p, seg5_start, end);
+    return vec2<f32>(probe.best, probe.best_s);
+}
+
+fn patch_cable_segmented_distance_arc(
+    p: vec2<f32>,
+    start: vec2<f32>,
+    end: vec2<f32>,
+    segment_y_px: f32,
+    corner_radius: f32,
+) -> vec2<f32> {
+    return patch_cable_segmented_distance_arc_y_up(
+        vec2<f32>(p.x, -p.y),
+        vec2<f32>(start.x, -start.y),
+        vec2<f32>(end.x, -end.y),
+        -segment_y_px,
+        corner_radius);
+}
+
 @fragment
 fn patch_cable_frag(input: PatchCableVaryings) -> @location(0) vec4<f32> {
     let start = input.start_control1.xy;
@@ -409,7 +595,38 @@ fn patch_cable_frag(input: PatchCableVaryings) -> @location(0) vec4<f32> {
     // A `select` here would evaluate both distance fields; branch instead and
     // take the derivative below, in uniform control flow.
     var min_dist_to_line: f32;
-    if (is_segmented > 0.5) {
+    let dashed = input.dash_px.x > 0.0 && input.dash_px.y > 0.0;
+    // Dashed (multichannel) cables: 1 inside a primary-colour run, 0 inside
+    // an alternate-colour run. The stroke itself never breaks.
+    var primary = 1.0;
+    if (dashed) {
+        var probe: vec2<f32>;
+        if (is_segmented > 0.5) {
+            probe = patch_cable_segmented_distance_arc(
+                input.pixel_pos,
+                start,
+                end,
+                segment_y_px,
+                corner_radius_px);
+        } else {
+            probe = patch_cable_curve_distance_arc(
+                input.pixel_pos,
+                start,
+                control1,
+                control2,
+                end);
+        }
+        // Signed arc distance to the nearest seam: positive inside a primary
+        // run. A pixel-wide ramp keeps the seam antialiased.
+        let period = input.dash_px.x + input.dash_px.y;
+        let u = probe.y - period * floor(probe.y / period);
+        var seam = min(u, input.dash_px.x - u);
+        if (u > input.dash_px.x) {
+            seam = -min(u - input.dash_px.x, period - u);
+        }
+        primary = smoothstep(-0.75, 0.75, seam);
+        min_dist_to_line = probe.x;
+    } else if (is_segmented > 0.5) {
         min_dist_to_line = patch_cable_segmented_distance(
             input.pixel_pos,
             start,
@@ -432,10 +649,12 @@ fn patch_cable_frag(input: PatchCableVaryings) -> @location(0) vec4<f32> {
     // centre like a jack, unioned into the body so they share one rim.
     var plug_dist = 1.0e6;
     var plug_level = 0.0;
+    var at_end_plug = false;
     if (style > 0.5 && plug_radius_px > 0.0) {
         let start_dist = length(input.pixel_pos - start);
         let end_dist = length(input.pixel_pos - end);
         plug_dist = min(start_dist, end_dist);
+        at_end_plug = end_dist <= start_dist;
         plug_level = select(input.style.w, input.style.z, start_dist < end_dist);
         sdf = min(sdf, plug_dist - plug_radius_px);
     }
@@ -451,13 +670,19 @@ fn patch_cable_frag(input: PatchCableVaryings) -> @location(0) vec4<f32> {
         // strip colour.
         let rim_width = max(radius_px * 0.34, 0.75);
         let rim_blend = smoothstep(-rim_width - derivative, -rim_width + derivative, sdf);
-        let rim_color = input.color.rgb * 0.42;
-        var cable_color = mix(input.color.rgb, rim_color, rim_blend);
+        // The input end's plug takes the input port's colour.
+        var end_plug = 0.0;
+        if (at_end_plug && input.end_plug_color.a > 0.0) {
+            end_plug = 1.0 - smoothstep(plug_radius_px - derivative, plug_radius_px + derivative, plug_dist);
+        }
+        let base_color = mix(input.color.rgb, input.end_plug_color.rgb, end_plug);
+        let rim_color = base_color * 0.42;
+        var cable_color = mix(base_color, rim_color, rim_blend);
         let hole_radius = plug_radius_px * 0.40;
         let hole_blend = 1.0 - smoothstep(hole_radius - derivative, hole_radius + derivative, plug_dist);
         // The hole is a jack LED: dark at rest, glowing past the cable's
         // own colour toward white with the port's live signal.
-        let lit_color = mix(input.color.rgb, vec3<f32>(1.0, 1.0, 1.0), 0.45);
+        let lit_color = mix(base_color, vec3<f32>(1.0, 1.0, 1.0), 0.45);
         let hole_color = mix(vec3<f32>(0.04, 0.045, 0.05), lit_color, clamp(plug_level, 0.0, 1.0));
         cable_color = mix(cable_color, hole_color, hole_blend);
         return vec4<f32>(cable_color, input.color.a * alpha);
@@ -468,13 +693,22 @@ fn patch_cable_frag(input: PatchCableVaryings) -> @location(0) vec4<f32> {
         max(core_radius - derivative, 0.0),
         core_radius + derivative,
         min_dist_to_line);
-    let edge_color = input.color.rgb * 0.58;
-    let core_color = mix(input.color.rgb, vec3<f32>(1.0, 1.0, 1.0), 0.78);
+    var base = input.color;
+    if (dashed) {
+        base = mix(input.alt_color, input.color, primary);
+    }
+    let edge_color = base.rgb * 0.58;
+    // A dashed (multichannel) cable keeps more of its own colours in the
+    // core, so the two-colour stroke reads at a glance rather than as white.
+    // Only the primary dashes get the highlight: the alternate dashes keep
+    // their theme colour, so a dark alternate (Max mc style) stays dark.
+    let core_whiten = select(0.78, 0.35 * primary, dashed);
+    let core_color = mix(base.rgb, vec3<f32>(1.0, 1.0, 1.0), core_whiten);
     let cable_color = mix(edge_color, core_color, core_blend);
     let edge_alpha_scale = 0.62;
     let alpha_scale = mix(edge_alpha_scale, 1.0, core_blend);
 
-    return vec4<f32>(cable_color, input.color.a * alpha * alpha_scale);
+    return vec4<f32>(cable_color, base.a * alpha * alpha_scale);
 }
 "#;
 

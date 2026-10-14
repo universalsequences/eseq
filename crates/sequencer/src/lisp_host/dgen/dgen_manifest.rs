@@ -59,6 +59,29 @@ pub struct DGenManifest {
     pub tensor_init_data: Vec<TensorInit>,
     /// Memory cell that holds the voice index (0-5) for voice-aware instruments.
     pub voice_cell_id: Option<usize>,
+    /// Compiler-reported shape of each top-level binding (`bindingShapes`,
+    /// docs/patcher-tensor-cables-spec.md §3). Empty for compilers that
+    /// predate the field. The patch editor maps bindings back to nodes.
+    pub binding_shapes: DGenBindingShapes,
+}
+
+/// Binding name -> shape, as the compiler reports it.
+pub type DGenBindingShapes =
+    std::collections::HashMap<String, eseqlisp::widget_render::patcher::BindingShape>;
+
+/// Parse a `bindingShapes` object. Absent -> empty. An entry this build cannot
+/// read is dropped (that binding's shape is unknown) rather than failing the
+/// manifest: shapes are display metadata, never load-bearing.
+pub(crate) fn parse_binding_shapes(value: &serde_json::Value) -> DGenBindingShapes {
+    let Some(entries) = value.get("bindingShapes").and_then(serde_json::Value::as_object) else {
+        return DGenBindingShapes::new();
+    };
+    entries
+        .iter()
+        .filter_map(|(name, shape)| {
+            serde_json::from_value(shape.clone()).ok().map(|shape| (name.clone(), shape))
+        })
+        .collect()
 }
 
 impl DGenManifest {
@@ -568,6 +591,7 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
         tensors,
         tensor_init_data,
         voice_cell_id,
+        binding_shapes: parse_binding_shapes(&v),
     })
 }
 

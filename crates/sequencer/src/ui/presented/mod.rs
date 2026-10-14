@@ -267,6 +267,27 @@ pub(crate) struct EditorView {
     pub(crate) active_macro: String,
     pub(crate) active_macro_action: String,
     pub(crate) open_macro: String,
+    /// The saved instrument / effect being edited, for the patch toolbar;
+    /// empty for a draft that has not been saved yet.
+    pub(crate) title: String,
+    /// The open release (`v3`); 0 for drafts and unversioned instruments.
+    pub(crate) release: i64,
+    /// Unsaved changes: always for a draft, else the patch differs from
+    /// what was last saved.
+    pub(crate) dirty: bool,
+    /// The patcher's selected boxes for the inspector, in patch order: ids
+    /// and their editable text, index-aligned.
+    pub(crate) selected_node_ids: Vec<String>,
+    pub(crate) selected_node_texts: Vec<String>,
+    /// Their compiled output shapes (`signal-tensor [8] · 8 lanes`, …).
+    pub(crate) selected_node_shapes: Vec<String>,
+    /// The selected cable: `[shape, from, to]`, empty when none.
+    pub(crate) selected_cable: Vec<String>,
+    /// The edited instrument's releases (1..=current) and, index-aligned,
+    /// how many tracks of the open project play each; empty when
+    /// unversioned.
+    pub(crate) releases: Vec<i64>,
+    pub(crate) release_tracks: Vec<i64>,
 }
 
 impl Default for EditorView {
@@ -281,6 +302,15 @@ impl Default for EditorView {
             active_macro: String::new(),
             active_macro_action: String::new(),
             open_macro: String::new(),
+            title: String::new(),
+            release: 0,
+            dirty: false,
+            selected_node_ids: Vec::new(),
+            selected_node_texts: Vec::new(),
+            selected_node_shapes: Vec::new(),
+            selected_cable: Vec::new(),
+            releases: Vec::new(),
+            release_tracks: Vec::new(),
         }
     }
 }
@@ -298,10 +328,35 @@ pub(crate) fn present_editor_open(
         mode.clone_into(&mut e.mode);
         buffer.clone_into(&mut e.buffer);
         e.error.clear();
+        // A draft has nothing saved yet; an existing one opens clean. Its
+        // title and release follow from `present_editor_saved`.
+        e.dirty = mode.starts_with("new-");
+        e.title.clear();
+        e.release = 0;
         if let Some(run_mode) = run_mode {
             instrument_run_mode_label(run_mode).clone_into(&mut e.run_mode);
         }
         editor_surface_label(surface).clone_into(&mut e.surface);
+    });
+}
+
+/// Present what the toolbar shows for the saved instrument / effect being
+/// edited: its `title`, open `release` (0: none) and whether it has unsaved
+/// changes.
+pub(crate) fn present_editor_saved(rt: &mut Runtime, title: &str, release: u32, dirty: bool) {
+    present_editor(rt, |e| {
+        title.clone_into(&mut e.title);
+        e.release = i64::from(release);
+        e.dirty = dirty;
+    });
+}
+
+/// Present the edited instrument's release list (see
+/// `instrument_release_listing`).
+pub(crate) fn present_editor_releases(rt: &mut Runtime, (releases, tracks): (Vec<i64>, Vec<i64>)) {
+    present_editor(rt, |e| {
+        e.releases = releases;
+        e.release_tracks = tracks;
     });
 }
 
@@ -312,6 +367,11 @@ pub(crate) fn present_editor_closed(rt: &mut Runtime) {
         e.mode.clear();
         e.error.clear();
         e.buffer.clear();
+        e.title.clear();
+        e.release = 0;
+        e.dirty = false;
+        e.releases.clear();
+        e.release_tracks.clear();
         instrument_run_mode_label(CustomInstrumentRunMode::Instrument).clone_into(&mut e.run_mode);
     });
 }

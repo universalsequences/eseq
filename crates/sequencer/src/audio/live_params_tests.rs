@@ -30,7 +30,7 @@ impl Fixture {
             tensors: vec![crate::lisp_host::TensorMeta {
                 name: "shape".into(), cell_offset: 2, shape: vec![2], kind: "param".into(),
                 mutable: true, source_file: None, source_sample_rate: None,
-            }], tensor_init_data: vec![], voice_cell_id: None,
+            }], tensor_init_data: vec![], voice_cell_id: None, binding_shapes: Default::default(),
         };
         let lib = crate::lisp_host::test_loaded_dgen_lib();
         let engine_id = app.editor.engine_registry.upsert(crate::app::EngineDescriptor {

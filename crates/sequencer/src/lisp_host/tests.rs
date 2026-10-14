@@ -2530,6 +2530,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             tensors: Vec::new(),
             tensor_init_data: Vec::new(),
             voice_cell_id: None,
+            binding_shapes: Default::default(),
         };
 
         let init = super::build_init_message_for_voice(0, &manifest, 0);
@@ -2582,6 +2583,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             tensors: Vec::new(),
             tensor_init_data: Vec::new(),
             voice_cell_id: Some(7),
+            binding_shapes: Default::default(),
         };
 
         let voice_index = 3usize;

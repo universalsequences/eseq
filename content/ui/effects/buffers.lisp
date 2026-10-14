@@ -6,7 +6,7 @@
 ;; (import eseq.effects.buffers) from library code.
 (module eseq.effects.buffers)
 
-(import eseq.kinds :refer (tracks buses engine selection))
+(import eseq.kinds :refer (tracks buses engine selection editor))
 (import eseq.drum-rack-v2)
 (import eseq.effects.devices :as dv)
 (import eseq.effects.drag-drop :as dd)
@@ -227,7 +227,11 @@
             (let ((fx (pd/fx-panel-of d)))
               (ep/fx-panel (get fx :name) (get fx :params) fx)))
           (pf/device-output-meter d.meter)))
-      (track-drop-placeholder-panel))))
+      ;; The patch editor previews its instrument dry; Track FX are the
+      ;; sequencer's (docs/patcher-workspace-spec.md §2).
+      (if (= editor.mode "")
+        (track-drop-placeholder-panel)
+        (box :width 0 :height 0)))))
 
 (effect-buffer "*track*"
   (if (no-tracks?)

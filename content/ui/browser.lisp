@@ -19,7 +19,7 @@
 (import eseq.drum-rack-v2)
 (import eseq.view-kit :refer (open-menu! menu-of listed? find))
 (import eseq.preview-strip :refer (sync-preview! toggle-preview! preview-strip))
-(import eseq.kinds :refer (track tracks scenes groups project selection browser editor))
+(import eseq.kinds :refer (track tracks scenes groups project selection browser))
 
 (export browser-view
         sample-pick
@@ -36,7 +36,6 @@
         clear-editor-name!
         show-browser-tab!
         mark-auditioned!
-        editor-status-row
         open-project-save
         open-project-browser
         new-project
@@ -221,51 +220,6 @@
 (def current-index (&optional (t selection.track))
   (if t t.index 0))
 
-(defwidget editor-spinner
-  ;; Sized to sit inside `editor-status-row`'s 1.35-row height — the
-  ;; row does not clip, so an oversized spinner paints over its neighbours.
-  ;; The dot row spans x = -0.72..0.72 in local space, so keep the box wider
-  ;; than it is tall or the outer dots run off the edges.
-  :width 3.0 :height 1.25
-  :animates true
-  :shader
-  (let ((phase (* itime 5.4))
-        (p0 (+ 0.45 (* 0.55 (sin phase))))
-        (p1 (+ 0.45 (* 0.55 (sin (- phase 0.75)))))
-        (p2 (+ 0.45 (* 0.55 (sin (- phase 1.5)))))
-        (p3 (+ 0.45 (* 0.55 (sin (- phase 2.25)))))
-        (p4 (+ 0.45 (* 0.55 (sin (- phase 3.0)))))
-        (r0 (+ 0.17 (* 0.12 p0)))
-        (r1 (+ 0.17 (* 0.12 p1)))
-        (r2 (+ 0.17 (* 0.12 p2)))
-        (r3 (+ 0.17 (* 0.12 p3)))
-        (r4 (+ 0.17 (* 0.12 p4))))
-    (sdf/layer
-      (sdf/fill (sdf/translate -0.72 0 (sdf/circle r0))
-        (material :color (rgba 0.22 0.52 1.0 (+ 0.35 (* 0.65 p0)))))
-      (sdf/fill (sdf/translate -0.36 0 (sdf/circle r1))
-        (material :color (rgba 0.22 0.52 1.0 (+ 0.35 (* 0.65 p1)))))
-      (sdf/fill (sdf/translate 0 0 (sdf/circle r2))
-        (material :color (rgba 0.22 0.52 1.0 (+ 0.35 (* 0.65 p2)))))
-      (sdf/fill (sdf/translate 0.36 0 (sdf/circle r3))
-        (material :color (rgba 0.22 0.52 1.0 (+ 0.35 (* 0.65 p3)))))
-      (sdf/fill (sdf/translate 0.72 0 (sdf/circle r4))
-        (material :color (rgba 0.22 0.52 1.0 (+ 0.35 (* 0.65 p4))))))))
-
-(def editor-status-row (text color)
-  ;; :center, not :baseline — the spinner is a bare SDF with no text baseline
-  ;; to align against.
-  (h-stack :width :fill :height 1.35 :gap 0.5 :align :center
-    (editor-spinner :width 2.8 :height 1.15)
-    (label text
-      :font-size 9
-      :color color
-      :bg :transparent)))
-
-(def editor-busy? ()
-  (or editor.canceling
-    (= editor.error "Preview compiling...")))
-
 (def audition-mode? ()
   (= browser-view.mode "audition"))
 
@@ -278,9 +232,6 @@
 
 (def project-browser-mode? ()
   (= browser-view.mode "project-browser"))
-
-(def editor-mode? ()
-  (not (= editor.mode "")))
 
 (def create-mode? ()
   (or (track-type-mode?) (create-sampler-mode?)))
@@ -2275,237 +2226,19 @@ Previews each preset as you move through the list; Esc puts the loaded one back.
 (def preset-save-panel ()
   (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1))
 
-;; ── Editor sidebar panels ──
-
-(def editor-macro-action? ()
-  (or (= editor.active-macro-action "save-to-library")
-      (= editor.active-macro-action "fork")))
-
-(def editor-macro-action-label ()
-  (if (= editor.active-macro-action "fork")
-    "Fork Macro"
-    "Save Macro to Library"))
-
-;; Fork is offered exactly when the primary button means "overwrite the shared
-;; definition" — i.e. edit-instrument / edit-effect. It has nothing to fork from
-;; in the new-* draft modes, and hides behind the macro action like everything
-;; else in that stack.
-(def editor-fork-available? ()
-  (and (not (editor-macro-action?))
-       (or (= editor.mode "edit-instrument")
-           (= editor.mode "edit-effect"))))
-
-(def editor-header ()
-  (box :width :fill :padding 0.25 :height :fill
-    (v-stack :width :fill :gap 0.4 :height :fill
-      ;(h-stack :width :fill :gap 0.5 :align :center
-      ;(label
-      ;  (if (editor-macro-action?) "Defmacro"
-      ;    (if (= editor.mode "new-instrument") "New Instrument"
-      ;      (if (= editor.mode "edit-instrument")
-      ;        (if (= editor.surface "code") "Edit Instrument (code)" "Edit Instrument")
-      ;        (if (= editor.mode "new-effect") "New Effect"
-      ;          (if (= editor.mode "edit-effect")
-      ;            (if (= editor.surface "code") "Edit Effect (code)" "Edit Effect")
-      ;            "Editor")))))
-      ;  :font-size 12
-      ;  :color :white
-      ;  :bg :transparent))
-      
-      (if (editor-macro-action?)
-        (v-stack :width :fill :gap 0.35
-          (label "Current macro"
-            :font-size 9
-            :color :gray
-            :bg :transparent)
-          (label editor.active-macro
-            :font-size 11
-            :color :white
-            :bg :transparent)
-          (label "Action"
-            :font-size 9
-            :color :gray
-            :bg :transparent)
-          (label (editor-macro-action-label)
-            :font-size 11
-            :color :white
-            :bg :transparent))
-        (if (= editor.mode "new-instrument")
-          (v-stack :width :fill :height :fill :gap 0.35
-            
-            (h-stack :width :fill :gap 0.35
-              (button "Instrument"
-                :background-color (if (= editor.run-mode "instrument") :mixer-strip-bg :transparent)
-                :border-color :black
-                :width 8.5
-                :height 1.2
-                :font-size 11
-                :on-click |x y r|
-                (set! editor.run-mode "instrument")
-                :color (if (= editor.run-mode "instrument") :white :dimmer))
-              (button "Free Patch"
-                :background-color (if (= editor.run-mode "free_patch") :mixer-strip-bg :transparent)
-                :border-color :black
-                :border-width 1
-                :width 8.5
-                :height 1.2
-                :font-size 11
-                :on-click |x y r|
-                (set! editor.run-mode "free_patch")
-                :color (if (= editor.run-mode "free_patch") :white :dim)))
-            (label "Save as"
-              :font-size 12
-              :color :gray
-              :bg :transparent)
-            (text-input
-              :width :fill
-              :value editor-draft.name
-              :placeholder "instrument-name"
-              :on-change (lambda (v) (set! editor-draft.name v))
-              :height 1.5
-              :font-size 12))
-          (if (= editor.mode "new-effect")
-            (v-stack :width :fill :gap 0.35
-              (label "Draft patch"
-                :font-size 9
-                :color :gray
-                :bg :transparent)
-              (label (str "track " (+ (current-index) 1))
-                :font-size 11
-                :color :white
-                :bg :transparent)
-              (label "Save as"
-                :font-size 9
-                :color :gray
-                :bg :transparent)
-              (text-input
-                :width :fill
-                :value editor-draft.name
-                :placeholder "effect-name"
-                :on-change (lambda (v) (set! editor-draft.name v))
-                :height 1.5
-                :font-size 12))
-            ;; For edit modes, show the file name
-            (label editor.buffer
-              :font-size 10
-              :color :gray
-              :bg :transparent))))
-      ;; Status display
-      (if editor.canceling
-        (editor-status-row "Canceling..." :gray)
-        (if (= editor.error "Preview compiling...")
-          (editor-status-row editor.error :gray)
-          (if (not (= editor.error ""))
-            (label editor.error
-              :font-size 9
-              :color :red
-              :bg :transparent)
-            (box))))
-      ;; Eval button (code editor only): compile + hot-swap the buffer
-      (if (= editor.surface "code")
-        (button "Eval (C-c C-c)"
-          :variant :secondary
-          :width 13
-          :height 1.2
-          :font-size 10
-          :on-click |x y r|
-          (host-command "evaluate-editor-source" (dict))
-          :color :white)
-        (box))
-      ;; Open as patch (code editor, edit-existing): promote to the patch editor
-      (if (and (= editor.surface "code")
-          (or (= editor.mode "edit-instrument") (= editor.mode "edit-effect")))
-        (button "Open as patch"
-          :variant :secondary
-          :width 13
-          :height 1.2
-          :font-size 10
-          :on-click |x y r|
-          (host-command "promote-editor-to-patch" (dict))
-          :color :white)
-        (box))
-      ;; Eject to code (patch editor, edit-existing only)
-      (if (and (= editor.surface "patch")
-          (or (= editor.mode "edit-instrument") (= editor.mode "edit-effect")))
-          (button "View code"
-            :variant :ghost
-            :corner-radius 16
-            :width 13
-            :font-size 13
-            :on-click |x y r|
-            (host-command "eject-editor-to-code" (dict))
-            :color :white)
-        (box))
-      (box :width 1 :flex 1)
-      ;; Save button
-      (if (editor-busy?)
-        (box :height 1.2)
-        (h-stack :align :center :width :fill :gap 0.5 :padding 0.1
-          (box :flex 1 :height 1)
-          (box :bg :dark-gray :width 6 :height 1.5 :align :center
-            :on-click |x y r|
-            (if editor.canceling nil (host-command "cancel-editor" (dict)))
-            (button "Cancel"
-              :variant :secondary
-              :font-size 13
-              :width 8
-              :color (if editor.canceling :white :white)
-              ))          
-          (box :width 0.7 :height 1)
-          (button
-            (if (editor-macro-action?)
-              (editor-macro-action-label)
-              (if (= editor.mode "new-instrument")
-                "Finalize"
-                (if (= editor.mode "new-effect")
-                  "Save & Add"
-                  "Save")))
-            :variant :primary
-            :width (if (editor-macro-action?) 14.5 10)
-            :font-size 13
-            :on-click |x y r|
-            (if (editor-macro-action?)
-              (host-command "save-active-editor-macro" (dict))
-              (if (= editor.mode "new-instrument")
-                (host-command "save-new-instrument" (dict :name editor-draft.name))
-                (if (= editor.mode "edit-instrument")
-                  (host-command "update-instrument" (dict :name browser.instrument))
-                  (if (= editor.mode "new-effect")
-                    (host-command "save-new-effect" (dict :name editor-draft.name))
-                    (host-command "update-effect" (dict))))))
-            :color :browser-primary-fg)
-          ;; Fork sits next to the clobbering path on purpose: in edit modes the
-          ;; primary button overwrites an instrument every project shares, and
-          ;; the safe alternative should not require leaving the buffer.
-          (if (editor-fork-available?)
-            (button "Fork"
-              :variant :secondary
-              :font-size 13
-              :on-click |x y r| (host-command "fork-editor-session" (dict))
-              :color :white)
-            (box))
-          )            
-        )
-      )))
-
-(def editor-panel ()
-  (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1))
-
 ;; ── Build widgets ──
 
+;; The patch editor's save / run mode / leave controls are its toolbar's
+;; (ui/patch-toolbar.lisp), so the browser is the browser while it is open.
 (def build-widgets ()
   (do
     (sync-track-search)
-    (if (editor-mode?)
+    (if (preset-save-mode?)
       (list
-        (editor-header)
-        (editor-panel))
-      (if (preset-save-mode?)
-        (list
-          (preset-save-header)
-          (preset-save-panel))
-        (list
-          (tabbed-content))))))
+        (preset-save-header)
+        (preset-save-panel))
+      (list
+        (tabbed-content)))))
 
 ;; ── Reactive rendering (like ui/main.lisp) ──
 

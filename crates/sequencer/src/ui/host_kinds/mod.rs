@@ -500,6 +500,15 @@ pub(crate) mod f {
     pub(crate) const EDITOR_ACTIVE_MACRO: FieldKey = (EDITOR, "active-macro");
     pub(crate) const EDITOR_ACTIVE_MACRO_ACTION: FieldKey = (EDITOR, "active-macro-action");
     pub(crate) const EDITOR_OPEN_MACRO: FieldKey = (EDITOR, "open-macro");
+    pub(crate) const EDITOR_TITLE: FieldKey = (EDITOR, "title");
+    pub(crate) const EDITOR_RELEASE: FieldKey = (EDITOR, "release");
+    pub(crate) const EDITOR_DIRTY: FieldKey = (EDITOR, "dirty");
+    pub(crate) const EDITOR_SELECTED_NODE_IDS: FieldKey = (EDITOR, "selected-node-ids");
+    pub(crate) const EDITOR_SELECTED_NODE_TEXTS: FieldKey = (EDITOR, "selected-node-texts");
+    pub(crate) const EDITOR_SELECTED_NODE_SHAPES: FieldKey = (EDITOR, "selected-node-shapes");
+    pub(crate) const EDITOR_SELECTED_CABLE: FieldKey = (EDITOR, "selected-cable");
+    pub(crate) const EDITOR_RELEASES: FieldKey = (EDITOR, "releases");
+    pub(crate) const EDITOR_RELEASE_TRACKS: FieldKey = (EDITOR, "release-tracks");
     pub(crate) const EDITOR_PATCH_MACROS: FieldKey = (EDITOR, "patch-macros");
     pub(crate) const EDITOR_LIBRARY_MACROS: FieldKey = (EDITOR, "library-macros");
     pub(crate) const EDITOR_ASSETS: FieldKey = (EDITOR, "assets");
@@ -2040,6 +2049,15 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::EDITOR_ACTIVE_MACRO, ":string", Model),
     (f::EDITOR_ACTIVE_MACRO_ACTION, ":string", Model),
     (f::EDITOR_OPEN_MACRO, ":string", Model),
+    (f::EDITOR_TITLE, ":string", Model),
+    (f::EDITOR_RELEASE, ":int", Model),
+    (f::EDITOR_DIRTY, ":bool", Model),
+    (f::EDITOR_SELECTED_NODE_IDS, "(list-of :string)", Model),
+    (f::EDITOR_SELECTED_NODE_TEXTS, "(list-of :string)", Model),
+    (f::EDITOR_SELECTED_NODE_SHAPES, "(list-of :string)", Model),
+    (f::EDITOR_SELECTED_CABLE, "(list-of :string)", Model),
+    (f::EDITOR_RELEASES, "(list-of :int)", Model),
+    (f::EDITOR_RELEASE_TRACKS, "(list-of :int)", Model),
     (f::EDITOR_PATCH_MACROS, "(list-of editor-macro)", Model),
     (f::EDITOR_LIBRARY_MACROS, "(list-of editor-macro)", Model),
     (f::EDITOR_ASSETS, "(list-of editor-asset)", Model),

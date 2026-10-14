@@ -7,6 +7,7 @@ mod encapsulate;
 mod generate;
 mod geometry;
 mod graph_payload;
+mod inspector;
 mod interaction;
 mod jev;
 mod layout;
@@ -17,6 +18,7 @@ mod project;
 mod preview;
 mod probe;
 mod render;
+mod shapes;
 mod sidecar;
 mod state;
 #[cfg(test)]
@@ -25,6 +27,12 @@ mod text;
 mod text_metrics;
 mod writeback;
 
+pub use inspector::{
+    NodeTextParts, OperatorDocs, PortDocs, format_node_text, operator_attribute_names,
+    operator_documentation, parse_node_text,
+    SelectedCable, selected_cable_for_path, selected_node_shapes_for_path,
+    selected_nodes_for_path, set_inspected_node_texts, set_node_text_attribute, shape_label,
+};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -48,6 +56,12 @@ pub use jev::{
     jev_suggestions_enabled, resolve_jev_suggestions, take_jev_suggestion_requests,
 };
 pub use preview::{PatcherPreviewRequest, PreparedPatcherPreview};
+pub use shapes::{
+    BindingShape, BindingShapeKind, CompileShapesReport, FailedForm, FailedNode,
+    PatcherEmissionBindings, cable_shape, clear_compile_shapes_for_path, connection_shape,
+    failed_compile_node, node_output_shape, set_compile_shapes_for_path,
+    unlocated_compile_failure,
+};
 use preview::patcher_preview_payload;
 pub use lisp::{parse_patch_source, parse_patch_source_with_library};
 pub use model::{
@@ -400,6 +414,60 @@ pub fn selected_asset_for_path(path: impl AsRef<std::path::Path>) -> Option<Stri
     state::patcher_keys_for_path(path.as_ref())
         .into_iter()
         .find_map(state::selected_asset_for_key)
+}
+
+/// Draw (true, the default) or suppress the breadcrumb and macro back button
+/// patchers paint over their canvas. Suppressed, they are not hit-tested
+/// either. A host showing the breadcrumb itself (the patch toolbar) turns it
+/// off; a patcher's `:breadcrumb-overlay` prop overrides this per widget.
+pub fn set_patcher_breadcrumb_overlay(enabled: bool) {
+    state::set_breadcrumb_overlay_enabled(enabled);
+}
+
+/// The patcher state keys a breadcrumb query targets: those registered for
+/// `path`, or the most recently rendered patcher when `path` is None.
+fn breadcrumb_target(path: Option<&std::path::Path>) -> Option<(std::path::PathBuf, Vec<u64>)> {
+    match path {
+        Some(path) => {
+            let keys = state::patcher_keys_for_path(path);
+            (!keys.is_empty()).then(|| (path.to_path_buf(), keys))
+        }
+        None => state::last_rendered_patcher()
+            .map(|(path, key)| (std::path::PathBuf::from(path), vec![key])),
+    }
+}
+
+/// The breadcrumb segments (`root`, the file name, then the open macro view
+/// if any) of the patcher for `path`, or of the most recently rendered patcher
+/// when `path` is None. None when no such patcher has been rendered.
+pub fn patcher_breadcrumb_segments(path: Option<&std::path::Path>) -> Option<Vec<String>> {
+    let (path, keys) = breadcrumb_target(path)?;
+    let active_macro = keys.into_iter().find_map(state::active_macro_for_key);
+    Some(state::patcher_breadcrumb_segments(
+        &path,
+        active_macro.as_deref(),
+    ))
+}
+
+/// Navigate to the view a breadcrumb segment names (index into
+/// `patcher_breadcrumb_segments`): segments 0 and 1 are the root view, so
+/// either leaves an open macro the way the canvas back button does. Returns
+/// whether the view changed (false for the current, last segment).
+pub fn pop_patcher_breadcrumb(path: Option<&std::path::Path>, depth: usize) -> bool {
+    let Some((_, keys)) = breadcrumb_target(path) else {
+        return false;
+    };
+    let mut changed = false;
+    for key in keys {
+        let mut state = state::get_patcher_interaction_state(key);
+        // Macro views are one level deep: everything above the open macro
+        // (the last segment, index 2) is the root.
+        if state.active_macro.is_some() && depth < 2 {
+            interaction::navigate_patcher_to_root(key, &mut state);
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Navigate the patcher for `path` to a macro view (or the root with None),
@@ -2453,6 +2521,14 @@ thread_local! {
     static PENDING_COMMAND_OUTPUTS: RefCell<Vec<super::EventOutput>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Queue `event`'s widget output for `node` like a Lisp-run command's: the
+/// editor delivers it after the current widget callback returns.
+fn queue_patcher_command_output(node: &LayoutNode, event: WidgetEvent) {
+    if let Some(output) = PATCHER_WIDGET.handle_event(node, event) {
+        PENDING_COMMAND_OUTPUTS.with(|cell| cell.borrow_mut().push(output));
+    }
+}
+
 pub fn take_pending_patcher_command_outputs() -> Vec<super::EventOutput> {
     PENDING_COMMAND_OUTPUTS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
 }
@@ -2896,7 +2972,14 @@ fn patcher_layout_payload(node: &LayoutNode) -> Value {
             ]);
         }
     };
-    match sidecar::current_layout_json(&root_patch, &state) {
+    // Key the layout by the emitted source's node ids, exactly like the
+    // writeback payload (see `PatcherPreviewRequest::prepare_layout`). Only
+    // when the edited patch cannot be generated — and so has no canonical
+    // source to agree with — fall back to the live model's interaction ids.
+    let layout = PatcherPreviewRequest::capture(node)
+        .and_then(PatcherPreviewRequest::prepare_layout)
+        .or_else(|_| sidecar::current_layout_json(&root_patch, &state));
+    match layout {
         Ok(layout) => map_value(vec![
             ("status", Value::Keyword("layout".to_string())),
             ("path", Value::String(path_str)),

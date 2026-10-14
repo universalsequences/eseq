@@ -26,6 +26,8 @@
         mixer-visible-before-arrangement
         lower-panel-visible
         patch-macros-panel-visible
+        patcher-mixer-visible
+        patcher-lower-visible
         param-mode
         page-size
         cursor-step-value
@@ -82,6 +84,11 @@
 (defstate mixer-visible-before-arrangement true)
 (defstate lower-panel-visible true)
 (defstate patch-macros-panel-visible true)
+;; The patcher's own bottom-bar flags (docs/patcher-workspace-spec.md §2.1):
+;; the transport's mixer / lower toggles drive these while a patcher layout is
+;; up, so leaving the patcher restores the sequencer's panels untouched.
+(defstate patcher-mixer-visible true)
+(defstate patcher-lower-visible true)
 
 ; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync 6=delay
 (defstate param-mode 0)

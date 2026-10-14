@@ -649,6 +649,41 @@ pub(crate) fn sync_reactive_tick(
             needs_reactive_cycle = true;
         }
 
+        // The inspector mirrors the patcher's selected boxes (their text, so
+        // an edit made anywhere shows), maintained by the render pass.
+        let selected_nodes = editor_patch_path
+            .map(eseqlisp::widget_render::patcher::selected_nodes_for_path)
+            .unwrap_or_default();
+        if selected_nodes != ctx.frame.prev_editor_selected_nodes {
+            present_editor(editor.runtime_mut(), |e| {
+                e.selected_node_ids = selected_nodes.iter().map(|(id, _)| id.clone()).collect();
+                e.selected_node_texts =
+                    selected_nodes.iter().map(|(_, text)| text.clone()).collect();
+            });
+            ctx.frame.prev_editor_selected_nodes = selected_nodes;
+            needs_reactive_cycle = true;
+        }
+
+        // Their compiled shapes and the selected cable (spec: patcher tensor
+        // cables §6); shapes change when a compile lands, not only on selection.
+        let node_shapes = editor_patch_path
+            .map(eseqlisp::widget_render::patcher::selected_node_shapes_for_path)
+            .unwrap_or_default();
+        let cable = editor_patch_path
+            .and_then(eseqlisp::widget_render::patcher::selected_cable_for_path)
+            .map(|cable| vec![cable.shape, cable.from, cable.to])
+            .unwrap_or_default();
+        if (&node_shapes, &cable)
+            != (&ctx.frame.prev_editor_selected_shapes.0, &ctx.frame.prev_editor_selected_shapes.1)
+        {
+            present_editor(editor.runtime_mut(), |e| {
+                e.selected_node_shapes.clone_from(&node_shapes);
+                e.selected_cable.clone_from(&cable);
+            });
+            ctx.frame.prev_editor_selected_shapes = (node_shapes, cable);
+            needs_reactive_cycle = true;
+        }
+
         sync_mark.checkpoint("epoch-to-cycle");
         if needs_reactive_cycle {
             let profile_cycle = profile_pattern_reactive_cycle;

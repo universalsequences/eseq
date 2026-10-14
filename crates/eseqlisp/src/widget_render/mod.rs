@@ -1,6 +1,7 @@
 pub mod adsr_editor;
 pub mod box_widget;
 pub mod button;
+pub mod button_press;
 pub mod cable;
 pub mod compressor_display;
 pub mod command_palette;
@@ -937,6 +938,13 @@ pub struct GpuPatchCablePrimitive {
     pub is_segmented: bool,
     pub segment_row: f32,
     pub corner_radius_cells: f32,
+    /// Two-colour stroke pattern in framebuffer pixels, measured along the
+    /// cable from `start`: `[primary, alternate]`. The stroke is continuous:
+    /// `color` for the primary run, `alt_color` for the alternate run, with a
+    /// soft seam between them. `[0, 0]` draws a single-colour cable.
+    pub dash_px: [f32; 2],
+    /// The alternate run's colour; ignored when `dash_px` is `[0, 0]`.
+    pub alt_color: Color,
 }
 
 #[derive(Clone, PartialEq)]
@@ -1706,6 +1714,12 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
     widget_state_shared_generation().hash(&mut hasher);
     paint_resources::generation().hash(&mut hasher);
     widget_state_revision(node.widget_id).hash(&mut hasher);
+    if node.widget_type == "button" {
+        // The release fade changes paint every frame without a state bump.
+        button_press::press_amount(node, viewport.time_seconds)
+            .to_bits()
+            .hash(&mut hasher);
+    }
     theme::generation().hash(&mut hasher);
     viewport.cell_w.to_bits().hash(&mut hasher);
     viewport.cell_h.to_bits().hash(&mut hasher);
@@ -3777,7 +3791,7 @@ mod tests {
                 color_token(run.bg)
             ),
             GpuPrimitive::PatchCable(cable) => format!(
-                "cable:{}:{}:{}:{}:{:08x}:{}:{}:{:08x}:{:08x}",
+                "cable:{}:{}:{}:{}:{:08x}:{}:{}:{:08x}:{:08x}:{}:{}",
                 f32s(cable.start),
                 f32s(cable.control1),
                 f32s(cable.control2),
@@ -3786,7 +3800,9 @@ mod tests {
                 color_token(cable.color),
                 cable.is_segmented,
                 cable.segment_row.to_bits(),
-                cable.corner_radius_cells.to_bits()
+                cable.corner_radius_cells.to_bits(),
+                f32s(cable.dash_px),
+                color_token(cable.alt_color)
             ),
             GpuPrimitive::Circle(circle) => format!(
                 "circle:{}:{:08x}:{}:{:?}",

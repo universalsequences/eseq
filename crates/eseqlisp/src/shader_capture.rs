@@ -20,6 +20,7 @@ use crate::capture_scenes::{
     waveform_buckets, waveform_instance, wavetable_bank, wavetable_instance,
     widget_instances_for_scene, widget_scene_shader,
 };
+use crate::ui::gpu_geometry::PatchCableInstance;
 use crate::ui::wgpu_pipelines as pipelines;
 use crate::ui::wgsl_shaders;
 use crate::widget_render::{ShaderBackend, WidgetInstance};
@@ -264,6 +265,18 @@ impl CaptureRenderer {
     /// top-left. Panics on an unknown scene name so a typo cannot silently
     /// produce a blank capture.
     pub fn render(&self, scene: &str) -> Vec<u8> {
+        self.render_scene(scene, None)
+    }
+
+    /// The `patch-cable` scene drawn with `cables` instead of its fixed
+    /// instances, for shader tests that need geometry the scene (and its
+    /// goldens) does not carry.
+    #[cfg(test)]
+    pub(crate) fn render_patch_cables(&self, cables: &[PatchCableInstance]) -> Vec<u8> {
+        self.render_scene("patch-cable", Some(cables))
+    }
+
+    fn render_scene(&self, scene: &str, cables_override: Option<&[PatchCableInstance]>) -> Vec<u8> {
         let target = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("eseqlisp capture target"),
             size: wgpu::Extent3d {
@@ -311,7 +324,7 @@ impl CaptureRenderer {
         let text_buffer = self.instance_buffer(&text_vertices);
         let image_verts = image_vertices();
         let image_buffer = self.instance_buffer(&image_verts);
-        let cables = patch_cable_instances();
+        let cables = cables_override.map_or_else(patch_cable_instances, <[_]>::to_vec);
         let cable_buffer = self.instance_buffer(&cables);
         let widgets = widget_instances_for_scene(scene);
         let widget_buffer = self.instance_buffer(&widgets);
@@ -518,6 +531,20 @@ mod tests {
             eprintln!("SKIPPED: no wgpu adapter available on this machine");
         }
         renderer
+    }
+
+    fn render_cables(cables: &[PatchCableInstance]) -> Option<Vec<u8>> {
+        Some(renderer()?.render_patch_cables(cables))
+    }
+
+    #[test]
+    fn two_colour_bezier_cable_alternates_without_gaps() {
+        crate::capture_scenes::two_colour_cable_tests::bezier_two_colour(render_cables);
+    }
+
+    #[test]
+    fn two_colour_segmented_cable_alternates_on_every_leg() {
+        crate::capture_scenes::two_colour_cable_tests::segmented_two_colour(render_cables);
     }
 
     #[track_caller]

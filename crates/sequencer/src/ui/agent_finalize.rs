@@ -309,7 +309,14 @@ pub(super) fn finalized_effect_storage_paths(slug: &str) -> (PathBuf, PathBuf) {
 }
 
 pub(super) fn display_instrument_name(name: &str) -> String {
-    let trimmed = name.trim_end_matches('/');
+    // A qualified, pinned id (`user:Pads/Glass@2`) shows as its name: the
+    // tier and release are shown elsewhere (the toolbar's vN badge).
+    let unqualified = name.split_once(':').map_or(name, |(_, rest)| rest);
+    let unpinned = match unqualified.rsplit_once('@') {
+        Some((base, release)) if release.chars().all(|c| c.is_ascii_digit()) && !release.is_empty() => base,
+        _ => unqualified,
+    };
+    let trimmed = unpinned.trim_end_matches('/');
     Path::new(trimmed)
         .file_name()
         .and_then(|value| value.to_str())

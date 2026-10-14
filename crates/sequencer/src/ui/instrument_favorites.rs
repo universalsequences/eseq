@@ -25,19 +25,31 @@ use serde::{Deserialize, Serialize};
 /// tree section a bare name came from (Factory or Library); with none, a bare
 /// name resolves the way loading it would (factory wins over user).
 ///
-/// A versioned factory instrument (docs/instrument-versioning-spec.md) keys
-/// on its lineage, `factory:<top folder>`, whatever release or old name the
-/// id spells: a heart survives new releases and renames, and a favorite saved
-/// as `factory:Synths/Digi Drift` lands on the Digi Syn row once its manifest
+/// A versioned instrument (docs/instrument-versioning-spec.md; user tier per
+/// docs/patcher-workspace-spec.md §5) keys on its lineage, `<tier>:<top
+/// folder>`, whatever release or old name the id spells: a heart survives new
+/// releases and renames, a favorite of `user:Pads/Glass@2` is the same heart
+/// as the Library row `Pads/Glass/`, and a favorite saved as
+/// `factory:Synths/Digi Drift` lands on the Digi Syn row once its manifest
 /// lists Digi Drift as a release.
 pub(crate) fn canonical_instrument_id(section_tier: Option<&ContentTier>, name: &str) -> String {
+    canonical_instrument_id_with(section_tier, name, sequencer::lisp_host::instrument_lineage_id)
+}
+
+/// [`canonical_instrument_id`] with the lineage lookup injected, so tests can
+/// exercise the dispatch without the process-wide content roots.
+fn canonical_instrument_id_with(
+    section_tier: Option<&ContentTier>,
+    name: &str,
+    lineage_id: impl Fn(&str) -> Option<String>,
+) -> String {
     let trimmed = name.trim_end_matches('/');
     let versioned = match (ContentTier::parse_id(name), section_tier) {
-        (Ok(Some((ContentTier::Factory, _))), _) | (Ok(None), None) => {
-            sequencer::lisp_host::instrument_lineage_id(name)
+        (Ok(Some((ContentTier::Factory | ContentTier::User, _))), _) | (Ok(None), None) => {
+            lineage_id(name)
         }
-        (Ok(None), Some(ContentTier::Factory)) => {
-            sequencer::lisp_host::instrument_lineage_id(&ContentTier::Factory.qualify(trimmed))
+        (Ok(None), Some(tier @ (ContentTier::Factory | ContentTier::User))) => {
+            lineage_id(&tier.qualify(trimmed))
         }
         _ => None,
     };
@@ -179,6 +191,35 @@ mod tests {
             canonical_instrument_id(Some(&ContentTier::Package("a.b".into())), "pkg:a.b/lead/"),
             "pkg:a.b/lead"
         );
+    }
+
+    #[test]
+    fn user_releases_share_their_lineage_key_and_unversioned_ids_keep_theirs() {
+        // Mirrors `instrument_lineage_id` for a user lineage `Pads/Glass`
+        // with releases 1 and 2, whose release 1 shipped as `Pads/Old Glass`.
+        let lineage = |id: &str| match id {
+            "user:Pads/Glass" | "user:Pads/Glass/" | "user:Pads/Glass@1" | "user:Pads/Glass@2"
+            | "user:Pads/Old Glass" | "Pads/Glass/" => Some("user:Pads/Glass".to_string()),
+            _ => None,
+        };
+        let key = |tier: Option<&ContentTier>, name: &str| canonical_instrument_id_with(tier, name, lineage);
+        for (tier, name) in [
+            (None, "user:Pads/Glass@2"),
+            (None, "user:Pads/Glass@1"),
+            (None, "user:Pads/Glass"),
+            (None, "user:Pads/Old Glass"),
+            (None, "Pads/Glass/"),
+            (Some(&ContentTier::User), "Pads/Glass/"),
+            (Some(&ContentTier::User), "Pads/Old Glass/"),
+        ] {
+            assert_eq!(key(tier, name), "user:Pads/Glass", "{tier:?} {name}");
+        }
+        // Unversioned user instruments key exactly as before.
+        assert_eq!(key(Some(&ContentTier::User), "Kicks/Boom/"), "user:Kicks/Boom");
+        assert_eq!(key(None, "user:Kicks/Boom"), "user:Kicks/Boom");
+        assert_eq!(key(None, "user:Kicks/Boom@3"), "user:Kicks/Boom@3");
+        // A package id never consults the lineage lookup.
+        assert_eq!(key(None, "pkg:a.b/lead/"), "pkg:a.b/lead");
     }
 
     #[test]

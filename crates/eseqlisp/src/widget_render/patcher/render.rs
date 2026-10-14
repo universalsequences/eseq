@@ -56,6 +56,7 @@ use super::state::{
     PatcherPanState, PatcherTextEdit, PatcherZSlot, active_patcher_patch, active_patcher_view_key,
     get_patcher_interaction_state, get_patcher_pan_state, max_node_z_index, node_z_index,
     ordered_patch_nodes, patch_with_interaction_state, patcher_breadcrumb, patcher_state_key,
+    breadcrumb_overlay_enabled, record_rendered_patcher,
     set_patcher_pan_state, set_selected_asset_for_key, source_connection_id,
     sync_patcher_z_order,
 };
@@ -151,10 +152,14 @@ pub(super) fn build_primitives_for_patcher(
     let loaded = load_patch_from_props(&node.props);
     match loaded {
         Ok((path, root_patch)) => {
+            record_rendered_patcher(&path, key);
             let mut interaction_state = get_patcher_interaction_state(key);
             let view_key = active_patcher_view_key(&interaction_state);
             let patch = active_patcher_patch(&root_patch, &interaction_state);
-            let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
+            let mut patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
+            // Derived, never stored: the latest compile's failed form marks its
+            // node (spec §5) until a newer result lands or the node is edited.
+            super::shapes::apply_compile_failure_diagnostic(&path, &view_key, &mut patch);
             let autocomplete_macros =
                 super::autocomplete_macros_for_patch(&node.props, Some(&patch));
             sync_patcher_z_order(&mut interaction_state, &view_key, &patch);
@@ -202,6 +207,7 @@ pub(super) fn build_primitives_for_patcher(
                 key,
                 selected_file_asset_reference(&patch, &interaction_state),
             );
+            super::inspector::mirror_selection(key, node, &patch, &interaction_state);
             let content_size = patch_content_size(&patch);
             if pan_uninitialized && patcher_fit_enabled(&node.props) {
                 pan_state.zoom = fit_zoom(content_size, node.rect);
@@ -255,34 +261,38 @@ pub(super) fn build_primitives_for_patcher(
             push_marquee(&mut marquee_prims, node.rect, viewport, &interaction_state);
             push_z_layered(&mut prims, PATCHER_OVERLAY_Z + 40, marquee_prims);
             let mut chrome_overlay_prims = Vec::new();
-            push_back_button(
-                &mut chrome_overlay_prims,
-                node.rect,
-                viewport,
-                &interaction_state,
-            );
-            chrome_overlay_prims.push(GpuPrimitive::ProportionalText(
-                GpuProportionalTextPrimitive {
-                    row: node.rect.row + 0.7,
-                    col: if interaction_state.active_macro.is_some() {
-                        node.rect.col + 3.2
-                    } else {
-                        node.rect.col + 1.0
+            // A host that shows the breadcrumb itself (the patch toolbar)
+            // suppresses the canvas copy and its back button.
+            if breadcrumb_overlay_enabled(node) {
+                push_back_button(
+                    &mut chrome_overlay_prims,
+                    node.rect,
+                    viewport,
+                    &interaction_state,
+                );
+                chrome_overlay_prims.push(GpuPrimitive::ProportionalText(
+                    GpuProportionalTextPrimitive {
+                        row: node.rect.row + 0.7,
+                        col: if interaction_state.active_macro.is_some() {
+                            node.rect.col + 3.2
+                        } else {
+                            node.rect.col + 1.0
+                        },
+                        align_width: if interaction_state.active_macro.is_some() {
+                            node.rect.width - 4.2
+                        } else {
+                            node.rect.width - 2.0
+                        },
+                        h_align: 0.0,
+                        text: format!("{}", patcher_breadcrumb(&path, &interaction_state)),
+                        font_size: 12.0,
+                        scale: 1.0,
+                        fg: theme::PATCHER_TEXT_MUTED(),
+                        bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                        mono: false,
                     },
-                    align_width: if interaction_state.active_macro.is_some() {
-                        node.rect.width - 4.2
-                    } else {
-                        node.rect.width - 2.0
-                    },
-                    h_align: 0.0,
-                    text: format!("{}", patcher_breadcrumb(&path, &interaction_state)),
-                    font_size: 12.0,
-                    scale: 1.0,
-                    fg: theme::PATCHER_TEXT_MUTED(),
-                    bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                    mono: false,
-                },
-            ));
+                ));
+            }
             if !patch.diagnostics.is_empty() {
                 chrome_overlay_prims.push(GpuPrimitive::ProportionalText(
                     GpuProportionalTextPrimitive {
@@ -1312,6 +1322,9 @@ fn draw_patch_with_view_key(
         _ => None,
     };
     let hidden_node_ids = hidden_inline_node_ids(patch);
+    // Compile shapes are reported for the root view only (spec §7); inside a
+    // macro view every cable's shape is unknown and draws plain.
+    let shapes_path = probe_path.filter(|_| view_key == "root");
 
     for connection in &patch.connections {
         if connection.presentation != InputPresentation::Cable {
@@ -1335,6 +1348,8 @@ fn draw_patch_with_view_key(
             continue;
         };
         let selected = interaction_state.selected_cable.as_deref() == Some(connection_id.as_str());
+        let shape = shapes_path.and_then(|path| super::shapes::connection_shape(path, connection));
+        let tensor = shape.as_ref().is_some_and(super::shapes::BindingShape::is_multichannel);
         let mut cable_prims = Vec::new();
         push_cable(
             &mut cable_prims,
@@ -1344,6 +1359,7 @@ fn draw_patch_with_view_key(
             origin.1,
             zoom,
             selected,
+            tensor,
         );
         push_z_layered(prims, cable_z, cable_prims);
         if selected {
@@ -2182,6 +2198,12 @@ fn wrap_autocomplete_doc_line(line: &str, max_chars: usize) -> Vec<String> {
     lines
 }
 
+/// Draw one cable. `tensor`: the cable carries a multichannel value, so it
+/// draws Max-mc style — thicker, its stroke alternating `:patcher-tensor-cable`
+/// and `:patcher-tensor-cable-alt` along its length (spec §5). A feedback
+/// cable keeps its colour for the primary dashes; a selected one takes the
+/// selection colour there. The alternate colour stays in both cases, so the
+/// cable still reads as multichannel.
 fn push_cable(
     prims: &mut Vec<GpuPrimitive>,
     start: (f32, f32),
@@ -2190,16 +2212,18 @@ fn push_cable(
     origin_row: f32,
     zoom: f32,
     selected: bool,
+    tensor: bool,
 ) {
     let color = if selected {
         theme::PATCHER_ERROR()
     } else {
         match connection.kind {
+            ConnectionKind::Forward if tensor => theme::PATCHER_TENSOR_CABLE(),
             ConnectionKind::Forward => theme::PATCHER_CABLE(),
             ConnectionKind::Feedback => theme::PATCHER_FEEDBACK_CABLE(),
         }
     };
-    push_cable_colored(prims, start, end, connection, origin_row, zoom, color);
+    push_cable_colored(prims, start, end, connection, origin_row, zoom, color, tensor);
 }
 
 fn push_cable_colored(
@@ -2210,31 +2234,61 @@ fn push_cable_colored(
     origin_row: f32,
     zoom: f32,
     color: crate::backend::Color,
+    tensor: bool,
 ) {
     let curve = super::super::cable::cable_curve(start, end);
     let is_segmented = connection
         .segment
         .is_some_and(|segment| segment.is_segmented)
         && super::super::cable::should_render_segmented_cable(start, end);
+    let base_radius_px = ui_design_px(if connection.kind == ConnectionKind::Feedback {
+        CABLE_FEEDBACK_RADIUS_PX
+    } else {
+        CABLE_FORWARD_RADIUS_PX
+    }) * zoom;
+    let (radius_px, dash_px, alt_color) = if tensor {
+        let (radius, dash) = tensor_cable_radius_and_dash(base_radius_px);
+        (radius, dash, theme::PATCHER_TENSOR_CABLE_ALT())
+    } else {
+        (base_radius_px, [0.0, 0.0], color)
+    };
     prims.push(GpuPrimitive::PatchCable(GpuPatchCablePrimitive {
         start: [curve.p0.0, curve.p0.1],
         control1: [curve.p1.0, curve.p1.1],
         control2: [curve.p2.0, curve.p2.1],
         end: [curve.p3.0, curve.p3.1],
-        radius_px: ui_design_px(if connection.kind == ConnectionKind::Feedback {
-            CABLE_FEEDBACK_RADIUS_PX
-        } else {
-            CABLE_FORWARD_RADIUS_PX
-        }) * zoom,
+        radius_px,
         color,
         is_segmented,
         segment_row: connection
             .segment
-            .map(|segment| origin_row + segment.segment_row * zoom)
+            .map(|segment| {
+                super::geometry::segmented_cable_row_px(
+                    start,
+                    end,
+                    origin_row,
+                    segment.segment_row,
+                    zoom,
+                )
+            })
             .unwrap_or(0.0),
         corner_radius_cells: SEGMENTED_CABLE_CORNER_RADIUS_CELLS * zoom,
+        dash_px,
+        alt_color,
     }));
 }
+
+/// A multichannel cable's radius and `[primary, alternate]` stroke lengths
+/// along its arc, from the scalar cable's radius.
+pub(super) fn tensor_cable_radius_and_dash(base_radius_px: f32) -> (f32, [f32; 2]) {
+    let radius = base_radius_px * TENSOR_CABLE_WIDTH_SCALE;
+    (radius, [radius * TENSOR_DASH_RADII, radius * TENSOR_DASH_RADII])
+}
+
+/// Multichannel cables are this much thicker than scalar ones (spec §5).
+pub(super) const TENSOR_CABLE_WIDTH_SCALE: f32 = 1.6;
+/// Length of each colour run along a multichannel cable, in cable radii.
+const TENSOR_DASH_RADII: f32 = 2.6;
 
 /// Jev ghost cables (`jev.rs`): translucent proposals from the selected node,
 /// each with its probability at the midpoint; the focused one carries
@@ -2484,7 +2538,7 @@ fn push_preview_cable(
         source: None,
         authored_reference: None,
     };
-    push_cable(prims, start, end, &connection, 0.0, zoom, selected);
+    push_cable(prims, start, end, &connection, 0.0, zoom, selected, false);
 }
 
 fn push_cable_handles(
@@ -2563,11 +2617,7 @@ fn push_node(
         ),
         _ => (
             theme::PATCHER_NODE_BG(),
-            if node.diagnostic.is_some() {
-                theme::PATCHER_ERROR()
-            } else {
-                theme::PATCHER_NODE_BORDER()
-            },
+            theme::PATCHER_NODE_BORDER(),
             theme::PATCHER_NODE_TEXT(),
         ),
     };
@@ -2576,6 +2626,14 @@ fn push_node(
     }
     if selected {
         border = theme::PATCHER_NODE_SELECTED_BORDER();
+    }
+    // A diagnostic (an authored error, or the compile failure located at
+    // this node, spec §5) owns the border whatever the node's kind, and
+    // outranks hover and selection: a selected errored node still reads as
+    // errored, and shows its selection through the resize handles, which
+    // keep the selection colour.
+    if node.diagnostic.is_some() {
+        border = theme::PATCHER_ERROR();
     }
     let node_base_z = node_chrome_z - PatcherZSlot::NodeChrome as i32;
     let mut chrome_prims = Vec::new();
@@ -2663,20 +2721,7 @@ fn push_node(
         );
     }
     if let Some(diagnostic) = &node.diagnostic {
-        text_prims.push(GpuPrimitive::ProportionalText(
-            GpuProportionalTextPrimitive {
-                row: rect.row + 2.65 * zoom,
-                col: rect.col + 1.0 * zoom,
-                align_width: rect.width - 2.0 * zoom,
-                h_align: 0.0,
-                text: preview(diagnostic, 32),
-                font_size: 9.5,
-                scale: zoom,
-                fg: theme::PATCHER_ERROR(),
-                bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                mono: false,
-            },
-        ));
+        push_node_diagnostic_chip(&mut text_prims, header_rect, diagnostic, viewport, zoom);
     }
     push_z_layered(prims, node_base_z + PatcherZSlot::Text as i32, text_prims);
     let mut cursor_prims = Vec::new();
@@ -2700,6 +2745,73 @@ fn push_node(
         node_base_z + PatcherZSlot::ResizeHandles as i32,
         handle_prims,
     );
+}
+
+const DIAGNOSTIC_FONT_SIZE: f32 = 9.5;
+/// Line box of the diagnostic text at its font size, in rows.
+const DIAGNOSTIC_TEXT_ROWS: f32 = 0.85;
+const DIAGNOSTIC_CHIP_HEIGHT_ROWS: f32 = 1.15;
+const DIAGNOSTIC_CHIP_PAD_X_CELLS: f32 = 0.6;
+const DIAGNOSTIC_CHIP_GAP_CELLS: f32 = 0.6;
+const DIAGNOSTIC_CHIP_RADIUS_PX: f32 = 6.0;
+const DIAGNOSTIC_CHIP_BORDER_PX: f32 = 1.0;
+/// Diagnostics are previewed to this many characters; the full message is
+/// in the node's tooltip and the inspector.
+const DIAGNOSTIC_PREVIEW_CHARS: usize = 40;
+
+/// A node's diagnostic (authored parse error or the compile failure located
+/// at it), as a chip attached to the node's right edge and centred on its
+/// header row. Beside the node rather than below it: patches flow top to
+/// bottom, so the space under a node holds its outgoing cable and the next
+/// node, while the right side is usually free; the chip's own background
+/// keeps it legible over any cable it does cross.
+fn push_node_diagnostic_chip(
+    prims: &mut Vec<GpuPrimitive>,
+    header_rect: Rect,
+    diagnostic: &str,
+    viewport: WidgetViewport,
+    zoom: f32,
+) {
+    let rect = node_diagnostic_chip_rect(header_rect, diagnostic, zoom);
+    let bg = theme::PATCHER_BG();
+    push_flat_panel_chrome(
+        prims,
+        rect,
+        crate::backend::Color::rgba(bg.r, bg.g, bg.b, 1.0),
+        theme::PATCHER_ERROR(),
+        viewport,
+        zoom,
+        ui_design_px(DIAGNOSTIC_CHIP_RADIUS_PX),
+        DIAGNOSTIC_CHIP_BORDER_PX * zoom,
+    );
+    prims.push(GpuPrimitive::ProportionalText(GpuProportionalTextPrimitive {
+        row: rect.row + (rect.height - DIAGNOSTIC_TEXT_ROWS * zoom) * 0.5,
+        col: rect.col,
+        align_width: rect.width,
+        h_align: 0.5,
+        text: preview(diagnostic, DIAGNOSTIC_PREVIEW_CHARS),
+        font_size: DIAGNOSTIC_FONT_SIZE,
+        scale: zoom,
+        fg: theme::PATCHER_ERROR(),
+        bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+        mono: false,
+    }));
+}
+
+pub(super) fn node_diagnostic_chip_rect(header_rect: Rect, diagnostic: &str, zoom: f32) -> Rect {
+    let text = preview(diagnostic, DIAGNOSTIC_PREVIEW_CHARS);
+    let width = (approx_text_width_cells(&text, DIAGNOSTIC_FONT_SIZE)
+        + DIAGNOSTIC_CHIP_PAD_X_CELLS * 2.0)
+        * zoom;
+    let height = (DIAGNOSTIC_CHIP_HEIGHT_ROWS * zoom).min(header_rect.height.max(0.0)).max(
+        DIAGNOSTIC_TEXT_ROWS * zoom,
+    );
+    Rect {
+        col: header_rect.col + header_rect.width + DIAGNOSTIC_CHIP_GAP_CELLS * zoom,
+        row: header_rect.row + (header_rect.height - height) * 0.5,
+        width,
+        height,
+    }
 }
 
 fn highlighted_inputs_for_node(drag: &Option<PatcherDragState>, node_id: &str) -> Vec<usize> {

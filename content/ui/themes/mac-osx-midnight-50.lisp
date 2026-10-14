@@ -311,6 +311,8 @@
       :patcher-error                 '(0.96 0.30 0.30)
       :patcher-cable                 '(0.68 0.75 0.84 0.92)
       :patcher-feedback-cable        '(0.92 0.62 0.20 0.88)
+      :patcher-tensor-cable          '(0.290 0.640 1.000 0.920)
+      :patcher-tensor-cable-alt      '(1.000 0.800 0.280 0.920)
       :patcher-marquee-fill          '(0.25 0.55 0.95 0.13)
       :patcher-marquee-border        '(0.25 0.55 0.95 0.74)
       :patcher-node-bg               '(0.0775 0.0930 0.1210)

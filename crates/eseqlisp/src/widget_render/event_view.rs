@@ -500,6 +500,8 @@ fn push_sdf_segment(
         is_segmented: false,
         segment_row: 0.0,
         corner_radius_cells: 0.0,
+        dash_px: [0.0, 0.0],
+        alt_color: color,
     }));
 }
 

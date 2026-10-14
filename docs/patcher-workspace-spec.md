@@ -94,7 +94,13 @@ Left to right:
   existing instrument, renaming it plus Save cuts a new release under the new
   name (a release's `name` may differ from its predecessor's, the way Digi
   Drift became Digi Syn).
-- **Release dropdown `vN ▾`.** Hidden for unsaved and unversioned patches. It
+- **Release menu `vN ▾`** (built: every release with its open-project track
+  count, and *Restore vK*, offered while the patch is saved, which cuts a new
+  release holding vK's files, plays it on the track and reopens the editor on
+  it: `editor-restore-release`. *Open vK* and *Revert as unsaved edits* were
+  not built: a retired release is never a write target, and restoring as a
+  new release covers going back). Hidden for unsaved and unversioned patches.
+  The original design: it
   lists the releases newest first, with the release the track is pinned to
   marked. Entries:
   - *Open vK*: re-pin the edited track to release K and load it into the
@@ -127,40 +133,31 @@ editing a macro, the primary button is the macro action.
 
 ### 3.1 Theming
 
-New theme slots in `crates/eseqlisp/src/ui/theme.rs` (struct field plus a
-`theme_slots!` entry each):
-
-| Slot | Default | Use |
-|---|---|---|
-| `:patch-toolbar-bg` | `:buffer-bg` value | toolbar row background |
-| `:patch-toolbar-fg` | `:white`-ish text | name, breadcrumb, button labels |
-| `:patch-toolbar-border` | `:dark-gray` value | hairline between toolbar and canvas |
-| `:patch-inspector-bg` | `:buffer-bg` value | inspector panel background |
-
-These must be added to every **complete** theme
-(`complete_themes_define_every_registered_theme_slot_once`,
-`crates/sequencer/src/ui/state_values/tests.rs:750`): mac-osx-light-theme,
-mac-osx-midnight-50, phosphor, phosphor-blue, aura. Other themes inherit
-through the normal fallback.
-
-Fallback caveat: a theme that omits a slot keeps the *previous* theme's value,
-not the default (`sync_from_value` only writes defined keys). That is
-acceptable for the incomplete themes and is why the complete ones must define
-the slots.
+Like `*transport*`: a borderless tile with no fill of its own, so the window
+background shows and every theme matches without new slots. Text uses `:fg`
+/ `:dim`, separators `:mixer-strip-border`. (Rev 1 added
+`:patch-toolbar-bg/-fg/-border`; a theme that omitted them kept the previous
+theme's colors, so they were removed.)
 
 ## 4. Save semantics
 
 | Action | Key | New patch | Existing instrument |
 |---|---|---|---|
-| **Save** | ⌘S | Requires a name (focuses the name field if empty), then writes `<user>/instruments/<name>/` as release 1 and stays in the patcher | Writes a new release (§5) and stays in the patcher |
-| **Save as…** | ⇧⌘S | Same as Save | Fork: new lineage under a new name (`fork-editor-session`), and the track is rebound to the fork |
-| **Done** | Esc, ⌘↩ | Returns to the sequencer, with a dirty prompt | Returns to the sequencer, with a dirty prompt |
+| **Save** | ⌘S | Requires a name, then writes `<user>/instruments/<name>/` and stays in the patcher | Writes the session's release (§5) and stays in the patcher |
+| **Save as…** | ⇧⌘S | — | Fork: new lineage under a new name (`fork-editor-session`), and the track is rebound to the fork |
+| **Done** | button | Returns to the sequencer, with a dirty prompt | Returns to the sequencer, with a dirty prompt |
 
-- The dirty prompt (a modal, `docs/modal-widget-spec.md`) offers *Save*,
-  *Discard*, and *Keep editing*. On an unnamed new patch, *Save* focuses the
-  name field.
-- Leaving the patcher and saving are independent. There is no button that does
-  both. ⌘↩ on a clean patch is simply "back".
+- ⌘S / ⇧⌘S are File > Save / Save As, which act on the patch while the editor
+  is open (`application-menus.lisp`), as in Max. Done has no key: Esc already
+  dismisses the agent bubble and ⌘↩ is the patcher's create-below.
+- The dirty prompt is inline in the toolbar's action group (*Unsaved changes:
+  Save / Discard / Keep editing*), not a modal, and lapses once nothing is
+  unsaved. Save there is `editor-save :done true`.
+- Leaving the patcher and saving are independent. Done on a clean patch is
+  simply "back".
+- **Dirty** (`editor.dirty`): always for a draft; otherwise the evaluated patch
+  or the run mode differs from what was saved. Moving boxes alone does not
+  count (the layout is written on Save regardless).
 - **Cancel goes away.** Its two meanings are covered by Done followed by
   Discard (leave without saving) and by Revert in the release dropdown.
 - `save-new-instrument`, `update-instrument`, `fork-editor-session` and
@@ -168,9 +165,12 @@ the slots.
   primitives. New host commands `editor-save`, `editor-save-as` and
   `editor-done` dispatch on `editor.mode` so the toolbar does not branch on
   mode in Lisp. "Return to the sequencer" is split out of `save-new-instrument`.
-- New effects (`editor.mode = "new-effect"`, "Save & Add") follow the same
-  pattern: Save writes it, Done returns, and it is added to the track on the
-  first Save rather than on leaving.
+- A draft's first Save converts the session in place to an edit of the saved
+  instrument: the patcher stays on the draft dir (`path`), Save writes to the
+  instrument's home (`save_path`), and the draft dir is deleted on Done.
+- Effects follow the same pattern (`save-new-effect` / `update-effect` take
+  `stay`): a draft effect's first Save loads it into its slot and the session
+  carries on as an edit of it; Done closes a clean one without recompiling.
 
 ## 5. User-tier versioning
 
@@ -200,6 +200,20 @@ Identical to factory:
 - An unversioned user instrument (no `releases`) becomes versioned on its first
   Save from the patcher: the on-disk source becomes `versions/1` with
   `name` = its current logical path, and the save becomes release 2.
+- Storage API: `cut_user_release(source, new_name)`
+  (`lisp_host/dgen/instrument_storage.rs`) freezes the top folder into
+  `versions/<current>/` (copying, so the new release starts from it, presets
+  included), rewrites the manifest, invalidates caches, and returns the new
+  pinned `user:<lineage>@<n>` and the top `dsp.lisp` to write. After the first
+  cut an unpinned `user:<lineage>` means release 1, so later writes go through
+  the pinned id; a retired release's source is never a write target (its
+  `versions/<n>.presets` bank stays writable: presets are user data).
+- Renames (Save with a new name) set the new release's `name` only; the top
+  folder, and so the lineage in every pin, stays put in this rev. The unpinned
+  new name resolves to that release through the name-match rule.
+- Bare names (`<logical>/`, the browser and runtime spelling) never consult the
+  user index: they keep meaning the top folder's current files, and saves pin
+  them to the release folder they land on.
 
 ### 5.2 When a Save cuts a release
 
@@ -218,8 +232,17 @@ rule:
   needed on this path. It remains relevant only for factory instruments edited
   in place by developers.
 
+- A draft saved this session counts as its working release
+  (`working_release = Some(0)`: unversioned files only this session wrote), so
+  re-saving a brand-new instrument amends it until a project save.
+- Saving the project (`save-project`) marks the session
+  (`project_saved_since_release`), whether or not the write then succeeds.
+- A cut renames the edited track's engine to the pinned id, so the next project
+  save pins it. Tracks *sharing that engine* move with it: they already play the
+  edited source live.
+
 Other tracks in the open project that use an older release of the same
-lineage stay pinned. The release dropdown shows them, and a future "move all
+lineage, on their own engine, stay pinned. The release dropdown shows them, and a future "move all
 tracks in this project to vN" action is out of scope here.
 
 ### 5.3 Pruning
@@ -229,6 +252,25 @@ releases" in the dropdown would need the global reference scan this spec
 avoids.
 
 ## 6. Inspector
+
+Built (rev 1): its own tile, `*patch-inspector*`, right of `*fx*` (0.65 /
+0.35, min 30 cells; the lower toggle shows or hides both). The patcher's
+render pass mirrors the selection (`selected_nodes_for_path`) onto
+`editor.selected-node-ids` / `selected-node-texts`; natives
+`patcher-node-parse`, `patcher-node-set-attr`,
+`patcher-operator-attributes`, `patcher-operator-doc` and
+`patcher-set-node-texts` (one undo step, queued `:on-change`) do the rest.
+It shows the operator's manifest docs (summary, then one entry per inlet and
+outlet: name, kind, optional, what it does) above the attribute fields. Box
+text is edited on the canvas only, and a box mid-edit is not inspected until
+its edit commits. A draft's name is asked in a modal on its first Save (and
+after Save as…), not by an always-on toolbar field. Saving an already-saved
+patch has nothing to ask, so it saves at once and a toast says what it did:
+`Saved pad v4 · projects using v3 keep it` (a new release), `Updated pad v4`
+(amending this session's release), or `Saved pad` (unversioned / in place). Fields are text inputs committing on Enter;
+drag numbers, role / mod-mode menus and instrument settings with nothing
+selected are not built yet (the toolbar holds run mode; voices are the
+instrument panel's).
 
 `*patch-inspector*` fills the remaining bottom-bar width. It edits the
 **selected patcher object**:

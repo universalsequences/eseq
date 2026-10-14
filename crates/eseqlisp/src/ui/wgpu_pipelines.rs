@@ -55,15 +55,21 @@ pub const IMAGE_VERTEX_ATTRIBUTES: [VertexAttribute; 8] = [
 
 /// [`PatchCableInstance`], stepped per instance. Adjacent `[f32; 2]` pairs are
 /// fetched as one `Float32x4` to keep the attribute count down.
-pub const PATCH_CABLE_ATTRIBUTES: [VertexAttribute; 7] = [
+pub const PATCH_CABLE_ATTRIBUTES: [VertexAttribute; 10] = [
     attribute(0, 0, wgpu::VertexFormat::Float32x4),
     attribute(16, 1, wgpu::VertexFormat::Float32x4),
     attribute(32, 2, wgpu::VertexFormat::Float32x4),
     attribute(48, 3, wgpu::VertexFormat::Float32x4),
     attribute(64, 4, wgpu::VertexFormat::Float32x4),
     attribute(80, 5, wgpu::VertexFormat::Float32x4),
-    // style, arrow_tip.xy, arrow_length
+    // style, plug_radius_px, plug_levels.xy
     attribute(96, 6, wgpu::VertexFormat::Float32x4),
+    // end_plug_color
+    attribute(112, 7, wgpu::VertexFormat::Float32x4),
+    // dash_px (on, off, unused, unused)
+    attribute(128, 8, wgpu::VertexFormat::Float32x4),
+    // alt_color
+    attribute(144, 9, wgpu::VertexFormat::Float32x4),
 ];
 
 /// [`WidgetInstance`], stepped per instance. One attribute per field: fifteen

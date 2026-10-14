@@ -546,6 +546,57 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "patcher-breadcrumb",
+        "(patcher-breadcrumb [path])",
+        "The patch editor breadcrumb as a list of segment strings: \"root\", the file name, then the open macro view if any. Targets the patcher for path, or else the most recently rendered patcher; empty when there is none. Not reactive by itself: read editor.open-macro alongside it.",
+        |args, _ctx| {
+            let path = optional_path_arg(args.first(), "patcher-breadcrumb")?;
+            let segments =
+                crate::widget_render::patcher::patcher_breadcrumb_segments(path.as_deref())
+                    .unwrap_or_default();
+            Ok(Value::List(
+                segments
+                    .into_iter()
+                    .map(|segment| Rc::new(RefCell::new(Value::String(segment))))
+                    .collect(),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "patcher-breadcrumb-pop!",
+        "(patcher-breadcrumb-pop! depth [path])",
+        "Navigate the patcher to the view that breadcrumb segment `depth` names: 0 and 1 are the root, so either leaves an open macro view the way the canvas back button does. Targets the patcher for path, or else the most recently rendered patcher. Returns whether the view changed.",
+        |args, _ctx| {
+            let Some(Value::Number(depth)) = args.first() else {
+                return Err("patcher-breadcrumb-pop! expects a segment index".to_string());
+            };
+            let path = optional_path_arg(args.get(1), "patcher-breadcrumb-pop!")?;
+            Ok(Value::Bool(
+                crate::widget_render::patcher::pop_patcher_breadcrumb(
+                    path.as_deref(),
+                    depth.max(0.0) as usize,
+                ),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "patcher-set-breadcrumb-overlay!",
+        "(patcher-set-breadcrumb-overlay! enabled)",
+        "Draw (true, the default) or suppress the breadcrumb and macro back button that patchers paint over their canvas; suppressed, they take no clicks either. For a host that shows the breadcrumb itself, such as the patch toolbar. A patcher's :breadcrumb-overlay prop overrides it.",
+        |args, _ctx| {
+            let enabled = match args.first() {
+                Some(Value::Bool(enabled)) => *enabled,
+                Some(Value::Nil) => false,
+                _ => return Err("patcher-set-breadcrumb-overlay! expects a bool".to_string()),
+            };
+            crate::widget_render::patcher::set_patcher_breadcrumb_overlay(enabled);
+            Ok(Value::Bool(enabled))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "patcher-key-label",
         "(patcher-key-label key)",
         "A key spelling such as \"s-c\" or \"C-S-z\" rendered as a menu shortcut label (⌘C, ⌃⇧Z on macOS; Ctrl+Shift+Z elsewhere).",
@@ -554,6 +605,140 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                 return Err("patcher-key-label expects a key string".to_string());
             };
             Ok(Value::String(crate::widget_render::patcher::patcher_key_label(key)))
+        },
+    );
+
+    // The patch editor's inspector (docs/patcher-workspace-spec.md §6).
+    fn inspector_cell(value: Value) -> Rc<RefCell<Value>> {
+        Rc::new(RefCell::new(value))
+    }
+    fn inspector_strings(items: &[String]) -> Value {
+        Value::List(
+            items
+                .iter()
+                .map(|item| inspector_cell(Value::String(item.clone())))
+                .collect(),
+        )
+    }
+
+    runtime.register_native_with_docs(
+        "patcher-node-parse",
+        "(patcher-node-parse text)",
+        "Split patch box text into a dict: :op, :args (positional, as written), :attrs (a list of (key value), keys with their @) and :constant (the box is a number literal). Nil when the text does not parse.",
+        |args, _ctx| {
+            let Some(Value::String(text)) = args.first() else {
+                return Err("patcher-node-parse expects box text".to_string());
+            };
+            let Ok(parts) = crate::widget_render::patcher::parse_node_text(text) else {
+                return Ok(Value::Nil);
+            };
+            let attrs = Value::List(
+                parts
+                    .attrs
+                    .iter()
+                    .map(|(key, value)| inspector_cell(inspector_strings(&[key.clone(), value.clone()])))
+                    .collect(),
+            );
+            Ok(Value::Map(HashMap::from([
+                ("op".to_string(), inspector_cell(Value::String(parts.op))),
+                ("args".to_string(), inspector_cell(inspector_strings(&parts.args))),
+                ("attrs".to_string(), inspector_cell(attrs)),
+                ("constant".to_string(), inspector_cell(Value::Bool(parts.constant))),
+            ])))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "patcher-node-set-attr",
+        "(patcher-node-set-attr text key value)",
+        "Box text with attribute key (\"@min\") set to value: replaced, appended when absent, removed when value is empty. The text unchanged when it does not parse.",
+        |args, _ctx| {
+            let (Some(Value::String(text)), Some(Value::String(key)), Some(Value::String(value))) =
+                (args.first(), args.get(1), args.get(2))
+            else {
+                return Err("patcher-node-set-attr expects text, key and value strings".to_string());
+            };
+            Ok(Value::String(
+                crate::widget_render::patcher::set_node_text_attribute(text, key, value)
+                    .unwrap_or_else(|_| text.clone()),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "patcher-operator-attributes",
+        "(patcher-operator-attributes op)",
+        "The attributes the dgenlisp manifest declares for operator op, each with its @.",
+        |args, _ctx| {
+            let Some(Value::String(op)) = args.first() else {
+                return Err("patcher-operator-attributes expects an operator name".to_string());
+            };
+            Ok(inspector_strings(
+                &crate::widget_render::patcher::operator_attribute_names(op),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "patcher-operator-doc",
+        "(patcher-operator-doc op)",
+        "Operator op's dgenlisp documentation as a dict: :summary, :signatures, and :inputs / :outputs (lists of dicts :name :kind :required :summary, in inlet order). Nil when undocumented (a macro, say).",
+        |args, _ctx| {
+            let Some(Value::String(op)) = args.first() else {
+                return Err("patcher-operator-doc expects an operator name".to_string());
+            };
+            let Some(docs) = crate::widget_render::patcher::operator_documentation(op) else {
+                return Ok(Value::Nil);
+            };
+            let ports = |ports: &[crate::widget_render::patcher::PortDocs]| {
+                Value::List(
+                    ports
+                        .iter()
+                        .map(|port| {
+                            inspector_cell(Value::Map(HashMap::from([
+                                ("name".to_string(), inspector_cell(Value::String(port.name.clone()))),
+                                ("kind".to_string(), inspector_cell(Value::String(port.kind.clone()))),
+                                ("required".to_string(), inspector_cell(Value::Bool(port.required))),
+                                ("summary".to_string(), inspector_cell(Value::String(port.summary.clone()))),
+                            ])))
+                        })
+                        .collect(),
+                )
+            };
+            Ok(Value::Map(HashMap::from([
+                ("summary".to_string(), inspector_cell(Value::String(docs.summary))),
+                ("signatures".to_string(), inspector_cell(inspector_strings(&docs.signatures))),
+                ("inputs".to_string(), inspector_cell(ports(&docs.inputs))),
+                ("outputs".to_string(), inspector_cell(ports(&docs.outputs))),
+            ])))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "patcher-set-node-texts",
+        "(patcher-set-node-texts edits)",
+        "Rewrite box texts in the open patcher as one undo step: edits is a list of (id text). Returns whether anything changed.",
+        |args, _ctx| {
+            let Some(Value::List(items)) = args.first() else {
+                return Err("patcher-set-node-texts expects a list of (id text)".to_string());
+            };
+            let mut edits = Vec::new();
+            for item in items {
+                let Value::List(pair) = &*item.borrow() else {
+                    return Err("patcher-set-node-texts expects (id text) pairs".to_string());
+                };
+                let (Some(id), Some(text)) = (pair.first(), pair.get(1)) else {
+                    return Err("patcher-set-node-texts expects (id text) pairs".to_string());
+                };
+                let (Value::String(id), Value::String(text)) = (&*id.borrow(), &*text.borrow())
+                else {
+                    return Err("patcher-set-node-texts expects string ids and texts".to_string());
+                };
+                edits.push((id.clone(), text.clone()));
+            }
+            Ok(Value::Bool(
+                crate::widget_render::patcher::set_inspected_node_texts(&edits),
+            ))
         },
     );
 
@@ -2138,6 +2323,15 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
             Ok(Value::Bool(true))
         },
     );
+}
+
+/// An optional path argument: absent or nil is None, a string is the path.
+fn optional_path_arg(arg: Option<&Value>, native: &str) -> Result<Option<PathBuf>, String> {
+    match arg {
+        None | Some(Value::Nil) => Ok(None),
+        Some(Value::String(path)) => Ok(Some(PathBuf::from(path))),
+        Some(_) => Err(format!("{native} expects an optional path string")),
+    }
 }
 
 pub(super) fn extract_suggested_name(payload: &Value) -> Option<String> {

@@ -13807,6 +13807,77 @@ fn segmented_horizontal_segment_hit_is_used_for_dragging() {
 }
 
 #[test]
+fn segmented_cable_row_left_outside_port_span_by_node_move_is_rerouted() {
+    let mut patch = parse(
+        r#"
+            (def pitch (in 1 @name pitch))
+            (def sig (phasor pitch))
+            "#,
+    );
+    let pan = PatcherPanState::default();
+    let rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 80.0,
+        height: 30.0,
+    };
+    let input_indices = patch_input_indices(&patch);
+    let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    let output_counts = patch_output_counts(&patch);
+    let to_node = patch.connections.first().unwrap().to_node.clone();
+    let target = patch
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == to_node)
+        .unwrap();
+    target.position.0 += 12.0;
+    target.position.1 += 6.0;
+    let node_rects = patch_node_rects(&patch, rect, &pan);
+    let (start, end) = connection_endpoints(
+        patch.connections.first().unwrap(),
+        &node_rects,
+        &input_indices,
+        &input_slot_counts,
+        &output_counts,
+    )
+    .unwrap();
+    let origin = patcher_origin(rect, &pan);
+    let zoom = patcher_zoom(&pan);
+    // A row authored when the source sat lower: now above the outlet.
+    let stale_row = (start.1 - origin.1) / zoom - 3.0;
+    patch.connections[0].segment = Some(CableSegmentInfo {
+        is_segmented: true,
+        segment_row: stale_row,
+    });
+
+    let effective = segmented_cable_row_px(start, end, origin.1, stale_row, zoom);
+    assert!(
+        effective > start.1 && effective < end.1,
+        "run must sit between outlet {} and inlet {}, got {effective}",
+        start.1,
+        end.1
+    );
+    let mid_col = (start.0 + end.0) * 0.5;
+    let hit = |row| {
+        hit_patcher_segmented_cable_horizontal_segment(
+            &patch,
+            rect,
+            &pan,
+            &input_indices,
+            &input_slot_counts,
+            &output_counts,
+            mid_col,
+            row,
+        )
+    };
+    assert!(hit(origin.1 + stale_row * zoom).is_none());
+    assert_eq!(
+        hit(effective).as_deref(),
+        Some(source_connection_id(patch.connections.first().unwrap()).as_str())
+    );
+}
+
+#[test]
 fn segmented_horizontal_segment_hit_uses_tight_cable_radius() {
     let mut patch = parse(
         r#"
@@ -13957,7 +14028,8 @@ fn node_drag_wins_over_segmented_cable_hit_inside_node_body() {
             segment_screen_row,
         )
         .as_deref(),
-        Some(source_connection_id(connection).as_str())
+        None,
+        "a stored row below the inlet reroutes above it, out of the node body"
     );
 
     handle_patcher_pointer_down(
@@ -14147,13 +14219,15 @@ fn segmented_cable_render_row_tracks_pan_origin_once() {
     };
     let pan_for_layout = PatcherPanState::default();
     let connection = patch.connections.first().unwrap().clone();
-    patch
+    let target = patch
         .nodes
         .iter_mut()
         .find(|node| node.id == connection.to_node)
-        .unwrap()
-        .position
-        .0 += 12.0;
+        .unwrap();
+    target.position.0 += 12.0;
+    // Leave vertical room between the ports so the stored row is in range
+    // and renders unclamped.
+    target.position.1 += 6.0;
     let input_indices = patch_input_indices(&patch);
     let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
     let output_counts = patch_output_counts(&patch);
@@ -19238,6 +19312,139 @@ fn metal_render_macro_back_button_uses_shader_chevron_not_text_glyph() {
     );
 }
 
+fn breadcrumb_test_viewport() -> WidgetViewport {
+    WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    }
+}
+
+fn breadcrumb_overlay_drawn(prims: &[GpuPrimitive]) -> (bool, bool) {
+    let chevron = prims.iter().any(|prim| {
+        matches!(
+            inner_prim(prim),
+            GpuPrimitive::WidgetInstance { widget_type, .. }
+                if widget_type == "patcher-back-chevron"
+        )
+    });
+    let text = prims.iter().any(|prim| {
+        matches!(
+            inner_prim(prim),
+            GpuPrimitive::ProportionalText(text) if text.text.starts_with("root / ")
+        )
+    });
+    (chevron, text)
+}
+
+#[test]
+fn breadcrumb_segments_follow_the_rendered_patcher_into_and_out_of_a_macro() {
+    let path = temp_patcher_source_path("breadcrumb-segments");
+    fs::write(
+        &path,
+        "(defmacro ap (x)\n  (phasor x))\n(def z (ap input))\n",
+    )
+    .expect("write source");
+    let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    build_primitives_for_patcher(&node, breadcrumb_test_viewport());
+
+    let root = vec!["root".to_string(), file_name.clone()];
+    assert_eq!(super::patcher_breadcrumb_segments(None), Some(root.clone()));
+    assert_eq!(super::patcher_breadcrumb_segments(Some(&path)), Some(root.clone()));
+
+    let mut state = get_patcher_interaction_state(key);
+    state.active_macro = Some("ap".to_string());
+    set_patcher_interaction_state(key, state);
+    let in_macro = vec!["root".to_string(), file_name, "ap".to_string()];
+    assert_eq!(super::patcher_breadcrumb_segments(None), Some(in_macro.clone()));
+    assert_eq!(super::patcher_breadcrumb_segments(Some(&path)), Some(in_macro));
+
+    // The last segment is the current view; popping to it changes nothing.
+    assert!(!super::pop_patcher_breadcrumb(Some(&path), 2));
+    assert_eq!(get_patcher_interaction_state(key).active_macro.as_deref(), Some("ap"));
+    assert!(super::pop_patcher_breadcrumb(None, 1));
+    assert_eq!(get_patcher_interaction_state(key).active_macro, None);
+    assert_eq!(super::patcher_breadcrumb_segments(None), Some(root));
+    assert!(!super::pop_patcher_breadcrumb(None, 0));
+
+    let unknown = temp_patcher_source_path("breadcrumb-never-rendered");
+    assert_eq!(super::patcher_breadcrumb_segments(Some(&unknown)), None);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn suppressed_breadcrumb_overlay_is_neither_drawn_nor_clickable() {
+    let path = temp_patcher_source_path("breadcrumb-suppressed");
+    fs::write(
+        &path,
+        "(defmacro ap (x)\n  (phasor x))\n(def z (ap input))\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let in_macro = || {
+        set_patcher_interaction_state(
+            key,
+            PatcherInteractionState {
+                active_macro: Some("ap".to_string()),
+                ..Default::default()
+            },
+        )
+    };
+    let back = patcher_back_button_rect(node.rect);
+    let (back_col, back_row) = (back.col + back.width * 0.5, back.row + back.height * 0.5);
+
+    in_macro();
+    assert_eq!(
+        breadcrumb_overlay_drawn(&build_primitives_for_patcher(&node, breadcrumb_test_viewport())),
+        (true, true),
+        "the overlay draws by default"
+    );
+
+    super::set_patcher_breadcrumb_overlay(false);
+    in_macro();
+    assert_eq!(
+        breadcrumb_overlay_drawn(&build_primitives_for_patcher(&node, breadcrumb_test_viewport())),
+        (false, false),
+        "suppressed: no back chevron and no breadcrumb text"
+    );
+    handle_patcher_pointer_moved(&node, back_col, back_row, 1.0, 1.0);
+    assert!(!get_patcher_interaction_state(key).hover_back_button);
+    handle_patcher_pointer_down(&node, back_col, back_row, KeyModifiers::empty(), 10.0, 20.0);
+    assert_eq!(
+        get_patcher_interaction_state(key).active_macro.as_deref(),
+        Some("ap"),
+        "the hidden back button must not take the click"
+    );
+
+    // A patcher's own prop wins over the global switch.
+    let mut forced = node.clone();
+    forced
+        .props
+        .insert("breadcrumb-overlay".to_string(), Value::Bool(true));
+    assert_eq!(
+        breadcrumb_overlay_drawn(&build_primitives_for_patcher(&forced, breadcrumb_test_viewport())),
+        (true, true)
+    );
+
+    super::set_patcher_breadcrumb_overlay(true);
+    in_macro();
+    handle_patcher_pointer_down(&node, back_col, back_row, KeyModifiers::empty(), 10.0, 20.0);
+    assert_eq!(get_patcher_interaction_state(key).active_macro, None);
+    let _ = fs::remove_file(path);
+}
+
 #[test]
 fn metal_render_emits_agentic_bubble_body_as_foreground_overlay() {
     let path = temp_patcher_source_path("agentic-bubble-foreground-render");
@@ -20332,6 +20539,86 @@ fn eject_flips_authored_flag_but_keeps_layout_for_repromotion() {
     let repromoted: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
     assert_eq!(repromoted["root"]["nodes"], before["root"]["nodes"]);
+}
+
+/// Realistic Code → Patch round trip for a hand-built patch. The host keeps
+/// `last_valid_source` from the writeback payload and `last_valid_layout` from
+/// the most recent payload of either kind — and a node drag after the last
+/// semantic edit sends a layout-only payload. Eject writes both to disk;
+/// promote re-parses the source and applies the sidecar positions by node id.
+/// Regression: the layout-only payload keyed created nodes by their
+/// interaction ids (`created-N`) instead of the binding names the generator
+/// emitted, so promotion matched nothing and auto-laid-out every new node.
+#[test]
+fn eject_then_promote_keeps_positions_of_nodes_created_and_moved_in_the_editor() {
+    let path = temp_patcher_dsp_path("patcher-eject-promote-created-positions");
+    fs::write(&path, "(def pitch (in 1 @name pitch))\n(out pitch 1 @name audio)\n").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    reset_patcher_widget_state(key);
+
+    let mut state = get_patcher_interaction_state(key);
+    let phasor = allocate_created_text_node(&mut state, "root", "phasor");
+    let scale = allocate_created_text_node(&mut state, "root", "* 0.25");
+    connect_output_to_input(&mut state, "root", "pitch", &phasor, 0);
+    connect_output_to_input(&mut state, "root", &phasor, &scale, 0);
+    set_patcher_interaction_state(key, state);
+
+    // Semantic edit → writeback payload: the host's `last_valid_source`.
+    let Value::Map(writeback) = patcher_writeback_payload(&node) else {
+        panic!("expected writeback payload map");
+    };
+    let Some(Value::String(source)) = writeback.get("source").map(|v| v.borrow().clone()) else {
+        panic!("writeback payload is missing source");
+    };
+
+    // The user then hand-positions the created nodes (layout-only change).
+    let mut state = get_patcher_interaction_state(key);
+    let expected = [(phasor.clone(), (37.0_f32, 11.0_f32)), (scale.clone(), (53.0, 29.0))];
+    for (id, position) in &expected {
+        state
+            .edit_state
+            .nodes
+            .get_mut(&node_edit_key("root", id))
+            .unwrap()
+            .position = *position;
+    }
+    set_patcher_interaction_state(key, state);
+    let Value::Map(layout_payload) = patcher_layout_payload(&node) else {
+        panic!("expected layout payload map");
+    };
+    let Some(Value::String(layout)) = layout_payload.get("layout").map(|v| v.borrow().clone())
+    else {
+        panic!("layout payload is missing layout");
+    };
+
+    let assert_positions = |stage: &str| {
+        reset_patcher_widget_state(key);
+        let reloaded = load_patch_from_props(&node.props).unwrap().1;
+        for (op, (_, position)) in ["phasor", "*"].iter().zip(expected.iter()) {
+            let found = reloaded
+                .nodes
+                .iter()
+                .find(|patch_node| patch_node.op == *op)
+                .unwrap_or_else(|| panic!("{stage}: reloaded patch lost the `{op}` node:\n{source}"));
+            assert_eq!(
+                found.position, *position,
+                "{stage}: `{op}` node (id `{}`) lost its hand-placed position\nsource:\n{source}\nlayout:\n{layout}",
+                found.id
+            );
+        }
+    };
+
+    // Save (`update-instrument`) writes the same pair; reopening loads the
+    // authored graph payload.
+    fs::write(&path, &source).unwrap();
+    fs::write(sidecar::sidecar_path_for_source(&path), &layout).unwrap();
+    assert_positions("save → reopen");
+
+    // Eject flips the authored flag; promote re-parses the unchanged code.
+    eject_patch_authored_sidecar(&path).unwrap();
+    promote_source_to_patch(&path, &source, PatcherIntent::Instrument).unwrap();
+    assert_positions("eject → promote");
 }
 
 // ── Created-node identity vs source bindings (regression: node-splice bug) ──
@@ -26818,4 +27105,529 @@ fn editor_node_comma_rewrite_skips_escaped_quotes_in_strings() {
         super::lisp::normalize_editor_node_text(r#"[a, "x\", y", b]"#),
         r#"[a  "x\", y"  b]"#
     );
+}
+
+#[test]
+fn inspector_mirrors_the_selection_and_rewrites_box_text_as_one_undoable_edit() {
+    let path = temp_patcher_source_path("inspector-rewrite");
+    fs::write(&path, "(def g (param gain @default 0.5 @min 0))\n(out g 1)\n").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    build_primitives_for_patcher(&node, breadcrumb_test_viewport());
+    assert!(super::selected_nodes_for_path(&path).is_empty(), "nothing selected yet");
+
+    let patch = debug_patch_for_state(&node, &get_patcher_interaction_state(key), "root")
+        .expect("patch");
+    let param = patch
+        .nodes
+        .iter()
+        .find(|n| n.op == "param")
+        .expect("param node")
+        .id
+        .clone();
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert(param.clone());
+    set_patcher_interaction_state(key, state);
+    build_primitives_for_patcher(&node, breadcrumb_test_viewport());
+    let selected = super::selected_nodes_for_path(&path);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].0, param);
+    assert!(selected[0].1.contains("@min 0"), "{:?}", selected[0].1);
+
+    let mut editing = get_patcher_interaction_state(key);
+    super::text::begin_patcher_text_edit(&mut editing, param.clone(), selected[0].1.clone(), 0, Vec::new());
+    set_patcher_interaction_state(key, editing.clone());
+    build_primitives_for_patcher(&node, breadcrumb_test_viewport());
+    assert!(
+        super::selected_nodes_for_path(&path).is_empty(),
+        "a box mid-edit is not inspected until the edit commits"
+    );
+    editing.text_edit = None;
+    set_patcher_interaction_state(key, editing);
+    build_primitives_for_patcher(&node, breadcrumb_test_viewport());
+
+    let rewritten = super::set_node_text_attribute(&selected[0].1, "@min", "-1").unwrap();
+    let _ = super::take_pending_patcher_command_outputs();
+    assert!(super::set_inspected_node_texts(&[(param.clone(), rewritten.clone())]));
+    assert_eq!(
+        super::take_pending_patcher_command_outputs().len(),
+        1,
+        "the edit reaches the host through the patcher's :on-change"
+    );
+    build_primitives_for_patcher(&node, breadcrumb_test_viewport());
+    assert!(super::selected_nodes_for_path(&path)[0].1.contains("@min -1"));
+    assert!(
+        !super::set_inspected_node_texts(&[(param, rewritten)]),
+        "an unchanged write is a no-op"
+    );
+    let _ = fs::remove_file(path);
+}
+
+/// A tensor constructor's shape is a compile-time literal typed in the box,
+/// never a cable: `ones [4 1]` must not grow an empty first inlet (which
+/// emitted `(ones __patcher_missing_input__ [4 1])`).
+#[test]
+fn typed_tensor_shape_is_an_argument_not_an_unconnected_inlet() {
+    for (text, expected) in [
+        ("ones [4 1]", "(ones [4 1"),
+        ("zeros [8]", "(zeros [8"),
+        ("randn [2 2]", "(randn [2 2"),
+    ] {
+        let path = temp_patcher_dsp_path("patcher-typed-tensor-shape");
+        fs::write(&path, "(def pitch (in 1 @name pitch))\n(out pitch 1 @name audio)\n").unwrap();
+        let node = patcher_test_node(&path);
+        let key = patcher_state_key(&node);
+        reset_patcher_widget_state(key);
+        let mut state = get_patcher_interaction_state(key);
+        let tensor = allocate_created_text_node(&mut state, "root", text);
+        let sum = allocate_created_text_node(&mut state, "root", "sum");
+        let out = allocate_created_text_node(&mut state, "root", "out 2 @name t");
+        connect_output_to_input(&mut state, "root", &tensor, &sum, 0);
+        connect_output_to_input(&mut state, "root", &sum, &out, 0);
+        set_patcher_interaction_state(key, state);
+        let Value::Map(writeback) = patcher_writeback_payload(&node) else {
+            panic!("expected writeback payload map");
+        };
+        let Some(Value::String(source)) = writeback.get("source").map(|v| v.borrow().clone()) else {
+            panic!("writeback payload is missing source");
+        };
+        assert!(
+            !source.contains("__patcher_missing_input__"),
+            "`{text}` emitted a missing-input placeholder:\n{source}"
+        );
+        assert!(source.contains(expected), "`{text}` should emit {expected}…:\n{source}");
+        let _ = fs::remove_file(&path);
+    }
+}
+
+#[test]
+fn preview_emission_bindings_map_compiled_shapes_onto_the_rendered_nodes() {
+    let path = temp_patcher_dsp_path("patcher-preview-binding-shapes");
+    fs::write(&path, POISONED_CREATED_ID_SOURCE).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    reset_patcher_widget_state(key);
+    let prepared = PatcherPreviewRequest::capture(&node).unwrap().prepare().unwrap();
+    // `created-1` is healed to an op-derived binding in the emitted source.
+    let binding = prepared.bindings.node_for_binding("created-1");
+    assert!(binding.is_none(), "created-1 must not survive as a binding");
+    let (phasor_binding, _) = prepared
+        .source
+        .lines()
+        .find_map(|line| {
+            let rest = line.trim().strip_prefix("(def ")?;
+            let (name, body) = rest.split_once(' ')?;
+            body.starts_with("(phasor").then(|| (name.to_string(), ()))
+        })
+        .expect("phasor def emitted");
+    assert_eq!(prepared.bindings.node_for_binding(&phasor_binding), Some("created-1"));
+    set_compile_shapes_for_path(
+        &path,
+        &prepared.bindings,
+        HashMap::from([(
+            phasor_binding,
+            BindingShape { kind: BindingShapeKind::SignalTensor, shape: vec![8], elements: None },
+        )]),
+        None,
+    );
+    assert_eq!(cable_shape(&path, "created-1", 0).map(|shape| shape.shape), Some(vec![8]));
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn inspector_mirror_reports_compiled_shapes_for_selected_nodes_and_cables() {
+    use super::shapes::{BindingShape, BindingShapeKind, PatcherEmissionBindings};
+    let path = temp_patcher_source_path("inspector-cable-shapes");
+    let source = "(def t (iota 8))\n(def ph (phasor t))\n(def c (cos ph))\n(out (sum c) 1)\n";
+    fs::write(&path, source).expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    build_primitives_for_patcher(&node, breadcrumb_test_viewport());
+
+    let patch = debug_patch_for_state(&node, &get_patcher_interaction_state(key), "root")
+        .expect("patch");
+    let generated = super::generate::generate_patch_source(&patch, PatcherIntent::Instrument).expect("emit");
+    let bindings = PatcherEmissionBindings::from_emission(&patch, &generated);
+    let shape = |kind, dims: &[usize]| BindingShape { kind, shape: dims.to_vec(), elements: None };
+    let node_id = |op: &str| patch.nodes.iter().find(|n| n.op == op).unwrap().id.clone();
+    let (phasor, cos) = (node_id("phasor"), node_id("cos"));
+    let binding = |id: &str| {
+        generated
+            .renamed_node_ids
+            .get(&("root".to_string(), id.to_string()))
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    };
+    let shapes = std::collections::HashMap::from([
+        (binding(&phasor), shape(BindingShapeKind::SignalTensor, &[8])),
+        (binding(&cos), shape(BindingShapeKind::SignalTensor, &[8])),
+    ]);
+    super::shapes::set_compile_shapes_for_path(&path, &bindings, shapes, None);
+
+    let connection = patch
+        .connections
+        .iter()
+        .find(|c| c.from_node == phasor && c.to_node == cos)
+        .expect("phasor → cos cable")
+        .clone();
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert(phasor.clone());
+    state.selected_cable = Some(format!(
+        "{}:{}->{}:{}",
+        connection.from_node, connection.from_output, connection.to_node, connection.to_input
+    ));
+    set_patcher_interaction_state(key, state);
+    build_primitives_for_patcher(&node, breadcrumb_test_viewport());
+
+    assert_eq!(
+        super::selected_node_shapes_for_path(&path),
+        vec!["signal-tensor|[8]|8 lanes".to_string()]
+    );
+    let cable = super::selected_cable_for_path(&path).expect("selected cable mirrored");
+    assert_eq!(cable.shape, "signal-tensor|[8]|8 lanes");
+    assert_eq!(cable.from, "phasor · outlet 1");
+    assert_eq!(cable.to, "cos · inlet 1");
+
+    super::shapes::clear_compile_shapes_for_path(&path);
+    build_primitives_for_patcher(&node, breadcrumb_test_viewport());
+    assert_eq!(
+        super::selected_cable_for_path(&path).map(|c| c.shape),
+        Some("shape unknown||".to_string()),
+        "no compile result: the shape is unknown, not guessed"
+    );
+    let _ = fs::remove_file(path);
+}
+
+// ── Tensor cables, lane badges, error borders (spec §5) ─────────────────────
+
+use crate::widget_render::ui_design_px;
+
+const TENSOR_CHAIN_SOURCE: &str = "(def lanes (iota 8))\n\
+     (def osc (phasor lanes))\n\
+     (def angle (* osc twopi))\n\
+     (def wave (cos angle))\n\
+     (def mixed (sum wave))\n\
+     (out mixed 1 @name audio)\n";
+
+fn tensor_test_viewport() -> WidgetViewport {
+    WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 2000.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 100.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    }
+}
+
+/// A patcher on `source` at `zoom`, with the compile shapes `shapes`
+/// (binding -> shape) published through the real emission bindings.
+fn tensor_test_patcher(
+    name: &str,
+    source: &str,
+    zoom: f32,
+    shapes: &[(&str, BindingShapeKind, &[usize])],
+) -> (std::path::PathBuf, LayoutNode) {
+    let path = temp_patcher_dsp_path(name);
+    fs::write(&path, source).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    reset_patcher_widget_state(key);
+    let mut pan = PatcherPanState::default();
+    pan.zoom = zoom;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+    if !shapes.is_empty() {
+        let prepared = PatcherPreviewRequest::capture(&node).unwrap().prepare().unwrap();
+        set_compile_shapes_for_path(
+            &path,
+            &prepared.bindings,
+            shapes
+                .iter()
+                .map(|(binding, kind, dims)| {
+                    (
+                        binding.to_string(),
+                        BindingShape { kind: *kind, shape: dims.to_vec(), elements: None },
+                    )
+                })
+                .collect(),
+            None,
+        );
+    }
+    (path, node)
+}
+
+fn patch_cables(prims: &[GpuPrimitive]) -> Vec<crate::widget_render::GpuPatchCablePrimitive> {
+    prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            GpuPrimitive::PatchCable(cable) => Some(cable.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+const TENSOR_CHAIN_SHAPES: &[(&str, BindingShapeKind, &[usize])] = &[
+    ("lanes", BindingShapeKind::Tensor, &[8]),
+    ("osc", BindingShapeKind::SignalTensor, &[8]),
+    ("angle", BindingShapeKind::SignalTensor, &[8]),
+    ("wave", BindingShapeKind::SignalTensor, &[8]),
+    ("mixed", BindingShapeKind::Signal, &[]),
+];
+
+#[test]
+fn tensor_cables_draw_thicker_with_a_two_colour_stroke_and_no_text() {
+    let (path, node) =
+        tensor_test_patcher("patcher-tensor-cables", TENSOR_CHAIN_SOURCE, 1.0, TENSOR_CHAIN_SHAPES);
+    let texts_before = patcher_texts(&build_primitives_for_patcher(
+        &tensor_test_patcher("patcher-tensor-cables-plain", TENSOR_CHAIN_SOURCE, 1.0, &[]).1,
+        tensor_test_viewport(),
+    ));
+    let prims = build_primitives_for_patcher(&node, tensor_test_viewport());
+    let cables = patch_cables(&prims);
+    assert_eq!(cables.len(), 5, "lanes→osc→angle→wave→mixed→out");
+
+    let scalar_radius = ui_design_px(CABLE_FORWARD_RADIUS_PX);
+    let (tensor, scalar): (Vec<_>, Vec<_>) =
+        cables.iter().partition(|cable| cable.dash_px != [0.0, 0.0]);
+    assert_eq!(tensor.len(), 4, "the four tensor-carrying cables alternate colours");
+    for cable in &tensor {
+        assert_eq!(cable.color, theme::PATCHER_TENSOR_CABLE());
+        assert_eq!(cable.alt_color, theme::PATCHER_TENSOR_CABLE_ALT());
+        assert!(
+            (cable.radius_px - scalar_radius * TENSOR_CABLE_WIDTH_SCALE).abs() < 1e-4,
+            "tensor cables are 1.6× thicker: {} vs {scalar_radius}",
+            cable.radius_px
+        );
+        assert!(cable.dash_px[0] > 0.0 && cable.dash_px[1] > 0.0, "{:?}", cable.dash_px);
+    }
+    assert_eq!(scalar.len(), 1, "sum → out carries a scalar");
+    assert_eq!(scalar[0].color, theme::PATCHER_CABLE());
+    assert_eq!(scalar[0].radius_px, scalar_radius, "scalar cables are unchanged");
+    assert_eq!(
+        patcher_texts(&prims),
+        texts_before,
+        "cables carry no text: the shape lives in the inspector"
+    );
+    clear_compile_shapes_for_path(&path);
+}
+
+#[test]
+fn a_selected_tensor_cable_takes_the_selection_colour_and_keeps_its_alternate() {
+    let (path, node) =
+        tensor_test_patcher("patcher-tensor-selected", TENSOR_CHAIN_SOURCE, 1.0, TENSOR_CHAIN_SHAPES);
+    let key = patcher_state_key(&node);
+    let (_, patch) = load_patch_from_props(&node.props).unwrap();
+    let connection = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == "osc")
+        .expect("osc cable");
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_cable = Some(source_connection_id(connection));
+    set_patcher_interaction_state(key, state);
+    let prims = build_primitives_for_patcher(&node, tensor_test_viewport());
+    let selected = patch_cables(&prims)
+        .into_iter()
+        .filter(|cable| cable.color == theme::PATCHER_ERROR())
+        .collect::<Vec<_>>();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].alt_color, theme::PATCHER_TENSOR_CABLE_ALT());
+    assert!(selected[0].dash_px != [0.0, 0.0], "selection keeps the two-colour stroke");
+    clear_compile_shapes_for_path(&path);
+}
+
+#[test]
+fn cables_with_unknown_shape_draw_plain() {
+    let (_path, node) = tensor_test_patcher("patcher-tensor-unknown", TENSOR_CHAIN_SOURCE, 1.0, &[]);
+    let prims = build_primitives_for_patcher(&node, tensor_test_viewport());
+    let cables = patch_cables(&prims);
+    assert_eq!(cables.len(), 5);
+    for cable in cables {
+        assert_eq!(cable.dash_px, [0.0, 0.0]);
+        assert_eq!(cable.color, theme::PATCHER_CABLE());
+        assert_eq!(cable.radius_px, ui_design_px(CABLE_FORWARD_RADIUS_PX));
+    }
+}
+
+#[test]
+fn a_tensor_feedback_cable_keeps_its_colour_but_takes_the_alternate_and_width() {
+    let source = "(make-history h)\n\
+         (def lanes (iota 4))\n\
+         (def previous (read-history h))\n\
+         (def acc (+ lanes previous))\n\
+         (write-history h acc)\n\
+         (out (sum acc) 1 @name audio)\n";
+    let (path, node) = tensor_test_patcher(
+        "patcher-tensor-feedback",
+        source,
+        1.0,
+        &[
+            ("lanes", BindingShapeKind::Tensor, &[4]),
+            ("acc", BindingShapeKind::SignalTensor, &[4]),
+            ("h", BindingShapeKind::TensorHistory, &[4]),
+        ],
+    );
+    let prims = build_primitives_for_patcher(&node, tensor_test_viewport());
+    let cables = patch_cables(&prims);
+    let feedback = cables
+        .iter()
+        .filter(|cable| cable.color == theme::PATCHER_FEEDBACK_CABLE())
+        .collect::<Vec<_>>();
+    assert!(!feedback.is_empty(), "fixture must draw a feedback cable: {} cables", cables.len());
+    for cable in feedback {
+        assert!(cable.dash_px != [0.0, 0.0], "a tensor feedback cable alternates colours");
+        assert_eq!(cable.alt_color, theme::PATCHER_TENSOR_CABLE_ALT());
+        let expected = ui_design_px(CABLE_FEEDBACK_RADIUS_PX) * TENSOR_CABLE_WIDTH_SCALE;
+        assert!((cable.radius_px - expected).abs() < 1e-4, "{} vs {expected}", cable.radius_px);
+    }
+    clear_compile_shapes_for_path(&path);
+}
+
+fn patcher_node_borders(prims: &[GpuPrimitive]) -> Vec<[f32; 4]> {
+    prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            GpuPrimitive::WidgetInstance { widget_type, instance, .. }
+                if widget_type == "patcher-node" =>
+            {
+                Some(instance.color_a)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_diagnostic_draws_the_error_border_on_every_node_kind_even_when_selected() {
+    let source = "(param cutoff @default 440 @min 20 @max 2000)\n\
+         (def gate (in 1 @name gate))\n\
+         (def body (* gate cutoff))\n\
+         (out body 1 @name audio)\n";
+    let mut patch = parse_patch_source(source, PatcherIntent::Instrument).unwrap();
+    for kind in [NodeKind::In, NodeKind::Out, NodeKind::Param] {
+        assert!(patch.nodes.iter().any(|node| node.kind == kind), "fixture lacks {kind:?}");
+    }
+    for node in &mut patch.nodes {
+        node.diagnostic = Some("Type error: boom".to_string());
+    }
+    let mut state = PatcherInteractionState::default();
+    let selected = patch.nodes.iter().find(|node| node.kind == NodeKind::Param).unwrap().id.clone();
+    state.selected_nodes.insert(selected);
+    let mut prims = Vec::new();
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    draw_patch(
+        &mut prims,
+        &patch,
+        Rect { row: 0.0, col: 0.0, width: 100.0, height: 100.0 },
+        tensor_test_viewport(),
+        &pan,
+        &state,
+    );
+    let borders = patcher_node_borders(&prims);
+    assert_eq!(borders.len(), patch.nodes.len());
+    let error = theme::PATCHER_ERROR().to_rgba();
+    assert!(borders.iter().all(|border| *border == error), "{borders:?}");
+    // The selection still shows, through the resize handles.
+    let handle = theme::PATCHER_NODE_SELECTED_BORDER();
+    assert!(prims.iter().any(|prim| matches!(
+        inner_prim(prim),
+        GpuPrimitive::ForegroundRect(rect) if rect.color == handle
+    )));
+}
+
+#[test]
+fn a_compile_failure_at_a_param_node_draws_its_error_border() {
+    let source = "(param cutoff @default 440 @min 20 @max 2000)\n\
+         (def gate (in 1 @name gate))\n\
+         (def body (* gate cutoff))\n\
+         (out body 1 @name audio)\n";
+    let (path, node) = tensor_test_patcher("patcher-failed-param", source, 1.0, &[]);
+    let (_, patch) = load_patch_from_props(&node.props).unwrap();
+    let param = patch.nodes.iter().find(|node| node.kind == NodeKind::Param).unwrap().id.clone();
+    let prepared = PatcherPreviewRequest::capture(&node).unwrap().prepare().unwrap();
+    assert_eq!(prepared.bindings.node_for_binding(&param), Some(param.as_str()));
+    set_compile_shapes_for_path(
+        &path,
+        &prepared.bindings,
+        HashMap::new(),
+        Some(FailedForm {
+            index: 0,
+            op: "param".to_string(),
+            name: Some(param.clone()),
+            message: "bad range".to_string(),
+        }),
+    );
+    let prims = build_primitives_for_patcher(&node, tensor_test_viewport());
+    let error = theme::PATCHER_ERROR().to_rgba();
+    let errored = patcher_node_borders(&prims).iter().filter(|border| **border == error).count();
+    assert_eq!(errored, 1, "exactly the failed param node gets the error border");
+    clear_compile_shapes_for_path(&path);
+}
+
+#[test]
+fn a_node_diagnostic_sits_beside_its_own_node_clear_of_the_node_below() {
+    let source = "(def lanes (iota 8))\n\
+         (def bad (reshape lanes 4))\n\
+         (def total (sum bad))\n\
+         (out total 1 @name audio)\n";
+    // An authored diagnostic and a located compile failure share this path.
+    let mut patch = parse_patch_source(source, PatcherIntent::Instrument).unwrap();
+    let message = "at (def bad): Invalid argument: reshape requires @shape";
+    patch.nodes.iter_mut().find(|node| node.id == "bad").unwrap().diagnostic =
+        Some(message.to_string());
+    let rect = Rect { row: 0.0, col: 0.0, width: 100.0, height: 100.0 };
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    let mut prims = Vec::new();
+    draw_patch(&mut prims, &patch, rect, tensor_test_viewport(), &pan, &PatcherInteractionState::default());
+    let rects = patch_node_rects(&patch, rect, &pan);
+    let node = rects["bad"];
+    let label = prims
+        .iter()
+        .find_map(|prim| match inner_prim(prim) {
+            GpuPrimitive::ProportionalText(text) if text.text.starts_with("at (def bad)") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .expect("diagnostic label drawn");
+    let header_bottom = node.row + (NODE_HEIGHT * pan.zoom).min(node.height);
+    assert!(
+        label.row >= node.row && label.row < header_bottom,
+        "label row {} must sit on the node's header row {}..{header_bottom}",
+        label.row,
+        node.row
+    );
+    assert!(label.col >= node.col + node.width, "label starts right of its node: {} vs {:?}", label.col, node);
+    let chip = node_diagnostic_chip_rect(
+        Rect { height: (NODE_HEIGHT * pan.zoom).min(node.height), ..node },
+        message,
+        pan.zoom,
+    );
+    for (id, other) in &rects {
+        if id == "bad" {
+            continue;
+        }
+        let overlaps = chip.col < other.col + other.width
+            && other.col < chip.col + chip.width
+            && chip.row < other.row + other.height
+            && other.row < chip.row + chip.height;
+        assert!(!overlaps, "diagnostic chip {chip:?} overlaps node {id} {other:?}");
+    }
+    // The chip has an opaque background so it reads over any cable.
+    assert!(prims.iter().any(|prim| matches!(
+        inner_prim(prim),
+        GpuPrimitive::WidgetInstance { widget_type, instance, .. }
+            if widget_type == "patcher-panel" && instance.color_a == theme::PATCHER_ERROR().to_rgba()
+    )));
 }

@@ -23,6 +23,10 @@ pub(super) const COMMANDS: &[&str] = &[
     "enter-edit-effect",
     "update-effect",
     "cancel-editor",
+    "editor-save",
+    "editor-save-as",
+    "editor-done",
+    "editor-restore-release",
 ];
 
 #[allow(clippy::too_many_lines)]
@@ -427,10 +431,8 @@ pub(super) fn handle(
                 ));
                 return;
             };
-            if !matches!(&session.mode, InstrumentEditMode::CreateDraft { .. }) {
-                editor_error(editor, "Run mode can only be changed for draft instruments");
-                return;
-            }
+            // An existing instrument switches live too; Save writes it to
+            // instrument.json (docs/patcher-workspace-spec.md §3).
             match app
                 .graph_controller()
                 .set_track_instrument_run_mode(session.track, run_mode)
@@ -440,15 +442,17 @@ pub(super) fn handle(
                     if let Some(engine_id) = app.graph.track_engine_ids[session.track] {
                         session.engine_id = engine_id;
                     }
+                    let dirty = session.is_dirty();
                     let rt = editor.runtime_mut();
                     present_editor(rt, |e| {
                         e.run_mode = instrument_run_mode_label(run_mode).to_string();
                         e.error.clear();
+                        e.dirty = dirty;
                     });
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.handle_host_event(HostEvent::Status(format!(
-                        "Draft instrument mode: {}",
+                        "Instrument mode: {}",
                         match run_mode {
                             CustomInstrumentRunMode::Instrument => "Instrument",
                             CustomInstrumentRunMode::FreePatch => "Free Patch",
@@ -505,6 +509,9 @@ pub(super) fn handle(
 
         "save-new-instrument" => {
             if let Value::Map(ref map) = payload {
+                // `stay`: the toolbar's Save (docs/patcher-workspace-spec.md
+                // §4) writes the instrument and keeps editing it.
+                let stay = extract_bool_from_payload(&payload, "stay");
                 if let Some(cell) = map.get("name") {
                     if let Value::String(inst_name) = &*cell.borrow() {
                         let inst_name = inst_name.trim().to_string();
@@ -687,6 +694,71 @@ pub(super) fn handle(
                             return;
                         }
 
+                        if stay {
+                            // Carry on as an edit of the saved instrument. The
+                            // patcher stays on the draft dir (`path`), so Save
+                            // writes to the instrument's home (`save_path`) and
+                            // the draft dir goes when the editor closes.
+                            let session = ctx
+                                .sessions
+                                .instrument_edit_session
+                                .as_mut()
+                                .expect("session checked");
+                            session.mode = InstrumentEditMode::EditExisting {
+                                persisted_source: source.clone(),
+                            };
+                            session.last_valid_source = source.clone();
+                            session.name = final_name.clone();
+                            session.save_path = Some(target_dsp.clone());
+                            session.saved_draft_dir = Some(draft_temp_dir.clone());
+                            session.persisted_run_mode = session.run_mode;
+                            session.fork_restore = None;
+                            // The new instrument's files are this session's
+                            // until a project save could pin them (§5.2).
+                            session.working_release = Some(0);
+                            session.project_saved_since_release = false;
+                            session.track = draft_track;
+                            if let Some(engine_id) =
+                                app.graph.track_engine_ids.get(draft_track).copied().flatten()
+                            {
+                                session.engine_id = engine_id;
+                            }
+                            ctx.sessions.editor_mode = Some("edit-instrument".to_string());
+                            current_track.store(draft_track, Ordering::Relaxed);
+                            app.ui.cursor_track = draft_track;
+                            *ctx.track_names = app.tracks.clone();
+                            sync_shared_track_collapsed(&track_collapsed, &app);
+                            if let Some(status) =
+                                staged_library_macro_flush_status(&flushed_macros)
+                            {
+                                editor.handle_host_event(HostEvent::Status(status));
+                            }
+                            let rt = editor.runtime_mut();
+                            present_editor(rt, |e| {
+                                "edit-instrument".clone_into(&mut e.mode);
+                                e.error.clear();
+                            });
+                            present_editor_saved(
+                                rt,
+                                &display_instrument_name(&final_name),
+                                editor_release_of(&final_name),
+                                false,
+                            );
+                            present_editor_releases(rt, instrument_release_listing(app, &final_name));
+                            crate::param_words::set_track_word_names(&app.tracks);
+                            sync_sidebar_browser(&app, draft_track);
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            editor.refresh_visible_layouts_for_buffer_named("*fx*");
+                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            // The toolbar's Save reports through a toast (no
+                            // confirm modal; docs/patcher-workspace-spec.md §4).
+                            editor.show_toast(
+                                format!("Saved {}", display_instrument_name(&final_name)),
+                                eseqlisp::ToastKind::Success,
+                            );
+                            return;
+                        }
                         let session =
                             ctx.sessions.instrument_edit_session.take().expect("session checked");
                         if let InstrumentEditMode::CreateDraft { temp_dir, .. } =
@@ -867,7 +939,7 @@ pub(super) fn handle(
                         ctx.sessions.editor_mode = Some("edit-instrument".to_string());
                         ctx.sessions.instrument_edit_session =
                             Some(InstrumentEditSession::begin_edit_existing(
-                                inst_name,
+                                inst_name.clone(),
                                 file_path,
                                 buf_name.clone(),
                                 engine_id,
@@ -884,6 +956,13 @@ pub(super) fn handle(
                             Some(run_mode),
                             surface,
                         );
+                        present_editor_saved(
+                            rt,
+                            &display_instrument_name(&inst_name),
+                            editor_release_of(&inst_name),
+                            false,
+                        );
+                        present_editor_releases(rt, instrument_release_listing(app, &inst_name));
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         refresh_visible_track_topology_layouts(&mut editor);
@@ -894,6 +973,7 @@ pub(super) fn handle(
 
         "update-instrument" => {
             if let Value::Map(ref map) = payload {
+                let stay = extract_bool_from_payload(&payload, "stay");
                 if let Some(cell) = map.get("name") {
                     if let Value::String(inst_name) = &*cell.borrow() {
                         let inst_name = inst_name.clone();
@@ -942,12 +1022,33 @@ pub(super) fn handle(
                             };
                             let unevaluated_changes = code_surface
                                 && source_to_save != session.last_valid_source;
+                            let target = match prepare_instrument_save_target(session) {
+                                Ok(target) => target,
+                                Err(error) => {
+                                    editor_error(editor, format!("Failed to save: {error}"));
+                                    return;
+                                }
+                            };
                             if let Err(e) = std::fs::write(
-                                &session.path,
+                                &target.source_path,
                                 &source_to_save,
                             ) {
                                 editor_error(editor, format!("Failed to save: {e}"));
                                 return;
+                            }
+                            if session.run_mode != session.persisted_run_mode {
+                                if let Err(error) =
+                                    sequencer::lisp_host::save_instrument_run_mode(
+                                        target.pinned_name.as_deref().unwrap_or(&inst_name),
+                                        session.run_mode,
+                                    )
+                                {
+                                    editor_error(
+                                        editor,
+                                        format!("Failed to save instrument mode: {error}"),
+                                    );
+                                    return;
+                                }
                             }
                             // Only the patch surface owns the sidecar: every
                             // layout the patcher emits carries `authored: true`,
@@ -959,13 +1060,78 @@ pub(super) fn handle(
                                 .filter(|_| !code_surface)
                             {
                                 if let Err(e) =
-                                    write_patcher_layout_sidecar(&session.path, layout)
+                                    write_patcher_layout_sidecar(&target.source_path, layout)
                                 {
                                     editor_error(editor, format!("Failed to save layout: {e}"));
                                     return;
                                 }
                             }
 
+                            if stay {
+                                let session = ctx
+                                    .sessions
+                                    .instrument_edit_session
+                                    .as_mut()
+                                    .expect("session checked");
+                                session.mode = InstrumentEditMode::EditExisting {
+                                    persisted_source: source_to_save.clone(),
+                                };
+                                session.persisted_run_mode = session.run_mode;
+                                session.working_release =
+                                    Some(target.release.unwrap_or(0));
+                                session.project_saved_since_release = false;
+                                if let Some(pinned) = target.pinned_name.as_ref() {
+                                    // The track now plays (and a project save
+                                    // pins) the release just cut.
+                                    let old_name =
+                                        std::mem::replace(&mut session.name, pinned.clone());
+                                    session.save_path = Some(target.source_path.clone());
+                                    bind_engine_to_release(
+                                        &mut app,
+                                        &mut *ctx.track_names,
+                                        session.engine_id,
+                                        &old_name,
+                                        pinned,
+                                    );
+                                }
+                                let dirty = session.is_dirty();
+                                let title = display_instrument_name(&session.name);
+                                let session_name = session.name.clone();
+                                if let Some(status) =
+                                    staged_library_macro_flush_status(&flushed_macros)
+                                {
+                                    editor.handle_host_event(HostEvent::Status(status));
+                                }
+                                let rt = editor.runtime_mut();
+                                present_editor(rt, |e| e.error.clear());
+                                present_editor_saved(
+                                    rt,
+                                    &title,
+                                    target.release.unwrap_or(0),
+                                    dirty,
+                                );
+                                present_editor_releases(
+                                    rt,
+                                    instrument_release_listing(app, &session_name),
+                                );
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_toast(
+                                    save_toast_message(
+                                        &title,
+                                        target.release,
+                                        target.pinned_name.is_some(),
+                                        unevaluated_changes,
+                                    ),
+                                    eseqlisp::ToastKind::Success,
+                                );
+                                return;
+                            }
+
+                            if let Some(dir) = session.saved_draft_dir.as_ref() {
+                                let _ = std::fs::remove_dir_all(dir);
+                            }
                             let buf_name = session.buffer_name.clone();
                             reset_instrument_patcher_state(&session.path);
                             if let Err(error) = editor
@@ -986,11 +1152,28 @@ pub(super) fn handle(
                             }
                             ctx.sessions.editor_buffer_name = None;
                             ctx.sessions.editor_mode = None;
-                            ctx.sessions.instrument_edit_session = None;
+                            let session = ctx
+                                .sessions
+                                .instrument_edit_session
+                                .take()
+                                .expect("session checked");
 
-                            let ct = current_track.load(Ordering::Relaxed);
-                            ctx.track_names[ct] = inst_name.clone();
-                            crate::param_words::set_track_word_names(ctx.track_names);
+                            if let Some(pinned) = target.pinned_name.as_ref() {
+                                // As on a staying Save: the track plays the
+                                // release just cut, not the one it opened on.
+                                bind_engine_to_release(
+                                    &mut app,
+                                    &mut *ctx.track_names,
+                                    session.engine_id,
+                                    &session.name,
+                                    pinned,
+                                );
+                            } else {
+                                let ct = current_track.load(Ordering::Relaxed);
+                                ctx.track_names[ct] = inst_name.clone();
+                                crate::param_words::set_track_word_names(ctx.track_names);
+                            }
+                            let inst_name = target.pinned_name.clone().unwrap_or(inst_name);
                             let rt = editor.runtime_mut();
                             present_editor_closed(rt);
                             rt.run_reactive_cycle();
@@ -2089,6 +2272,7 @@ pub(super) fn handle(
         }
 
         "save-new-effect" => {
+            let stay = extract_bool_from_payload(&payload, "stay");
             if let Value::Map(ref map) = payload {
                 if let Some(cell) = map.get("name") {
                     if let Value::String(effect_name) = &*cell.borrow() {
@@ -2219,6 +2403,52 @@ pub(super) fn handle(
                             editor_error(
                                 editor,
                                 format!("Failed to load finalized effect: {error}"),
+                            );
+                            return;
+                        }
+                        if stay {
+                            // Carry on editing the saved effect, as the
+                            // instrument path does (`save-new-instrument`).
+                            let session = ctx
+                                .sessions
+                                .effect_edit_session
+                                .as_mut()
+                                .expect("session exists");
+                            if let EffectEditMode::CreateDraft { temp_dir } = &session.mode {
+                                session.saved_draft_dir = Some(temp_dir.clone());
+                            }
+                            session.mode = EffectEditMode::EditExisting {
+                                persisted_source: source.clone(),
+                            };
+                            session.last_valid_source = source.clone();
+                            session.name = final_name.clone();
+                            session.save_path = Some(final_dsp.clone());
+                            session.fork_restore = None;
+                            ctx.sessions.editor_mode = Some("edit-effect".to_string());
+                            if let Some(status) =
+                                staged_library_macro_flush_status(&flushed_macros)
+                            {
+                                editor.handle_host_event(HostEvent::Status(status));
+                            }
+                            let rt = editor.runtime_mut();
+                            present_editor(rt, |e| {
+                                "edit-effect".clone_into(&mut e.mode);
+                                e.error.clear();
+                            });
+                            present_editor_saved(
+                                rt,
+                                &display_instrument_name(&final_name),
+                                0,
+                                false,
+                            );
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            editor.refresh_visible_layouts_for_buffer_named("*fx*");
+                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            editor.show_toast(
+                                format!("Saved {}", display_instrument_name(&final_name)),
+                                eseqlisp::ToastKind::Success,
                             );
                             return;
                         }
@@ -2382,6 +2612,7 @@ pub(super) fn handle(
                             ));
                         let rt = editor.runtime_mut();
                         present_editor_open(rt, "edit-effect", &buf_name, None, surface);
+                        present_editor_saved(rt, &effect_name, 0, false);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                     }
@@ -2390,6 +2621,7 @@ pub(super) fn handle(
         }
 
         "update-effect" => {
+            let stay = extract_bool_from_payload(&payload, "stay");
             let Some(session) = ctx.sessions.effect_edit_session.as_ref() else {
                 editor.handle_host_event(HostEvent::Error(
                     "No effect being edited".to_string(),
@@ -2433,7 +2665,7 @@ pub(super) fn handle(
             };
             let unevaluated_changes =
                 code_surface && source_to_save != session.last_valid_source;
-            if let Err(e) = std::fs::write(&session.path, &source_to_save) {
+            if let Err(e) = std::fs::write(session.save_target(), &source_to_save) {
                 editor_error(editor, format!("Failed to save: {e}"));
                 return;
             }
@@ -2443,12 +2675,37 @@ pub(super) fn handle(
                 .as_deref()
                 .filter(|_| !code_surface)
             {
-                if let Err(e) = write_patcher_layout_sidecar(&session.path, layout) {
+                if let Err(e) = write_patcher_layout_sidecar(session.save_target(), layout) {
                     editor_error(editor, format!("Failed to save layout: {e}"));
                     return;
                 }
             }
+            if stay {
+                let session = ctx.sessions.effect_edit_session.as_mut().expect("session exists");
+                session.mode = EffectEditMode::EditExisting {
+                    persisted_source: source_to_save.clone(),
+                };
+                let dirty = session.is_dirty();
+                let title = display_instrument_name(&session.name);
+                if let Some(status) = staged_library_macro_flush_status(&flushed_macros) {
+                    editor.handle_host_event(HostEvent::Status(status));
+                }
+                let rt = editor.runtime_mut();
+                present_editor(rt, |e| e.error.clear());
+                present_editor_saved(rt, &title, 0, dirty);
+                rt.run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                editor.show_toast(
+                    save_toast_message(&title, None, false, unevaluated_changes),
+                    eseqlisp::ToastKind::Success,
+                );
+                return;
+            }
             let session = ctx.sessions.effect_edit_session.take().expect("session exists");
+            if let Some(dir) = session.saved_draft_dir.as_ref() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
             reset_effect_patcher_state(&session.path);
             if let Err(error) = editor
                 .runtime_mut()
@@ -2668,11 +2925,17 @@ pub(super) fn handle(
                         e.mode = "new-instrument".to_string();
                         e.error.clear();
                         e.buffer = buf_name;
+                        // A draft now: nothing saved under its new name yet.
+                        e.title.clear();
+                        e.release = 0;
+                        e.dirty = true;
+                        e.releases.clear();
+                        e.release_tracks.clear();
                     });
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.handle_host_event(HostEvent::Status(format!(
-                        "Forked '{origin_display}' — name it to finalize; the original is untouched"
+                        "Forked '{origin_display}' — name it to save; the original is untouched"
                     )));
                 }
                 ForkKind::Effect => {
@@ -2813,11 +3076,17 @@ pub(super) fn handle(
                         e.mode = "new-effect".to_string();
                         e.error.clear();
                         e.buffer = buf_name;
+                        // A draft now: nothing saved under its new name yet.
+                        e.title.clear();
+                        e.release = 0;
+                        e.dirty = true;
+                        e.releases.clear();
+                        e.release_tracks.clear();
                     });
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.handle_host_event(HostEvent::Status(format!(
-                        "Forked '{origin_display}' — name it to finalize; the original is untouched"
+                        "Forked '{origin_display}' — name it to save; the original is untouched"
                     )));
                 }
             }
@@ -3092,8 +3361,406 @@ pub(super) fn handle(
             editor.handle_host_event(HostEvent::Status("Editor cancelled".to_string()));
         }
 
+        // The patch toolbar's actions (docs/patcher-workspace-spec.md §4),
+        // dispatched on the open session onto the per-mode commands above.
+        // Save writes and keeps editing (`:done true`: then leave); Save as
+        // forks an existing instrument / effect into a draft to name; Done
+        // leaves, discarding only a draft that was never saved (the toolbar
+        // asks first while there are unsaved changes).
+        "editor-save" => {
+            let done = extract_bool_from_payload(&payload, "done");
+            let name = extract_string_from_payload(&payload, "name").unwrap_or_default();
+            let (command, name) = if let Some(session) =
+                ctx.sessions.instrument_edit_session.as_ref()
+            {
+                match &session.mode {
+                    InstrumentEditMode::CreateDraft { .. } => ("save-new-instrument", name),
+                    InstrumentEditMode::EditExisting { .. } => {
+                        ("update-instrument", session.name.clone())
+                    }
+                }
+            } else if let Some(session) = ctx.sessions.effect_edit_session.as_ref() {
+                match &session.mode {
+                    EffectEditMode::CreateDraft { .. } => ("save-new-effect", name),
+                    EffectEditMode::EditExisting { .. } => ("update-effect", String::new()),
+                }
+            } else {
+                return;
+            };
+            if command.starts_with("save-new") && name.trim().is_empty() {
+                editor_error(editor, "Name it to save it");
+                return;
+            }
+            let payload = payload_map(&[
+                ("name", Value::String(name)),
+                ("stay", Value::Bool(!done)),
+            ]);
+            handle(command, payload, app, editor, ctx);
+        }
+
+        "editor-save-as" => {
+            let existing = ctx.sessions.instrument_edit_session.as_ref().is_some_and(|s| {
+                matches!(s.mode, InstrumentEditMode::EditExisting { .. })
+            }) || ctx.sessions.effect_edit_session.as_ref().is_some_and(|s| {
+                matches!(s.mode, EffectEditMode::EditExisting { .. })
+            });
+            if existing {
+                handle("fork-editor-session", Value::Nil, app, editor, ctx);
+            }
+        }
+
+        "editor-done" => {
+            // `force`: close over the current state (a restore just replaced it).
+            let force = extract_bool_from_payload(&payload, "force");
+            let clean_existing = ctx
+                .sessions
+                .instrument_edit_session
+                .as_ref()
+                .is_some_and(|s| {
+                    matches!(s.mode, InstrumentEditMode::EditExisting { .. })
+                        && (force || !s.is_dirty())
+                });
+            let clean_effect = ctx.sessions.effect_edit_session.as_ref().is_some_and(|s| {
+                matches!(s.mode, EffectEditMode::EditExisting { .. }) && !s.is_dirty()
+            });
+            if clean_effect {
+                let session = ctx.sessions.effect_edit_session.take().expect("session checked");
+                if let Some(dir) = session.saved_draft_dir.as_ref() {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+                reset_effect_patcher_state(&session.path);
+                if let Err(error) = editor
+                    .runtime_mut()
+                    .eval_str(restore_instrument_patcher_layout_source())
+                {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to restore main editor layout: {error:?}"
+                    )));
+                    return;
+                }
+                editor.refresh_runtime_side_effects();
+                editor.remove_buffer_by_name(&session.buffer_name);
+                ctx.sessions.editor_buffer_name = None;
+                ctx.sessions.editor_mode = None;
+                ctx.sessions.pending_effect_preview = None;
+                let rt = editor.runtime_mut();
+                present_editor_closed(rt);
+                rt.run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                editor.refresh_visible_layouts_for_buffer_named("*fx*");
+                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            if !clean_existing {
+                // A draft never saved, or unsaved changes the toolbar
+                // already confirmed discarding: cancel restores the last
+                // saved state.
+                handle("cancel-editor", Value::Nil, app, editor, ctx);
+                return;
+            }
+            let session = ctx
+                .sessions
+                .instrument_edit_session
+                .take()
+                .expect("session checked");
+            if let Some(dir) = session.saved_draft_dir.as_ref() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            reset_instrument_patcher_state(&session.path);
+            if let Err(error) = editor
+                .runtime_mut()
+                .eval_str(restore_instrument_patcher_layout_source())
+            {
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Failed to restore main editor layout: {error:?}"
+                )));
+                return;
+            }
+            editor.refresh_runtime_side_effects();
+            editor.remove_buffer_by_name(&session.buffer_name);
+            ctx.sessions.editor_buffer_name = None;
+            ctx.sessions.editor_mode = None;
+            ctx.sessions.pending_instrument_preview = None;
+            let rt = editor.runtime_mut();
+            present_editor_closed(rt);
+            rt.run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            refresh_visible_track_topology_layouts(&mut editor);
+            ui_epoch.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Restore release K of the user instrument being edited (the toolbar's
+        // release menu, docs/patcher-workspace-spec.md §3): cut a new release
+        // holding K's files, play it on the track, and reopen the editor on
+        // it. Never rewrites a release; the toolbar offers it only while the
+        // patch is saved.
+        "editor-restore-release" => {
+            let release = extract_usize_from_payload(&payload, "release").unwrap_or(0) as u32;
+            let Some(session) = ctx.sessions.instrument_edit_session.as_ref() else {
+                return;
+            };
+            if !matches!(session.mode, InstrumentEditMode::EditExisting { .. }) {
+                return;
+            }
+            if session.is_dirty() {
+                editor_error(editor, "Save or discard your changes before restoring a release");
+                return;
+            }
+            let Some(current) = editor_release_struct(&session.name) else {
+                editor_error(editor, "This instrument has no releases to restore");
+                return;
+            };
+            if current.tier != sequencer::app_paths::ContentTier::User {
+                editor_error(editor, "Only your own instruments' releases can be restored");
+                return;
+            }
+            let restored = match sequencer::lisp_host::instrument_release(&format!(
+                "user:{}@{release}",
+                current.lineage
+            )) {
+                Ok(Some(restored)) => restored,
+                _ => {
+                    editor_error(editor, format!("Release v{release} does not exist"));
+                    return;
+                }
+            };
+            let source = match std::fs::read_to_string(restored.folder.join("dsp.lisp")) {
+                Ok(source) => source,
+                Err(error) => {
+                    editor_error(editor, format!("Failed to read v{release}: {error}"));
+                    return;
+                }
+            };
+            let cut = match sequencer::lisp_host::cut_user_release(session.save_target(), None) {
+                Ok(cut) => cut,
+                Err(error) => {
+                    editor_error(editor, format!("Failed to restore v{release}: {error}"));
+                    return;
+                }
+            };
+            let top = cut.source_path.parent().map(Path::to_path_buf).unwrap_or_default();
+            for file in ["dsp.lisp", "dsp.layout.json", "ui.lisp"] {
+                let from = restored.folder.join(file);
+                let to = top.join(file);
+                let result = if from.is_file() {
+                    std::fs::copy(&from, &to).map(|_| ())
+                } else if to.is_file() {
+                    std::fs::remove_file(&to)
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = result {
+                    editor_error(editor, format!("Failed to restore v{release}: {error}"));
+                    return;
+                }
+            }
+            sequencer::lisp_host::invalidate_instrument_release_index();
+            let track = session.track;
+            app.ui.cursor_track = track;
+            current_track.store(track, Ordering::Relaxed);
+            if let Err(error) = app.replace_current_custom_instrument_sync(&cut.id, &source) {
+                editor_error(editor, format!("Failed to load v{release}: {error}"));
+                return;
+            }
+            handle("editor-done", payload_map(&[("force", Value::Bool(true))]), app, editor, ctx);
+            handle(
+                "enter-edit-instrument",
+                payload_map(&[("name", Value::String(cut.id.clone()))]),
+                app,
+                editor,
+                ctx,
+            );
+            editor.handle_host_event(HostEvent::Status(format!(
+                "Restored v{release} as v{}",
+                cut.release
+            )));
+        }
+
         _ => {}
     }
+}
+
+/// The release `name` resolves to, a bare user id meaning its lineage's
+/// current files; `None` when unversioned.
+fn editor_release_struct(name: &str) -> Option<sequencer::lisp_host::InstrumentRelease> {
+    if let Ok(Some(release)) = sequencer::lisp_host::instrument_release(name) {
+        return Some(release);
+    }
+    if name.contains(':') {
+        return None;
+    }
+    let lineage = name.trim_end_matches('/');
+    match sequencer::lisp_host::instrument_release(&format!("user:{lineage}")) {
+        Ok(Some(mut release)) => {
+            release.release = release.current;
+            Some(release)
+        }
+        _ => None,
+    }
+}
+
+/// The releases of `name`'s lineage (1..=current) and how many tracks of the
+/// open project play each, for the toolbar's release menu. Empty when
+/// unversioned.
+pub(super) fn instrument_release_listing(app: &app::App, name: &str) -> (Vec<i64>, Vec<i64>) {
+    let Some(subject) = editor_release_struct(name) else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut tracks = vec![0i64; subject.current as usize];
+    for track in 0..app.tracks.len() {
+        let Some(track_name) = crate::state_values::current_custom_instrument_name(app, track)
+        else {
+            continue;
+        };
+        let Some(release) = editor_release_struct(&track_name) else {
+            continue;
+        };
+        if release.tier != subject.tier || release.lineage != subject.lineage {
+            continue;
+        }
+        if let Some(count) = tracks.get_mut(release.release.saturating_sub(1) as usize) {
+            *count += 1;
+        }
+    }
+    ((1..=i64::from(subject.current)).collect(), tracks)
+}
+
+/// What a toolbar Save did, for its toast: a new release (and what keeps the
+/// previous one), an update of the release this session is amending, or a
+/// plain in-place save.
+pub(super) fn save_toast_message(
+    title: &str,
+    release: Option<u32>,
+    cut: bool,
+    unevaluated_changes: bool,
+) -> String {
+    let saved = match (release, cut) {
+        (Some(release), true) if release > 1 => format!(
+            "Saved {title} v{release} · projects using v{} keep it",
+            release - 1
+        ),
+        (Some(release), true) => format!("Saved {title} v{release}"),
+        (Some(release), false) => format!("Updated {title} v{release}"),
+        (None, _) => format!("Saved {title}"),
+    };
+    if unevaluated_changes {
+        format!("{saved} (code not evaluated yet)")
+    } else {
+        saved
+    }
+}
+
+/// A host-command payload map of `entries`.
+fn payload_map(entries: &[(&str, Value)]) -> Value {
+    Value::Map(
+        entries
+            .iter()
+            .map(|(key, value)| {
+                (
+                    (*key).to_string(),
+                    std::rc::Rc::new(std::cell::RefCell::new(value.clone())),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// Where an existing instrument's Save writes, and the release it lands in.
+pub(super) struct InstrumentSaveTarget {
+    pub(super) source_path: PathBuf,
+    /// The release written; `None` for an unversioned (factory, in-place)
+    /// save.
+    pub(super) release: Option<u32>,
+    /// The instrument's id after the save, when it moved (a pinned release
+    /// or a migrated legacy file).
+    pub(super) pinned_name: Option<String>,
+}
+
+/// Resolve where `session`'s Save writes (docs/patcher-workspace-spec.md
+/// §5.2). Factory and package instruments are developer edits, written in
+/// place. A user instrument's first Save in a session cuts a release, as does
+/// the first Save after the project was saved (the project may now pin the
+/// release being edited); other Saves amend the session's own release.
+pub(super) fn prepare_instrument_save_target(
+    session: &InstrumentEditSession,
+) -> Result<InstrumentSaveTarget, String> {
+    let path = session.save_target().to_path_buf();
+    let user_root = sequencer::app_paths::app_paths().user_instruments_dir();
+    let in_place = InstrumentSaveTarget {
+        source_path: path.clone(),
+        release: session.working_release.filter(|release| *release > 0),
+        pinned_name: None,
+    };
+    if !path.starts_with(&user_root) {
+        return Ok(InstrumentSaveTarget { release: None, ..in_place });
+    }
+    // Editing a retired release (a track still pinned to it): never write the
+    // frozen folder; build on it as the lineage's next release instead.
+    if let Some(top) = frozen_release_lineage_top(&session.name) {
+        let cut = sequencer::lisp_host::cut_user_release(&top, None)?;
+        return Ok(InstrumentSaveTarget {
+            source_path: cut.source_path,
+            release: Some(cut.release),
+            pinned_name: Some(cut.id),
+        });
+    }
+    if session.working_release.is_some() && !session.project_saved_since_release {
+        return Ok(in_place);
+    }
+    let cut = sequencer::lisp_host::cut_user_release(&path, None)?;
+    Ok(InstrumentSaveTarget {
+        source_path: cut.source_path,
+        release: Some(cut.release),
+        pinned_name: Some(cut.id),
+    })
+}
+
+/// The lineage's current-release `dsp.lisp` when `name` is a retired
+/// (frozen) release of a user instrument; `None` otherwise.
+fn frozen_release_lineage_top(name: &str) -> Option<PathBuf> {
+    let release = editor_release_struct(name)?;
+    if release.tier != sequencer::app_paths::ContentTier::User || release.release == release.current {
+        return None;
+    }
+    let current = sequencer::lisp_host::instrument_release(&format!(
+        "user:{}@{}",
+        release.lineage, release.current
+    ))
+    .ok()
+    .flatten()?;
+    Some(current.folder.join("dsp.lisp"))
+}
+
+/// Point every track playing `engine_id` at `pinned` (a release a Save just
+/// cut): the engine's name is what a project save writes and what Edit
+/// reopens, so the open project follows the instrument being built.
+fn bind_engine_to_release(
+    app: &mut app::App,
+    track_names: &mut Vec<String>,
+    engine_id: usize,
+    old_name: &str,
+    pinned: &str,
+) {
+    app.rename_instrument_engine(engine_id, pinned);
+    for track in 0..app.tracks.len() {
+        if app.graph.track_engine_ids.get(track).copied().flatten() != Some(engine_id) {
+            continue;
+        }
+        if app.tracks[track] == old_name {
+            app.tracks[track] = pinned.to_string();
+        }
+    }
+    *track_names = app.tracks.clone();
+    crate::param_words::set_track_word_names(track_names);
+    sync_sidebar_browser(app, app.ui.cursor_track);
+}
+
+/// The release of instrument `name` the toolbar shows; 0 when unversioned. A
+/// bare user id names the folder's current files, so its release is the
+/// lineage's `current`.
+pub(super) fn editor_release_of(name: &str) -> u32 {
+    editor_release_struct(name).map_or(0, |release| release.release)
 }
 
 /// The bubble conversation carried on an `agentic-submit` payload: a flat list
@@ -3118,4 +3785,137 @@ fn agentic_bubble_history(payload: &Value) -> Vec<(String, String)> {
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod toolbar_save_tests {
+    use super::*;
+
+    fn existing(path: &Path) -> InstrumentEditSession {
+        InstrumentEditSession::begin_edit_existing(
+            "probe/".to_string(),
+            path.to_path_buf(),
+            "*probe*".to_string(),
+            0,
+            0,
+            "(out 0 1)".to_string(),
+            CustomInstrumentRunMode::Instrument,
+            EditorSurface::Patch,
+        )
+    }
+
+    #[test]
+    fn an_existing_session_is_dirty_only_while_its_patch_or_run_mode_differs() {
+        let mut session = existing(Path::new("/tmp/eseq-toolbar-probe/dsp.lisp"));
+        assert!(!session.is_dirty(), "an instrument opens clean");
+        session.last_valid_source = "(out 1 1)".to_string();
+        assert!(session.is_dirty(), "an evaluated edit is unsaved");
+        session.last_valid_source = "(out 0 1)".to_string();
+        session.run_mode = CustomInstrumentRunMode::FreePatch;
+        assert!(session.is_dirty(), "a run mode switch is unsaved until Save writes it");
+        session.persisted_run_mode = CustomInstrumentRunMode::FreePatch;
+        assert!(!session.is_dirty());
+    }
+
+    #[test]
+    fn the_save_toast_says_what_the_save_did() {
+        assert_eq!(
+            save_toast_message("pad", Some(4), true, false),
+            "Saved pad v4 · projects using v3 keep it"
+        );
+        assert_eq!(save_toast_message("pad", Some(4), false, false), "Updated pad v4");
+        assert_eq!(save_toast_message("pad", None, false, false), "Saved pad");
+        assert_eq!(
+            save_toast_message("pad", None, false, true),
+            "Saved pad (code not evaluated yet)"
+        );
+    }
+
+    #[test]
+    fn a_pinned_id_displays_as_its_name() {
+        assert_eq!(display_instrument_name("user:testsr1@2"), "testsr1");
+        assert_eq!(display_instrument_name("factory:Synths/Digi Syn@2"), "Digi Syn");
+        assert_eq!(display_instrument_name("pads/glass/"), "glass");
+    }
+
+    #[test]
+    fn a_draft_is_always_dirty() {
+        let session = InstrumentEditSession::begin_create_draft(
+            "draft".to_string(),
+            PathBuf::from("/tmp/eseq-toolbar-draft/dsp.lisp"),
+            "*draft*".to_string(),
+            0,
+            "(out 0 1)".to_string(),
+            PathBuf::from("/tmp/eseq-toolbar-draft"),
+            0,
+            0,
+            EditorSurface::Patch,
+        );
+        assert!(session.is_dirty(), "nothing of a draft is saved yet");
+    }
+
+    /// A track still pinned to a retired release (or a bare id, which keeps
+    /// resolving to release 1) opens a frozen folder. Save must build on it
+    /// as the lineage's next release, never fail with "frozen".
+    #[test]
+    fn saving_a_frozen_release_cuts_the_next_release_from_the_lineage_top() {
+        let root = sequencer::app_paths::app_paths().user_instruments_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let dir = tempfile::Builder::new().prefix("eseq-frozen-save-").tempdir_in(&root).unwrap();
+        let lineage = dir.path().file_name().unwrap().to_str().unwrap().to_string();
+        std::fs::write(dir.path().join("dsp.lisp"), "(out 0 1)").unwrap();
+        let first = sequencer::lisp_host::cut_user_release(&dir.path().join("dsp.lisp"), None)
+            .expect("first cut");
+        assert_eq!((first.frozen, first.release), (1, 2));
+
+        for name in [format!("user:{lineage}@1"), format!("user:{lineage}")] {
+            let frozen = sequencer::lisp_host::instrument_source_path(&name).unwrap();
+            assert!(frozen.starts_with(dir.path().join("versions")), "{name} opens the frozen folder");
+            let mut session = existing(&frozen);
+            session.name = name.clone();
+            session.working_release = Some(1);
+            let target = prepare_instrument_save_target(&session).expect("save must not fail");
+            assert_eq!(target.source_path, dir.path().join("dsp.lisp"), "{name}");
+            let release = target.release.expect("a release was cut");
+            assert_eq!(target.pinned_name, Some(format!("user:{lineage}@{release}")));
+            assert!(frozen_release_lineage_top(target.pinned_name.as_deref().unwrap()).is_none());
+        }
+    }
+
+    #[test]
+    fn a_non_user_instrument_saves_in_place_without_a_release() {
+        let path = Path::new("/tmp/eseq-toolbar-factory/Synths/Probe/dsp.lisp");
+        let mut session = existing(path);
+        session.working_release = Some(4);
+        let target = prepare_instrument_save_target(&session).expect("save target");
+        assert_eq!(target.source_path, path);
+        assert_eq!(target.release, None, "factory edits are developer edits, unversioned");
+        assert_eq!(target.pinned_name, None);
+    }
+
+    #[test]
+    fn an_effect_session_tracks_dirty_and_writes_to_its_saved_home() {
+        let mut session = EffectEditSession::begin_edit_existing(
+            "fx/".to_string(),
+            PathBuf::from("/tmp/eseq-toolbar-fx-draft/dsp.lisp"),
+            "*fx-probe*".to_string(),
+            EffectEditTarget::Track { track: 0, slot: 0 },
+            "(out (in 1) 1)".to_string(),
+            EditorSurface::Patch,
+        );
+        assert!(!session.is_dirty());
+        session.last_valid_source = "(out (* 0.5 (in 1)) 1)".to_string();
+        assert!(session.is_dirty());
+        assert_eq!(session.save_target(), Path::new("/tmp/eseq-toolbar-fx-draft/dsp.lisp"));
+        session.save_path = Some(PathBuf::from("/tmp/eseq-toolbar-fx-home/dsp.lisp"));
+        assert_eq!(session.save_target(), Path::new("/tmp/eseq-toolbar-fx-home/dsp.lisp"));
+    }
+
+    #[test]
+    fn a_saved_draft_writes_to_its_new_home_not_the_draft_dir() {
+        let mut session = existing(Path::new("/tmp/eseq-toolbar-draft/dsp.lisp"));
+        session.save_path = Some(PathBuf::from("/tmp/eseq-toolbar-home/dsp.lisp"));
+        let target = prepare_instrument_save_target(&session).expect("save target");
+        assert_eq!(target.source_path, Path::new("/tmp/eseq-toolbar-home/dsp.lisp"));
+    }
 }

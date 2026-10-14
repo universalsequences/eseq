@@ -361,6 +361,9 @@ pub fn patch_cable_instances() -> Vec<PatchCableInstance> {
         style,
         plug_radius_px,
         plug_levels,
+        end_plug_color: [0.0; 4],
+        dash_px: [0.0; 4],
+        alt_color: [0.0; 4],
     };
     vec![
         // Patcher bezier: a long horizontal S-curve.
@@ -672,5 +675,123 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+/// Two-colour (multichannel) patch-cable checks shared by the MSL and WGSL capture tests: each
+/// backend passes its own "render these instances" function, so both shader
+/// ports are held to the same pixels.
+#[cfg(test)]
+pub(crate) mod two_colour_cable_tests {
+    pub(crate) use crate::ui::gpu_geometry::PatchCableInstance;
+    use super::{HEIGHT, PATCH_CABLE_STYLE_PATCHER, WIDTH, ndc};
+
+    fn cable(
+        start: [f32; 2],
+        control1: [f32; 2],
+        control2: [f32; 2],
+        end: [f32; 2],
+        radius_px: f32,
+        segment_y_px: Option<f32>,
+        dash_px: [f32; 2],
+    ) -> PatchCableInstance {
+        let bounds = [2.0, 2.0, WIDTH as f32 - 2.0, HEIGHT as f32 - 2.0];
+        PatchCableInstance {
+            ndc_min: ndc(bounds[0], bounds[1]),
+            ndc_max: ndc(bounds[2], bounds[3]),
+            bounds_min: [bounds[0], bounds[1]],
+            bounds_max: [bounds[2], bounds[3]],
+            start,
+            control1,
+            control2,
+            end,
+            color: [0.29, 0.64, 1.0, 1.0],
+            radius_px,
+            is_segmented: if segment_y_px.is_some() { 1.0 } else { 0.0 },
+            segment_y_px: segment_y_px.unwrap_or(0.0),
+            corner_radius_px: 12.0,
+            style: PATCH_CABLE_STYLE_PATCHER,
+            plug_radius_px: 0.0,
+            plug_levels: [0.0, 0.0],
+            end_plug_color: [0.0; 4],
+            dash_px: [dash_px[0], dash_px[1], 0.0, 0.0],
+            alt_color: [1.0, 0.8, 0.28, 1.0],
+        }
+    }
+
+    fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * WIDTH + x) * 4) as usize;
+        [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+    }
+
+    fn painted(pixels: &[u8], x: u32, y: u32) -> bool {
+        let [r, g, b, _] = pixel(pixels, x, y);
+        // The clear is (10, 13, 18); any cable fragment lifts it well past.
+        r.max(g).max(b) > 60
+    }
+
+    /// Along a scan line: (gaps, runs of the primary blue, runs of the
+    /// amber alternate). Blue has b > r, amber has r > b.
+    fn colour_runs(pixels: &[u8], points: impl Iterator<Item = (u32, u32)>) -> (usize, usize, usize) {
+        let (mut gaps, mut blue, mut amber, mut last) = (0, 0, 0, None);
+        for (x, y) in points {
+            let [r, _, b, _] = pixel(pixels, x, y);
+            let class = if !painted(pixels, x, y) {
+                0
+            } else if b > r {
+                1
+            } else {
+                2
+            };
+            if last != Some(class) {
+                match class {
+                    0 => gaps += 1,
+                    1 => blue += 1,
+                    _ => amber += 1,
+                }
+            }
+            last = Some(class);
+        }
+        (gaps, blue, amber)
+    }
+
+    /// A two-colour (multichannel) cable alternates blue and amber runs
+    /// along a bezier without ever breaking, while a single-colour cable in
+    /// the same instanced call stays one blue run — two instances in one
+    /// buffer also pin the Rust/shader instance stride. `render` answers
+    /// `None` when the machine has no GPU (skip).
+    pub(crate) fn bezier_two_colour(render: impl Fn(&[PatchCableInstance]) -> Option<Vec<u8>>) {
+        let line = |y, dash| cable([40.0, y], [200.0, y], [320.0, y], [470.0, y], 5.0, None, dash);
+        let Some(pixels) = render(&[line(60.0, [0.0, 0.0]), line(140.0, [15.0, 15.0])]) else {
+            return;
+        };
+        let scan = |y| (60..440).map(move |x| (x, y));
+        let (gaps, blue, amber) = colour_runs(&pixels, scan(140));
+        assert_eq!(gaps, 0, "a two-colour cable never breaks");
+        // 380 px at a 30 px period.
+        assert!((11..=14).contains(&blue) && (11..=14).contains(&amber), "blue {blue}, amber {amber}");
+        assert_eq!(colour_runs(&pixels, scan(60)), (0, 1, 0), "a single-colour cable stays blue");
+    }
+
+    /// The segmented router alternates colours along its whole path — both
+    /// legs and the horizontal run — and still never paints the area its
+    /// bend encloses.
+    pub(crate) fn segmented_two_colour(render: impl Fn(&[PatchCableInstance]) -> Option<Vec<u8>>) {
+        let routed =
+            |dash| cable([60.0, 40.0], [0.0; 2], [0.0; 2], [440.0, 230.0], 4.0, Some(150.0), dash);
+        let Some(dashed) = render(&[routed([8.0, 16.0])]) else { return };
+        let solid = render(&[routed([0.0, 0.0])]).unwrap();
+        let scans: [(&str, Vec<(u32, u32)>); 3] = [
+            ("first leg", (44..130).map(|y| (60, y)).collect()),
+            ("horizontal run", (90..410).map(|x| (x, 150)).collect()),
+            ("last leg", (165..226).map(|y| (440, y)).collect()),
+        ];
+        for (name, scan) in scans {
+            let (gaps, blue, amber) = colour_runs(&dashed, scan.iter().copied());
+            assert_eq!(gaps, 0, "{name}: the stroke never breaks");
+            assert!(blue >= 2 && amber >= 1, "{name}: blue {blue}, amber {amber}");
+            assert_eq!(colour_runs(&solid, scan.iter().copied()), (0, 1, 0), "{name} solid");
+        }
+        assert!(!painted(&dashed, 250, 100), "the bend's interior stays empty");
     }
 }

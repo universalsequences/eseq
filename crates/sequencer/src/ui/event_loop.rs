@@ -384,6 +384,8 @@ pub(crate) fn run_event_loop(
         prev_editor_macro_sidebar_fingerprint: u64::MAX,
         prev_editor_open_macro: String::new(),
         prev_editor_selected_asset: None,
+        prev_editor_selected_nodes: Vec::new(),
+        prev_editor_selected_shapes: (Vec::new(), Vec::new()),
         prev_playing: false,
         prev_bpm: 0,
         prev_playhead: u32::MAX,
@@ -1927,10 +1929,15 @@ pub(crate) fn run_event_loop(
             let _ = sessions.pending_instrument_preview.take();
             let mut replan_after_preview = false;
             match completed_preview {
-                Ok((generation, layout_override, compile_result)) => {
+                Ok((generation, layout_override, outcome)) => {
                     if let Some(session) = sessions.instrument_edit_session.as_mut() {
                         if session.preview_generation == generation {
-                            match compile_result {
+                            publish_preview_shapes(outcome.shapes, &session.path);
+                            // Cable shapes and the failed-node border are
+                            // derived paint state: repaint even when no
+                            // presented value changes (a repeat failure).
+                            editor.mark_needs_redraw();
+                            match outcome.result {
                                 Ok(CompiledPreview { source, layout, result }) => match app.apply_compiled_instrument_engine(
                                     session.engine_id,
                                     &session.name,
@@ -1942,8 +1949,12 @@ pub(crate) fn run_event_loop(
                                         session.last_valid_layout = layout_override.or(layout);
                                         session.visible_revision_valid = true;
                                         replan_after_preview = session.learn_target_path.is_some();
+                                        let dirty = session.is_dirty();
                                         let rt = editor.runtime_mut();
-                                        present_editor(rt, |e| e.error.clear());
+                                        present_editor(rt, |e| {
+                                            e.error.clear();
+                                            e.dirty = dirty;
+                                        });
                                         rt.run_reactive_cycle();
                                         editor.refresh_runtime_side_effects();
                                         shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2017,10 +2028,15 @@ pub(crate) fn run_event_loop(
         {
             let _ = sessions.pending_effect_preview.take();
             match completed_preview {
-                Ok((generation, layout_override, compile_result)) => {
+                Ok((generation, layout_override, outcome)) => {
                     if let Some(session) = sessions.effect_edit_session.as_mut() {
                         if session.preview_generation == generation {
-                            match compile_result {
+                            publish_preview_shapes(outcome.shapes, &session.path);
+                            // Cable shapes and the failed-node border are
+                            // derived paint state: repaint even when no
+                            // presented value changes (a repeat failure).
+                            editor.mark_needs_redraw();
+                            match outcome.result {
                                 Ok(CompiledPreview { source, layout, result }) => {
                                     let name = session.name.clone();
                                     match apply_compiled_effect_edit_session(
@@ -2036,8 +2052,12 @@ pub(crate) fn run_event_loop(
                                             session.last_valid_source = source;
                                             session.last_valid_layout = layout_override.or(layout);
                                             session.visible_revision_valid = true;
+                                            let dirty = session.is_dirty();
                                             let rt = editor.runtime_mut();
-                                            present_editor(rt, |e| e.error.clear());
+                                            present_editor(rt, |e| {
+                                                e.error.clear();
+                                                e.dirty = dirty;
+                                            });
                                             if let EffectEditTarget::Bus { .. } = session.target {
                                                 *shared.bus_state.lock().unwrap() =
                                                     app.buses.clone();

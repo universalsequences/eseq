@@ -37,6 +37,9 @@ pub(super) struct GeneratedPatchSource {
     /// canonical emitted identity differs from the model id. Shape matches the
     /// map consumed by `sidecar::emitted_layout_json_with_node_map`.
     pub(super) renamed_node_ids: HashMap<(String, String), String>,
+    /// Root-view multi-output node id -> its destructured output bindings, by
+    /// outlet (`(def (re im) (fft …))` -> `["re", "im"]`).
+    pub(super) root_output_names: HashMap<String, Vec<String>>,
 }
 
 pub(super) fn generate_patch_source(
@@ -121,6 +124,7 @@ pub(super) fn generate_patch_source(
     }
 
     let scope = ScopeEmitter::new(patch, &patch.macros, "root".to_string(), intent, false)?;
+    let root_output_names = scope.output_names.clone();
     let emitted = scope.emit(&mut renames)?;
     for group in emitted.root_groups {
         if !group.is_empty() {
@@ -131,6 +135,7 @@ pub(super) fn generate_patch_source(
     Ok(GeneratedPatchSource {
         source: format!("{}\n", sections.join("\n\n")),
         renamed_node_ids: renames,
+        root_output_names,
     })
 }
 

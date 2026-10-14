@@ -25,6 +25,8 @@
 (import eseq.browser)
 (import eseq.mixer)
 (import eseq.patch-macros)
+(import eseq.patch-toolbar)
+(import eseq.patch-inspector)
 (load "@/ui/effects.lisp")
 (import eseq.macros)
 (import eseq.piano-roll)

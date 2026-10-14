@@ -1685,7 +1685,11 @@ pub(super) fn dgenlisp_operator_port_shapes() -> &'static HashMap<String, Operat
                 continue;
             };
             let shape = OperatorPortShape {
-                input_count: documented_port_count(operator, "inputs", "input_count"),
+                input_count: if shape_literal_only(operator) {
+                    0
+                } else {
+                    documented_port_count(operator, "inputs", "input_count")
+                },
                 output_count: documented_port_count(operator, "outputs", "output_count"),
             };
             shapes.insert(name.to_string(), shape);
@@ -1844,6 +1848,21 @@ fn documented_required_input_count(operator: &serde_json::Value) -> usize {
         .and_then(|count| count.get("minimum").or_else(|| count.get("maximum")))
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0) as usize
+}
+
+/// A tensor constructor whose only input is its shape (`ones`, `zeros`,
+/// `randn`): the shape is a compile-time literal typed in the box, so it has
+/// no inlet to cable.
+fn shape_literal_only(operator: &serde_json::Value) -> bool {
+    operator
+        .get("inputs")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|inputs| {
+            !inputs.is_empty()
+                && inputs
+                    .iter()
+                    .all(|input| input.get("kind").and_then(serde_json::Value::as_str) == Some("int[]"))
+        })
 }
 
 fn documented_port_count(operator: &serde_json::Value, array_key: &str, count_key: &str) -> usize {
