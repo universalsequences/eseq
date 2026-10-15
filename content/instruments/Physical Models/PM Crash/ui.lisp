@@ -8,17 +8,13 @@
     (list
       (dict :title "Metal"
         :view (lambda () (eseq.effects.physical-model-surface/cymbal-body-view))
-        :controls (lambda () '(("tuning.tracking" "Key tracking" 2)))
-        :hint "Voicing follows the reference collection; Size changes the body.")
+        :controls (lambda () '(("tuning.tracking" "Key tracking" 2))))
       (dict :title "Ring"
         :view (lambda () (eseq.effects.physical-model-surface/cymbal-loss-view))
-        :controls (lambda () '(("contact.touch" "Choke" 2)))
-        :hint "Choke dissipates the ringing state; key-up leaves it ringing.")
+        :controls (lambda () '(("contact.touch" "Choke" 2))))
       (dict :title "Contact"
         :view (lambda () (eseq.effects.physical-model-surface/cymbal-contact-view false))
-        :controls (lambda () '( ("output.color" "Spectral color" 2)))
-        :hint "Finite stick contact excites a freely ringing metal body.")
+        :controls (lambda () '( ("output.color" "Spectral color" 2))))
       (dict :title "Output"
         :view (lambda () (eseq.effects.physical-model-surface/cymbal-output-view))
-        :controls (lambda () '(("output.width" "Stereo spread" 2)))
-        :hint "Bell and Wash balance resolved and dense body resonances."))))
+        :controls (lambda () '(("output.width" "Stereo spread" 2)))))))

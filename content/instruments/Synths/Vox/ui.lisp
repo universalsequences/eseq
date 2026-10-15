@@ -2,8 +2,7 @@
 (def vox-source ()
   (v-stack :gap 0.3
     (eseq.effects.mnm-surface/mnm-source-preview 2 "glottis")
-    (eseq.effects.mnm-surface/mnm-caption "Glottal pulse before breath mixing and formant filtering.")
-    (h-stack :gap 0.3 (eseq.effects.mnm-surface/mnm-num "growl_hz" "Growl Hz" 1))))
+    (h-stack :gap 0.3 (eseq.effects.mnm-surface/mnm-num "growl_hz" "Growl rate" 1))))
 (def vox-frequency (values)
   (let ((v (floor (eseq.effects.mnm-surface/mnm-value "vowel"))) (m (eseq.effects.mnm-surface/mnm-value "vowel_morph")))
     (* (+ (* (nth values v) (- 1 m)) (* (nth values (if (>= v 9) 0 (+ v 1))) m))
@@ -41,7 +40,6 @@
             (do (eseq.effects.mnm-surface/mnm-write scope "formant_shift" (* (nth gesture.start 2) (exp (- x (nth gesture.start 0)))))
                 (eseq.effects.mnm-surface/mnm-write scope "formant_q" (+ (nth gesture.start 3) (* 8 (- (nth gesture.start 1) y)))))
             false)))
-      (eseq.effects.mnm-surface/mnm-caption "Nominal formant bank / 0–9 kHz, square-root axis.")
       (eseq.effects.mnm-surface/mnm-option "vowel" '("A" "AE" "E" "I" "EE" "UH" "ER" "O" "AW" "OO"))
       (h-stack :gap 0.3 (eseq.effects.mnm-surface/mnm-num "formant_q" "Focus Q" 1)))))
 (def vox-consonant ()
@@ -54,8 +52,7 @@
         :curve-color :black :point-color :black :grid-color :black :background-color (eseq.effects.mnm-surface/mnm-accent)
         :on-change (lambda (env) (eseq.effects.mnm-surface/mnm-write scope "cons_len_ms" (/ (get env :time) scale))))
       (eseq.effects.mnm-surface/mnm-option "cons_type" '("None" "S" "SH" "F" "T" "K" "P" "H"))
-      (h-stack :gap 0.3 (eseq.effects.mnm-surface/mnm-num "sibilance" "Sibilance" 2) (eseq.effects.mnm-surface/mnm-num "cons_duck" "Vowel Duck" 2))
-      (eseq.effects.mnm-surface/mnm-caption "Consonant decay includes the selected articulation's length scale."))))
+      (h-stack :gap 0.3 (eseq.effects.mnm-surface/mnm-num "sibilance" "Sibilance" 2) (eseq.effects.mnm-surface/mnm-num "cons_duck" "Vowel Duck" 2)))))
 (defsynth-ui
   (h-stack :height 9.8 :gap 0.3 :align :start
     (v-stack :gap 0.2
@@ -70,11 +67,11 @@
       (list vox-source vox-vowel eseq.effects.mnm-surface/mnm-filter-page eseq.effects.mnm-surface/mnm-amp-page vox-consonant eseq.effects.mnm-surface/mnm-color-page))
     (v-stack :gap 0.2
       (eseq.effects.mnm-surface/mnm-panel 2 "FILTER" 14.6
-        (h-stack :gap 0.2 (eseq.effects.mnm-surface/mnm-knob 2 "flt_base" "Base Hz" 7 0 :log) (eseq.effects.mnm-surface/mnm-knob 2 "flt_width" "Width oct" 7 2 :linear)))
+        (h-stack :gap 0.2 (eseq.effects.mnm-surface/mnm-knob 2 "flt_base" "Base" 7 0 :log) (eseq.effects.mnm-surface/mnm-knob 2 "flt_width" "Width" 7 2 :linear)))
       (eseq.effects.mnm-surface/mnm-panel 3 "AMP" 14.6
         (h-stack :gap 0.2 (eseq.effects.mnm-surface/mnm-knob 3 "gain" "Level" 7 2 :linear) (eseq.effects.mnm-surface/mnm-knob 3 "pan_width" "Spread" 7 2 :linear))))
     (v-stack :gap 0.2
       (eseq.effects.mnm-surface/mnm-panel 4 "CONSONANT" 14.6
-        (h-stack :gap 0.2 (eseq.effects.mnm-surface/mnm-knob 4 "cons_level" "Level" 7 2 :linear) (eseq.effects.mnm-surface/mnm-knob 4 "cons_len_ms" "Length ms" 7 1 :log)))
+        (h-stack :gap 0.2 (eseq.effects.mnm-surface/mnm-knob 4 "cons_level" "Level" 7 2 :linear) (eseq.effects.mnm-surface/mnm-knob 4 "cons_len_ms" "Length" 7 1 :log)))
       (eseq.effects.mnm-surface/mnm-panel 5 "COLOR" 14.6
         (h-stack :gap 0.2 (eseq.effects.mnm-surface/mnm-knob 5 "drive" "Drive" 7 2 :linear) (eseq.effects.mnm-surface/mnm-knob 5 "srr" "Reduction" 7 2 :linear))))))

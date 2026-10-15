@@ -140,7 +140,7 @@
 ;; test_freeze is a research switch (frozen noise), deliberately not on the panel.
 (def vh-pages ()
   (list
-    (list "metal" 2 '(("tune" "tune" 2) ("metal" "metal dB" 1) ("ring" "ring" 2) ("motion" "motion" 2) ("tick" "tick" 2) ("sizzle" "sizzle" 2)))
+    (list "metal" 2 '(("tune" "tune" 2) ("metal" "metal" 1) ("ring" "ring" 2) ("motion" "motion" 2) ("tick" "tick" 2) ("sizzle" "sizzle" 2)))
     (list "record" 3 '(("tone" "tone" 2) ("grit" "grit" 2) ("codec" "codec" 2) ("record" "record" 2)))
     (list "out" 4 '(("drive" "drive" 2) ("length" "length" 2) ("level" "level" 2)))))
 

@@ -62,6 +62,7 @@
         (v-stack :width width :height height :gap 0.06
           (label title :v-align :center :height label-height :font-size 8.6 :color ink :bg :transparent)
           (number-picker :width width :height 0.50 :noui true :decimals decimals :step step :font-size 8.0 :value-labels labels
+            :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
@@ -204,16 +205,16 @@
       (h-stack :gap 0.8
         (tri-knob (str prefix "_wave") "Wave" 7.6 2.2 3.0 0 "linear")
         (if (= section 0)
-          (tri-knob "osc1_tune" "Tune ct" 7.6 2.2 3.0 0 "linear")
-          (tri-knob "osc2_detune" "Detune st" 7.6 2.2 3.0 1 "linear"))
-        (tri-knob (str prefix "_gain_db") "Gain dB" 7.6 2.2 3.0 1 "linear")))))
+          (tri-knob "osc1_tune" "Tune" 7.6 2.2 3.0 0 "linear")
+          (tri-knob "osc2_detune" "Detune" 7.6 2.2 3.0 1 "linear"))
+        (tri-knob (str prefix "_gain_db") "Gain" 7.6 2.2 3.0 1 "linear")))))
 (def tri-voice-block ()
   (tri-panel 6 25.5 2.3
     (v-stack :gap 0.1
       (tri-select-label 6 "VOICE" 5.8)
       (h-stack :gap 0.6
         (eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s 6 7.7 :fg)
-        (tri-num "glide_ms" "Glide ms" 7.7 0 :dim)
+        (tri-num "glide_ms" "Glide" 7.7 0 :dim)
         (tri-num "spread" "Spread" 7.7 2 :dim)))))
 (def tri-env-plot (section prefix height)
   (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
@@ -232,14 +233,14 @@
 
 (def tri-env-controls (prefix)
   (h-stack :gap 0.6
-    (tri-num (str prefix "_attack_ms") "Attack ms" 8.3 0 (tri-ink))
-    (tri-num (str prefix "_decay_ms") "Decay ms" 8.3 0 (tri-ink))
+    (tri-num (str prefix "_attack_ms") "Attack" 8.3 0 (tri-ink))
+    (tri-num (str prefix "_decay_ms") "Decay" 8.3 0 (tri-ink))
     (tri-num (str prefix "_sustain") "Sustain" 8.3 2 (tri-ink))
-    (tri-num (str prefix "_release_ms") "Release ms" 8.3 0 (tri-ink))))
+    (tri-num (str prefix "_release_ms") "Release" 8.3 0 (tri-ink))))
 (def tri-stage-controls (prefix)
   (h-stack :gap 0.6
     (tri-num (str prefix "_break") "Break Level" 8.3 2 (tri-ink))
-    (tri-num (str prefix "_slope_ms") "Slope ms" 8.3 0 (tri-ink))))
+    (tri-num (str prefix "_slope_ms") "Slope" 8.3 0 (tri-ink))))
 (def tri-osc-detail (prefix)
   (v-stack :gap 0.3
     (tri-viewer (str prefix "_set") (str prefix "_wave") (str prefix "_warp") (str prefix "_fold"))
@@ -256,13 +257,13 @@
     (h-stack :gap 0.5
       (tri-num "feg_atk_lvl" "Attack Level" 8.3 2 (tri-ink))
       (tri-num "feg_rel_lvl" "Release Level" 8.3 2 (tri-ink))
-      (tri-num "feg_int_oct" "Intensity oct" 8.3 1 (tri-ink))
-      (tri-num "feg_vel_oct" "Vel→Int oct" 8.3 1 (tri-ink)))
+      (tri-num "feg_int_oct" "Intensity" 8.3 1 (tri-ink))
+      (tri-num "feg_vel_oct" "Vel→Int" 8.3 1 (tri-ink)))
     (h-stack :gap 0.5
       (tri-num "feg_break" "Break Level" 8.3 2 (tri-ink))
-      (tri-num "feg_slope_ms" "Slope ms" 8.3 0 (tri-ink))
+      (tri-num "feg_slope_ms" "Slope" 8.3 0 (tri-ink))
       (tri-num "keytrack" "Keytrack" 8.3 2 (tri-ink))
-      (if (tri-hp-enabled?) (tri-num "hp_freq" "HP Hz" 8.3 0 (tri-ink))
+      (if (tri-hp-enabled?) (tri-num "hp_freq" "HP" 8.3 0 (tri-ink))
         (label "HP Off" :height 1.1 :width 8.3 :font-size 8 :color (tri-ink) :bg :transparent :v-align :center)))))
 (def tri-amp-page ()
   (v-stack :gap 0.3
@@ -273,9 +274,9 @@
   (v-stack :gap 0.4
     (label "PITCH ENVELOPE" :height 0.75 :v-align :center :font-size 8 :color (tri-ink) :bg :transparent)
     (h-stack :gap 0.8
-      (tri-num "peg_amt_st" "Amount st" 10.8 1 (tri-ink))
-      (tri-num "peg_attack_ms" "Attack ms" 10.8 0 (tri-ink))
-      (tri-num "peg_decay_ms" "Decay ms" 10.8 0 (tri-ink)))))
+      (tri-num "peg_amt_st" "Amount" 10.8 1 (tri-ink))
+      (tri-num "peg_attack_ms" "Attack" 10.8 0 (tri-ink))
+      (tri-num "peg_decay_ms" "Decay" 10.8 0 (tri-ink)))))
 (def tri-lfo-preview (prefix)
   (let ((wave (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_wave") 0)))
     (subtree :key (str "tri-lfo-preview-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" prefix)
@@ -288,10 +289,10 @@
     (h-stack :gap 0.6 :align :center
       (tri-option (str prefix "_wave") (tri-lfo-wave-options) 8.3 :fg :instrument-control-bg)
       (tri-option (str prefix "_keysync") (tri-sync-options) 8.3 :fg :instrument-control-bg)
-      (tri-num (str prefix "_fade_ms") "Fade ms" 8.3 0 (tri-ink)))
+      (tri-num (str prefix "_fade_ms") "Fade" 8.3 0 (tri-ink)))
     (h-stack :gap 0.6
       (tri-num target target-title 11 2 (tri-ink))
-      (tri-num (str prefix "_to_cutoff") "Cutoff oct" 11 2 (tri-ink)))
+      (tri-num (str prefix "_to_cutoff") "Cutoff" 11 2 (tri-ink)))
     (h-stack :gap 0.6 :align :center
       (tri-option (str ams "_src") (tri-ams-src-options) 10.8 :fg :instrument-control-bg)
       (tri-option (str ams "_dest") (tri-ams-dest-options) 10.8 :fg :instrument-control-bg)
@@ -308,7 +309,7 @@
           (if (= section 1) (tri-osc-detail "osc2")
           (if (= section 2) (tri-filter-page)
           (if (= section 3) (tri-amp-page)
-          (if (= section 4) (tri-lfo-page "lfo1" "ams1" "lfo1_to_pitch" "Pitch ct")
+          (if (= section 4) (tri-lfo-page "lfo1" "ams1" "lfo1_to_pitch" "Pitch")
           (if (= section 5) (tri-lfo-page "lfo2" "ams2" "lfo2_to_amp" "Amp")
           (tri-voice-page)))))))))))
 (def tri-filter-block ()
@@ -318,7 +319,7 @@
         (tri-select-label 2 "FILTER" 6)
         (tri-option "filter_mode" (tri-fmode-options) 15 :fg :instrument-control-bg))
       (h-stack :gap 0.6
-        (tri-knob "cutoff" "Cutoff Hz" 7.3 3.0 3.8 0 "log")
+        (tri-knob "cutoff" "Cutoff" 7.3 3.0 3.8 0 "log")
         (tri-knob "resonance" "Resonance" 7.3 3.0 3.8 2 "linear")
         (tri-knob "drive" "Drive" 7.3 3.0 3.8 2 "linear")))))
 (def tri-amp-block ()
@@ -328,12 +329,12 @@
       (h-stack :gap 0.6
         (tri-knob "vel_to_amp" "Velocity" 7.3 3.0 3.8 2 "linear")
         (tri-knob "voice_pan" "Pan" 7.3 3.0 3.8 2 "linear")
-        (tri-knob "volume_db" "Vol dB" 7.3 3.0 3.8 1 "linear")))))
+        (tri-knob "volume_db" "Vol" 7.3 3.0 3.8 1 "linear")))))
 (def tri-lfo-strip (section prefix title)
   (tri-panel section 9.5 4.85
     (v-stack :gap 0.4 :align :center
       (tri-select-label section title 7.8)
-      (tri-knob (str prefix "_rate_hz") "Rate Hz" 8.5 3.0 3.8 2 "log"))))
+      (tri-knob (str prefix "_rate_hz") "Rate" 8.5 3.0 3.8 2 "log"))))
 (defsynth-ui
   (h-stack :gap 0.15 :align :start
     (v-stack :gap 0.1

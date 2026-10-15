@@ -35,6 +35,8 @@
         ui-lego-dense-h
         ui-lego-full-h
         ui-lego-col-w
+        ui-lego-wide-col-w
+        ui-lego-knob-sized-s
         ui-lego-strip-w
         ui-lego-text-row-3
         ui-lego-text-row-4

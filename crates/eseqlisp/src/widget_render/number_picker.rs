@@ -54,9 +54,19 @@ mod tests {
             ("value-labels".to_string(), labels),
             ("value-scale".to_string(), Value::Number(1000.0)),
         ]);
-        assert_eq!(formatted_model_value(&props, -1.0, 2), "infinite");
-        assert_eq!(formatted_model_value(&props, 0.5, 2), "500.00");
-        assert_eq!(formatted_model_value(&props, -0.999, 2), "-999.00");
+        assert_eq!(formatted_display_value(&props, -1.0, 2, ""), "infinite");
+        assert_eq!(formatted_display_value(&props, 0.5, 2, ""), "500.00");
+        assert_eq!(formatted_display_value(&props, -0.999, 2, ""), "-999.00");
+    }
+
+    #[test]
+    fn value_labels_carry_no_unit() {
+        let mut runtime = crate::Runtime::new();
+        let labels = runtime.eval_str("'((0 \"Off\"))").unwrap().unwrap();
+        let props = HashMap::from([("value-labels".to_string(), labels)]);
+        assert_eq!(formatted_display_value(&props, 0.0, 0, "ms"), "Off");
+        assert_eq!(formatted_display_value(&props, 12.0, 0, "ms"), "12 ms");
+        assert_eq!(formatted_display_value(&props, 12.0, 0, ""), "12");
     }
 
     fn color_value(r: f64, g: f64, b: f64, a: f64) -> Value {
@@ -551,18 +561,27 @@ fn format_value(value: f64, decimals: u32) -> String {
 // Optional display aliases for sentinel values, e.g. ((-1 "inf")). Values
 // remain numeric for dragging, automation and text editing. Match in the
 // model domain, before value-scale is applied.
-fn formatted_model_value(props: &HashMap<String, Value>, value: f32, decimals: u32) -> String {
-    if let Some(Value::List(labels)) = props.get("value-labels") {
-        for entry in labels {
-            let entry = entry.borrow();
-            let Value::List(pair) = &*entry else { continue };
-            if pair.len() != 2 { continue; }
-            if let (Value::Number(key), Value::String(label)) = (&*pair[0].borrow(), &*pair[1].borrow()) {
-                if *key as f32 == value { return label.clone(); }
-            }
+fn value_label(props: &HashMap<String, Value>, value: f32) -> Option<String> {
+    let Some(Value::List(labels)) = props.get("value-labels") else { return None };
+    for entry in labels {
+        let entry = entry.borrow();
+        let Value::List(pair) = &*entry else { continue };
+        if pair.len() != 2 { continue; }
+        if let (Value::Number(key), Value::String(label)) = (&*pair[0].borrow(), &*pair[1].borrow()) {
+            if *key as f32 == value { return Some(label.clone()); }
         }
     }
-    format_value(display_value(props, value) as f64, decimals)
+    None
+}
+
+/// The idle readout: the value plus its unit. A value label ("Off",
+/// "infinite") names the value outright, so it carries no unit.
+fn formatted_display_value(props: &HashMap<String, Value>, value: f32, decimals: u32, unit: &str) -> String {
+    if let Some(label) = value_label(props, value) {
+        return label;
+    }
+    let value_text = format_value(display_value(props, value) as f64, decimals);
+    if unit.is_empty() { value_text } else { format!("{value_text} {unit}") }
 }
 
 fn value_scale(props: &HashMap<String, Value>) -> f32 {
@@ -1166,12 +1185,7 @@ impl WidgetDefinition for NumberPickerWidget {
             Some(Value::String(unit)) => unit.as_str(),
             _ => "",
         };
-        let value_text = formatted_model_value(props, value, decimals);
-        let display_value = if unit.is_empty() {
-            value_text
-        } else {
-            format!("{value_text} {unit}")
-        };
+        let display_value = formatted_display_value(props, value, decimals, unit);
         let text = if number_picker_slider_mode(props) {
             display_value
         } else {
@@ -1527,12 +1541,7 @@ impl WidgetDefinition for NumberPickerWidget {
             a: 0.0,
         };
 
-        let value_text = formatted_model_value(&node.props, value, decimals);
-        let display_value = if unit.is_empty() {
-            value_text
-        } else {
-            format!("{value_text} {unit}")
-        };
+        let display_value = formatted_display_value(&node.props, value, decimals, unit);
         let (display_text, fg) = if state.editing {
             (state.edit_text.clone(), edit_color)
         } else if effective_focused {

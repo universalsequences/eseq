@@ -31,10 +31,11 @@
       (str "pm-detail-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
       (subtree :key (str "pm-detail-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
-        (v-stack :width 11.3 :height 1.15 :gap 0.05
-          (label (nth spec 1) :height 0.5 :v-align :center :font-size 9 :color text-ink :bg :transparent)
+        (v-stack :width 11.3 :height 1.4 :gap 0.05
+          (label (nth spec 1) :height 0.6 :v-align :center :font-size 11 :color text-ink :bg :transparent)
           (number-picker :debug-name (str "pm-value-" name)
-            :width 11.3 :height 0.6 :noui true :decimals (nth spec 2) :font-size 10 :text-align :left
+            :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
+            :width 11.3 :height 0.75 :noui true :decimals (nth spec 2) :font-size 12.5 :text-align :left
             :step (pow 10 (- 0 (nth spec 2)))
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
@@ -57,11 +58,9 @@
         (v-stack :gap 0.2
           (box :width 35.3 :height 0.7 :background-color (ink)
             (label (str title " / " (get page :title)) :width 35.3 :height 0.7
-              :h-align :center :v-align :center :font-size 9 :color (accent) :bg :transparent))
+              :h-align :center :v-align :center :font-size 10.5 :color (accent) :bg :transparent))
           (box :width 35.3 :height 3.7 ((get page :view)))
-          (box :width 35.3 :height 2.5 (details ((get page :controls)) active))
-          (label (get page :hint) :width 35.3 :height 0.65 :v-align :center
-            :font-size 8.3 :color (ink) :bg :transparent)
+          (box :width 35.3 :height 3.35 (details ((get page :controls)) active))
           (h-stack :gap 0.15 :height 0.75
             (each (range (len pages)) |i|
               (button (get (nth pages i) :title) :debug-name (str "pm-page-" i)
@@ -112,7 +111,7 @@
   (curved-reed-view slope closure direction 1))
 (def curved-reed-view (slope closure direction curvature)
   (v-stack :gap 0.15
-    (caption "Reed reflection / pressure difference -1 to +1")
+    (caption "Reed reflection")
     (pm-reed-response :debug-name "pm-reed" :slope slope :closure closure :direction direction :curvature curvature)))
 
 (defwidget pm-bore-loss
@@ -129,7 +128,7 @@
       (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink)))))
 (def bore-loss-view (cutoff loss)
   (v-stack :gap 0.15
-    (caption "Bore reflection / nominal magnitude / 40 Hz-16 kHz")
+    (caption "Bore reflection")
     (pm-bore-loss :debug-name "pm-bore-loss" :cutoff cutoff :loss loss)))
 
 (defwidget pm-air-column
@@ -161,7 +160,7 @@
       (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink)))))
 (def flutter-view ()
   (v-stack :gap 0.15
-    (caption "Breath multiplier / 0-2 seconds")
+    (caption "Breath")
     (pm-flutter-motion :debug-name "pm-flutter" :rate (bind "flutter.rate")
       :drift (bind "flutter.drift_hz") :depth (bind "flutter.depth") :floor (bind "flutter.floor"))))
 
@@ -177,7 +176,7 @@
       (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink)))))
 (def vibrato-view ()
   (v-stack :gap 0.15
-    (caption "Pitch vibrato / +/-100 cents / 0-2 seconds")
+    (caption "Vibrato")
     (pm-vibrato-motion :debug-name "pm-vibrato" :rate (bind "expression.vib_hz")
       :depth (bind "expression.vib_cent") :wait (bind "expression.vib_wait"))))
 
@@ -202,7 +201,7 @@
       (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink)))))
 (def body-view ()
   (v-stack :gap 0.15
-    (caption "Body band / nominal magnitude / 40 Hz-16 kHz")
+    (caption "Body band")
     (pm-body-response :debug-name "pm-body" :frequency (bind "color.body_hz")
       :q (bind "color.body_q") :amount (bind "color.body"))))
 
@@ -230,7 +229,7 @@
         (eseq.effects.physical-model-surface/screen-ink)))))
 (def partials-view ()
   (v-stack :gap 0.15
-    (caption "Body partials / center frequencies / 40 Hz-14 kHz")
+    (caption "Body partials")
     (pm-flute-body-partials :debug-name "pm-partials"
       :frequency (bind "freq") :stretch (bind "stretch") :brightness (bind "bright"))))
 
@@ -250,7 +249,7 @@
       (sdf/paint (- (abs (- x marker)) 0.009) (rgba 0.16 0.06 0.11 0.45)))))
 (def bow-view ()
   (v-stack :gap 0.15
-    (caption "Bow grip / relative velocity / marker = bow speed")
+    (caption "Bow grip")
     (pm-bow-friction :debug-name "pm-bow" :pressure (bind "bow.pressure")
       :curve (bind "bow.rosin") :speed (bind "bow.speed"))))
 
@@ -267,7 +266,7 @@
       (sdf/paint (- (abs (- y line)) 0.025) (eseq.effects.physical-model-surface/screen-ink)))))
 (def pluck-view ()
   (v-stack :gap 0.15
-    (caption "Pluck force pulse / 0-25 ms / shading = texture")
+    (caption "Pluck force")
     (pm-pluck-pulse :debug-name "pm-pluck" :duration (bind "pluck.width_ms")
       :amount (bind "pluck.strength") :texture (bind "pluck.texture"))))
 
@@ -299,7 +298,7 @@
       (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink)))))
 (def cello-body-view ()
   (v-stack :gap 0.15
-    (caption "Wood modes / nominal magnitude / 40 Hz-16 kHz")
+    (caption "Wood modes")
     (pm-cello-body :debug-name "pm-cello-body" :amount (bind "body.wood") :size (bind "body.size")
       :q (bind "body.resonance") :f1 (bind "body.low_hz") :g1 (bind "body.low")
       :f2 (bind "body.mid_hz") :g2 (bind "body.mid") :f3 (bind "body.high_hz") :g3 (bind "body.high")
@@ -316,7 +315,7 @@
         (- (abs y) (* 0.65 amount))) (rgba 0.16 0.06 0.11 0.6)))))
 (def section-view ()
   (v-stack :gap 0.15
-    (caption "Player tuning / center note +/-55 cents")
+    (caption "Player tuning")
     (pm-string-section :debug-name "pm-section-spread" :amount (bind "section.blend") :spread (bind "section.spread"))))
 
 (export piano-hammer-view piano-string-view piano-body-view piano-tuning-view piano-damper-view piano-motion-view piano-swell-view piano-output-view)
@@ -336,7 +335,7 @@
       (sdf/paint (max (- (abs (- x (* aspect (- (* position 2) 1)))) 0.014)
         (- (abs (+ y 0.89)) 0.08)) (eseq.effects.physical-model-surface/screen-ink)))))
 (def piano-hammer-view ()
-  (v-stack :gap 0.15 (caption "Felt force / C4, full velocity / 0-3 ms")
+  (v-stack :gap 0.15 (caption "Felt force")
     (pm-piano-hammer :debug-name "pm-piano-hammer" :hardness (bind "hammer.hardness")
       :contact (bind "hammer.contact") :position (bind "hammer.position"))))
 
@@ -356,7 +355,7 @@
       (sdf/paint (max (max (- (abs (- slot (+ 0.62 shift))) 0.06)
         (- (- 0.8 (* a aftersound 0.5)) y)) (- y 0.8)) (rgba 0.16 0.06 0.11 0.3)))))
 (def piano-string-view ()
-  (v-stack :gap 0.15 (caption "String modes / decay, damping, stiffness and aftersound")
+  (v-stack :gap 0.15 (caption "String modes")
     (pm-piano-strings :debug-name "pm-piano-strings" :decay (bind "string.decay")
       :damping (bind "string.damping") :stiffness (bind "string.stiffness") :aftersound (bind "string.aftersound"))))
 
@@ -375,7 +374,7 @@
       (sdf/paint (max (- y 0.8) (- curve y)) (rgba 0.16 0.06 0.11 0.12))
       (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink)))))
 (def piano-body-view ()
-  (v-stack :gap 0.15 (caption "Soundboard color / nominal resonances / 40 Hz-16 kHz")
+  (v-stack :gap 0.15 (caption "Soundboard")
     (pm-piano-body :debug-name "pm-piano-body" :size (bind "body.size") :amount (bind "body.resonance")
       :color (bind "body.color") :low (bind "body.low_hz") :high (bind "body.high_hz"))))
 
@@ -394,7 +393,7 @@
       (sdf/paint (max (- (abs (- y (+ 0.85 (* -0.14 stretch (/ x aspect))))) 0.012)
         (- (abs x) (* aspect 0.9))) (rgba 0.16 0.06 0.11 0.35)))))
 (def piano-tuning-view ()
-  (v-stack :gap 0.15 (caption "Unison / detuning, stereo spread and tuning stretch")
+  (v-stack :gap 0.15 (caption "Unison")
     (pm-piano-unison :debug-name "pm-piano-unison" :spread (bind "tuning.unison")
       :stereo (bind "tuning.width") :stretch (bind "tuning.stretch"))))
 
@@ -411,7 +410,7 @@
       (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink))
       (sdf/paint (- (abs (- y (- 0.8 (* 1.6 upper)))) 0.01) (rgba 0.16 0.06 0.11 0.25)))))
 (def piano-damper-view ()
-  (v-stack :gap 0.15 (caption "Key-up damping / pedal lift / first second after release")
+  (v-stack :gap 0.15 (caption "Key-up damping")
     (pm-piano-dampers :debug-name "pm-piano-dampers" :release (bind "damper.release_s")
       :pedal (bind "damper.pedal") :upper (bind "damper.upper_free"))))
 
@@ -427,7 +426,7 @@
       (sdf/paint (- (abs (- y center)) edge) (rgba 0.16 0.06 0.11 0.14))
       (sdf/paint (- (abs (- (abs (- y center)) edge)) 0.025) (eseq.effects.physical-model-surface/screen-ink)))))
 (def piano-motion-view ()
-  (v-stack :gap 0.15 (caption "Tremolo and pan / 0-2 seconds")
+  (v-stack :gap 0.15 (caption "Tremolo and pan")
     (pm-piano-motion :debug-name "pm-piano-motion" :depth (bind "motion.tremolo")
       :rate (bind "motion.tremolo_hz") :pan (bind "motion.pan") :panrate (bind "motion.pan_hz"))))
 
@@ -444,7 +443,7 @@
       (sdf/paint (min (- (abs y) 0.005) (- (abs x) 0.012)) (rgba 0.16 0.06 0.11 0.2))
       (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink)))))
 (def piano-output-view ()
-  (v-stack :gap 0.15 (caption "Output drive / transfer curve")
+  (v-stack :gap 0.15 (caption "Output drive")
     (pm-piano-output :debug-name "pm-piano-output" :drive (bind "output.drive") :gain (bind "output.gain"))))
 
 
@@ -469,7 +468,7 @@
       (sdf/paint (- (abs (- x crest)) 0.01) (rgba 0.16 0.06 0.11 0.3))
       (sdf/paint (- (abs (- y edge)) 0.025) (eseq.effects.physical-model-surface/screen-ink)))))
 (def piano-swell-view ()
-  (v-stack :gap 0.15 (caption "Reverse contour / rise to marker, then ringing tail")
+  (v-stack :gap 0.15 (caption "Reverse contour")
     (pm-piano-swell :debug-name "pm-piano-swell" :amount (bind "swell.amount")
       :duration (bind "swell.length_s") :curve (bind "swell.curve") :tail (bind "swell.tail"))))
 
@@ -489,7 +488,7 @@
       (sdf/paint (max (- (abs x) (* aspect (+ 0.03 (* spread 0.4))))
         (- (abs (+ y 0.85)) 0.08)) (eseq.effects.physical-model-surface/screen-ink)))))
 (def saron-mallet-view ()
-  (v-stack :gap 0.15 (caption "Mallet force / contact pulse and footprint / 0-1 ms")
+  (v-stack :gap 0.15 (caption "Mallet force")
     (pm-saron-mallet :debug-name "pm-saron-mallet" :hardness (bind "mallet.hardness")
       :contact (bind "mallet.contact") :spread (bind "mallet.spread"))))
 
@@ -508,7 +507,7 @@
       (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink))
       (sdf/paint (- (abs (- y upper)) 0.022) (rgba 0.16 0.06 0.11 0.45)))))
 (def saron-bar-view ()
-  (v-stack :gap 0.15 (caption "Bar 3 / fundamental bloom and upper-mode loss / 0-3 s")
+  (v-stack :gap 0.15 (caption "Bar resonance")
     (pm-saron-bar :debug-name "pm-saron-bar" :decay (bind "bar.decay")
       :bloom (bind "bar.bloom") :loss (bind "bar.loss"))))
 
@@ -527,7 +526,7 @@
       (sdf/paint (max (- (abs (- slot 0.5)) 0.2) (- (abs (- y edge)) 0.05))
         (eseq.effects.physical-model-surface/screen-ink)))))
 (def saron-tuning-view ()
-  (v-stack :gap 0.15 (caption "Seven bars / tuning offsets from equal temperament")
+  (v-stack :gap 0.15 (caption "Tuning")
     (pm-saron-tuning :debug-name "pm-saron-tuning" :amount (bind "tuning.amount")
       :tune (bind "tuning.tune"))))
 
@@ -546,7 +545,7 @@
       (sdf/paint (- (abs (- x (* aspect (- (/ 0.5 (+ release 0.6)) 1)))) 0.012)
         (rgba 0.16 0.06 0.11 0.3)))))
 (def saron-damper-view ()
-  (v-stack :gap 0.15 (caption "Hand damping / marker = key-up / natural loss remains")
+  (v-stack :gap 0.15 (caption "Hand damping")
     (pm-saron-damper :debug-name "pm-saron-damper" :touch (bind "damper.touch")
       :release (bind "damper.release_s") :lift (bind "damper.lift"))))
 
@@ -562,7 +561,7 @@
       (sdf/paint (min (- (abs y) 0.005) (- (abs x) 0.012)) (rgba 0.16 0.06 0.11 0.2))
       (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink)))))
 (def saron-output-view ()
-  (v-stack :gap 0.15 (caption "Output drive / transfer curve / full scale = 4x gain")
+  (v-stack :gap 0.15 (caption "Output drive")
     (pm-saron-output :debug-name "pm-saron-output" :drive (bind "output.drive") :gain (bind "output.gain"))))
 
 (export gamelan-mallet-view gamelan-body-view gamelan-tuning-view gamelan-damper-view)
@@ -582,8 +581,8 @@
       (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink))
       (sdf/paint (max (- (abs x) (* aspect (+ 0.03 (* spread 0.4))))
         (- (abs (+ y 0.85)) 0.08)) (eseq.effects.physical-model-surface/screen-ink)))))
-(def gamelan-mallet-view (span-ms)
-  (v-stack :gap 0.15 (caption (str "Mallet force and footprint / 0-" span-ms " ms"))
+(def gamelan-mallet-view ()
+  (v-stack :gap 0.15 (caption "Mallet force")
     (pm-gamelan-mallet :debug-name "pm-gamelan-mallet" :hardness (bind "mallet.hardness")
       :contact (bind "mallet.contact") :spread (bind "mallet.spread"))))
 
@@ -603,7 +602,7 @@
       (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink))
       (sdf/paint (- (abs (- y upper)) 0.022) (rgba 0.16 0.06 0.11 0.45)))))
 (def gamelan-body-view (rate rise direct)
-  (v-stack :gap 0.15 (caption "Reference resonance / bloom and upper-mode loss / 0-5 s")
+  (v-stack :gap 0.15 (caption "Resonance")
     (pm-gamelan-body :debug-name "pm-gamelan-body" :decay (bind "body.decay")
       :bloom (bind "body.bloom") :loss (bind "body.loss") :rate rate :rise rise :direct direct)))
 
@@ -618,7 +617,7 @@
       (sdf/paint (max (- (abs (- x position)) 0.08) (- (abs y) 0.55))
         (eseq.effects.physical-model-surface/screen-ink)))))
 (def gamelan-tuning-view (offset)
-  (v-stack :gap 0.15 (caption "Reference key / tuning offset / -200 to +200 cents")
+  (v-stack :gap 0.15 (caption "Tuning")
     (pm-gamelan-tuning :debug-name "pm-gamelan-tuning" :amount (bind "tuning.amount")
       :tune (bind "tuning.tune") :offset offset)))
 
@@ -637,7 +636,7 @@
       (sdf/paint (- (abs (- x (* aspect (- (/ 0.5 (+ release 0.6)) 1)))) 0.012)
         (rgba 0.16 0.06 0.11 0.3)))))
 (def gamelan-damper-view (rate)
-  (v-stack :gap 0.15 (caption "Hand damping / marker = key-up / natural loss remains")
+  (v-stack :gap 0.15 (caption "Hand damping")
     (pm-gamelan-damper :debug-name "pm-gamelan-damper" :touch (bind "damper.touch")
       :release (bind "damper.release_s") :lift (bind "damper.lift") :rate rate)))
 
@@ -665,7 +664,7 @@
       (eseq.effects.physical-model-surface/cymbal-ring major 0.22 1.25)
       (eseq.effects.physical-model-surface/cymbal-ring major 1 1.5))))
 (def cymbal-body-view ()
-  (v-stack :gap 0.15 (caption "Plate size and voicing / dense inharmonic resonance")
+  (v-stack :gap 0.15 (caption "Plate")
     (pm-cymbal-body :debug-name "pm-cymbal-body" :size (bind "body.size")
       :character (bind "voicing.character"))))
 
@@ -681,7 +680,7 @@
       (sdf/paint (- (abs (- y low)) 0.025) (eseq.effects.physical-model-surface/screen-ink))
       (sdf/paint (- (abs (- y high)) 0.025) (rgba 0.16 0.06 0.11 0.45)))))
 (def cymbal-loss-view ()
-  (v-stack :gap 0.15 (caption "Illustrative low / high loss and hand choke / 0-3 s")
+  (v-stack :gap 0.15 (caption "Loss and choke")
     (pm-cymbal-loss :debug-name "pm-cymbal-loss" :decay (bind "body.decay")
       :damping (bind "body.damping") :touch (bind "contact.touch"))))
 
@@ -701,7 +700,7 @@
       (sdf/paint (max (- (abs (- u 0.65)) (* touch 0.12)) (- (abs (- y 0.4)) (* touch 0.28)))
         (rgba 0.16 0.06 0.11 0.45)))))
 (def cymbal-contact-view (hat?)
-  (v-stack :gap 0.15 (caption (if hat? "Stick contact and shell gap / closing adds loss" "Stick hardness and hand contact"))
+  (v-stack :gap 0.15 (caption (if hat? "Stick contact" "Stick hardness and hand contact"))
     (pm-cymbal-contact :debug-name "pm-cymbal-contact" :hardness (bind "stick.hardness")
       :openness (if hat? (bind "contact.openness") 0) :touch (bind "contact.touch") :hat (if hat? 1 0))))
 
@@ -717,6 +716,6 @@
       (sdf/paint bell-bar (eseq.effects.physical-model-surface/screen-ink))
       (sdf/paint wash-bar (rgba 0.16 0.06 0.11 0.45)))))
 (def cymbal-output-view ()
-  (v-stack :gap 0.15 (caption "Bell / dense wash / output and stereo radiation")
+  (v-stack :gap 0.15 (caption "Output")
     (pm-cymbal-output :debug-name "pm-cymbal-output" :bell (bind "body.bell")
       :wash (bind "body.wash") :gain (bind "output.gain") :width (bind "output.width"))))

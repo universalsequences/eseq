@@ -23,54 +23,37 @@
       (sdf/paint (- (abs (- y line)) 0.025) (rgba 0.16 0.06 0.11 1)))))
 
 (def lips-view ()
-  (v-stack :gap 0.15 (mb-caption "Lip opening / two buzz cycles / faint = half breath")
+  (v-stack :gap 0.15 (mb-caption "Lip opening")
     (pm-brass-lips :debug-name "pm-brass-lips" :lips (mb-bind "lips.lips")
       :buzz (mb-bind "lips.buzz") :curve (mb-bind "lips.buzz_curve"))))
-
-(def text-view (a b c)
-  (v-stack :gap 0.15 (mb-caption a) (mb-caption b) (mb-caption c)))
 
 (defsynth-ui
   (eseq.effects.physical-model-surface/panel "PM MILAGRE BRASS"
     (list
       '("BREATH" ("blow.breath" "Breath" 2 :linear) ("blow.pressure" "Pressure" 2 :linear))
       '("LIPS" ("lips.buzz" "Buzz" 2 :linear) ("lips.lips" "Lips" 2 :linear))
-      '("HORN" ("bore.horn" "Horn key" 0 :linear) ("bore.bell_hz" "Bell Hz" 0 :log))
+      '("HORN" ("bore.horn" "Horn key" 0 :linear) ("bore.bell_hz" "Bell" 0 :log))
       '("ROOM" ("room.body" "Body" 2 :linear) ("room.hall" "Hall" 2 :linear)))
     (list
       (dict :title "Lips"
         :view (lambda () (lips-view))
         :controls (lambda () '(("lips.buzz_curve" "Breath > buzz" 2) ("lips.register" "Register" 2)
-          ("blow.air" "Air noise" 3)))
-        :hint "Lips closes the valve; more buzz and breath give a brassier tone.")
+          ("blow.air" "Air noise" 3))))
       (dict :title "Breath"
-        :view (lambda () (text-view "Breath is the player's blowing: p-lock it per step."
-          "It glides to each new value over Breath ms."
-          "High partials need less: Register breath evens them out."))
-        :controls (lambda () '(("blow.breath_ms" "Breath ms" 0) ("blow.vel_breath" "Velocity > breath" 2)
-          ("blow.reg_breath" "Register breath" 2) ("voice_mode" "Voicing" 0)))
-        :hint "The reference phrase plays with Breath p-locks every step.")
+        :view (lambda () (box))
+        :controls (lambda () '(("blow.breath_ms" "Breath glide" 0) ("blow.vel_breath" "Velocity > breath" 2)
+          ("blow.reg_breath" "Register breath" 2) ("voice_mode" "Voicing" 0))))
       (dict :title "Horn"
-        :view (lambda () (text-view "A valveless horn: each note sounds as the nearest"
-          "partial of the Horn key (A2 = 45: A2 E4 C#5 E5 ...)."
-          "The identified bore is not harmonic: that is the tone."))
-        :controls (lambda () '(("bore.impedance" "Impedance" 2) ("bore.bore_q" "Bore Q" 2)))
-        :hint "Move Horn key to play other partial sets from the same keys.")
+        :view (lambda () (box))
+        :controls (lambda () '(("bore.impedance" "Impedance" 2) ("bore.bore_q" "Bore Q" 2))))
       (dict :title "Pitch"
-        :view (lambda () (text-view "Tune detunes in cents (the record is +31)."
-          "Slide glides slurred notes; vibrato is in cents."
-          "Lock Tune per note to follow the player's intonation."))
-        :controls (lambda () '(("pitch.tune" "Tune cents" 1) ("pitch.slide" "Slide ms" 0)
-          ("pitch.vib_cent" "Vibrato ct" 1) ("pitch.vib_hz" "Vibrato Hz" 2)))
-        :hint "Mono legato: overlapping notes slur without a new attack.")
+        :view (lambda () (box))
+        :controls (lambda () '(("pitch.tune" "Tune" 1) ("pitch.slide" "Slide" 0)
+          ("pitch.vib_cent" "Vibrato depth" 1) ("pitch.vib_hz" "Vibrato rate" 2))))
       (dict :title "Room"
-        :view (lambda () (text-view "Body is the measured radiation, mic and room colour."
-          "Hall is the live room of the recording."
-          "Body 0 and Hall 0 give the dry horn."))
-        :controls (lambda () '(("room.hall_s" "Hall seconds" 2) ("gain" "Output" 2)))
-        :hint "Body scales the identified response; above 1 exaggerates it.")
+        :view (lambda () (box))
+        :controls (lambda () '(("room.hall_s" "Hall time" 2) ("gain" "Output" 2))))
       (dict :title "Amp"
         :view (lambda () (eseq.effects.physical-model-surface/envelope 5))
-        :controls (lambda () '(("amp.attack" "Attack ms" 1) ("amp.decay" "Decay ms" 1) ("amp.sustain" "Sustain" 2)
-          ("amp.release" "Release ms" 1) ("gain" "Output" 2)))
-        :hint "The envelope shapes the breath, not the output."))))
+        :controls (lambda () '(("amp.attack" "Attack" 1) ("amp.decay" "Decay" 1) ("amp.sustain" "Sustain" 2)
+          ("amp.release" "Release" 1) ("gain" "Output" 2)))))))

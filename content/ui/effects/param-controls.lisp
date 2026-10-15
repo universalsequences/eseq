@@ -917,14 +917,16 @@
 ;; the base param's: the built-in Filter's cutoff reads 20..20000 Hz but scales
 ;; exponentially, so its depth is +/-4 *octaves*. Showing the depth's unit is
 ;; what makes that legible instead of looking like a 4 Hz sweep. Outside the
-;; mods tab the param's own unit is used, and `false` when neither declares one
+;; mods tab the param's own unit is used (an instrument panel's param dict
+;; carries none; its prm's @unit does), and `false` when neither declares one
 ;; so the display is unchanged.
 (def param-control-unit (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
     (let ((mt (param-control-mod-target fx p)))
       (if (and mt (not (= mt.unit ""))) mt.unit false))
-    (let ((unit (get p :unit)))
-      (if unit unit false))))
+    (let ((prm (get p :prm))
+          (unit (if (get p :unit) (get p :unit) (if prm prm.unit false))))
+      (if (and unit (not (= unit ""))) unit false))))
 
 ;; The :value-scale a percent control shows p with. Its own value: a 0-1
 ;; fraction (x 100) unless its unit is % (display units, x 1). A lane depth

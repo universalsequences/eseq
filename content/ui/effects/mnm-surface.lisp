@@ -23,9 +23,10 @@
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "mnm-mod-" name)
       (v-stack :width 8.4 :height 1.3 :gap 0
-        (label title :height 0.65 :font-size 9 :v-align :center :color (mnm-ink p) :bg :transparent)
+        (label title :height 0.65 :font-size 10.5 :v-align :center :color (mnm-ink p) :bg :transparent)
         (number-picker :debug-name (str "mnm-num-" name) :width 8.4 :height 0.65
-          :noui true :font-size 10 :decimals decimals :step (pow 10 (- 0 decimals))
+          :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
+          :noui true :font-size 11.5 :decimals decimals :step (pow 10 (- 0 decimals))
           :value (mnm-bind name)
           :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
           :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
@@ -67,13 +68,13 @@
 (def mnm-amp-page ()
   (v-stack :gap 0.15
       (mnm-ahd "amp_attack_ms" "amp_hold_ms" "amp_decay_ms" 2.5)
-      (mnm-caption "Gate off / release from the current level")
+      (mnm-caption "Release")
       (mnm-release)
       (h-stack :gap 0.3
-        (mnm-num "amp_attack_ms" "Attack ms" 1) (mnm-num "amp_hold_ms" "Hold ms" 1)
-        (mnm-num "amp_decay_ms" "Decay ms" 1) (mnm-num "amp_release_ms" "Release ms" 1))
+        (mnm-num "amp_attack_ms" "Attack" 1) (mnm-num "amp_hold_ms" "Hold" 1)
+        (mnm-num "amp_decay_ms" "Decay" 1) (mnm-num "amp_release_ms" "Release" 1))
       (h-stack :gap 0.3
-        (mnm-num "glide_ms" "Glide ms" 1)
+        (mnm-num "glide_ms" "Glide" 1)
         (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-base-note-param)))
           (v-stack :width 8.4 :height 1.3 :gap 0
             (label "Note" :height 0.65 :font-size 9 :v-align :center :color :black :bg :transparent)
@@ -118,7 +119,7 @@
     (mnm-ahd "fenv_attack_ms" false "fenv_decay_ms" 2)
     (h-stack :gap 0.3
       (mnm-num "flt_res_hi" "HP Res" 2) (mnm-num "flt_res_lo" "LP Res" 2)
-      (mnm-num "fenv_attack_ms" "Attack ms" 1) (mnm-num "fenv_decay_ms" "Decay ms" 1))
+      (mnm-num "fenv_attack_ms" "Attack" 1) (mnm-num "fenv_decay_ms" "Decay" 1))
     (h-stack :gap 0.3
       (mnm-num "env_to_base" "Env > Base" 2) (mnm-num "env_to_width" "Env > Width" 2)
       (mnm-num "keytrack" "Keytrack" 2))))
@@ -140,11 +141,10 @@
                 (mnm-write scope "eq_gain_db" (get event :gain))
                 (mnm-write scope "eq_q" (get event :q))) false)))
       (h-stack :gap 0.3
-        (mnm-num "eq_freq" "EQ Hz" 0) (mnm-num "eq_gain_db" "EQ dB" 1)
+        (mnm-num "eq_freq" "EQ freq" 0) (mnm-num "eq_gain_db" "EQ gain" 1)
         (mnm-num "eq_q" "EQ Q" 2))
       (h-stack :gap 0.3
-        (mnm-num "am_rate" "AM Hz" 1) (mnm-num "am_depth" "AM Depth" 2))
-      (mnm-caption "AM > Filter > Sample reduction > EQ > Drive"))))
+        (mnm-num "am_rate" "AM rate" 1) (mnm-num "am_depth" "AM Depth" 2)))))
 
 (export mnm-option mnm-display mnm-source-preview)
 (def mnm-option (name options)

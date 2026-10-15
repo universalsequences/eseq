@@ -16,7 +16,7 @@
         (p (eseq.effects.custom-ui-runtime/custom-ui-current-param (nth spec 0))))
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "drum-mod-" name)
       (v-stack :width 8.4 :height 1.3 :gap 0
-        (label title :height 0.65 :v-align :center :font-size 9 :color (ink p) :bg :transparent)
+        (label title :height 0.65 :v-align :center :font-size 10 :color (ink p) :bg :transparent)
         (if options
           (dropdown :width 8.4 :height 0.65 :font-size 9 :options options
             :value-index (- (value name) (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p))
@@ -26,7 +26,8 @@
                 (+ (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
                   (eseq.effects.param-controls/custom-ui-option-index options v)))))
           (number-picker :debug-name (str "drum-detail-" name)
-            :width 8.4 :height 0.65 :noui true :decimals decimals :font-size 10 :text-align :left
+            :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
+            :width 8.4 :height 0.65 :noui true :decimals decimals :font-size 11 :text-align :left
             :step (if (= name "bank_harm") 0.5 (pow 10 (- 0 decimals)))
             :value (bind name) :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
@@ -215,10 +216,10 @@
 (def cut-view ()
   (let ((ga (parameter-gesture "decay" false)) (gb (parameter-gesture "ring" false)))
   (v-stack :gap 0.12
-    (label "Body cut / 0–1.2 s" :height 0.4 :v-align :center :font-size 8.5 :color :black :bg :transparent)
+    (label "Body cut" :height 0.4 :v-align :center :font-size 8.5 :color :black :bg :transparent)
     (eseq-drum-layer-cut :length (bind "length") :scale (bind "decay")
       :on-mouse-down (get ga :down) :on-drag (get ga :drag) :on-mouse-up (get ga :up))
-    (label "Shell cut / 0–1.2 s" :height 0.4 :v-align :center :font-size 8.5 :color :black :bg :transparent)
+    (label "Shell cut" :height 0.4 :v-align :center :font-size 8.5 :color :black :bg :transparent)
     (eseq-drum-layer-cut :length (bind "length") :scale (bind "ring")
       :on-mouse-down (get gb :down) :on-drag (get gb :drag) :on-mouse-up (get gb :up)))))
 
@@ -259,9 +260,9 @@
   (let ((decay (parameter-gesture "dec" "sustain"))
         (release (parameter-gesture "release" false)))
     (v-stack :gap 0.12
-      (label "Held: decay to sustain / 0–1 s" :height 0.4 :v-align :center :font-size 8.5 :color :black :bg :transparent)
+      (label "Decay" :height 0.4 :v-align :center :font-size 8.5 :color :black :bg :transparent)
       (eseq-drum-sustain-envelope :duration decay-time :sustain (bind "sustain")
         :on-mouse-down (get decay :down) :on-drag (get decay :drag) :on-mouse-up (get decay :up))
-      (label "Note-off: release from current level / 0–1 s" :height 0.4 :v-align :center :font-size 8.5 :color :black :bg :transparent)
+      (label "Release" :height 0.4 :v-align :center :font-size 8.5 :color :black :bg :transparent)
       (eseq-drum-decay-envelope :duration (bind "release")
         :on-mouse-down (get release :down) :on-drag (get release :drag) :on-mouse-up (get release :up)))))

@@ -25,6 +25,7 @@
         (v-stack :width width :height 1.15 :gap 0.08
           (label title :height 0.5 :v-align :center :font-size 8 :color ink :bg :transparent)
           (number-picker :width width :height 0.55 :noui true :font-size 8.5 :decimals decimals
+            :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
@@ -172,9 +173,9 @@
 (def idclap-page-0 ()
   (v-stack :gap 0.15
     (h-stack :gap 0.35
-      (idclap-num 0 "sp1" "SP1 ms" 8.4 2)
-      (idclap-num 0 "sp2" "SP2 ms" 8.4 2)
-      (idclap-num 0 "sp3" "SP3 ms" 8.4 2)
+      (idclap-num 0 "sp1" "SP1" 8.4 2)
+      (idclap-num 0 "sp2" "SP2" 8.4 2)
+      (idclap-num 0 "sp3" "SP3" 8.4 2)
       (idclap-num 0 "bdecay" "BDEC" 8.4 0)
     )
     (h-stack :gap 0.35
@@ -193,8 +194,8 @@
       (idclap-num 1 "tail_d2" "S.Dec" 8.4 1)
     )
     (h-stack :gap 0.35
-      (idclap-num 1 "tail_lpf" "TLPF Hz" 8.4 0)
-      (idclap-num 1 "sub_delay" "Sub ms" 8.4 2)
+      (idclap-num 1 "tail_lpf" "TLPF" 8.4 0)
+      (idclap-num 1 "sub_delay" "Sub delay" 8.4 2)
       (idclap-num 1 "sub_gain" "Sub gain" 8.4 2)
     )
   ))
@@ -203,7 +204,7 @@
     (h-stack :gap 0.35
       (idclap-num 2 "q2" "Q2" 8.4 2)
       (idclap-num 2 "g2" "G2" 8.4 2)
-      (idclap-num 2 "hp_fc" "HPF Hz" 8.4 0)
+      (idclap-num 2 "hp_fc" "HPF" 8.4 0)
     )
   ))
 (def idclap-page-3 ()
@@ -231,7 +232,7 @@
 (def idclap-bank-wave ()
   (let ((gesture (eseq.effects.drum-surface/parameter-gesture "bank_time" "bank_env")))
     (v-stack :width 35.2 :height 4.65 :gap 0.05
-      (label "Cutoff control envelope / 0–1 s" :height 0.5 :font-size 8 :color :black :bg :transparent)
+      (label "Cutoff envelope" :height 0.5 :font-size 8 :color :black :bg :transparent)
       (eseq-clap-bank-display :debug-name "clap-bank-envelope"
         :floor (idclap-bind "bank_freq") :depth (idclap-bind "bank_env") :duration (idclap-bind "bank_time")
         :on-mouse-down (get gesture :down) :on-drag (get gesture :drag) :on-mouse-up (get gesture :up)))))
@@ -243,7 +244,7 @@
       (idclap-num 4 "bank_res" "Resonance" 8.4 2)
       (idclap-num 4 "bank_env" "Env depth" 8.4 2))
     (h-stack :gap 0.35
-      (idclap-num 4 "bank_time" "Time ms" 8.4 0)
+      (idclap-num 4 "bank_time" "Time" 8.4 0)
       (idclap-num 4 "bank_harm" "Harmonic" 8.4 1)
       (idclap-num 4 "bank_crunch" "Crush" 8.4 2)
       (idclap-num 4 "bank_drive" "Drive" 8.4 2))))
@@ -256,7 +257,7 @@
         (dropdown :width 8.4 :height 0.55 :font-size 8.5 :options '("Free" "Key")
           :value-index (idclap-bind "bank_track")
           :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s 5 p))))
-    (idclap-num 5 "smoothing" "Slew ms" 8.4 1)))
+    (idclap-num 5 "smoothing" "Slew" 8.4 1)))
 
 (def idclap-page-button (section title)
   (button title :width 5.6 :height 0.8 :padding 0 :font-size 8

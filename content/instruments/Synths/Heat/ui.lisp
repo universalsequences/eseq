@@ -31,6 +31,7 @@
         (v-stack :width width :height height :gap 0.06
           (label title :v-align :center :height label-height :font-size 8.6 :color ink :bg :transparent)
           (number-picker :width width :height 0.50 :noui true :decimals decimals :step step :font-size 8.0 :value-labels labels
+            :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
@@ -94,7 +95,7 @@
         (heat-source-option section (str prefix "_wave") "Shape" '("Sine" "Saw" "Pulse" "Noise") 6.2)
         (heat-compact section (str prefix "_to_filter1") "F2 / F1"))
       (h-stack :gap 1.5
-        (heat-short-knob section (str prefix "_level_db") "Level dB")
+        (heat-short-knob section (str prefix "_level_db") "Level")
         (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (str prefix "_semitones") "Semi"
           4.7 2.1 2.8 (heat-accent) 0 "linear" :widget-knob-track 10.5 9.5 :right)
         (heat-short-knob section (str prefix "_cents") "Detune")))))
@@ -166,7 +167,7 @@
             (heat-source-option section "filter2_follow" "Follow" '("Off" "F1") 4.6)))
         (heat-source-option section (str prefix "_mode") "Type"
           '("LP12" "LP24" "BP6" "BP12" "N2" "N4" "HP12" "HP24") 4.5)
-        (heat-log-sized section (str prefix "_cutoff_hz") "Freq Hz" 5.6)
+        (heat-log-sized section (str prefix "_cutoff_hz") "Freq" 5.6)
         (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (str prefix "_q") "Reso Q" 4.7 2.15 2.58 (heat-accent) 2 "log" :widget-knob-track 10.5 9.5 :right))
       (heat-filter-curve section prefix))))
 (def heat-amp-row (section prefix title)
@@ -175,11 +176,11 @@
       (heat-switch section (str prefix "_enabled") title)
       (h-stack :gap 0.3
         (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (str prefix "_pan") "Pan" 5.1 2.9 3.5 (heat-accent) 2 "linear" :widget-knob-track 10.5 9.5 :center)
-        (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (str prefix "_level_db") "Level dB" 5.1 2.9 3.5 (heat-accent) 2 "linear" :widget-knob-track 10.5 9.5 :center)))))
+        (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (str prefix "_level_db") "Level" 5.1 2.9 3.5 (heat-accent) 2 "linear" :widget-knob-track 10.5 9.5 :center)))))
 (def heat-lfo-row (prefix title)
   (v-stack :height 2.95 :gap 0.12 :align :center
     (heat-switch 4 (str prefix "_enabled") title)
-    (heat-log 4 (str prefix "_rate_hz") "Rate Hz")))
+    (heat-log 4 (str prefix "_rate_hz") "Rate")))
 
 (def heat-env-plot (section prefix)
   (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
@@ -201,11 +202,11 @@
   (v-stack :gap 0.15
     (h-stack :gap 0.3
       (heat-num section (str prefix "_velocity") "Att<Vel")
-      (heat-num section (str prefix "_attack_ms") "Attack ms")
-      (heat-num section (str prefix "_decay_ms") "Decay ms")
+      (heat-num section (str prefix "_attack_ms") "Attack")
+      (heat-num section (str prefix "_decay_ms") "Decay")
       (heat-num section (str prefix "_sustain") "Sustain")
-      (heat-num-labeled section (str prefix "_sustain_seconds") "S.Time s" '((-1 "inf")))
-      (heat-num section (str prefix "_release_ms") "Release ms"))
+      (heat-num-labeled section (str prefix "_sustain_seconds") "S.Time" '((-1 "inf")))
+      (heat-num section (str prefix "_release_ms") "Release"))
     (h-stack :gap 0.3
       (heat-option section (str prefix "_exponential") "Slope" '("LIN" "EXP"))
       (heat-option section (str prefix "_legato") "Legato" '("Retrig" "Hold"))
@@ -266,8 +267,8 @@
   (v-stack :gap 0.2
     (heat-pitch-editor section prefix)
     (h-stack :gap 0.5
-      (heat-num section (str prefix "_pitch_env_initial") "Initial st")
-      (heat-num section (str prefix "_pitch_env_time_ms") "Time ms")
+      (heat-num section (str prefix "_pitch_env_initial") "Initial")
+      (heat-num section (str prefix "_pitch_env_time_ms") "Time")
       (heat-num section (str prefix "_lfo_pitch_semitones") "Pitch<LFO")
       (heat-num section (str prefix "_keytrack") "Pitch<Key"))
     (heat-group "Pulse Width"
@@ -278,7 +279,7 @@
       (h-stack :gap 0.5
         (heat-option section (str prefix "_sub_sync") "Mode" '("Sub" "Sync"))
         (if (> (heat-value (str prefix "_sub_sync") 0) 0.5)
-          (heat-num section (str prefix "_sync_semitones") "Ratio st")
+          (heat-num section (str prefix "_sync_semitones") "Ratio")
           (heat-num section (str prefix "_sub_level") "Level"))))))
 (def heat-lfo-curve (prefix)
   (let ((shape (heat-bound (str prefix "_shape") 0))
@@ -298,8 +299,8 @@
       (heat-num 4 (str prefix "_width") "Width")
       (heat-option 4 (str prefix "_retrigger") "Retrig" '("Off" "On"))
       (heat-num 4 (str prefix "_phase") "Offset")
-      (heat-num 4 (str prefix "_delay_ms") "Delay ms")
-      (heat-num 4 (str prefix "_fade_ms") "Attack ms"))))
+      (heat-num 4 (str prefix "_delay_ms") "Delay")
+      (heat-num 4 (str prefix "_fade_ms") "Attack"))))
 (def heat-lfo-detail ()
   (v-stack :gap 0.6
     (heat-lfo-detail-row "lfo1")
@@ -310,8 +311,8 @@
     (v-stack :gap 0.3
       (heat-switch false "noise_enabled" "Noise")
       (h-stack :gap 1.5
-        (heat-compact false "noise_level_db" "Level dB")
-        (heat-compact false "noise_color_hz" "Color Hz")
+        (heat-compact false "noise_level_db" "Level")
+        (heat-compact false "noise_color_hz" "Color")
         (heat-compact false "noise_to_filter1" "F2 / F1")))))
 ; Quick Routing writes the same eight ordinary parameters as Analog.
 (def heat-routing-values (mode)
@@ -402,6 +403,7 @@
         (h-stack :width 10.5 :height 0.5 :gap 0.1 :align :center
           (label title :width 6.2 :height 0.5 :v-align :center :font-size 8.6 :color ink :bg :transparent)
           (number-picker :width 4.1 :height 0.5 :noui true :font-size 8 :text-align :right
+            :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
             :decimals decimals :step step :value-labels labels
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
@@ -441,37 +443,37 @@
     (h-stack :gap 0.45 :align :start
       (heat-group "Vibrato"
         (v-stack :gap 0.04
-          (heat-screen-num "vibrato_rate_hz" "Rate Hz")
-          (heat-screen-num "vibrato_amount_cents" "Amount ct")
-          (heat-screen-num "vibrato_delay_ms" "Delay ms")
-          (heat-screen-num "vibrato_attack_ms" "Attack ms")
+          (heat-screen-num "vibrato_rate_hz" "Rate")
+          (heat-screen-num "vibrato_amount_cents" "Amount")
+          (heat-screen-num "vibrato_delay_ms" "Delay")
+          (heat-screen-num "vibrato_attack_ms" "Attack")
           (heat-screen-num "vibrato_wheel_cents" "Amt<MW")))
       (heat-group "Keyboard"
         (v-stack :gap 0.04
           (heat-screen-integer "octave" "Octave")
           (heat-screen-integer "tune_semitones" "Semi")
-          (heat-screen-num "detune_cents" "Detune ct")))
+          (heat-screen-num "detune_cents" "Detune")))
       (heat-group "Unison"
         (v-stack :gap 0.04
           (heat-screen-choice "unison_voices" "Voices" '("Off" "2" "3" "4"))
-          (heat-screen-num "unison_detune_cents" "Detune ct")
-          (heat-screen-num "unison_delay_ms" "Delay ms")
+          (heat-screen-num "unison_detune_cents" "Detune")
+          (heat-screen-num "unison_delay_ms" "Delay")
           (heat-screen-num "unison_spread" "Spread"))))
     (h-stack :gap 0.45 :align :start
       (heat-group "Glide"
         (v-stack :gap 0.04
           (heat-screen-choice "glide_mode" "Apply" '("Off" "Always" "Legato"))
           (heat-screen-choice "glide_rate_mode" "Mode" '("Const" "Prop"))
-          (heat-screen-num "glide_time_ms" "Time ms")))
+          (heat-screen-num "glide_time_ms" "Time")))
       (heat-group "Pressure"
         (v-stack :gap 0.04
-          (heat-screen-num "pressure_pitch_semitones" "Pitch st")
-          (heat-screen-num "pressure_filter_octaves" "Filter oct")
-          (heat-screen-num "pressure_amp_db" "Level dB")))
+          (heat-screen-num "pressure_pitch_semitones" "Pitch")
+          (heat-screen-num "pressure_filter_octaves" "Filter")
+          (heat-screen-num "pressure_amp_db" "Level")))
       (heat-group "Tuning"
         (v-stack :gap 0.04
           (heat-screen-num "stretch_cents" "Stretch")
-          (heat-screen-num "tuning_error_cents" "Error ct")
+          (heat-screen-num "tuning_error_cents" "Error")
           (heat-screen-num "bend_range_semitones" "PB Range"))))))
 (def heat-detail ()
   (let ((section eseq.vanilla/custom-ui-selected-section))

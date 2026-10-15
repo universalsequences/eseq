@@ -3,8 +3,8 @@
 ;; Curves show nominal isolated T60s, not the mixed audio waveform.
 (def modal-snare-head-envelopes ()
   (eseq.effects.drum-surface/envelope
-    "Nominal batter T60 / 0–1 s" (eseq.effects.drum-surface/bind "release")
-    "Nominal resonant head T60 / 0–1 s" (eseq.effects.drum-surface/bind "release2")
+    "Batter" (eseq.effects.drum-surface/bind "release")
+    "Resonant head" (eseq.effects.drum-surface/bind "release2")
     "release" "release2"))
 
 (defsynth-ui
@@ -44,8 +44,8 @@
           (list "contact_loss" "Contact loss" 4 nil)
           (list "wire_tone" "Wire tone" 2 nil)))
         :visual (lambda () (eseq.effects.drum-surface/envelope
-          "Nominal wire T60 / 0–1 s" (eseq.effects.drum-surface/bind "wire_decay")
-          "Nominal resonant head T60 / 0–1 s" (eseq.effects.drum-surface/bind "release2")
+          "Wires" (eseq.effects.drum-surface/bind "wire_decay")
+          "Resonant head" (eseq.effects.drum-surface/bind "release2")
           "wire_decay" "release2")))
       (dict :title "Color"
         :controls (lambda () (list
@@ -61,6 +61,6 @@
           (list "rim_level" "Rim level" 2 nil)
           (list "rim_drive" "Rim drive" 5 nil)))
         :visual (lambda () (eseq.effects.drum-surface/envelope
-          "Nominal rim T60 / 0–1 s" (eseq.effects.drum-surface/bind "rim_decay")
-          "Nominal batter T60 / 0–1 s" (eseq.effects.drum-surface/bind "release")
+          "Rim" (eseq.effects.drum-surface/bind "rim_decay")
+          "Batter" (eseq.effects.drum-surface/bind "release")
           "rim_decay" "release"))))))

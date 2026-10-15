@@ -26,8 +26,9 @@
       (subtree :key (str "kick-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
         (v-stack :width width :height 1.15 :gap 0.08
-          (label title :height 0.5 :v-align :center :font-size 8 :color ink :bg :transparent)
-          (number-picker :width width :height 0.55 :noui true :font-size 8.5 :decimals decimals
+          (label title :height 0.5 :v-align :center :font-size 9.5 :color ink :bg :transparent)
+          (number-picker :width width :height 0.55 :noui true :font-size 10 :decimals decimals
+            :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
             :step (if (= name "bank_harm") 0.5 (pow 10 (- 0 decimals)))
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
@@ -308,10 +309,10 @@
 (def drum-page-0 (config)
   (v-stack :gap 0.15
     (h-stack :gap 0.35
-      (drum-num 0 "sweep" "Sweep ms" 8.4 1)
-      (drum-num 0 "glide" "Glide ms" 8.4 0)
+      (drum-num 0 "sweep" "Sweep" 8.4 1)
+      (drum-num 0 "glide" "Glide" 8.4 0)
       (drum-num 0 "body_asymmetry" "Asymmetry" 8.4 3)
-      (drum-num 0 "smoothing" "Smooth ms" 8.4 1)
+      (drum-num 0 "smoothing" "Smooth" 8.4 1)
     )
     (h-stack :gap 0.35
       (if (get config :odd) (drum-num 0 "body_harmonic" "Odd harmonics" 8.4 2) (box :width 8.4))
@@ -328,12 +329,12 @@
 (def drum-page-1 ()
   (v-stack :gap 0.15
     (h-stack :gap 0.35
-      (drum-num 1 "attack" "Attack ms" 8.4 0)
+      (drum-num 1 "attack" "Attack" 8.4 0)
       (drum-num 1 "sustain" "Sustain" 8.4 2)
     )
     (h-stack :gap 0.35
-      (drum-num 1 "fade" "Fade ms" 8.4 0)
-      (drum-num 1 "retrigger_fade" "Retrig ms" 8.4 1)
+      (drum-num 1 "fade" "Fade" 8.4 0)
+      (drum-num 1 "retrigger_fade" "Retrig fade" 8.4 1)
       (drum-num 1 "out_gain" "Gain" 8.4 3)
     )
   ))
@@ -352,7 +353,7 @@
 (def drum-page-4 ()
   (v-stack :gap 0.15
     (h-stack :gap 0.35
-      (drum-num 4 "bank_time" "Time ms" 8.4 0)
+      (drum-num 4 "bank_time" "Time" 8.4 0)
       (drum-num 4 "bank_freq" "Cutoff" 8.4 3)
       (drum-num 4 "bank_harm" "Harmonic" 8.4 1)
       (drum-num 4 "bank_crunch" "Crush" 8.4 2)
@@ -369,8 +370,8 @@
       (drum-num 5 "out_gain" "Gain" 8.4 3)
     )
     (h-stack :gap 0.35
-      (drum-num 5 "fade" "Fade ms" 8.4 0)
-      (drum-num 5 "retrigger_fade" "Retrig ms" 8.4 1)
+      (drum-num 5 "fade" "Fade" 8.4 0)
+      (drum-num 5 "retrigger_fade" "Retrig fade" 8.4 1)
     )
   ))
 (def drum-page-button (section title)

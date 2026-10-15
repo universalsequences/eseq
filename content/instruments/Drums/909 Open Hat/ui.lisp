@@ -72,7 +72,7 @@
     (v-stack :gap 0.14
       (label "909 OPEN HAT / DECAY" :width 35 :height 0.7 :font-size 8
         :h-align :center :v-align :center :color (idhat-c) :bg :black)
-      (label "METAL / Hz" :height 0.5 :v-align :center :font-size 7.5 :color :black :bg :transparent)
+      (label "METAL" :height 0.5 :v-align :center :font-size 7.5 :color :black :bg :transparent)
       (v-stack :gap 0.05
         (idhat-mode 1) (idhat-mode 2) (idhat-mode 3) (idhat-mode 4)
         (idhat-mode 5) (idhat-mode 6) (idhat-mode 7) (idhat-mode 8)

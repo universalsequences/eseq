@@ -3,10 +3,7 @@
   (v-stack :gap 0.3
     (if (< (eseq.effects.mnm-surface/mnm-value "osc_wave") 4)
       (eseq.effects.mnm-surface/mnm-source-preview (eseq.effects.mnm-surface/mnm-bind "osc_wave") "pw")
-      (box :width 35.2 :height 4.2
-        (v-stack :gap 0.4
-          (eseq.effects.mnm-surface/mnm-caption "Keytracked sample-and-hold noise")
-          (eseq.effects.mnm-surface/mnm-caption "The noise clock follows the note at eight times its frequency."))))
+      (box :width 35.2 :height 4.2))
     (eseq.effects.mnm-surface/mnm-option "osc_wave" '("Triangle" "Saw" "Pulse" "Saw x Pulse" "Clocked noise"))))
 (defwidget grit-interlace-view
   :width 35.2 :height 3.5 :state (rate depth)
@@ -37,8 +34,8 @@
     (grit-interlace)
     (eseq.effects.mnm-surface/mnm-option "osc_mode" '("Free" "Sync" "Ring" "Sync + Ring"))
     (h-stack :gap 0.3
-      (eseq.effects.mnm-surface/mnm-num "fine_cents" "Fine cents" 1)
-      (eseq.effects.mnm-surface/mnm-num "interlace_hz" "Interlace Hz" 1))))
+      (eseq.effects.mnm-surface/mnm-num "fine_cents" "Fine" 1)
+      (eseq.effects.mnm-surface/mnm-num "interlace_hz" "Interlace rate" 1))))
 (defsynth-ui
   (h-stack :height 9.8 :gap 0.3 :align :start
     (v-stack :gap 0.2
@@ -46,7 +43,7 @@
         (h-stack :gap 0.2
           (eseq.effects.mnm-surface/mnm-knob 0 "pw" "Pulse Width" 6.8 2 :linear)
           (eseq.effects.mnm-surface/mnm-knob 0 "bits" "Bits" 6.8 1 :linear)
-          (eseq.effects.mnm-surface/mnm-knob 0 "tune_semi" "OSC 2 st" 6.8 0 :linear)))
+          (eseq.effects.mnm-surface/mnm-knob 0 "tune_semi" "OSC 2 Tune" 6.8 0 :linear)))
       (eseq.effects.mnm-surface/mnm-panel 1 "INTERACTION" 21.4
         (h-stack :gap 0.2
           (eseq.effects.mnm-surface/mnm-knob 1 "osc2_level" "OSC 2 Level" 10.3 2 :linear)
@@ -55,7 +52,7 @@
       (list grit-source grit-motion eseq.effects.mnm-surface/mnm-filter-page eseq.effects.mnm-surface/mnm-amp-page eseq.effects.mnm-surface/mnm-color-page))
     (v-stack :gap 0.2
       (eseq.effects.mnm-surface/mnm-panel 2 "FILTER" 14.6
-        (h-stack :gap 0.2 (eseq.effects.mnm-surface/mnm-knob 2 "flt_base" "Base Hz" 7 0 :log) (eseq.effects.mnm-surface/mnm-knob 2 "flt_width" "Width oct" 7 2 :linear)))
+        (h-stack :gap 0.2 (eseq.effects.mnm-surface/mnm-knob 2 "flt_base" "Base" 7 0 :log) (eseq.effects.mnm-surface/mnm-knob 2 "flt_width" "Width" 7 2 :linear)))
       (eseq.effects.mnm-surface/mnm-panel 3 "AMP" 14.6
         (h-stack :gap 0.2 (eseq.effects.mnm-surface/mnm-knob 3 "gain" "Level" 7 2 :linear) (eseq.effects.mnm-surface/mnm-knob 3 "pan_width" "Spread" 7 2 :linear))))
     (box :width 9.2 :height 9.8 :padding 0.2

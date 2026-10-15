@@ -3,7 +3,7 @@
 
 (def strokes-view ()
   (v-stack :gap 0.15
-    (bongo-caption "Strokes repeat every octave / C4 octave = recorded pitch")
+    (bongo-caption "Strokes")
     (h-stack :gap 0.2
           (v-stack :gap 0.05 (stroke-row "C  Low Open") (stroke-row "C#  Slap + Ghost") (stroke-row "D  Low Ghost") (stroke-row "D#  Pressed Tone"))
           (v-stack :gap 0.05 (stroke-row "E  Mid Open Flam") (stroke-row "F  Mid Open") (stroke-row "F#  Mid Open Short") (stroke-row "G  Mid Ghost"))
@@ -31,7 +31,7 @@
       (sdf/paint (- (abs (- y quiet)) 0.018) (rgba 0.16 0.06 0.11 0.4))
       (sdf/paint (- (abs (- y curve)) 0.025) (rgba 0.16 0.06 0.11 1)))))
 (def hand-view ()
-  (v-stack :gap 0.15 (bongo-caption "Hand contact force / 0-1.5 ms / faint = half-velocity hit")
+  (v-stack :gap 0.15 (bongo-caption "Contact force")
     (pm-bongo-hand :debug-name "pm-bongo-hand" :hardness (bongo-bind "hand.hardness")
       :dynamics (bongo-bind "hand.dynamics"))))
 
@@ -49,7 +49,7 @@
       (sdf/paint (- (abs (- y bend)) 0.015) (rgba 0.16 0.06 0.11 0.4))
       (sdf/paint (- (abs (- y curve)) 0.025) (rgba 0.16 0.06 0.11 1)))))
 (def head-view ()
-  (v-stack :gap 0.15 (bongo-caption "Low head ring / 0-0.6 s / faint = tension glide")
+  (v-stack :gap 0.15 (bongo-caption "Low head ring")
     (pm-bongo-head :debug-name "pm-bongo-head" :decay (bongo-bind "head.decay")
       :muffle (bongo-bind "head.muffle") :glide (bongo-bind "head.glide"))))
 
@@ -66,7 +66,7 @@
       (sdf/paint (max (- y 0.8) (- curve y)) (rgba 0.16 0.06 0.11 0.14))
       (sdf/paint (- (abs (- y curve)) 0.025) (rgba 0.16 0.06 0.11 1)))))
 (def skin-view ()
-  (v-stack :gap 0.15 (bongo-caption "Skin contact noise / 125 Hz-32 kHz, log / band per stroke")
+  (v-stack :gap 0.15 (bongo-caption "Skin noise")
     (pm-bongo-skin :debug-name "pm-bongo-skin" :skin (bongo-bind "contact.skin")
       :tone (bongo-bind "contact.skin_tone"))))
 
@@ -75,26 +75,21 @@
     (list
       '("HAND" ("hand.hardness" "Hardness" 2 :linear) ("hand.flam" "Flam" 2 :linear))
       '("HEADS" ("head.decay" "Decay" 2 :log) ("head.muffle" "Muffle" 2 :linear))
-      '("PITCH" ("head.tune" "Tune st" 1 :linear) ("head.glide" "Glide" 2 :linear))
+      '("PITCH" ("head.tune" "Tune" 1 :linear) ("head.glide" "Glide" 2 :linear))
       '("SKIN & LEVEL" ("contact.skin" "Skin" 2 :linear) ("output.gain" "Output" 2 :linear)))
     (list
       (dict :title "Strokes"
         :view (lambda () (strokes-view))
-        :controls (lambda () '(("hand.flam" "Flam spacing" 2) ("hand.flam_level" "Flam level" 2)))
-        :hint "Flam scales the measured contact spacing.")
+        :controls (lambda () '(("hand.flam" "Flam spacing" 2) ("hand.flam_level" "Flam level" 2))))
       (dict :title "Hand"
         :view (lambda () (hand-view))
-        :controls (lambda () '(("hand.hardness" "Hardness" 2) ("hand.dynamics" "Vel > timbre" 2)))
-        :hint "Harder hands shorten contact; energy is redistributed, not added.")
+        :controls (lambda () '(("hand.hardness" "Hardness" 2) ("hand.dynamics" "Vel > timbre" 2))))
       (dict :title "Heads"
         :view (lambda () (head-view))
-        :controls (lambda () '(("head.muffle" "Muffle" 2) ("head.glide" "Tension glide" 2)))
-        :hint "Muffle rests a hand on the head. Glide bends hard hits.")
+        :controls (lambda () '(("head.muffle" "Muffle" 2) ("head.glide" "Tension glide" 2))))
       (dict :title "Skin"
         :view (lambda () (skin-view))
-        :controls (lambda () '(("contact.skin" "Skin noise" 2) ("contact.skin_tone" "Skin tone" 2)))
-        :hint "Hand-on-skin contact noise, band-limited per stroke.")
+        :controls (lambda () '(("contact.skin" "Skin noise" 2) ("contact.skin_tone" "Skin tone" 2))))
       (dict :title "Output"
         :view (lambda () (eseq.effects.physical-model-surface/saron-output-view))
-        :controls (lambda () '(("output.width" "Stereo" 2) ("output.drive" "Drive" 2) ("output.tone_hz" "Tone Hz" 0)))
-        :hint "Stereo 1 reproduces the measured head placement."))))
+        :controls (lambda () '(("output.width" "Stereo" 2) ("output.drive" "Drive" 2) ("output.tone_hz" "Tone" 0)))))))

@@ -81,7 +81,7 @@
 (param sibilance @default 0.3 @min 0.0 @max 1.0)
 (param cons_duck @default 0.5 @min 0.0 @max 1.0)
 (param flt_base @default 60.0 @min 20.0 @max 11000.0 @unit Hz @mod true @mod-mode additive)
-(param flt_width @default 7.5 @min 0.1 @max 9.0 @mod true @mod-mode additive)
+(param flt_width @default 7.5 @min 0.1 @max 9.0 @unit oct @mod true @mod-mode additive)
 (param flt_res_lo @default 0.7 @min 0.5 @max 14.0)
 (param flt_res_hi @default 0.7 @min 0.5 @max 14.0)
 (param fenv_attack_ms @default 2.0 @min 0.2 @max 4000.0 @unit ms)

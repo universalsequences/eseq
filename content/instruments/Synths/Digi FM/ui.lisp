@@ -26,6 +26,7 @@
         (v-stack :width width :height height :gap 0.06
           (label title :v-align :center :height label-height :font-size 8.6 :color ink :bg :transparent)
           (number-picker :width width :height 0.50 :noui true :decimals decimals :step step :font-size 8.0 :value-labels labels
+            :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
@@ -192,7 +193,7 @@
         :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section))
       (df-knob section (str prefix "_ratio") "Ratio")
       (df-knob section (str prefix "_fine") "Fine")
-      (df-knob section (str prefix "_level_db") "Level dB"))))
+      (df-knob section (str prefix "_level_db") "Level"))))
 
 (def df-tab (section title)
   (button title :width 4.55 :height 0.7 :font-size 7.5 :padding 0 :corner-radius 1
@@ -219,9 +220,9 @@
                   (list :decay (str prefix "_decay_ms"))
                   (list :end (str prefix "_end"))) env))))
     (h-stack :gap 0.4
-      (df-num section (str prefix "_delay_ms") "Delay ms")
-      (df-num section (str prefix "_attack_ms") "Attack ms")
-      (df-num section (str prefix "_decay_ms") "Decay ms")
+      (df-num section (str prefix "_delay_ms") "Delay")
+      (df-num section (str prefix "_attack_ms") "Attack")
+      (df-num section (str prefix "_decay_ms") "Decay")
       (df-num section (str prefix "_end") "End")
       (df-num section (str prefix "_depth") "FM depth"))
     (h-stack :gap 0.4
@@ -247,15 +248,15 @@
             (str prefix "_attack_ms") (str prefix "_decay_ms")
             (str prefix "_sustain") (str prefix "_release_ms") env))))
     (h-stack :gap 0.4
-      (df-num section (str prefix "_attack_ms") "Attack ms")
-      (df-num section (str prefix "_decay_ms") "Decay ms")
+      (df-num section (str prefix "_attack_ms") "Attack")
+      (df-num section (str prefix "_decay_ms") "Decay")
       (df-num section (str prefix "_sustain") "Sustain")
-      (df-num section (str prefix "_release_ms") "Release ms"))
+      (df-num section (str prefix "_release_ms") "Release"))
     (if (= prefix "filter")
       (h-stack :gap 0.4
-        (df-num section "filter_depth" "Env oct")
+        (df-num section "filter_depth" "Env")
         (df-num section "keytrack" "Keytrack")
-        (df-num section "highpass" "Highpass Hz"))
+        (df-num section "highpass" "Highpass"))
       (h-stack :gap 0.4
         (df-num section "velocity_amount" "Velocity")
         (df-num section "pan" "Pan")))))
@@ -313,10 +314,10 @@
       (df-panel 5 17 3.6
         (v-stack :gap 0.1
           (df-source-option 5 "filter_type" "Filter" '("I 12dB" "II 24dB") 6)
-          (h-stack :gap 0.3 (df-log 5 "cutoff" "Cutoff Hz") (df-knob 5 "resonance" "Resonance") (df-log 5 "highpass" "HP Hz"))))
+          (h-stack :gap 0.3 (df-log 5 "cutoff" "Cutoff") (df-knob 5 "resonance" "Resonance") (df-log 5 "highpass" "HP"))))
       (df-panel 6 17 2.9
         (h-stack :gap 0.4 :align :center
-          (df-knob 6 "amp_attack_ms" "Attack ms") (df-log 6 "amp_release_ms" "Release ms")))
+          (df-knob 6 "amp_attack_ms" "Attack") (df-log 6 "amp_release_ms" "Release")))
       (df-panel 4 17 2.9
         (h-stack :gap 0.4 :align :center
-          (df-knob 4 "source_db" "Source dB") (df-knob 4 "volume_db" "Volume dB"))))))
+          (df-knob 4 "source_db" "Source") (df-knob 4 "volume_db" "Volume"))))))

@@ -24,9 +24,10 @@
         (ink (if (eseq.effects.custom-ui-runtime/custom-ui-param-mod-highlighted? p) :white :black)))
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "melt-mod-" name)
       (v-stack :width 8.4 :height 1.15 :gap 0.08
-        (label title :height 0.5 :font-size 8 :v-align :center :color ink :bg :transparent)
+        (label title :height 0.5 :font-size 9.5 :v-align :center :color ink :bg :transparent)
         (number-picker :debug-name (str "melt-num-" name) :width 8.4 :height 0.55
-          :noui true :font-size 8.5 :decimals decimals :step (pow 10 (- 0 decimals))
+          :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
+          :noui true :font-size 10 :decimals decimals :step (pow 10 (- 0 decimals))
           :value (melt-bind name)
           :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
           :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
@@ -60,11 +61,10 @@
   (v-stack :gap 0.2
     (melt-op-envelope prefix)
     (h-stack :gap 0.3
-      (melt-num (str prefix "_attack_ms") "Attack ms" 1)
-      (melt-num (str prefix "_decay_ms") "Decay ms" 1)
+      (melt-num (str prefix "_attack_ms") "Attack" 1)
+      (melt-num (str prefix "_decay_ms") "Decay" 1)
       (melt-num (str prefix "_sustain") "Sustain" 2)
-      (melt-num (str prefix "_release_ms") "Release ms" 1))
-    (melt-caption "Envelope moves both FM depth and ratio.")))
+      (melt-num (str prefix "_release_ms") "Release" 1))))
 
 (def melt-ahd (attack hold decay height)
   (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
@@ -90,13 +90,13 @@
 (def melt-amp-page ()
   (v-stack :gap 0.15
       (melt-ahd "amp_attack_ms" "amp_hold_ms" "amp_decay_ms" 2.5)
-      (melt-caption "Gate off / release from the current level")
+      (melt-caption "Release")
       (melt-release)
       (h-stack :gap 0.3
-        (melt-num "amp_attack_ms" "Attack ms" 1) (melt-num "amp_hold_ms" "Hold ms" 1)
-        (melt-num "amp_decay_ms" "Decay ms" 1) (melt-num "amp_release_ms" "Release ms" 1))
+        (melt-num "amp_attack_ms" "Attack" 1) (melt-num "amp_hold_ms" "Hold" 1)
+        (melt-num "amp_decay_ms" "Decay" 1) (melt-num "amp_release_ms" "Release" 1))
       (h-stack :gap 0.3
-        (melt-num "glide_ms" "Glide ms" 1)
+        (melt-num "glide_ms" "Glide" 1)
         (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-base-note-param)))
           (v-stack :width 8.4 :height 1.15 :gap 0.08
             (label "Note" :height 0.5 :font-size 8 :v-align :center :color :black :bg :transparent)
@@ -142,7 +142,7 @@
     (melt-ahd "fenv_attack_ms" false "fenv_decay_ms" 2)
     (h-stack :gap 0.3
       (melt-num "flt_res_hi" "HP Res" 2) (melt-num "flt_res_lo" "LP Res" 2)
-      (melt-num "fenv_attack_ms" "Attack ms" 1) (melt-num "fenv_decay_ms" "Decay ms" 1))
+      (melt-num "fenv_attack_ms" "Attack" 1) (melt-num "fenv_decay_ms" "Decay" 1))
     (h-stack :gap 0.3
       (melt-num "env_to_base" "Env > Base" 2) (melt-num "env_to_width" "Env > Width" 2)
       (melt-num "keytrack" "Keytrack" 2))))
@@ -207,11 +207,10 @@
                 (melt-write scope "eq_gain_db" (get event :gain))
                 (melt-write scope "eq_q" (get event :q))) false)))
       (h-stack :gap 0.3
-        (melt-num "eq_freq" "EQ Hz" 0) (melt-num "eq_gain_db" "EQ dB" 1)
+        (melt-num "eq_freq" "EQ freq" 0) (melt-num "eq_gain_db" "EQ gain" 1)
         (melt-num "eq_q" "EQ Q" 2))
       (h-stack :gap 0.3
-        (melt-num "am_rate" "AM Hz" 1) (melt-num "am_depth" "AM Depth" 2))
-      (melt-caption "AM > Filter > Sample reduction > EQ > Drive"))))
+        (melt-num "am_rate" "AM rate" 1) (melt-num "am_depth" "AM Depth" 2)))))
 
 (def melt-display ()
   (box :debug-name "melt-display" :width 35.8 :height 9.8 :padding 0.3 :background-color (melt-accent)
@@ -231,18 +230,18 @@
         (h-stack :gap 0.2
           (melt-knob 0 "ratio1" "Ratio" 6.8 2 :log)
           (melt-knob 0 "idx1" "Index" 6.8 2 :linear)
-          (melt-knob 0 "sweep1" "Sweep oct" 6.8 2 :linear)))
+          (melt-knob 0 "sweep1" "Sweep" 6.8 2 :linear)))
       (melt-panel 1 "OP 2" 21.4
         (h-stack :gap 0.2
           (melt-knob 1 "ratio2" "Ratio" 6.8 2 :log)
           (melt-knob 1 "idx2" "Index" 6.8 2 :linear)
-          (melt-knob 1 "sweep2" "Sweep oct" 6.8 2 :linear))))
+          (melt-knob 1 "sweep2" "Sweep" 6.8 2 :linear))))
     (melt-display)
     (v-stack :gap 0.2
       (melt-panel 2 "FILTER" 14.6
         (h-stack :gap 0.2
-          (melt-knob 2 "flt_base" "Base Hz" 7 0 :log)
-          (melt-knob 2 "flt_width" "Width oct" 7 2 :linear)))
+          (melt-knob 2 "flt_base" "Base" 7 0 :log)
+          (melt-knob 2 "flt_width" "Width" 7 2 :linear)))
       (melt-panel 3 "AMP" 14.6
         (h-stack :gap 0.2
           (melt-knob 3 "gain" "Level" 7 2 :linear)

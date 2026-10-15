@@ -101,7 +101,7 @@
 
 (param osc_wave      @default 2    @min 0    @max 4)
 (param pw            @default 0.5  @min 0.05 @max 0.95 @mod true @mod-mode additive)
-(param tune_semi     @default 7    @min -36  @max 36 @mod true @mod-mode additive)
+(param tune_semi     @default 7    @min -36  @max 36 @unit st @mod true @mod-mode additive)
 (param fine_cents    @default 4    @min -100 @max 100 @unit cents)
 (param osc_mode      @default 0    @min 0    @max 3)
 (param interlace_hz  @default 8    @min 0.5  @max 60 @unit Hz)
@@ -116,7 +116,7 @@
 (param glide_ms       @default 0    @min 0   @max 1500 @unit ms)
 
 (param flt_base       @default 140  @min 20  @max 11000 @unit Hz @mod true @mod-mode additive)
-(param flt_width      @default 5.0  @min 0.1 @max 9 @mod true @mod-mode additive)
+(param flt_width      @default 5.0  @min 0.1 @max 9 @unit oct @mod true @mod-mode additive)
 (param flt_res_lo     @default 2.5  @min 0.5 @max 14)
 (param flt_res_hi     @default 0.8  @min 0.5 @max 14)
 (param fenv_attack_ms @default 1    @min 0.2 @max 4000 @unit ms)

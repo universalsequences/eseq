@@ -82,6 +82,7 @@
         (v-stack :width width :height height :gap 0.06
           (label title :v-align :center :height label-height :font-size 8.6 :color ink :bg :transparent)
           (number-picker :width width :height 0.50 :noui true :decimals decimals :step step :font-size 8.0 :value-labels labels
+            :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
@@ -106,6 +107,7 @@
         (h-stack :width width :height 0.8 :gap 0.25 :align :center
           (label title :width (min 5.8 (* width 0.5)) :height 0.8 :font-size 8.6 :color (if ink ink :dim) :bg :transparent :v-align :center)
           (number-picker :width (- width (+ 0.25 (min 5.8 (* width 0.5)))) :height 0.75 :noui true :decimals decimals :font-size 8
+            :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
@@ -212,7 +214,7 @@
       (h-stack :gap 1.4
         (syn-knob (str prefix "_octave") "Octave" 6.2 2.3 3.1 0 "linear")
         (syn-knob second second-title 6.2 2.3 3.1 decimals "linear")
-        (syn-knob (str prefix "_gain_db") "Gain dB" 6.2 2.3 3.1 1 "linear")))))
+        (syn-knob (str prefix "_gain_db") "Gain" 6.2 2.3 3.1 1 "linear")))))
 ;; Osc1 carries its shape-mod source over the matching amount knob.
 (def syn-osc1-row ()
   (syn-panel 25 3.5
@@ -226,7 +228,7 @@
         (syn-knob "osc1_octave" "Octave" 5.6 2.3 3.1 0 "linear")
         (syn-knob "osc1_shape" "Shape" 5.6 2.3 3.1 2 "linear")
         (syn-knob "osc1_shape_amt" "Shape mod" 5.6 2.3 3.1 2 "linear")
-        (syn-knob "osc1_gain_db" "Gain dB" 5.6 2.3 3.1 1 "linear")))))
+        (syn-knob "osc1_gain_db" "Gain" 5.6 2.3 3.1 1 "linear")))))
 (def syn-sources ()
   (v-stack :gap 0.1
     (syn-osc1-row)
@@ -234,7 +236,7 @@
     (syn-panel 25 2.6
       (h-stack :gap 0.35 :align :center
         (syn-source-preview)
-        (syn-knob "noise_gain_db" "Noise dB" 5.2 2.3 2.8 0 "linear")
+        (syn-knob "noise_gain_db" "Level" 5.2 2.3 2.8 0 "linear")
         (v-stack :gap 0.3
           (syn-switch "noise_on" "Noise" 4.1)
           (syn-switch "noise_route" "To Filt" 4.1))))))
@@ -268,10 +270,10 @@
   (v-stack :gap 0.12
     (syn-env-plot section prefix)
     (h-stack :gap 0.8
-      (syn-num (str prefix "_attack") "Attack ms" 7.6 0 (syn-ink))
-      (syn-num (str prefix "_decay") "Decay ms" 7.6 0 (syn-ink))
+      (syn-num (str prefix "_attack") "Attack" 7.6 0 (syn-ink))
+      (syn-num (str prefix "_decay") "Decay" 7.6 0 (syn-ink))
       (syn-num (str prefix "_sustain") "Sustain" 7.6 2 (syn-ink))
-      (syn-num (str prefix "_release") "Release ms" 7.6 0 (syn-ink)))
+      (syn-num (str prefix "_release") "Release" 7.6 0 (syn-ink)))
     (box :width 33.2 :height 0.03 :background-color (syn-ink))
     (h-stack :gap 0.2 :align :end
       (h-stack :width 9.8 :height 1.1 :gap 0.3 :align :center
@@ -297,6 +299,7 @@
         (h-stack :width 10.6 :height 0.8 :gap 0.1 :align :center
           (label title :width 6.0 :height 0.8 :v-align :center :font-size 8.6 :color ink :bg :transparent)
           (number-picker :width 4.4 :height 0.8 :noui true :font-size 8.6 :text-align :right
+            :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
             :decimals decimals :step step
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
@@ -386,9 +389,9 @@
         (syn-option "filter_type" (syn-ftype-options) 8 :fg :instrument-control-bg)
         (syn-inline-num "keytrack" "Key" 6 2))
       (h-stack :gap 1.8
-        (syn-knob "lp_freq" "Cutoff Hz" 8.3 2.15 3.0 0 "log")
+        (syn-knob "lp_freq" "Cutoff" 8.3 2.15 3.0 0 "log")
         (syn-knob "lp_res" "Resonance" 8.3 2.15 3.0 2 "linear")
-        (syn-knob "hp_freq" "HP Hz" 8.3 2.15 3.0 0 "log"))
+        (syn-knob "hp_freq" "HP" 8.3 2.15 3.0 0 "log"))
       (syn-filter-curve))))
 (def syn-lfo-panel ()
   (syn-panel 29.8 3.0
@@ -422,9 +425,9 @@
         (syn-knob "pitch_mod2_amt" "Amount 2" 5.8 2.0 2.8 1 "linear"))
       (h-stack :gap 0.3
         (syn-knob "drift" "Drift" 5.8 2.2 3.0 2 "linear")
-        (syn-knob "volume_db" "Vol dB" 5.8 2.2 3.0 1 "linear"))
+        (syn-knob "volume_db" "Vol" 5.8 2.2 3.0 1 "linear"))
       (h-stack :gap 0.3
-        (syn-num "glide_ms" "Glide ms" 5.8 0 :dim)
+        (syn-num "glide_ms" "Glide" 5.8 0 :dim)
         (syn-num "vel_to_vol" "Velocity" 5.8 2 :dim))
       (eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s (syn-section) 5.8 :fg))))
 (def syn-rate-param (prefix)
