@@ -1819,12 +1819,31 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     // Isotropic pixel size: fwidth(d) grows up to ~1.41x where the corner arc
     // runs diagonally, fattening the stroke there; fwidth(p) does not.
     float pixel = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
+    float border_px = max(in.uniform_a.x, 0.0);
+
+    // Corner cap (uniform_a.z = 1): drawn after the tile's rect-scissored
+    // content to restore what the rounded corners should show. Outside the
+    // outer contour gets the window background (color_a), the border band
+    // the tile fill (color_b) so content never shows through the stroke.
+    if (in.uniform_a.z > 0.5) {
+        float outside = smoothstep(-pixel, pixel, d);
+        float band = smoothstep(-pixel, pixel, d + border_px * pixel);
+        if (band <= 0.002) {
+            discard_fragment();
+        }
+        float band_a = in.color_b.a * band;
+        float outside_a = in.color_a.a * outside;
+        float cap_a = outside_a + band_a * (1.0 - outside_a);
+        float3 cap_rgb = (in.color_a.rgb * outside_a
+            + in.color_b.rgb * band_a * (1.0 - outside_a)) / max(cap_a, 0.0001);
+        return float4(cap_rgb, cap_a);
+    }
+
     float outer_mask = smoothstep(pixel, -pixel, d);
     if (outer_mask <= 0.002) {
         discard_fragment();
     }
 
-    float border_px = max(in.uniform_a.x, 0.0);
     float border_mask = 0.0;
     float fill_mask = outer_mask;
     if (border_px > 0.0) {

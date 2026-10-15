@@ -2697,12 +2697,31 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     // Isotropic pixel size: fwidth(d) grows up to ~1.41x where the corner arc
     // runs diagonally, fattening the stroke there; fwidth(p) does not.
     var pixel: f32 = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
+    var border_px: f32 = max(input.uniform_a.x, 0.0);
+
+    // Corner cap (uniform_a.z = 1): drawn after the tile's rect-scissored
+    // content to restore what the rounded corners should show. Outside the
+    // outer contour gets the window background (color_a), the border band
+    // the tile fill (color_b) so content never shows through the stroke.
+    if (input.uniform_a.z > 0.5) {
+        var outside: f32 = smoothstep(-pixel, pixel, d);
+        var band: f32 = smoothstep(-pixel, pixel, d + border_px * pixel);
+        if (band <= 0.002) {
+            discard;
+        }
+        var band_a: f32 = input.color_b.a * band;
+        var outside_a: f32 = input.color_a.a * outside;
+        var cap_a: f32 = outside_a + band_a * (1.0 - outside_a);
+        var cap_rgb: vec3<f32> = (input.color_a.rgb * outside_a
+            + input.color_b.rgb * band_a * (1.0 - outside_a)) / max(cap_a, 0.0001);
+        return vec4<f32>(cap_rgb, cap_a);
+    }
+
     var outer_mask: f32 = smoothstep(pixel, -pixel, d);
     if (outer_mask <= 0.002) {
         discard;
     }
 
-    var border_px: f32 = max(input.uniform_a.x, 0.0);
     var border_mask: f32 = 0.0;
     var fill_mask: f32 = outer_mask;
     if (border_px > 0.0) {

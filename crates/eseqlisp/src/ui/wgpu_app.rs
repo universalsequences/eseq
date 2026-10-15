@@ -1963,6 +1963,37 @@ impl WgpuAppBackend {
                 }
             }
 
+            // ── Rounded corner caps (content scissor is rectangular) ─────────
+            {
+                let gpu = self.gpu.as_ref().expect("gpu initialized");
+                let cap = gpu
+                    .widget_pipelines
+                    .contains_key("tile-chrome")
+                    .then(|| {
+                        gpu_scene::tile_corner_cap_instance_px(
+                            frame_left_px,
+                            frame_top_px,
+                            frame_width_px,
+                            frame_height_px,
+                            tile.border_radius_px * ui_px_scale,
+                            border_inset_px,
+                            theme::BG(),
+                            tile_bg,
+                            vp_w,
+                            vp_h,
+                        )
+                    })
+                    .flatten();
+                if let Some(instance) = cap {
+                    Self::plan_widget_instances(
+                        &mut plan,
+                        tile_scissor,
+                        "tile-chrome",
+                        std::slice::from_ref(&instance),
+                    );
+                }
+            }
+
             // ── Thin pixel borders (on top of content) ───────────────────────
             if has_multiple_tiles && tile.show_border {
                 let border_color = if tile.is_active {

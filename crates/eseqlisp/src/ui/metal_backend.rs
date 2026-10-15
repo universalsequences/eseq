@@ -5980,6 +5980,33 @@ fragment float4 live_spectrogram_frag(
                     );
                 }
 
+                // ── Rounded corner caps (content scissor is rectangular) ─────
+                if let (Some(tile_chrome_pipeline), Some(instance)) = (
+                    tile_chrome_pipeline.as_ref(),
+                    crate::ui::gpu_scene::tile_corner_cap_instance_px(
+                        frame_left_px,
+                        frame_top_px,
+                        frame_width_px,
+                        frame_height_px,
+                        widget_render::ui_design_px(tile.border_radius_px),
+                        border_inset_px,
+                        theme::BG(),
+                        tile_bg,
+                        vp_w,
+                        vp_h,
+                    ),
+                ) {
+                    enc.setScissorRect(mtl_scissor(tile_scissor));
+                    draw_widget_instances(
+                        &enc,
+                        &self.device,
+                        &mut self.upload_arena,
+                        &mut self.stats,
+                        tile_chrome_pipeline,
+                        std::slice::from_ref(&instance),
+                    );
+                }
+
                 // ── Thin pixel borders (drawn AFTER content, on top) ─────────
                 if has_multiple_tiles && tile.show_border {
                     enc.setScissorRect(mtl_scissor(tile_scissor));

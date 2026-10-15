@@ -1886,6 +1886,34 @@ pub(crate) fn set_tile_border_rim(instance: &mut WidgetInstance, is_active: bool
     instance.uniform_a[1] = if is_active { 1.0 } else { 0.55 };
 }
 
+/// A `tile-chrome` corner cap: tile content is clipped by a rectangular
+/// scissor, so at rounded corners it spills past the curve. Drawn after the
+/// content, the cap repaints `outside` (the window background) beyond the
+/// outer contour and `band` (the tile fill) in the `border_inset_px` band
+/// the content scissor excludes on straight edges. `None` for square tiles.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tile_corner_cap_instance_px(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    radius_px: f32,
+    border_inset_px: f32,
+    outside: Color,
+    band: Color,
+    vp_w: f32,
+    vp_h: f32,
+) -> Option<WidgetInstance> {
+    if radius_px <= 0.0 {
+        return None;
+    }
+    let mut instance = tile_chrome_instance_px(
+        x, y, width, height, radius_px, border_inset_px, outside, band, vp_w, vp_h,
+    )?;
+    instance.uniform_a[2] = 1.0;
+    Some(instance)
+}
+
 // ── Segmenting, z-ordering, offsets ──────────────────────────────────────────
 
 pub(crate) fn full_viewport_scissor(vp_w: f32, vp_h: f32) -> ScissorRect {
@@ -2304,6 +2332,26 @@ mod tests {
             connected_sources: Vec::new(),
             selected_sources: Vec::new(),
         }
+    }
+
+    /// Rounded tiles get a corner cap carrying the window background outside
+    /// and the tile fill in the border band; square tiles need none.
+    #[test]
+    fn corner_cap_only_for_rounded_tiles_and_flags_cap_mode() {
+        let outside = Color::rgba(0.1, 0.1, 0.1, 1.0);
+        let band = Color::rgba(0.3, 0.3, 0.3, 1.0);
+        assert!(tile_corner_cap_instance_px(
+            0.0, 0.0, 200.0, 100.0, 0.0, 1.0, outside, band, 800.0, 600.0,
+        )
+        .is_none());
+        let cap = tile_corner_cap_instance_px(
+            0.0, 0.0, 200.0, 100.0, 16.0, 1.0, outside, band, 800.0, 600.0,
+        )
+        .expect("rounded tile gets a cap");
+        assert_eq!(cap.uniform_a[0], 1.0);
+        assert_eq!(cap.uniform_a[2], 1.0);
+        assert_eq!(cap.color_a, outside.to_rgba());
+        assert_eq!(cap.color_b, band.to_rgba());
     }
 
     /// The selected cable draws over the others, and every cable's input end
