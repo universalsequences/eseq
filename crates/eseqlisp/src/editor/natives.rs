@@ -2323,6 +2323,8 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
             Ok(Value::Bool(true))
         },
     );
+
+    register_theme_editor_natives(runtime);
 }
 
 /// An optional path argument: absent or nil is None, a string is the path.
@@ -2760,4 +2762,315 @@ mod asset_metadata_tests {
         .is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+fn color_value(color: crate::backend::Color) -> Value {
+    Value::List(
+        [color.r, color.g, color.b, color.a]
+            .into_iter()
+            .map(|n| Rc::new(RefCell::new(Value::Number(((n as f64) * 1000.0).round() / 1000.0))))
+            .collect(),
+    )
+}
+
+fn number_args<const N: usize>(args: &[Value], native: &str) -> Result<[f32; N], String> {
+    let mut out = [0.0f32; N];
+    for (index, slot) in out.iter_mut().enumerate() {
+        match args.get(index) {
+            Some(Value::Number(n)) => *slot = *n as f32,
+            _ => return Err(format!("{native} expects {N} numbers")),
+        }
+    }
+    Ok(out)
+}
+
+fn number_list(values: &[f32]) -> Value {
+    Value::List(
+        values
+            .iter()
+            .map(|n| Rc::new(RefCell::new(Value::Number(*n as f64))))
+            .collect(),
+    )
+}
+
+fn string_arg<'a>(args: &'a [Value], index: usize, native: &str) -> Result<&'a str, String> {
+    match args.get(index) {
+        Some(Value::String(text)) => Ok(text),
+        _ => Err(format!("{native} expects a string at argument {}", index + 1)),
+    }
+}
+
+fn slot_key(name: &str) -> String {
+    name.trim_start_matches(':').replace('_', "-")
+}
+
+/// Slot edits from a list of `(name color)` pairs (in order; a later pair
+/// for the same slot wins) or a dict, keeping only parseable colors.
+fn color_edits(value: Option<&Value>, native: &str) -> Result<Vec<(String, crate::backend::Color)>, String> {
+    let mut edits: Vec<(String, crate::backend::Color)> = Vec::new();
+    match value {
+        Some(Value::List(pairs)) => {
+            for pair in pairs {
+                let Value::List(items) = &*pair.borrow() else {
+                    return Err(format!("{native} expects (name color) pairs"));
+                };
+                let (Some(name), Some(color)) = (items.first(), items.get(1)) else {
+                    return Err(format!("{native} expects (name color) pairs"));
+                };
+                let name = match &*name.borrow() {
+                    Value::String(text) | Value::Keyword(text) | Value::Symbol(text) => slot_key(text),
+                    _ => return Err(format!("{native}: a slot name must be a string")),
+                };
+                if let Some(color) = theme::parse_color_value(&color.borrow()) {
+                    edits.retain(|(existing, _)| *existing != name);
+                    edits.push((name, color));
+                }
+            }
+        }
+        Some(Value::Map(map)) => {
+            edits = map
+                .iter()
+                .filter_map(|(name, value)| {
+                    let color = theme::parse_color_value(&value.borrow())?;
+                    Some((slot_key(name), color))
+                })
+                .collect();
+            // HashMap order is arbitrary; appended slots land in a stable order.
+            edits.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        _ => return Err(format!("{native} expects a list of (name color) pairs")),
+    }
+    Ok(edits)
+}
+
+/// Sort key for the "colors in this theme" grid: greys first (dark to
+/// light), then chromatic colors by hue band and lightness.
+fn swatch_order(color: crate::backend::Color) -> (u8, u8, i32) {
+    let [h, s, v] = crate::widget_render::color_picker::rgb_to_hsv(color.r, color.g, color.b);
+    let grey = s < 0.12 || v < 0.08;
+    let band = if grey { 0 } else { 1 + ((h * 12.0).floor() as u8).min(11) };
+    (u8::from(!grey), band, (v * 1000.0) as i32)
+}
+
+fn read_theme_file(path: &str, native: &str) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|error| format!("{native}: {path}: {error}"))
+}
+
+fn register_theme_editor_natives(runtime: &mut Runtime) {
+    runtime.register_native_with_docs(
+        "theme-slots",
+        "(theme-slots [path])",
+        "Every theme color slot in declaration order, as dicts with :name (keyword name without the colon), :color (r g b a), :widget (the widget name when the slot holds one, else nil) and :folder (the name's first dash segment when at least three slots share it, else \"general\"). With a theme file path, each row also has :in-file, true when that file sets the slot. Includes theme maps queued by apply-theme this evaluation.",
+        |args, ctx| {
+            let in_file: Option<std::collections::HashSet<String>> = match args.first() {
+                Some(Value::String(path)) => {
+                    let text = read_theme_file(path, "theme-slots")?;
+                    let dict = crate::ui::theme_file::ThemeDict::scan(&text)
+                        .map_err(|error| format!("theme-slots: {path}: {error}"))?;
+                    Some(dict.names().into_iter().collect())
+                }
+                _ => None,
+            };
+            let theme = ctx.effective_theme();
+            let slots = theme::slot_colors_in(&theme);
+            let prefix = |name: &str| name.split('-').next().unwrap_or(name).to_string();
+            let mut prefix_counts: HashMap<String, usize> = HashMap::new();
+            for (name, _) in &slots {
+                *prefix_counts.entry(prefix(name)).or_default() += 1;
+            }
+            let cell = |value: Value| Rc::new(RefCell::new(value));
+            let rows = slots
+                .into_iter()
+                .map(|(name, color)| {
+                    let widget = theme::named_widget_in(&theme, &name)
+                        .map(Value::String)
+                        .unwrap_or(Value::Nil);
+                    let head = prefix(&name);
+                    let folder = if prefix_counts[&head] >= 3 { head } else { "general".to_string() };
+                    let mut row = HashMap::new();
+                    if let Some(in_file) = &in_file {
+                        row.insert("in-file".to_string(), cell(Value::Bool(in_file.contains(&name))));
+                    }
+                    row.insert("folder".to_string(), cell(Value::String(folder)));
+                    row.insert("name".to_string(), cell(Value::String(name)));
+                    row.insert("color".to_string(), cell(color_value(color)));
+                    row.insert("widget".to_string(), cell(widget));
+                    cell(Value::Map(row))
+                })
+                .collect();
+            Ok(Value::List(rows))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "theme-file-save",
+        "(theme-file-save path edits)",
+        "Write (name color) pairs (or a dict of slot -> color) into the theme file at path, replacing existing values in place (comments and layout are kept) and appending slots the file does not set yet.",
+        |args, _ctx| {
+            let path = string_arg(&args, 0, "theme-file-save")?;
+            let edits = color_edits(args.get(1), "theme-file-save")?;
+            let text = read_theme_file(path, "theme-file-save")?;
+            let out = crate::ui::theme_file::apply_color_edits(&text, &edits)
+                .map_err(|error| format!("theme-file-save: {path}: {error}"))?;
+            std::fs::write(path, out).map_err(|error| format!("theme-file-save: {path}: {error}"))?;
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "theme-file-save-as",
+        "(theme-file-save-as source-path new-path def-name edits)",
+        "Copy the theme file at source-path to new-path (which must not exist) with edits applied, renaming its (def NAME ...) to def-name. edits should carry every slot the copy must pin, so the new theme does not inherit from whichever theme was loaded before it.",
+        |args, _ctx| {
+            let source = string_arg(&args, 0, "theme-file-save-as")?;
+            let target = string_arg(&args, 1, "theme-file-save-as")?;
+            let def_name = string_arg(&args, 2, "theme-file-save-as")?;
+            let edits = color_edits(args.get(3), "theme-file-save-as")?;
+            if Path::new(target).exists() {
+                return Err(format!("theme-file-save-as: {target} already exists"));
+            }
+            let text = read_theme_file(source, "theme-file-save-as")?;
+            let text = crate::ui::theme_file::rename_theme_def(&text, def_name);
+            let out = crate::ui::theme_file::apply_color_edits(&text, &edits)
+                .map_err(|error| format!("theme-file-save-as: {source}: {error}"))?;
+            std::fs::write(target, out)
+                .map_err(|error| format!("theme-file-save-as: {target}: {error}"))?;
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "hsv->rgb",
+        "(hsv->rgb h s v)",
+        "Convert HSV (each 0..1) to a list (r g b), each 0..1.",
+        |args, _ctx| {
+            let [h, s, v] = number_args::<3>(&args, "hsv->rgb")?;
+            Ok(number_list(&crate::widget_render::color_picker::hsv_to_rgb(h, s, v)))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "rgb->hsv",
+        "(rgb->hsv r g b)",
+        "Convert RGB (each 0..1) to a list (h s v), each 0..1. Grey has hue 0.",
+        |args, _ctx| {
+            let [r, g, b] = number_args::<3>(&args, "rgb->hsv")?;
+            Ok(number_list(&crate::widget_render::color_picker::rgb_to_hsv(r, g, b)))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "apply-theme-slots",
+        "(apply-theme-slots pairs)",
+        "Apply a list of (slot-name color) pairs to the live theme, like apply-theme with computed slot names.",
+        |args, ctx| {
+            let edits = color_edits(args.first(), "apply-theme-slots")?;
+            let map = edits
+                .into_iter()
+                .map(|(name, color)| (name, Rc::new(RefCell::new(color_value(color)))))
+                .collect();
+            ctx.apply_theme(Value::Map(map));
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "distinct-colors",
+        "(distinct-colors colors)",
+        "The distinct colors in a list (compared at 8-bit precision, alpha included) as (color count) pairs: greys dark to light, then by hue and lightness.",
+        |args, _ctx| {
+            let Some(Value::List(items)) = args.first() else {
+                return Err("distinct-colors expects a list of colors".to_string());
+            };
+            let mut seen: Vec<(String, crate::backend::Color, usize)> = Vec::new();
+            for item in items {
+                let Some(color) = theme::parse_color_value(&item.borrow()) else {
+                    continue;
+                };
+                let hex = theme::color_hex(color);
+                match seen.iter_mut().find(|(key, _, _)| *key == hex) {
+                    Some(entry) => entry.2 += 1,
+                    None => seen.push((hex, color, 1)),
+                }
+            }
+            seen.sort_by_key(|(_, color, _)| swatch_order(*color));
+            Ok(Value::List(
+                seen.into_iter()
+                    .map(|(_, color, count)| {
+                        Rc::new(RefCell::new(Value::List(vec![
+                            Rc::new(RefCell::new(color_value(color))),
+                            Rc::new(RefCell::new(Value::Number(count as f64))),
+                        ])))
+                    })
+                    .collect(),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "color->hex",
+        "(color->hex color)",
+        "Format a color (r g b [a]) as #rrggbb, with an aa suffix when it is not opaque.",
+        |args, _ctx| {
+            let color = args
+                .first()
+                .and_then(theme::parse_color_value)
+                .ok_or("color->hex expects a color")?;
+            Ok(Value::String(theme::color_hex(color)))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "hex->color",
+        "(hex->color text)",
+        "Parse #rrggbb / #rrggbbaa (the # is optional) into (r g b a), or nil when it is not a hex color.",
+        |args, _ctx| {
+            let Some(Value::String(text)) = args.first() else {
+                return Ok(Value::Nil);
+            };
+            let text = text.trim();
+            let hex = text.strip_prefix('#').unwrap_or(text);
+            if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Ok(Value::Nil);
+            }
+            Ok(theme::parse_color_value(&Value::String(format!("#{hex}")))
+                .map(color_value)
+                .unwrap_or(Value::Nil))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "theme-pick-start",
+        "(theme-pick-start callback)",
+        "Enter inspect mode as a theme pick: hovering a widget shows the theme slots it paints with, and clicking calls (callback groups) with one dict per widget from the clicked one outward, :label and :slots (slot names). Esc cancels.",
+        |args, ctx| {
+            let Some(callback) = args.into_iter().next() else {
+                return Err("theme-pick-start expects a callback".to_string());
+            };
+            ctx.start_theme_pick(callback);
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "show-in-side-pane",
+        "(show-in-side-pane buffer-name)",
+        "Show a buffer in the right-side pane that inspect mode opens source in, creating the pane when it is not open.",
+        |args, ctx| {
+            let name = string_arg(&args, 0, "show-in-side-pane")?;
+            ctx.show_in_side_pane(name.to_string());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "close-window-for",
+        "(close-window-for buffer-name)",
+        "Close the window showing buffer-name, unless it is the only window.",
+        |args, ctx| {
+            let name = string_arg(&args, 0, "close-window-for")?;
+            ctx.close_window_for(name.to_string());
+            Ok(Value::Bool(true))
+        },
+    );
 }

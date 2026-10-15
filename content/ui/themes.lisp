@@ -3,6 +3,25 @@
 (defstate seq-current-theme "mac-osx-dark")
 
 (def seq-theme-registry ()
+  (append (seq-theme-builtin-registry) (seq-theme-discovered)))
+
+;; Theme files in ui/themes/ the list below does not name (the theme
+;; editor's Save As writes them there), offered under their file name.
+(def seq-theme-discovered ()
+  (let ((dir (seq-factory-path "ui/themes"))
+        (known (map |entry| (get entry :file) (seq-theme-builtin-registry))))
+    (if (not (directory? dir))
+      (list)
+      (map |file| (let ((name (substring file 0 (- (len file) 5))))
+                    (dict :name name :curated true :label name
+                          :file (str "@/ui/themes/" file)))
+           (filter |file| (and (string-ends-with? file ".lisp")
+                               (not (reduce (lambda (acc known-file)
+                                              (if (= known-file (str "@/ui/themes/" file)) true acc))
+                                            false known)))
+                   (map |entry| (get entry :name) (list-directory dir)))))))
+
+(def seq-theme-builtin-registry ()
   (list
     (dict :name "mac-osx-dark" :label "macOS Dark" :command "seq-theme-mac-osx-dark" :file "@/ui/themes/mac-osx-dark.lisp")
     (dict :name "mac-osx-light-theme" :label "macOS Light" :command "seq-theme-mac-osx-light" :file "@/ui/themes/mac-osx-light-theme.lisp")

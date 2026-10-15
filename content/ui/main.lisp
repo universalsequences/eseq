@@ -38,6 +38,7 @@
 (import eseq.midi-midimix)
 (import eseq.agent)
 (import eseq.manual)
+(import eseq.theme-editor)
 
 ;; Deliberately command-only for now: Patch Learn has no button in the patch
 ;; editor. Invoke this while the instrument patcher buffer is active.

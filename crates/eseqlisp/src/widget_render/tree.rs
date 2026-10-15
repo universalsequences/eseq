@@ -80,6 +80,9 @@ struct TreeRow {
     label: String,
     detail: Option<String>,
     icon: Option<f32>,
+    /// A color chip drawn in the icon slot (`:swatch`, any color value),
+    /// for rows that stand for a color, such as the theme editor's slots.
+    swatch: Option<Color>,
     /// Trailing glyph at the row's right edge (`:status-icon`), for state
     /// such as "attached" that is not part of the item's identity.
     status_icon: Option<f32>,
@@ -299,6 +302,7 @@ fn flatten_items_inner(
             label,
             detail,
             icon: item_icon_value(&item),
+            swatch: get_item_field(&item, "swatch").and_then(|value| theme::parse_color_value(&value)),
             status_icon: item_status_icon_value(&item),
             badge: item_badge_value(&item),
             compact: item_bool_field(&item, "compact", false),
@@ -1554,7 +1558,7 @@ impl WidgetDefinition for TreeWidget {
             let icon_col = x + 1.55;
             let label_x = if row.is_header {
                 x + 0.8
-            } else if row.icon.is_some() {
+            } else if row.icon.is_some() || row.swatch.is_some() {
                 icon_col + icon_width + 0.55
             } else {
                 x + 2.2
@@ -1573,6 +1577,33 @@ impl WidgetDefinition for TreeWidget {
                 b: 0.0,
                 a: 0.0,
             };
+            if let Some(swatch) = row.swatch {
+                // A square chip (in pixels) with a hairline border so dark
+                // and transparent colors still read against the row.
+                let side_h = icon_height * 0.82;
+                let side_w = side_h * cell_aspect;
+                let chip = Rect {
+                    row: y + (rh - side_h) * 0.5,
+                    col: icon_col + (icon_width - side_w) * 0.5,
+                    width: side_w,
+                    height: side_h,
+                };
+                let line_w = super::ui_design_px(1.0) / _viewport.cell_w.max(1.0);
+                let line_h = super::ui_design_px(1.0) / _viewport.cell_h.max(1.0);
+                prims.push(GpuPrimitive::Rect(super::GpuRectPrimitive {
+                    rect: chip,
+                    color: theme::BORDER_INACTIVE(),
+                }));
+                prims.push(GpuPrimitive::Rect(super::GpuRectPrimitive {
+                    rect: Rect {
+                        row: chip.row + line_h,
+                        col: chip.col + line_w,
+                        width: (chip.width - 2.0 * line_w).max(0.0),
+                        height: (chip.height - 2.0 * line_h).max(0.0),
+                    },
+                    color: swatch,
+                }));
+            }
             if let Some(icon) = row.icon {
                 let icon_rect = Rect {
                     row: y + (rh - icon_height) * 0.5 - 0.08,

@@ -648,6 +648,27 @@ pub fn register_inline_shader(
     });
 }
 
+/// Resolve every keyword in `def`'s shader expression as a theme color, the
+/// way the shader codegen bakes them. Called inside
+/// [`crate::theme::record_slot_reads`], this reports the theme slots the
+/// shader paints with; keywords that are not colors (`:light`, `:color`)
+/// resolve to nothing and are not recorded.
+pub fn resolve_theme_keywords(def: &SdfWidgetDef) {
+    let mut stack = vec![&def.sdf_expr];
+    while let Some(expr) = stack.pop() {
+        match expr {
+            Expression::Keyword(name) => {
+                let _ = crate::theme::named_color(name);
+            }
+            Expression::List(items) | Expression::QuoteList(items) => stack.extend(items.iter()),
+            Expression::Quasiquote(inner)
+            | Expression::Unquote(inner)
+            | Expression::UnquoteSplicing(inner) => stack.push(inner),
+            _ => {}
+        }
+    }
+}
+
 pub fn sdf_widget_def(name: &str) -> Option<Rc<SdfWidgetDef>> {
     SDF_WIDGETS.with(|w| w.borrow().get(name).cloned())
 }

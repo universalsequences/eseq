@@ -905,6 +905,12 @@ pub enum TileOp {
     },
     /// Focus the tile currently showing buffer `name` (no-op when none does).
     SelectWindowFor(String),
+    /// Show buffer `name` in the right-side pane inspect mode opens source
+    /// in, splitting the root to create it when it is not open.
+    ShowInSidePane(String),
+    /// Close the tile currently showing buffer `name` (no-op when none does,
+    /// or when it is the only tile).
+    CloseWindowFor(String),
     SetWindowTabsFor {
         current: String,
         tabs: Vec<LayoutTabSpec>,
@@ -1126,6 +1132,8 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_resize_window: Option<f64>,
     /// Theme map to apply (from `apply-theme` native).
     pub pending_apply_theme: Option<Value>,
+    /// Callback for a requested theme pick (`theme-pick-start`).
+    pub pending_theme_pick: Option<Value>,
     /// Scratch buffers to create with initial text (name, text).
     pub pending_scratch_buffers: Vec<(String, String)>,
 }
@@ -1465,6 +1473,24 @@ impl NativeContext {
 
     // ── Tiling operations ─────────────────────────────────────────────────
 
+    pub fn start_theme_pick(&mut self, callback: Value) {
+        self.shared.borrow_mut().pending_theme_pick = Some(callback);
+    }
+
+    pub fn show_in_side_pane(&mut self, buffer_name: String) {
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::ShowInSidePane(buffer_name));
+    }
+
+    pub fn close_window_for(&mut self, buffer_name: String) {
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::CloseWindowFor(buffer_name));
+    }
+
     pub fn split_window_right(&mut self, buffer_name: Option<String>) {
         self.shared
             .borrow_mut()
@@ -1608,8 +1634,25 @@ impl NativeContext {
         }
     }
 
+    /// Queue a theme map. Several calls before the editor drains the queue
+    /// merge (later keys win), so loading a theme file and then layering
+    /// edits on it in one evaluation applies both.
     pub fn apply_theme(&mut self, map: Value) {
-        self.shared.borrow_mut().pending_apply_theme = Some(map);
+        let mut shared = self.shared.borrow_mut();
+        match (&mut shared.pending_apply_theme, map) {
+            (Some(Value::Map(pending)), Value::Map(next)) => pending.extend(next),
+            (pending, map) => *pending = Some(map),
+        }
+    }
+
+    /// The current theme with any queued `apply-theme` maps folded in: what
+    /// the theme will be once the editor applies them.
+    pub fn effective_theme(&self) -> crate::theme::Theme {
+        let mut theme = crate::theme::current();
+        if let Some(pending) = self.shared.borrow().pending_apply_theme.as_ref() {
+            crate::theme::apply_value_to(&mut theme, pending);
+        }
+        theme
     }
 }
 
@@ -4462,6 +4505,10 @@ impl Runtime {
 
     pub(crate) fn take_pending_set_text_zoom(&mut self) -> Option<f64> {
         self.shared.borrow_mut().pending_set_text_zoom.take()
+    }
+
+    pub(crate) fn take_pending_theme_pick(&mut self) -> Option<Value> {
+        self.shared.borrow_mut().pending_theme_pick.take()
     }
 
     pub(crate) fn take_pending_apply_theme(&mut self) -> Option<Value> {

@@ -789,6 +789,10 @@ pub struct Editor {
     inspect_hover_status: Option<String>,
     inspect_hover_rect: Option<crate::layout::Rect>,
     inspect_source_tile_id: Option<TileId>,
+    /// Set while inspect mode runs as a theme pick (`theme-pick-start`): a
+    /// click reports the slots under the pointer to this callback instead of
+    /// opening source.
+    inspect_theme_pick: Option<Value>,
     #[cfg(test)]
     test_clipboard: Option<String>,
 }
@@ -955,6 +959,7 @@ impl Editor {
             inspect_hover_status: None,
             inspect_hover_rect: None,
             inspect_source_tile_id: None,
+            inspect_theme_pick: None,
             #[cfg(test)]
             test_clipboard: None,
         };
@@ -2125,6 +2130,30 @@ impl Editor {
             .unwrap_or(0);
         let next_idx = (current_idx + 1) % ids.len();
         self.switch_active_tile(ids[next_idx]);
+    }
+
+    /// Close the tile showing `buffer_name`. Refuses to close the last tile.
+    pub fn close_tile_showing_buffer_named(&mut self, buffer_name: &str) -> bool {
+        let Some(tile_id) = self
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == buffer_name)
+            .and_then(|idx| self.tile_root.find_leaf_by_buffer_idx(idx))
+            .map(|leaf| leaf.id)
+        else {
+            return false;
+        };
+        if self.inspect_source_tile_id == Some(tile_id) {
+            self.inspect_source_tile_id = None;
+        }
+        if tile_id == self.active_tile {
+            return self.delete_active_tile();
+        }
+        if self.tile_root.leaf_count() <= 1 || self.tile_root.remove_leaf(tile_id).is_none() {
+            return false;
+        }
+        self.mark_needs_redraw();
+        true
     }
 
     pub fn switch_active_tile_to_buffer_named(&mut self, buffer_name: &str) -> bool {
@@ -5783,6 +5812,7 @@ impl Editor {
 
     pub fn toggle_inspect_mode(&mut self) {
         self.inspect_mode = !self.inspect_mode;
+        self.inspect_theme_pick = None;
         self.inspect_hover_tile_id = None;
         self.inspect_hover_widget_id = None;
         self.inspect_hover_status = None;
@@ -5798,11 +5828,22 @@ impl Editor {
         self.mark_needs_redraw();
     }
 
+    /// Enter inspect mode as a theme pick: hover shows the theme slots each
+    /// widget paints with, a click hands them to `callback`.
+    pub fn start_theme_pick(&mut self, callback: Value) {
+        if !self.inspect_mode {
+            self.toggle_inspect_mode();
+        }
+        self.inspect_theme_pick = Some(callback);
+        self.show_sticky_message("Theme pick: hover an element, click to filter its theme colors (Esc cancels)");
+    }
+
     fn exit_inspect_mode(&mut self) {
         if !self.inspect_mode {
             return;
         }
         self.inspect_mode = false;
+        self.inspect_theme_pick = None;
         self.inspect_hover_tile_id = None;
         self.inspect_hover_widget_id = None;
         self.inspect_hover_status = None;
@@ -5821,6 +5862,9 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
     ) -> bool {
+        if self.inspect_theme_pick.is_some() {
+            return self.update_theme_pick_hover(tile_id, content_col, content_row, precise_col, precise_row);
+        }
         let Some(node) = self.inspect_widget_node_at_tile(
             tile_id,
             content_col,
@@ -5856,6 +5900,97 @@ impl Editor {
         true
     }
 
+    fn update_theme_pick_hover(
+        &mut self,
+        tile_id: TileId,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> bool {
+        // Probing re-builds every widget on the path, so only do it when
+        // the widget under the pointer changes.
+        let hit_id = self
+            .inspect_layout_point(tile_id, content_col, content_row, precise_col, precise_row)
+            .and_then(|(root, row, col)| {
+                let mut path = Vec::new();
+                theme_pick_hit_path(root, row, col, 0.0, &mut path)?;
+                path.last().map(|node| node.widget_id)
+            });
+        if hit_id.is_some()
+            && self.inspect_hover_tile_id == Some(tile_id)
+            && self.inspect_hover_widget_id == hit_id
+        {
+            return true;
+        }
+        let Some((node, groups)) =
+            self.theme_pick_groups_at_tile(tile_id, content_col, content_row, precise_col, precise_row)
+        else {
+            if self.inspect_hover_widget_id.take().is_some() {
+                self.inspect_hover_tile_id = None;
+                self.inspect_hover_status = None;
+                self.inspect_hover_rect = None;
+                self.mark_needs_redraw();
+            }
+            return false;
+        };
+        let summary = groups
+            .iter()
+            .map(|(label, slots)| format!("{label}: {}", slots.join(" ")))
+            .collect::<Vec<_>>()
+            .join("  |  ");
+        self.inspect_hover_tile_id = Some(tile_id);
+        self.inspect_hover_widget_id = Some(node.widget_id);
+        self.inspect_hover_rect = Some(node.rect);
+        self.inspect_hover_status = Some(if summary.is_empty() {
+            format!("Theme pick: {} reads no theme slots", inspect_node_debug_label(&node))
+        } else {
+            format!("Theme pick: {summary}")
+        });
+        self.mark_needs_redraw();
+        true
+    }
+
+    fn handle_theme_pick_click(
+        &mut self,
+        tile_id: TileId,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> bool {
+        let Some((_, groups)) =
+            self.theme_pick_groups_at_tile(tile_id, content_col, content_row, precise_col, precise_row)
+        else {
+            self.show_sticky_message("Theme pick: no widget at pointer");
+            return true;
+        };
+        let Some(callback) = self.inspect_theme_pick.take() else {
+            return true;
+        };
+        self.exit_inspect_mode();
+        let cell = |value: Value| std::rc::Rc::new(std::cell::RefCell::new(value));
+        let groups = Value::List(
+            groups
+                .into_iter()
+                .map(|(label, slots)| {
+                    let mut map = std::collections::HashMap::new();
+                    map.insert("label".to_string(), cell(Value::String(label)));
+                    map.insert(
+                        "slots".to_string(),
+                        cell(Value::List(slots.into_iter().map(|slot| cell(Value::String(slot))).collect())),
+                    );
+                    cell(Value::Map(map))
+                })
+                .collect(),
+        );
+        self.apply_widget_output(Some(crate::widget_render::EventOutput {
+            callback,
+            args: vec![groups],
+        }));
+        true
+    }
+
     fn handle_widget_inspect_click(
         &mut self,
         tile_id: TileId,
@@ -5864,6 +5999,9 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
     ) -> bool {
+        if self.inspect_theme_pick.is_some() {
+            return self.handle_theme_pick_click(tile_id, content_col, content_row, precise_col, precise_row);
+        }
         let Some(node) = self.inspect_widget_node_at_tile(
             tile_id,
             content_col,
@@ -5919,14 +6057,16 @@ impl Editor {
             .then_some(rect)
     }
 
-    fn inspect_widget_node_at_tile(
+    /// The layout subtree a pointer in `tile_id` hits (the open modal's, or
+    /// the tile's whole layout) and the pointer in that layout's coordinates.
+    fn inspect_layout_point(
         &self,
         tile_id: TileId,
         content_col: u16,
         content_row: u16,
         precise_col: f32,
         precise_row: f32,
-    ) -> Option<crate::layout::LayoutNode> {
+    ) -> Option<(&crate::layout::LayoutNode, f32, f32)> {
         let leaf = self.tile_root.find_leaf(tile_id)?;
         let buffer = self.buffers.get(leaf.buffer_idx)?;
         if buffer.view_mode == ViewMode::TextOnly {
@@ -5967,13 +6107,65 @@ impl Editor {
         let layout_row = local_row + leaf.widget_scroll_top + text_scroll_top;
         // While a modal is open, inspect only its subtree — hits must never
         // fall through the panel to the widgets underneath.
-        let (node, scroll_dy) = match modal {
-            Some(modal) => inspect_hit_test_layout(modal, layout_row, layout_col)?,
-            None => inspect_hit_test_layout(layout, layout_row, layout_col)?,
-        };
+        Some((modal.unwrap_or(layout), layout_row, layout_col))
+    }
+
+    fn inspect_widget_node_at_tile(
+        &self,
+        tile_id: TileId,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<crate::layout::LayoutNode> {
+        let (root, layout_row, layout_col) =
+            self.inspect_layout_point(tile_id, content_col, content_row, precise_col, precise_row)?;
+        let (node, scroll_dy) = inspect_hit_test_layout(root, layout_row, layout_col)?;
         let mut node = node.clone();
         node.rect.row -= scroll_dy;
         Some(node)
+    }
+
+    /// Theme pick: the deepest widget under the pointer and every ancestor
+    /// up to the tile root, innermost first, each with the theme slots its
+    /// own paint reads. Widgets that read no slots are left out.
+    fn theme_pick_groups_at_tile(
+        &self,
+        tile_id: TileId,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<(crate::layout::LayoutNode, Vec<(String, Vec<String>)>)> {
+        let (root, layout_row, layout_col) =
+            self.inspect_layout_point(tile_id, content_col, content_row, precise_col, precise_row)?;
+        let mut path = Vec::new();
+        let scroll_dy = theme_pick_hit_path(root, layout_row, layout_col, 0.0, &mut path)?;
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+        let viewport = crate::widget_render::WidgetViewport {
+            cell_w,
+            cell_h,
+            vp_w: 4096.0,
+            vp_h: 4096.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 4096.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let groups = path
+            .iter()
+            .rev()
+            .filter_map(|node| {
+                let slots = crate::widget_render::theme_slots_used_by_node(node, viewport);
+                (!slots.is_empty()).then(|| (inspect_node_debug_label(node), slots))
+            })
+            .collect();
+        let mut hit = (*path.last()?).clone();
+        hit.rect.row -= scroll_dy;
+        Some((hit, groups))
     }
 
     fn inspect_status_for_node(&self, node: &crate::layout::LayoutNode) -> String {
@@ -6027,7 +6219,12 @@ impl Editor {
         source_buffer_idx: usize,
     ) {
         self.buffers[source_buffer_idx].view_mode = ViewMode::TextOnly;
+        self.present_buffer_in_side_pane(source_buffer_id, source_buffer_idx);
+    }
 
+    /// Show a buffer in the right-side pane shared with inspect mode,
+    /// keeping its view mode (a UI buffer stays a UI buffer).
+    fn present_buffer_in_side_pane(&mut self, source_buffer_id: BufferId, source_buffer_idx: usize) {
         if let Some(tile_id) = self.visible_tile_for_buffer_id(source_buffer_id) {
             inspect_debug_log(format!(
                 "source buffer id {source_buffer_id} already visible in tile {tile_id:?}; switching"
@@ -9894,6 +10091,9 @@ impl Editor {
         }
 
         // ── Process tiling operations (in order enqueued) ─────────────────────
+        if let Some(callback) = self.runtime.take_pending_theme_pick() {
+            self.start_theme_pick(callback);
+        }
         for op in self.runtime.take_pending_tile_ops() {
             match op {
                 crate::runtime::TileOp::SplitRight(buf_name) => {
@@ -9962,6 +10162,19 @@ impl Editor {
                 }
                 crate::runtime::TileOp::SelectWindowFor(name) => {
                     self.switch_active_tile_to_buffer_named(&name);
+                }
+                crate::runtime::TileOp::ShowInSidePane(name) => {
+                    match self.buffers.iter().position(|buffer| buffer.name == name) {
+                        Some(idx) => {
+                            let id = self.buffers[idx].id;
+                            self.present_buffer_in_side_pane(id, idx);
+                            self.sync_runtime_context();
+                        }
+                        None => self.minibuffer = Some(format!("No buffer named '{name}'")),
+                    }
+                }
+                crate::runtime::TileOp::CloseWindowFor(name) => {
+                    self.close_tile_showing_buffer_named(&name);
                 }
                 crate::runtime::TileOp::SetWindowBufferFor { current, new_name } => {
                     if !self.swap_buffer_in_tile_showing(&current, &new_name) {
@@ -10845,6 +11058,41 @@ fn inspect_hit_test_layout_impl(
         Some(hit) => Some(hit),
         None => Some((node, scroll_dy)),
     }
+}
+
+/// Root-to-leaf path to the deepest node at (row, col), following the same
+/// overlay and scroll rules as [`inspect_hit_test_layout`]. Returns the
+/// scroll offset applied to the deepest node.
+fn theme_pick_hit_path<'a>(
+    node: &'a crate::layout::LayoutNode,
+    row: f32,
+    col: f32,
+    scroll_dy: f32,
+    path: &mut Vec<&'a crate::layout::LayoutNode>,
+) -> Option<f32> {
+    let overlay = crate::widget_render::is_overlay_panel_widget(&node.widget_type);
+    if !overlay && !rect_contains_point(node.rect, row, col) {
+        return None;
+    }
+    path.push(node);
+    let (child_row, child_dy) = if node.widget_type == "scroll" {
+        let state = crate::widget_render::scroll::get_scroll_state(
+            crate::widget_render::scroll::scroll_state_key(node),
+        );
+        (row + state.offset_y, scroll_dy + state.offset_y)
+    } else {
+        (row, scroll_dy)
+    };
+    for child in node.children.iter().rev() {
+        if let Some(dy) = theme_pick_hit_path(child, child_row, col, child_dy, path) {
+            return Some(dy);
+        }
+    }
+    if overlay {
+        path.pop();
+        return None;
+    }
+    Some(scroll_dy)
 }
 
 fn rect_contains_point(rect: Rect, row: f32, col: f32) -> bool {

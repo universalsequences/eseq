@@ -46527,6 +46527,9 @@ mod mnm_ui_tests;
 
 #[path = "manual_ui_tests.rs"]
 mod manual_ui_tests;
+
+#[path = "theme_editor_ui_tests.rs"]
+mod theme_editor_ui_tests;
 #[path = "customize_ui_tests.rs"]
 mod customize_ui_tests;
 #[path = "command_palette_ui_tests.rs"]

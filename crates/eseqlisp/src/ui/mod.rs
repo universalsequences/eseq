@@ -39,6 +39,7 @@ pub mod presentation_timing;
 pub mod platform;
 pub(crate) mod pointer_input;
 pub mod theme;
+pub mod theme_file;
 pub mod tui;
 pub mod wgsl_shaders;
 pub mod window_chrome;

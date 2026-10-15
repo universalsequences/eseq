@@ -18340,3 +18340,81 @@ fn held_button_shows_pressed_until_drag_off_and_still_clicks_on_mouse_down() {
         "release (inside or out) never adds a click"
     );
 }
+
+/// Theme pick (the theme editor's Pick button): a click reports the theme
+/// slots each widget under the pointer paints with, clicked widget first,
+/// and leaves inspect mode.
+#[test]
+fn theme_pick_click_reports_slots_of_the_clicked_widget_and_its_ancestors() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"(do
+                 (def picked nil)
+                 (effect (box :debug-name "panel" :width 30 :height 6 :background-color :accent
+                           (label "hi" :color :status-ui-fg :font-size 20))))"#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(120, 20);
+    editor
+        .runtime_mut()
+        .eval_str("(theme-pick-start (lambda (groups) (set! picked groups)))")
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    assert!(editor.inspect_mode && editor.inspect_theme_pick.is_some());
+
+    let tile = editor.active_tile;
+    let (col, row, _, _) = editor.tile_content_area(tile, 0).expect("content area");
+    let (precise_col, precise_row) = (col as f32 + 0.5, row as f32 + 0.5);
+    let (hit, groups) = editor
+        .theme_pick_groups_at_tile(tile, col, row, precise_col, precise_row)
+        .expect("a widget under the pointer");
+    assert_eq!(hit.widget_type, "label");
+    assert!(groups[0].1.contains(&"status-ui-fg".to_string()), "{groups:?}");
+    assert!(
+        groups.iter().any(|(_, slots)| slots.contains(&"accent".to_string())),
+        "the panel's background is listed after the label: {groups:?}"
+    );
+
+    editor.handle_theme_pick_click(tile, col, row, precise_col, precise_row);
+    assert!(!editor.inspect_mode && editor.inspect_theme_pick.is_none());
+    let picked = editor.runtime_mut().eval_str("(get (first picked) :slots)").unwrap();
+    assert!(
+        format!("{picked:?}").contains("status-ui-fg"),
+        "callback got the groups: {picked:?}"
+    );
+}
+
+/// A defwidget shader bakes its theme keywords at compile time, so the pick
+/// has to read them off the shader the box names as its `:background`.
+#[test]
+fn theme_pick_reports_theme_keywords_of_a_defwidget_background() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"(do
+                 (defwidget pick-test-pill
+                   :width 1 :height 1
+                   :shader (sdf/fill (sdf/rounded-rect width height 0.5)
+                             (material :color (+ :scene-queued-base :scene-push-base))))
+                 (effect (box :debug-name "pill" :width 30 :height 6 :background "pick-test-pill")))"#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(120, 20);
+    let tile = editor.active_tile;
+    let (col, row, _, _) = editor.tile_content_area(tile, 0).expect("content area");
+    let (_, groups) = editor
+        .theme_pick_groups_at_tile(tile, col, row, col as f32 + 0.5, row as f32 + 0.5)
+        .expect("a widget under the pointer");
+    let slots: Vec<_> = groups.iter().flat_map(|(_, slots)| slots.iter().cloned()).collect();
+    for expected in ["scene-queued-base", "scene-push-base"] {
+        assert!(slots.contains(&expected.to_string()), "{expected} missing: {groups:?}");
+    }
+    assert!(!slots.contains(&"color".to_string()), "material arg keywords are not slots");
+}

@@ -410,6 +410,47 @@ pub fn list_row_fg(selected: bool, base: Color) -> Color {
     if fg.a > 0.0 { fg } else { base }
 }
 
+thread_local! {
+    /// Slot names read while [`record_slot_reads`] runs on this thread.
+    static SLOT_READS: std::cell::RefCell<Option<Vec<&'static str>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Fast gate so the getters on the render path skip the RefCell.
+    static RECORDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[inline]
+fn record_slot_read(field: &'static str) {
+    if !RECORDING.with(std::cell::Cell::get) {
+        return;
+    }
+    SLOT_READS.with(|reads| {
+        if let Ok(mut reads) = reads.try_borrow_mut()
+            && let Some(reads) = reads.as_mut()
+            && !reads.contains(&field)
+        {
+            reads.push(field);
+        }
+    });
+}
+
+/// Run `f` and report which theme slots it read (through a slot getter or a
+/// named color), as keyword names (`button-primary-bg`) in first-read order.
+/// Used by the theme editor's pick mode to ask "what does this widget paint
+/// with": build the widget's primitives inside this.
+pub fn record_slot_reads<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    let previous = SLOT_READS.with(|reads| reads.borrow_mut().replace(Vec::new()));
+    let was_recording = RECORDING.with(|recording| recording.replace(true));
+    let result = f();
+    RECORDING.with(|recording| recording.set(was_recording));
+    let reads = SLOT_READS.with(|reads| std::mem::replace(&mut *reads.borrow_mut(), previous));
+    let names = reads
+        .unwrap_or_default()
+        .into_iter()
+        .map(|field| field.replace('_', "-"))
+        .collect();
+    (result, names)
+}
+
 macro_rules! theme_slots {
     ($(($field:ident, $getter:ident, $default:expr)),+ $(,)?) => {
         pub fn default_theme() -> Theme {
@@ -429,6 +470,15 @@ macro_rules! theme_slots {
         pub fn sync_from_value(value: &Value) {
             let mut theme = current();
             let prev = theme;
+            apply_value_to(&mut theme, value);
+            if theme != prev {
+                set_current(theme);
+            }
+        }
+
+        /// Fold a theme map (as `apply-theme` takes it) into `theme`
+        /// without publishing it.
+        pub fn apply_value_to(theme: &mut Theme, value: &Value) {
             if let Value::Map(map) = value {
                 let mut widgets = theme.widgets.slots();
                 $(
@@ -450,9 +500,14 @@ macro_rules! theme_slots {
                 )+
                 theme.widgets = WidgetSlots::intern(widgets);
             }
-            if theme != prev {
-                set_current(theme);
-            }
+        }
+
+        /// Every color slot of `theme` in declaration order, by its Lisp
+        /// keyword name (`status-ui-bg`).
+        pub fn slot_colors_in(theme: &Theme) -> Vec<(String, Color)> {
+            vec![
+                $((stringify!($field).replace('_', "-"), theme.$field),)+
+            ]
         }
 
         pub fn named_color(name: &str) -> Option<Color> {
@@ -463,14 +518,17 @@ macro_rules! theme_slots {
         pub fn named_color_in(theme: &Theme, name: &str) -> Option<Color> {
             let normalized = normalize_name(name);
             match normalized.as_str() {
-                "primary" => Some(theme.accent),
-                "secondary" => Some(theme.red),
-                "gray" | "grey" => Some(theme.bright_black),
-                "dim" => Some(theme.dim),
-                "dimmer" => Some(theme.dimmer),
+                "primary" => { record_slot_read("accent"); Some(theme.accent) }
+                "secondary" => { record_slot_read("red"); Some(theme.red) }
+                "gray" | "grey" => { record_slot_read("bright_black"); Some(theme.bright_black) }
+                "dim" => { record_slot_read("dim"); Some(theme.dim) }
+                "dimmer" => { record_slot_read("dimmer"); Some(theme.dimmer) }
                 "transparent" | "none" => Some(Color::rgba(0.0, 0.0, 0.0, 0.0)),
                 $(
-                    stringify!($field) => Some(theme.$field),
+                    stringify!($field) => {
+                        record_slot_read(stringify!($field));
+                        Some(theme.$field)
+                    }
                 )+
                 _ => None,
             }
@@ -479,6 +537,7 @@ macro_rules! theme_slots {
         $(
             #[allow(non_snake_case)]
             pub fn $getter() -> Color {
+                record_slot_read(stringify!($field));
                 current().$field
             }
         )+
@@ -1570,7 +1629,12 @@ pub fn parse_widget_value(value: &Value) -> Option<String> {
 /// The widget theme slot `name` (a keyword such as `instrument-group-bg`)
 /// is painted with, if it holds one.
 pub fn named_widget(name: &str) -> Option<String> {
-    let widgets = current().widgets;
+    named_widget_in(&current(), name)
+}
+
+/// [`named_widget`] against an explicit theme.
+pub fn named_widget_in(theme: &Theme, name: &str) -> Option<String> {
+    let widgets = theme.widgets;
     if widgets == WidgetSlots::NONE {
         return None;
     }
@@ -1653,14 +1717,19 @@ fn parse_hex_color(hex: &str) -> Option<Color> {
     }
 }
 
-fn color_to_value(color: Color) -> Value {
-    Value::String(format!(
+/// `#rrggbb`, with an `aa` suffix when the color is not opaque.
+pub fn color_hex(color: Color) -> String {
+    format!(
         "#{:02x}{:02x}{:02x}{}",
         to_u8(color.r),
         to_u8(color.g),
         to_u8(color.b),
         alpha_suffix(color.a)
-    ))
+    )
+}
+
+fn color_to_value(color: Color) -> Value {
+    Value::String(color_hex(color))
 }
 
 fn alpha_suffix(alpha: f32) -> String {

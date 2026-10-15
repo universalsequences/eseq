@@ -505,6 +505,7 @@ fn is_widget_name(name: &str) -> bool {
             | "tree"
             | "xy-pad"
             | "automation-lane"
+            | "color-picker"
     )
 }
 

@@ -67,6 +67,7 @@ pub mod wavetable_viewer;
 pub(crate) mod wgsl;
 pub mod wrap;
 pub mod xy_pad;
+pub mod color_picker;
 pub mod automation_lane;
 
 pub use focus_decoration::{FocusCornerStyle, FocusDecoration};
@@ -1392,6 +1393,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &tree::TREE_WIDGET,
     &tree::TREE_ROW_BG_WIDGET,
     &xy_pad::XY_PAD_WIDGET,
+    &color_picker::COLOR_PICKER_WIDGET,
     &automation_lane::AUTOMATION_LANE_WIDGET,
 ];
 
@@ -1975,6 +1977,37 @@ pub fn widget_primitives_for_node(
         });
     }
     primitives
+}
+
+/// The theme slots `node`'s own paint reads (not its children's), found by
+/// building its primitives uncached with slot reads recorded. Overlay
+/// primitives the build pushes (an open dropdown menu) are discarded so the
+/// probe never paints.
+pub fn theme_slots_used_by_node(node: &LayoutNode, viewport: WidgetViewport) -> Vec<String> {
+    let pending_overlay = drain_overlay_primitives();
+    let (_, slots) = crate::theme::record_slot_reads(|| {
+        build_widget_primitives_for_node(node, viewport);
+        // Shaders bake theme keywords at compile time, so their reads never
+        // happen at paint time: resolve the keywords of every defwidget this
+        // node draws with (its own type, or one named by a prop such as
+        // `:background "queued-scene-pill-bg"`).
+        let shader_names = std::iter::once(node.widget_type.as_str()).chain(
+            node.props.values().filter_map(|value| match value {
+                Value::String(name) => Some(name.as_str()),
+                _ => None,
+            }),
+        );
+        for name in shader_names {
+            if let Some(def) = sdf_widget::sdf_widget_def(name) {
+                sdf_widget::resolve_theme_keywords(&def);
+            }
+        }
+    });
+    drain_overlay_primitives();
+    for primitive in pending_overlay {
+        push_overlay_primitive(primitive);
+    }
+    slots
 }
 
 /// Paint directly for owners that already retain and validate their inputs.
