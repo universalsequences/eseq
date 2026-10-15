@@ -155,7 +155,7 @@
 (def sampler-param-knob (p key)
   (pc/instrument-param-mod-wrapper p (str key "-mod-wrapper")
     (subtree :key (str key (pc/instrument-param-control-key-mode p))
-      (knob-number :label (substring (get p :name) 0 12)
+      (knob-number :label (substring (sampler-param-display-name p) 0 12)
         :value (pc/fx-param-value p)
         :min (pc/instrument-param-control-min p) :max (pc/instrument-param-control-max p) :decimals 1
         :base-value (pc/instrument-param-base-value-prop p)
@@ -276,10 +276,14 @@
 (def sampler-base-note-param? (p)
   (= (get p :control) "base-note"))
 
+;; The Beats `decay` param fades each warp slice out from its transient (0 =
+;; slices sustain); the bare name read like an amp-envelope control.
 (def sampler-param-display-name (p)
   (if (sampler-base-note-param? p)
     "base"
-    (get p :name)))
+    (if (= (get p :name) "decay")
+      "slice decay"
+      (get p :name))))
 
 ;; Slice mode replaces the old `slice` dropdown: the Classic/Slice switch left
 ;; of the waveform is the only way to reach it. The mode is a two-value enum
