@@ -35,6 +35,11 @@
 ; - SEED presses fire a grain even while latched.
 ; - Stereo only (no mono 2x-time mode); no gate output.
 
+; Nearly all of Beads is feedback (the buffer, the grains reading it, the
+; reverb): one sample loop keeps its values in registers instead of passing
+; them between many small loops.
+(scalar-loop)
+
 (def in_l (in 1 @name left))
 (def in_r (in 2 @name right))
 (def mod1 (in 3 @name mod1 @modulator 1))
@@ -99,6 +104,11 @@
 (defmacro smooth-step (x)
   (* x x (- 3 (* 2 x))))
 
+; Control-rate value: computed on the first sample of each 0.25 ms module
+; block (`block_start`), held for the rest, as the module's control code does.
+(defmacro control (x)
+  (latch (sample-gate block_start x) block_start))
+
 ; A one-pole coefficient `c` set for a rate k times slower than the host's.
 (defmacro rate-coef (c k)
   (gswitch (eq k 1) c (- 1 (pow (- 1 c) (/ 1 k)))))
@@ -162,7 +172,8 @@
   (peek ulaw_table (gswitch (lt pv 0) (- 127 code) (- 255 code)) 0))
 
 (defmacro store-q (x qsel)
-  (gswitch (eq qsel 1) (block-gate dirty (mu-law x)) (gswitch (eq qsel 4) (q16 x) (q12 x))))
+  (gswitch (eq qsel 1) (block-gate dirty (mu-law x))
+           (gswitch (eq qsel 4) (block-gate hifi (q16 x)) (block-gate twelve_bit (q12 x)))))
 
 ; ----------------------------------------------------------------------
 ; buffer reads
@@ -173,8 +184,9 @@
 (defmacro ring-read (wp len di frac)
   ; (wp + di + len - 1) mod len, for 0 <= di < 2 len
   (def i0 (+ wp di len -1))
-  ; (floor: a no-op that lets the compiler skip peek's interpolating reads)
-  (def i (floor (- i0 (* len (+ (gte i0 len) (gte i0 (* 2 len)))))))
+  ; (floor and clip are no-ops here: they let the compiler skip peek's
+  ; interpolating reads and its wrap)
+  (def i (clip (floor (- i0 (* len (+ (gte i0 len) (gte i0 (* 2 len)))))) 0 kCapacity))
   (def l0 (peek ring i 0))
   (def l1 (peek ring (+ i 1) 0))
   (def l2 (peek ring (+ i 2) 0))
@@ -243,8 +255,9 @@
   (def regular (lt density 0.48))
   (def rand_mode (gt density 0.52))
   (def taps (* (not regular) (not rand_mode)))
-  (def f_regular (* max_f (beads-semi-ratio (* density -192))))
-  (def f_random (* 0.5 max_f (beads-semi-ratio (* (- 1 density) -192))))
+  ; (TriggerGenerator takes its frequency once per block)
+  (def f_regular (control (* max_f (beads-semi-ratio (* density -192)))))
+  (def f_random (control (* 0.5 max_f (beads-semi-ratio (* (- 1 density) -192)))))
   (def ratio0 (gswitch rand_mode (read-history h_ratio) 1))
   (def f (clip (* (gswitch rand_mode f_random f_regular) ratio0) 0.000001 0.25))
   (def ph1 (+ (read-history h_phase) (* gate f)))
@@ -266,11 +279,11 @@
 ; ======================================================================
 
 ; Envelope stage: 1 attack, 2 sustain, 3 release, 0 done (zeroed memory =
-; idle). A new grain renders in the sample it starts. Returns (left right
-; steal_rank fade_rank active): steal_rank is the remaining time (idle grains
-; far below any playing one); fade_rank is the same but pushed past every
-; grain once this grain has taken a safety-fade slot since the last new grain.
-(defmacro beads-grain (k victim fade_target trig fade_hit fade_len run frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 n_dur n_ia n_is n_ir n_sm n_frac)
+; idle). A new grain renders in the sample it starts. `rank` is the grain's
+; place in the stealing order, kept in a history the scheduler reads: 0 while
+; idle, else its remaining time + 1 (so idle grains come first, as the module's
+; sorted list has them). Returns (left right).
+(defmacro beads-grain (k rank victim fade_target trig fade_hit fade_len run frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 n_dur n_ia n_is n_ir n_sm n_frac)
   (make-history h_di)
   (make-history h_df)
   (make-history h_stage)
@@ -278,96 +291,90 @@
   (make-history h_vval)
   (make-history h_vdec)
   (make-history h_rem)
-  (make-history h_faded)
   (def start (* trig (eq victim k)))
-  (def speed (latch n_speed start))
-  (def g00 (latch n_g00 start))
-  (def g01 (latch n_g01 start))
-  (def g10 (latch n_g10 start))
-  (def g11 (latch n_g11 start))
-  (def ia (latch n_ia start))
-  (def is (latch n_is start))
-  (def ir (latch n_ir start))
-  (def sm (latch n_sm start))
-  ; Start(): the state this sample renders from.
-  (def di0 (gswitch start n_di (read-history h_di)))
-  (def df0 (gswitch start n_df (read-history h_df)))
-  (def st0 (gswitch start 1 (read-history h_stage)))
-  (def eph0 (gswitch start (* n_ia n_frac) (read-history h_eph)))
-  (def vval0 (gswitch start 1 (read-history h_vval)))
-  (def vdec0 (gswitch start 0 (read-history h_vdec)))
-  (def rem0 (gswitch start (floor n_dur) (read-history h_rem)))
-  (def act (* run (not (or (eq st0 0) (lte vval0 0)))))
-  ; FadeOut(): after a new grain, the grains next in line to be stolen fade
-  ; out (idle ones take a slot as a no-op, as in the module's sorted list).
-  (def fade_mine (* fade_hit (eq fade_target k)))
-  (def faded (gswitch trig 0 (gswitch fade_mine 1 (read-history h_faded))))
-  (write-history h_faded faded)
-  (def fading (* fade_mine (gt rem0 fade_len) act))
-  (def vdec1 (gswitch fading (/ 1 fade_len) vdec0))
-  (def rem1 (gswitch fading (floor (* vval0 fade_len)) rem0))
-  ; Render(): move the head (1024ths of a sample), stop at either end.
-  (def nf (+ df0 (- (gswitch frozen 0 1024) speed)))
-  (def carry (floor (/ nf 1024)))
-  (def di1 (+ di0 carry))
-  (def cross (or (lt di1 0) (gte di1 len)))
-  (def di (gswitch cross 0 di1))
-  (def df (gswitch cross 0 (- nf (* carry 1024))))
-  (def st (gswitch cross 0 st0))
-  (def d (gswitch (gte di (* len 0.5)) (- (- len di) (/ df 1024)) (+ di (/ df 1024))))
-  (def head_fade (smooth-step (min (/ d zone) 1)))
-  (def (sl sr) (ring-read wp len di (/ df 1024)))
-  ; grain envelope
-  (def in_attack (eq st 1))
-  (def tt (gswitch in_attack eph0 (- 1 eph0)))
-  (def base (gswitch in_attack tt (* tt tt tt tt)))
-  (def ev (* (not (eq st 0)) (gswitch (eq st 2) 1 (+ base (* (- (smooth-step tt) base) sm)))))
-  (def inc (selector st ia is ir))
-  (def ph2 (+ eph0 inc))
-  (def wrapst (gte ph2 1))
-  (def eph_adv (gswitch wrapst (* (/ (- ph2 1) inc) (selector st is ir 0)) ph2))
-  (def st_adv (gswitch wrapst (% (+ st 1) 4) st))
-  (def vval_adv (- vval0 vdec1))
-  (def done1 (or (eq st_adv 0) (lte vval_adv 0)))
-  (def rem_adv (gswitch done1 0 (- rem1 1)))
-  (write-history h_di (gswitch act di di0))
-  (write-history h_df (gswitch act df df0))
-  (write-history h_stage (gswitch act st_adv st0))
-  (write-history h_eph (gswitch act eph_adv eph0))
-  (write-history h_vval (gswitch act vval_adv vval0))
-  (write-history h_vdec vdec1)
-  (write-history h_rem (gswitch act rem_adv rem1))
-  (def y (* act head_fade ev (max vval_adv 0)))
-  (def idle (gswitch act done1 (or (eq st0 0) (lte vval0 0))))
-  (def steal_rank (gswitch idle -1000000000 (gswitch act rem_adv rem1)))
-  (tuple (* y (+ (* sl g00) (* sr g01)))
-         (* y (+ (* sl g10) (* sr g11)))
-         steal_rank
-         (gswitch faded 1000000000 steal_rank)
-         (not idle)))
+  ; A grain renders while it plays and from the sample it starts in; the rest
+  ; of the time its state holds and it costs nothing.
+  (def go (* run (or start (gt (read-history rank) 0))))
+  (sample-gate go
+    (do
+      (def speed (latch n_speed start))
+      (def g00 (latch n_g00 start))
+      (def g01 (latch n_g01 start))
+      (def g10 (latch n_g10 start))
+      (def g11 (latch n_g11 start))
+      (def ia (latch n_ia start))
+      (def is (latch n_is start))
+      (def ir (latch n_ir start))
+      (def sm (latch n_sm start))
+      ; Start(): the state this sample renders from.
+      (def di0 (gswitch start n_di (read-history h_di)))
+      (def df0 (gswitch start n_df (read-history h_df)))
+      (def st0 (gswitch start 1 (read-history h_stage)))
+      (def eph0 (gswitch start (* n_ia n_frac) (read-history h_eph)))
+      (def vval0 (gswitch start 1 (read-history h_vval)))
+      (def vdec0 (gswitch start 0 (read-history h_vdec)))
+      (def rem0 (gswitch start (floor n_dur) (read-history h_rem)))
+      ; FadeOut(): after a new grain, the grains next in line to be stolen
+      ; fade out.
+      (def fading (* fade_hit (eq fade_target k) (gt rem0 fade_len)))
+      (def vdec1 (gswitch fading (/ 1 fade_len) vdec0))
+      (def rem1 (gswitch fading (floor (* vval0 fade_len)) rem0))
+      ; Render(): move the head (1024ths of a sample), stop at either end.
+      (def nf (+ df0 (- (gswitch frozen 0 1024) speed)))
+      (def carry (floor (/ nf 1024)))
+      (def di1 (+ di0 carry))
+      (def cross (or (lt di1 0) (gte di1 len)))
+      (def di (gswitch cross 0 di1))
+      (def df (gswitch cross 0 (- nf (* carry 1024))))
+      (def st (gswitch cross 0 st0))
+      (def d (gswitch (gte di (* len 0.5)) (- (- len di) (/ df 1024)) (+ di (/ df 1024))))
+      (def head_fade (smooth-step (min (/ d zone) 1)))
+      (def (sl sr) (ring-read wp len di (/ df 1024)))
+      ; grain envelope
+      (def in_attack (eq st 1))
+      (def tt (gswitch in_attack eph0 (- 1 eph0)))
+      (def base (gswitch in_attack tt (* tt tt tt tt)))
+      (def ev (* (not (eq st 0)) (gswitch (eq st 2) 1 (+ base (* (- (smooth-step tt) base) sm)))))
+      (def inc (selector st ia is ir))
+      (def ph2 (+ eph0 inc))
+      (def wrapst (gte ph2 1))
+      (def eph_adv (gswitch wrapst (* (/ (- ph2 1) inc) (selector st is ir 0)) ph2))
+      (def st_adv (gswitch wrapst (% (+ st 1) 4) st))
+      (def vval_adv (- vval0 vdec1))
+      (def done1 (or (eq st_adv 0) (lte vval_adv 0)))
+      (def rem_adv (gswitch done1 0 (- rem1 1)))
+      (write-history h_di di)
+      (write-history h_df df)
+      (write-history h_stage st_adv)
+      (write-history h_eph eph_adv)
+      (write-history h_vval vval_adv)
+      (write-history h_vdec vdec1)
+      (write-history h_rem rem_adv)
+      (write-history rank (gswitch done1 0 (+ rem_adv 1)))
+      (def y (* head_fade ev (max vval_adv 0)))
+      (tuple (* y (+ (* sl g00) (* sr g01)))
+             (* y (+ (* sl g10) (* sr g11)))))))
 
-; Lower remaining time wins; ties keep the lower index.
+; Lower value wins; ties keep the lower index. (value index) pairs.
 (defmacro argmin2 (ra ia rb ib)
   (def take_b (lt rb ra))
   (tuple (gswitch take_b rb ra) (gswitch take_b ib ia)))
 
-; Four grains: returns (left right min_steal steal_index min_fade fade_index
-; active_count).
-(defmacro grain-quad (k0 victim fade_target trig fade_hit fade_len run frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 n_dur n_ia n_is n_ir n_sm n_frac)
-  (def (l0 r0 s0 f0 a0) (beads-grain k0 victim fade_target trig fade_hit fade_len run frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 n_dur n_ia n_is n_ir n_sm n_frac))
-  (def (l1 r1 s1 f1 a1) (beads-grain (+ k0 1) victim fade_target trig fade_hit fade_len run frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 n_dur n_ia n_is n_ir n_sm n_frac))
-  (def (l2 r2 s2 f2 a2) (beads-grain (+ k0 2) victim fade_target trig fade_hit fade_len run frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 n_dur n_ia n_is n_ir n_sm n_frac))
-  (def (l3 r3 s3 f3 a3) (beads-grain (+ k0 3) victim fade_target trig fade_hit fade_len run frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 n_dur n_ia n_is n_ir n_sm n_frac))
-  (def (sa sia) (argmin2 s0 k0 s1 (+ k0 1)))
-  (def (sb sib) (argmin2 s2 (+ k0 2) s3 (+ k0 3)))
-  (def (sq siq) (argmin2 sa sia sb sib))
-  (def (fa fia) (argmin2 f0 k0 f1 (+ k0 1)))
-  (def (fb fib) (argmin2 f2 (+ k0 2) f3 (+ k0 3)))
-  (def (fq fiq) (argmin2 fa fia fb fib))
-  (tuple (+ l0 l1 l2 l3) (+ r0 r1 r2 r3) sq siq fq fiq (+ a0 a1 a2 a3)))
+(defmacro argmin4 (k0 a b c d)
+  (def (ab iab) (argmin2 a k0 b (+ k0 1)))
+  (def (cd icd) (argmin2 c (+ k0 2) d (+ k0 3)))
+  (argmin2 ab iab cd icd))
 
-; Index of the smallest of eight (value index) pairs.
-(defmacro argmin8 (m0 i0 m1 i1 m2 i2 m3 i3 m4 i4 m5 i5 m6 i6 m7 i7)
+; Index of the smallest of 32 values.
+(defmacro argmin32 (v0 v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24 v25 v26 v27 v28 v29 v30 v31)
+  (def (m0 i0) (argmin4 0 v0 v1 v2 v3))
+  (def (m1 i1) (argmin4 4 v4 v5 v6 v7))
+  (def (m2 i2) (argmin4 8 v8 v9 v10 v11))
+  (def (m3 i3) (argmin4 12 v12 v13 v14 v15))
+  (def (m4 i4) (argmin4 16 v16 v17 v18 v19))
+  (def (m5 i5) (argmin4 20 v20 v21 v22 v23))
+  (def (m6 i6) (argmin4 24 v24 v25 v26 v27))
+  (def (m7 i7) (argmin4 28 v28 v29 v30 v31))
   (def (m01 i01) (argmin2 m0 i0 m1 i1))
   (def (m23 i23) (argmin2 m2 i2 m3 i3))
   (def (m45 i45) (argmin2 m4 i4 m5 i5))
@@ -376,6 +383,15 @@
   (def (m47 i47) (argmin2 m45 i45 m67 i67))
   (def (m07 i07) (argmin2 m03 i03 m47 i47))
   i07)
+
+; A grain's safety-fade rank: past every grain once it has taken a fade slot
+; since the last new grain.
+(defmacro fade-rank (rank faded)
+  (gswitch (read-history faded) 1000000000 (read-history rank)))
+
+; A grain's faded flag: cleared by a new grain, set when it takes a fade slot.
+(defmacro update-faded (faded k ft)
+  (write-history faded (gswitch g_trig 0 (gswitch (* fade_hit (eq ft k)) 1 (read-history faded)))))
 
 ; ======================================================================
 ; delay mode: DelayController play heads and tap envelopes
@@ -714,59 +730,95 @@
   (def y0 (gswitch started (read-history h_y0) 0.5))
   (def y1 (gswitch started (read-history h_y1) (* coef 0.25)))
   (def count (+ (read-history h_count) 1))
-  (def step (eq (% count 32) 0))
+  (def step (gte count 32))
   (def y0n (gswitch step (- (* coef y0) y1) y0))
   (def y1n (gswitch step y0 y1))
   (write-history h_started 1)
-  (write-history h_count (% count 32))
+  (write-history h_count (gswitch step 0 count))
   (write-history h_y0 y0n)
   (write-history h_y1 y1n)
   (+ y1n 0.5))
 
-; FxEngine allpass: tail read of an L-sample line (L - 1 samples back), L in
-; samples at the media rate (`k` host samples each).
-(defmacro reverb-allpass (x len g k)
-  (make-history h)
-  (def r (delay (read-history h) (- (* len k) 2) @max-delay 16384))
-  (def w (fx-store (+ x (* r g))))
-  (write-history h w)
-  (+ (* w (- g)) r))
+; FxEngine (beads/dsp/fx/fx_engine.h): one delay memory holding every line
+; of the reverb, one write pointer that steps back a sample per sample, and an
+; accumulator. Lines sit at fixed bases in `rv_mem`; positions are scaled by
+; the media rate `k` (whole host samples), spaced for k up to 2.
+(def kRvSize 65536)
+(def rv_mem (tensor @shape [65536 1]))
+(make-history h_rv_wp)
+(def rv_wp_next (+ (clip (read-history h_rv_wp) 0 (- kRvSize 1)) (- kRvSize 1)))
+(def rv_wp (gswitch (gte rv_wp_next kRvSize) (- rv_wp_next kRvSize) rv_wp_next))
+(write-history h_rv_wp rv_wp)
 
-; Griesinger/Dattorro reverb (beads/dsp/fx/reverb.h).
-(defmacro beads-reverb (l r rv_mix rt klp k)
-  (make-history h_del1)
-  (make-history h_del2)
+; Memory position `offset` samples into the lines (offset in [0, kRvSize)).
+(defmacro rv-at (offset)
+  (def j (+ rv_wp offset))
+  (gswitch (gte j kRvSize) (- j kRvSize) j))
+
+; Write (int16 storage, DataType<FORMAT_16_BIT>::Compress).
+(defmacro rv-write (base offset x)
+  (poke rv_mem (rv-at (+ base offset)) 0 (fx-store x)))
+
+; Read(line TAIL): the oldest sample of a `len`-sample line.
+(defmacro rv-tail (base len)
+  (rv-interp base (+ len -1)))
+
+; Interpolate(line, offset): a fractional read `offset` samples into a line.
+(defmacro rv-interp (base offset)
+  (peek rv_mem (rv-at (+ base offset)) 0))
+
+; Read(line TAIL, g) then WriteAllPass(line, -g) on accumulator `acc`.
+(defmacro rv-allpass (acc base len g)
+  (def tail (rv-tail base len))
+  (def a1 (+ acc (* tail g)))
+  (seq (rv-write base 0 a1) (+ (* a1 (- g)) tail)))
+
+; Griesinger/Dattorro reverb (beads/dsp/fx/reverb.h), on the FxEngine above.
+(defmacro beads-reverb (l r rv_mix rt klp k_media)
   (make-history h_lp1)
+  ; (k is 1, 1.5 or 2; bounding it bounds every position)
+  (def k (clip k_media 1 2))
   (make-history h_lp2)
-  (def input_gain (* 0.2 (- 1 (* 0.333 rt))))
+  ; (set_mix / set_time once per block)
+  (def input_gain (control (* 0.2 (- 1 (* 0.333 rt)))))
   (def send_sqrt (* rv_mix (- 2 rv_mix)))
-  (def send (* send_sqrt (- 2 send_sqrt) input_gain))
-  (def rv_wet (/ 0.4 input_gain))
-  (def rv_dry (* (- 1 rv_mix) (+ 1 rv_mix)))
+  (def send (control (* send_sqrt (- 2 send_sqrt) input_gain)))
+  (def rv_wet (control (/ 0.4 input_gain)))
+  (def rv_dry (control (* (- 1 rv_mix) (+ 1 rv_mix))))
   (def lp (rate-coef klp k))
-  (def lfo1 (fx-lfo 0.5))
-  (def lfo2 (fx-lfo 0.3))
-  ; The first diffuser's in-loop smear (read at 10 + 80 lfo, rewrite at 100)
-  ; makes its tail read come from 59 + 80 lfo samples back: a 60 + 80 lfo line.
-  (def ap_a (reverb-allpass (* (+ l r) send) (+ 60 (* 80 lfo1)) 0.625 k))
-  (def ap_b (reverb-allpass ap_a 214 0.625 k))
-  (def ap_c (reverb-allpass ap_b 319 0.625 k))
-  (def apout (reverb-allpass ap_c 527 0.625 k))
-  ; loop half 1: apout + del2 tail -> lp -> 2 allpasses -> del1
-  (def d2 (delay (read-history h_del2) (- (* (+ 6261 (* 50 lfo2)) k) 1) @max-delay 16384))
+  (def lfo1 (clip (fx-lfo 0.5) 0 1))
+  (def lfo2 (clip (fx-lfo 0.3) 0 1))
+  ; line lengths (Reserve<...>) at the media rate; bases leave room for k = 2
+  (def L1 (floor (* 150 k)))
+  (def L2 (floor (* 214 k)))
+  (def L3 (floor (* 319 k)))
+  (def L4 (floor (* 527 k)))
+  (def L5 (floor (* 2182 k)))
+  (def L6 (floor (* 2690 k)))
+  (def L8 (floor (* 2525 k)))
+  (def L9 (floor (* 2197 k)))
+  ; Smear AP1 inside the loop: read at 10 + 80 lfo, rewrite at 100.
+  (def smear (rv-interp 0 (* (+ 10 (* 80 lfo1)) k)))
+  (def smeared (seq (rv-write 0 (floor (* 100 k)) smear) 0))
+  ; Diffuse through 4 allpasses.
+  (def ap_a (rv-allpass (+ smeared (* (+ l r) send)) 0 L1 0.625))
+  (def ap_b (rv-allpass ap_a 300 L2 0.625))
+  (def ap_c (rv-allpass ap_b 728 L3 0.625))
+  (def apout (rv-allpass ap_c 1366 L4 0.625))
+  ; Main loop, half 1: del2 -> lp -> 2 allpasses -> del1.
+  (def d2 (rv-interp 30610 (* (+ 6261 (* 50 lfo2)) k)))
   (def lp1 (+ (read-history h_lp1) (* lp (- (+ apout (* d2 rt)) (read-history h_lp1)))))
   (write-history h_lp1 lp1)
-  (def wet_l (reverb-allpass (reverb-allpass lp1 2182 -0.625 k) 2690 0.625 k))
-  (def del1_in (fx-store wet_l))
-  (write-history h_del1 del1_in)
-  ; loop half 2: apout + del1 tail -> lp -> 2 allpasses -> del2
-  (def d1 (delay del1_in (* (+ 4460 (* 40 lfo1)) k) @max-delay 16384))
+  (def wet_l (rv-allpass (rv-allpass lp1 2420 L5 -0.625) 6784 L6 0.625))
+  (def wet_l_w (seq (rv-write 12164 0 wet_l) wet_l))
+  ; half 2: del1 -> lp -> 2 allpasses -> del2.
+  (def d1 (rv-interp 12164 (* (+ 4460 (* 40 lfo1)) k)))
   (def lp2 (+ (read-history h_lp2) (* lp (- (+ apout (* d1 rt)) (read-history h_lp2)))))
   (write-history h_lp2 lp2)
-  (def wet_r (reverb-allpass (reverb-allpass lp2 2525 0.625 k) 2197 -0.625 k))
-  (write-history h_del2 (fx-store wet_r))
-  (tuple (+ (* l rv_dry) (* wet_l rv_wet))
-         (+ (* r rv_dry) (* wet_r rv_wet))))
+  (def wet_r (rv-allpass (rv-allpass lp2 21166 L8 0.625) 26216 L9 -0.625))
+  (def wet_r_w (seq (rv-write 30610 0 wet_r) wet_r))
+  (tuple (+ (* l rv_dry) (* wet_l_w rv_wet))
+         (+ (* r rv_dry) (* wet_r_w rv_wet))))
 
 ; WowAndFlutter (dirty tape): a 0.23 Hz wow whose rate and depth wander,
 ; plus a 1.99 Hz flutter, modulating a short delay; then a one-pole.
@@ -812,6 +864,11 @@
 (def qsel (+ quality_i 1))
 (def hifi (eq quality_i 3))
 (def dirty (eq quality_i 0))
+; (static per call: only the selected medium's arithmetic runs)
+(def lofi (not hifi))
+(def tape (lt quality_i 2))
+(def vintage (eq quality_i 2))
+(def twelve_bit (* lofi (not dirty)))
 ; granular core rate, processor (codec) rate, buffer frames at the core rate
 (def g_sr (selector qsel 24000 24000 32000 48000))
 (def p_sr (selector qsel 24000 48000 32000 48000))
@@ -837,10 +894,10 @@
 (write-history h_in_peak in_peak)
 ; GainControl soft clipping: off for the digital media, on for dirty tape,
 ; level-dependent for clean tape.
-(def soft_amt (selector qsel 1 (clip (* 2 (- (/ (* (min in_peak 0.9) in_gain) 0.9) 0.75)) 0 1) 0 0))
+(def soft_amt (selector qsel 1 (block-gate (eq quality_i 1) (clip (* 2 (- (/ (* (min in_peak 0.9) in_gain) 0.9) 0.75)) 0 1)) 0 0))
 (defmacro gain-stage (x)
   (def g (* x in_gain))
-  (def soft (- (* 0.95 (soft-clip (+ g 0.05))) 0.05))
+  (def soft (block-gate tape (- (* 0.95 (soft-clip (+ g 0.05))) 0.05)))
   (def hard (clip g -1 1))
   (+ hard (* (- soft hard) soft_amt)))
 (def x_l (gain-stage in_l))
@@ -851,8 +908,8 @@
 ; signal is band-limited and quantized too); clean tape resamples the wet path.
 (def codec_l (gswitch (eq quality_i 1) x_l band_l))
 (def codec_r (gswitch (eq quality_i 1) x_r band_r))
-(def dry_l (selector qsel (block-gate dirty (mu-law codec_l)) codec_l (/ (trunc (* codec_l 4096)) 4096) codec_l))
-(def dry_r (selector qsel (block-gate dirty (mu-law codec_r)) codec_r (/ (trunc (* codec_r 4096)) 4096) codec_r))
+(def dry_l (selector qsel (block-gate dirty (mu-law codec_l)) codec_l (block-gate vintage (/ (trunc (* codec_l 4096)) 4096)) codec_l))
+(def dry_r (selector qsel (block-gate dirty (mu-law codec_r)) codec_r (block-gate vintage (/ (trunc (* codec_r 4096)) 4096)) codec_r))
 
 ; ======================================================================
 ; seed, freeze, granular <-> delay mode
@@ -881,7 +938,8 @@
 (make-history h_bcount)
 (def bcount (read-history h_bcount))
 (def block_start (eq bcount 0))
-(write-history h_bcount (% (+ bcount 1) block_size))
+(def bcount_next (+ bcount 1))
+(write-history h_bcount (gswitch (gte bcount_next block_size) 0 bcount_next))
 
 ; Delay mode once SIZE passes 0.99 (back below 0.98), through a 1.5 s
 ; transition whose middle 1.5 s silences the wet signal.
@@ -924,8 +982,8 @@
 (def prev_r (read-history h_prev_r))
 (def fb_gain (gswitch hifi (* fb fb max_fb_gain) (* fb (/ max_fb_gain soft_limit_gain))))
 (def (lim_in_l lim_in_r) (beads-limiter (+ band_l (* prev_l fb_gain)) (+ band_r (* prev_r fb_gain)) (/ 1 samplerate) 0.95 kg))
-(def s_l (gswitch hifi lim_in_l (+ band_l (* fb (- (soft-clip (* lim_in_l soft_limit_gain)) band_l)))))
-(def s_r (gswitch hifi lim_in_r (+ band_r (* fb (- (soft-clip (* lim_in_r soft_limit_gain)) band_r)))))
+(def s_l (gswitch hifi lim_in_l (block-gate lofi (+ band_l (* fb (- (soft-clip (* lim_in_l soft_limit_gain)) band_l))))))
+(def s_r (gswitch hifi lim_in_r (block-gate lofi (+ band_r (* fb (- (soft-clip (* lim_in_r soft_limit_gain)) band_r))))))
 
 ; FREEZE: record the first 256 frozen frames into the tail; after it, fade
 ; from the tail back into the live input.
@@ -937,7 +995,7 @@
 (def tail_wp0 (read-history h_tail_wp))
 (def tw_start (gswitch (* frozen (not was_frozen)) 0 tail_wp0))
 (def tail_rec (* frozen (lt tw_start 256)))
-(def tail_slot (gswitch tail_rec tw_start 256))
+(def tail_slot (clip (gswitch tail_rec tw_start 256) 0 256))
 (def tail_dur (gswitch (* was_frozen (gt tail_wp0 0)) tail_wp0 (read-history h_tail_dur)))
 (write-history h_tail_dur tail_dur)
 (def tail_on (* (not frozen) (gt tail_wp0 0)))
@@ -948,7 +1006,7 @@
 (write-history h_tail_wp (gswitch frozen (+ tw_start tail_rec) (- tail_wp0 tail_on)))
 
 (make-history h_wp)
-(def wp0 (min (read-history h_wp) (- len 1)))
+(def wp0 (clip (read-history h_wp) 0 (- len 1)))
 (def store_l (store-q w_l qsel))
 (def store_r (store-q w_r qsel))
 (def slot (gswitch frozen kScratch wp0))
@@ -971,16 +1029,38 @@
 (def (clock_trig clock_frac regularity) (grain-clock gate gate_onset seed_onset latched density_v u0))
 (def g_trig (* clock_trig granular))
 
-; Grain scheduler state: the next victim (least remaining time, chosen at
-; the end of the previous sample), the active count, the inter-grain gap, and
-; the safety-fade target (next in line among grains not yet faded).
-(make-history h_victim)
-(make-history h_fade_target)
-(make-history h_active)
+; Grain scheduler state: each grain's stealing rank and faded flag (read at
+; the start of a sample, they are the module's sorted grain list after the
+; previous sample), the inter-grain gap, and the fade step.
+(make-history rk0) (make-history rk1) (make-history rk2) (make-history rk3)
+(make-history rk4) (make-history rk5) (make-history rk6) (make-history rk7)
+(make-history rk8) (make-history rk9) (make-history rk10) (make-history rk11)
+(make-history rk12) (make-history rk13) (make-history rk14) (make-history rk15)
+(make-history rk16) (make-history rk17) (make-history rk18) (make-history rk19)
+(make-history rk20) (make-history rk21) (make-history rk22) (make-history rk23)
+(make-history rk24) (make-history rk25) (make-history rk26) (make-history rk27)
+(make-history rk28) (make-history rk29) (make-history rk30) (make-history rk31)
+(make-history fd0) (make-history fd1) (make-history fd2) (make-history fd3)
+(make-history fd4) (make-history fd5) (make-history fd6) (make-history fd7)
+(make-history fd8) (make-history fd9) (make-history fd10) (make-history fd11)
+(make-history fd12) (make-history fd13) (make-history fd14) (make-history fd15)
+(make-history fd16) (make-history fd17) (make-history fd18) (make-history fd19)
+(make-history fd20) (make-history fd21) (make-history fd22) (make-history fd23)
+(make-history fd24) (make-history fd25) (make-history fd26) (make-history fd27)
+(make-history fd28) (make-history fd29) (make-history fd30) (make-history fd31)
 (make-history h_interval)
 (make-history h_fade_step)
-(def victim (read-history h_victim))
-(def fade_target (read-history h_fade_target))
+; The grain a new grain replaces: the least remaining time (idle first).
+(def victim
+  (sample-gate g_trig
+    (argmin32 (read-history rk0) (read-history rk1) (read-history rk2) (read-history rk3)
+              (read-history rk4) (read-history rk5) (read-history rk6) (read-history rk7)
+              (read-history rk8) (read-history rk9) (read-history rk10) (read-history rk11)
+              (read-history rk12) (read-history rk13) (read-history rk14) (read-history rk15)
+              (read-history rk16) (read-history rk17) (read-history rk18) (read-history rk19)
+              (read-history rk20) (read-history rk21) (read-history rk22) (read-history rk23)
+              (read-history rk24) (read-history rk25) (read-history rk26) (read-history rk27)
+              (read-history rk28) (read-history rk29) (read-history rk30) (read-history rk31))))
 (def interval0 (read-history h_interval))
 (write-history h_interval (gswitch g_trig 1 (+ interval0 granular)))
 
@@ -1001,72 +1081,142 @@
 (write-history h_fade_step fade_step)
 (def fade_hit (* (gte fade_step 1) (lte fade_step 4)))
 (def fade_len (max (selector fade_step fade0 fade1 fade2 fade3) 1))
+; The next grain to fade (least remaining time among grains not yet faded),
+; and the faded flags; both only change on a new grain or a fade step.
+(def fade_target
+  (sample-gate (or g_trig fade_hit)
+    (do
+      (def ft (argmin32 (fade-rank rk0 fd0) (fade-rank rk1 fd1) (fade-rank rk2 fd2) (fade-rank rk3 fd3)
+                         (fade-rank rk4 fd4) (fade-rank rk5 fd5) (fade-rank rk6 fd6) (fade-rank rk7 fd7)
+                         (fade-rank rk8 fd8) (fade-rank rk9 fd9) (fade-rank rk10 fd10) (fade-rank rk11 fd11)
+                         (fade-rank rk12 fd12) (fade-rank rk13 fd13) (fade-rank rk14 fd14) (fade-rank rk15 fd15)
+                         (fade-rank rk16 fd16) (fade-rank rk17 fd17) (fade-rank rk18 fd18) (fade-rank rk19 fd19)
+                         (fade-rank rk20 fd20) (fade-rank rk21 fd21) (fade-rank rk22 fd22) (fade-rank rk23 fd23)
+                         (fade-rank rk24 fd24) (fade-rank rk25 fd25) (fade-rank rk26 fd26) (fade-rank rk27 fd27)
+                         (fade-rank rk28 fd28) (fade-rank rk29 fd29) (fade-rank rk30 fd30) (fade-rank rk31 fd31)))
+      (update-faded fd0 0 ft)
+      (update-faded fd1 1 ft)
+      (update-faded fd2 2 ft)
+      (update-faded fd3 3 ft)
+      (update-faded fd4 4 ft)
+      (update-faded fd5 5 ft)
+      (update-faded fd6 6 ft)
+      (update-faded fd7 7 ft)
+      (update-faded fd8 8 ft)
+      (update-faded fd9 9 ft)
+      (update-faded fd10 10 ft)
+      (update-faded fd11 11 ft)
+      (update-faded fd12 12 ft)
+      (update-faded fd13 13 ft)
+      (update-faded fd14 14 ft)
+      (update-faded fd15 15 ft)
+      (update-faded fd16 16 ft)
+      (update-faded fd17 17 ft)
+      (update-faded fd18 18 ft)
+      (update-faded fd19 19 ft)
+      (update-faded fd20 20 ft)
+      (update-faded fd21 21 ft)
+      (update-faded fd22 22 ft)
+      (update-faded fd23 23 ft)
+      (update-faded fd24 24 ft)
+      (update-faded fd25 25 ft)
+      (update-faded fd26 26 ft)
+      (update-faded fd27 27 ft)
+      (update-faded fd28 28 ft)
+      (update-faded fd29 29 ft)
+      (update-faded fd30 30 ft)
+      (update-faded fd31 31 ft)
+      ft)))
 
-; ---- new-grain parameters (latched by whichever grain starts) ----
-(def g_time (randomized-unit time_v time_amt u1 u2))
-(def g_size (randomized-unit size_v size_amt u3 u4))
-(def g_shape (randomized-unit shape_v shape_amt u5 u6))
-(def g_semis (randomized-semis pitch_v pitch_amt u7 u8))
+; ---- new-grain parameters (latched by whichever grain starts; only
+; computed on the sample a grain starts) ----
+(def (n_di n_df n_speed g_dur n_ia n_is n_ir n_sm n_g00 n_g01 n_g10 n_g11)
+  (sample-gate g_trig
+    (do
+      (def g_time (randomized-unit time_v time_amt u1 u2))
+      (def g_size (randomized-unit size_v size_amt u3 u4))
+      (def g_shape (randomized-unit shape_v shape_amt u5 u6))
+      (def g_semis (randomized-semis pitch_v pitch_amt u7 u8))
 
-; ComputeGrainDuration: V-shaped around size = 1/3 (reversed below), 4 s down
-; to 4 s / 512.
-(def reverse (lt g_size 0.3333333))
-(def shortness (min 1 (* 1.025 (gswitch reverse
-                                         (* g_size 3 (- 2 (* g_size 3)))
-                                         (- 1 (* 1.5 (- g_size 0.3333333)))))))
-(def g_speed (* (gswitch reverse -1 1) (beads-semi-ratio g_semis)))
-(def g_dur0 (* (beads-semi-ratio (* shortness -108)) 4 samplerate))
+      ; ComputeGrainDuration: V-shaped around size = 1/3 (reversed below), 4 s down
+      ; to 4 s / 512.
+      (def reverse (lt g_size 0.3333333))
+      (def shortness (min 1 (* 1.025 (gswitch reverse
+                                               (* g_size 3 (- 2 (* g_size 3)))
+                                               (- 1 (* 1.5 (- g_size 0.3333333)))))))
+      (def g_speed (* (gswitch reverse -1 1) (beads-semi-ratio g_semis)))
+      (def g_dur0 (* (beads-semi-ratio (* shortness -108)) 4 samplerate))
 
-; DelayGrain::Start: keep the grain clear of the record head.
-(def consumption (- g_speed (gswitch frozen 0 1)))
-(def g_delay0 (- (+ (* g_time (- len (* 2 safety))) safety) (* clock_frac consumption)))
-(def g_dur (gswitch (eq consumption 0) g_dur0 (min g_dur0 (/ len (abs consumption)))))
-(def g_delay (gswitch (gt consumption 0) (max g_delay0 (* g_dur consumption))
-                      (gswitch (lt consumption 0) (min g_delay0 (+ len (* g_dur consumption))) g_delay0)))
-(def n_di (floor g_delay))
-(def n_df (floor (* (- g_delay n_di) 1024)))
-(def n_speed (trunc (* g_speed 1024)))
+      ; DelayGrain::Start: keep the grain clear of the record head.
+      (def consumption (- g_speed (gswitch frozen 0 1)))
+      (def g_delay0 (- (+ (* g_time (- len (* 2 safety))) safety) (* clock_frac consumption)))
+      (def g_dur (gswitch (eq consumption 0) g_dur0 (min g_dur0 (/ len (abs consumption)))))
+      (def g_delay (gswitch (gt consumption 0) (max g_delay0 (* g_dur consumption))
+                            (gswitch (lt consumption 0) (min g_delay0 (+ len (* g_dur consumption))) g_delay0)))
+      (def n_di (floor g_delay))
+      (def n_df (floor (* (- g_delay n_di) 1024)))
+      (def n_speed (trunc (* g_speed 1024)))
 
-; GrainEnvelope::Start
-(def env_sustain (max (- 1 (* 3 g_shape)) 0))
-(def shape_s (* (- g_shape 0.33333333) 1.5))
-(def env_attack (gswitch (lt shape_s 0) 0 (gswitch (lt shape_s 0.5) (* shape_s shape_s shape_s 4) shape_s)))
-(def env_release (* (- 1 env_attack) (- 1 env_sustain)))
-(def n_ia (/ 1 (max (* g_dur env_attack) (* 0.0005 samplerate (+ 1 (* 3 env_sustain))))))
-(def n_is (/ 1 (max (* g_dur env_sustain) 2)))
-(def n_ir (/ 1 (max (* g_dur env_release) (* 0.010 samplerate))))
-(def n_sm (gswitch (lt env_attack 0.5) (* 2 env_attack) (- 2 (* 2 env_attack))))
+      ; GrainEnvelope::Start
+      (def env_sustain (max (- 1 (* 3 g_shape)) 0))
+      (def shape_s (* (- g_shape 0.33333333) 1.5))
+      (def env_attack (gswitch (lt shape_s 0) 0 (gswitch (lt shape_s 0.5) (* shape_s shape_s shape_s 4) shape_s)))
+      (def env_release (* (- 1 env_attack) (- 1 env_sustain)))
+      (def n_ia (/ 1 (max (* g_dur env_attack) (* 0.0005 samplerate (+ 1 (* 3 env_sustain))))))
+      (def n_is (/ 1 (max (* g_dur env_sustain) 2)))
+      (def n_ir (/ 1 (max (* g_dur env_release) (* 0.010 samplerate))))
+      (def n_sm (gswitch (lt env_attack 0.5) (* 2 env_attack) (- 2 (* 2 env_attack))))
 
-; ComputeGrainAmplitudeAndPan, then DelayGrain's stereo pan matrix
-; (destination x source, roughly equal power).
-(def n_active (+ (read-history h_active) 1))
-(def spread (min 1 (+ (abs time_amt) (abs size_amt) (abs shape_amt) (abs pitch_amt) (- 1 regularity))))
-(def g_pan (+ 0.5 (* (- u9 0.5) (min (* 0.5 n_active spread u10) 1))))
-(def g_amp (/ 1 (sqrt n_active)))
-(def pan_left (lt g_pan 0.5))
-(def pan_p (gswitch pan_left (* 2 g_pan) (* 2 (- 1 g_pan))))
-(def pan_near (* pan_p (- 2 pan_p) g_amp))
-(def pan_far (* (- 1 pan_p) (+ 1 pan_p) g_amp))
-(def n_g00 (gswitch pan_left g_amp pan_near))
-(def n_g01 (gswitch pan_left pan_far 0))
-(def n_g10 (gswitch pan_left 0 pan_far))
-(def n_g11 (gswitch pan_left pan_near g_amp))
+      ; ComputeGrainAmplitudeAndPan, then DelayGrain's stereo pan matrix
+      ; (destination x source, roughly equal power).
+      (def n_active (+ 1 (gt (read-history rk0) 0) (gt (read-history rk1) 0) (gt (read-history rk2) 0) (gt (read-history rk3) 0) (gt (read-history rk4) 0) (gt (read-history rk5) 0) (gt (read-history rk6) 0) (gt (read-history rk7) 0) (gt (read-history rk8) 0) (gt (read-history rk9) 0) (gt (read-history rk10) 0) (gt (read-history rk11) 0) (gt (read-history rk12) 0) (gt (read-history rk13) 0) (gt (read-history rk14) 0) (gt (read-history rk15) 0) (gt (read-history rk16) 0) (gt (read-history rk17) 0) (gt (read-history rk18) 0) (gt (read-history rk19) 0) (gt (read-history rk20) 0) (gt (read-history rk21) 0) (gt (read-history rk22) 0) (gt (read-history rk23) 0) (gt (read-history rk24) 0) (gt (read-history rk25) 0) (gt (read-history rk26) 0) (gt (read-history rk27) 0) (gt (read-history rk28) 0) (gt (read-history rk29) 0) (gt (read-history rk30) 0) (gt (read-history rk31) 0)))
+      (def spread (min 1 (+ (abs time_amt) (abs size_amt) (abs shape_amt) (abs pitch_amt) (- 1 regularity))))
+      (def g_pan (+ 0.5 (* (- u9 0.5) (min (* 0.5 n_active spread u10) 1))))
+      (def g_amp (/ 1 (sqrt n_active)))
+      (def pan_left (lt g_pan 0.5))
+      (def pan_p (gswitch pan_left (* 2 g_pan) (* 2 (- 1 g_pan))))
+      (def pan_near (* pan_p (- 2 pan_p) g_amp))
+      (def pan_far (* (- 1 pan_p) (+ 1 pan_p) g_amp))
+      (def n_g00 (gswitch pan_left g_amp pan_near))
+      (def n_g01 (gswitch pan_left pan_far 0))
+      (def n_g10 (gswitch pan_left 0 pan_far))
+      (def n_g11 (gswitch pan_left pan_near g_amp))
+      (tuple n_di n_df n_speed g_dur n_ia n_is n_ir n_sm n_g00 n_g01 n_g10 n_g11))))
 
-(def (gl0 gr0 gs0 gsi0 gf0 gfi0 ga0) (grain-quad 0 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
-(def (gl1 gr1 gs1 gsi1 gf1 gfi1 ga1) (grain-quad 4 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
-(def (gl2 gr2 gs2 gsi2 gf2 gfi2 ga2) (grain-quad 8 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
-(def (gl3 gr3 gs3 gsi3 gf3 gfi3 ga3) (grain-quad 12 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
-(def (gl4 gr4 gs4 gsi4 gf4 gfi4 ga4) (grain-quad 16 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
-(def (gl5 gr5 gs5 gsi5 gf5 gfi5 ga5) (grain-quad 20 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
-(def (gl6 gr6 gs6 gsi6 gf6 gfi6 ga6) (grain-quad 24 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
-(def (gl7 gr7 gs7 gsi7 gf7 gfi7 ga7) (grain-quad 28 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
-
-(write-history h_victim (argmin8 gs0 gsi0 gs1 gsi1 gs2 gsi2 gs3 gsi3 gs4 gsi4 gs5 gsi5 gs6 gsi6 gs7 gsi7))
-(write-history h_fade_target (argmin8 gf0 gfi0 gf1 gfi1 gf2 gfi2 gf3 gfi3 gf4 gfi4 gf5 gfi5 gf6 gfi6 gf7 gfi7))
-(write-history h_active (+ ga0 ga1 ga2 ga3 ga4 ga5 ga6 ga7))
-
-(def grains_l (+ gl0 gl1 gl2 gl3 gl4 gl5 gl6 gl7))
-(def grains_r (+ gr0 gr1 gr2 gr3 gr4 gr5 gr6 gr7))
+(def (gl0 gr0) (beads-grain 0 rk0 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl1 gr1) (beads-grain 1 rk1 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl2 gr2) (beads-grain 2 rk2 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl3 gr3) (beads-grain 3 rk3 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl4 gr4) (beads-grain 4 rk4 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl5 gr5) (beads-grain 5 rk5 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl6 gr6) (beads-grain 6 rk6 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl7 gr7) (beads-grain 7 rk7 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl8 gr8) (beads-grain 8 rk8 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl9 gr9) (beads-grain 9 rk9 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl10 gr10) (beads-grain 10 rk10 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl11 gr11) (beads-grain 11 rk11 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl12 gr12) (beads-grain 12 rk12 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl13 gr13) (beads-grain 13 rk13 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl14 gr14) (beads-grain 14 rk14 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl15 gr15) (beads-grain 15 rk15 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl16 gr16) (beads-grain 16 rk16 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl17 gr17) (beads-grain 17 rk17 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl18 gr18) (beads-grain 18 rk18 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl19 gr19) (beads-grain 19 rk19 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl20 gr20) (beads-grain 20 rk20 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl21 gr21) (beads-grain 21 rk21 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl22 gr22) (beads-grain 22 rk22 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl23 gr23) (beads-grain 23 rk23 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl24 gr24) (beads-grain 24 rk24 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl25 gr25) (beads-grain 25 rk25 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl26 gr26) (beads-grain 26 rk26 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl27 gr27) (beads-grain 27 rk27 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl28 gr28) (beads-grain 28 rk28 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl29 gr29) (beads-grain 29 rk29 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl30 gr30) (beads-grain 30 rk30 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def (gl31 gr31) (beads-grain 31 rk31 victim fade_target g_trig fade_hit fade_len granular frozen wp len zone n_di n_df n_speed n_g00 n_g01 n_g10 n_g11 g_dur n_ia n_is n_ir n_sm clock_frac))
+(def grains_l (+ gl0 gl1 gl2 gl3 gl4 gl5 gl6 gl7 gl8 gl9 gl10 gl11 gl12 gl13 gl14 gl15 gl16 gl17 gl18 gl19 gl20 gl21 gl22 gl23 gl24 gl25 gl26 gl27 gl28 gl29 gl30 gl31))
+(def grains_r (+ gr0 gr1 gr2 gr3 gr4 gr5 gr6 gr7 gr8 gr9 gr10 gr11 gr12 gr13 gr14 gr15 gr16 gr17 gr18 gr19 gr20 gr21 gr22 gr23 gr24 gr25 gr26 gr27 gr28 gr29 gr30 gr31))
 
 ; ======================================================================
 ; delay mode: DelayController and MultitapDelay
@@ -1075,13 +1225,6 @@
 ; ======================================================================
 
 
-(def (td0 tg0 td1 tg1 td2 tg2 td3 tg3 td4 tg4 td5 tg5 td6 tg6 td7 tg7)
-  (delay-controller delay_mode (not latched) (* seed_onset delay_mode) frozen started density_v time_v time_amt shape_v shape_amt u1 u2 len min_delay))
-
-; Delay-mode transposition: PITCH plus a random-walk vibrato from its
-; attenuverter.
-; (ParameterInterpolator: per-block ramps that only move in delay mode, so
-; the first delay block ramps from the module's initial 0.)
 (defmacro block-ramp (target run)
   (make-history h_state)
   (make-history h_from)
@@ -1093,33 +1236,52 @@
   (def v (+ from (* (- to from) (/ (+ bcount 1) block_size))))
   (write-history h_state (gswitch (* run (eq bcount (- block_size 1))) v (read-history h_state)))
   v)
-(def tap_speed (block-ramp (beads-semi-ratio (+ pitch_v (* pitch_amt 24 (random-walk 0.2 pitch_amt u4 0)))) delay_mode))
-(def pg (clip (* 100 (- (abs (- tap_speed 1)) 0.01)) 0 1))
-(def (tl0 tr0) (multitap wp len td0 tg0 pg tap_speed delay_mode window))
-(def (tl1 tr1) (multitap wp len td1 tg1 pg tap_speed delay_mode window))
-(def (tl2 tr2) (multitap wp len td2 tg2 pg tap_speed delay_mode window))
-(def (tl3 tr3) (multitap wp len td3 tg3 pg tap_speed delay_mode window))
-(def (tl4 tr4) (multitap wp len td4 tg4 pg tap_speed delay_mode window))
-(def (tl5 tr5) (multitap wp len td5 tg5 pg tap_speed delay_mode window))
-(def (tl6 tr6) (multitap wp len td6 tg6 pg tap_speed delay_mode window))
-(def (tl7 tr7) (multitap wp len td7 tg7 pg tap_speed delay_mode window))
-(def taps_l (+ tl0 tl1 tl2 tl3 tl4 tl5 tl6 tl7))
-(def taps_r (+ tr0 tr1 tr2 tr3 tr4 tr5 tr6 tr7))
-
-; Bandwidth (SIZE's attenuverter): low-pass to the left, high-pass to the right.
+; Delay-mode transposition: PITCH plus a random-walk vibrato from its
+; attenuverter; bandwidth: SIZE's attenuverter. (ParameterInterpolator:
+; per-block ramps that only move in delay mode, so the first delay block ramps
+; from the module's initial 0.)
+(def tap_vibrato (random-walk 0.2 pitch_amt u4 0))
+(def tap_speed (block-ramp (sample-gate block_start (beads-semi-ratio (+ pitch_v (* pitch_amt 24 tap_vibrato)))) delay_mode))
 (def bandwidth (block-ramp (clip (* 0.5 (+ 1 size_amt)) 0 1) delay_mode))
-(def bw_amount (abs (- (* 2 bandwidth) 1)))
-(def bw_octave (gswitch (lt bandwidth 0.5) (+ -7 (* bandwidth 10)) (+ -8 (* (- bandwidth 0.5) 10))))
-(def bw_f (* 0.49 (beads-semi-ratio (* 12 bw_octave))))
-(def bw_g (tan-fast (/ (* bw_f g_sr) samplerate)))
-(def bw_r (/ 1 (+ 1 (* 16 bw_amount bw_f))))
-(def bw_wet_sqrt (* bw_amount (- 2 bw_amount)))
-(def bw_wet (* bw_wet_sqrt (- 2 bw_wet_sqrt)))
-(def bw_hp (gte bandwidth 0.5))
-(def filt_l (st-svf taps_l bw_g bw_r bw_hp granular))
-(def filt_r (st-svf taps_r bw_g bw_r bw_hp granular))
-(def delay_l (+ taps_l (* (- filt_l taps_l) bw_wet)))
-(def delay_r (+ taps_r (* (- filt_r taps_r) bw_wet)))
+
+; The rest of delay mode runs only while it is selected; its state holds in
+; granular mode, as the module's controller does.
+(def (delay_l delay_r)
+  (sample-gate delay_mode
+    (do
+        ; The controller initializes on its first run (it holds that state
+        ; through granular mode until then).
+        (make-history h_dstarted)
+        (def dstarted (read-history h_dstarted))
+        (write-history h_dstarted 1)
+        (def (td0 tg0 td1 tg1 td2 tg2 td3 tg3 td4 tg4 td5 tg5 td6 tg6 td7 tg7)
+          (delay-controller delay_mode (not latched) (* seed_onset delay_mode) frozen dstarted density_v time_v time_amt shape_v shape_amt u1 u2 len min_delay))
+
+        (def pg (clip (* 100 (- (abs (- tap_speed 1)) 0.01)) 0 1))
+        (def (tl0 tr0) (multitap wp len td0 tg0 pg tap_speed delay_mode window))
+        (def (tl1 tr1) (multitap wp len td1 tg1 pg tap_speed delay_mode window))
+        (def (tl2 tr2) (multitap wp len td2 tg2 pg tap_speed delay_mode window))
+        (def (tl3 tr3) (multitap wp len td3 tg3 pg tap_speed delay_mode window))
+        (def (tl4 tr4) (multitap wp len td4 tg4 pg tap_speed delay_mode window))
+        (def (tl5 tr5) (multitap wp len td5 tg5 pg tap_speed delay_mode window))
+        (def (tl6 tr6) (multitap wp len td6 tg6 pg tap_speed delay_mode window))
+        (def (tl7 tr7) (multitap wp len td7 tg7 pg tap_speed delay_mode window))
+        (def taps_l (+ tl0 tl1 tl2 tl3 tl4 tl5 tl6 tl7))
+        (def taps_r (+ tr0 tr1 tr2 tr3 tr4 tr5 tr6 tr7))
+
+        ; Bandwidth: low-pass to the left, high-pass to the right.
+        (def bw_amount (abs (- (* 2 bandwidth) 1)))
+        (def bw_octave (gswitch (lt bandwidth 0.5) (+ -7 (* bandwidth 10)) (+ -8 (* (- bandwidth 0.5) 10))))
+        (def bw_f (* 0.49 (beads-semi-ratio (* 12 bw_octave))))
+        (def bw_g (tan-fast (/ (* bw_f g_sr) samplerate)))
+        (def bw_r (/ 1 (+ 1 (* 16 bw_amount bw_f))))
+        (def bw_wet_sqrt (* bw_amount (- 2 bw_amount)))
+        (def bw_wet (* bw_wet_sqrt (- 2 bw_wet_sqrt)))
+        (def bw_hp (gte bandwidth 0.5))
+        (def filt_l (st-svf taps_l bw_g bw_r bw_hp granular))
+        (def filt_r (st-svf taps_r bw_g bw_r bw_hp granular))
+        (tuple (+ taps_l (* (- filt_l taps_l) bw_wet))
+               (+ taps_r (* (- filt_r taps_r) bw_wet))))))
 
 ; ======================================================================
 ; wet signal, feedback tap, mix
@@ -1155,6 +1317,8 @@
                                  kp))
 (def (lim_l lim_r) (beads-limiter rev_l rev_r (/ 1 (* samplerate 6)) 0.9 kp))
 
-(def out_gain (db-amp (smoothed (clip (mod level_db) -24 12))))
+; The glide runs every sample; only the dB-to-gain conversion is control-rate.
+(def level_glide (smoothed (clip (mod level_db) -24 12)))
+(def out_gain (control (db-amp level_glide)))
 (out (* lim_l out_gain) 1 @name left)
 (out (* lim_r out_gain) 2 @name right)

@@ -11,7 +11,7 @@ os.environ.setdefault("ESEQ_DGENLISP_TOOL", os.path.join(REPO, "crates", "sequen
 os.environ.setdefault("ESEQ_DGEN_TOOLCHAIN_ROOT", os.path.join(REPO, "crates", "sequencer", "tools", "dgen-toolchain"))
 import audition as A  # noqa: E402
 
-EFFECT = os.path.join(REPO, "content", "effects", "Beads")
+EFFECT = os.environ.get("BEADS_FX", os.path.join(REPO, "content", "effects", "Beads"))
 WORK = os.environ.get("BEADS_WORK", os.path.expanduser("~/.cache/eseq-beads"))
 REF = os.environ.get("BEADS_REF", os.path.join(WORK, "bfxref"))
 SR = 48000

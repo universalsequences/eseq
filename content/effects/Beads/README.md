@@ -35,11 +35,15 @@ desktop (`tools/beads/ref`, `tools/beads/tools/compare.py`), in hi-fi with
 randomization off: dry path, grains (all size/shape/pitch combinations
 tested, reversed, frozen mid-stream, with feedback), SEED taps, and delay
 mode (free and tapped clocks, pitch-shifted taps, LP/HP filter, frozen
-slices) match to 0.0–0.2% RMS error; the reverb to 0.5%.
+slices) match to 0.0–0.7% RMS error; the reverb to 0.2%. The reverb is the
+module's FxEngine: one int16 delay memory and write pointer for all ten
+lines, including the first diffuser's LFO smear.
 
 The other media keep their bit depth, recording time and time constants but
 run at the host rate, band-limited to the media's codec rate instead of
-resampled; levels match the original within 0.5 dB (`lofi.py`).
+resampled; levels match the original within 0.5 dB (`lofi.py`). Their reverb
+lines are the module's lengths scaled to whole host samples (vintage rounds
+odd lengths down half a sample).
 
 Deliberate differences:
 
@@ -51,9 +55,17 @@ Deliberate differences:
 - **Stereo only**: no mono 2x-time mode, no gate output.
 - Recording time is fixed in seconds; above 48 kHz the buffer holds 16 s at
   the host rate at most.
+- Control-rate values (the grain clock's rate, the reverb's mix and time, the
+  output level) are taken once per 0.25 ms block, as the module's control
+  code does.
 
-Cost: about 14% of one core (32 grains with Hermite reads and the eight
-delay taps all run every sample, whichever mode is active).
+Cost, at 48 kHz on an M1 Max: about 1.5% of one core for a sparse cloud and
+4% with all 32 grains playing or in delay mode, 2–4x the original C++
+compiled for the desktop. Only playing grains run (each grain is a
+`sample-gate` on its own envelope state), delay mode runs only while it is
+selected, and new-grain parameters, grain stealing and safety fades are
+computed only on the samples they happen. The patch is one sample loop
+(`(scalar-loop)`).
 
 ## License
 
