@@ -275,6 +275,8 @@
       :dropdown-ring        '(0.00 0.478 1.00)
       :dropdown-chevron     '(0.286 0.286 0.302)
       :dropdown-badge-bg    '(0.00 0.478 1.00)
+      :dropdown-border      '(0.0 0.0 0.0 0.16)
+      :dropdown-badge-border '(0.0 0.0 0.0 0.10)
       :dropdown-menu-bg     '(0.992 0.992 0.996 0.98)
       :dropdown-menu-border '(0.710 0.710 0.729)
       :dropdown-hover-bg    '(0.00 0.478 1.00)

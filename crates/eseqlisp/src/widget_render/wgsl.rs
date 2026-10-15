@@ -776,6 +776,49 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     return vec4<f32>(out_rgb, out_alpha);
 }"#;
 
+pub const DROPDOWN_SURFACE_SHADER: &str = r#"
+@fragment
+fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
+{
+    var aspect: f32 = max(input.aspect, 0.001);
+    var p: vec2<f32> = vec2<f32>((input.uv.x - 0.5) * 2.0 * aspect, (input.uv.y - 0.5) * 2.0);
+
+    var r: f32 = select(0.75, input.corner_radius, input.corner_radius > 0.0);
+    r = min(r, min(aspect, 1.0));
+    var size: vec2<f32> = vec2<f32>(aspect, 1.0);
+    var border_px: f32 = max(input.uniform_a.x, 0.0);
+    var outer: f32;
+    var border_mask: f32 = compute_border_mask(p, size, r, border_px, &outer);
+    if (outer < 0.002) { discard; }
+
+    var d: f32 = sdf_rounded_rect(p, size, r);
+    var q: vec2<f32> = abs(p) - (size - vec2<f32>(r));
+    var pixel: f32 = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
+
+    // Quads are emitted top row first, so uv.y = 0 is the screen top.
+    var up: f32 = 1.0 - clamp(input.uv.y, 0.0, 1.0);
+    var facing: f32 = -rounded_rect_facing(p, q);
+    var top: f32 = clamp(facing, 0.0, 1.0);
+    var bottom: f32 = clamp(-facing, 0.0, 1.0);
+    var light: f32 = clamp(input.uniform_a.y, 0.0, 1.0);
+    var grad: f32 = clamp(input.uniform_a.z, 0.0, 1.0);
+    var inside_px: f32 = max(-d / pixel - border_px, 0.0);
+
+    var fill_rgb: vec3<f32> = input.color_a.rgb * (1.0 + grad * (up - 0.5));
+    fill_rgb = mix(fill_rgb, vec3<f32>(1.0), exp(-inside_px / 1.6) * top * light * 0.14);
+
+    var border_rgb: vec3<f32> = mix(input.color_b.rgb, vec3<f32>(1.0), top * light * 0.6);
+    var border_a: f32 = input.color_b.a * (1.0 - bottom * light * 0.45) + top * light * 0.24;
+    border_a = clamp(border_a, 0.0, 1.0) * border_mask * step(0.001, input.color_b.a);
+
+    // Border over fill: the hairline sits on top of the surface.
+    var fill_a: f32 = input.color_a.a * outer;
+    var out_alpha: f32 = border_a + fill_a * (1.0 - border_a);
+    if (out_alpha <= 0.002) { discard; }
+    var out_rgb: vec3<f32> = (border_rgb * border_a + fill_rgb * fill_a * (1.0 - border_a)) / out_alpha;
+    return vec4<f32>(out_rgb, out_alpha);
+}"#;
+
 pub const DROPDOWN_CHEVRON_SHADER: &str = r#"
 @fragment
 fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>

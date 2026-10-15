@@ -24,8 +24,17 @@ use crate::backend::Color;
 const PADDING_H: f32 = super::menu_style::TEXT_PADDING_H;
 const MENU_ROW_HEIGHT: f32 = super::menu_style::ROW_HEIGHT;
 const MENU_PADDING_V: f32 = super::menu_style::PANEL_PADDING_V;
-const CHEVRON_RIGHT_PAD: f32 = 0.35;
-const TEXT_CHEVRON_GAP: f32 = 0.4;
+const TEXT_CHEVRON_GAP: f32 = 0.3;
+/// The chevron badge sits this fraction of the trigger height in from its
+/// top, bottom and right edges, like AppKit's pop-up buttons.
+const BADGE_INSET: f32 = 0.12;
+/// Badge width over height, in pixels.
+const BADGE_ASPECT: f32 = 1.12;
+/// Badge corner radius, normalized to half its height (see `DROPDOWN_SURFACE_SHADER`).
+const BADGE_CORNER_RADIUS: f32 = 0.5;
+const TRIGGER_LIGHT: SurfaceLight = SurfaceLight { strength: 0.5, gradient: 0.04 };
+const BADGE_LIGHT: SurfaceLight = SurfaceLight { strength: 0.5, gradient: 0.08 };
+const SURFACE_WIDGET: &str = "dropdown-surface";
 /// Extra right-side padding in the menu when a scrollbar is visible.
 const SCROLLBAR_WIDTH: f32 = 0.4;
 const SCROLLBAR_MARGIN: f32 = 0.15;
@@ -34,6 +43,32 @@ const APPROX_CHAR_WIDTH: f32 = super::menu_style::APPROX_CHAR_WIDTH;
 // Round action-menu glyphs sit optically below the midpoint when placed at
 // the font baseline's mathematical center.
 const ACTION_MENU_ICON_OPTICAL_OFFSET: f32 = -0.08;
+
+/// Chevron badge geometry for a trigger `height` rows tall; `cell_aspect` is
+/// `cell_h / cell_w`, so the horizontal inset and the width come out in
+/// columns while matching the vertical ones in pixels.
+#[derive(Clone, Copy, Debug)]
+struct BadgeMetrics {
+    inset_v: f32,
+    inset_h: f32,
+    width: f32,
+    height: f32,
+}
+
+fn badge_metrics(height: f32, cell_aspect: f32) -> BadgeMetrics {
+    let inset_v = height * BADGE_INSET;
+    let badge_h = (height - inset_v * 2.0).max(0.0);
+    BadgeMetrics {
+        inset_v,
+        inset_h: inset_v * cell_aspect,
+        width: badge_h * cell_aspect * BADGE_ASPECT,
+        height: badge_h,
+    }
+}
+
+fn cell_aspect(cell_w: f32, cell_h: f32) -> f32 {
+    if cell_w > 0.0 { cell_h / cell_w } else { 2.0 }
+}
 
 // ── Internal state ──────────────────────────────────────────────────────────
 
@@ -720,6 +755,7 @@ impl WidgetDefinition for DropdownWidget {
             "dropdown",
             "menu-button",
             "dropdown-chevron",
+            SURFACE_WIDGET,
             "dropdown-checkmark",
             "dropdown-magnifier",
         ]
@@ -800,7 +836,7 @@ impl WidgetDefinition for DropdownWidget {
         } else {
             text_width(&selected)
         };
-        let chevron_width = height * 0.48 * 1.8;
+        let badge = badge_metrics(height, cell_aspect(ctx.cell_w, ctx.cell_h));
         let detail_width = string_prop(&props, "detail")
             .map(|detail| text_width(&detail) + TEXT_CHEVRON_GAP)
             .unwrap_or(0.0);
@@ -808,8 +844,8 @@ impl WidgetDefinition for DropdownWidget {
             + selected_width
             + TEXT_CHEVRON_GAP
             + detail_width
-            + chevron_width
-            + CHEVRON_RIGHT_PAD;
+            + badge.width
+            + badge.inset_h;
         Some(Size {
             width: explicit_width.unwrap_or_else(|| width.max(min_width)),
             height,
@@ -1060,6 +1096,7 @@ impl WidgetDefinition for DropdownWidget {
         match widget_type {
             "dropdown" | "menu-button" => super::ROUNDED_RECT_SHADER.source(backend),
             "dropdown-chevron" => DROPDOWN_CHEVRON_SHADER.source(backend),
+            SURFACE_WIDGET => DROPDOWN_SURFACE_SHADER.source(backend),
             "dropdown-checkmark" => DROPDOWN_CHECKMARK_SHADER.source(backend),
             "dropdown-magnifier" => DROPDOWN_MAGNIFIER_SHADER.source(backend),
             _ => None,
@@ -1116,21 +1153,24 @@ impl WidgetDefinition for DropdownWidget {
                 .unwrap_or(0.0)
         };
 
+        let cell_aspect = cell_aspect(viewport.cell_w, viewport.cell_h);
+
         // ── Focus ring ──
         if is_focused && (!action_menu || !state.open) {
             let ring_v = 0.15_f32;
-            let ring_h = ring_v * viewport.cell_h / viewport.cell_w;
+            let ring_h = ring_v * cell_aspect;
             let ring_rect = Rect {
                 row: node.rect.row - ring_v,
                 col: node.rect.col - ring_h,
                 width: node.rect.width + ring_h * 2.0,
                 height: node.rect.height + ring_v * 2.0,
             };
-            emit_rounded_rect(&mut prims, ring_rect, ring_color, viewport, true, radius_for(ring_rect));
+            emit_flat_surface(&mut prims, ring_rect, ring_color, viewport, true, radius_for(ring_rect));
         }
 
         // ── Border (only when border-color is set; default is no border) ──
-        if plocked || node.props.contains_key("border-color") {
+        let custom_border = plocked || node.props.contains_key("border-color");
+        if custom_border {
             let border_color = if plocked {
                 plock_color
             } else {
@@ -1141,25 +1181,45 @@ impl WidgetDefinition for DropdownWidget {
                 "border-width",
                 if plocked { 0.10 } else { 0.08 },
             );
-            let bw_h = bw_v * viewport.cell_h / viewport.cell_w;
+            let bw_h = bw_v * cell_aspect;
             let border_rect = Rect {
                 row: node.rect.row - bw_v,
                 col: node.rect.col - bw_h,
                 width: node.rect.width + bw_h * 2.0,
                 height: node.rect.height + bw_v * 2.0,
             };
-            emit_rounded_rect(&mut prims, border_rect, border_color, viewport, true, radius_for(border_rect));
+            emit_flat_surface(&mut prims, border_rect, border_color, viewport, true, radius_for(border_rect));
         }
 
         // ── Background ──
-        emit_rounded_rect(&mut prims, node.rect, bg_color, viewport, true, radius_for(node.rect));
+        if action_menu {
+            emit_flat_surface(&mut prims, node.rect, bg_color, viewport, true, radius_for(node.rect));
+        } else {
+            // A custom or p-lock border already rings the trigger; skip the
+            // lit hairline under it.
+            let hairline = if custom_border { transparent } else { theme::DROPDOWN_BORDER() };
+            prims.push(surface_primitive(
+                SURFACE_WIDGET,
+                node.rect,
+                viewport,
+                radius_for(node.rect),
+                SurfaceStyle { fill: bg_color, border: hairline, light: TRIGGER_LIGHT },
+                true,
+            ));
+        }
 
-        let ch_h = node.rect.height * 0.48;
-        let ch_w = ch_h * 1.8;
-        let ch_col = node.rect.col + node.rect.width - CHEVRON_RIGHT_PAD - ch_w;
+        let badge = badge_metrics(node.rect.height, cell_aspect);
+        let badge_rect = Rect {
+            row: node.rect.row + badge.inset_v,
+            col: node.rect.col + node.rect.width - badge.inset_h - badge.width,
+            width: badge.width,
+            height: badge.height,
+        };
+        let ch_h = badge.height * 0.66;
+        let ch_w = badge.width * 0.82;
         let ch_rect = Rect {
-            row: node.rect.row + (node.rect.height - ch_h) * 0.5,
-            col: ch_col,
+            row: badge_rect.row + (badge.height - ch_h) * 0.5,
+            col: badge_rect.col + (badge.width - ch_w) * 0.5,
             width: ch_w,
             height: ch_h,
         };
@@ -1183,7 +1243,7 @@ impl WidgetDefinition for DropdownWidget {
         } else {
             // ── Detail (`:detail`): dim text just before the chevron ──
             let text_col = node.rect.col + PADDING_H;
-            let mut text_right = ch_rect.col - TEXT_CHEVRON_GAP;
+            let mut text_right = badge_rect.col - TEXT_CHEVRON_GAP;
             if let Some(detail) = string_prop(&node.props, "detail") {
                 let room = (text_right - text_col) * 0.55;
                 let detail = truncate_text_to_width(&detail, room, font_size * 0.9, viewport.cell_w);
@@ -1234,46 +1294,28 @@ impl WidgetDefinition for DropdownWidget {
             }
 
             // ── Chevron badge + arrows ──
-            // Badge background behind chevrons
             let badge_color =
                 resolve_named_color(&node.props, "badge-color", theme::DROPDOWN_BADGE_BG());
-            let badge_pad = 0.1;
-            let badge_rect = Rect {
-                row: ch_rect.row - badge_pad,
-                col: ch_rect.col - badge_pad * 0.5,
-                width: ch_rect.width + badge_pad,
-                height: ch_rect.height + badge_pad * 2.0,
-            };
-            emit_rounded_rect(&mut prims, badge_rect, badge_color, viewport, false, 0.4);
-            let (ndc_min, ndc_max) = ndc_bounds(ch_rect, viewport);
-            let px_w = ch_rect.width * viewport.cell_w;
-            let px_h = ch_rect.height * viewport.cell_h;
-            prims.push(GpuPrimitive::WidgetInstance {
-                widget_type: "dropdown-chevron".to_string(),
-                instance: WidgetInstance {
-                    ndc_min,
-                    ndc_max,
-                    value_t: 0.0,
-                    orientation: 0.0,
-                    itime: viewport.time_seconds,
-                    uniform_a: [0.0; 4],
-                    uniform_b: [0.0; 4],
-                    uniform_c: [0.0; 4],
-                    uniform_d: [0.0; 4],
-                    color_a: [
-                        chevron_color.r,
-                        chevron_color.g,
-                        chevron_color.b,
-                        chevron_color.a,
-                    ],
-                    color_b: [0.0; 4],
-                    color_c: [0.0; 4],
-                    color_d: [0.0; 4],
-                    corner_radius: 0.0,
-                    pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+            prims.push(surface_primitive(
+                SURFACE_WIDGET,
+                badge_rect,
+                viewport,
+                BADGE_CORNER_RADIUS,
+                SurfaceStyle {
+                    fill: badge_color,
+                    border: theme::DROPDOWN_BADGE_BORDER(),
+                    light: BADGE_LIGHT,
                 },
-                is_background: false,
-            });
+                false,
+            ));
+            prims.push(surface_primitive(
+                "dropdown-chevron",
+                ch_rect,
+                viewport,
+                0.0,
+                SurfaceStyle::flat(chevron_color),
+                false,
+            ));
         }
 
         // ── Menu overlay (when open) ──
@@ -1568,7 +1610,34 @@ fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32
     ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
 }
 
-fn emit_rounded_rect(
+/// How a `dropdown-surface` primitive is lit; see `DROPDOWN_SURFACE_SHADER`.
+#[derive(Clone, Copy)]
+struct SurfaceLight {
+    /// Edge highlight/shade and top sheen, 0..1.
+    strength: f32,
+    /// Top-to-bottom fill gradient, 0 = flat.
+    gradient: f32,
+}
+
+/// Colors and lighting for one dropdown primitive. Every surface-shaded
+/// piece of the trigger (ring, border, background, badge) shares
+/// `SURFACE_WIDGET`'s pipeline so they batch into one draw run.
+#[derive(Clone, Copy)]
+struct SurfaceStyle {
+    fill: Color,
+    /// Hairline drawn inside the rect; alpha 0 draws none.
+    border: Color,
+    light: SurfaceLight,
+}
+
+impl SurfaceStyle {
+    fn flat(fill: Color) -> Self {
+        let none = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+        Self { fill, border: none, light: SurfaceLight { strength: 0.0, gradient: 0.0 } }
+    }
+}
+
+fn emit_flat_surface(
     prims: &mut Vec<GpuPrimitive>,
     rect: Rect,
     color: Color,
@@ -1576,30 +1645,49 @@ fn emit_rounded_rect(
     is_background: bool,
     corner_radius: f32,
 ) {
+    prims.push(surface_primitive(
+        SURFACE_WIDGET,
+        rect,
+        viewport,
+        corner_radius,
+        SurfaceStyle::flat(color),
+        is_background,
+    ));
+}
+
+fn surface_primitive(
+    widget_type: &str,
+    rect: Rect,
+    viewport: WidgetViewport,
+    corner_radius: f32,
+    style: SurfaceStyle,
+    is_background: bool,
+) -> GpuPrimitive {
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
-    prims.push(GpuPrimitive::WidgetInstance {
-        widget_type: "dropdown".to_string(),
+    let SurfaceStyle { fill, border, light } = style;
+    GpuPrimitive::WidgetInstance {
+        widget_type: widget_type.to_string(),
         instance: WidgetInstance {
             ndc_min,
             ndc_max,
             value_t: 0.0,
             orientation: 0.0,
             itime: viewport.time_seconds,
-            uniform_a: [0.0; 4],
+            uniform_a: [1.0, light.strength, light.gradient, 0.0],
             uniform_b: [0.0; 4],
             uniform_c: [0.0; 4],
             uniform_d: [0.0; 4],
-            color_a: [color.r, color.g, color.b, color.a],
-            color_b: [0.0; 4],
+            color_a: [fill.r, fill.g, fill.b, fill.a],
+            color_b: [border.r, border.g, border.b, border.a],
             color_c: [0.0; 4],
             color_d: [0.0; 4],
             corner_radius,
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         },
         is_background,
-    });
+    }
 }
 
 // ── Metal shaders ────────────────────────────────────────────────────────────
@@ -1651,6 +1739,58 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     return float4(col.rgb, col.a * mask);
 }
 "#, super::wgsl::DROPDOWN_CHEVRON_SHADER);
+
+/// Lit control surface for the trigger and its chevron badge, after AppKit's
+/// pop-up buttons: a rounded fill with a soft top-to-bottom gradient, a
+/// hairline border (`color_b`) that catches light along the top edge and
+/// falls into shade along the bottom, and a faint sheen just under the top.
+///
+/// `color_a` = fill, `color_b` = border (alpha 0 = no border),
+/// `uniform_a.x` = border width in device pixels, `uniform_a.y` = light
+/// strength 0..1, `uniform_a.z` = fill gradient 0..1, `corner_radius` as in
+/// `ROUNDED_RECT_SHADER`.
+const DROPDOWN_SURFACE_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float aspect = max(in.aspect, 0.001);
+    float2 p = float2((in.uv.x - 0.5) * 2.0 * aspect, (in.uv.y - 0.5) * 2.0);
+
+    float r = in.corner_radius > 0.0 ? in.corner_radius : 0.75;
+    r = min(r, min(aspect, 1.0));
+    float2 size = float2(aspect, 1.0);
+    float border_px = max(in.uniform_a.x, 0.0);
+    float outer;
+    float border_mask = compute_border_mask(p, size, r, border_px, outer);
+    if (outer < 0.002) { discard_fragment(); }
+
+    float d = sdf_rounded_rect(p, size, r);
+    float2 q = abs(p) - (size - r);
+    float pixel = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
+
+    // Quads are emitted top row first, so uv.y = 0 is the screen top.
+    float up = 1.0 - clamp(in.uv.y, 0.0, 1.0);
+    float facing = -rounded_rect_facing(p, q);
+    float top = clamp(facing, 0.0, 1.0);
+    float bottom = clamp(-facing, 0.0, 1.0);
+    float light = clamp(in.uniform_a.y, 0.0, 1.0);
+    float grad = clamp(in.uniform_a.z, 0.0, 1.0);
+    float inside_px = max(-d / pixel - border_px, 0.0);
+
+    float3 fill_rgb = in.color_a.rgb * (1.0 + grad * (up - 0.5));
+    fill_rgb = mix(fill_rgb, float3(1.0), exp(-inside_px / 1.6) * top * light * 0.14);
+
+    float3 border_rgb = mix(in.color_b.rgb, float3(1.0), top * light * 0.6);
+    float border_a = in.color_b.a * (1.0 - bottom * light * 0.45) + top * light * 0.24;
+    border_a = clamp(border_a, 0.0, 1.0) * border_mask * step(0.001, in.color_b.a);
+
+    // Border over fill: the hairline sits on top of the surface.
+    float fill_a = in.color_a.a * outer;
+    float out_alpha = border_a + fill_a * (1.0 - border_a);
+    if (out_alpha <= 0.002) { discard_fragment(); }
+    float3 out_rgb = (border_rgb * border_a + fill_rgb * fill_a * (1.0 - border_a)) / out_alpha;
+    return float4(out_rgb, out_alpha);
+}
+"#, super::wgsl::DROPDOWN_SURFACE_SHADER);
 
 const DROPDOWN_CHECKMARK_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])

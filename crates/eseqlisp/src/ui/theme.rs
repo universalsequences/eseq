@@ -277,6 +277,8 @@ pub struct Theme {
     pub dropdown_ring: Color,
     pub dropdown_chevron: Color,
     pub dropdown_badge_bg: Color,
+    pub dropdown_border: Color,
+    pub dropdown_badge_border: Color,
     pub dropdown_menu_bg: Color,
     pub dropdown_menu_border: Color,
     pub dropdown_hover_bg: Color,
@@ -1048,6 +1050,17 @@ theme_slots!(
         dropdown_badge_bg,
         DROPDOWN_BADGE_BG,
         Color::from_hex(0x00, 0x7a, 0xff)
+    ),
+    // Hairline around the trigger; the shader brightens its top edge.
+    (
+        dropdown_border,
+        DROPDOWN_BORDER,
+        Color::rgba(1.0, 1.0, 1.0, 0.11)
+    ),
+    (
+        dropdown_badge_border,
+        DROPDOWN_BADGE_BORDER,
+        Color::rgba(1.0, 1.0, 1.0, 0.16)
     ),
     (
         dropdown_menu_bg,
