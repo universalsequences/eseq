@@ -8934,6 +8934,39 @@ impl EffectDescriptor {
         ]);
         // Strict extension: newer modulator params land after the slice tail.
         params.extend(deferred_mod_params);
+        // Strict extension again: the tape-scrub release shape.
+        for (name, min, max, default, node_param_idx) in [
+            (
+                "settle",
+                crate::instruments::sampler::SCRUB_SETTLE_MS_MIN,
+                crate::instruments::sampler::SCRUB_SETTLE_MS_MAX,
+                crate::instruments::sampler::SCRUB_SETTLE_MS_DEFAULT,
+                crate::instruments::sampler::PARAM_SCRUB_SETTLE_MS,
+            ),
+            (
+                "catch",
+                crate::instruments::sampler::SCRUB_CATCH_MS_MIN,
+                crate::instruments::sampler::SCRUB_CATCH_MS_MAX,
+                crate::instruments::sampler::SCRUB_CATCH_MS_DEFAULT,
+                crate::instruments::sampler::PARAM_SCRUB_CATCH_MS,
+            ),
+        ] {
+            params.push(ParamDescriptor {
+                name: name.to_string(),
+                min,
+                max,
+                default,
+                kind: ParamKind::Continuous {
+                    unit: Some("ms".to_string()),
+                },
+                scaling: ParamScaling::Exponential,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                percent_ratio: false,
+                host_control: None,
+                ui_metadata: None,
+            });
+        }
         Self::new(EffectDescriptorData {
             name: "Sampler".to_string(),
             input_channels: 0,

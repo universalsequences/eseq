@@ -35,6 +35,21 @@ const MARKER_LINE_SLOP_PX: f32 = 2.0;
 /// and hit-tested over that whole triangle, not just the hairline below it.
 const SLICE_FLAG_HALF_WIDTH: f32 = 0.45;
 const SLICE_FLAG_HEIGHT: f32 = 0.6;
+/// Below this mean spacing (in cells) between visible active slices, flags
+/// overlap into a solid bar: draw ticks instead.
+const SLICE_FLAG_MIN_SPACING: f32 = 1.5;
+/// Below this mean spacing between *all* visible markers, inactive markers are
+/// hidden (and not hit-tested): zoom in to edit them.
+const SLICE_INACTIVE_MIN_SPACING: f32 = 1.0;
+
+/// How much slice-marker detail the current zoom can carry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SliceLod {
+    active_flags: bool,
+    show_inactive: bool,
+    active_line_alpha: f32,
+    band_alpha: f32,
+}
 
 fn waveform_color(props: &HashMap<String, Value>) -> crate::backend::Color {
     resolve_named_color(props, "waveform-color", theme::WHITE())
@@ -352,7 +367,10 @@ impl WidgetDefinition for WaveformWidget {
             }
         }
 
-        for (index, time) in view.visible_slices() {
+        // Same LOD filter as the GPU path and the hit test: draw only what
+        // can be grabbed.
+        let lod = view.slice_lod();
+        for (index, time) in view.drawn_slices(&lod) {
             let col = view.col_for_time(time);
             let color = if view.slice_is_active(index) {
                 active_marker_color(props)
@@ -649,31 +667,89 @@ fn build_primitives(node: &LayoutNode) -> Vec<GpuPrimitive> {
         }));
     }
 
-    for (index, time) in view.visible_slices() {
-        // Active boundaries take the accent; sensitivity-deactivated markers
-        // stay visible in the dim marker colour.
-        let color = if view.slice_is_active(index) {
-            active_marker_color(&node.props)
-        } else {
-            marker_color(&node.props)
-        };
+    let lod = view.slice_lod();
+    let active_color = active_marker_color(&node.props);
+    // Faint alternating bands make dense chops readable as regions once the
+    // individual lines blur together.
+    if lod.band_alpha > 0.0 {
+        let mut band = active_color;
+        band.a *= lod.band_alpha;
+        let view_end = view.view_start + view.view_duration;
+        let mut active_times = view
+            .slices
+            .iter()
+            .enumerate()
+            .filter(|(index, time)| time.is_finite() && view.slice_is_active(*index))
+            .map(|(_, time)| *time)
+            .peekable();
+        let mut ordinal = 0usize;
+        while let Some(start) = active_times.next() {
+            let end = active_times
+                .peek()
+                .copied()
+                .or_else(|| view.buffer.as_ref().map(|buffer| buffer.sample.duration_seconds))
+                .unwrap_or(view_end);
+            ordinal += 1;
+            if ordinal % 2 == 1 || end <= view.view_start || start >= view_end {
+                continue;
+            }
+            let (from, to) = (start.max(view.view_start), end.min(view_end));
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+                x: view.x_for_time(from),
+                y: waveform_rect.row,
+                width: (view.x_for_time(to) - view.x_for_time(from)).max(0.0),
+                height: waveform_rect.height,
+                color: band,
+            }));
+        }
+    }
+    let band_height = (waveform_rect.row - content.row).max(0.0);
+    for (index, time) in view.drawn_slices(&lod) {
         let x = view.x_for_time(time);
+        if !view.slice_is_active(index) {
+            // Sensitivity-deactivated markers are a tick in the flag band
+            // only: present and grabbable, never competing with real cuts.
+            let mut color = marker_color(&node.props);
+            color.a *= 0.7;
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+                x: x - 0.0625,
+                y: content.row,
+                width: 0.125,
+                height: band_height,
+                color,
+            }));
+            continue;
+        }
+        let mut line = active_color;
+        line.a *= lod.active_line_alpha;
         primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
             x: x - 0.0625,
             y: content.row,
             width: 0.125,
             height: content.height,
-            color,
+            color: line,
         }));
-        let flag_height = SLICE_FLAG_HEIGHT.min(content.height);
-        primitives.push(GpuPrimitive::Triangle(GpuTrianglePrimitive {
-            points: [
-                [x - SLICE_FLAG_HALF_WIDTH, content.row],
-                [x + SLICE_FLAG_HALF_WIDTH, content.row],
-                [x, content.row + flag_height],
-            ],
-            color,
-        }));
+        if lod.active_flags {
+            let flag_height = SLICE_FLAG_HEIGHT.min(content.height);
+            primitives.push(GpuPrimitive::Triangle(GpuTrianglePrimitive {
+                points: [
+                    [x - SLICE_FLAG_HALF_WIDTH, content.row],
+                    [x + SLICE_FLAG_HALF_WIDTH, content.row],
+                    [x, content.row + flag_height],
+                ],
+                color: active_color,
+            }));
+        } else {
+            // Too dense for flags: a full-strength tick in the band keeps the
+            // grab point visible without the flags fusing into one bar.
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+                x: x - 0.0625,
+                y: content.row,
+                width: 0.125,
+                height: band_height,
+                color: active_color,
+            }));
+        }
     }
 
     primitives
@@ -851,6 +927,36 @@ impl WaveformView {
             .filter(|(_, time)| time.is_finite() && self.time_visible(*time))
     }
 
+    /// Level of detail for slice markers, from their mean on-screen spacing.
+    fn slice_lod(&self) -> SliceLod {
+        let width = self.content_rect().width.max(1.0);
+        let (mut active, mut total) = (0usize, 0usize);
+        for (index, _) in self.visible_slices() {
+            total += 1;
+            if self.slice_is_active(index) {
+                active += 1;
+            }
+        }
+        let active_spacing = width / active.max(1) as f32;
+        let total_spacing = width / total.max(1) as f32;
+        // Fade active lines as they crowd, so a 200-slice break reads as a
+        // texture rather than a wall; never below a still-visible floor.
+        let crowding = (active_spacing / SLICE_FLAG_MIN_SPACING).clamp(0.0, 1.0);
+        SliceLod {
+            active_flags: active_spacing >= SLICE_FLAG_MIN_SPACING,
+            show_inactive: total_spacing >= SLICE_INACTIVE_MIN_SPACING,
+            active_line_alpha: 0.35 + 0.65 * crowding,
+            band_alpha: if active >= 2 { 0.07 } else { 0.0 },
+        }
+    }
+
+    /// The markers drawn — and therefore grabbable — at this level of detail.
+    fn drawn_slices<'a>(&'a self, lod: &SliceLod) -> impl Iterator<Item = (usize, f64)> + 'a {
+        let show_inactive = lod.show_inactive;
+        self.visible_slices()
+            .filter(move |(index, _)| show_inactive || self.slice_is_active(*index))
+    }
+
     /// Markers default to active when no flag list is supplied.
     fn slice_is_active(&self, index: usize) -> bool {
         self.slice_active.get(index).copied().unwrap_or(true)
@@ -950,7 +1056,8 @@ impl WaveformView {
     }
 
     fn slice_marker_hit_test(&self, local_col: f32) -> Option<(usize, f64)> {
-        self.visible_slices()
+        let lod = self.slice_lod();
+        self.drawn_slices(&lod)
             .filter_map(|(index, time)| {
                 let distance = (local_col - self.x_for_time(time)).abs();
                 (distance <= MARKER_LINE_SLOP_PX).then_some((index, time, distance))
@@ -1922,6 +2029,46 @@ mod tests {
             action.get("index").map(|value| value.borrow().clone()),
             Some(Value::Number(0.0))
         );
+    }
+
+    /// A 200-slice break on a 32-cell waveform: flags and dimmed markers
+    /// would fuse into a solid bar, so both step down — and a hidden inactive
+    /// marker must not keep stealing clicks from the body.
+    #[test]
+    fn dense_slices_drop_flags_and_hide_inactive_markers() {
+        let view_for = |count: usize, active_every: usize| {
+            let times = (0..count)
+                .map(|i| number_value(i as f64 / count as f64))
+                .collect::<Vec<_>>();
+            let flags = (0..count)
+                .map(|i| number_value(if i % active_every == 0 { 1.0 } else { 0.0 }))
+                .collect::<Vec<_>>();
+            let props = HashMap::from([
+                ("view-start".to_string(), number_value(0.0)),
+                ("view-duration".to_string(), number_value(1.0)),
+                ("slice-select".to_string(), Value::Bool(true)),
+                ("slices".to_string(), list_value_raw(times)),
+                ("slice-active".to_string(), list_value_raw(flags)),
+            ]);
+            WaveformView::from_props(
+                &props,
+                Rect { row: 0.0, col: 0.0, width: 32.0, height: 8.0 },
+            )
+        };
+
+        let sparse = view_for(8, 2).slice_lod();
+        assert!(sparse.active_flags && sparse.show_inactive);
+        assert_eq!(sparse.active_line_alpha, 1.0);
+
+        let dense = view_for(200, 4);
+        let lod = dense.slice_lod();
+        assert!(!lod.active_flags, "50 flags in 32 cells overlap");
+        assert!(!lod.show_inactive);
+        assert!(lod.active_line_alpha < 1.0 && lod.active_line_alpha >= 0.35);
+        // Marker 1 is inactive: once hidden it is not grabbable either.
+        let x = dense.x_for_time(1.0 / 200.0);
+        assert!(dense.slice_marker_hit_test(x).is_none_or(|(index, _)| index % 4 == 0));
+        assert_eq!(dense.drawn_slices(&lod).count(), 50);
     }
 
     #[test]

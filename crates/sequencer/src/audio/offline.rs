@@ -178,6 +178,7 @@ mod tests {
         engine.state.set_step_param(0, 0, StepParam::Transpose, 1.0);
         let table = OnsetTableShared {
             onsets_frames: vec![0, 24_000],
+            onset_rank: Vec::new(),
             sample_len_frames: 48_000,
             sample_rate: 48_000,
             bpm: 120.0,

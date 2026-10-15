@@ -117,8 +117,17 @@ const STATE_WARP_SEG_LOOP_MODE: usize = 106; // 0=off, 1=loop, 2=ping-pong tail 
 const STATE_WARP_SEG_ENVELOPE: usize = 107; // 0..1 per-segment decay amount
 const STATE_WARP_SEG_TAIL_DIR: usize = 108; // ±1, ping-pong tail direction
 const STATE_WARP_LAST_PRESERVE: usize = 109;
-const STATE_TIMELINE_COUNT: usize = 110;
-const STATE_TIMELINE_BASE: usize = 111;
+// Tape scrub (see `TapeScrub`). STATE_SCRUB_SMOOTH holds the output offset.
+const STATE_SCRUB_STAGE: usize = 110; // first smoothing stage, fraction of region
+const STATE_SCRUB_PREV_TARGET: usize = 111; // last target, fraction of region
+const STATE_SCRUB_SPEED: usize = 112; // mean |target motion|, x playback speed
+const STATE_SCRUB_VACTROL: usize = 113; // attack/release follower of SPEED
+const STATE_SCRUB_HAND: usize = 114; // 0 = record spinning, 1 = hand holding it
+const STATE_SCRUB_CATCH_MS: usize = 115; // ramp back to full speed after the hand lets go
+const STATE_SCRUB_SETTLE_MS: usize = 116; // how long the head's weight lingers after motion
+const STATE_SCRUB_STILL: usize = 117; // frames since the target last moved (hand release)
+const STATE_TIMELINE_COUNT: usize = 118;
+const STATE_TIMELINE_BASE: usize = 119;
 const TIMELINE_EVENT_WIDTH: usize = 3 + GBE_AUX_CAP;
 const TIMELINE_FRAME: usize = 0;
 const TIMELINE_KIND: usize = 1;
@@ -191,7 +200,12 @@ pub const WARP_PRESERVE_DEFAULT: i32 = crate::instruments::warp_grid::PRESERVE_T
 pub const WARP_SEG_LOOP_MODE_DEFAULT: i32 = SEG_LOOP_FORWARD;
 pub const WARP_SEG_ENVELOPE_DEFAULT: f32 = 0.0;
 const SCRUB_SMOOTH_TIME_MS_DEFAULT: f32 = 6.0;
-const SCRUB_RELEASE_EPSILON: f32 = 0.000_1;
+pub const SCRUB_CATCH_MS_DEFAULT: f32 = 30.0;
+pub const SCRUB_CATCH_MS_MIN: f32 = 1.0;
+pub const SCRUB_CATCH_MS_MAX: f32 = 2_000.0;
+pub const SCRUB_SETTLE_MS_DEFAULT: f32 = 60.0;
+pub const SCRUB_SETTLE_MS_MIN: f32 = 1.0;
+pub const SCRUB_SETTLE_MS_MAX: f32 = 1_000.0;
 
 const MOD_SPEED_LANES: [(usize, usize); SAMPLER_MOD_LANES_PER_PARAM] = [
     (STATE_MOD_SPEED_SOURCE, STATE_MOD_SPEED_DEPTH),
@@ -407,39 +421,169 @@ fn advance_retrigger_playhead(
     }
 }
 
-fn accumulated_scrub_read_head(
-    playhead: &mut f32,
-    scrub_smooth: &mut f32,
-    target_scrub: f32,
-    region_len: f32,
-    start_sample: f32,
-    end_sample: f32,
-    sample_rate: f32,
-    smooth_time_ms: f32,
-) -> f32 {
-    let max_read_head = end_sample.max(start_sample);
-    let target_scrub = target_scrub.clamp(-1.0, 1.0);
-    if target_scrub.abs() <= SCRUB_RELEASE_EPSILON && scrub_smooth.abs() > SCRUB_RELEASE_EPSILON {
-        *playhead = (*playhead + *scrub_smooth * region_len).clamp(start_sample, max_read_head);
-        *scrub_smooth = 0.0;
-        return *playhead;
-    }
-    if target_scrub.abs() <= SCRUB_RELEASE_EPSILON {
-        *scrub_smooth = 0.0;
-        return (*playhead).clamp(start_sample, max_read_head);
-    }
-    if scrub_smooth.abs() > SCRUB_RELEASE_EPSILON && target_scrub.signum() != scrub_smooth.signum()
-    {
-        *playhead = (*playhead + *scrub_smooth * region_len).clamp(start_sample, max_read_head);
-        *scrub_smooth = 0.0;
+/// Tape-style scrub, after the catalog-radio tape worklet.
+///
+/// The scrub value is a target offset (fraction of the region) that the read
+/// head chases through two cascaded one-poles, so the head's *velocity* — the
+/// pitch you hear — stays continuous even though knob values arrive in
+/// per-block steps. What makes it feel like a record is that the smoothing is
+/// not fixed:
+///
+/// - A "vactrol" follower tracks how fast the target is moving. Slow, careful
+///   moves keep the base `smooth` time and stay precise; fast flicks raise the
+///   inertia toward `INERTIA_MAX_MS`, so the head glides and winds down like a
+///   platter with mass instead of zippering from step to step.
+/// - When motion stops the follower decays over the `settle` time and the
+///   inertia falls back with it: short lands the head right on the target
+///   (surgical scratches), long lets it float in.
+/// - While the target is moving, a hand is on the record: the underlying
+///   playback slows toward `HAND_RATE` within a few ms. The hand lets go once
+///   the target has been still for `STILL_MS` (independent of the follower
+///   above), and the record ramps linearly back to full speed over exactly
+///   the `catch` time.
+///
+/// Everything while the target moves (inertia build-up, the grab) depends
+/// only on constants; `settle` and `catch` shape only the release.
+///
+/// A static scrub value is just a fixed offset at full speed, so a parked
+/// knob or a slow wobble behaves like before, minus the zipper noise.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct TapeScrub {
+    /// Output offset, fraction of the region (published for the visual
+    /// playhead as STATE_SCRUB_SMOOTH).
+    offset: f32,
+    stage: f32,
+    prev_target: f32,
+    speed: f32,
+    vactrol: f32,
+    hand: f32,
+    /// Frames since the target last moved faster than `HAND_SPEED`.
+    still: f32,
+}
+
+impl TapeScrub {
+    /// Mean-speed window: long enough to integrate per-block knob steps.
+    const SPEED_MS: f32 = 20.0;
+    const VACTROL_ATTACK_MS: f32 = 10.0;
+    /// Stillness that releases the hand. Longer than one 128-frame block, so
+    /// a knob that only moves once per block still counts as moving.
+    const STILL_MS: f32 = 5.0;
+    /// Head speed (x normal playback) at which inertia is fully engaged.
+    const FULL_INERTIA_SPEED: f32 = 16.0;
+    const INERTIA_MAX_MS: f32 = 90.0;
+    /// Motion faster than this (x playback) means a hand is on the record.
+    const HAND_SPEED: f32 = 0.25;
+    const HAND_GRAB_MS: f32 = 4.0;
+    /// Underlying playback rate while held (the worklet's scratch rate).
+    const HAND_RATE: f32 = 0.125;
+
+    unsafe fn load(s: *const f32) -> Self {
+        Self {
+            offset: *s.add(STATE_SCRUB_SMOOTH),
+            stage: *s.add(STATE_SCRUB_STAGE),
+            prev_target: *s.add(STATE_SCRUB_PREV_TARGET),
+            speed: *s.add(STATE_SCRUB_SPEED),
+            vactrol: *s.add(STATE_SCRUB_VACTROL),
+            hand: *s.add(STATE_SCRUB_HAND),
+            still: *s.add(STATE_SCRUB_STILL),
+        }
     }
 
-    if target_scrub.abs() > scrub_smooth.abs() {
-        let smooth_seconds = smooth_time_ms.clamp(0.0, 5000.0) * 0.001;
-        let scrub_coeff = (1.0 / (sample_rate * smooth_seconds)).clamp(0.0001, 1.0);
-        *scrub_smooth += (target_scrub - *scrub_smooth) * scrub_coeff;
+    unsafe fn store(&self, s: *mut f32) {
+        *s.add(STATE_SCRUB_SMOOTH) = self.offset;
+        *s.add(STATE_SCRUB_STAGE) = self.stage;
+        *s.add(STATE_SCRUB_PREV_TARGET) = self.prev_target;
+        *s.add(STATE_SCRUB_SPEED) = self.speed;
+        *s.add(STATE_SCRUB_VACTROL) = self.vactrol;
+        *s.add(STATE_SCRUB_HAND) = self.hand;
+        *s.add(STATE_SCRUB_STILL) = self.still;
     }
-    (*playhead + *scrub_smooth * region_len).clamp(start_sample, max_read_head)
+
+    /// Jump straight to `target` with no motion: a new note starts at the
+    /// current scrub position rather than swooping to it.
+    fn snap(&mut self, target: f32) {
+        *self = Self {
+            offset: target,
+            stage: target,
+            prev_target: target,
+            ..Self::default()
+        };
+    }
+
+    /// Advance one sample toward `target` (fraction of the region). Returns
+    /// the offset in frames and the multiplier for the underlying playback
+    /// rate.
+    fn step(&mut self, target: f32, region_len: f32, k: &TapeScrubCoeffs) -> (f32, f32) {
+        let target = if target.is_finite() { target.clamp(-1.0, 1.0) } else { 0.0 };
+        let motion = (target - self.prev_target).abs() * region_len;
+        self.prev_target = target;
+        self.speed += (motion - self.speed) * k.speed;
+        let follow = if self.speed > self.vactrol { k.vactrol_attack } else { k.settle };
+        self.vactrol += (self.speed - self.vactrol) * follow;
+
+        let inertia = ((1.0 + self.vactrol).log2() * k.inv_full_inertia_log2).clamp(0.0, 1.0);
+        let tau_ms = k.base_ms + (Self::INERTIA_MAX_MS - k.base_ms).max(0.0) * inertia;
+        // Two critically damped stages share the time constant.
+        let c = k.coeff(tau_ms * 0.5);
+        self.stage += (target - self.stage) * c;
+        self.offset += (self.stage - self.offset) * c;
+
+        // Grab once the follower says the target is moving fast; let go once
+        // the target is still, not after the follower drains.
+        self.still = if motion > Self::HAND_SPEED { 0.0 } else { self.still + 1.0 };
+        if self.vactrol > Self::HAND_SPEED && self.still < k.still_frames {
+            self.hand += (1.0 - self.hand) * k.grab;
+        } else {
+            // Constant-torque linear ramp: `catch` is exactly the time from
+            // held to full speed.
+            self.hand = (self.hand - k.catch_step).max(0.0);
+        }
+        let rate = 1.0 - self.hand * (1.0 - Self::HAND_RATE);
+        (self.offset * region_len, rate)
+    }
+}
+
+/// Everything `TapeScrub::step` needs that only changes per block, so the
+/// per-sample path pays for one `exp` (the inertia-dependent stage).
+struct TapeScrubCoeffs {
+    sample_rate: f32,
+    base_ms: f32,
+    speed: f32,
+    vactrol_attack: f32,
+    settle: f32,
+    grab: f32,
+    catch_step: f32,
+    still_frames: f32,
+    inv_full_inertia_log2: f32,
+}
+
+impl TapeScrubCoeffs {
+    fn new(sample_rate: f32, smooth_ms: f32, settle_ms: f32, catch_ms: f32) -> Self {
+        let mut k = Self {
+            sample_rate,
+            base_ms: smooth_ms.clamp(0.5, 5_000.0),
+            speed: 0.0,
+            vactrol_attack: 0.0,
+            settle: 0.0,
+            grab: 0.0,
+            catch_step: 0.0,
+            still_frames: sample_rate * TapeScrub::STILL_MS * 0.001,
+            inv_full_inertia_log2: 1.0 / (1.0 + TapeScrub::FULL_INERTIA_SPEED).log2(),
+        };
+        k.speed = k.coeff(TapeScrub::SPEED_MS);
+        k.vactrol_attack = k.coeff(TapeScrub::VACTROL_ATTACK_MS);
+        k.settle = k.coeff(settle_ms.clamp(SCRUB_SETTLE_MS_MIN, SCRUB_SETTLE_MS_MAX));
+        k.grab = k.coeff(TapeScrub::HAND_GRAB_MS);
+        let catch_frames =
+            sample_rate * catch_ms.clamp(SCRUB_CATCH_MS_MIN, SCRUB_CATCH_MS_MAX) * 0.001;
+        k.catch_step = 1.0 / catch_frames.max(1.0);
+        k
+    }
+
+    /// One-pole coefficient for a time constant in ms.
+    fn coeff(&self, ms: f32) -> f32 {
+        1.0 - (-1.0 / (self.sample_rate * ms * 0.001).max(1.0)).exp()
+    }
 }
 
 // Param indices (match state layout for direct write)
@@ -488,6 +632,8 @@ pub const SLOT_PARAM_SLICE_SENSITIVITY: usize = 139;
 pub const SLOT_PARAM_SLICE_BASE: usize = 140;
 pub const PARAM_SCRUB_SMOOTH: u64 = STATE_SCRUB_SMOOTH as u64;
 pub const PARAM_SCRUB_SMOOTH_TIME_MS: u64 = STATE_SCRUB_SMOOTH_TIME_MS as u64;
+pub const PARAM_SCRUB_CATCH_MS: u64 = STATE_SCRUB_CATCH_MS as u64;
+pub const PARAM_SCRUB_SETTLE_MS: u64 = STATE_SCRUB_SETTLE_MS as u64;
 pub const PARAM_MOD_SPEED_SOURCE: u64 = STATE_MOD_SPEED_SOURCE as u64;
 pub const PARAM_MOD_SPEED_DEPTH: u64 = STATE_MOD_SPEED_DEPTH as u64;
 pub const PARAM_MOD_SCRUB_SOURCE: u64 = STATE_MOD_SCRUB_SOURCE as u64;
@@ -746,8 +892,10 @@ unsafe extern "C" fn sampler_init(
         *s.add(STATE_SOURCE_SAMPLE_RATE) = 44_100.0;
     }
     *s.add(STATE_SCRUB_OFFSET) = 0.0;
-    *s.add(STATE_SCRUB_SMOOTH) = 0.0;
+    TapeScrub::default().store(s);
     *s.add(STATE_SCRUB_SMOOTH_TIME_MS) = SCRUB_SMOOTH_TIME_MS_DEFAULT;
+    *s.add(STATE_SCRUB_CATCH_MS) = SCRUB_CATCH_MS_DEFAULT;
+    *s.add(STATE_SCRUB_SETTLE_MS) = SCRUB_SETTLE_MS_DEFAULT;
     *s.add(STATE_TIMELINE_COUNT) = 0.0;
     for (source_idx, depth_idx) in ALL_MOD_LANES {
         *s.add(source_idx) = 0.0;
@@ -842,8 +990,14 @@ unsafe fn sampler_process_segment(
     };
     let mut last_warp_preserve = (*s.add(STATE_WARP_LAST_PRESERVE)).round() as i32;
     let scrub_offset = (*s.add(STATE_SCRUB_OFFSET)).clamp(-1.0, 1.0);
-    let mut scrub_smooth = *s.add(STATE_SCRUB_SMOOTH);
-    let scrub_smooth_time_ms = (*s.add(STATE_SCRUB_SMOOTH_TIME_MS)).clamp(0.0, 5000.0);
+    let mut scrub = TapeScrub::load(s);
+    let mut scrub_snap = false;
+    let scrub_coeffs = TapeScrubCoeffs::new(
+        sample_rate,
+        *s.add(STATE_SCRUB_SMOOTH_TIME_MS),
+        *s.add(STATE_SCRUB_SETTLE_MS),
+        *s.add(STATE_SCRUB_CATCH_MS),
+    );
     let buf_desc = buffers as *const BufferDesc;
     let desc = &*buf_desc.add(buffer_id);
     let sample_data = desc.buffer;
@@ -990,7 +1144,7 @@ unsafe fn sampler_process_segment(
         }
         gate_counter = 0.0; // reset real-time duration counter
         sr_phase = 0.0;
-        scrub_smooth = 0.0;
+        scrub_snap = true;
         if env_level > 0.001 || last_out_l.abs() > 0.000_1 || last_out_r.abs() > 0.000_1 {
             // Voice was still audible. Keep rendering the outgoing waveform as a
             // short stolen tail while the new trigger starts its normal attack.
@@ -1245,16 +1399,13 @@ unsafe fn sampler_process_segment(
 
         let scrub_mod = modulation_lane_sum(inp, MOD_INPUT_COUNT, s, &MOD_SCRUB_LANES, i);
         let target_scrub = (scrub_offset + scrub_mod).clamp(-1.0, 1.0);
-        let read_head = accumulated_scrub_read_head(
-            &mut playhead,
-            &mut scrub_smooth,
-            target_scrub,
-            region_len,
-            start_sample as f32,
-            (end_sample.saturating_sub(1)) as f32,
-            sample_rate,
-            scrub_smooth_time_ms,
-        );
+        if scrub_snap {
+            scrub.snap(target_scrub);
+            scrub_snap = false;
+        }
+        let (scrub_frames, scrub_rate) = scrub.step(target_scrub, region_len, &scrub_coeffs);
+        let read_head = (playhead + scrub_frames)
+            .clamp(start_sample as f32, (end_sample.saturating_sub(1)) as f32);
 
         let (mut sample_l, mut sample_r) = if warp_silent {
             (0.0, 0.0)
@@ -1379,15 +1530,16 @@ unsafe fn sampler_process_segment(
         last_env_amp = env_amp;
         last_read_head = read_head;
 
-        playhead += if warp_active && play_direction >= 0.0 {
-            playback_step * seg_tail_dir
-        } else if warp_repitch {
-            // Re-pitch: fold the tempo ratio into the resample rate so pitch
-            // rides with tempo (tape-style). No segmentation, no artifacts.
-            playback_step * warp_ratio * play_direction
-        } else {
-            playback_step * play_direction
-        };
+        playhead += scrub_rate
+            * if warp_active && play_direction >= 0.0 {
+                playback_step * seg_tail_dir
+            } else if warp_repitch {
+                // Re-pitch: fold the tempo ratio into the resample rate so pitch
+                // rides with tempo (tape-style). No segmentation, no artifacts.
+                playback_step * warp_ratio * play_direction
+            } else {
+                playback_step * play_direction
+            };
         gate_counter += 1.0; // real-time counter (1 per sample, independent of transpose/speed)
     }
 
@@ -1422,7 +1574,7 @@ unsafe fn sampler_process_segment(
     *s.add(STATE_WARP_LAST_TARGET_RATIO) = last_warp_target_ratio;
     *s.add(STATE_WARP_SEG_TAIL_DIR) = seg_tail_dir;
     *s.add(STATE_WARP_LAST_PRESERVE) = last_warp_preserve as f32;
-    *s.add(STATE_SCRUB_SMOOTH) = scrub_smooth;
+    scrub.store(s);
     *s.add(STATE_LAST_READ_HEAD) = last_read_head;
 }
 
@@ -1794,7 +1946,7 @@ pub fn create_sampler_track(lg: *mut LiveGraph, wav_path: &Path) -> Result<Sampl
 #[cfg(test)]
 mod tests {
     use super::{
-        accumulated_scrub_read_head, advance_retrigger_playhead, modulation_lane_sum,
+        advance_retrigger_playhead, modulation_lane_sum,
         retrigger_fade_samples, sampler_begin_event_slice, sampler_init, sampler_playback_step,
         sampler_process, sampler_schedule_event, source_frames_to_host_frames, BufferDesc,
         SAMPLER_EVENT_AUX_ATTACK_SAMPLES, SAMPLER_EVENT_AUX_ENABLED, SAMPLER_EVENT_AUX_END_POINT,
@@ -1808,7 +1960,7 @@ mod tests {
         SAMPLER_EVENT_AUX_WARP_PTR_HI, SAMPLER_EVENT_AUX_WARP_PTR_LO, SAMPLER_EVENT_AUX_WARP_RATIO,
         SAMPLER_EVENT_AUX_WARP_SAMPLE_BPM, SAMPLER_EVENT_AUX_WARP_SEG_ENVELOPE,
         SAMPLER_EVENT_AUX_WARP_SEG_LOOP_MODE, SAMPLER_MOD_LANES_PER_PARAM, SAMPLER_STATE_SIZE,
-        SCRUB_SMOOTH_TIME_MS_DEFAULT, SEG_LOOP_FORWARD, SEG_LOOP_OFF, SEG_LOOP_PINGPONG,
+        SCRUB_CATCH_MS_DEFAULT, SCRUB_SETTLE_MS_DEFAULT, SCRUB_SMOOTH_TIME_MS_DEFAULT, SEG_LOOP_FORWARD, SEG_LOOP_OFF, SEG_LOOP_PINGPONG,
         STATE_ATTACK_SAMPLES, STATE_BUFFER_ID, STATE_END_POINT, STATE_GAIN, STATE_GATE_SAMPLES,
         STATE_MOD_SPEED_DEPTH, STATE_MOD_SPEED_LANE2_DEPTH, STATE_MOD_SPEED_LANE2_SOURCE,
         STATE_MOD_SPEED_SOURCE, STATE_PLAYHEAD, STATE_PLAYING, STATE_SAMPLE_RATE,
@@ -1816,7 +1968,7 @@ mod tests {
         STATE_WARP_LAST_PRESERVE, STATE_WARP_LAST_TARGET_RATIO, STATE_WARP_MODE,
         STATE_WARP_NEXT_BOUNDARY, STATE_WARP_PRESERVE, STATE_WARP_PROJECT_BPM, STATE_WARP_RATIO,
         STATE_WARP_SAMPLE_BPM, STATE_WARP_SEG_ENVELOPE, STATE_WARP_SEG_LOOP_MODE,
-        STATE_WARP_SLICE_SOURCE_FRAME_START, WARP_MODE_BEATS, WARP_MODE_REPITCH,
+        STATE_WARP_SLICE_SOURCE_FRAME_START, TapeScrub, TapeScrubCoeffs, WARP_MODE_BEATS, WARP_MODE_REPITCH,
     };
     use crate::audiograph::{GraphBlockEvent, GBE_AUX_CAP, GBE_NOTE_ON};
     use std::ffi::c_void;
@@ -2572,90 +2724,204 @@ mod tests {
         assert!((sum + 1.8).abs() < 0.00001, "sum was {sum}");
     }
 
-    #[test]
-    fn accumulated_scrub_commits_offset_when_scrub_releases() {
-        let mut playhead = 500.0;
-        let mut scrub_smooth = 0.25;
+    const SR: f32 = 48_000.0;
+    const REGION: f32 = 480_000.0; // 10 s
 
-        let read_head = accumulated_scrub_read_head(
-            &mut playhead,
-            &mut scrub_smooth,
-            0.0,
-            1_000.0,
-            0.0,
-            999.0,
-            48_000.0,
-            SCRUB_SMOOTH_TIME_MS_DEFAULT,
-        );
+    /// Drive the scrub with a knob that updates once per 128-frame block.
+    fn run_blocks(scrub: &mut TapeScrub, targets: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        run_blocks_with(scrub, targets, SCRUB_SETTLE_MS_DEFAULT, SCRUB_CATCH_MS_DEFAULT)
+    }
 
-        assert_eq!(read_head, 750.0);
-        assert_eq!(playhead, 750.0);
-        assert_eq!(scrub_smooth, 0.0);
+    fn run_blocks_with(
+        scrub: &mut TapeScrub,
+        targets: &[f32],
+        settle_ms: f32,
+        catch_ms: f32,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let mut offsets = Vec::new();
+        let mut rates = Vec::new();
+        for target in targets {
+            for _ in 0..128 {
+                let (frames, rate) =
+                    step_with(scrub, *target, settle_ms, catch_ms);
+                offsets.push(frames);
+                rates.push(rate);
+            }
+        }
+        (offsets, rates)
+    }
+
+    fn step_with(scrub: &mut TapeScrub, target: f32, settle_ms: f32, catch_ms: f32) -> (f32, f32) {
+        let k = TapeScrubCoeffs::new(SR, SCRUB_SMOOTH_TIME_MS_DEFAULT, settle_ms, catch_ms);
+        scrub.step(target, REGION, &k)
+    }
+
+    /// A modulator-track pulse driving scrub per sample: linear attack to
+    /// `depth`, exponential release back toward 0, then silence.
+    fn run_pulse(scrub: &mut TapeScrub, settle_ms: f32, catch_ms: f32) -> (Vec<f32>, Vec<f32>, usize) {
+        let attack = (0.03 * SR) as usize;
+        let release = (0.06 * SR) as usize;
+        let total = (0.6 * SR) as usize;
+        let depth = 0.02_f32;
+        let mut offsets = Vec::new();
+        let mut rates = Vec::new();
+        for i in 0..total {
+            let target = if i < attack {
+                depth * i as f32 / attack as f32
+            } else if i < attack + release {
+                let t = (i - attack) as f32 / release as f32;
+                // Reaches exactly 0 at the end of the release.
+                depth * ((-5.0 * t).exp() - (-5.0_f32).exp()) / (1.0 - (-5.0_f32).exp())
+            } else {
+                0.0
+            };
+            let (frames, rate) = step_with(scrub, target, settle_ms, catch_ms);
+            offsets.push(frames);
+            rates.push(rate);
+        }
+        (offsets, rates, attack + release)
     }
 
     #[test]
-    fn accumulated_scrub_offsets_read_head_while_active_without_committing() {
-        let mut playhead = 500.0;
-        let mut scrub_smooth = 0.0;
+    fn tape_scrub_parked_value_is_a_fixed_offset_at_full_speed() {
+        let mut scrub = TapeScrub::default();
+        scrub.snap(0.3);
+        let (offsets, rates) = run_blocks(&mut scrub, &[0.3; 40]);
+        assert!(offsets.iter().all(|frames| (frames - 0.3 * REGION).abs() < 1.0));
+        assert!(rates.iter().all(|rate| *rate == 1.0), "no hand on a parked knob");
+    }
 
-        let read_head = accumulated_scrub_read_head(
-            &mut playhead,
-            &mut scrub_smooth,
-            1.0,
-            1_000.0,
-            0.0,
-            999.0,
-            48_000.0,
-            SCRUB_SMOOTH_TIME_MS_DEFAULT,
-        );
+    /// Block-stepped knob values must not zipper: the head's per-sample
+    /// velocity (the pitch) has to stay continuous across block edges.
+    #[test]
+    fn tape_scrub_velocity_is_continuous_across_knob_steps() {
+        let mut scrub = TapeScrub::default();
+        // A steady sweep: 0.002 of the region (960 frames) per block.
+        let targets = (0..60).map(|block| block as f32 * 0.002).collect::<Vec<_>>();
+        let (offsets, _) = run_blocks(&mut scrub, &targets);
+        let velocity = offsets.windows(2).map(|w| w[1] - w[0]).collect::<Vec<_>>();
+        let jerk = velocity
+            .windows(2)
+            .skip(128 * 20) // past the initial grab
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0_f32, f32::max);
+        let mean = 960.0 / 128.0;
+        assert!(jerk < mean * 0.05, "velocity jumped by {jerk} (mean {mean})");
+    }
 
+    #[test]
+    fn tape_scrub_fast_flicks_carry_more_inertia_than_slow_moves() {
+        // Time for the head to cover half of a target step.
+        fn half_way_frames(step_per_block: f32) -> usize {
+            let mut scrub = TapeScrub::default();
+            // Build up motion at this speed, then hold.
+            let mut targets = (1..=16).map(|b| b as f32 * step_per_block).collect::<Vec<_>>();
+            let last = *targets.last().unwrap();
+            targets.extend(std::iter::repeat_n(last, 200));
+            let (offsets, _) = run_blocks(&mut scrub, &targets);
+            let start = 16 * 128;
+            let from = offsets[start - 1];
+            let to = last * REGION;
+            offsets[start..]
+                .iter()
+                .position(|frames| (frames - from).abs() >= 0.5 * (to - from).abs())
+                .unwrap_or(usize::MAX)
+        }
+        let slow = half_way_frames(0.0001);
+        let fast = half_way_frames(0.01);
+        assert!(fast > slow * 2, "fast={fast} slow={slow}");
+    }
+
+    #[test]
+    fn tape_scrub_hand_slows_the_record_then_it_spins_back_up() {
+        let mut scrub = TapeScrub::default();
+        let mut targets = (0..40).map(|block| block as f32 * 0.002).collect::<Vec<_>>();
+        targets.extend(std::iter::repeat_n(0.078, 800));
+        let (_, rates) = run_blocks(&mut scrub, &targets);
+        let held = rates[39 * 128];
+        assert!(held < 0.2, "moving the scrub holds the record: rate {held}");
+        assert!(*rates.last().unwrap() > 0.99, "released record spins back up");
+        // Spin-up is gradual, not a jump.
+        let max_jump = rates.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0_f32, f32::max);
+        assert!(max_jump < 0.01, "rate jumped by {max_jump}");
+    }
+
+    #[test]
+    fn tape_scrub_slow_wobble_does_not_grab_the_record() {
+        let mut scrub = TapeScrub::default();
+        // ±0.05% of the region at ~2 Hz: tape-wow depth, far below hand speed.
+        let targets = (0..800)
+            .map(|block| 0.0005 * (block as f32 * 128.0 / SR * 2.0 * std::f32::consts::TAU).sin())
+            .collect::<Vec<_>>();
+        let (_, rates) = run_blocks(&mut scrub, &targets);
+        let min = rates.iter().copied().fold(1.0_f32, f32::min);
+        assert!(min > 0.95, "wobble slowed playback to {min}");
+    }
+
+    #[test]
+    fn tape_scrub_catch_sets_how_long_the_record_takes_to_recover() {
+        // Frames from the end of a scrub until playback is back to 90%.
+        fn recovery_frames(catch_ms: f32) -> usize {
+            let mut scrub = TapeScrub::default();
+            let mut targets = (0..40).map(|block| block as f32 * 0.002).collect::<Vec<_>>();
+            targets.extend(std::iter::repeat_n(0.078, 2_000));
+            let (_, rates) = run_blocks_with(&mut scrub, &targets, SCRUB_SETTLE_MS_DEFAULT, catch_ms);
+            let released = 40 * 128;
+            rates[released..].iter().position(|rate| *rate >= 0.9).expect("recovers")
+        }
+        let snap = recovery_frames(1.0);
+        let swell = recovery_frames(1_000.0);
+        // The hand lets go within a few ms of the target stopping, so a
+        // short catch is back at speed almost at once.
+        assert!(snap < (0.015 * SR) as usize, "snap={snap}");
+        // A linear ramp: 90% speed lands ~0.89 of the way through the catch.
+        assert!(swell > snap + (0.8 * SR) as usize, "snap={snap} swell={swell}");
+    }
+
+    /// The modulator-track scratch: a pulse goes out and comes back to 0.
+    /// With short release settings the record is back at full speed within
+    /// 10 ms of the pulse ending and the head is home soon after.
+    #[test]
+    fn tape_scrub_pulse_releases_surgically_with_short_settle_and_catch() {
+        let mut scrub = TapeScrub::default();
+        let (offsets, rates, pulse_end) = run_pulse(&mut scrub, 5.0, 5.0);
+        let held = rates[pulse_end / 2];
+        assert!(held < 0.2, "the pulse holds the record: rate {held}");
+        let caught = pulse_end + (0.01 * SR) as usize;
+        assert!(rates[caught] > 0.99, "rate 10 ms after the pulse: {}", rates[caught]);
+        // The head was trailing the pulse (onset inertia) and glides home.
+        let landed = pulse_end + (0.06 * SR) as usize;
+        assert!(offsets[landed].abs() < 20.0, "head 60 ms after the pulse: {} frames", offsets[landed]);
+    }
+
+    #[test]
+    fn tape_scrub_settle_and_catch_stretch_only_the_release() {
+        let mut tight = TapeScrub::default();
+        let (tight_offsets, tight_rates, pulse_end) = run_pulse(&mut tight, 5.0, 5.0);
+        let mut loose = TapeScrub::default();
+        let (loose_offsets, loose_rates, _) = run_pulse(&mut loose, 500.0, 500.0);
+        // Through the attack the two are identical: the onset is constant.
+        let attack = (0.03 * SR) as usize;
+        assert_eq!(tight_offsets[..attack], loose_offsets[..attack]);
+        assert_eq!(tight_rates[..attack], loose_rates[..attack]);
+        // After the pulse the loose record is still slow and the head lags.
+        let after = pulse_end + (0.03 * SR) as usize;
+        assert!(loose_rates[after] < 0.6, "loose rate {}", loose_rates[after]);
         assert!(
-            read_head > playhead,
-            "read_head={read_head} playhead={playhead}"
+            loose_offsets[after].abs() > tight_offsets[after].abs() + 50.0,
+            "loose head {} vs tight {}",
+            loose_offsets[after],
+            tight_offsets[after]
         );
-        assert_eq!(playhead, 500.0);
-        assert!(scrub_smooth > 0.0);
     }
 
     #[test]
-    fn accumulated_scrub_holds_peak_while_pulse_falls() {
-        let mut playhead = 500.0;
-        let mut scrub_smooth = 0.25;
-
-        let read_head = accumulated_scrub_read_head(
-            &mut playhead,
-            &mut scrub_smooth,
-            0.1,
-            1_000.0,
-            0.0,
-            999.0,
-            48_000.0,
-            SCRUB_SMOOTH_TIME_MS_DEFAULT,
-        );
-
-        assert_eq!(read_head, 750.0);
-        assert_eq!(playhead, 500.0);
-        assert_eq!(scrub_smooth, 0.25);
-    }
-
-    #[test]
-    fn accumulated_scrub_commits_before_opposite_direction_scrub() {
-        let mut playhead = 500.0;
-        let mut scrub_smooth = 0.25;
-
-        let read_head = accumulated_scrub_read_head(
-            &mut playhead,
-            &mut scrub_smooth,
-            -1.0,
-            1_000.0,
-            0.0,
-            999.0,
-            48_000.0,
-            SCRUB_SMOOTH_TIME_MS_DEFAULT,
-        );
-
-        assert!(read_head < 750.0);
-        assert_eq!(playhead, 750.0);
-        assert!(scrub_smooth < 0.0);
+    fn tape_scrub_snap_starts_a_note_at_the_current_position() {
+        let mut scrub = TapeScrub::default();
+        scrub.snap(-0.5);
+        let (frames, rate) =
+            step_with(&mut scrub, -0.5, SCRUB_SETTLE_MS_DEFAULT, SCRUB_CATCH_MS_DEFAULT);
+        assert_eq!(frames, -0.5 * REGION);
+        assert_eq!(rate, 1.0);
     }
 }

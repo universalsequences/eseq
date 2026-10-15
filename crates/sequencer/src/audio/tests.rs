@@ -1819,6 +1819,7 @@ fn sampler_warp_ratio_speeds_source_when_project_bpm_is_higher() {
     state.runtime.sampler_analysis_status[0].store(2, Ordering::Relaxed);
     let table = OnsetTableShared {
         onsets_frames: vec![0, 22_050],
+        onset_rank: Vec::new(),
         sample_len_frames: 44_100,
         sample_rate: 44_100,
         bpm: 120.0,
@@ -1843,6 +1844,7 @@ fn transient_slice_resolution_selects_bounds_and_preserves_explicit_range_locks(
     state.runtime.sampler_analysis_status[0].store(2, Ordering::Relaxed);
     let table = OnsetTableShared {
         onsets_frames: vec![0, 4_000, 8_000],
+        onset_rank: Vec::new(),
         sample_len_frames: 12_000,
         sample_rate: 8_000,
         bpm: 120.0,

@@ -567,6 +567,7 @@ fn sampler_media_read_like_the_sampler_panel_while_observed() {
         bpm: 120.0,
         bpm_confidence: 0.75,
         onsets_frames: vec![0, 11_025, 22_050, 33_075],
+        onset_strengths: Vec::new(),
         downbeat_frame: Some(11_025),
     };
     h.app

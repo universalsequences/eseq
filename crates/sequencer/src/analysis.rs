@@ -18,6 +18,10 @@ pub struct AnalysisResult {
     pub bpm: f32,
     pub bpm_confidence: f32,
     pub onsets_frames: Vec<u32>,
+    /// Parallel to `onsets_frames`: how hard each onset hits (see
+    /// [`onset_strengths`]). Empty means "unknown"; every onset then ranks
+    /// as equally strong.
+    pub onset_strengths: Vec<f32>,
     pub downbeat_frame: Option<u32>,
 }
 
@@ -217,6 +221,10 @@ pub fn sample_path_hash(path: &str) -> Option<String> {
 #[derive(Clone, Debug)]
 pub struct SliceTableShared {
     pub onsets_frames: Vec<u32>,
+    /// Parallel to `onsets_frames`: the order in which sensitivity activates
+    /// each onset (0 = first to become a slice). Empty falls back to time
+    /// order. See [`onset_rank`].
+    pub onset_rank: Vec<u32>,
     pub sample_len_frames: u32,
     pub sample_rate: u32,
     pub bpm: f32,
@@ -228,6 +236,11 @@ impl SliceTableShared {
     pub fn from_result(result: &AnalysisResult, sample_len_frames: u32, sample_rate: u32) -> Self {
         Self {
             onsets_frames: result.onsets_frames.clone(),
+            onset_rank: onset_rank(
+                &result.onsets_frames,
+                &result.onset_strengths,
+                sample_len_frames,
+            ),
             sample_len_frames,
             sample_rate,
             bpm: result.bpm,
@@ -236,11 +249,6 @@ impl SliceTableShared {
         }
     }
 
-    /// Iterate transient slice starts without allocating on the audio thread.
-    /// Aubio has already applied its strength threshold; sensitivity controls
-    /// the second half of transient filtering, minimum spacing. Manual edits
-    /// are overlaid after that filtering, so authored markers survive every
-    /// sensitivity value, including trigger-time parameter locks.
     /// Every candidate marker (manual edits applied), paired with whether
     /// sensitivity keeps it as a real slice boundary.
     ///
@@ -273,18 +281,30 @@ impl SliceTableShared {
         (all, flags)
     }
 
+    /// Iterate transient slice starts without allocating on the audio thread.
+    ///
+    /// Sensitivity spans the whole range from one slice (0) to every detected
+    /// onset (1): it activates the `(N + 1)^s - 1` best-ranked onsets, so each
+    /// knob step multiplies the slice count rather than adding to it — the
+    /// low end yields a few long phrases, the high end every hit. Manual edits
+    /// are overlaid afterwards, so authored markers survive every sensitivity
+    /// value, including trigger-time parameter locks.
     pub fn slice_starts(&self, sensitivity: f32) -> SliceStarts<'_> {
         let sensitivity = if sensitivity.is_finite() {
             sensitivity.clamp(0.0, 1.0)
         } else {
             0.5
         };
-        let min_spacing_ms = 500.0 + (40.0 - 500.0) * sensitivity;
+        let candidates = self
+            .onsets_frames
+            .iter()
+            .filter(|frame| is_slice_candidate(**frame, self.sample_len_frames))
+            .count();
         SliceStarts {
             table: self,
-            min_spacing: (self.sample_rate as f32 * min_spacing_ms / 1000.0).round() as u32,
+            active_count: active_onset_count(candidates, sensitivity),
             detected_cursor: 0,
-            last_detected: 0,
+            candidate_ordinal: 0,
             detected_candidate: None,
             last_output: None,
         }
@@ -293,6 +313,7 @@ impl SliceTableShared {
     pub fn with_edits(&self, edits: Option<&SamplerSliceEdits>) -> Self {
         Self {
             onsets_frames: self.onsets_frames.clone(),
+            onset_rank: self.onset_rank.clone(),
             sample_len_frames: self.sample_len_frames,
             sample_rate: self.sample_rate,
             bpm: self.bpm,
@@ -304,9 +325,11 @@ impl SliceTableShared {
 
 pub struct SliceStarts<'a> {
     table: &'a SliceTableShared,
-    min_spacing: u32,
+    /// Onsets ranked below this are active slice boundaries.
+    active_count: u32,
     detected_cursor: usize,
-    last_detected: u32,
+    /// In-range onsets seen so far: the rank when the table has no ranking.
+    candidate_ordinal: u32,
     detected_candidate: Option<u32>,
     last_output: Option<u32>,
 }
@@ -314,17 +337,26 @@ pub struct SliceStarts<'a> {
 impl SliceStarts<'_> {
     fn fill_detected_candidate(&mut self) {
         while self.detected_candidate.is_none() {
-            let Some(frame) = self.table.onsets_frames.get(self.detected_cursor).copied() else {
+            let index = self.detected_cursor;
+            let Some(frame) = self.table.onsets_frames.get(index).copied() else {
                 return;
             };
             self.detected_cursor += 1;
-            if frame == 0 || frame >= self.table.sample_len_frames {
+            if !is_slice_candidate(frame, self.table.sample_len_frames) {
                 continue;
             }
-            if frame.saturating_sub(self.last_detected) < self.min_spacing {
+            let ordinal = self.candidate_ordinal;
+            self.candidate_ordinal += 1;
+            let rank = match self.table.onset_rank.get(index) {
+                Some(rank) if self.table.onset_rank.len() == self.table.onsets_frames.len() => {
+                    *rank
+                }
+                // No ranking (hand-built tables): activate in time order.
+                _ => ordinal,
+            };
+            if rank >= self.active_count {
                 continue;
             }
-            self.last_detected = frame;
             let suppressed = self.table.manual_edits.as_ref().is_some_and(|edits| {
                 edits.user_deleted.contains(&frame)
                     || edits.user_moved.iter().any(|item| item.from == frame)
@@ -370,6 +402,140 @@ impl Iterator for SliceStarts<'_> {
         self.last_output = Some(next);
         Some(next)
     }
+}
+
+/// How many of `candidates` onsets sensitivity `s` activates:
+/// `(candidates + 1)^s - 1`, i.e. one slice at 0 and every onset at 1, with
+/// the slice count growing geometrically in between.
+fn active_onset_count(candidates: usize, sensitivity: f32) -> u32 {
+    if candidates == 0 {
+        return 0;
+    }
+    let slices = ((candidates + 1) as f32).powf(sensitivity);
+    (slices.round() as u32).saturating_sub(1).min(candidates as u32)
+}
+
+/// Above this many onsets the spread-aware ranking (quadratic) gives way to a
+/// plain strength sort; minutes-long material that dense is past the point
+/// where the spread term is audible anyway.
+const SPREAD_RANK_MAX_ONSETS: usize = 6_000;
+
+/// A detected onset can start a slice only strictly inside the sample: frame
+/// 0 is always a slice already. The rank, the candidate count and the
+/// iterator must agree on this, so it lives in one place.
+fn is_slice_candidate(frame: u32, sample_len_frames: u32) -> bool {
+    frame > 0 && frame < sample_len_frames
+}
+
+/// The order in which sensitivity activates onsets, parallel to `onsets`.
+///
+/// Greedy: each pick is the onset that best combines strength with distance
+/// from the slices already chosen, measured against the slice length the
+/// current count implies. Every prefix of the ranking is therefore a musical
+/// slicing on its own — the first few picks land on the big hits *and* divide
+/// the sample into phrases, instead of clustering wherever the loudest bar is.
+/// Frame 0 and out-of-range onsets rank last (`u32::MAX`).
+pub fn onset_rank(onsets: &[u32], strengths: &[f32], sample_len_frames: u32) -> Vec<u32> {
+    let mut rank = vec![u32::MAX; onsets.len()];
+    let candidates = onsets
+        .iter()
+        .enumerate()
+        .filter(|(_, frame)| is_slice_candidate(**frame, sample_len_frames))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return rank;
+    }
+    let strength = |index: usize| -> f32 {
+        if strengths.len() == onsets.len() {
+            let value = strengths[index];
+            if value.is_finite() { value.max(0.0) } else { 0.0 }
+        } else {
+            1.0
+        }
+    };
+    let peak = candidates
+        .iter()
+        .map(|index| strength(*index))
+        .fold(0.0_f32, f32::max);
+    // A small floor keeps silent-but-detected onsets orderable by spread.
+    let weight = |index: usize| -> f32 {
+        if peak > 0.0 { 0.05 + strength(index) / peak } else { 1.0 }
+    };
+
+    if candidates.len() > SPREAD_RANK_MAX_ONSETS {
+        let mut order = candidates;
+        order.sort_by(|a, b| weight(*b).total_cmp(&weight(*a)).then(a.cmp(b)));
+        for (position, index) in order.into_iter().enumerate() {
+            rank[index] = position as u32;
+        }
+        return rank;
+    }
+
+    // Distance from each candidate to the nearest chosen boundary (frame 0
+    // and the sample end count as chosen from the start).
+    let len = sample_len_frames as f32;
+    let mut nearest = candidates
+        .iter()
+        .map(|index| {
+            let frame = onsets[*index] as f32;
+            frame.min(len - frame)
+        })
+        .collect::<Vec<_>>();
+    let mut taken = vec![false; candidates.len()];
+    for picked in 0..candidates.len() {
+        // The gap one more evenly spread slice would leave.
+        let gap = len / (picked + 2) as f32;
+        let mut best: Option<(usize, f32)> = None;
+        for (slot, index) in candidates.iter().enumerate() {
+            if taken[slot] {
+                continue;
+            }
+            let spread = nearest[slot] / (nearest[slot] + 0.5 * gap);
+            let score = weight(*index) * spread;
+            if best.is_none_or(|(_, top)| score > top) {
+                best = Some((slot, score));
+            }
+        }
+        let Some((slot, _)) = best else { break };
+        taken[slot] = true;
+        rank[candidates[slot]] = picked as u32;
+        let frame = onsets[candidates[slot]] as f32;
+        for (other, index) in candidates.iter().enumerate() {
+            let distance = (onsets[*index] as f32 - frame).abs();
+            if distance < nearest[other] {
+                nearest[other] = distance;
+            }
+        }
+    }
+    rank
+}
+
+/// How hard each onset hits: the RMS of the attack window, weighted by how far
+/// it rises over the window just before it. A kick out of a quiet gap scores
+/// high; a ghost note riding a sustained pad scores low.
+pub fn onset_strengths(samples: &[f32], sample_rate: u32, onsets: &[u32]) -> Vec<f32> {
+    let window = |ms: f32| ((sample_rate as f32 * ms / 1000.0) as usize).max(1);
+    let pre_len = window(30.0);
+    let post_len = window(25.0);
+    let rms = |from: usize, to: usize| -> f32 {
+        let to = to.min(samples.len());
+        if from >= to {
+            return 0.0;
+        }
+        let sum = samples[from..to].iter().map(|value| value * value).sum::<f32>();
+        (sum / (to - from) as f32).sqrt()
+    };
+    onsets
+        .iter()
+        .map(|frame| {
+            let frame = *frame as usize;
+            let post = rms(frame, frame + post_len);
+            let pre = rms(frame.saturating_sub(pre_len), frame);
+            let rise = ((post + 1.0e-4) / (pre + 1.0e-4)).log2().clamp(0.25, 6.0);
+            post * rise
+        })
+        .collect()
 }
 
 /// Warp and slice resolution intentionally share the same immutable analysis table.
@@ -624,11 +790,13 @@ fn analyze_with_aubio(samples: &[f32], sr: u32, buffer_id: i32) -> Result<Analys
     let bpm = tempo.get_bpm().max(0.0);
     let confidence = tempo.get_confidence().max(0.0);
     let downbeat_frame = estimate_downbeat(&onsets_frames, bpm, sr);
+    let onset_strengths = onset_strengths(samples, sr, &onsets_frames);
     Ok(AnalysisResult {
         buffer_id,
         bpm,
         bpm_confidence: confidence,
         onsets_frames,
+        onset_strengths,
         downbeat_frame,
     })
 }
@@ -652,6 +820,7 @@ fn analyze_fallback(samples: &[f32], sr: u32, buffer_id: i32) -> AnalysisResult 
         bpm: 120.0,
         bpm_confidence: 0.5,
         downbeat_frame: onsets.first().copied(),
+        onset_strengths: onset_strengths(samples, sr, &onsets),
         onsets_frames: onsets,
     }
 }
@@ -692,20 +861,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transient_sensitivity_filters_by_minimum_spacing() {
+    fn sensitivity_spans_one_slice_to_every_onset() {
+        let onsets = vec![0, 400, 4_000, 4_400];
         let table = SliceTableShared {
-            onsets_frames: vec![0, 400, 4_000, 4_400],
+            onset_rank: onset_rank(&onsets, &[0.0, 0.2, 1.0, 0.3], 8_000),
+            onsets_frames: onsets,
             sample_len_frames: 8_000,
             sample_rate: 8_000,
             bpm: 120.0,
             downbeat_frame: Some(0),
             manual_edits: None,
         };
-        assert_eq!(table.slice_starts(0.0).collect::<Vec<_>>(), vec![0, 4_000]);
+        // Zero is the whole sample as one slice, not "fewer slices".
+        assert_eq!(table.slice_starts(0.0).collect::<Vec<_>>(), vec![0]);
         assert_eq!(
             table.slice_starts(1.0).collect::<Vec<_>>(),
             vec![0, 400, 4_000, 4_400]
         );
+        // In between, the strongest onset arrives first.
+        assert_eq!(table.slice_starts(0.5).collect::<Vec<_>>(), vec![0, 4_000]);
+    }
+
+    #[test]
+    fn active_onset_count_grows_geometrically_from_one_slice() {
+        assert_eq!(active_onset_count(300, 0.0), 0);
+        assert_eq!(active_onset_count(300, 1.0), 300);
+        // Half way is ~sqrt: a handful of phrases, not half the hits.
+        assert_eq!(active_onset_count(300, 0.5), 16);
+        assert_eq!(active_onset_count(0, 0.7), 0);
+        let counts = (0..=20)
+            .map(|step| active_onset_count(300, step as f32 / 20.0))
+            .collect::<Vec<_>>();
+        assert!(counts.windows(2).all(|pair| pair[0] <= pair[1]), "{counts:?}");
+    }
+
+    /// The first picks divide the sample into phrases rather than piling onto
+    /// the loudest bar, but a much stronger hit still wins over spread.
+    #[test]
+    fn onset_rank_balances_strength_against_spread() {
+        let len = 100_000;
+        // A loud hit plus two ghosts early on, one medium hit mid-sample.
+        let onsets = vec![0, 10_000, 12_000, 14_000, 50_000];
+        let strengths = vec![0.0, 1.0, 0.3, 0.3, 0.6];
+        let rank = onset_rank(&onsets, &strengths, len);
+        assert_eq!(rank[0], u32::MAX, "frame 0 is always a boundary, never ranked");
+        assert_eq!(rank[4], 0, "the mid-sample hit splits the sample first");
+        assert_eq!(rank[1], 1, "then the loud hit, ahead of the better-spaced ghosts");
+        // Every candidate gets a distinct rank.
+        let mut seen = rank[1..].to_vec();
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, 1, 2, 3]);
+
+        // Without strength information the ranking is pure spread.
+        let rank = onset_rank(&onsets, &[], len);
+        assert_eq!(rank[4], 0);
+    }
+
+    #[test]
+    fn onset_strength_rewards_loud_attacks_out_of_quiet() {
+        let sr = 1_000;
+        let mut samples = vec![0.0_f32; 1_000];
+        // A hard hit out of silence at 200, a soft bump on a bed at 600.
+        samples[200..260].fill(0.8);
+        samples[540..700].fill(0.2);
+        samples[600..640].fill(0.3);
+        let strengths = onset_strengths(&samples, sr, &[200, 600]);
+        assert!(strengths[0] > strengths[1] * 4.0, "{strengths:?}");
     }
 
     /// Sensitivity deactivates markers rather than removing them, so the
@@ -715,6 +936,7 @@ mod tests {
     fn sensitivity_deactivates_markers_without_changing_the_candidate_list() {
         let table = SliceTableShared {
             onsets_frames: vec![0, 4_410, 8_820, 44_100, 88_200],
+            onset_rank: Vec::new(),
             sample_len_frames: 132_300,
             sample_rate: 44_100,
             bpm: 120.0,
@@ -722,18 +944,16 @@ mod tests {
             manual_edits: None,
         };
 
-        // sens = 1.0 -> 40 ms minimum spacing: 100 ms apart, all survive.
         let (loose_all, loose_flags) = table.slice_markers(1.0);
         assert_eq!(loose_all, vec![0, 4_410, 8_820, 44_100, 88_200]);
         assert_eq!(loose_flags, vec![true, true, true, true, true]);
 
-        // sens = 0.0 -> 500 ms minimum spacing: the 100 ms cluster collapses.
         let (tight_all, tight_flags) = table.slice_markers(0.0);
         assert_eq!(
             tight_all, loose_all,
             "the candidate list must not change with sensitivity"
         );
-        assert_eq!(tight_flags, vec![true, false, false, true, true]);
+        assert_eq!(tight_flags, vec![true, false, false, false, false]);
     }
 
     #[test]
@@ -775,6 +995,7 @@ mod tests {
     fn resolved_manual_table_keeps_user_markers_regardless_of_sensitivity_spacing() {
         let table = SliceTableShared {
             onsets_frames: vec![0, 100, 1_000],
+            onset_rank: Vec::new(),
             sample_len_frames: 2_000,
             sample_rate: 1_000,
             bpm: 120.0,
@@ -791,7 +1012,7 @@ mod tests {
 
         assert_eq!(
             resolved.slice_starts(0.0).collect::<Vec<_>>(),
-            vec![0, 50, 1_000],
+            vec![0, 50],
         );
         assert_eq!(
             resolved.slice_starts(1.0).collect::<Vec<_>>(),
@@ -874,6 +1095,7 @@ mod tests {
             bpm: 120.0,
             bpm_confidence: 1.0,
             onsets_frames: vec![0, 128],
+            onset_strengths: Vec::new(),
             downbeat_frame: None,
         };
         cache.insert_ready(result.clone(), 256, 44_100);
@@ -893,6 +1115,7 @@ mod tests {
     fn pointer_pack_round_trips() {
         let table = OnsetTableShared {
             onsets_frames: vec![0, 128],
+            onset_rank: Vec::new(),
             sample_len_frames: 256,
             sample_rate: 44_100,
             bpm: 120.0,

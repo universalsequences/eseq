@@ -91,7 +91,7 @@ The step supplies the note. At a transpose of 0 (C4), the sample plays at its re
 4. The **attack** and **release** envelope (0 to 5,000 ms and 0 to 2,000 ms) shapes the level, scaled by the step's velocity.
 5. The **sr** control reduces the sample rate, from 44.1 kHz down to 2 kHz, for aliasing and grit.
 
-The other controls are **speed** (a playback-rate multiplier, default 1), **scrub** (an offset to the read position), **smooth** (0 to 250 ms, default 6 ms), which softens changes to scrub, and **base**, which shifts every note the sampler plays by a fixed number of semitones.
+The other controls are **speed** (a playback-rate multiplier, default 1), **scrub** (an offset to the read position that behaves like a hand on a record: moving it scratches through the sample with inertia that grows with the speed of the move, and holds the underlying playback while it moves), **smooth** (0 to 250 ms, default 6 ms), which softens changes to scrub, **settle** (1 ms to 1 s, default 60 ms), how long the head keeps its weight after a scratch stops (short lands it right back on the playhead, long lets it float in), **catch** (1 ms to 2 s, default 30 ms), how long the record takes to get back to full speed once the scratch stops, and **base**, which shifts every note the sampler plays by a fixed number of semitones.
 
 ### The playback region
 
@@ -116,7 +116,7 @@ Click **slice** in the switch at the left of the waveform. eseq analyses the sam
 
 With slice base at 0, C4 plays slice 1, C#4 plays slice 2, D4 plays slice 3, and so on up the keyboard. A note below the slice base, or past the last slice, plays nothing. Each slice plays at its recorded pitch. The note chooses the slice and does not transpose it.
 
-**sens** (default 50%) sets how close together two slices may be. At 0% slices are at least 500 ms apart, and at 100% they may be as close as 40 ms. Markers that the current setting rejects are drawn dimmed, and playback runs through them.
+**sens** (default 50%) sets how many of the detected transients become slices. At 0% the whole sample is one slice, and at 100% every transient starts a slice. In between, the count grows steadily as you turn the knob, and the hardest hits become slices first, spread across the sample, so a low setting gives a few long phrases. Markers that the current setting rejects are drawn as short dim ticks along the top of the waveform, and playback runs through them. When markers are too crowded to tell apart, the dim ticks are hidden and the slice flags become plain ticks. Zoom in to see and edit them.
 
 The markers can be edited by hand:
 

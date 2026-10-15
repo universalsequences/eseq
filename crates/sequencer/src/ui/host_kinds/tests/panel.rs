@@ -64,7 +64,7 @@ fn param_placement_and_lanes_follow_the_sampler_descriptor() {
     let row = |section: &str, label: &str, slot: f64, visible: bool| {
         vec![s(section), s(label), Value::Number(slot), Value::Bool(visible)]
     };
-    assert_eq!(h.eval_panel("(len inst.params)"), Value::Number(145.0));
+    assert_eq!(h.eval_panel("(len inst.params)"), Value::Number(147.0));
     let main = [
         "attack", "release", "start", "end", "enabled", "reverse", "loop", "xfade", "sr",
         "warp", "mode", "bpm", "speed", "scrub",
@@ -104,6 +104,9 @@ fn param_placement_and_lanes_follow_the_sampler_descriptor() {
         let visible = slot == 0;
         assert_eq!(read(&mut h, 141 + slot), row("source", "phase", (slot + 1) as f64, visible));
     }
+    // The tape-scrub release shape, appended after those.
+    assert_eq!(read(&mut h, 145), row("main", "settle", 0.0, true));
+    assert_eq!(read(&mut h, 146), row("main", "catch", 0.0, true));
     // The lane params, under the mods editor.
     assert_eq!(read(&mut h, 86), row("mod", "speed src", 0.0, true));
     assert_eq!(read(&mut h, 133), row("mod", "end lane 4 amt", 0.0, true));
