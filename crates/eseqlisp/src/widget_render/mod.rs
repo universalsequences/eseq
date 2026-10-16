@@ -1792,6 +1792,7 @@ pub fn widget_shader_sources(
         ("patcher-panel", PATCHER_PANEL_SHADER),
         ("patcher-port", PATCHER_PORT_SHADER),
         ("patcher-back-chevron", PATCHER_BACK_CHEVRON_SHADER),
+        ("patcher-macro-badge", PATCHER_MACRO_BADGE_SHADER),
     ] {
         if let Some(fragment_shader) = sources.source(backend) {
             shaders.push((name, None, fragment_shader));
@@ -5079,6 +5080,53 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     return float4(in.color_a.rgb, in.color_a.a * mask);
 }
 "#, wgsl::PATCHER_BACK_CHEVRON_SHADER);
+
+/// The badge on a macro node's top-left corner: a disc in the node's fill
+/// (`color_b`) ringed in the macro text colour (`color_a`). A library macro
+/// (`uniform_a.y` = 0) shows three book spines, the last one leaning; one the
+/// patch owns (`uniform_a.y` = 1) shows a box inside a box.
+pub const PATCHER_MACRO_BADGE_SHADER: ShaderSources = ShaderSources::both(r#"
+float2 patcher_badge_rotate(float2 p, float angle)
+{
+    float c = cos(angle);
+    float s = sin(angle);
+    return float2(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float aspect = max(in.aspect, 0.001);
+    float2 p = float2((in.uv.x - 0.5) * 2.0 * aspect, (in.uv.y - 0.5) * 2.0);
+    float pixel = max(max(fwidth(p.x), fwidth(p.y)), 0.0001);
+
+    float disc = length(p) - 0.94;
+    float disc_mask = smoothstep(pixel, -pixel, disc);
+    if (disc_mask < 0.002) {
+        discard_fragment();
+    }
+    float ring_width = max(in.uniform_a.x, 1.0) * pixel;
+    float ring = smoothstep(-ring_width - pixel, -ring_width + pixel, disc);
+
+    float glyph;
+    if (in.uniform_a.y > 0.5) {
+        float frame = abs(sdf_rounded_rect(p, float2(0.42, 0.42), 0.10)) - 0.065;
+        glyph = min(frame, sdf_rounded_rect(p, float2(0.15, 0.15), 0.03));
+    } else {
+        float2 spine = float2(0.085, 0.36);
+        glyph = min(
+            sdf_rounded_rect(p - float2(-0.30, 0.04), spine, 0.03),
+            sdf_rounded_rect(p - float2(-0.06, 0.04), spine, 0.03));
+        float2 leaning = patcher_badge_rotate(p - float2(0.24, 0.06), 0.36);
+        glyph = min(glyph, sdf_rounded_rect(leaning, float2(0.085, 0.34), 0.03));
+    }
+    float glyph_mask = smoothstep(pixel, -pixel, glyph);
+
+    float ink = max(ring, glyph_mask);
+    float3 rgb = mix(in.color_b.rgb, in.color_a.rgb, ink);
+    float alpha = mix(in.color_b.a, in.color_a.a, ink) * disc_mask;
+    return float4(rgb, alpha);
+}
+"#, wgsl::PATCHER_MACRO_BADGE_SHADER);
 
 pub const PATCHER_NODE_SHADER: ShaderSources = ShaderSources::both(r#"
 float patcher_node_smooth_rounded_rect(float2 pos, float2 size, float radius, float smin, float smax)

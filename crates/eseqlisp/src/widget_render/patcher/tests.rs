@@ -27631,3 +27631,165 @@ fn a_node_diagnostic_sits_beside_its_own_node_clear_of_the_node_below() {
             if widget_type == "patcher-panel" && instance.color_a == theme::PATCHER_ERROR().to_rgba()
     )));
 }
+
+/// A patcher on `dsp.lisp` that calls the library macro `dif`, whose body has
+/// a scalar history, with the library on its props.
+fn library_history_macro_node(name: &str) -> (LayoutNode, DefmacroLibrary) {
+    let library = temp_defmacro_library(
+        name,
+        &[(
+            "dif",
+            "(defmacro dif (x) (make-history h) (def y (+ x (read-history h))) (write-history h y) y)",
+        )],
+    );
+    let path = temp_patcher_dsp_path(name);
+    fs::write(
+        &path,
+        "(use-defmacro dif)\n(def input (in 1))\n(def d (dif input))\n(out d 1)",
+    )
+    .unwrap();
+    let mut node = patcher_test_node(&path);
+    node.props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library.root().display().to_string()),
+    );
+    (node, library)
+}
+
+/// The edit `allpass-diffuser` hit: turning a history inside a library macro
+/// into a tensor history. The library writeback cannot stage it.
+fn shape_history_edit_in_dif(state: &mut PatcherInteractionState) {
+    state.edit_state.nodes.insert(
+        node_edit_key("macro:dif", "h"),
+        PatcherNodeEdit {
+            view_key: "macro:dif".to_string(),
+            id: "h".to_string(),
+            origin: PatcherNodeOrigin::Source {
+                source_node_id: "h".to_string(),
+            },
+            text: "history @shape [8]".to_string(),
+            position: (8.0, 8.0),
+            width: None,
+            height: None,
+        },
+    );
+}
+
+fn payload_text(payload: &Value, field: &str) -> String {
+    let Value::Map(map) = payload else {
+        panic!("expected payload map");
+    };
+    map.get(field)
+        .and_then(|value| match &*value.borrow() {
+            Value::Keyword(value) | Value::String(value) => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Deleting the last instance of a library macro must drop it from the
+/// preview: its view's pending edits are no longer compiled, so an edit the
+/// library could not stage stops failing every later revision.
+#[test]
+fn deleting_the_last_library_macro_instance_stops_staging_its_edits() {
+    let (node, _library) = library_history_macro_node("stale-library-edit");
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    shape_history_edit_in_dif(&mut state);
+    set_patcher_interaction_state(key, state.clone());
+    let payload = patcher_writeback_payload(&node);
+    assert!(
+        payload_text(&payload, "diagnostic").contains("failed to stage library macro edits"),
+        "precondition: the library cannot stage this edit: {payload:?}"
+    );
+
+    state.edit_state.deleted_nodes.insert(node_edit_key("root", "d"));
+    set_patcher_interaction_state(key, state);
+    let payload = patcher_writeback_payload(&node);
+    assert_eq!(payload_text(&payload, "diagnostic"), "", "{payload:?}");
+    assert!(!payload_text(&payload, "compile-source").contains("dif"), "{payload:?}");
+}
+
+/// Forking a library macro gives the patch its own copy: it is emitted as a
+/// local defmacro carrying the edits made in its view, including ones the
+/// library writeback cannot stage, and the package is left alone.
+#[test]
+fn a_forked_library_macro_is_emitted_locally_with_its_view_edits() {
+    let (node, library) = library_history_macro_node("fork-library-macro");
+    let package = library.package("dif").unwrap();
+    let package_before = fs::read_to_string(&package.source_path).unwrap();
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    state.selected_nodes.insert("d".to_string());
+    shape_history_edit_in_dif(&mut state);
+    set_patcher_interaction_state(key, state);
+
+    assert!(super::run_patcher_command(&node, "fork-macro").is_some());
+    let state = get_patcher_interaction_state(key);
+    assert!(state.edit_state.forked_macros.contains("dif"));
+
+    let payload = patcher_writeback_payload(&node);
+    assert_eq!(payload_text(&payload, "diagnostic"), "", "{payload:?}");
+    let source = payload_text(&payload, "source");
+    assert!(source.contains("(defmacro dif"), "{source}");
+    assert!(source.contains("@shape [8]"), "{source}");
+    assert!(!source.contains("use-defmacro dif"), "{source}");
+    assert_eq!(fs::read_to_string(&package.source_path).unwrap(), package_before);
+
+    // Forking is an edit: undo puts the library macro back.
+    assert!(super::run_patcher_command(&node, "undo").is_some());
+    assert!(!get_patcher_interaction_state(key).edit_state.forked_macros.contains("dif"));
+}
+
+/// Every macro instance wears a badge: books for a library macro, a box in a
+/// box for one the patch owns (`uniform_a.y`), and both draw their name in the
+/// macro colour. Forking turns the library badge into the owned one.
+#[test]
+fn macro_instances_wear_a_badge_saying_whether_the_library_or_the_patch_owns_them() {
+    let (node, _library) = library_history_macro_node("macro-badge");
+    let path = std::path::PathBuf::from(prop_str(&node.props, "path").unwrap());
+    fs::write(
+        &path,
+        "(use-defmacro dif)\n(defmacro own (x) (* x 2))\n(def input (in 1))\n\
+         (def d (dif input))\n(def o (own d))\n(out o 1)",
+    )
+    .unwrap();
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    // (library badges, owned badges)
+    let badges = |prims: &[GpuPrimitive]| {
+        let modes = prims
+            .iter()
+            .filter_map(|prim| match inner_prim(prim) {
+                GpuPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "patcher-macro-badge" =>
+                {
+                    Some(instance.uniform_a[1])
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        (
+            modes.iter().filter(|mode| **mode == 0.0).count(),
+            modes.iter().filter(|mode| **mode == 1.0).count(),
+        )
+    };
+    let name_color = |prims: &[GpuPrimitive], name: &str| {
+        prims.iter().find_map(|prim| match inner_prim(prim) {
+            GpuPrimitive::ProportionalText(text) if text.text == name => Some(text.fg),
+            _ => None,
+        })
+    };
+
+    let prims = build_primitives_for_patcher(&node, breadcrumb_test_viewport());
+    assert_eq!(badges(&prims), (1, 1), "`dif` is the library's, `own` the patch's");
+    let macro_color = Some(theme::PATCHER_MACRO_NODE_TEXT());
+    assert_eq!(name_color(&prims, "dif"), macro_color);
+    assert_eq!(name_color(&prims, "own"), macro_color);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.edit_state.forked_macros.insert("dif".to_string());
+    set_patcher_interaction_state(key, state);
+    let prims = build_primitives_for_patcher(&node, breadcrumb_test_viewport());
+    assert_eq!(badges(&prims), (0, 2), "a forked macro belongs to the patch");
+}

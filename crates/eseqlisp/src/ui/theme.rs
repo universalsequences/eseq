@@ -342,6 +342,8 @@ pub struct Theme {
     pub patcher_param_node_bg: Color,
     pub patcher_param_node_border: Color,
     pub patcher_param_node_text: Color,
+    /// A macro instance's name: set apart from operators the way params are.
+    pub patcher_macro_node_text: Color,
     pub patcher_code_node_bg: Color,
     pub patcher_code_node_border: Color,
     pub patcher_code_node_text: Color,
@@ -1297,6 +1299,11 @@ theme_slots!(
         patcher_param_node_text,
         PATCHER_PARAM_NODE_TEXT,
         Color::from_hex(0x6d, 0xae, 0xff)
+    ),
+    (
+        patcher_macro_node_text,
+        PATCHER_MACRO_NODE_TEXT,
+        Color::from_hex(0xd2, 0x9e, 0xff)
     ),
     (
         patcher_code_node_bg,

@@ -65,6 +65,7 @@ pub const SCENES: &[&str] = &[
     "widget-patcher-panel",
     "widget-patcher-port",
     "widget-patcher-back-chevron",
+    "widget-patcher-macro-badge",
     "widget-patcher-node",
     "widget-dropdown-checkmark",
     "widget-dropdown-magnifier",

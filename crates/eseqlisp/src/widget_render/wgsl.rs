@@ -2941,6 +2941,48 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     return vec4<f32>(input.color_a.rgb, input.color_a.a * mask);
 }"#;
 
+pub const PATCHER_MACRO_BADGE_SHADER: &str = r#"
+fn patcher_badge_rotate(p: vec2<f32>, angle: f32) -> vec2<f32> {
+    var c: f32 = cos(angle);
+    var s: f32 = sin(angle);
+    return vec2<f32>(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+
+@fragment
+fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
+{
+    var aspect: f32 = max(input.aspect, 0.001);
+    var p: vec2<f32> = vec2<f32>((input.uv.x - 0.5) * 2.0 * aspect, (input.uv.y - 0.5) * 2.0);
+    var pixel: f32 = max(max(fwidth(p.x), fwidth(p.y)), 0.0001);
+
+    var disc: f32 = length(p) - 0.94;
+    var disc_mask: f32 = smoothstep(pixel, -pixel, disc);
+    if (disc_mask < 0.002) {
+        discard;
+    }
+    var ring_width: f32 = max(input.uniform_a.x, 1.0) * pixel;
+    var ring: f32 = smoothstep(-ring_width - pixel, -ring_width + pixel, disc);
+
+    var glyph: f32;
+    if (input.uniform_a.y > 0.5) {
+        var frame: f32 = abs(sdf_rounded_rect(p, vec2<f32>(0.42, 0.42), 0.10)) - 0.065;
+        glyph = min(frame, sdf_rounded_rect(p, vec2<f32>(0.15, 0.15), 0.03));
+    } else {
+        var spine: vec2<f32> = vec2<f32>(0.085, 0.36);
+        glyph = min(
+            sdf_rounded_rect(p - vec2<f32>(-0.30, 0.04), spine, 0.03),
+            sdf_rounded_rect(p - vec2<f32>(-0.06, 0.04), spine, 0.03));
+        var leaning: vec2<f32> = patcher_badge_rotate(p - vec2<f32>(0.24, 0.06), 0.36);
+        glyph = min(glyph, sdf_rounded_rect(leaning, vec2<f32>(0.085, 0.34), 0.03));
+    }
+    var glyph_mask: f32 = smoothstep(pixel, -pixel, glyph);
+
+    var ink: f32 = max(ring, glyph_mask);
+    var rgb: vec3<f32> = mix(input.color_b.rgb, input.color_a.rgb, ink);
+    var alpha: f32 = mix(input.color_b.a, input.color_a.a, ink) * disc_mask;
+    return vec4<f32>(rgb, alpha);
+}"#;
+
 pub const PATCHER_NODE_SHADER: &str = r#"
 fn patcher_node_smooth_rounded_rect(pos: vec2<f32>, size: vec2<f32>, radius: f32, smin: f32, smax: f32) -> f32 {
     return smoothstep(smin, smax, sdf_rounded_rect(pos, size, radius));

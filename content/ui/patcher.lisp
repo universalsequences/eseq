@@ -80,6 +80,11 @@
         (list (menu-entry "Open Macro" "open-macro")
               (menu-entry "Rename" "edit-node"))
         (list))
+      ;; A library macro is shared by every patch that uses it; forking gives
+      ;; this patch its own copy to edit.
+      (if (and (not (= node nil)) (get node :library-macro?))
+        (list (menu-entry "Fork into Patch" "fork-macro"))
+        (list))
       (if (and (not (= node nil)) (not (get node :macro?)))
         (list (menu-entry "Edit" "edit-node"))
         (list))

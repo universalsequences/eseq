@@ -6065,6 +6065,13 @@ fn real_patcher_lisp_menu_offers_probe_entries() {
     );
     assert_eq!(number, plain + 1, "a number probe offers Show as Scope");
     assert_eq!(scope, plain + 1, "a scope probe offers Show as Number");
+    let local_macro = entry_count(
+        r#"(dict :col 1 :row 1 :node (dict :id "m" :macro? true :library-macro? false :probe-view nil) :cable nil :ghosts false)"#,
+    );
+    let library_macro = entry_count(
+        r#"(dict :col 1 :row 1 :node (dict :id "m" :macro? true :library-macro? true :probe-view nil) :cable nil :ghosts false)"#,
+    );
+    assert_eq!(library_macro, local_macro + 1, "a library macro offers Fork into Patch");
 }
 
 #[test]

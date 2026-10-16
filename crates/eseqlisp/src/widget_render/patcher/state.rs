@@ -511,6 +511,11 @@ pub(super) struct PatchEditState {
     /// parsed patch (the defmacro and every call to it) before any other edit,
     /// so view keys and node edits use the current name throughout.
     pub(super) renamed_macros: HashMap<String, String>,
+    /// Library macros this patch took its own copy of. Applied to the parsed
+    /// patch before any other edit: each becomes a local macro, so the
+    /// generator emits its body (with its view's edits) as a defmacro in the
+    /// patch instead of importing the package.
+    pub(super) forked_macros: HashSet<String>,
     pub(super) next_created_node: u64,
     pub(super) next_created_connection: u64,
 }
@@ -2337,6 +2342,7 @@ pub(super) fn patch_with_created_macros(
     mut patch: Patch,
     interaction_state: &PatcherInteractionState,
 ) -> Patch {
+    apply_macro_forks(&mut patch, &interaction_state.edit_state.forked_macros);
     apply_macro_renames(&mut patch, &interaction_state.edit_state.renamed_macros);
     for macro_edit in interaction_state.edit_state.created_macros.values() {
         if patch
@@ -2622,6 +2628,14 @@ pub(super) fn empty_created_macro_source(name: &str) -> String {
 /// (`rename_source_macro` refuses those), so running it again on an already
 /// renamed patch — `active_patcher_patch` hands a renamed body back through
 /// here — changes nothing.
+fn apply_macro_forks(patch: &mut Patch, forks: &HashSet<String>) {
+    for macro_patch in &mut patch.macros {
+        if forks.contains(&macro_patch.name) {
+            macro_patch.origin = MacroOrigin::Local;
+        }
+    }
+}
+
 fn apply_macro_renames(patch: &mut Patch, renames: &HashMap<String, String>) {
     if renames.is_empty() {
         return;

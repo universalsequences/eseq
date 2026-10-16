@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use super::super::text_input::selection_range as text_selection_range;
@@ -229,6 +229,7 @@ pub(super) fn build_primitives_for_patcher(
                 &view_key,
                 &autocomplete_macros,
                 Some(path.to_string_lossy().as_ref()),
+                &super::unforked_library_macro_names(&root_patch, &interaction_state),
             );
             let mut ghost_prims = Vec::new();
             let mut ghost_chip_prims = Vec::new();
@@ -1292,6 +1293,7 @@ pub(super) fn draw_patch(
         "root",
         &patch.macros,
         None,
+        &HashSet::new(),
     );
 }
 
@@ -1305,6 +1307,7 @@ fn draw_patch_with_view_key(
     view_key: &str,
     autocomplete_macros: &[super::model::MacroPatch],
     probe_path: Option<&str>,
+    library_macros: &HashSet<String>,
 ) {
     // Each probe node's `@id`/`@view`, parsed once for this paint.
     let probe_attrs = probe_attrs_by_node(patch);
@@ -1507,6 +1510,7 @@ fn draw_patch_with_view_key(
             probe_attrs.get(node.id.as_str()),
             probe_values.get(node.id.as_str()),
             probe_frames.get(node.id.as_str()).cloned().flatten(),
+            node.kind == NodeKind::MacroInstance && library_macros.contains(&node.op),
         );
     }
     if let Some((node_rect, edit)) = active_edit_panel {
@@ -2565,6 +2569,63 @@ fn push_cable_handles(
     }
 }
 
+/// Diameter of the macro badge, in design pixels at zoom 1.
+const MACRO_BADGE_DIAMETER_PX: f32 = 26.0;
+
+/// The macro badge: a disc on the node's top-left corner, over the border,
+/// showing books for a library macro (shared with every patch that uses it)
+/// and a box inside a box for one the patch owns. It changes neither the
+/// node's size nor where its text sits.
+fn push_macro_badge(
+    prims: &mut Vec<GpuPrimitive>,
+    node_rect: Rect,
+    fill: crate::backend::Color,
+    ink: crate::backend::Color,
+    library: bool,
+    viewport: WidgetViewport,
+    zoom: f32,
+) {
+    let diameter_px = ui_design_px(MACRO_BADGE_DIAMETER_PX) * zoom;
+    let width = diameter_px / viewport.cell_w.max(0.001);
+    let height = diameter_px / viewport.cell_h.max(0.001);
+    // Centred a little inside the corner: the node's rounded corner leaves
+    // the exact corner point empty.
+    let inset_px = ui_design_px(6.0) * zoom;
+    let badge = Rect {
+        col: node_rect.col + inset_px / viewport.cell_w.max(0.001) - width * 0.5,
+        row: node_rect.row + inset_px / viewport.cell_h.max(0.001) - height * 0.5,
+        width,
+        height,
+    };
+    let (ndc_min, ndc_max) = ndc_bounds(badge, viewport);
+    prims.push(GpuPrimitive::WidgetInstance {
+        widget_type: "patcher-macro-badge".to_string(),
+        instance: WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t: 0.0,
+            orientation: 0.0,
+            itime: viewport.time_seconds,
+            uniform_a: [
+                ui_design_px(NODE_BORDER_WIDTH_PX) * zoom,
+                if library { 0.0 } else { 1.0 },
+                0.0,
+                0.0,
+            ],
+            uniform_b: [0.0; 4],
+            uniform_c: [0.0; 4],
+            uniform_d: [0.0; 4],
+            color_a: ink.to_rgba(),
+            color_b: fill.to_rgba(),
+            color_c: [0.0; 4],
+            color_d: [0.0; 4],
+            corner_radius: 0.0,
+            pixel_aspect: 1.0,
+        },
+        is_background: false,
+    });
+}
+
 fn push_node(
     prims: &mut Vec<GpuPrimitive>,
     node: &PatchNode,
@@ -2587,6 +2648,7 @@ fn push_node(
     probe: Option<&ProbeAttrs>,
     probe_value: Option<&ProbeValueDisplay>,
     probe_frame: Option<std::sync::Arc<crate::live_audio::ProbeFrame>>,
+    library_macro: bool,
 ) {
     let is_scope = probe.is_some_and(ProbeAttrs::is_scope);
     // A scope's header (label, value, text edit) sits in a standard-height
@@ -2614,6 +2676,11 @@ fn push_node(
             theme::PATCHER_CODE_NODE_BG(),
             theme::PATCHER_CODE_NODE_BORDER(),
             theme::PATCHER_CODE_NODE_TEXT(),
+        ),
+        NodeKind::MacroInstance => (
+            theme::PATCHER_NODE_BG(),
+            theme::PATCHER_NODE_BORDER(),
+            theme::PATCHER_MACRO_NODE_TEXT(),
         ),
         _ => (
             theme::PATCHER_NODE_BG(),
@@ -2661,6 +2728,11 @@ fn push_node(
         node_base_z + PatcherZSlot::NodeChrome as i32,
         chrome_prims,
     );
+    if node.kind == NodeKind::MacroInstance {
+        let mut badge_prims = Vec::new();
+        push_macro_badge(&mut badge_prims, rect, bg, text, library_macro, viewport, zoom);
+        push_z_layered(prims, node_base_z + PatcherZSlot::Ports as i32, badge_prims);
+    }
     let mut port_prims = Vec::new();
     for &index in input_indices {
         push_port(

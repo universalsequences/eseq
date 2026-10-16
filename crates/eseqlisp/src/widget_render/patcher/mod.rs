@@ -2364,6 +2364,7 @@ pub const PATCHER_COMMANDS: &[&str] = &[
     "open-bubble",
     "connect-bubble",
     "open-macro",
+    "fork-macro",
     "edit-node",
     "delete-selection",
     "accept-suggestions",
@@ -2700,6 +2701,15 @@ pub fn run_patcher_command(node: &LayoutNode, name: &str) -> Option<WidgetEvent>
             reset_patcher_pan(key);
             Some(WidgetEvent::Custom(Value::Nil))
         }
+        // Give the patch its own copy of a library macro: the selected
+        // instance's, or the one whose view is open.
+        "fork-macro" => {
+            let (_, root_patch) = load_patch_from_props(&node.props).ok()?;
+            let name = forkable_library_macro(&root_patch, &state, &view_key)?;
+            state.edit_state.forked_macros.insert(name);
+            set_patcher_interaction_state(key, state);
+            Some(patcher_semantic_event(true))
+        }
         // Open the single selected node's text with its name selected — the
         // context menu's Rename / Edit. Committing a new name on a macro
         // instance renames the defmacro.
@@ -2818,6 +2828,20 @@ pub(super) fn patcher_context_menu_info(
                     (
                         "macro?",
                         Value::Bool(patch_node.kind == NodeKind::MacroInstance),
+                    ),
+                    // An instance of a library macro the patch has not forked:
+                    // the menu offers Fork into Patch.
+                    (
+                        "library-macro?",
+                        Value::Bool(
+                            patch_node.kind == NodeKind::MacroInstance
+                                && load_patch_from_props(&node.props).is_ok_and(|(_, root)| {
+                                    root.macros.iter().any(|macro_patch| {
+                                        macro_patch.name == patch_node.op
+                                            && is_unforked_library_macro(macro_patch, &state)
+                                    })
+                                }),
+                        ),
                     ),
                     // `number` / `scope` / … for a probe, nil otherwise: the
                     // menu offers the other view.
@@ -3179,7 +3203,7 @@ fn interaction_state_without_library_macro_views(
     let library_views = root_patch
         .macros
         .iter()
-        .filter(|macro_patch| matches!(macro_patch.origin, MacroOrigin::Library { .. }))
+        .filter(|macro_patch| is_unforked_library_macro(macro_patch, state))
         .map(|macro_patch| format!("macro:{}", macro_patch.name))
         .collect::<std::collections::HashSet<_>>();
     if library_views.is_empty() {
@@ -3640,6 +3664,117 @@ fn staged_library_macro_writeback(
         .map_err(|error| format!("{error:?}"))
 }
 
+/// The library macro `fork-macro` acts on: the single selected node's when
+/// it is an instance of one, else the macro whose view is open.
+fn forkable_library_macro(
+    root_patch: &Patch,
+    state: &state::PatcherInteractionState,
+    view_key: &str,
+) -> Option<String> {
+    let is_forkable = |name: &str| {
+        root_patch
+            .macros
+            .iter()
+            .any(|macro_patch| macro_patch.name == name && is_unforked_library_macro(macro_patch, state))
+    };
+    let selected = (state.selected_nodes.len() == 1)
+        .then(|| state.selected_nodes.iter().next())
+        .flatten()
+        .and_then(|node_id| {
+            let patch = active_patcher_patch(root_patch, state);
+            let patch = patch_with_interaction_state(patch, state, view_key);
+            patch
+                .nodes
+                .iter()
+                .find(|candidate| &candidate.id == node_id && candidate.kind == NodeKind::MacroInstance)
+                .map(|instance| instance.op.clone())
+        });
+    selected
+        .filter(|name| is_forkable(name))
+        .or_else(|| state.active_macro.clone().filter(|name| is_forkable(name)))
+}
+
+/// Names of the library macros the patch still takes from the package: the
+/// ones whose instances wear the library badge.
+fn unforked_library_macro_names(
+    root_patch: &Patch,
+    state: &state::PatcherInteractionState,
+) -> HashSet<String> {
+    root_patch
+        .macros
+        .iter()
+        .filter(|macro_patch| is_unforked_library_macro(macro_patch, state))
+        .map(|macro_patch| macro_patch.name.clone())
+        .collect()
+}
+
+/// A library macro the patch still takes from the package: not forked into a
+/// local copy (`PatchEditState::forked_macros`).
+fn is_unforked_library_macro(macro_patch: &MacroPatch, state: &state::PatcherInteractionState) -> bool {
+    matches!(macro_patch.origin, MacroOrigin::Library { .. })
+        && !state.edit_state.forked_macros.contains(&macro_patch.name)
+}
+
+/// Names of the macros the edited patch calls: from the root and every local
+/// defmacro (all of which are emitted), then through each called macro's body.
+/// A library macro whose last instance was deleted is not among them, so its
+/// view's pending edits are neither compiled nor written to the package.
+fn macros_called_by_edited_patch(
+    root_patch: &Patch,
+    state: &state::PatcherInteractionState,
+) -> HashSet<String> {
+    let visible = sidecar::root_patch_with_interaction(root_patch, state);
+    let bodies = visible
+        .macros
+        .iter()
+        .map(|macro_patch| (macro_patch.name.as_str(), &macro_patch.patch))
+        .collect::<HashMap<_, _>>();
+    let mut pending = std::iter::once(&visible)
+        .chain(
+            visible
+                .macros
+                .iter()
+                .filter(|macro_patch| matches!(macro_patch.origin, MacroOrigin::Local))
+                .map(|macro_patch| &macro_patch.patch),
+        )
+        .collect::<Vec<_>>();
+    let mut called = HashSet::new();
+    while let Some(scope) = pending.pop() {
+        for node in &scope.nodes {
+            if node.kind == NodeKind::MacroInstance && called.insert(node.op.clone())
+                && let Some(body) = bodies.get(node.op.as_str())
+            {
+                pending.push(body);
+            }
+        }
+    }
+    called
+}
+
+/// The unforked library macros the edited patch still calls whose views
+/// have pending edits.
+fn library_macros_with_live_edits<'a>(
+    root_patch: &'a Patch,
+    state: &state::PatcherInteractionState,
+) -> Vec<&'a MacroPatch> {
+    let edited = root_patch
+        .macros
+        .iter()
+        .filter(|macro_patch| is_unforked_library_macro(macro_patch, state))
+        .filter(|macro_patch| {
+            library_macro_view_has_edits(state, &format!("macro:{}", macro_patch.name))
+        })
+        .collect::<Vec<_>>();
+    if edited.is_empty() {
+        return edited;
+    }
+    let called = macros_called_by_edited_patch(root_patch, state);
+    edited
+        .into_iter()
+        .filter(|macro_patch| called.contains(&macro_patch.name))
+        .collect()
+}
+
 fn library_with_staged_macro_edits(
     root_patch: &Patch,
     intent: PatcherIntent,
@@ -3647,14 +3782,7 @@ fn library_with_staged_macro_edits(
     library: &crate::defmacro_library::DefmacroLibrary,
 ) -> Result<crate::defmacro_library::DefmacroLibrary, String> {
     let mut staged_library = library.clone();
-    for macro_patch in &root_patch.macros {
-        if !matches!(macro_patch.origin, MacroOrigin::Library { .. }) {
-            continue;
-        }
-        let view_key = format!("macro:{}", macro_patch.name);
-        if !library_macro_view_has_edits(state, &view_key) {
-            continue;
-        }
+    for macro_patch in library_macros_with_live_edits(root_patch, state) {
         let emitted = staged_library_macro_writeback(macro_patch, intent, state, &staged_library)?;
         staged_library = staged_library
             .with_package_source(&macro_patch.name, &emitted.source)
@@ -3670,7 +3798,7 @@ fn persist_library_macro_edits(
     library: &crate::defmacro_library::DefmacroLibrary,
 ) -> Result<Vec<String>, String> {
     let mut persisted = Vec::new();
-    for macro_patch in &root_patch.macros {
+    for macro_patch in library_macros_with_live_edits(root_patch, state) {
         let MacroOrigin::Library {
             source_path,
             layout_path,
@@ -3679,9 +3807,6 @@ fn persist_library_macro_edits(
             continue;
         };
         let view_key = format!("macro:{}", macro_patch.name);
-        if !library_macro_view_has_edits(state, &view_key) {
-            continue;
-        }
         let source_path = PathBuf::from(source_path);
         let source = std::fs::read_to_string(&source_path)
             .map_err(|error| format!("failed to read '{}': {error}", source_path.display()))?;

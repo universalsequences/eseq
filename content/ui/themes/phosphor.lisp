@@ -309,6 +309,7 @@
       :patcher-param-node-bg              '(0.085 0.130 0.025)
       :patcher-param-node-border          '(0.520 0.880 0.250)
       :patcher-param-node-text            '(0.520 0.760 0.300)
+      :patcher-macro-node-text            '(0.780 0.900 0.420)
       :patcher-code-node-bg               '(0.085 0.130 0.025)
       :patcher-code-node-border           '(0.300 0.450 0.160)
       :patcher-code-node-text             '(0.520 0.760 0.300)
