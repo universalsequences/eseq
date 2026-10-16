@@ -13666,7 +13666,7 @@ fn patcher_cable_hit_testing_uses_rendered_curve() {
         &output_counts,
     )
     .expect("rendered connection endpoints");
-    let curve = super::super::cable::cable_curve(start, end);
+    let curve = super::super::cable::cable_curve(start, end, patcher_zoom(&pan));
     let midpoint = super::super::cable::cubic_bezier_point(curve, 0.5);
 
     assert_eq!(

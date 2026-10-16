@@ -2240,7 +2240,7 @@ fn push_cable_colored(
     color: crate::backend::Color,
     tensor: bool,
 ) {
-    let curve = super::super::cable::cable_curve(start, end);
+    let curve = super::super::cable::cable_curve(start, end, zoom);
     let is_segmented = connection
         .segment
         .is_some_and(|segment| segment.is_segmented)
@@ -2378,7 +2378,7 @@ fn draw_jev_ghosts(
         hits.cables.push((index, start, end));
 
         let mid = super::super::cable::cubic_bezier_point(
-            super::super::cable::cable_curve(start, end),
+            super::super::cable::cable_curve(start, end, zoom),
             0.5,
         );
         if !focused {
@@ -2467,7 +2467,7 @@ fn push_dotted_cable(
     zoom: f32,
     color: crate::backend::Color,
 ) {
-    let curve = super::super::cable::cable_curve(start, end);
+    let curve = super::super::cable::cable_curve(start, end, zoom);
     // Arc length in pixels, from a fine polyline, so spacing is uniform on
     // screen whatever the cable's shape.
     const SAMPLES: usize = 48;

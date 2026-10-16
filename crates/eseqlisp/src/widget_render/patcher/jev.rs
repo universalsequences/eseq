@@ -1011,7 +1011,7 @@ pub(super) fn handle_jev_click(
         let zoom = hits.zoom.max(0.01);
         let hit_radius = CABLE_HIT_RADIUS_CELLS * zoom;
         let on_real_cable = hits.real_cables.iter().any(|(start, end)| {
-            distance_to_cable_px(*start, *end, (local_col, local_row)) <= hit_radius
+            distance_to_cable_px(*start, *end, (local_col, local_row), zoom) <= hit_radius
         });
         if on_real_cable {
             return None;
@@ -1028,7 +1028,7 @@ pub(super) fn handle_jev_click(
             .iter()
             .filter(|(_, start, end)| !near(*start) && !near(*end))
             .filter_map(|(index, start, end)| {
-                let distance = distance_to_cable_px(*start, *end, (local_col, local_row));
+                let distance = distance_to_cable_px(*start, *end, (local_col, local_row), zoom);
                 (distance <= hit_radius).then_some((distance, *index))
             })
             .min_by(|a, b| a.0.total_cmp(&b.0))

@@ -7,25 +7,35 @@ pub struct CableCurve {
 }
 
 const SAME_X_EPSILON: f32 = 0.20;
-const MIN_Y_HANDLE: f32 = 1.1;
-const MAX_Y_HANDLE: f32 = 8.0;
-const Y_HANDLE_VERTICAL_WEIGHT: f32 = 0.35;
-const Y_HANDLE_HORIZONTAL_WEIGHT: f32 = 0.08;
+/// Shortest handle, in unzoomed cells: what a cable between nearly level
+/// ports gets, so it still leaves and enters its ports vertically.
+const MIN_Y_HANDLE: f32 = 0.8;
+/// Handle length for an ordinary downward cable, in unzoomed cells (about 2.3
+/// node heights; see `patcher::metrics::NODE_HEIGHT`). Fixed in patch units, so the bend lives in a same-sized zone at
+/// each port whatever the cable's length, and the rest runs nearly straight,
+/// like a Max/MSP patch cord. The farther apart the ports, the smaller a share
+/// of the cable that zone is, so long cables read as pulled taut.
+const PORT_HANDLE: f32 = 3.6;
+/// Ceiling on the handle as a fraction of vertical drop: keeps wide, shallow
+/// cables from bowing into an S.
+const Y_HANDLE_VERTICAL_LIMIT: f32 = 0.33;
 
 pub fn should_render_segmented_cable(start: (f32, f32), end: (f32, f32)) -> bool {
     (end.0 - start.0).abs() >= SAME_X_EPSILON
 }
 
-/// Generate the patch-editor cable Bezier.
+/// Generate the patch-editor cable Bezier. `start`/`end` are screen cells at
+/// `zoom`; the shape is computed in unzoomed cells so it is the same at every
+/// zoom level.
 ///
 /// Cable endpoints keep port-oriented vertical tangents: patcher cables leave
-/// bottom outlets downward and enter top inlets from above. The handle length
-/// adapts mostly to vertical span, with horizontal distance contributing only
-/// when the cable is meaningfully diagonal.
-pub fn cable_curve(start: (f32, f32), end: (f32, f32)) -> CableCurve {
-    let diff_x = (end.0 - start.0).abs();
-    let diff_y = (end.1 - start.1).abs();
-    let y_handle = cable_y_handle(diff_x, diff_y);
+/// bottom outlets downward and enter top inlets from above. The handles are a
+/// fixed length in patch units (see [`PORT_HANDLE`]), so the curvature stays
+/// near the ports and the middle of the cable runs close to straight.
+pub fn cable_curve(start: (f32, f32), end: (f32, f32), zoom: f32) -> CableCurve {
+    let zoom = zoom.max(f32::EPSILON);
+    let diff_y = (end.1 - start.1).abs() / zoom;
+    let y_handle = cable_y_handle(diff_y) * zoom;
     let p1 = (start.0, start.1 + y_handle);
     let p2 = (end.0, end.1 - y_handle);
 
@@ -37,15 +47,11 @@ pub fn cable_curve(start: (f32, f32), end: (f32, f32)) -> CableCurve {
     }
 }
 
-fn cable_y_handle(diff_x: f32, diff_y: f32) -> f32 {
-    let span = diff_x + diff_y;
-    let verticalness = if span > f32::EPSILON {
-        diff_y / span
-    } else {
-        0.0
-    };
-    (diff_y * Y_HANDLE_VERTICAL_WEIGHT + diff_x * Y_HANDLE_HORIZONTAL_WEIGHT * verticalness)
-        .clamp(MIN_Y_HANDLE, MAX_Y_HANDLE)
+/// Handle length in unzoomed cells.
+fn cable_y_handle(diff_y: f32) -> f32 {
+    PORT_HANDLE
+        .min(diff_y * Y_HANDLE_VERTICAL_LIMIT)
+        .max(MIN_Y_HANDLE)
 }
 
 pub fn cubic_bezier_point(curve: CableCurve, t: f32) -> (f32, f32) {
@@ -64,8 +70,9 @@ pub fn cable_edit_points(
     start: (f32, f32),
     end: (f32, f32),
     distance: f32,
+    zoom: f32,
 ) -> ((f32, f32), (f32, f32)) {
-    let curve = cable_curve(start, end);
+    let curve = cable_curve(start, end, zoom);
     let start_t = find_t_for_fixed_distance(curve, 0.0, distance);
     let end_t = find_t_for_fixed_distance_from_end(curve, distance);
     (
@@ -130,8 +137,13 @@ fn point_distance(a: (f32, f32), b: (f32, f32)) -> f32 {
     ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
 }
 
-pub fn distance_to_cable_px(start: (f32, f32), end: (f32, f32), point: (f32, f32)) -> f32 {
-    let curve = cable_curve(start, end);
+pub fn distance_to_cable_px(
+    start: (f32, f32),
+    end: (f32, f32),
+    point: (f32, f32),
+    zoom: f32,
+) -> f32 {
+    let curve = cable_curve(start, end, zoom);
     let mut best = f32::MAX;
     let mut prev = curve.p0;
     for i in 1..=8 {
@@ -147,9 +159,10 @@ pub fn segmented_cable_edit_points(
     start: (f32, f32),
     end: (f32, f32),
     distance: f32,
+    zoom: f32,
 ) -> ((f32, f32), (f32, f32)) {
     if !should_render_segmented_cable(start, end) {
-        return cable_edit_points(start, end, distance);
+        return cable_edit_points(start, end, distance, zoom);
     }
     ((start.0, start.1 + distance), (end.0, end.1 - distance))
 }
@@ -182,9 +195,10 @@ pub fn distance_to_segmented_cable_px(
     segment_row: f32,
     corner_radius: f32,
     point: (f32, f32),
+    zoom: f32,
 ) -> f32 {
     if !should_render_segmented_cable(start, end) {
-        return distance_to_cable_px(start, end, point);
+        return distance_to_cable_px(start, end, point, zoom);
     }
     let start = (start.0, -start.1);
     let end = (end.0, -end.1);
@@ -458,14 +472,14 @@ mod tests {
 
     #[test]
     fn cable_curve_has_expected_endpoints() {
-        let curve = cable_curve((10.0, 20.0), (100.0, 40.0));
+        let curve = cable_curve((10.0, 20.0), (100.0, 40.0), 1.0);
         assert_eq!(cubic_bezier_point(curve, 0.0), (10.0, 20.0));
         assert_eq!(cubic_bezier_point(curve, 1.0), (100.0, 40.0));
     }
 
     #[test]
     fn cable_curve_uses_vertical_endpoint_tangents_for_horizontal_offsets() {
-        let curve = cable_curve((10.0, 20.0), (100.0, 40.0));
+        let curve = cable_curve((10.0, 20.0), (100.0, 40.0), 1.0);
         assert_eq!(curve.p1.0, curve.p0.0);
         assert_eq!(curve.p2.0, curve.p3.0);
         assert!(curve.p1.1 > curve.p0.1, "{curve:?}");
@@ -473,29 +487,66 @@ mod tests {
     }
 
     #[test]
-    fn cable_curve_scales_vertical_handles_with_span() {
-        let short = cable_curve((10.0, 20.0), (18.0, 30.0));
-        let long = cable_curve((10.0, 20.0), (18.0, 120.0));
-        let short_handle = (short.p1.1 - short.p0.1).abs();
-        let long_handle = (long.p1.1 - long.p0.1).abs();
-        assert!(short_handle >= MIN_Y_HANDLE, "{short:?}");
-        assert!(long_handle > short_handle, "{short:?} {long:?}");
-        assert!(long_handle <= MAX_Y_HANDLE, "{long:?}");
+    fn cable_curve_bends_near_the_ports_and_runs_straight_between() {
+        // A long diagonal cable: the handle is a short zone at each port, not
+        // a fraction of the cable, so the middle is close to the chord.
+        let curve = cable_curve((0.0, 0.0), (-20.0, 40.0), 1.0);
+        let handle = curve.p1.1 - curve.p0.1;
+        assert_eq!(handle, PORT_HANDLE, "{curve:?}");
+        let mid = cubic_bezier_point(curve, 0.5);
+        assert!((mid.0 - -10.0).abs() < 1e-3 && (mid.1 - 20.0).abs() < 1e-3);
+        let quarter = cubic_bezier_point(curve, 0.25);
+        let chord_x_at_quarter_row = -20.0 * quarter.1 / 40.0;
+        assert!(
+            (quarter.0 - chord_x_at_quarter_row).abs() < 2.0,
+            "{quarter:?}"
+        );
+    }
+
+    #[test]
+    fn cable_curve_bend_zone_is_fixed_so_far_cables_read_taut() {
+        let near = cable_curve((0.0, 0.0), (-6.0, 12.0), 1.0);
+        let far = cable_curve((0.0, 0.0), (-24.0, 48.0), 1.0);
+        let near_handle = near.p1.1 - near.p0.1;
+        let far_handle = far.p1.1 - far.p0.1;
+        assert_eq!(near_handle, far_handle, "{near:?} {far:?}");
+        assert!(far_handle / 48.0 < near_handle / 12.0, "{near:?} {far:?}");
+    }
+
+    #[test]
+    fn cable_curve_shape_does_not_change_with_zoom() {
+        let base = cable_curve((0.0, 0.0), (-6.0, 4.0), 1.0);
+        for zoom in [0.2_f32, 0.7, 2.5] {
+            let zoomed = cable_curve((0.0, 0.0), (-6.0 * zoom, 4.0 * zoom), zoom);
+            let base_handle = base.p1.1 - base.p0.1;
+            let zoomed_handle = zoomed.p1.1 - zoomed.p0.1;
+            assert!(
+                (zoomed_handle - base_handle * zoom).abs() < 1e-4,
+                "{zoom} {zoomed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cable_curve_caps_wide_shallow_cables_by_their_drop() {
+        let curve = cable_curve((0.0, 0.0), (-200.0, 10.0), 1.0);
+        let handle = curve.p1.1 - curve.p0.1;
+        assert_eq!(handle, 10.0 * Y_HANDLE_VERTICAL_LIMIT, "{curve:?}");
     }
 
     #[test]
     fn cable_curve_keeps_mostly_horizontal_cables_tight() {
-        let shallow = cable_curve((10.0, 20.0), (130.0, 24.0));
-        let diagonal = cable_curve((10.0, 20.0), (130.0, 70.0));
+        let shallow = cable_curve((10.0, 20.0), (130.0, 24.0), 1.0);
         let shallow_handle = (shallow.p1.1 - shallow.p0.1).abs();
-        let diagonal_handle = (diagonal.p1.1 - diagonal.p0.1).abs();
-        assert!(shallow_handle < 2.0, "{shallow:?}");
-        assert!(diagonal_handle > shallow_handle, "{shallow:?} {diagonal:?}");
+        assert!(
+            shallow_handle <= 4.0 * Y_HANDLE_VERTICAL_LIMIT,
+            "{shallow:?}"
+        );
     }
 
     #[test]
     fn cable_curve_keeps_vertical_cables_vertical() {
-        let curve = cable_curve((10.0, 20.0), (10.0, 60.0));
+        let curve = cable_curve((10.0, 20.0), (10.0, 60.0), 1.0);
         assert_eq!(curve.p1.0, curve.p0.0);
         assert_eq!(curve.p2.0, curve.p3.0);
         assert!(curve.p1.1 > curve.p0.1, "{curve:?}");
@@ -504,7 +555,7 @@ mod tests {
 
     #[test]
     fn cable_curve_keeps_port_oriented_tangents_when_destination_is_above_source() {
-        let curve = cable_curve((10.0, 60.0), (10.0, 20.0));
+        let curve = cable_curve((10.0, 60.0), (10.0, 20.0), 1.0);
         assert_eq!(curve.p1.0, curve.p0.0);
         assert_eq!(curve.p2.0, curve.p3.0);
         assert!(curve.p1.1 > curve.p0.1, "{curve:?}");
@@ -513,7 +564,7 @@ mod tests {
 
     #[test]
     fn cable_curve_treats_nearly_aligned_ports_as_vertical() {
-        let curve = cable_curve((10.0, 20.0), (10.12, 60.0));
+        let curve = cable_curve((10.0, 20.0), (10.12, 60.0), 1.0);
         assert_eq!(curve.p1.0, curve.p0.0);
         assert_eq!(curve.p2.0, curve.p3.0);
     }
@@ -525,12 +576,12 @@ mod tests {
         let point = (10.0, 40.0);
         assert!(!should_render_segmented_cable(start, end));
         assert_eq!(
-            segmented_cable_edit_points(start, end, 3.0),
-            cable_edit_points(start, end, 3.0)
+            segmented_cable_edit_points(start, end, 3.0, 1.0),
+            cable_edit_points(start, end, 3.0, 1.0)
         );
         assert_eq!(
-            distance_to_segmented_cable_px(start, end, 34.0, 0.7, point),
-            distance_to_cable_px(start, end, point)
+            distance_to_segmented_cable_px(start, end, 34.0, 0.7, point, 1.0),
+            distance_to_cable_px(start, end, point, 1.0)
         );
         assert!(!segmented_horizontal_segment_hit(
             start, end, 34.0, 0.7, 0.4, point
@@ -539,13 +590,13 @@ mod tests {
 
     #[test]
     fn distance_to_cable_is_small_near_endpoint() {
-        let distance = distance_to_cable_px((10.0, 20.0), (100.0, 40.0), (10.5, 20.5));
+        let distance = distance_to_cable_px((10.0, 20.0), (100.0, 40.0), (10.5, 20.5), 1.0);
         assert!(distance < 1.0, "{distance}");
     }
 
     #[test]
     fn cable_edit_points_are_inside_curve_endpoints() {
-        let (start_handle, end_handle) = cable_edit_points((10.0, 20.0), (100.0, 40.0), 3.0);
+        let (start_handle, end_handle) = cable_edit_points((10.0, 20.0), (100.0, 40.0), 3.0, 1.0);
         assert!(start_handle.0 > 10.0, "{start_handle:?}");
         assert!(start_handle.0 < 100.0, "{start_handle:?}");
         assert!(end_handle.0 > 10.0, "{end_handle:?}");

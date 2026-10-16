@@ -646,9 +646,15 @@ pub(super) fn hit_patcher_cable(
                         segmented_cable_row_px(start, end, origin.1, segment.segment_row, zoom),
                         SEGMENTED_CABLE_CORNER_RADIUS_CELLS * zoom,
                         (local_col, local_row),
+                        zoom,
                     )
                 }
-                _ => super::super::cable::distance_to_cable_px(start, end, (local_col, local_row)),
+                _ => super::super::cable::distance_to_cable_px(
+                    start,
+                    end,
+                    (local_col, local_row),
+                    zoom,
+                ),
             };
             (distance <= CABLE_HIT_RADIUS_CELLS * zoom)
                 .then(|| (distance, source_connection_id(connection)))
@@ -662,7 +668,12 @@ pub(super) fn cable_edit_points(
     end: (f32, f32),
     zoom: f32,
 ) -> ((f32, f32), (f32, f32)) {
-    super::super::cable::cable_edit_points(start, end, cable_handle_distance(start, end, zoom))
+    super::super::cable::cable_edit_points(
+        start,
+        end,
+        cable_handle_distance(start, end, zoom),
+        zoom,
+    )
 }
 
 /// How far each endpoint handle sits in from its end of the cable. Short cables
@@ -688,6 +699,7 @@ pub(super) fn connection_cable_edit_points(
             start,
             end,
             cable_handle_distance(start, end, zoom),
+            zoom,
         )
     } else {
         cable_edit_points(start, end, zoom)
