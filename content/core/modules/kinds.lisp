@@ -1890,15 +1890,29 @@
 
 ;; ── Collections and actions ──
 
+;; The project's tracks, in order: `track` instances (t.index, t.name,
+;; t.color, …; (describe-kind 'track) lists them all).
 (def tracks () project.tracks)
+;; The project's scenes, in order (`scene` instances).
 (def scenes () project.scenes)
+;; The project's scene banks (`bank` instances).
 (def banks () project.banks)
+;; The mixer's buses (`bus` instances).
 (def buses () project.buses)
+;; The project's track groups and racks (`group` instances): a rack's
+;; g.tracks are its pads, in pad order; an instance a rack owns has that
+;; group's gid as its self.owner.
 (def groups () project.groups)
+;; The project's send routes (`route` instances).
 (def routes () project.routes)
+;; The project's macros (`macro` instances).
 (def macros () project.macros)
+;; The project's graph sequencers (`graph` instances).
 (def graphs () project.graphs)
+;; The project's neural networks (`network` instances).
 (def networks () project.networks)
+;; The project's generators, one per sequencer instance with a :generator
+;; (`generator` instances); (generator-of self) is an instance's own.
 (def generators () project.generators)
 
 ;; Graph sequencers (spec §14.2k). The graph of a created instance (self) or

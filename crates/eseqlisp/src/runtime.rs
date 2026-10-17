@@ -2222,6 +2222,73 @@ impl Runtime {
         self.document_symbols([
             ("dict", "(dict :key value ...)", "Return a map from keyword/value pairs."),
             (
+                "instance-ref",
+                "(instance-ref id)",
+                "The live instance with this id, as a value (what a kind's :view receives as `self`), or nil. Read and write its fields with a `let`: (let ((e (instance-ref 1))) (set! e.rings (list)) e.rings).",
+            ),
+            (
+                "describe-kind",
+                "(describe-kind 'name)",
+                "A kind's fields as text: group, name, type, :default, :set, :range and :doc.",
+            ),
+            (
+                "field",
+                "(field instance :name)",
+                "Read field `name` of an instance, as `instance.name` does (a tracked read), for code handed a field by name.",
+            ),
+            (
+                "set-field!",
+                "(set-field! instance :name value)",
+                "Write field `name` of an instance, as `(set! instance.name value)` does.",
+            ),
+            (
+                "field-info",
+                "(field-info #'instance.name) or (field-info instance :name)",
+                "What the kind declares about a field: a map of :kind :field :type and, when declared, :range (lo hi), :default, :options, :doc, :settable. Nil for anything else.",
+            ),
+            (
+                "instance-icon",
+                "(instance-icon id)",
+                "The :icon defwidget name of the live instance's kind, or nil.",
+            ),
+            (
+                "drop-instance",
+                "(drop-instance x)",
+                "Drop a view-local instance (it turns stale and its constructor's readers re-run); whether it was live. Host and singleton instances are an error.",
+            ),
+            (
+                "rerender-log!",
+                "(rerender-log! on)",
+                "Turn the re-render reason log on or off; read it with (rerender-reasons).",
+            ),
+            (
+                "rerender-reasons",
+                "(rerender-reasons)",
+                "The re-render reason log's lines since the last call, oldest first (see rerender-log!).",
+            ),
+            (
+                "module-loaded?",
+                "(module-loaded? \"eseq.sequencer\")",
+                "Whether that module has been loaded, so a library can call an optional module only under a root that loads it.",
+            ),
+            (
+                "setopt-by-name",
+                "(setopt-by-name \"module/name\" value)",
+                "Set a defcustom (or defstate) by its registration name string, as setopt does: `module/name`, or the bare name in a file without (module …).",
+            ),
+            (
+                "read-string",
+                "(read-string text)",
+                "One s-expression of data read from text, never evaluated; nil when the text is not exactly one piece of data.",
+            ),
+            ("number?", "(number? x)", "Whether x is a number."),
+            ("string?", "(string? x)", "Whether x is a string."),
+            (
+                "current-source-path",
+                "(current-source-path)",
+                "The path of the file being evaluated, or \"\" outside a file.",
+            ),
+            (
                 "ui/style",
                 "(ui/style :state style-map ...)",
                 "Return a widget style map, commonly keyed by :pressed, :hover, or :focused.",
@@ -2638,13 +2705,14 @@ impl Runtime {
         self.vm.begin_inline_widget_capture();
         let path = self.vm.source_manager.canonicalize_path(&path);
         let revision = crate::hot_reload::hash_source(source);
-        let result = self.vm.eval_module_source(path, source, revision);
+        let result = self.vm.eval_module_source(path.clone(), source, revision);
         let load_errors = self.vm.take_source_load_errors();
         if !load_errors.is_empty() {
             for error in load_errors {
                 self.vm.source_manager.push_diagnostic(error);
             }
             let _ = self.vm.take_inline_widgets();
+            self.vm.forget_comment_docs(&path);
             return Err(crate::vm::VMError::CompileError);
         }
         if result.is_ok() {
@@ -4195,6 +4263,19 @@ impl Runtime {
         }
 
         let mut metadata = self.symbol_metadata.clone();
+        // A definition documented by its source (a `:doc` slot, docstring or
+        // the comment above it), latest load first among those; a native's
+        // registered docs and a `:doc` header (below) win over it.
+        let mut documented: HashMap<String, SymbolMetadata> = HashMap::new();
+        for (global, signature, docs) in self.vm.comment_docs() {
+            documented.insert(
+                crate::modules::strip_implicit(&global).to_string(),
+                SymbolMetadata { signature, docs, keyword_args: Vec::new() },
+            );
+        }
+        for (name, meta) in documented {
+            metadata.entry(name).or_insert(meta);
+        }
         // A documented Lisp `def` is the live definition, so its header wins
         // over a native it shadows.
         for (global, header) in &self.vm.definition_headers {
@@ -5830,6 +5911,15 @@ mod observer_tests {
         assert_eq!(seen.borrow().len(), 2);
         assert!(matches!(seen.borrow()[1], Value::Number(2.0)));
         assert!(runtime.take_pending_buffer_widget_trees().is_empty());
+    }
+
+    #[test]
+    fn a_module_definitions_comment_documents_it_for_describe() {
+        let mut runtime = Runtime::new();
+        let source = "(module doc.demo)\n(export menu-of)\n\n;; The menu for m.\n(def menu-of (m) m)\n";
+        runtime.eval_source_at_path(std::path::PathBuf::from("/virtual/doc/demo.lisp"), source).unwrap();
+        let meta = runtime.completion_metadata_for("doc.demo/menu-of").expect("documented");
+        assert_eq!((meta.signature.as_str(), meta.docs.as_str()), ("(menu-of m)", "The menu for m."));
     }
 
     #[test]

@@ -16560,3 +16560,16 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let unique: std::collections::HashSet<&String> = labels.iter().collect();
         assert_eq!(unique.len(), labels.len(), "duplicate node picker labels: {labels:?}");
     }
+
+    #[test]
+    fn every_documented_tick_native_is_registered_in_the_scheduler_runtime() {
+        let state = Arc::new(crate::sequencer::SequencerState::new(
+            1,
+            vec![crate::sequencer::default_empty_effect_chain()],
+        ));
+        let mut scratch = super::scheduler_scratch_runtime_with_fallbacks(state, 0, 0);
+        for (name, signature, docs) in super::GENERATOR_TICK_NATIVE_DOCS {
+            let registered = scratch.runtime.completion_metadata_for(name).unwrap_or_else(|| panic!("{name} is not registered"));
+            assert_eq!((registered.signature.as_str(), registered.docs.as_str()), (*signature, *docs), "{name}");
+        }
+    }

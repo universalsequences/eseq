@@ -2921,6 +2921,13 @@ pub struct VM {
     /// Latest definition header per qualified global
     /// (docs/command-palette-spec.md §3).
     pub definition_headers: HashMap<String, crate::lang::def_header::DefinitionHeader>,
+    /// Successfully evaluated module sources whose definition docs
+    /// `describe` can show (see [`VM::comment_docs`]): path → (declared
+    /// module, revision, load order). The text stays in the source manager.
+    comment_doc_sources: HashMap<std::path::PathBuf, (Option<String>, u64, u64)>,
+    comment_doc_order: u64,
+    /// [`VM::comment_docs`]'s scans, per path at the revision scanned.
+    scanned_comment_docs: HashMap<std::path::PathBuf, (u64, Vec<(String, String, String)>)>,
     pub source_manager: SourceManager,
     pub(crate) source_load_errors: Vec<String>,
     /// Deprecations already reported (`:bindable`, `reactive-value`): each
@@ -3009,6 +3016,7 @@ pub struct VmStateSnapshot {
     reactive_exec_timings: Vec<ReactiveExecTiming>,
     last_reactive_error_context: Option<String>,
     last_reactive_error_detail: Option<String>,
+    comment_doc_sources: HashMap<std::path::PathBuf, (Option<String>, u64, u64)>,
     current_effect_source_buffer_id: Option<BufferId>,
     current_effect_target: EffectTarget,
     current_effect_reactive_reads: Option<HashSet<ReactiveFieldKey>>,
@@ -5267,6 +5275,9 @@ impl VM {
             macros: Rc::default(),
             definition_generation: 0,
             definition_headers: HashMap::new(),
+            comment_doc_sources: HashMap::new(),
+            comment_doc_order: 0,
+            scanned_comment_docs: HashMap::new(),
             source_manager: SourceManager::new(),
             source_load_errors: Vec::new(),
             deprecations_warned: HashSet::new(),
@@ -6096,6 +6107,10 @@ impl VM {
             }
         }
         if result.is_ok() {
+            // Its definition docs are scanned lazily, on the first describe.
+            self.comment_doc_order += 1;
+            self.comment_doc_sources
+                .insert(path.clone(), (declared_module.clone(), revision, self.comment_doc_order));
             self.source_manager.record_module_success(
                 path.clone(),
                 source,
@@ -6121,6 +6136,52 @@ impl VM {
 
     pub fn take_source_load_errors(&mut self) -> Vec<String> {
         std::mem::take(&mut self.source_load_errors)
+    }
+
+    /// (global, signature, doc) for every documented top-level definition
+    /// of the module sources evaluated so far (see
+    /// [`crate::lang::def_header::comment_docs`]), in load order so a later
+    /// flat definition of a name comes after an earlier one. Each source is
+    /// scanned once per revision, on demand.
+    pub fn comment_docs(&mut self) -> Vec<(String, String, String)> {
+        let mut sources: Vec<(std::path::PathBuf, Option<String>, u64, u64)> = self
+            .comment_doc_sources
+            .iter()
+            .map(|(path, (module, revision, order))| (path.clone(), module.clone(), *revision, *order))
+            .collect();
+        sources.sort_by_key(|source| source.3);
+        let mut docs = Vec::new();
+        for (path, module, revision, _) in sources {
+            if self.scanned_comment_docs.get(&path).is_none_or(|(scanned, _)| *scanned != revision) {
+                let module = module.as_deref().unwrap_or(crate::modules::IMPLICIT_MODULE);
+                let entries = self
+                    .source_manager
+                    .evaluated_source(&path, revision)
+                    .map(crate::lang::def_header::comment_docs)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|entry| {
+                        let global = if entry.flat || crate::modules::is_qualified(&entry.name) {
+                            entry.name
+                        } else {
+                            crate::modules::qualify(module, &entry.name)
+                        };
+                        (global, entry.signature, entry.doc)
+                    })
+                    .collect();
+                self.scanned_comment_docs.insert(path.clone(), (revision, entries));
+            }
+            if let Some((_, entries)) = self.scanned_comment_docs.get(&path) {
+                docs.extend(entries.iter().cloned());
+            }
+        }
+        docs
+    }
+
+    /// Forget a source's definition docs: its load failed after the VM had
+    /// accepted it.
+    pub fn forget_comment_docs(&mut self, path: &std::path::Path) {
+        self.comment_doc_sources.remove(path);
     }
 
     /// Report deprecation `key` once per session (per VM): to stderr and
@@ -6171,6 +6232,7 @@ impl VM {
             reactive_exec_timings: self.reactive_exec_timings.clone(),
             last_reactive_error_context: self.last_reactive_error_context.clone(),
             last_reactive_error_detail: self.last_reactive_error_detail.clone(),
+            comment_doc_sources: self.comment_doc_sources.clone(),
             current_effect_source_buffer_id: self.current_effect_source_buffer_id,
             current_effect_target: self.current_effect_target.clone(),
             current_effect_reactive_reads: self.current_effect_reactive_reads.clone(),
@@ -6263,6 +6325,7 @@ impl VM {
         self.reactive_exec_timings = snapshot.reactive_exec_timings;
         self.last_reactive_error_context = snapshot.last_reactive_error_context;
         self.last_reactive_error_detail = snapshot.last_reactive_error_detail;
+        self.comment_doc_sources = snapshot.comment_doc_sources;
         self.current_effect_source_buffer_id = snapshot.current_effect_source_buffer_id;
         self.current_effect_target = snapshot.current_effect_target;
         self.current_effect_reactive_reads = snapshot.current_effect_reactive_reads;

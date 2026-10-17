@@ -878,3 +878,71 @@ mod tests {
         assert!(with_log("ok".to_string(), &long).ends_with("… (log truncated)"));
     }
 }
+
+#[cfg(test)]
+mod coverage {
+    use super::*;
+
+    fn booted() -> HeadlessSession {
+        let setup = sequencer::authoring_kit::SEQUENCER_CHECK_PROJECT;
+        let parsed = super::super::super::capture::parse_capture_source(setup).unwrap();
+        let script = std::env::temp_dir().join("eseq-doc-coverage.lisp");
+        let mut session = HeadlessSession::boot(&script, &parsed, None, 0, false).unwrap();
+        load_lisp_tools(&mut session);
+        session
+    }
+
+    fn documented(runtime: &mut eseqlisp::Runtime, name: &str) -> bool {
+        runtime.definition_header(name).and_then(|header| header.doc.clone()).is_some()
+            || runtime.completion_metadata_for(name).is_some_and(|meta| !meta.docs.trim().is_empty())
+    }
+
+    /// The names the sequencer guide teaches an agent to call.
+    const AGENT_SURFACE: &[&str] = &[
+        "gen-tick", "gen-beat", "gen-bar", "gen-phase", "gen-rand", "gen-mark", "state-get", "state-set!",
+        "seq-emit", "chan-get", "box", "h-stack", "v-stack", "label", "button", "number-picker", "dropdown",
+        "sexp-slot", "each", "instance-ref", "describe-kind", "field", "set-field!", "field-info",
+        "eseq.kinds/tracks", "eseq.kinds/groups", "eseq.kinds/generator-of", "eseq.kinds/generator-mark-of",
+        "eseq.kinds/generator-mark-named", "eseq.view-kit/menu-of", "eseq.view-kit/open-menu!",
+        "eseq.agent-tools/define-agent-tool",
+    ];
+
+    #[test]
+    fn every_name_the_sequencer_guide_teaches_is_documented() {
+        let mut session = booted();
+        let runtime = session.editor.runtime_mut();
+        let missing: Vec<&str> =
+            AGENT_SURFACE.iter().copied().filter(|name| !documented(runtime, name)).collect();
+        assert!(missing.is_empty(), "describe has nothing for {missing:?}");
+    }
+
+    /// Run with `--run-ignored only --no-capture`: how much of the booted UI
+    /// runtime `describe` / `apropos` can document, by module.
+    #[test]
+    #[ignore = "report, not a check"]
+    fn doc_coverage_report() {
+        let mut session = booted();
+        let runtime = session.editor.runtime_mut();
+        let mut by_module: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+        for name in runtime.callable_global_names() {
+            let native = matches!(runtime.global_value(&name), Some(Value::NativeFunction(_)));
+            let module = match name.rsplit_once('/') {
+                Some((module, _)) if eseqlisp::modules::is_valid_module_name(module) => module.to_string(),
+                // Per-instrument panel functions: generated, not API.
+                _ if name.starts_with("custom_ui_") || name.starts_with("custom-synth-ui-") => continue,
+                _ if native => "(native)".to_string(),
+                _ => "(flat lisp)".to_string(),
+            };
+            let entry = by_module.entry(module).or_default();
+            entry.0 += 1;
+            entry.1 += usize::from(documented(runtime, &name));
+        }
+        let (mut total, mut docs) = (0, 0);
+        for (module, (count, documented)) in &by_module {
+            total += count;
+            docs += documented;
+            println!("{module:<48} {documented:>4}/{count:<4}");
+        }
+        println!("TOTAL {docs}/{total}");
+    }
+}

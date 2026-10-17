@@ -1028,6 +1028,36 @@ pub fn register_neural_authoring_natives_with_selection(
     );
 }
 
+/// The docs of the natives a generator `:tick` calls, which only the
+/// scheduler's runtime registers: they register from here, and the UI
+/// runtime documents them from here, so `describe` and the agent tools can
+/// explain a tick being written there.
+pub const GENERATOR_TICK_NATIVE_DOCS: &[(&str, &str, &str)] = &[
+    ("param-label?", "(param-label? label)", "True when label is a per-hit parameter label seq-emit :params accepts (e.g. \"instrument:cutoff\", \"fx2:filterbank:freq\", \"rack-macro:macro_1\"); false otherwise, including non-strings. Existence on a track is checked only when the hit lands."),
+    ("gen-tick", "(gen-tick)", "0-based count of this generator's boundary crossings since reset."),
+    ("gen-beat", "(gen-beat)", "Musical position of this boundary in quarter-note beats."),
+    ("gen-bar", "(gen-bar)", "0-based bar index of this boundary (4 beats per bar)."),
+    ("gen-phase", "(gen-phase)", "Position within the current bar in beats (0..4)."),
+    ("gen-rand", "(gen-rand)", "Deterministic pseudo-random float in [0,1), seeded per generator."),
+    ("state-get", "(state-get \"key\") | (state-get \"key\" default)", "Read a persistent per-generator scalar state cell (0.0, or the given default, if unset)."),
+    ("state-set!", "(state-set! \"key\" value)", "Write a persistent per-generator scalar state cell; returns the value."),
+    ("gen-gate", "(gen-gate)", "The gate other sequencers hold on this generator at this boundary (docs/jaki-trig-modes-spec.md): (dict :epoch n :open bool :note st :vel v :restart n). :epoch/:restart count boundaries that delivered a play/restart trigger; never triggered is epoch 0, closed, note 0, vel 1."),
+    ("chan-get", "(chan-get \"name\") | (chan-get \"name\" default)", "Read a process channel's current value from a generator :tick (nil, or the given default, if unset). Read-only: values are a per-chunk snapshot, so a process write lands on subsequent ticks."),
+    ("gen-mark", "(gen-mark value [key] [at-beats])", "Stamp a number at this boundary's audio time (plus at-beats); the UI reads the latest sounded one as (generator-mark-named g key).value (key \"\" unkeyed)."),
+    ("gen-track-harmony", "(gen-track-harmony track)", "Track TRACK's harmony at this tick's beat, for a generator :tick: (list chord key) — chord pitches in semitones from the track root, key its pitch classes — the step it is on (else what it sounds), or nil before it has played. Refreshed once per lookahead chunk."),
+    ("gen-offset", "(gen-offset :16 n)", "Beats offset = n steps at a timebase, for seq-emit :at."),
+    ("beats", "(beats :8) | (beats 0.25)", "Beats in one step of a timebase, or a numeric beat duration."),
+];
+
+/// A tick native's (signature, docs) from [`GENERATOR_TICK_NATIVE_DOCS`].
+fn tick_doc(name: &str) -> (&'static str, &'static str) {
+    GENERATOR_TICK_NATIVE_DOCS
+        .iter()
+        .find(|(native, _, _)| *native == name)
+        .map(|(_, signature, docs)| (*signature, *docs))
+        .unwrap_or_else(|| panic!("{name} is not in GENERATOR_TICK_NATIVE_DOCS"))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     runtime: &mut Runtime,
@@ -1118,8 +1148,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     // (which rejects the whole call, silencing the note).
     runtime.register_native_with_docs(
         "param-label?",
-        "(param-label? label)",
-        "True when label is a per-hit parameter label seq-emit :params accepts (e.g. \"instrument:cutoff\", \"fx2:filterbank:freq\", \"rack-macro:macro_1\"); false otherwise, including non-strings. Existence on a track is checked only when the hit lands.",
+        tick_doc("param-label?").0,
+        tick_doc("param-label?").1,
         |args, _ctx| {
             Ok(EValue::Bool(matches!(
                 args.first(),
@@ -1131,8 +1161,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     let generator_tick_for_tick = Arc::clone(&generator_tick);
     runtime.register_native_with_docs(
         "gen-tick",
-        "(gen-tick)",
-        "0-based count of this generator's boundary crossings since reset.",
+        tick_doc("gen-tick").0,
+        tick_doc("gen-tick").1,
         move |_args, _ctx| {
             let guard = generator_tick_for_tick
                 .lock()
@@ -1147,8 +1177,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     let generator_tick_for_beat = Arc::clone(&generator_tick);
     runtime.register_native_with_docs(
         "gen-beat",
-        "(gen-beat)",
-        "Musical position of this boundary in quarter-note beats.",
+        tick_doc("gen-beat").0,
+        tick_doc("gen-beat").1,
         move |_args, _ctx| {
             let guard = generator_tick_for_beat
                 .lock()
@@ -1163,8 +1193,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     let generator_tick_for_bar = Arc::clone(&generator_tick);
     runtime.register_native_with_docs(
         "gen-bar",
-        "(gen-bar)",
-        "0-based bar index of this boundary (4 beats per bar).",
+        tick_doc("gen-bar").0,
+        tick_doc("gen-bar").1,
         move |_args, _ctx| {
             let guard = generator_tick_for_bar
                 .lock()
@@ -1179,8 +1209,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     let generator_tick_for_phase = Arc::clone(&generator_tick);
     runtime.register_native_with_docs(
         "gen-phase",
-        "(gen-phase)",
-        "Position within the current bar in beats (0..4).",
+        tick_doc("gen-phase").0,
+        tick_doc("gen-phase").1,
         move |_args, _ctx| {
             let guard = generator_tick_for_phase
                 .lock()
@@ -1195,8 +1225,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     let generator_tick_for_rand = Arc::clone(&generator_tick);
     runtime.register_native_with_docs(
         "gen-rand",
-        "(gen-rand)",
-        "Deterministic pseudo-random float in [0,1), seeded per generator.",
+        tick_doc("gen-rand").0,
+        tick_doc("gen-rand").1,
         move |_args, _ctx| {
             let mut guard = generator_tick_for_rand
                 .lock()
@@ -1213,8 +1243,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     let generator_tick_for_state_get = Arc::clone(&generator_tick);
     runtime.register_native_with_docs(
         "state-get",
-        "(state-get \"key\") | (state-get \"key\" default)",
-        "Read a persistent per-generator scalar state cell (0.0, or the given default, if unset).",
+        tick_doc("state-get").0,
+        tick_doc("state-get").1,
         move |args, _ctx| {
             let key = match args.first() {
                 Some(EValue::String(s) | EValue::Symbol(s) | EValue::Keyword(s)) => s.clone(),
@@ -1239,8 +1269,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     let generator_tick_for_state_set = Arc::clone(&generator_tick);
     runtime.register_native_with_docs(
         "state-set!",
-        "(state-set! \"key\" value)",
-        "Write a persistent per-generator scalar state cell; returns the value.",
+        tick_doc("state-set!").0,
+        tick_doc("state-set!").1,
         move |args, _ctx| {
             let key = match args.first() {
                 Some(EValue::String(s) | EValue::Symbol(s) | EValue::Keyword(s)) => s.clone(),
@@ -1263,8 +1293,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     let generator_tick_for_gate = Arc::clone(&generator_tick);
     runtime.register_native_with_docs(
         "gen-gate",
-        "(gen-gate)",
-        "The gate other sequencers hold on this generator at this boundary (docs/jaki-trig-modes-spec.md): (dict :epoch n :open bool :note st :vel v :restart n). :epoch/:restart count boundaries that delivered a play/restart trigger; never triggered is epoch 0, closed, note 0, vel 1.",
+        tick_doc("gen-gate").0,
+        tick_doc("gen-gate").1,
         move |_args, _ctx| {
             let guard = generator_tick_for_gate
                 .lock()
@@ -1288,8 +1318,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     let generator_channels_for_chan_get = Arc::clone(&generator_channels);
     runtime.register_native_with_docs(
         "chan-get",
-        "(chan-get \"name\") | (chan-get \"name\" default)",
-        "Read a process channel's current value from a generator :tick (nil, or the given default, if unset). Read-only: values are a per-chunk snapshot, so a process write lands on subsequent ticks.",
+        tick_doc("chan-get").0,
+        tick_doc("chan-get").1,
         move |args, _ctx| {
             let name = match args.first() {
                 Some(EValue::String(s) | EValue::Symbol(s) | EValue::Keyword(s)) => s.clone(),
@@ -1323,8 +1353,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     let state_for_mark = Arc::clone(&state);
     runtime.register_native_with_docs(
         "gen-mark",
-        "(gen-mark value [key] [at-beats])",
-        "Stamp a number at this boundary's audio time (plus at-beats); the UI reads the latest sounded one as (generator-mark-named g key).value (key \"\" unkeyed).",
+        tick_doc("gen-mark").0,
+        tick_doc("gen-mark").1,
         move |args, _ctx| {
             let Some(EValue::Number(value)) = args.first() else {
                 return Err("gen-mark expects a number".to_string());
@@ -1355,8 +1385,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     let generator_channels_for_harmony = Arc::clone(&generator_channels);
     runtime.register_native_with_docs(
         "gen-track-harmony",
-        "(gen-track-harmony track)",
-        "Track TRACK's harmony at this tick's beat, for a generator :tick: (list chord key) — chord pitches in semitones from the track root, key its pitch classes — the step it is on (else what it sounds), or nil before it has played. Refreshed once per lookahead chunk.",
+        tick_doc("gen-track-harmony").0,
+        tick_doc("gen-track-harmony").1,
         move |args, _ctx| {
             let Some(EValue::Number(track)) = args.first() else {
                 return Err("gen-track-harmony expects a track number".to_string());
@@ -1419,8 +1449,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
 
     runtime.register_native_with_docs(
         "gen-offset",
-        "(gen-offset :16 n)",
-        "Beats offset = n steps at a timebase, for seq-emit :at.",
+        tick_doc("gen-offset").0,
+        tick_doc("gen-offset").1,
         move |args, _ctx| {
             let timebase = parse_timebase_arg(&args, 0)?;
             let Some(EValue::Number(n)) = args.get(1) else {
@@ -1434,8 +1464,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
 
     runtime.register_native_with_docs(
         "beats",
-        "(beats :8) | (beats 0.25)",
-        "Beats in one step of a timebase, or a numeric beat duration.",
+        tick_doc("beats").0,
+        tick_doc("beats").1,
         move |args, _ctx| {
             if let Some(EValue::Number(n)) = args.first() {
                 return Ok(EValue::Number(n.max(0.0)));

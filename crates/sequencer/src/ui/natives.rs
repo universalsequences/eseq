@@ -7460,7 +7460,10 @@ fn agent_audition_value(audition: sequencer::agent::store::AuditionResult) -> Va
 }
 
 fn document_metal_seq_natives(runtime: &mut Runtime) {
+    // Tick natives run in the scheduler's runtime, but ticks are written here.
+    runtime.document_symbols(sequencer::lisp_host::GENERATOR_TICK_NATIVE_DOCS.iter().copied());
     runtime.document_symbols([
+        ("now-ms", "(now-ms)", "Wall-clock milliseconds since the Unix epoch, for gesture timing (hold-to-select)."),
         (
             "seq-toggle-step",
             "(seq-toggle-step step)",

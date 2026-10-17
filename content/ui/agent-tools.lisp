@@ -27,6 +27,9 @@
 
 (defstate registry (list))
 
+;; Add (or replace) an agent tool: `doc` is what the model reads, `params`
+;; a list of (name :type "doc" [:optional true]), `run` a function of the
+;; arguments map.
 (def define-agent-tool (name &key doc params run)
   (set! registry
     (append (filter |tool| (not (= (get tool :name) name)) registry)
@@ -37,9 +40,11 @@
   (map |tool| (dict :name (get tool :name) :doc (get tool :doc) :params (get tool :params))
        registry))
 
+;; Whether a tool with this name is registered.
 (def has-tool? (name)
   (not (empty? (filter |tool| (= (get tool :name) name) registry))))
 
+;; Run tool `name` with the arguments map `args`.
 (def call-tool (name args)
   (let ((tool (first (filter |tool| (= (get tool :name) name) registry))))
     (if (= tool nil)

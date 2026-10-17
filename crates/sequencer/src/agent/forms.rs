@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use eseqlisp::lang::def_header::first_doc_line;
+use eseqlisp::lang::def_header::{comment_block_above, first_doc_line, form_doc_text};
 use eseqlisp::parser::{Expr, ExprKind, Parser, SpannedASTParser};
 
 /// One top-level form of a source file.
@@ -68,7 +68,9 @@ pub fn top_level_forms(source: &str) -> Result<Vec<TopForm>, String> {
             let head = items.first().and_then(symbol).unwrap_or_default().to_string();
             let name = is_defining(&head).then(|| items.get(1).and_then(name_of)).flatten();
             TopForm {
-                doc: form_doc(items).or_else(|| comment_doc(source, span.start_byte)),
+                doc: form_doc_text(items)
+                    .or_else(|| comment_block_above(source, span.start_byte))
+                    .and_then(|doc| first_doc_line(&doc).map(str::to_string)),
                 head,
                 name,
                 start_byte: span.start_byte,
@@ -277,41 +279,6 @@ fn name_of(expr: &Expr) -> Option<String> {
         ExprKind::Symbol(name) | ExprKind::String(name) => Some(name.clone()),
         _ => None,
     }
-}
-
-/// `:doc "…"` anywhere at the top of the form, or a docstring as the first
-/// body form of `(def name (args) "doc" body…)`.
-fn form_doc(items: &[Expr]) -> Option<String> {
-    let keyword_doc = items.windows(2).find_map(|pair| match (&pair[0].kind, &pair[1].kind) {
-        (ExprKind::Keyword(key), ExprKind::String(doc)) if key.trim_start_matches(':') == "doc" => {
-            Some(doc.clone())
-        }
-        _ => None,
-    });
-    let docstring = match items {
-        [head, _, args, doc, _, ..] if symbol(head) == Some("def") => match (&args.kind, &doc.kind) {
-            (ExprKind::List(_), ExprKind::String(doc)) => Some(doc.clone()),
-            _ => None,
-        },
-        _ => None,
-    };
-    keyword_doc.or(docstring).and_then(|doc| first_doc_line(&doc).map(str::to_string))
-}
-
-/// The first line of the `;` comment block that ends on the line above
-/// `start_byte`, if the form is not separated from it by a blank line.
-fn comment_doc(source: &str, start_byte: usize) -> Option<String> {
-    let before = &source[..start_byte];
-    let mut block = Vec::new();
-    for line in before.lines().rev().skip(usize::from(!before.ends_with('\n'))) {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with(';') {
-            break;
-        }
-        block.push(trimmed.trim_start_matches(';').trim());
-    }
-    block.reverse();
-    block.into_iter().find(|line| !line.is_empty()).map(str::to_string)
 }
 
 fn line_starts(source: &str) -> Vec<usize> {
