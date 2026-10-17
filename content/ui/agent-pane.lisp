@@ -11,6 +11,7 @@
 
 (import eseq.kinds :refer (agent))
 (import eseq.markdown-view :as markdown-view)
+(import eseq.view-kit :refer (nothing))
 
 (export agent-pane-open agent-pane-close agent-pane-send)
 
@@ -40,23 +41,23 @@
         (set! draft "")
         (agent-pane/send text)))))
 
-(def tool-color (status)
-  (cond
-    ((= status "running") :blue)
-    ((= status "failed") :red)
-    (else :green)))
+;; Secondary text: prefixes, tool rows, the counters.
+(def dim-text (text size wrap)
+  (label text :font-size size :color :dim :wrap wrap :bg :transparent))
 
 (def tool-view (entry i)
-  (v-stack :key (str "entry-" i) :width :fill :gap 0.15
-    (h-stack :width :fill :gap 0.5
-      (label (str "◆ " (get entry :name)) :font-size 11 :color (tool-color (get entry :status)) :bg :transparent)
-      (label (get entry :input) :font-size 10 :color :gray :bg :transparent))
-    (if (= (get entry :output) "")
-      (box :width 0 :height 0)
-      (label (get entry :output) :font-size 10 :color :gray :wrap true :bg :transparent))
-    (v-stack :width :fill :gap 0.2
-      (each (get entry :images) |path j|
-        (image :key (str "entry-" i "-image-" j) :src path :width :fill :height 14)))))
+  (let ((status (get entry :status)))
+    (v-stack :key (str "entry-" i) :width :fill :gap 0.15
+      (h-stack :width :fill :gap 0.5
+        (dim-text (str "• " (get entry :name) (cond ((= status "failed") " failed") ((= status "running") " …") (else "")))
+          11 false)
+        (dim-text (get entry :input) 10 false))
+      (if (= (get entry :output) "")
+        (nothing)
+        (dim-text (get entry :output) 10 true))
+      (v-stack :width :fill :gap 0.2
+        (each (get entry :images) |path j|
+          (image :key (str "entry-" i "-image-" j) :src path :width :fill :height 14))))))
 
 (def text-view (entry i prefix color size)
   (label (str prefix (get entry :text))
@@ -76,18 +77,17 @@
   (let ((kind (get entry :kind)))
     (cond
       ((= kind "tool") (tool-view entry i))
-      ((= kind "user") (text-view entry i "› " :accent 12))
-      ((= kind "thinking") (text-view entry i "… " :gray 10))
-      ((= kind "notice") (text-view entry i "! " :yellow 11))
+      ((= kind "user") (text-view entry i "› " :fg 12))
+      ((= kind "thinking") (text-view entry i "… " :dim 10))
+      ((= kind "notice") (text-view entry i "! " :fg 11))
       (else (reply-view entry i)))))
 
 (def header (busy usage)
   (h-stack :key "agent-pane-header" :width :fill :gap 0.5 :align :center
-    (label "Agent" :font-size 14 :color :white :bg :transparent)
-    (label (if busy "working…" "") :font-size 10 :color :blue :bg :transparent)
+    (label "Agent" :font-size 14 :color :fg :bg :transparent)
+    (dim-text (if busy "working…" "") 10 false)
     (box :flex 1)
-    (label (str (get usage :input) " in · " (get usage :output) " out")
-      :font-size 9 :color :gray :bg :transparent)
+    (dim-text (str (get usage :input) " in · " (get usage :output) " out") 9 false)
     (if busy
       (button "Stop" :key "agent-pane-stop" :variant :danger :height 1.2
         :on-click |x y r| (agent-pane/cancel))
@@ -96,8 +96,8 @@
 
 (def empty-state ()
   (v-stack :key "agent-pane-empty" :width :fill :flex 1 :gap 0.6 :padding 1.0
-    (label "Ask for a sequencer, a panel or an extension. The agent writes it as a Local module, checks how it plays and looks, and your project picks it up."
-      :font-size 11 :color :gray :wrap true :bg :transparent)
+    (dim-text "Ask for a sequencer, a panel or an extension. The agent writes it as a Local module, checks how it plays and looks, and your project picks it up."
+      11 true)
     (button "a euclidean sequencer with three rings" :key "agent-pane-example" :variant :ghost
       :on-click |x y r| (set! draft "Build a euclidean rhythm sequencer with three rings, each routed to a track."))))
 

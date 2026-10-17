@@ -23,9 +23,13 @@
   (let ((size (get opts :size)))
     (if size size 13)))
 
+;; Code: the one coloured text, in the monospace face.
+(def code-text (text opts)
+  (label text :font-size (body-size opts) :color :blue :mono true :bg :transparent))
+
 (def code-chip (text opts)
   (box :background-color :button-ghost-bg :corner-radius 3 :padding 0.08
-    (label text :font-size (body-size opts) :color :cyan :mono true :bg :transparent)))
+    (code-text text opts)))
 
 ;; A web address, as opposed to a manual node or other relative target.
 (def external-link? (target)
@@ -35,21 +39,22 @@
 (def open-external (target)
   (host-command "open-url" (dict :url target)))
 
-;; A link: clickable when `handler` is given, else drawn like one.
-(def link-label (text target handler color opts)
+;; A link: underlined, clickable when `handler` is given. Text is fg or
+;; dim throughout; only code is coloured.
+(def link-label (text target handler opts)
   (if handler
-    (label text :font-size (body-size opts) :color color :hover-color :white :bg :transparent
+    (label text :font-size (body-size opts) :color :fg :hover-color :dim :bg :transparent
       :underline true :on-click (lambda (event) (handler target)))
-    (label text :font-size (body-size opts) :color color :bg :transparent :underline true)))
+    (label text :font-size (body-size opts) :color :fg :bg :transparent :underline true)))
 
 (def render-fragment (frag opts)
   (let ((kind (nth frag 0)) (text (nth frag 1)) (size (body-size opts)))
     (cond
       ((= kind 'code) (code-chip text opts))
-      ((= kind 'link) (link-label text (nth frag 2) (get opts :on-link) :blue opts))
-      ((= kind 'action-link) (link-label text (nth frag 2) (get opts :on-action) :accent opts))
-      ((= kind 'b) (label text :font-size size :color :white :bold true :bg :transparent))
-      ((= kind 'em) (label text :font-size size :color :cyan :bg :transparent))
+      ((= kind 'link) (link-label text (nth frag 2) (get opts :on-link) opts))
+      ((= kind 'action-link) (link-label text (nth frag 2) (get opts :on-action) opts))
+      ((= kind 'b) (label text :font-size size :color :fg :bold true :bg :transparent))
+      ((= kind 'em) (label text :font-size size :color :dim :bg :transparent))
       (else (label text :font-size size :color :fg :bg :transparent)))))
 
 (def render-group (group opts)
@@ -72,7 +77,7 @@
 
 (def render-heading (block opts)
   (label (nth block 1) :font-size (heading-size (nth block 0) opts) :bg :transparent
-    :width :fill :wrap true :color :dim))
+    :width :fill :wrap true :color :fg :bold true))
 
 (def render-code-block (block opts)
   (let ((lines (string-split (nth block 2) "
@@ -80,7 +85,7 @@
     (box :width :fill :background-color :button-ghost-bg :corner-radius 4 :padding 0.4
       (v-stack :width :fill :gap 0.05
         (each (range 0 (len lines)) |i|
-          (label (nth lines i) :font-size (body-size opts) :color :cyan :mono true :bg :transparent))))))
+          (code-text (nth lines i) opts))))))
 
 ;; The marker is the first group of the item's own wrap container: a flexed
 ;; sibling would be measured at unbounded width and report a one-line height,
