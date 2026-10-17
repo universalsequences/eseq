@@ -1,0 +1,100 @@
+; ======================================================================
+; Phase distortion engine (plaits/dsp/engine2/phase_distortion_engine.cc):
+; two VariableShapeOscillators in phase-output mode (triangle shaper, one
+; hard-synced to f0, one free running) driving sine lookups, 2x oversampled
+; with naive decimation. OUT = synced, AUX = free running.
+; ======================================================================
+(def pd_lut_fm_quantizer (tensor @shape [130 1] @file "lut_fm_frequency_quantizer.json"))
+
+; ParameterInterpolator over a 24-step (2x oversampled) block, state starts
+; at `init`: values for oversampled sub-steps 2*bphase and 2*bphase+1.
+(defmacro pd-interp2 (target bstart bphase init)
+  (make-history h_prev)
+  (make-history h_cur)
+  (def prev (gswitch bstart (read-history h_cur) (read-history h_prev)))
+  (def cur (gswitch bstart (- target init) (read-history h_cur)))
+  (write-history h_prev prev)
+  (write-history h_cur cur)
+  (def d (- cur prev))
+  (tuple (+ init prev (* d (/ (+ (* 2 bphase) 1) 24)))
+         (+ init prev (* d (/ (+ (* 2 bphase) 2) 24)))))
+
+; Triangle naive sample (waveshape 0: triangle_amount 1, square_amount 0).
+(defmacro pd-tri (phase pw su sd)
+  (gswitch (lt phase pw) (* phase su) (- 1 (* (- phase pw) sd))))
+
+; One VariableShapeOscillator::Render<sync, true> step with waveshape 0.
+; State (mp sp ns high ppw); returns (mp' sp' ns' high' out).
+(defmacro pd-vso-step (is_sync mp sp ns high ppw mf sf pw pm)
+  (def su (/ 1 pw))
+  (def sd (/ 1 (- 1 pw)))
+  (def sfs (max sf 0.000000001))
+  (def tstep (* (+ su sd) sf))
+  (def mpa (+ mp mf))
+  (def wrap (gte mpa 1))
+  (def mp1 (- mpa wrap))
+  (def reset (* is_sync wrap))
+  (def rt (/ mp1 (max mf 0.000000001)))
+  (def spar0 (+ sp (* (- 1 rt) sf)))
+  (def sw (gte spar0 1))
+  (def spar (- spar0 sw))
+  (def trans (max sw (* (- 1 high) (gte spar pw))))
+  (def rval (* reset (pd-tri spar pw su sd)))
+  (def spa (+ sp sf))
+  (def run (max trans (- 1 reset)))
+  (def rise (* run (- 1 high) (gte spa pw)))
+  (def den (+ (- ppw pw) sf))
+  (def tr (/ (- spa pw) (gswitch (lt (abs den) 0.000000001) 0.000000001 den)))
+  (def high1 (max high rise))
+  (def fall (* run high1 (gte spa 1)))
+  (def sp1 (- spa fall))
+  (def tf (/ sp1 sfs))
+  (def high2 (* high1 (- 1 fall)))
+  (def this1 (+ ns (- (* rval (pl-this-blep rt)))
+                (- (* rise tstep (pl-this-integrated-blep tr)))
+                (* fall tstep (pl-this-integrated-blep tf))))
+  (def nxt1 (+ (- (* rval (pl-next-blep rt)))
+               (- (* rise tstep (pl-next-integrated-blep tr)))
+               (* fall tstep (pl-next-integrated-blep tf))))
+  (def sp2 (gswitch reset (* rt sf) sp1))
+  (def high3 (* high2 (- 1 reset)))
+  (def nxt2 (+ nxt1 (pd-tri sp2 pw su sd)))
+  (def w (* 4 (- 1 mp1) mp1))
+  (def this2 (gswitch is_sync (* this1 w (- 2 w)) this1))
+  (def p2 (* mp1 mp1))
+  (def phasor (gswitch is_sync (+ mp1 (* (- (* p2 p2) mp1) (abs (- pw 0.5)) 2)) mp1))
+  (tuple mp1 sp2 nxt2 high3 (+ phasor (* pm this2))))
+
+; Two oversampled steps of one oscillator; returns the decimated sine output.
+(defmacro pd-osc (is_sync mf0 mf1 sf0 sf1 pw0 pw1 pm0 pm1)
+  (make-history h_mp)
+  (make-history h_sp)
+  (make-history h_ns)
+  (make-history h_hi)
+  (make-history h_ppw)
+  (def ppw (+ 0.5 (read-history h_ppw)))
+  (def (mpa spa nsa hia oa) (pd-vso-step is_sync (read-history h_mp) (read-history h_sp) (read-history h_ns) (read-history h_hi) ppw mf0 sf0 pw0 pm0))
+  (def (mpb spb nsb hib ob) (pd-vso-step is_sync mpa spa nsa hia pw0 mf1 sf1 pw1 pm1))
+  (write-history h_mp mpb)
+  (write-history h_sp spb)
+  (write-history h_ns nsb)
+  (write-history h_hi hib)
+  (write-history h_ppw (- pw1 0.5))
+  (* 0.5 (+ (sin (* twopi (+ oa 0.25))) (sin (* twopi (+ ob 0.25))))))
+
+(defmacro plaits-pd (bstart bphase rise high patched note timbre morph harmonics accent)
+  (def f0 (* 0.5 (pl-note-to-freq note)))
+  (def ratio (pl-hold (pl-semi-ratio (pl-lut pd_lut_fm_quantizer harmonics 128)) bstart))
+  (def modf (min 0.25 (* f0 ratio)))
+  (def pw (+ 0.5 (* morph 0.49)))
+  (def amount (* 8 timbre timbre (- 1 (* modf 3.8))))
+  (def mf (min f0 0.25))
+  (def pwc (gswitch (gte modf 0.25) 0.5 (clip pw (* modf 2) (- 1 (* 2 modf)))))
+  ; each oscillator has its own interpolator state, but both start from the
+  ; same values and see the same targets, so one set serves both.
+  (def (mf0 mf1) (pd-interp2 mf bstart bphase 0))
+  (def (sf0 sf1) (pd-interp2 modf bstart bphase 0.01))
+  (def (pw0 pw1) (pd-interp2 pwc bstart bphase 0.5))
+  (def (pm0 pm1) (pd-interp2 amount bstart bphase 0))
+  (tuple (pd-osc 1 mf0 mf1 sf0 sf1 pw0 pw1 pm0 pm1)
+         (pd-osc 0 mf0 mf1 sf0 sf1 pw0 pw1 pm0 pm1)))

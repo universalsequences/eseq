@@ -1,0 +1,10 @@
+import sys, os; sys.path.insert(0, os.path.dirname(__file__))
+from voicecmp import VoiceTest
+v = VoiceTest(only=["fm"], tag="voice_fm")
+v.compare("ping default", 2, lpg_mode=0)
+v.compare("ping short decay lpg0", 2, lpg_mode=0, decay=0.2, lpg=0.0)
+v.compare("ping long decay lpg1", 2, lpg_mode=0, decay=0.8, lpg=1.0)
+v.compare("ping env mods", 2, lpg_mode=0, fm_amt=0.5, timbre_amt=0.8, morph_amt=-0.6)
+v.compare("gate vel1", 2, lpg_mode=1, gate=1.0)
+v.compare("gate vel.5 decay.3", 2, lpg_mode=1, vel=0.5, decay=0.3)
+v.compare("ping retrig", 2, lpg_mode=0, retrig=0.25, gate=0.1, seconds=1.5)
