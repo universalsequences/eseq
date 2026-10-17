@@ -385,7 +385,8 @@ fn compiled_instrument_probe_reaches_capture_through_the_wrapper() {
     publish_dgen_instrument_probes(engine_id, manifest, process_fn as usize);
     note_dgen_display_voice(engine_id, voice_idx);
 
-    let init = crate::lisp_host::build_init_message_for_voice(slot_id, manifest, voice_idx);
+    let init =
+        crate::lisp_host::build_init_message_for_voice(slot_id, manifest, voice_idx, process_fn);
     let mut state =
         vec![0.0_f32; crate::lisp_host::dgen_total_state_slots(manifest.total_memory_slots)];
     unsafe {

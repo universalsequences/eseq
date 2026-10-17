@@ -495,7 +495,8 @@ pub fn render_loaded_instrument_samples_for_test(
     let total_slots = manifest.total_memory_slots;
     let mut memory = vec![0.0f32; total_slots + DGEN_STATE_REDZONE_SLOTS];
     let slot_id = options.voice_index;
-    let init_msg = build_init_message_for_voice(slot_id, manifest, options.voice_index);
+    let init_msg =
+        build_init_message_for_voice(slot_id, manifest, options.voice_index, lib.process_fn);
     let entry_count = init_msg.get(9).copied().unwrap_or(0.0) as usize;
     for i in 0..entry_count {
         let idx = init_msg[10 + i * 2] as usize;

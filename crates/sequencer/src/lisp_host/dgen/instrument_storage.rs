@@ -2029,6 +2029,20 @@ pub struct DGenEngineProcessStats {
     pub process_blocks: u64,
 }
 
+/// Publish a voice slot's library. The fn is stored before the layout:
+/// `dgenlisp_instrument_wrapper_process` reads the layout first, so any new
+/// layout it sees comes with the new fn, and an old node then reads as stale.
+pub fn publish_dgen_instrument_slot(
+    slot_id: usize,
+    process_fn: DGenProcessFn,
+    output_count: usize,
+    amp_channel: Option<usize>,
+) {
+    set_dgen_instrument_fn(slot_id, process_fn);
+    set_dgen_instrument_output_count(slot_id, output_count);
+    set_dgen_instrument_amp_channel(slot_id, amp_channel);
+}
+
 pub fn set_dgen_instrument_fn(slot_id: usize, f: DGenProcessFn) {
     DGEN_INSTRUMENT_FNS[slot_id % INSTRUMENT_REGISTRY_SIZE].store(f as usize, Ordering::Release);
 }
@@ -2161,7 +2175,9 @@ pub fn take_dgen_engine_process_stats() -> Vec<DGenEngineProcessStats> {
         .collect()
 }
 
-/// Wrapper process function for instrument nodes — reads from DGEN_INSTRUMENT_FNS.
+/// Wrapper process function for instrument nodes. Each node runs the kernel
+/// in its own header; `DGEN_INSTRUMENT_FNS` only tells whether the node is
+/// still its slot's current one.
 unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
     inp: *const *mut f32,
     out: *const *mut f32,
@@ -2180,11 +2196,30 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
     if (*s.add(2)).to_bits() != HEADER_CANARY.to_bits() {
         return;
     }
-    if *s.add(DGEN_ENABLED_PARAM_IDX) <= 0.5 {
+    // The slot's layout is read before its process fn: a rebuild stores the
+    // fn first, so a new layout here implies the new fn below.
+    let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id].load(Ordering::Acquire).max(1);
+    let amp_channel = DGEN_INSTRUMENT_AMP_CHANNELS[slot_id].load(Ordering::Acquire);
+    let current_fn = DGEN_INSTRUMENT_FNS[slot_id].load(Ordering::Acquire);
+    // A node runs the kernel it was built with. A rebuild publishes the new
+    // library to the slot before the old node's queued delete lands; the old
+    // node's memory and ports are sized for its own library, and the slot's
+    // layout globals already describe the new one, so a stale node uses none
+    // of them. A header without a kernel (no build writes one) follows the slot.
+    let fn_ptr = dgen_process_fn_from_state(s).map_or(current_fn, |f| f as usize);
+    let stale = fn_ptr != current_fn;
+    let engine_id = slot_id / MAX_VOICES;
+    let voice_idx = slot_id % MAX_VOICES;
+    let disabled = *s.add(DGEN_ENABLED_PARAM_IDX) <= 0.5;
+    if stale && (disabled || !dgen_engine_voice_runs(engine_id, voice_idx)) {
+        // Silent either way, over the ports the graph built it with.
+        if !out.is_null() {
+            crate::effects::silence::emit_node_outputs(out, nframes);
+        }
+        return;
+    }
+    if disabled {
         let nf = nframes as usize;
-        let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]
-            .load(Ordering::Acquire)
-            .max(1);
         if !out.is_null() {
             for ch in 0..output_count {
                 let out_ch = *out.add(ch);
@@ -2197,12 +2232,7 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
         }
         return;
     }
-    let engine_id = slot_id / MAX_VOICES;
-    let voice_idx = slot_id % MAX_VOICES;
     if !dgen_engine_voice_runs(engine_id, voice_idx) {
-        let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]
-            .load(Ordering::Acquire)
-            .max(1);
         if !out.is_null() {
             // An idle voice is silent: zero once, then let downstream
             // routes skip it (silence propagation).
@@ -2210,7 +2240,6 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
         }
         return;
     }
-    let fn_ptr = DGEN_INSTRUMENT_FNS[slot_id % INSTRUMENT_REGISTRY_SIZE].load(Ordering::Acquire);
     if fn_ptr != 0 {
         let process_fn: DGenProcessFn = std::mem::transmute(fn_ptr);
         let memory = dgen_memory_ptr(s) as *mut c_void;
@@ -2220,7 +2249,7 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
         if (*out.add(0)).is_null() {
             return;
         }
-        if engine_id < MAX_INSTRUMENT_ENGINES {
+        if !stale && engine_id < MAX_INSTRUMENT_ENGINES {
             DGEN_ENGINE_PROCESS_CALLS[engine_id].fetch_add(1, Ordering::Relaxed);
             if voice_idx == 0 {
                 DGEN_ENGINE_PROCESS_BLOCKS[engine_id].fetch_add(1, Ordering::Relaxed);
@@ -2235,13 +2264,13 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
             &context,
             dgen_host_services_v1(),
         );
-        record_dgen_voice_amp(slot_id % INSTRUMENT_REGISTRY_SIZE, out, nframes);
+        if stale {
+            return;
+        }
+        record_dgen_voice_amp(slot_id, amp_channel, output_count, out, nframes);
         super::probe_capture::record_dgen_voice_probes(engine_id, voice_idx, fn_ptr, out, nframes);
     } else {
         let nf = nframes as usize;
-        let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]
-            .load(Ordering::Acquire)
-            .max(1);
         if !out.is_null() {
             for ch in 0..output_count {
                 let out_ch = *out.add(ch);
@@ -2257,13 +2286,14 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
 
 /// Latch the voice's `@amp` output at the end of the block it just rendered.
 #[inline]
-unsafe fn record_dgen_voice_amp(slot_id: usize, out: *const *mut f32, nframes: c_int) {
-    let channel = DGEN_INSTRUMENT_AMP_CHANNELS[slot_id].load(Ordering::Relaxed);
-    if channel == NO_AMP_CHANNEL || nframes <= 0 {
-        return;
-    }
-    let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id].load(Ordering::Relaxed);
-    if channel >= output_count {
+unsafe fn record_dgen_voice_amp(
+    slot_id: usize,
+    channel: usize,
+    output_count: usize,
+    out: *const *mut f32,
+    nframes: c_int,
+) {
+    if channel == NO_AMP_CHANNEL || nframes <= 0 || channel >= output_count {
         return;
     }
     let amp = *out.add(channel);
@@ -2280,9 +2310,10 @@ unsafe fn record_dgen_voice_amp(slot_id: usize, out: *const *mut f32, nframes: c
 pub fn record_dgen_voice_amp_for_test(engine_id: usize, voice_idx: usize, last_amp: f32) {
     let slot_id = engine_id * MAX_VOICES + voice_idx;
     let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id].load(Ordering::Relaxed);
+    let channel = DGEN_INSTRUMENT_AMP_CHANNELS[slot_id].load(Ordering::Relaxed);
     let mut buffers = vec![[0.0f32, last_amp]; output_count];
     let pointers: Vec<*mut f32> = buffers.iter_mut().map(|buffer| buffer.as_mut_ptr()).collect();
-    unsafe { record_dgen_voice_amp(slot_id, pointers.as_ptr(), 2) };
+    unsafe { record_dgen_voice_amp(slot_id, channel, output_count, pointers.as_ptr(), 2) };
 }
 
 pub fn dgenlisp_instrument_vtable() -> NodeVTable {
@@ -2297,11 +2328,13 @@ pub fn dgenlisp_instrument_vtable() -> NodeVTable {
 
 /// Build init message for a voice-aware instrument node.
 /// Sets slot_id, total_memory_slots, param defaults, tensor data,
-/// and voice_cell_id = voice_index.
+/// and voice_cell_id = voice_index. `process_fn` is the node's own kernel
+/// (see `dgenlisp_instrument_wrapper_process`).
 pub fn build_init_message_for_voice(
     slot_id: usize,
     manifest: &DGenManifest,
     voice_index: usize,
+    process_fn: DGenProcessFn,
 ) -> Vec<f32> {
     let mut entries = init_state_entries(manifest);
 
@@ -2312,21 +2345,7 @@ pub fn build_init_message_for_voice(
         }
     }
 
-    // Header (10) + pairs (2 * N). Instrument nodes resolve their process
-    // function through DGEN_INSTRUMENT_FNS, so the pointer chunks stay zero.
-    let mut msg = Vec::with_capacity(10 + entries.len() * 2);
-    msg.push(slot_id as f32);
-    msg.push(manifest.total_memory_slots as f32);
-    msg.push(HEADER_CANARY);
-    msg.push(manifest.n_inputs as f32);
-    msg.push(1.0);
-    msg.extend([0.0; DGEN_PROCESS_FN_CHUNKS]);
-    msg.push(entries.len() as f32);
-    for (idx, val) in &entries {
-        msg.push(*idx as f32);
-        msg.push(*val);
-    }
-    msg
+    encode_init_message(slot_id, manifest, Some(process_fn), &entries)
 }
 
 // ── Instrument storage ──

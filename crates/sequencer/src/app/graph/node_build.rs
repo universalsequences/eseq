@@ -767,7 +767,8 @@ impl GraphController<'_> {
             let mod_id = transaction.own(mod_id)?;
 
             let slot_id = engine_id * MAX_VOICES + v;
-            let init_msg = lisp_host::build_init_message_for_voice(slot_id, manifest, v);
+            let init_msg =
+                lisp_host::build_init_message_for_voice(slot_id, manifest, v, lib.process_fn);
             let init_msg_size = init_msg.len() * std::mem::size_of::<f32>();
             let state_size = lisp_host::dgen_total_state_slots(manifest.total_memory_slots)
                 * std::mem::size_of::<f32>();
@@ -834,9 +835,12 @@ impl GraphController<'_> {
         // audio thread. No fallible operations remain after this publication.
         for v in 0..MAX_VOICES {
             let slot_id = engine_id * MAX_VOICES + v;
-            lisp_host::set_dgen_instrument_fn(slot_id, lib.process_fn);
-            lisp_host::set_dgen_instrument_output_count(slot_id, manifest.n_outputs.max(1));
-            lisp_host::set_dgen_instrument_amp_channel(slot_id, manifest.amp_output_channel);
+            lisp_host::publish_dgen_instrument_slot(
+                slot_id,
+                lib.process_fn,
+                manifest.n_outputs.max(1),
+                manifest.amp_output_channel,
+            );
         }
         lisp_host::publish_dgen_instrument_probes(engine_id, manifest, lib.process_fn as usize);
         transaction.commit();

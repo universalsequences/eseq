@@ -2533,7 +2533,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             binding_shapes: Default::default(),
         };
 
-        let init = super::build_init_message_for_voice(0, &manifest, 0);
+        let init = super::build_init_message_for_voice(0, &manifest, 0, write_one_process);
         let entries = init[10..]
             .chunks_exact(2)
             .map(|entry| (entry[0] as usize, entry[1]))
@@ -2587,7 +2587,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         };
 
         let voice_index = 3usize;
-        let init_msg = super::build_init_message_for_voice(0, &manifest, voice_index);
+        let init_msg = super::build_init_message_for_voice(0, &manifest, voice_index, write_one_process);
         let mut state = vec![0.0_f32; super::dgen_total_state_slots(total_memory_slots)];
         unsafe {
             super::dgenlisp_init(
@@ -2641,6 +2641,46 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(state[super::DGEN_HOST_SAMPLE_RATE_IDX], 48_000.0);
         assert_eq!(state[super::HEADER_SLOTS + 4], 0.25);
         assert_eq!(state[super::HEADER_SLOTS + 8], 0.5);
+    }
+
+    #[test]
+    fn instrument_node_pending_delete_keeps_its_own_kernel_after_slot_swap() {
+        // A rebuild publishes the new library to the slot before the old
+        // node's queued delete lands. The old node must keep running its own
+        // kernel and must not size its outputs by the new layout.
+        let manifest = parse_manifest(
+            r#"{"processAbi": "dgen-host-abi-v1", "totalMemorySlots": 4,
+                "outputs": [{"channel": 0}]}"#,
+        )
+        .expect("manifest parses");
+        let engine_id = 13;
+        let slot_id = engine_id * crate::audio::MAX_VOICES;
+        super::publish_dgen_instrument_slot(slot_id, write_one_process, 1, None);
+        super::set_dgen_engine_enabled_voices(engine_id, 1);
+        let init = super::build_init_message_for_voice(slot_id, &manifest, 0, write_one_process);
+        let mut state = vec![0.0_f32; super::dgen_total_state_slots(manifest.total_memory_slots)];
+        unsafe {
+            super::dgenlisp_init(state.as_mut_ptr().cast(), 48_000, 128, init.as_ptr().cast());
+        }
+
+        // The rebuild's new library: wider outputs, and an amp channel past
+        // the old node's single port.
+        super::publish_dgen_instrument_slot(slot_id, write_two_process, 8, Some(7));
+
+        let process = super::dgenlisp_instrument_vtable().process.unwrap();
+        let mut out0 = vec![0.0_f32; 16];
+        let outputs = [out0.as_mut_ptr()];
+        let inputs: [*mut f32; 1] = [std::ptr::null_mut()];
+        unsafe {
+            process(
+                inputs.as_ptr(),
+                outputs.as_ptr(),
+                16,
+                state.as_mut_ptr().cast(),
+                std::ptr::null_mut(),
+            );
+        }
+        assert!(out0.iter().all(|&sample| sample == 1.0), "old node ran its own kernel");
     }
 
     #[test]

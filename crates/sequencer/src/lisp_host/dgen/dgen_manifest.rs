@@ -1081,8 +1081,16 @@ pub(in crate::lisp_host) fn build_init_message(
     manifest: &DGenManifest,
     process_fn: Option<DGenProcessFn>,
 ) -> Vec<f32> {
-    let entries = init_state_entries(manifest);
+    encode_init_message(slot_id, manifest, process_fn, &init_state_entries(manifest))
+}
 
+/// [`build_init_message`] over caller-assembled `entries`.
+pub(in crate::lisp_host) fn encode_init_message(
+    slot_id: usize,
+    manifest: &DGenManifest,
+    process_fn: Option<DGenProcessFn>,
+    entries: &[(usize, f32)],
+) -> Vec<f32> {
     // Header (10) + pairs (2 * N)
     let mut msg = Vec::with_capacity(10 + entries.len() * 2);
     msg.push(slot_id as f32);
@@ -1095,7 +1103,7 @@ pub(in crate::lisp_host) fn build_init_message(
         .unwrap_or([0.0; DGEN_PROCESS_FN_CHUNKS]);
     msg.extend(process_fn_chunks);
     msg.push(entries.len() as f32);
-    for (idx, val) in &entries {
+    for (idx, val) in entries {
         msg.push(*idx as f32);
         msg.push(*val);
     }

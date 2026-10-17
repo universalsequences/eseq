@@ -10,6 +10,7 @@ extern "C" {
     fn ap_inputs_silent() -> c_int;
     fn ap_set_output_silent(port: c_int);
     fn ap_output_was_silent(port: c_int) -> c_int;
+    fn ap_emit_silence(out: *const *mut f32, nframes: c_int);
 }
 
 /// Every input of the running kernel reads silence this block.
@@ -30,6 +31,17 @@ pub unsafe fn emit(out: *const *mut f32, ports: usize, nframes: c_int) {
             emit_port(port, std::slice::from_raw_parts_mut(lane, nframes.max(0) as usize));
         }
     }
+}
+
+/// Like [`emit`] over every output port the running node was built with, for
+/// a kernel that cannot trust its own idea of its port count. Outside a graph
+/// this does nothing.
+///
+/// # Safety
+/// `out` must be the running kernel's output pointers, each valid for
+/// `nframes` writes.
+pub unsafe fn emit_node_outputs(out: *const *mut f32, nframes: c_int) {
+    ap_emit_silence(out, nframes);
 }
 
 /// Zero output `port` unless it already holds zeros over all of `lane`, and
