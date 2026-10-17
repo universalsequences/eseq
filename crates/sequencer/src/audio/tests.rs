@@ -2920,6 +2920,31 @@ fn invalidating_custom_voice_cache_clears_all_fingerprints() {
 }
 
 #[test]
+fn rebuilt_synth_node_clears_that_voices_fingerprint() {
+    // Patch-editor previews hot-reload the engine: each voice keeps its lid
+    // but gets a fresh synth node at the DSP's compiled defaults. A voice
+    // whose fingerprint survived would skip the next note's param dispatch.
+    let state = SequencerState::new(1, Vec::new());
+    let engine_id = 1;
+    for (v, (lid, synth)) in [(10u64, 100u32), (20, 200)].into_iter().enumerate() {
+        state.runtime.engine_voice_lids[engine_id][v].store(lid, Ordering::Relaxed);
+        state.runtime.engine_synth_node_ids[engine_id][v].store(synth, Ordering::Relaxed);
+    }
+    state.runtime.engine_voice_counts.store(engine_id, 2, Ordering::Relaxed);
+    let mut pool = CustomEnginePool::new();
+    crate::audio::sync_custom_engine_pool(&state, engine_id, &mut pool);
+    pool.voices[0].fingerprint = 123;
+    pool.voices[1].fingerprint = 456;
+
+    crate::audio::sync_custom_engine_pool(&state, engine_id, &mut pool);
+    assert_eq!((pool.voices[0].fingerprint, pool.voices[1].fingerprint), (123, 456));
+
+    state.runtime.engine_synth_node_ids[engine_id][1].store(201, Ordering::Relaxed);
+    crate::audio::sync_custom_engine_pool(&state, engine_id, &mut pool);
+    assert_eq!((pool.voices[0].fingerprint, pool.voices[1].fingerprint), (123, 0));
+}
+
+#[test]
 fn resolved_chord_transpose_applies_accumulator_offset() {
     assert_eq!(resolved_chord_transpose(7.0, 0.0, 5.0), 12.0);
     assert_eq!(resolved_chord_transpose(7.0, 2.0, 8.0), 13.0);

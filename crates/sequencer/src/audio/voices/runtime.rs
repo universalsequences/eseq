@@ -33,7 +33,33 @@ pub(in crate::audio) struct CustomVoiceSlot {
     pub(in crate::audio) assigned_track: Option<usize>,
     pub(in crate::audio) assigned_route: Option<usize>,
     pub(in crate::audio) fingerprint: u64,
+    /// The synth node `fingerprint` was stamped onto. A recompile (patch
+    /// editor preview, hot reload) swaps in fresh synth nodes holding the
+    /// DSP's compiled defaults while the pool's lids stay put; a stale
+    /// fingerprint would then skip the next note's param dispatch and the
+    /// voice would play defaults instead of the track's values.
+    pub(in crate::audio) synth_id: u32,
     pub(in crate::audio) expression: crate::audio::pressure::VoiceExpression,
+}
+
+impl CustomVoiceSlot {
+    fn idle(logical_id: u64) -> Self {
+        Self {
+            logical_id,
+            age: 0,
+            active: false,
+            release_started_sample: None,
+            amp_armed: false,
+            one_shot: false,
+            amp_heard: false,
+            note: 0.0,
+            assigned_track: None,
+            assigned_route: None,
+            fingerprint: 0,
+            synth_id: 0,
+            expression: crate::audio::pressure::VoiceExpression::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,20 +96,7 @@ pub(in crate::audio) struct CustomEnginePool {
 impl CustomEnginePool {
     pub(in crate::audio) fn new() -> Self {
         Self {
-            voices: std::array::from_fn(|_| CustomVoiceSlot {
-                logical_id: 0,
-                age: 0,
-                active: false,
-                release_started_sample: None,
-                amp_armed: false,
-                one_shot: false,
-                amp_heard: false,
-                note: 0.0,
-                assigned_track: None,
-                assigned_route: None,
-                fingerprint: 0,
-                expression: crate::audio::pressure::VoiceExpression::default(),
-            }),
+            voices: std::array::from_fn(|_| CustomVoiceSlot::idle(0)),
             num_voices: 0,
             enabled_voice_count: 1,
             age_counter: 0,
@@ -92,20 +105,7 @@ impl CustomEnginePool {
 
     pub(in crate::audio) fn add_voice(&mut self, logical_id: u64) {
         if self.num_voices < MAX_VOICES {
-            self.voices[self.num_voices] = CustomVoiceSlot {
-                logical_id,
-                age: 0,
-                active: false,
-                release_started_sample: None,
-                amp_armed: false,
-                one_shot: false,
-                amp_heard: false,
-                note: 0.0,
-                assigned_track: None,
-                assigned_route: None,
-                fingerprint: 0,
-                expression: crate::audio::pressure::VoiceExpression::default(),
-            };
+            self.voices[self.num_voices] = CustomVoiceSlot::idle(logical_id);
             self.num_voices += 1;
         }
     }
@@ -115,20 +115,7 @@ impl CustomEnginePool {
         self.enabled_voice_count = 1;
         self.age_counter = 0;
         for voice in &mut self.voices {
-            *voice = CustomVoiceSlot {
-                logical_id: 0,
-                age: 0,
-                active: false,
-                release_started_sample: None,
-                amp_armed: false,
-                one_shot: false,
-                amp_heard: false,
-                note: 0.0,
-                assigned_track: None,
-                assigned_route: None,
-                fingerprint: 0,
-                expression: crate::audio::pressure::VoiceExpression::default(),
-            };
+            *voice = CustomVoiceSlot::idle(0);
         }
     }
 
@@ -603,6 +590,15 @@ pub(in crate::audio) fn sync_custom_engine_pool(state: &SequencerState, engine_i
         }
     } else {
         pool.sync_enabled_voice_count(engine_id);
+    }
+
+    for v in 0..pool.num_voices {
+        let synth_id = state.runtime.engine_synth_node_ids[engine_id][v].load(Ordering::Relaxed);
+        let voice = &mut pool.voices[v];
+        if voice.synth_id != synth_id {
+            voice.synth_id = synth_id;
+            voice.fingerprint = 0;
+        }
     }
 }
 
