@@ -1499,6 +1499,10 @@ impl HeadlessSession {
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
 
+        // As the live loop does each frame: an agent pane conversation the
+        // hook started is presented, so the pane draws it.
+        super::agent_pane::publish(&mut editor, &mut 0);
+
         // capture-after-sync may apply a theme after the initial project sync:
         // the host kinds re-push the tinted colors before rendering.
         sync_host_kinds(&mut host_kinds, &mut editor, &app, &kinds_handles);

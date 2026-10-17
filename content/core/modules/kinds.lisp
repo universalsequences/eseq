@@ -1781,7 +1781,8 @@
 ;; The agent.
 (def-kind agent
   :key ()
-  :host ((generation :int :doc "Moves whenever an agent session changes")))
+  :host ((generation :int :doc "Moves whenever an agent session changes")
+         (pane-generation :int :doc "Moves whenever the agent pane's conversation changes")))
 
 ;; Promote to factory: what the open promotion copies and skips
 ;; (`factory-promote-open`), and what its commit reported. `kind` is a

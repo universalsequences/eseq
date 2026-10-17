@@ -52,6 +52,7 @@ struct Seen {
     export: Option<u64>,
     settings: Option<u64>,
     agent: Option<u64>,
+    agent_pane: Option<u64>,
     promote: Option<u64>,
 }
 
@@ -199,6 +200,11 @@ impl HostKinds {
             if moved(&mut state.seen.agent, generation, &mut state.pushes) {
                 let value = presented(|p| *p.agent.get());
                 pusher.push(agent, f::AGENT_GENERATION, number(value as f64));
+            }
+            let generation = presented(|p| p.agent_pane.generation());
+            if moved(&mut state.seen.agent_pane, generation, &mut state.pushes) {
+                let value = presented(|p| *p.agent_pane.get());
+                pusher.push(agent, f::AGENT_PANE_GENERATION, number(value as f64));
             }
         }
         if let Some(promote) = promote {

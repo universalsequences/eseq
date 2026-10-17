@@ -645,6 +645,7 @@ pub(crate) mod f {
     pub(crate) const SETTINGS_MIDI_PERSISTENT: FieldKey = (SETTINGS, "midi-persistent");
 
     pub(crate) const AGENT_GENERATION: FieldKey = (AGENT, "generation");
+    pub(crate) const AGENT_PANE_GENERATION: FieldKey = (AGENT, "pane-generation");
 
     pub(crate) const PROMOTE_TARGET: FieldKey = (FACTORY_PROMOTE, "target");
     pub(crate) const PROMOTE_DESTINATION: FieldKey = (FACTORY_PROMOTE, "destination");
@@ -2198,6 +2199,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SETTINGS_MIDI_ERROR, ":string", Model),
     (f::SETTINGS_MIDI_PERSISTENT, ":bool", Model),
     (f::AGENT_GENERATION, ":int", Model),
+    (f::AGENT_PANE_GENERATION, ":int", Model),
     (f::PROMOTE_TARGET, ":string", Model),
     (f::PROMOTE_DESTINATION, ":string", Model),
     (f::PROMOTE_SKIPPED, "(list-of :string)", Model),

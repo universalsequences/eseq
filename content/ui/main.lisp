@@ -39,6 +39,7 @@
 (import eseq.agent)
 (import eseq.manual)
 (import eseq.theme-editor)
+(import eseq.agent-pane)
 
 ;; Deliberately command-only for now: Patch Learn has no button in the patch
 ;; editor. Invoke this while the instrument patcher buffer is active.

@@ -56,7 +56,7 @@ mod server {
     use super::super::capture::{parse_capture_source, HeadlessSession};
     use super::{stdio, tools, McpArgs};
 
-    const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+    const PROTOCOL_VERSIONS: &[&str] = &[sequencer::agent::harness::mcp_client::MCP_PROTOCOL_VERSION, "2025-03-26", "2024-11-05"];
 
     const INSTRUCTIONS: &str = "These tools run against a live, headless eseq: a music \
 sequencer whose UI, sequencers and extensions are written in eseqlisp, a small Lisp. The \

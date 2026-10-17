@@ -4,6 +4,7 @@ pub mod audition;
 pub mod catalog;
 pub mod dsp_validate;
 pub mod forms;
+pub mod harness;
 pub mod jev;
 pub mod model_choice;
 pub mod models;

@@ -1,3 +1,4 @@
+mod agent_pane;
 mod application_menu;
 mod arrangement_actions;
 mod browser;
