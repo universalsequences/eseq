@@ -10,6 +10,7 @@
 (module eseq.agent-pane)
 
 (import eseq.kinds :refer (agent))
+(import eseq.markdown-view :as markdown-view)
 
 (export agent-pane-open agent-pane-close agent-pane-send)
 
@@ -61,6 +62,16 @@
   (label (str prefix (get entry :text))
     :key (str "entry-" i) :font-size size :color color :wrap true :bg :transparent))
 
+(def open-link (target)
+  (if (markdown-view/external-link? target)
+    (markdown-view/open-external target)
+    (status (str "Not a web link: " target))))
+
+;; The agent's replies are markdown: bold, code, lists, headings.
+(def reply-view (entry i)
+  (box :key (str "entry-" i) :width :fill
+    (markdown-view/render-markdown (get entry :text) (dict :size 12 :on-link open-link))))
+
 (def entry-view (entry i)
   (let ((kind (get entry :kind)))
     (cond
@@ -68,7 +79,7 @@
       ((= kind "user") (text-view entry i "› " :accent 12))
       ((= kind "thinking") (text-view entry i "… " :gray 10))
       ((= kind "notice") (text-view entry i "! " :yellow 11))
-      (else (text-view entry i "" :white 12)))))
+      (else (reply-view entry i)))))
 
 (def header (busy usage)
   (h-stack :key "agent-pane-header" :width :fill :gap 0.5 :align :center
@@ -103,7 +114,10 @@
           (empty-state)
           (scroll :key "agent-pane-scroll" :width :fill :flex 1 :stick-to-bottom true
             (v-stack :key "agent-pane-entries" :width :fill :gap 0.5 :padding 0.3
-              (each entries |entry i| (entry-view entry i)))))))))
+              ;; One subtree per entry: while a reply streams only it redraws,
+              ;; the finished ones are reused.
+              (each entries |entry i|
+                (subtree :key (str "agent-entry-" i) (entry-view entry i))))))))))
 
 (def composer ()
   (box :key "agent-pane-composer" :width :fill :padding 0.5 :corner-radius 8

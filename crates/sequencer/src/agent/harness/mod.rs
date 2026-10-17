@@ -36,7 +36,11 @@ in a pane beside their project and sees your tool calls as they run.\n\
 Your tools run against a separate, headless eseq, not the user's open project. What you write \
 with create_module, define_form or write_module goes to the Local packages folder, which the \
 user's app reloads by itself. When you finish something, tell the user how to use it in their \
-project (for a sequencer kind: the Packages tab, then New <kind>), and keep explanations short.";
+project (for a sequencer kind: the Packages tab, then New <kind>), and keep explanations short.\n\
+\n\
+The pane renders your replies as simple markdown: paragraphs, **bold**, `code`, fenced code \
+blocks, # headings and one level of - or 1. lists. Nested lists are not supported; keep lists \
+flat.";
 
 /// A lock that outlives a panicked turn: the pane must keep drawing.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

@@ -82,6 +82,9 @@ impl McpClient {
     /// Start `program args…` as an MCP server (its stderr to `log`) and
     /// complete the handshake.
     pub fn spawn(program: &Path, args: &[String], log: &Path) -> Result<Self, String> {
+        if let Some(dir) = log.parent() {
+            std::fs::create_dir_all(dir).map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+        }
         let stderr = std::fs::File::create(log).map_err(|error| format!("cannot write {}: {error}", log.display()))?;
         let mut child = Command::new(program)
             .args(args)

@@ -13,6 +13,8 @@
 ;; level. Import it only from main.lisp, never from a library module.
 (module eseq.manual)
 
+(import eseq.markdown-view :as markdown-view)
+
 (export open-manual
         open-node
         manual-node
@@ -163,12 +165,9 @@ Back to the [top page](index).")))
 
 ;; ── Links ──
 
-(def external-link? (target)
-  (or (string-starts-with? target "https://") (string-starts-with? target "http://")))
-
 (def follow-link (target)
-  (if (external-link? target)
-    (host-command "open-url" (dict :url target))
+  (if (markdown-view/external-link? target)
+    (markdown-view/open-external target)
     (open-node target)))
 
 ;; Action links carry a Lisp form without its outer parens (spec §3.1); it is
@@ -177,68 +176,13 @@ Back to the [top page](index).")))
   (eval (str "(" form ")")))
 
 ;; ── Rendering ──
+;; Headings, prose, lists and code come from eseq.markdown-view; the manual
+;; adds its menus and images, and follows links to nodes or URLs.
 
 (def body-size 13)
 
-(def code-chip (text)
-  (box :background-color :button-ghost-bg :corner-radius 3 :padding 0.08
-    (label text :font-size body-size :color :cyan :bg :transparent)))
-
-(def render-fragment (frag)
-  (let ((kind (nth frag 0)) (text (nth frag 1)))
-    (if (= kind 'code)
-      (code-chip text)
-      (if (= kind 'link)
-        (label text :font-size body-size :color :blue :hover-color :white :bg :transparent
-          :underline true :on-click (lambda (event) (follow-link (nth frag 2))))
-        (if (= kind 'action-link)
-          (label text :font-size body-size :color :accent :hover-color :white :bg :transparent
-            :underline true :on-click (lambda (event) (run-action (nth frag 2))))
-          (if (= kind 'b)
-            (label text :font-size body-size :color :white :bg :transparent)
-            (if (= kind 'em)
-              (label text :font-size body-size :color :cyan :bg :transparent)
-              (label text :font-size body-size :color :fg :bg :transparent))))))))
-
-(def render-group (group)
-  (h-stack :gap 0
-    (each (range 0 (len group)) |i| (render-fragment (nth group i)))))
-
-;; Prose: one widget per glued word group, flowing in a wrap container.
 (def render-inlines (inlines)
-  (let ((groups (manual-wrap-runs inlines)))
-    (wrap :width :fill :gap 0.35 :row-gap 0.12
-      (each (range 0 (len groups)) |i| (render-group (nth groups i))))))
-
-(def heading-size (head)
-  (if (= head 'h1) 24 (if (= head 'h2) 17 15)))
-
-(def render-heading (block)
-  (label (nth block 1) :font-size (heading-size (nth block 0)) :color :white :bg :transparent
-    :width :fill :wrap true :color :dim))
-
-(def render-code-block (block)
-  (let ((lines (string-split (nth block 2) "
-")))
-    (box :width :fill :background-color :button-ghost-bg :corner-radius 4 :padding 0.4
-      (v-stack :width :fill :gap 0.05
-        (each (range 0 (len lines)) |i|
-          (label (nth lines i) :font-size body-size :color :cyan :bg :transparent))))))
-
-;; The marker is the first group of the item's own wrap container: a flexed
-;; sibling would be measured at unbounded width and report a one-line height,
-;; so wrapped items would overlap the next item.
-(def render-list-item (marker item)
-  (let ((groups (manual-wrap-runs (rest item))))
-    (wrap :width :fill :gap 0.35 :row-gap 0.12
-      (label marker :width 2 :font-size body-size :color :dim :bg :transparent)
-      (each (range 0 (len groups)) |i| (render-group (nth groups i))))))
-
-(def render-list (block)
-  (let ((items (rest block)) (ordered (= (nth block 0) 'ol)))
-    (v-stack :width :fill :gap 0.15 :padding-left 0.5
-      (each (range 0 (len items)) |i|
-        (render-list-item (if ordered (str (+ i 1) ".") "•") (nth items i))))))
+  (markdown-view/render-inlines inlines (dict :size body-size)))
 
 (def render-menu-entry (entry)
   (wrap :width :fill :gap 0.6 :row-gap 0.12
@@ -263,21 +207,15 @@ Back to the [top page](index).")))
       (if (= alt "") (box :height 0)
         (render-inlines (list (list 'em alt)))))))
 
-(def render-block (block)
+(def render-manual-block (block)
   (let ((head (nth block 0)))
-    (if (or (= head 'h1) (= head 'h2) (= head 'h3))
-      (render-heading block)
-      (if (= head 'p)
-        (render-inlines (rest block))
-        (if (= head 'code-block)
-          (render-code-block block)
-          (if (or (= head 'ul) (= head 'ol))
-            (render-list block)
-            (if (= head 'menu)
-              (render-menu block)
-              (if (= head 'image)
-                (render-image block)
-                (box :height 0)))))))))
+    (cond
+      ((= head 'menu) (render-menu block))
+      ((= head 'image) (render-image block))
+      (else (box :height 0)))))
+
+(def page-opts ()
+  (dict :size body-size :on-link follow-link :on-action run-action :other render-manual-block))
 
 (def nav-button (text key handler)
   (h-stack :gap 0.2 :align :center
@@ -296,9 +234,8 @@ Back to the [top page](index).")))
     (nav-button "Close" "q" manual-quit)))
 
 (def render-page ()
-  (let ((blocks (rest manual-page)))
-    (v-stack :width :fill :gap 0.85 :debug-name "manual-page"
-      (each (range 0 (len blocks)) |i| (render-block (nth blocks i))))))
+  (box :width :fill :debug-name "manual-page"
+    (markdown-view/render-blocks (rest manual-page) (page-opts))))
 
 (def root-widget ()
   (let ((generation manual-generation))

@@ -22,7 +22,6 @@ fn main() {
         usage();
     }
     let state_dir = PathBuf::from(state_dir);
-    std::fs::create_dir_all(&state_dir).expect("state dir");
     let mut config = SessionConfig::for_this_app(state_dir).expect("config");
     config.tool_server.program = program.into();
     let session = AgentSession::new(config);
