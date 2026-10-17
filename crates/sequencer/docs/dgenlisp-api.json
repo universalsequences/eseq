@@ -6185,6 +6185,7 @@
             "values": [
               "number",
               "scope",
+              "spectrogram",
               "meter"
             ]
           }
@@ -6232,7 +6233,7 @@
           "(probe signal)",
           "(probe signal @id string @view number|scope|meter @name string)"
         ],
-        "summary": "Identity passthrough that exposes a scalar signal to the host as a live probe (patcher number~/scope~ views). Every probe is a graph root, so a dangling probe still compiles. Scalar signals only."
+        "summary": "Identity passthrough that exposes a scalar signal to the host as a live probe (patcher number~/scope~/spectrogram~ views). Every probe is a graph root, so a dangling probe still compiles. Scalar signals only."
       },
       {
         "aliases": [],

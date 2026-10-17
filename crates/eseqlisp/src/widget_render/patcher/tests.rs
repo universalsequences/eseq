@@ -26111,7 +26111,12 @@ fn probe_fixture_node(name: &str, source: &str) -> (std::path::PathBuf, LayoutNo
 
 #[test]
 fn typing_probe_number_or_scope_creates_a_canonical_probe_form() {
-    for (typed, view) in [("probe", "number"), ("number~", "number"), ("scope~", "scope")] {
+    for (typed, view) in [
+        ("probe", "number"),
+        ("number~", "number"),
+        ("scope~", "scope"),
+        ("spectrogram~", "spectrogram"),
+    ] {
         let (_path, node) = probe_fixture_node("probe-create", PROBE_FIXTURE_SOURCE);
         let created = type_and_commit_node(&node, "root", typed, Some("ph"));
         assert_eq!(
@@ -26636,7 +26641,7 @@ fn undo_key_event() -> WidgetKeyEvent {
 fn scope_probe_is_a_taller_node_with_ports_on_its_edges() {
     let patch = parse(SCOPE_FIXTURE_SOURCE);
     let scope = patch_node_by_id(&patch, "p1");
-    assert!(probe::is_scope_probe(scope));
+    assert!(probe::is_plot_probe(scope));
     let (width, height) = node_size(scope);
     assert!(
         (height - probe::SCOPE_DEFAULT_HEIGHT).abs() < 1e-4,
@@ -26647,7 +26652,7 @@ fn scope_probe_is_a_taller_node_with_ports_on_its_edges() {
 
     let mut number = scope.clone();
     number.label = "probe @id \"p1\" @view number".to_string();
-    assert!(!probe::is_scope_probe(&number));
+    assert!(!probe::is_plot_probe(&number));
     assert!(
         node_size(&number).0 < width,
         "the scope is wider than a number box"
@@ -27107,7 +27112,7 @@ fn insert_scope_on_a_cable_splices_a_probe_at_its_midpoint_in_one_undo_step() {
         .find(|patch_node| probe::is_probe_node(patch_node))
         .expect("spliced probe");
     assert_eq!(probe::probe_node_id(probe_node).as_deref(), Some("p1"));
-    assert!(probe::is_scope_probe(probe_node));
+    assert!(probe::is_plot_probe(probe_node));
     assert_eq!(
         state.selected_nodes,
         HashSet::from([probe_node.id.clone()]),
@@ -27228,7 +27233,7 @@ fn switching_a_probe_between_number_and_scope_keeps_its_id() {
         "root",
     );
     let cut = patch_node_by_id(&edited, "cut");
-    assert!(probe::is_scope_probe(cut));
+    assert!(probe::is_plot_probe(cut));
     assert!((node_size(cut).1 - probe::SCOPE_DEFAULT_HEIGHT).abs() < 1e-4);
     let (source, _) = persistence_payload_source_and_layout(&node, "view switch");
     assert!(
@@ -28240,4 +28245,96 @@ fn semicolon_opening_an_empty_box_makes_it_a_comment_without_showing_the_marker(
     assert!(edit.comment);
     assert_eq!(edit.text, "hi");
     assert_eq!((edit.state.selection_anchor, edit.state.cursor_pos), (Some(0), 2));
+}
+
+const SPECTROGRAM_FIXTURE_SOURCE: &str =
+    "(def ph (phasor 440))\n(def p1 (probe ph @id \"p1\" @view spectrogram))\n(out p1 1 @name audio)";
+
+#[test]
+fn spectrogram_probe_is_sized_like_a_scope_and_switches_views_keeping_its_id() {
+    let patch = parse(SPECTROGRAM_FIXTURE_SOURCE);
+    let spectrogram = patch_node_by_id(&patch, "p1");
+    assert!(probe::is_plot_probe(spectrogram));
+    let (width, height) = node_size(spectrogram);
+    assert!((height - probe::SCOPE_DEFAULT_HEIGHT).abs() < 1e-4, "{height}");
+    assert!(width >= probe::SCOPE_DEFAULT_WIDTH, "{width}");
+    let mut resized = spectrogram.clone();
+    resized.height = Some(12.0);
+    assert_eq!(node_size(&resized).1, 12.0, "resizable vertically");
+
+    let (_path, node) = probe_fixture_node("probe-spectrogram-switch", SPECTROGRAM_FIXTURE_SOURCE);
+    let key = patcher_state_key(&node);
+    let select = || {
+        let mut state = get_patcher_interaction_state(key);
+        state.selected_nodes = HashSet::from(["p1".to_string()]);
+        set_patcher_interaction_state(key, state);
+    };
+    select();
+    assert!(run_patcher_command(&node, "show-as-spectrogram").is_none(), "already one");
+    assert!(run_patcher_command(&node, "show-as-scope").is_some());
+    assert_eq!(committed_node_text(&node, "root", "p1"), "probe @id \"p1\" @view scope");
+    select();
+    assert!(run_patcher_command(&node, "show-as-spectrogram").is_some());
+    assert_eq!(
+        committed_node_text(&node, "root", "p1"),
+        "probe @id \"p1\" @view spectrogram"
+    );
+    let (source, _) = persistence_payload_source_and_layout(&node, "spectrogram switch");
+    assert!(source.contains("(probe ph @id \"p1\" @view spectrogram)"), "{source}");
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+}
+
+#[test]
+fn spectrogram_probe_paints_its_waterfall_in_the_plot() {
+    let (path, node) = probe_fixture_node("probe-spectrogram-render", SPECTROGRAM_FIXTURE_SOURCE);
+    let path = path.display().to_string();
+    let viewport = probe_test_viewport();
+    let key = patcher_state_key(&node);
+    let live_spectrograms = |prims: &[GpuPrimitive]| {
+        prims
+            .iter()
+            .filter_map(|prim| match inner_prim(prim) {
+                GpuPrimitive::LiveSpectrogram(spectrogram) => Some(spectrogram.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // No live instance: the header shows its alias, the plot a placeholder.
+    let prims = build_primitives_for_patcher(&node, viewport);
+    let texts = patcher_texts(&prims);
+    assert!(texts.contains(&"spectrogram~".to_string()), "{texts:?}");
+    assert_eq!(texts.iter().filter(|text| *text == "—").count(), 1, "{texts:?}");
+    assert!(live_spectrograms(&prims).is_empty());
+
+    eseqlisp_live_audio::publish_patch_probe_instance(&path, Some("fx93"));
+    let data_key = eseqlisp_live_audio::probe_spectrogram_key("fx93", "p1", 0);
+    eseqlisp_live_audio::publish_spectrogram_frame(
+        data_key.clone(),
+        eseqlisp_live_audio::SpectrogramFrame {
+            revision: 1,
+            bins: 4,
+            time_slices: 2,
+            write_head: 0,
+            sample_rate: 48_000.0,
+            waterfall: std::sync::Arc::new(vec![0.5; 8]),
+            smoothed: std::sync::Arc::new(vec![0.5; 4]),
+        },
+    );
+    let prims = build_primitives_for_patcher(&node, viewport);
+    assert!(!patcher_texts(&prims).contains(&"—".to_string()));
+    let spectrograms = live_spectrograms(&prims);
+    assert_eq!(spectrograms.len(), 1);
+    let spectrogram = &spectrograms[0];
+    assert_eq!(spectrogram.data_key, data_key);
+    assert_eq!(spectrogram.max_hz, 24_000.0, "up to Nyquist");
+    let (patch, pan, _) = interaction::load_interactive_patch_for_node(&node).unwrap();
+    let node_rect = patch_node_rects(&patch, node.rect, &pan)["p1"];
+    let zoom = patcher_zoom(&pan);
+    let header = Rect { height: NODE_HEIGHT * zoom, ..node_rect };
+    assert_eq!(spectrogram.rect, render::scope_plot_rect(node_rect, header, zoom));
+
+    eseqlisp_live_audio::publish_patch_probe_instance(&path, None);
+    eseqlisp_live_audio::retain_spectrogram_frames(&HashSet::new());
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
 }

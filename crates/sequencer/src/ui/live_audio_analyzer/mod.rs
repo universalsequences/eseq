@@ -218,6 +218,7 @@ impl LiveAudioAnalyzerManager {
                     (path, instance)
                 })
                 .collect::<Vec<_>>();
+            self.probes.set_sample_rate(app.graph.sample_rate as f32);
             self.probes.sync(&probe_bindings, Instant::now())
         };
         let meters_changed = self.sync_band_meters(app, meter_requests, poll_due)
@@ -303,6 +304,7 @@ impl LiveAudioAnalyzerManager {
 
         self.processors
             .retain(|data_key, _| active_keys.contains(data_key));
+        active_keys.extend(self.probes.spectrogram_keys().cloned());
         eseqlisp::live_audio::retain_spectrogram_frames(&active_keys);
         eseqlisp::live_audio::retain_scope_frames(&active_scope_keys);
 

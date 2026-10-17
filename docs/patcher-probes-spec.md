@@ -70,7 +70,7 @@ The cost is one buffer write per probe per sample, the same as a `poke`.
 
 ### 3.1 Surface
 
-`(probe <signal> [@id <string>] [@view number|scope|meter] [@name <string>])`
+`(probe <signal> [@id <string>] [@view number|scope|spectrogram|meter] [@name <string>])`
 
 - Returns `<signal>` unchanged; no extra DSP on the audio path.
 - `@id`: stable identity for the host and the patcher. If omitted, the compiler
@@ -193,11 +193,12 @@ instance shows probes as `—`.
 `probe` is an ordinary builtin node in the patcher. It writes source, and
 writeback round-trips it like any other node. What makes it special:
 
-- **Creation:** typing `probe`, `number~` or `scope~` in the new-object box
-  creates `(probe <in> @id "<generated>" @view number|scope)`. The `~` names
+- **Creation:** typing `probe`, `number~`, `scope~` or `spectrogram~` in the
+  new-object box creates
+  `(probe <in> @id "<generated>" @view number|scope|spectrogram)`. The `~` names
   are patcher aliases for the view and are never written to source. The
   generated `@id` is unique within the source and stays stable across edits.
-- **Insert on a cable:** right-clicking a cable and choosing "Insert Probe" or "Insert Scope" splices a
+- **Insert on a cable:** right-clicking a cable and choosing "Insert Probe", "Insert Scope" or "Insert Spectrogram" splices a
   passthrough probe in. With nothing connected to its outlet, a probe is a
   dangling top-level form (`should_emit_top_level` must accept it).
 - **Mapping:** node ↔ manifest entry by `@id`. In a macro view, a node shows
@@ -237,3 +238,15 @@ writeback round-trips it like any other node. What makes it special:
 | .5 | Patcher `number` view + probe creation (`probe`/`number~`, generated `@id`, dangling top-level emit) | .4 |
 | .6 | Patcher `scope` view (resizable, sidecar size) + insert-probe-on-cable | .5 |
 | .7 | Manual: probes section in the patcher docs | .5 |
+
+## Spectrogram view
+
+`@view spectrogram` (`spectrogram~`) draws a scrolling FFT waterfall under the
+node header, sized and resized like a scope. The capture keeps the probe's raw
+samples in an 8192-sample ring (`PROBE_SPECTRUM_RING_SAMPLES`); each analyzer
+poll in which the capture advanced takes the newest 2048 samples, runs one
+Hann-windowed FFT through `audio_tap::SpectrogramProcessor` (128 slices,
+-84..0 dB) and publishes the waterfall to the spectrogram store under
+`probe_spectrogram_key(instance, id, occurrence)`. The patcher paints it with
+the GPU live-spectrogram pass (log frequency, 20 Hz to Nyquist). Non-finite
+samples read as silence. The header shows no value.

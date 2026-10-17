@@ -665,7 +665,7 @@ pub(super) fn handle_patcher_pointer_drag(
                     (start_width + dx).max(min_width)
                 };
                 // Only a probe scope is resizable vertically.
-                let height = super::probe::is_scope_probe(patch_node).then(|| {
+                let height = super::probe::is_plot_probe(patch_node).then(|| {
                     if corner.resizes_top_edge() {
                         (start_height - dy).max(min_height)
                     } else {

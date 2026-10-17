@@ -583,3 +583,53 @@ fn parse_manifest_reads_probe_views_and_capture_skips_id_less_probes() {
     assert!(!set.read_scope(1, 8, &mut window), "m is not");
     clear_dgen_instrument_probes(engine);
 }
+
+#[test]
+fn spectrogram_probe_keeps_raw_samples_for_the_fft() {
+    let engine = 9;
+    let manifest = parse_manifest(
+        r#"{"processAbi": "dgen-host-abi-v1",
+            "outputs": [{"channel": 0}],
+            "probes": [
+              {"id": "sp", "occurrence": 0, "channel": 1, "view": "spectrogram"},
+              {"id": "n", "occurrence": 0, "channel": 2, "view": "number"}
+            ]}"#,
+    )
+    .expect("manifest parses");
+    assert_eq!(manifest.probes[0].view, ProbeView::Spectrogram);
+    publish_dgen_instrument_probes(engine, &manifest, FN_A);
+    let _watch = ProbeWatchGuard::new();
+    for start in [0, 4] {
+        let samples: Vec<f32> = (start..start + 4).map(|value| value as f32).collect();
+        let outputs = Outputs::new(vec![vec![0.0; 4], samples, vec![0.5; 4]]);
+        record_voice(engine, 0, FN_A, &outputs);
+    }
+    let set = probe_set(instrument(engine)).expect("live set");
+    let mut out = Vec::new();
+    assert!(set.read_spectrum_samples(0, 6, &mut out));
+    assert_eq!(out, vec![2.0, 3.0, 4.0, 5.0, 6.0, 7.0], "newest samples, oldest first");
+    assert!(set.read_spectrum_samples(0, usize::MAX, &mut out));
+    assert_eq!(out.len(), 8, "no more than were written");
+    assert!(!set.read_spectrum_samples(1, 4, &mut out), "a number probe keeps no samples");
+    assert!(out.is_empty());
+}
+
+#[test]
+fn spectrum_ring_wraps_and_never_returns_samples_being_rewritten() {
+    let ring = SampleRing::new();
+    let total = PROBE_SPECTRUM_RING_SAMPLES * 2 + 100;
+    let samples: Vec<f32> = (0..total).map(|value| value as f32).collect();
+    for chunk in samples.chunks(512) {
+        ring.push_block(chunk);
+    }
+    let mut out = Vec::new();
+    ring.read_recent(usize::MAX, &mut out);
+    assert_eq!(out.len(), PROBE_SPECTRUM_MAX_READ);
+    assert_eq!(out.first().copied(), Some((total - PROBE_SPECTRUM_MAX_READ) as f32));
+    assert_eq!(out.last().copied(), Some((total - 1) as f32));
+    // A block longer than the write budget keeps only its newest samples.
+    let long: Vec<f32> = (0..PROBE_SPECTRUM_MAX_BLOCK + 10).map(|value| -(value as f32)).collect();
+    ring.push_block(&long);
+    ring.read_recent(1, &mut out);
+    assert_eq!(out, vec![-((PROBE_SPECTRUM_MAX_BLOCK + 9) as f32)]);
+}

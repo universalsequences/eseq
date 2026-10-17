@@ -6026,7 +6026,9 @@ fn real_patcher_lisp_menu_offers_probe_entries() {
     for command in [
         "insert-probe",
         "insert-scope",
+        "insert-spectrogram",
         "show-as-scope",
+        "show-as-spectrogram",
         "show-as-number",
     ] {
         assert!(
@@ -6049,10 +6051,11 @@ fn real_patcher_lisp_menu_offers_probe_entries() {
             other => panic!("menu entries: {other:?}"),
         }
     };
-    // Ask Agent, Paste, Insert Probe, Insert Scope, Toggle Cable Style, Delete.
+    // Ask Agent, Paste, Insert Probe, Insert Scope, Insert Spectrogram,
+    // Toggle Cable Style, Delete.
     assert_eq!(
         entry_count(r#"(dict :col 1 :row 1 :node nil :cable "a:0->b:0" :ghosts false)"#),
-        6
+        7
     );
     let plain = entry_count(
         r#"(dict :col 1 :row 1 :node (dict :id "ph" :macro? false :probe-view nil) :cable nil :ghosts false)"#,
@@ -6063,8 +6066,12 @@ fn real_patcher_lisp_menu_offers_probe_entries() {
     let scope = entry_count(
         r#"(dict :col 1 :row 1 :node (dict :id "p1" :macro? false :probe-view "scope") :cable nil :ghosts false)"#,
     );
-    assert_eq!(number, plain + 1, "a number probe offers Show as Scope");
-    assert_eq!(scope, plain + 1, "a scope probe offers Show as Number");
+    let spectrogram = entry_count(
+        r#"(dict :col 1 :row 1 :node (dict :id "p1" :macro? false :probe-view "spectrogram") :cable nil :ghosts false)"#,
+    );
+    assert_eq!(number, plain + 2, "a number probe offers Show as Scope / Spectrogram");
+    assert_eq!(scope, plain + 2, "a scope probe offers Show as Number / Spectrogram");
+    assert_eq!(spectrogram, plain + 2, "a spectrogram probe offers Show as Number / Scope");
     let local_macro = entry_count(
         r#"(dict :col 1 :row 1 :node (dict :id "m" :macro? true :library-macro? false :probe-view nil) :cable nil :ghosts false)"#,
     );

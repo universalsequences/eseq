@@ -5,8 +5,9 @@ A compiled source with probes writes each probe's signal to a hidden output
 channel (`DGenManifest::probes`). After a block renders, the instrument and
 effect wrappers hand those buffers to this module, which reduces each probe
 channel to a per-block summary (`last`/`min`/`max`) and, for `@view scope`,
-appends a decimated min/max trace to a fixed ring. Nothing here allocates on
-the audio thread.
+appends a decimated min/max trace to a fixed ring; for `@view spectrogram` it
+appends the raw samples to a ring the UI reads FFT windows from. Nothing here
+allocates on the audio thread.
 
 # Instances
 
@@ -95,6 +96,16 @@ pub const PROBE_SCOPE_POINTS_PER_BLOCK: usize = 8;
 /// PROBE_SCOPE_POINTS_PER_BLOCK` pairs: the oldest block's slots may be
 /// mid-rewrite.
 pub const PROBE_SCOPE_RING_PAIRS: usize = 1024;
+/// Spectrogram sample ring capacity. Power of two so the index wraps with a
+/// mask.
+pub const PROBE_SPECTRUM_RING_SAMPLES: usize = 8192;
+/// Samples one block may write into a spectrogram ring; a longer block keeps
+/// only its newest this many. A read returns at most
+/// `PROBE_SPECTRUM_RING_SAMPLES - PROBE_SPECTRUM_MAX_BLOCK` samples, since
+/// that many past the published end may be mid-rewrite.
+pub const PROBE_SPECTRUM_MAX_BLOCK: usize = 4096;
+/// Most samples a spectrogram read can return intact.
+pub const PROBE_SPECTRUM_MAX_READ: usize = PROBE_SPECTRUM_RING_SAMPLES - PROBE_SPECTRUM_MAX_BLOCK;
 /// Live effects with probes at once. Beyond this an effect still renders but
 /// captures nothing.
 pub const MAX_EFFECT_PROBE_INSTANCES: usize = 256;
@@ -239,6 +250,56 @@ impl ScopeRing {
     }
 }
 
+/// The raw signal of a `spectrogram` probe, written by one producer and read
+/// by any thread; the same publish-after-write protocol as [`ScopeRing`].
+struct SampleRing {
+    samples: Box<[AtomicU32]>,
+    /// Samples ever written; the next write lands at `written % capacity`.
+    written: AtomicU64,
+}
+
+impl SampleRing {
+    fn new() -> Self {
+        Self {
+            samples: (0..PROBE_SPECTRUM_RING_SAMPLES)
+                .map(|_| AtomicU32::new(0))
+                .collect(),
+            written: AtomicU64::new(0),
+        }
+    }
+
+    fn push_block(&self, samples: &[f32]) {
+        let samples = &samples[samples.len().saturating_sub(PROBE_SPECTRUM_MAX_BLOCK)..];
+        let start = self.written.load(Ordering::Relaxed);
+        for (offset, sample) in samples.iter().enumerate() {
+            let index = (start as usize + offset) & (PROBE_SPECTRUM_RING_SAMPLES - 1);
+            self.samples[index].store(sample.to_bits(), Ordering::Relaxed);
+        }
+        self.written.store(start + samples.len() as u64, Ordering::Release);
+    }
+
+    /// The most recent `max_samples` samples, oldest first, dropping from
+    /// the front any the producer may have overwritten during the copy.
+    fn read_recent(&self, max_samples: usize, out: &mut Vec<f32>) {
+        out.clear();
+        let end = self.written.load(Ordering::Acquire);
+        let wanted = (max_samples.min(PROBE_SPECTRUM_MAX_READ) as u64).min(end);
+        let start = end - wanted;
+        for sample in start..end {
+            let index = sample as usize & (PROBE_SPECTRUM_RING_SAMPLES - 1);
+            out.push(f32::from_bits(self.samples[index].load(Ordering::Relaxed)));
+        }
+        std::sync::atomic::fence(Ordering::Acquire);
+        let after = self.written.load(Ordering::Relaxed);
+        let oldest_intact = (after + PROBE_SPECTRUM_MAX_BLOCK as u64)
+            .saturating_sub(PROBE_SPECTRUM_RING_SAMPLES as u64);
+        if oldest_intact > start {
+            let torn = ((oldest_intact - start) as usize).min(out.len());
+            out.drain(..torn);
+        }
+    }
+}
+
 fn min_max(samples: &[f32]) -> (f32, f32) {
     samples
         .iter()
@@ -255,6 +316,7 @@ struct ProbeSlot {
     /// Blocks captured; 0 until the first.
     seq: AtomicU64,
     scope: Option<ScopeRing>,
+    spectrum: Option<SampleRing>,
 }
 
 impl ProbeSlot {
@@ -271,6 +333,9 @@ impl ProbeSlot {
         self.max.store(max.to_bits(), Ordering::Relaxed);
         if let Some(scope) = &self.scope {
             scope.push_block(samples);
+        }
+        if let Some(spectrum) = &self.spectrum {
+            spectrum.push_block(samples);
         }
         let seq = self.seq.load(Ordering::Relaxed);
         self.seq.store(seq + 1, Ordering::Release);
@@ -305,6 +370,7 @@ impl ProbeSet {
                 max: AtomicU32::new(0),
                 seq: AtomicU64::new(0),
                 scope: (probe.view == ProbeView::Scope).then(ScopeRing::new),
+                spectrum: (probe.view == ProbeView::Spectrogram).then(SampleRing::new),
             })
             .collect();
         (!slots.is_empty()).then(|| Arc::new(Self { process_fn, generation, slots }))
@@ -701,6 +767,19 @@ impl ProbeSetHandle {
             return false;
         };
         scope.read_recent(max_pairs, out);
+        true
+    }
+
+    /// Fill `out` with the most recent `max_samples` raw samples of slot
+    /// `index` (at most [`PROBE_SPECTRUM_MAX_READ`]), oldest first. `false`
+    /// (and `out` empty) when the slot is out of range or not a
+    /// `spectrogram` view.
+    pub fn read_spectrum_samples(&self, index: usize, max_samples: usize, out: &mut Vec<f32>) -> bool {
+        out.clear();
+        let Some(ring) = self.0.slots.get(index).and_then(|slot| slot.spectrum.as_ref()) else {
+            return false;
+        };
+        ring.read_recent(max_samples, out);
         true
     }
 }

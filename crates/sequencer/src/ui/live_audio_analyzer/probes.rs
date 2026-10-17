@@ -22,6 +22,9 @@ effect changes on every recompile, so resolution runs every poll.
   or rebinding the path repaints the patcher without a layout rerun.
 - Frames live under `probe_frame_key(instance, id, occurrence)` =
   `probe:<instance>:<id>#<occurrence>`.
+- A `spectrogram` probe's waterfall is published to the spectrogram store
+  under `probe_spectrogram_key(instance, id, occurrence)`: one FFT slice of
+  its newest samples per poll in which its capture advanced.
 - A scope frame carries `display_range`, the eased y-range to draw its trace
   in ([`scope_target_range`] eased by [`relax_scope_range`]), so the painter
   keeps no easing state of its own.
@@ -48,6 +51,7 @@ use eseqlisp::layout::LayoutNode;
 use eseqlisp::live_audio::{self, ProbeFrame};
 use eseqlisp::vm::Value;
 use sequencer::app;
+use sequencer::audio_tap::SpectrogramProcessor;
 use sequencer::lisp_host::{
     self, ProbeInstance, ProbeReading, ProbeSetHandle, ProbeView, ProbeWatchGuard,
 };
@@ -82,6 +86,67 @@ const SCOPE_RANGE_HEADROOM: f32 = 0.08;
 /// Fraction of the way a scope's displayed range narrows toward a smaller
 /// target per published frame. Widening is immediate.
 const SCOPE_RANGE_RELAX: f32 = 0.2;
+
+/// FFT window of a `spectrogram` probe: ~43 ms at 48 kHz.
+const PROBE_SPECTROGRAM_FFT_SIZE: usize = 2048;
+const _: () = assert!(PROBE_SPECTROGRAM_FFT_SIZE <= lisp_host::PROBE_SPECTRUM_MAX_READ);
+/// Waterfall slices kept: one per analyzer poll, so ~4 s of history.
+const PROBE_SPECTROGRAM_TIME_SLICES: usize = 128;
+const PROBE_SPECTROGRAM_MIN_DB: f32 = -84.0;
+const PROBE_SPECTROGRAM_MAX_DB: f32 = 0.0;
+const PROBE_SPECTROGRAM_SMOOTHING: f32 = 0.5;
+
+/// The waterfall of one `spectrogram` probe.
+struct ProbeSpectrogram {
+    /// `probe-spectrogram:<instance>:<id>#<occurrence>`.
+    key: String,
+    processor: SpectrogramProcessor,
+}
+
+impl std::fmt::Debug for ProbeSpectrogram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProbeSpectrogram").field("key", &self.key).finish_non_exhaustive()
+    }
+}
+
+impl ProbeSpectrogram {
+    fn new(key: String) -> Self {
+        Self {
+            key,
+            processor: SpectrogramProcessor::new(
+                PROBE_SPECTROGRAM_FFT_SIZE,
+                PROBE_SPECTROGRAM_TIME_SLICES,
+                PROBE_SPECTROGRAM_MIN_DB,
+                PROBE_SPECTROGRAM_MAX_DB,
+                PROBE_SPECTROGRAM_SMOOTHING,
+            ),
+        }
+    }
+
+    /// Add a slice from `samples` (non-finite values read as silence, so a
+    /// NaN burst cannot poison the FFT) and publish the waterfall.
+    fn push(&mut self, samples: &mut [f32], sample_rate: f32) -> bool {
+        for sample in samples.iter_mut().filter(|sample| !sample.is_finite()) {
+            *sample = 0.0;
+        }
+        let Some(frame) = self.processor.push_window(samples, sample_rate) else {
+            return false;
+        };
+        live_audio::publish_spectrogram_frame(
+            self.key.clone(),
+            live_audio::SpectrogramFrame {
+                revision: frame.revision,
+                bins: frame.bins,
+                time_slices: frame.time_slices,
+                write_head: frame.write_head,
+                sample_rate: frame.sample_rate,
+                waterfall: Arc::new(frame.waterfall),
+                smoothed: Arc::new(frame.smoothed),
+            },
+        );
+        true
+    }
+}
 
 /// What an open patch-editor session edits.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -264,6 +329,8 @@ pub(crate) struct ProbeTrack {
     scope_target: Option<(f32, f32)>,
     /// The frame last published under this key.
     published: Option<ProbeFrame>,
+    /// `spectrogram` view: its waterfall.
+    spectrogram: Option<ProbeSpectrogram>,
 }
 
 impl ProbeTrack {
@@ -274,6 +341,7 @@ impl ProbeTrack {
             seq_changed_at: Instant::now(),
             scope_target: None,
             published: None,
+            spectrogram: None,
         }
     }
 
@@ -359,11 +427,36 @@ pub(crate) struct ProbePublisher {
     /// has something to unbind).
     bound: bool,
     scope_scratch: Vec<(f32, f32)>,
+    spectrum_scratch: Vec<f32>,
+    /// Engine sample rate, for the spectrogram's frequency axis.
+    sample_rate: f32,
 }
 
 impl ProbePublisher {
     pub(crate) fn new() -> Self {
-        Self { watch: None, instances: HashMap::new(), bound: false, scope_scratch: Vec::new() }
+        Self {
+            watch: None,
+            instances: HashMap::new(),
+            bound: false,
+            scope_scratch: Vec::new(),
+            spectrum_scratch: Vec::new(),
+            sample_rate: 48_000.0,
+        }
+    }
+
+    pub(crate) fn set_sample_rate(&mut self, sample_rate: f32) {
+        if sample_rate.is_finite() && sample_rate > 0.0 {
+            self.sample_rate = sample_rate;
+        }
+    }
+
+    /// Spectrogram-store keys of the watched `spectrogram` probes, which the
+    /// analyzer's own spectrogram pass must not retain away.
+    pub(crate) fn spectrogram_keys(&self) -> impl Iterator<Item = &String> + '_ {
+        self.instances
+            .values()
+            .flat_map(|entry| entry.tracks.iter())
+            .filter_map(|track| track.spectrogram.as_ref().map(|spectrogram| &spectrogram.key))
     }
 
     pub(crate) fn watching(&self) -> bool {
@@ -418,7 +511,15 @@ impl ProbePublisher {
                         .probes()
                         .map(|probe| {
                             let key = live_audio::probe_frame_key(&instance_key, &probe.id, probe.occurrence);
-                            old_tracks.remove(&key).unwrap_or_else(|| ProbeTrack::new(key))
+                            let mut track = old_tracks.remove(&key).unwrap_or_else(|| ProbeTrack::new(key));
+                            if probe.view != ProbeView::Spectrogram {
+                                track.spectrogram = None;
+                            } else if track.spectrogram.is_none() {
+                                track.spectrogram = Some(ProbeSpectrogram::new(
+                                    live_audio::probe_spectrogram_key(&instance_key, &probe.id, probe.occurrence),
+                                ));
+                            }
+                            track
                         })
                         .collect();
                     InstanceProbes { set, tracks }
@@ -446,12 +547,22 @@ impl ProbePublisher {
 
         lisp_host::reclaim_retired_probe_sets();
         let scratch = &mut self.scope_scratch;
+        let spectrum_scratch = &mut self.spectrum_scratch;
         for entry in self.instances.values_mut() {
             for (index, (probe, track)) in entry.set.probes().zip(&mut entry.tracks).enumerate() {
                 let Some(reading) = entry.set.reading(index) else {
                     continue;
                 };
-                let scope_changed = probe.view == ProbeView::Scope && track.seq() != Some(reading.seq);
+                // One slice per poll in which the capture advanced.
+                let advanced = track.seq() != Some(reading.seq);
+                if let Some(spectrogram) = &mut track.spectrogram {
+                    if advanced
+                        && entry.set.read_spectrum_samples(index, PROBE_SPECTROGRAM_FFT_SIZE, spectrum_scratch)
+                    {
+                        changed |= spectrogram.push(spectrum_scratch, self.sample_rate);
+                    }
+                }
+                let scope_changed = probe.view == ProbeView::Scope && advanced;
                 let scope = (scope_changed
                     && entry.set.read_scope(index, PROBE_SCOPE_PUBLISH_PAIRS, scratch))
                 .then_some(scratch.as_slice());
@@ -915,6 +1026,61 @@ mod tests {
         drop(publisher);
         app.graph_controller().clear_all_tracks();
         assert!(lisp_host::probe_infos(instance).is_empty());
+        drop(app);
+        unsafe { audiograph::destroy_live_graph(lg.0) };
+    }
+
+    /// A `spectrogram` probe compiles through the pinned DGenLisp (the view
+    /// is an opaque hint) and, once enough samples are captured for one FFT
+    /// window, publishes a waterfall under its spectrogram key that the
+    /// analyzer's own spectrogram pass keeps.
+    #[test]
+    fn compiled_spectrogram_probe_publishes_a_waterfall() {
+        let (mut app, lg, instance) = install_probe_effect(
+            r#"
+(def in_l (in 1 @name left))
+(def in_r (in 2 @name right))
+(out in_l 1 @name left)
+(out in_r 2 @name right)
+(probe (+ 0.5 (* 0 in_l)) @id "sp" @view spectrogram)
+"#,
+            c"probe-spectrogram",
+        );
+        let ProbeInstance::Effect { node_id } = instance else {
+            panic!("an effect target resolves to an effect node");
+        };
+        let path = "/probe-sp/dsp.lisp".to_string();
+        let bindings = [(path.clone(), Some(instance))];
+        let mut publisher = ProbePublisher::new();
+        publisher.set_sample_rate(44_100.0);
+        publisher.sync(&bindings, Instant::now());
+
+        let instance_key = live_audio::probe_instance_key_for_effect(node_id);
+        let key = live_audio::probe_spectrogram_key(&instance_key, "sp", 0);
+        assert_eq!(publisher.spectrogram_keys().collect::<Vec<_>>(), vec![&key]);
+        // 512 frames per render_blocks: a 2048-sample window needs four.
+        render_blocks(lg);
+        publisher.sync(&bindings, Instant::now());
+        assert!(live_audio::spectrogram_frame(&key).is_none(), "not a full window yet");
+        for _ in 0..3 {
+            render_blocks(lg);
+        }
+        assert!(publisher.sync(&bindings, Instant::now()));
+        let frame = live_audio::spectrogram_frame(&key).expect("waterfall published");
+        assert_eq!(frame.bins as usize, PROBE_SPECTROGRAM_FFT_SIZE / 2);
+        assert_eq!(frame.time_slices as usize, PROBE_SPECTROGRAM_TIME_SLICES);
+        assert_eq!(frame.sample_rate, 44_100.0);
+        let slice = &frame.smoothed;
+        assert!(slice[0] > 0.5, "DC lands in the lowest bins: {:?}", &slice[..4]);
+        assert!(slice[slice.len() / 2] < 0.05, "nothing up high");
+
+        // No new samples, no new slice.
+        let revision = frame.revision;
+        publisher.sync(&bindings, Instant::now());
+        assert_eq!(live_audio::spectrogram_frame(&key).unwrap().revision, revision);
+
+        drop(publisher);
+        app.graph_controller().clear_all_tracks();
         drop(app);
         unsafe { audiograph::destroy_live_graph(lg.0) };
     }

@@ -1464,6 +1464,20 @@ fn draw_patch_with_view_key(
             (*node_id, frame)
         })
         .collect::<HashMap<_, _>>();
+    // A spectrogram's waterfall lives in the spectrogram store, keyed per
+    // probe; the GPU pass reads it by that key.
+    let probe_spectrograms = probe_attrs
+        .iter()
+        .filter(|(_, attrs)| attrs.is_spectrogram())
+        .filter_map(|(node_id, attrs)| {
+            let key = crate::live_audio::probe_spectrogram_key(
+                probe_instance.as_deref()?,
+                attrs.id.as_deref()?,
+                0,
+            );
+            Some((*node_id, key))
+        })
+        .collect::<HashMap<_, _>>();
     let probe_values = probe_frames
         .iter()
         .map(|(node_id, frame)| (*node_id, probe_value_display(frame.as_deref())))
@@ -1514,6 +1528,7 @@ fn draw_patch_with_view_key(
             probe_attrs.get(node.id.as_str()),
             probe_values.get(node.id.as_str()),
             probe_frames.get(node.id.as_str()).cloned().flatten(),
+            probe_spectrograms.get(node.id.as_str()).map(String::as_str),
             node.kind == NodeKind::MacroInstance && library_macros.contains(&node.op),
         );
     }
@@ -2652,6 +2667,7 @@ fn push_node(
     probe: Option<&ProbeAttrs>,
     probe_value: Option<&ProbeValueDisplay>,
     probe_frame: Option<std::sync::Arc<crate::live_audio::ProbeFrame>>,
+    probe_spectrogram_key: Option<&str>,
     library_macro: bool,
 ) {
     if node.kind == NodeKind::Comment {
@@ -2669,9 +2685,10 @@ fn push_node(
         return;
     }
     let is_scope = probe.is_some_and(ProbeAttrs::is_scope);
-    // A scope's header (label, value, text edit) sits in a standard-height
-    // row at its top; the rest of the box is the plot.
-    let header_rect = if is_scope {
+    let is_spectrogram = probe.is_some_and(ProbeAttrs::is_spectrogram);
+    // A plot view's header (label, value, text edit) sits in a
+    // standard-height row at its top; the rest of the box is the plot.
+    let header_rect = if is_scope || is_spectrogram {
         Rect {
             height: (NODE_HEIGHT * zoom).min(rect.height),
             ..rect
@@ -2809,6 +2826,9 @@ fn push_node(
             viewport,
             zoom,
         );
+    }
+    if is_spectrogram {
+        push_probe_spectrogram(&mut text_prims, rect, header_rect, bg, probe_spectrogram_key, zoom);
     }
     if let Some(diagnostic) = &node.diagnostic {
         push_node_diagnostic_chip(&mut text_prims, header_rect, diagnostic, viewport, zoom);
@@ -3521,6 +3541,67 @@ fn push_probe_scope(
     }
     mesh.push_into(prims);
     prims.extend(labels);
+}
+
+/// Lowest frequency the spectrogram view shows; the top is Nyquist.
+const SPECTROGRAM_MIN_HZ: f32 = 20.0;
+
+/// The spectrogram plot: the probe's FFT waterfall (time left→right, log
+/// frequency bottom→top) drawn by the GPU live-spectrogram pass from the
+/// spectrogram store, or `—` centred while there is no frame yet. Reading
+/// the frame registers a paint dependency, so each new slice repaints.
+fn push_probe_spectrogram(
+    prims: &mut Vec<GpuPrimitive>,
+    rect: Rect,
+    header_rect: Rect,
+    bg: crate::backend::Color,
+    data_key: Option<&str>,
+    zoom: f32,
+) {
+    let plot = scope_plot_rect(rect, header_rect, zoom);
+    if plot.width <= 0.0 || plot.height <= 0.0 {
+        return;
+    }
+    let frame = data_key.and_then(|key| Some((key, crate::live_audio::spectrogram_frame(key)?)));
+    let Some((data_key, frame)) = frame else {
+        prims.push(GpuPrimitive::ProportionalText(GpuProportionalTextPrimitive {
+            row: plot.row + (plot.height - zoom) * 0.5,
+            col: plot.col,
+            align_width: plot.width,
+            h_align: 0.5,
+            text: PROBE_NO_VALUE.to_string(),
+            font_size: super::metrics::NODE_FONT_SIZE,
+            scale: zoom,
+            fg: theme::PATCHER_TEXT_MUTED(),
+            bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+            mono: false,
+        }));
+        return;
+    };
+    let hot = theme::PATCHER_PORT_OUTPUT();
+    let mix = |a: crate::backend::Color, b: crate::backend::Color, t: f32| {
+        crate::backend::Color::rgba(
+            a.r + (b.r - a.r) * t,
+            a.g + (b.g - a.g) * t,
+            a.b + (b.b - a.b) * t,
+            1.0,
+        )
+    };
+    let white = crate::backend::Color::rgba(1.0, 1.0, 1.0, 1.0);
+    prims.push(GpuPrimitive::LiveSpectrogram(super::super::GpuLiveSpectrogramPrimitive {
+        rect: plot,
+        data_key: data_key.to_string(),
+        mode: 0,
+        freq_scale: 0,
+        min_hz: SPECTROGRAM_MIN_HZ,
+        max_hz: frame.sample_rate * 0.5,
+        min_color: mix(bg, hot, 0.15),
+        mid_color: hot,
+        max_color: mix(hot, white, 0.75),
+        eq_line_color: hot,
+        eq_fill_color: hot,
+        background_color: crate::backend::Color::rgba(bg.r, bg.g, bg.b, 0.0),
+    }));
 }
 
 /// Split plotted columns at gaps (a run of non-finite pairs leaves a hole in

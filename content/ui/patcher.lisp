@@ -19,7 +19,7 @@
 ;; Commands: create-below create-comment connect-last-two undo redo copy paste encapsulate
 ;; toggle-cable-style retry-bubble dismiss-bubble open-bubble connect-bubble
 ;; open-macro edit-node delete-selection accept-suggestions insert-probe
-;; insert-scope show-as-scope show-as-number
+;; insert-scope insert-spectrogram show-as-scope show-as-spectrogram show-as-number
 (module eseq.patcher)
 
 (export handle-focus-key
@@ -88,12 +88,21 @@
       (if (and (not (= node nil)) (not (get node :macro?)))
         (list (menu-entry "Edit" "edit-node"))
         (list))
-      ;; A probe offers its other view; the id is kept.
-      (if (and (not (= node nil)) (= (get node :probe-view) "number"))
+      ;; A probe offers its other views; the id is kept.
+      (if (and (not (= node nil))
+               (and (not (= (get node :probe-view) nil))
+                    (not (= (get node :probe-view) "number"))))
+        (list (menu-entry "Show as Number" "show-as-number"))
+        (list))
+      (if (and (not (= node nil))
+               (and (not (= (get node :probe-view) nil))
+                    (not (= (get node :probe-view) "scope"))))
         (list (menu-entry "Show as Scope" "show-as-scope"))
         (list))
-      (if (and (not (= node nil)) (= (get node :probe-view) "scope"))
-        (list (menu-entry "Show as Number" "show-as-number"))
+      (if (and (not (= node nil))
+               (and (not (= (get node :probe-view) nil))
+                    (not (= (get node :probe-view) "spectrogram"))))
+        (list (menu-entry "Show as Spectrogram" "show-as-spectrogram"))
         (list))
       ;; A comment has no ports, so there is nothing to connect or
       ;; encapsulate; the empty canvas offers a new one.
@@ -119,6 +128,7 @@
       (if (not (= cable nil))
         (list (menu-entry "Insert Probe" "insert-probe")
               (menu-entry "Insert Scope" "insert-scope")
+              (menu-entry "Insert Spectrogram" "insert-spectrogram")
               (menu-entry "Toggle Cable Style" "toggle-cable-style"))
         (list))
       (if (or (not (= node nil)) (not (= cable nil)))

@@ -2543,7 +2543,9 @@ pub const PATCHER_COMMANDS: &[&str] = &[
     "accept-suggestions",
     "insert-probe",
     "insert-scope",
+    "insert-spectrogram",
     "show-as-scope",
+    "show-as-spectrogram",
     "show-as-number",
 ];
 
@@ -2936,15 +2938,17 @@ pub fn run_patcher_command(node: &LayoutNode, name: &str) -> Option<WidgetEvent>
         }
         "accept-suggestions" => jev::accept_all_ghosts(node),
         // Splice a probe into the selected cable (the context menu's Insert
-        // Probe / Insert Scope), or rewrite the selected probe's `@view`
-        // keeping its `@id` (Show as …; docs/patcher-probes-spec.md §6.2).
-        "insert-probe" | "insert-scope" | "show-as-number" | "show-as-scope"
+        // Probe / Scope / Spectrogram), or rewrite the selected probe's
+        // `@view` keeping its `@id` (Show as …; docs/patcher-probes-spec.md
+        // §6.2).
+        "insert-probe" | "insert-scope" | "insert-spectrogram" | "show-as-number"
+        | "show-as-scope" | "show-as-spectrogram"
             if state.drag.is_none() =>
         {
-            let view = if matches!(name, "insert-scope" | "show-as-scope") {
-                ProbeView::Scope
-            } else {
-                ProbeView::Number
+            let view = match name {
+                "insert-scope" | "show-as-scope" => ProbeView::Scope,
+                "insert-spectrogram" | "show-as-spectrogram" => ProbeView::Spectrogram,
+                _ => ProbeView::Number,
             };
             let changed = if name.starts_with("insert-") {
                 probe::insert_probe_on_selected_cable(node, &mut state, &view_key, view)

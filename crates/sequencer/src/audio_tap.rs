@@ -90,7 +90,16 @@ impl SpectrogramProcessor {
             return None;
         }
         let samples = read_latest_mono(state, self.fft_size)?;
-        let spectrum = compute_normalized_spectrum(&samples, self.min_db, self.max_db);
+        let frame = self.push_window(&samples, metadata.sample_rate)?;
+        self.last_tap_write_head = Some(metadata.write_head);
+        Some(frame)
+    }
+
+    /// Add one waterfall slice from the newest `fft_size` samples of
+    /// `samples` (oldest first). `None` when fewer than `fft_size` are given.
+    pub fn push_window(&mut self, samples: &[f32], sample_rate: f32) -> Option<SpectrogramFrameData> {
+        let samples = samples.get(samples.len().checked_sub(self.fft_size)?..)?;
+        let spectrum = compute_normalized_spectrum(samples, self.min_db, self.max_db);
         let bins = self.bins();
         let row_start = self.write_head * bins;
         self.waterfall[row_start..row_start + bins].copy_from_slice(&spectrum);
@@ -106,14 +115,13 @@ impl SpectrogramProcessor {
 
         self.write_head = (self.write_head + 1) % self.time_slices;
         self.revision = self.revision.wrapping_add(1);
-        self.last_tap_write_head = Some(metadata.write_head);
 
         Some(SpectrogramFrameData {
             revision: self.revision,
             bins: bins as u32,
             time_slices: self.time_slices as u32,
             write_head: self.write_head as u32,
-            sample_rate: metadata.sample_rate,
+            sample_rate,
             waterfall: self.waterfall.clone(),
             smoothed: self.smoothed.clone(),
         })

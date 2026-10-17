@@ -73,6 +73,7 @@ pub use dgen::probe_capture::{
     register_effect_probes, release_effect_probe_token, unwatch_probes, watch_probes,
     EffectProbeToken, ProbeInstance, ProbeReading, ProbeSetHandle, ProbeWatchGuard,
     MAX_EFFECT_PROBE_INSTANCES, PROBE_SCOPE_POINTS_PER_BLOCK, PROBE_SCOPE_RING_PAIRS,
+    PROBE_SPECTRUM_MAX_READ,
 };
 pub use eseqlisp::live_audio::ProbeView;
 

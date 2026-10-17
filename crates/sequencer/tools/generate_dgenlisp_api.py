@@ -120,7 +120,7 @@ CURATED_OPERATORS = {
     "out": {"category": "io", "summary": "Audio output channel.", "signatures": ["(out expr channel @name string)"], "arity": {"minimum": 2, "maximum": None}},
     "probe": {
         "category": "io",
-        "summary": "Identity passthrough that exposes a scalar signal to the host as a live probe (patcher number~/scope~ views). Every probe is a graph root, so a dangling probe still compiles. Scalar signals only.",
+        "summary": "Identity passthrough that exposes a scalar signal to the host as a live probe (patcher number~/scope~/spectrogram~ views). Every probe is a graph root, so a dangling probe still compiles. Scalar signals only.",
         "signatures": [
             "(probe signal)",
             "(probe signal @id string @view number|scope|meter @name string)",
@@ -293,7 +293,7 @@ ATTRIBUTE_SPECS = {
     "@threshold": {"type": "signal|float", "summary": "Compressor threshold in dB."},
     "@type": {"type": "enum", "values": ["hann"], "summary": "Window type."},
     "@unit": {"type": "string", "summary": "Host-visible unit label."},
-    "@view": {"type": "enum", "values": ["number", "scope", "meter"], "summary": "Probe display hint passed through to the manifest. Defaults to number."},
+    "@view": {"type": "enum", "values": ["number", "scope", "spectrogram", "meter"], "summary": "Probe display hint passed through to the manifest. Defaults to number."},
 }
 
 

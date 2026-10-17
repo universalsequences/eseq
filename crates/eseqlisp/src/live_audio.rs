@@ -214,6 +214,7 @@ pub enum ProbeView {
     #[default]
     Number,
     Scope,
+    Spectrogram,
     Meter,
 }
 
@@ -222,6 +223,7 @@ impl ProbeView {
         match self {
             ProbeView::Number => "number",
             ProbeView::Scope => "scope",
+            ProbeView::Spectrogram => "spectrogram",
             ProbeView::Meter => "meter",
         }
     }
@@ -231,6 +233,7 @@ impl ProbeView {
         match view {
             "number" => Some(ProbeView::Number),
             "scope" => Some(ProbeView::Scope),
+            "spectrogram" => Some(ProbeView::Spectrogram),
             "meter" => Some(ProbeView::Meter),
             _ => None,
         }
@@ -348,6 +351,12 @@ pub fn retain_patch_probe_instances(active_paths: &HashSet<String>) {
 pub fn patch_probe_frame(path: &str, id: &str, occurrence: u32) -> Option<Arc<ProbeFrame>> {
     let instance = patch_probe_instance(path)?;
     probe_frame_for(&instance, id, occurrence)
+}
+
+/// Spectrogram-store key of a `@view spectrogram` probe's waterfall
+/// ([`publish_spectrogram_frame`]), beside its [`probe_frame_key`] frame.
+pub fn probe_spectrogram_key(instance_key: &str, id: &str, occurrence: u32) -> String {
+    format!("probe-spectrogram:{instance_key}:{id}#{occurrence}")
 }
 
 /// The live frame of probe `id`#`occurrence` in `instance` (from
@@ -501,7 +510,7 @@ mod tests {
 
     #[test]
     fn probe_view_round_trips_and_rejects_unknown_views() {
-        for view in [ProbeView::Number, ProbeView::Scope, ProbeView::Meter] {
+        for view in [ProbeView::Number, ProbeView::Scope, ProbeView::Spectrogram, ProbeView::Meter] {
             assert_eq!(ProbeView::parse(view.as_str()), Some(view));
         }
         assert_eq!(ProbeView::parse("spectrum"), None);

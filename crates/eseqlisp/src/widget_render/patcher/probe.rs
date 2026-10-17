@@ -1,11 +1,11 @@
-//! Patcher side of DGen `(probe x @id "…" @view number|scope)` taps
+//! Patcher side of DGen `(probe x @id "…" @view number|scope|spectrogram)` taps
 //! (docs/patcher-probes-spec.md §6.2).
 //!
 //! A probe is an ordinary builtin node: it round-trips through the graph
 //! payload and the generator like any other. What this module adds:
 //!
-//! - **Creation.** `number~` / `scope~` are patcher-only spellings of
-//!   `probe @view number|scope`; they are expanded on commit and never reach
+//! - **Creation.** `number~` / `scope~` / `spectrogram~` are patcher-only
+//!   spellings of `probe @view number|scope|spectrogram`; they are expanded on commit and never reach
 //!   source. A committed probe always carries an `@id`: the one it already had,
 //!   else a freshly minted `pN` unique within the source. Paste mints new ids.
 //! - **Display.** The node header shows the alias (`number~`) rather than the
@@ -29,8 +29,11 @@ use super::state::PatcherInteractionState;
 
 pub(super) const PROBE_OP: &str = "probe";
 /// Patcher-only spellings of a probe with a given `@view`.
-const PROBE_ALIASES: [(&str, ProbeView); 2] =
-    [("number~", ProbeView::Number), ("scope~", ProbeView::Scope)];
+const PROBE_ALIASES: [(&str, ProbeView); 3] = [
+    ("number~", ProbeView::Number),
+    ("scope~", ProbeView::Scope),
+    ("spectrogram~", ProbeView::Spectrogram),
+];
 /// Prefix of the ids the patcher mints. Deliberately not the compiler's own
 /// default (`probe-<ordinal>`), so a minted id can never collide with one the
 /// compiler assigns to a hand-written id-less probe.
@@ -125,6 +128,18 @@ impl ProbeAttrs {
         self.view == Some(ProbeView::Scope)
     }
 
+    /// Drawn in its `spectrogram` view: sized like a scope, with a scrolling
+    /// FFT waterfall under its header.
+    pub(super) fn is_spectrogram(&self) -> bool {
+        self.view == Some(ProbeView::Spectrogram)
+    }
+
+    /// A view with a plot under its header (`scope`, `spectrogram`): taller
+    /// than a node row, and resizable in both directions.
+    pub(super) fn is_plot(&self) -> bool {
+        self.is_scope() || self.is_spectrogram()
+    }
+
     /// The header a probe node draws in place of its attribute list: the
     /// alias for its view (`number~`, `scope~`, else `probe`), followed by its
     /// id when the author chose one (`number~ cut`). Minted ids are noise and
@@ -163,10 +178,10 @@ pub(super) fn probe_node_view_text(node: &PatchNode) -> String {
         .unwrap_or_else(|| ProbeView::default().as_str().to_string())
 }
 
-/// A probe drawn in its `scope` view. One label parse; painting uses
-/// [`ProbeAttrs`] instead.
-pub(super) fn is_scope_probe(node: &PatchNode) -> bool {
-    ProbeAttrs::of(node).is_some_and(|attrs| attrs.is_scope())
+/// A probe drawn with a plot (`scope` / `spectrogram` view). One label
+/// parse; painting uses [`ProbeAttrs`] instead.
+pub(super) fn is_plot_probe(node: &PatchNode) -> bool {
+    ProbeAttrs::of(node).is_some_and(|attrs| attrs.is_plot())
 }
 
 fn is_minted_id(id: &str) -> bool {
@@ -218,7 +233,8 @@ impl ParsedProbe {
     }
 }
 
-/// Parse probe node text (`probe …`, `number~ …`, `scope~ …`); `None` for
+/// Parse probe node text (`probe …`, `number~ …`, `scope~ …`,
+/// `spectrogram~ …`); `None` for
 /// anything else, without parsing when the head token already rules it out.
 pub(super) fn parse_probe(text: &str) -> Option<ParsedProbe> {
     if !is_probe_text(text) {
@@ -557,7 +573,7 @@ pub(super) fn taken_probe_ids_in(
     taken
 }
 
-/// Splice a passthrough probe (`@view number` or `scope`) into the selected
+/// Splice a passthrough probe (`@view number`, `scope` or `spectrogram`) into the selected
 /// cable: `source → probe → destination`, the probe centred on the cable's
 /// midpoint and selected. One edit-state change, so one undo step. `false`
 /// when no cable is selected or it is a feedback cable (a probe there would
@@ -713,7 +729,7 @@ pub(super) fn selected_probe(
 
 /// Switch the single selected probe to `view`, keeping its `@id`. The node's
 /// width override is dropped so it takes the new view's default width; a
-/// scope's height is kept, so switching back restores it. `false` when the
+/// plot view's height is kept, so switching back restores it. `false` when the
 /// selection is not one probe or it already shows `view`.
 pub(super) fn set_selected_probe_view(
     node: &crate::layout::LayoutNode,
