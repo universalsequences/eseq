@@ -1,0 +1,367 @@
+{
+  "version": 1,
+  "engine_name": "Synths/Rings/",
+  "source_file": "instruments/Synths/Rings/dsp.lisp",
+  "presets": [
+    {
+      "id": "init",
+      "name": "init",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.5,
+        "damping": 0.5,
+        "level_db": 0.0,
+        "model": 0.0,
+        "position": 0.5,
+        "spread": 1.0,
+        "structure": 0.5,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "glass-bowl",
+      "name": "Glass Bowl",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.65,
+        "damping": 0.8,
+        "level_db": 7.9,
+        "model": 0.0,
+        "position": 0.3,
+        "spread": 1.0,
+        "structure": 0.9,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "wood-mallet",
+      "name": "Wood Mallet",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.35,
+        "damping": 0.45,
+        "level_db": 6.2,
+        "model": 0.0,
+        "position": 0.2,
+        "spread": 1.0,
+        "structure": 0.2,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "tuned-bars",
+      "name": "Tuned Bars",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.55,
+        "damping": 0.7,
+        "level_db": 3.3,
+        "model": 0.0,
+        "position": 0.6,
+        "spread": 1.0,
+        "structure": 0.27,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "gong",
+      "name": "Gong",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.8,
+        "damping": 0.92,
+        "level_db": 2.9,
+        "model": 0.0,
+        "position": 0.75,
+        "spread": 1.0,
+        "structure": 0.95,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "sitar-drone",
+      "name": "Sitar Drone",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.7,
+        "damping": 0.75,
+        "level_db": -4.3,
+        "model": 1.0,
+        "position": 0.15,
+        "spread": 1.0,
+        "structure": 0.3,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "harp-strings",
+      "name": "Harp Strings",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.5,
+        "damping": 0.65,
+        "level_db": 5.1,
+        "model": 1.0,
+        "position": 0.5,
+        "spread": 1.0,
+        "structure": 0.75,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "tanpura",
+      "name": "Tanpura",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.6,
+        "damping": 0.85,
+        "level_db": 1.2,
+        "model": 1.0,
+        "position": 0.2,
+        "spread": 1.0,
+        "structure": 0.1,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "nylon-pluck",
+      "name": "Nylon Pluck",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.45,
+        "damping": 0.55,
+        "level_db": 7.6,
+        "model": 2.0,
+        "position": 0.25,
+        "spread": 1.0,
+        "structure": 0.25,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "steel-pluck",
+      "name": "Steel Pluck",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.75,
+        "damping": 0.6,
+        "level_db": 4.4,
+        "model": 2.0,
+        "position": 0.15,
+        "spread": 1.0,
+        "structure": 0.5,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "piano-wire",
+      "name": "Piano Wire",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.65,
+        "damping": 0.7,
+        "level_db": 6.9,
+        "model": 2.0,
+        "position": 0.2,
+        "spread": 1.0,
+        "structure": 0.85,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "bent-bridge",
+      "name": "Bent Bridge",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.6,
+        "damping": 0.7,
+        "level_db": 6.9,
+        "model": 2.0,
+        "position": 0.4,
+        "spread": 1.0,
+        "structure": 0.05,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "fm-bell",
+      "name": "FM Bell",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.6,
+        "damping": 0.6,
+        "level_db": -2.3,
+        "model": 3.0,
+        "position": 0.5,
+        "spread": 1.0,
+        "structure": 0.55,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "fm-organ",
+      "name": "FM Organ",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.35,
+        "damping": 0.95,
+        "level_db": -7.3,
+        "model": 3.0,
+        "position": 0.5,
+        "spread": 1.0,
+        "structure": 0.25,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "fm-growl",
+      "name": "FM Growl",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.75,
+        "damping": 0.5,
+        "level_db": -2.5,
+        "model": 3.0,
+        "position": 0.9,
+        "spread": 1.0,
+        "structure": 0.4,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "minor-harp",
+      "name": "Minor Harp",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.55,
+        "damping": 0.7,
+        "level_db": 8.4,
+        "model": 4.0,
+        "position": 0.3,
+        "spread": 1.0,
+        "structure": 0.3,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "maj7-shimmer",
+      "name": "Maj7 Shimmer",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.7,
+        "damping": 0.8,
+        "level_db": 0.9,
+        "model": 4.0,
+        "position": 0.6,
+        "spread": 1.0,
+        "structure": 0.9,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "ambient-pluck",
+      "name": "Ambient Pluck",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.5,
+        "damping": 0.6,
+        "level_db": 9.2,
+        "model": 5.0,
+        "position": 0.7,
+        "spread": 1.0,
+        "structure": 0.25,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "cathedral-wire",
+      "name": "Cathedral Wire",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.6,
+        "damping": 0.85,
+        "level_db": 4.5,
+        "model": 5.0,
+        "position": 0.4,
+        "spread": 1.0,
+        "structure": 0.85,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "peace-vowels",
+      "name": "Peace Vowels",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.4,
+        "damping": 0.55,
+        "level_db": 7.7,
+        "model": 6.0,
+        "position": 0.5,
+        "spread": 1.0,
+        "structure": 0.5,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "peace-drone",
+      "name": "Peace Drone",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.6,
+        "damping": 1.0,
+        "level_db": 0.2,
+        "model": 7.0,
+        "position": 0.6,
+        "spread": 1.0,
+        "structure": 0.1,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "peace-hall",
+      "name": "Peace Hall",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.5,
+        "damping": 0.4,
+        "level_db": 12.4,
+        "model": 8.0,
+        "position": 0.8,
+        "spread": 1.0,
+        "structure": 0.4,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "peace-choir",
+      "name": "Peace Choir",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.25,
+        "damping": 0.65,
+        "level_db": 1.5,
+        "model": 9.0,
+        "position": 0.3,
+        "spread": 1.0,
+        "structure": 0.2,
+        "tune": 0.0
+      }
+    },
+    {
+      "id": "peace-strings",
+      "name": "Peace Strings",
+      "base_note_offset": 0.0,
+      "params": {
+        "brightness": 0.65,
+        "damping": 0.75,
+        "level_db": 6.2,
+        "model": 10.0,
+        "position": 0.8,
+        "spread": 1.0,
+        "structure": 1.0,
+        "tune": 0.0
+      }
+    }
+  ]
+}

@@ -1,0 +1,115 @@
+; ======================================================================
+; String models (rings/dsp/part.cc RenderStringVoice, string.cc,
+; plucker.h) at polyphony 1:
+; - model 1, sympathetic strings: 8 strings. String 0 is plucked; the
+;   other 7 are tuned by STRUCTURE (sympathetic intervals) and vibrate from
+;   string 0's output, with slow LFOs on their pickup positions.
+; - model 2, inharmonic string: 1 string with dispersion (allpass
+;   stiffness, curved bridge, noise), set by STRUCTURE.
+; - model 4, quantized sympathetic strings: as model 1, tuned to one of 11
+;   chords chosen by STRUCTURE.
+; - model 5, string and reverb: model 2's string, stereo, into the reverb.
+; Excitation: on each strum a noise burst of 1/f0 x pickup ratio samples
+; through a comb filter and a lowpass (Plucker), DC-blocked.
+; The delay-line loops cannot sit in a block-gate, so they always run;
+; `active` flags (1 in the string models) clear them otherwise.
+; ======================================================================
+(def rg_lut_svf_shift (tensor @shape [257 1] @file "lut_svf_shift.json"))
+
+; Delay memory: String::string_ (2048) for the 8 strings, String::stretch_
+; (1024) for string 0, the Plucker comb (256).
+(def rg_line0 (tensor @shape [2048]))
+(def rg_line1 (tensor @shape [2048]))
+(def rg_line2 (tensor @shape [2048]))
+(def rg_line3 (tensor @shape [2048]))
+(def rg_line4 (tensor @shape [2048]))
+(def rg_line5 (tensor @shape [2048]))
+(def rg_line6 (tensor @shape [2048]))
+(def rg_line7 (tensor @shape [2048]))
+(def rg_stretch (tensor @shape [1024]))
+(def rg_comb (tensor @shape [256]))
+
+; DelayLine::Read(d) for a line whose next write goes to counter c: the
+; sample written d writes ago (d = 1 is the most recent, d = 0 the oldest).
+; `peek` on a 1-D tensor wraps its index and interpolates linearly, so a
+; fractional d is DelayLine::Read(float d).
+(defmacro rg-tap (buf c d)
+  (peek buf (- c d)))
+
+; Part::Squash.
+(defmacro rg-squash (x)
+  (def lo (* 2 x))
+  (def lo2 (* lo lo))
+  (def lo4 (* lo2 lo2))
+  (def lo8 (* lo4 lo4))
+  (def hi (- 2 (* 2 x)))
+  (def hi2 (* hi hi))
+  (def hi4 (* hi2 hi2))
+  (def hi8 (* hi4 hi4))
+  (gswitch (lt x 0.5) (* 0.5 lo8 lo8) (- 1 (* 0.5 hi8 hi8))))
+
+; Part::ComputeSympatheticStringsNotes, string i in 1..4 of 8: `parameter`
+; is the value for this string (STRUCTURE advanced i - 1 times).
+(defmacro rg-sym-note (tonic parameter)
+  (def x (* parameter 7))
+  (def xi (floor x))
+  (def xf (rg-squash (- x xi)))
+  (def a (selector (+ xi 1) tonic (- tonic 12) (- tonic 7.01955) tonic (+ tonic 7.01955)
+                   (+ tonic 12) (+ tonic 19.01955) (+ tonic 24) (+ tonic 24)))
+  (def b (selector (+ xi 2) tonic (- tonic 12) (- tonic 7.01955) tonic (+ tonic 7.01955)
+                   (+ tonic 12) (+ tonic 19.01955) (+ tonic 24) (+ tonic 24)))
+  (+ a (* (- b a) xf)))
+
+; Per-block String coefficients (string.cc ProcessInternal preamble), pure
+; functions of the block-latched frequency/brightness/damping/position.
+(defmacro rg-string-ctl (freq b d p)
+  (def dly (clip (/ 1 (max freq 0.000000001)) 4 2044))
+  (def src_raw (* dly freq))
+  (def src_full (gte src_raw 0.9999))
+  (def src_ratio (gswitch src_full 1 src_raw))
+  (def cpos (- 0.5 (* 0.98 (abs (- p 0.5)))))
+  (def lfd (* d (- 2 d)))
+  (def rt60 (* 0.07 (rg-semi-ratio (* lfd 96)) samplerate))
+  (def dc0 (rg-semi-ratio (max (/ (* -120 dly) (* src_ratio rt60)) -127)))
+  (def br0 (* b b))
+  (def nfilt (rg-semi-ratio (* (- b 1) 48)))
+  (def dcut0 (min (+ 24 (* d d 48) (* b b 24)) 84))
+  (def df0 (min (* freq (rg-semi-ratio dcut0)) 0.499))
+  (def ti (gswitch (gte d 0.95) (* 20 (- d 0.95)) 0))
+  (def dcoef (+ dc0 (* ti (- 1 dc0))))
+  (def bright (+ br0 (* ti (- 1 br0))))
+  (def df (+ df0 (* ti (- 0.4999 df0))))
+  (def dcut (+ dcut0 (* ti (- 128 dcut0))))
+  (def g (rg-tan-accurate df))
+  (def h (/ 1 (+ 1 (* 2 g) (* g g))))
+  (def dcomp (- 1 (rg-lut rg_lut_svf_shift dcut 1)))
+  (tuple src_full src_ratio dly cpos dcoef bright g h dcomp nfilt))
+
+; ParameterInterpolator advanced once per tick: the increment is set on the
+; first sample of the block, (target - state) / 24. `init` is the state
+; before the first block. Returns (value-after-Next value-before).
+(defmacro rg-tick-interp (target tick bstart active init)
+  (make-history h_v)
+  (make-history h_inc)
+  (def prev (+ init (read-history h_v)))
+  (def inc (gswitch bstart (* (- target prev) 0.041666667) (read-history h_inc)))
+  (def v (+ prev (* tick inc)))
+  (write-history h_v (gswitch active (- v init) 0))
+  (write-history h_inc inc)
+  (tuple v prev))
+
+; Hermite read (DelayLine::ReadHermite) of `line` at delay `dl`.
+(defmacro rg-hermite (line c dl)
+  (def hi (floor (max dl 0)))
+  (def hf (- dl hi))
+  (def xm1 (rg-tap line c (- hi 1)))
+  (def x0 (rg-tap line c hi))
+  (def x1 (rg-tap line c (+ hi 1)))
+  (def x2 (rg-tap line c (+ hi 2)))
+  (def hc (* (- x1 xm1) 0.5))
+  (def hv (- x0 x1))
+  (def hw (+ hc hv))
+  (def ha (+ hw hv (* (- x2 x0) 0.5)))
+  (def hb (+ hw ha))
+  (+ (* (+ (* (- (* ha hf) hb) hf) hc) hf) x0))
+
