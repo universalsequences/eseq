@@ -668,6 +668,10 @@ pub fn instrument_release_ids() -> Vec<InstrumentReleaseIds> {
 }
 
 fn instrument_release_ids_with_paths(paths: &crate::app_paths::AppPaths) -> Vec<InstrumentReleaseIds> {
+    with_leaf_walk_snapshot(|| release_ids_from_index(paths))
+}
+
+fn release_ids_from_index(paths: &crate::app_paths::AppPaths) -> Vec<InstrumentReleaseIds> {
     let index = instrument_release_index(paths);
     let mut out = Vec::new();
     for instrument in index.iter() {
@@ -729,35 +733,94 @@ fn release_storage_path(folder: &Path, extension: &str) -> PathBuf {
     folder.with_file_name(format!("{file_name}.{extension}"))
 }
 
+/// One instrument root's non-hidden entries by file name, for the leaf-name
+/// fallback: `folders` maps a folder's name to its `dsp.lisp`, for folders
+/// that have one; `files` maps every non-directory's name to its path.
+#[derive(Default)]
+struct RootLeafIndex {
+    folders: std::collections::HashMap<String, Vec<PathBuf>>,
+    files: std::collections::HashMap<String, Vec<PathBuf>>,
+}
+
+impl RootLeafIndex {
+    fn build(root: &Path) -> Self {
+        fn walk(dir: &Path, index: &mut RootLeafIndex) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_name().and_then(|name| name.to_str()).map(str::to_owned);
+                if name.as_deref().is_some_and(|name| name.starts_with('.')) {
+                    continue;
+                }
+                if path.is_dir() {
+                    let dsp = path.join("dsp.lisp");
+                    if let Some(name) = name.filter(|_| dsp.exists()) {
+                        index.folders.entry(name).or_default().push(dsp);
+                    }
+                    walk(&path, index);
+                } else if let Some(name) = name {
+                    index.files.entry(name).or_default().push(path);
+                }
+            }
+        }
+        let mut index = Self::default();
+        walk(root, &mut index);
+        index
+    }
+}
+
+thread_local! {
+    /// Root indexes shared by the leaf-name lookups of one batch; `None`
+    /// outside [`with_leaf_walk_snapshot`], where every lookup walks.
+    static LEAF_WALK_SNAPSHOT: std::cell::RefCell<
+        Option<std::collections::HashMap<PathBuf, std::rc::Rc<RootLeafIndex>>>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with each root's tree walked at most once for leaf-name lookups.
+/// For batches that resolve many spellings back to back
+/// ([`instrument_release_ids_with_paths`] resolves ~10 per release); the
+/// tree must not change meanwhile.
+fn with_leaf_walk_snapshot<T>(f: impl FnOnce() -> T) -> T {
+    /// Drops the snapshot this call installed, even if `f` unwinds.
+    struct Installed(bool);
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            if self.0 {
+                LEAF_WALK_SNAPSHOT.with(|snapshot| snapshot.borrow_mut().take());
+            }
+        }
+    }
+    let _installed = Installed(LEAF_WALK_SNAPSHOT.with(|snapshot| {
+        let mut snapshot = snapshot.borrow_mut();
+        let install = snapshot.is_none();
+        if install {
+            *snapshot = Some(Default::default());
+        }
+        install
+    }));
+    f()
+}
+
+/// `root`'s leaf index: the batch's shared one inside
+/// [`with_leaf_walk_snapshot`], otherwise a fresh walk.
+fn root_leaf_index(root: &Path) -> std::rc::Rc<RootLeafIndex> {
+    LEAF_WALK_SNAPSHOT.with(|snapshot| match snapshot.borrow_mut().as_mut() {
+        Some(indexes) => indexes
+            .entry(root.to_path_buf())
+            .or_insert_with(|| std::rc::Rc::new(RootLeafIndex::build(root)))
+            .clone(),
+        None => std::rc::Rc::new(RootLeafIndex::build(root)),
+    })
+}
+
 fn resolve_instrument_storage_path_with_paths(
     paths: &crate::app_paths::AppPaths,
     name: &str,
     extension: &str,
 ) -> io::Result<PathBuf> {
-    fn is_hidden(path: &Path) -> bool {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| name.starts_with('.'))
-            .unwrap_or(false)
-    }
-
-    fn collect_file_matches(dir: &Path, file_name: &str, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if is_hidden(&path) {
-                continue;
-            }
-            if path.is_dir() {
-                collect_file_matches(&path, file_name, out);
-            } else if path.file_name().and_then(|n| n.to_str()) == Some(file_name) {
-                out.push(path);
-            }
-        }
-    }
-
     fn resolve_in_root(
         root: &Path,
         logical_name: &str,
@@ -784,11 +847,13 @@ fn resolve_instrument_storage_path_with_paths(
             .file_name()
             .and_then(|part| part.to_str())
             .unwrap_or(trimmed);
+        let file_name = format!("{basename}.{extension}");
+        let index = root_leaf_index(root);
         let mut matches = Vec::new();
         if extension == "lisp" {
-            collect_folder_source_matches(root, basename, &mut matches);
+            matches.extend(index.folders.get(basename).into_iter().flatten().cloned());
         }
-        collect_file_matches(root, &format!("{basename}.{extension}"), &mut matches);
+        matches.extend(index.files.get(&file_name).into_iter().flatten().cloned());
         matches.sort_by_key(|path| path.to_string_lossy().to_lowercase());
         matches.dedup();
         match matches.len() {
@@ -984,29 +1049,6 @@ fn qualify_instrument_id_with_paths(
         io::ErrorKind::InvalidData,
         format!("instrument source '{}' is outside the configured tiers", source.display()),
     ))
-}
-
-pub(in crate::lisp_host) fn collect_folder_source_matches(dir: &Path, folder_name: &str, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        if name.starts_with('.') || !path.is_dir() {
-            continue;
-        }
-        if name == folder_name {
-            let dsp = path.join("dsp.lisp");
-            if dsp.exists() {
-                out.push(dsp);
-            }
-        }
-        collect_folder_source_matches(&path, folder_name, out);
-    }
 }
 
 pub(in crate::lisp_host) fn resolve_instrument_folder_path(name: &str) -> io::Result<PathBuf> {

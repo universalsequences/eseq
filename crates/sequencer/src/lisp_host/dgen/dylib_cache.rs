@@ -276,6 +276,27 @@ struct CacheRequest {
 impl DylibCacheManager {
     pub fn new(root: PathBuf) -> Self {
         sweep_cache_root(&root);
+        Self::without_sweep(root)
+    }
+
+    /// [`Self::new`] with the sweep on a background thread. The sweep parses
+    /// every artifact's metadata, which costs most of a second at app startup
+    /// once the cache holds thousands of artifacts. Racing it against this
+    /// process's own acquires is as safe as racing another process sharing the
+    /// root: artifacts appear only by atomic rename with parseable metadata
+    /// already written, and in-flight staging dirs are `flock`-held.
+    fn new_with_background_sweep(root: PathBuf) -> Self {
+        let sweep_root = root.clone();
+        let spawned = std::thread::Builder::new()
+            .name("dgen-cache-sweep".into())
+            .spawn(move || sweep_cache_root(&sweep_root));
+        if spawned.is_err() {
+            sweep_cache_root(&root);
+        }
+        Self::without_sweep(root)
+    }
+
+    fn without_sweep(root: PathBuf) -> Self {
         Self {
             inner: Arc::new(Mutex::new(DylibCacheInner {
                 root,
@@ -701,7 +722,9 @@ impl DylibCacheInner {
 
 pub fn global_cache_manager() -> &'static DylibCacheManager {
     static GLOBAL: OnceLock<DylibCacheManager> = OnceLock::new();
-    GLOBAL.get_or_init(|| DylibCacheManager::new(crate::app_paths::app_paths().dgen_cache_root()))
+    GLOBAL.get_or_init(|| {
+        DylibCacheManager::new_with_background_sweep(crate::app_paths::app_paths().dgen_cache_root())
+    })
 }
 
 /// Path tier for the current schema:

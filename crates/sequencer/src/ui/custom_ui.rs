@@ -714,6 +714,10 @@ pub(crate) fn build_custom_audio_fx_ui_source_with_overlay(
                             out.push((fx_name, ui_path.display().to_string(), src));
                         }
                     }
+                    // A folder effect owns everything beneath it (captures,
+                    // research snapshots, helper Lisp); none of it is an
+                    // effect, matching `list_saved_effects_in_roots`.
+                    continue;
                 }
                 collect(&path, root, prefix, out);
             }
