@@ -1413,6 +1413,28 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
         },
     );
 
+    // `list-directory` describes each entry dired-style, a `stat` process
+    // per entry: code that only needs the names (a menu built on every
+    // palette open) reads them here instead.
+    runtime.register_native_with_docs(
+        "list-directory-names",
+        "(list-directory-names path)",
+        "List the names of a directory's entries, sorted case-insensitively.",
+        |args, _ctx| {
+            let path = string_arg(&args, 0, "list-directory-names")?;
+            let mut names = std::fs::read_dir(path)
+                .map_err(|e| format!("list-directory-names: {e}"))?
+                .map(|entry| {
+                    entry
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .map_err(|e| format!("list-directory-names: {e}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            names.sort_by_cached_key(|name| name.to_ascii_lowercase());
+            Ok(Value::List(names.into_iter().map(|name| Rc::new(RefCell::new(Value::String(name)))).collect()))
+        },
+    );
+
     runtime.register_native_with_docs(
         "current-directory",
         "(current-directory)",

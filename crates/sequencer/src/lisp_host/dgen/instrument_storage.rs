@@ -1493,6 +1493,11 @@ struct PresetNameIndex {
     rerun: bool,
 }
 
+/// Moves when the index's names are replaced or dropped, so a cache built
+/// from it (the command palette's preset search) knows to re-read it. An
+/// atomic: the UI reads it every tick, off the index lock.
+static PRESET_NAME_INDEX_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn preset_name_index() -> &'static std::sync::Mutex<PresetNameIndex> {
     static INDEX: std::sync::OnceLock<std::sync::Mutex<PresetNameIndex>> = std::sync::OnceLock::new();
     INDEX.get_or_init(|| std::sync::Mutex::new(PresetNameIndex::default()))
@@ -1534,6 +1539,13 @@ fn forget_indexed_preset_names(instruments: &[String]) {
     for instrument in instruments {
         index.names.remove(preset_index_key(instrument));
     }
+    PRESET_NAME_INDEX_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The preset name index's generation: moves when a rebuild lands or a
+/// bank change drops names (a lookup reloading a dropped name does not).
+pub fn preset_name_index_generation() -> u64 {
+    PRESET_NAME_INDEX_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 
@@ -1559,6 +1571,7 @@ pub fn refresh_preset_name_index() {
         let mut index = preset_name_index().lock().unwrap();
         // Replace rather than merge: instruments that went away drop out.
         index.names = names;
+        PRESET_NAME_INDEX_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if std::mem::take(&mut index.rerun) {
             continue;
         }

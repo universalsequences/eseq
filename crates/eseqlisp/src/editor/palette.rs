@@ -65,6 +65,20 @@ pub(super) struct PaletteState {
     stale: bool,
 }
 
+/// The `:searchable` commands' final choices as commands-stage entries,
+/// kept across palette sessions: walking them runs every choice source
+/// (the instrument tree, each instrument's presets), too slow for the
+/// first keystroke. Dropped when the searchable commands (names, titles,
+/// icons) change or the host reports their sources' data moved
+/// ([`Editor::invalidate_palette_search`]); a choice source redefined
+/// from the REPL shows once one of those moves.
+#[derive(Debug)]
+pub(super) struct PaletteSearchCache {
+    commands: Vec<(String, String, Option<String>)>,
+    entries: Vec<PaletteEntry>,
+    group_icons: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone)]
 struct Stage {
     kind: StageKind,
@@ -603,35 +617,54 @@ impl Editor {
     /// Adds every `:searchable` command's final choices to the commands
     /// stage, each under a section named for the command with the picks
     /// before it as its value (`808 Kick` · `Kicks › Digi Kick`). Walked
-    /// once per palette session: the sources read host indexes (the preset
-    /// index), so the walk is cheap and never stale.
+    /// on the first keystroke after they changed (see
+    /// [`PaletteSearchCache`]), else copied from the last walk.
     fn load_search_leaves(&mut self, state: &mut PaletteState) {
         state.leaves_loaded = true;
-        let leaves = self.walk_search_leaves();
-        let stage = &mut state.stages[0];
-        for leaf in leaves {
-            let (label, crumbs) = leaf.labels.split_last().expect("a leaf has its own label");
-            let mut entry = PaletteEntry::new(label.clone(), leaf.command.clone(), false);
-            entry.group = Some(leaf.title.clone());
-            entry.detail = leaf.detail.clone().or_else(|| (!crumbs.is_empty()).then(|| crumbs.join(" › ")));
-            entry.args = Some(leaf.args);
-            entry.stands_for_parent = leaf.stands_for_parent;
-            stage.entries.push(entry);
-            if let Some(icon) = &leaf.icon {
-                state.group_icons.entry(leaf.title.clone()).or_insert_with(|| icon.clone());
+        let commands = self.searchable_commands();
+        if self.palette_search_cache.as_ref().is_none_or(|cache| cache.commands != commands) {
+            let mut entries = Vec::new();
+            let mut group_icons = Vec::new();
+            for leaf in self.walk_search_leaves(commands.clone()) {
+                let (label, crumbs) = leaf.labels.split_last().expect("a leaf has its own label");
+                let mut entry = PaletteEntry::new(label.clone(), leaf.command.clone(), false);
+                entry.group = Some(leaf.title.clone());
+                entry.detail = leaf.detail.clone().or_else(|| (!crumbs.is_empty()).then(|| crumbs.join(" › ")));
+                entry.args = Some(leaf.args);
+                entry.stands_for_parent = leaf.stands_for_parent;
+                entries.push(entry);
+                if let Some(icon) = leaf.icon {
+                    group_icons.push((leaf.title, icon));
+                }
             }
+            self.palette_search_cache = Some(PaletteSearchCache { commands, entries, group_icons });
+        }
+        let cache = self.palette_search_cache.as_ref().expect("filled above");
+        state.stages[0].entries.extend(cache.entries.iter().cloned());
+        for (title, icon) in &cache.group_icons {
+            state.group_icons.entry(title.clone()).or_insert_with(|| icon.clone());
         }
     }
 
-    /// Every `:searchable` command's final choices.
-    fn walk_search_leaves(&mut self) -> Vec<SearchLeaf> {
-        let searchable: Vec<(String, String, Option<String>)> = self
-            .runtime
+    /// The host's data behind the `:searchable` commands' choices moved
+    /// (the instrument library, a preset bank): the next palette search
+    /// walks them again.
+    pub fn invalidate_palette_search(&mut self) {
+        self.palette_search_cache = None;
+    }
+
+    /// The `:searchable` commands with choices: name, title and icon.
+    fn searchable_commands(&self) -> Vec<(String, String, Option<String>)> {
+        self.runtime
             .commands()
             .into_iter()
             .filter(|(_, header)| header.searchable && !header.choices.is_empty())
             .map(|(name, header)| (name, header.command.clone().unwrap_or_default(), header.icon.clone()))
-            .collect();
+            .collect()
+    }
+
+    /// Every final choice of the `searchable` commands.
+    fn walk_search_leaves(&mut self, searchable: Vec<(String, String, Option<String>)>) -> Vec<SearchLeaf> {
         let mut leaves = Vec::new();
         for (name, title, icon) in searchable {
             let Ok(sources) = self.runtime.command_choice_sources(&name) else {
@@ -1589,6 +1622,33 @@ mod tests {
         }
         editor.handle_key(key(KeyCode::Enter));
         assert_eq!(ran(&editor), Some(Value::String("snares/Clap Snare".into())));
+    }
+
+    #[test]
+    fn search_choices_are_kept_across_sessions_until_invalidated() {
+        let mut editor = two_step_editor();
+        let search = |editor: &mut Editor, text: &str| {
+            editor.run_command(COMMAND_PALETTE);
+            type_text(editor, text);
+            let found = labels(editor);
+            editor.handle_key(key(KeyCode::Esc));
+            found
+        };
+        assert!(search(&mut editor, "clap").iter().any(|row| row == "Clap Snare"));
+
+        // A source's data changing is invisible until the host says so.
+        editor.runtime_mut().eval_str(r#"(def pal-sounds (kit) (list "Rim Snare"))"#).unwrap();
+        assert!(search(&mut editor, "clap").iter().any(|row| row == "Clap Snare"), "the last walk is reused");
+        editor.invalidate_palette_search();
+        let found = search(&mut editor, "snare");
+        assert!(found.iter().any(|row| row == "Rim Snare") && !found.iter().any(|row| row == "Clap Snare"));
+
+        // A new searchable command re-walks on its own.
+        editor
+            .runtime_mut()
+            .eval_str(r#"(def pal-fx (fx) :command "Add FX" :choices pal-kits :searchable true (set! ran fx))"#)
+            .unwrap();
+        assert!(search(&mut editor, "kicks").iter().any(|row| row == "Kicks"));
     }
 
     #[test]

@@ -248,6 +248,20 @@ pub(crate) fn sync_reactive_tick(
         if synced.paint {
             editor.mark_needs_redraw();
         }
+        // The palette keeps its search entries across sessions; they are
+        // re-walked once what they list moved.
+        let library = (crate::content_library_epoch(), sequencer::lisp_host::preset_name_index_generation());
+        let moved_engines = crate::presented::presented(|p| {
+            let engines = &p.sidebar.get().engines;
+            (*engines != ctx.frame.palette_search_engines).then(|| engines.clone())
+        });
+        if library != ctx.frame.palette_search_library || moved_engines.is_some() {
+            ctx.frame.palette_search_library = library;
+            if let Some(engines) = moved_engines {
+                ctx.frame.palette_search_engines = engines;
+            }
+            editor.invalidate_palette_search();
+        }
         // Drum-rack pad lights (eseq-4b5.16). The flags are read every tick —
         // reading is what consumes the audio thread's trigger latch, so it must
         // not be skipped. Host kinds read them as `pad.triggered`, gated by

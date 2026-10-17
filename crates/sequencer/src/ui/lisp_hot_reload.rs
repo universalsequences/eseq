@@ -126,6 +126,8 @@ pub(crate) fn process_lisp_hot_reload_paths(editor: &mut Editor, changes: Reload
     if changes.paths.is_empty() {
         return library_changed;
     }
+    // A reloaded file may redefine a `:searchable` command's choice source.
+    editor.invalidate_palette_search();
     let paths: Vec<_> = changes.paths.into_iter().collect();
     eprintln!(
         "metal_seq: Lisp hot reload observed changes: {}",

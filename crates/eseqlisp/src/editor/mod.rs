@@ -710,6 +710,7 @@ pub struct Editor {
     /// Command-palette names, most recently run first.
     palette_history: Vec<String>,
     palette_history_path: Option<PathBuf>,
+    palette_search_cache: Option<palette::PaletteSearchCache>,
     runtime: Runtime,
     runtime_source_context_revision: Option<RuntimeSourceContextRevision>,
     runtime_context_cache: runtime_context::RuntimeContextCache,
@@ -896,6 +897,7 @@ impl Editor {
             lisp_bindings: HashMap::new(),
             palette_history: Vec::new(),
             palette_history_path: None,
+            palette_search_cache: None,
             runtime,
             runtime_source_context_revision: None,
             runtime_context_cache: runtime_context::RuntimeContextCache::default(),

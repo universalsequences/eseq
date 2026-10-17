@@ -19,7 +19,7 @@
                                (not (reduce (lambda (acc known-file)
                                               (if (= known-file (str "@/ui/themes/" file)) true acc))
                                             false known)))
-                   (map |entry| (get entry :name) (list-directory dir)))))))
+                   (list-directory-names dir))))))
 
 (def seq-theme-builtin-registry ()
   (list

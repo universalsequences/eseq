@@ -404,6 +404,8 @@ pub(crate) fn run_event_loop(
         prev_variant_tint: None,
         prev_ui_epoch: 0,
         prev_sound_binding_epoch: 0,
+        palette_search_library: (0, 0),
+        palette_search_engines: Vec::new(),
         prev_delete_target_version: 0,
         prev_multi_track_selection: Vec::new(),
         prev_active_buffer_name: editor.active_buffer().name.clone(),

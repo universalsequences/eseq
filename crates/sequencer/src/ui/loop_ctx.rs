@@ -187,6 +187,11 @@ pub(crate) struct FrameDiffState {
         Option<(eseqlisp::backend::Color, [eseqlisp::backend::Color; eseqlisp::theme::TRACK_PALETTE_SLOTS])>,
     pub(crate) prev_ui_epoch: usize,
     pub(crate) prev_sound_binding_epoch: usize,
+    /// What the command palette's search entries (Add Instrument / Add
+    /// Effect choices) were last read from: the content library epoch and
+    /// preset index generation, and the project's engines.
+    pub(crate) palette_search_library: (u64, u64),
+    pub(crate) palette_search_engines: Vec<String>,
     /// Arming/clearing a delete target republishes only the delete-target
     /// read surfaces (version reactive + mixer/rack binding fields) off this
     /// counter — it deliberately does NOT ride `ui_epoch`.
