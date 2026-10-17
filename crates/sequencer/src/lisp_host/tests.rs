@@ -6542,11 +6542,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             &mut out,
         );
 
-        // :1 = whole note = 4 beats; one boundary at beat 4.0 within (0, 4].
+        // :1 = whole note = 4 beats; one boundary, the downbeat, within [0, 4).
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].event.track, Some(0));
         assert_eq!(out[0].event.chord, vec![0.0, 4.0, 7.0]);
-        assert_eq!(out[0].sample_time, 192_000); // 4 beats * 48000 spq
+        assert_eq!(out[0].sample_time, 0);
     }
 
     // ── jaki: pure-Lisp evaluator core + pattern surface + generator wiring ──
@@ -7152,7 +7152,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             &vels,
             &[0.8, 0.4, 0.2, 0.1, 0.05, 0.025, 0.0125, 0.00625],
         );
-        assert_eq!(out[0].sample_time, 12_000);
+        assert_eq!(out[0].sample_time, 0, "tick 0 is the downbeat");
         assert!(out.iter().all(|e| e.event.track == Some(0)));
     }
 
@@ -7187,10 +7187,10 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut samples: Vec<u64> = out.iter().map(|e| e.sample_time).collect();
         samples.sort_unstable();
         // the 3-unit cycle wraps mid-block: tick 3 owns cycle 1's [0,1) window
-        // and emits both of its hits (0 and 1/2 units past beat 1.0)
+        // and emits both of its hits (0 and 1/2 units past beat 0.75)
         assert_eq!(
             samples,
-            vec![12_000, 18_000, 24_000, 30_000, 36_000, 42_000, 48_000, 54_000]
+            vec![0, 6_000, 12_000, 18_000, 24_000, 30_000, 36_000, 42_000]
         );
     }
 
@@ -7288,7 +7288,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             assert_eq!(control.release_sample, control.engage_sample + 9_600);
         }
         let engages: Vec<u64> = controls.iter().map(|c| c.engage_sample).collect();
-        assert_eq!(engages, vec![12_000, 24_000, 36_000, 48_000, 60_000]);
+        // one hold per tick, from the downbeat
+        assert_eq!(engages, vec![0, 12_000, 24_000, 36_000, 48_000]);
     }
 
     #[test]
@@ -7322,7 +7323,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert!(out.is_empty(), "a control-only jak emits no notes");
         // 4-unit cycle, gates [k, k+4/5) for k=0..4 → complements
         // [k+4/5, k+1): 0.05 beats = 2400 samples each, 0.2 beats past the
-        // owning boundary
+        // owning boundary (ticks 0..3 at beats 0, 0.25, 0.5, 0.75)
         assert_eq!(controls.len(), 4);
         for control in &controls {
             assert_eq!(control.control.op, crate::mixer_control::MixerControlOp::Solo);
@@ -7333,7 +7334,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             assert_eq!(control.release_sample, control.engage_sample + 2_400);
         }
         let engages: Vec<u64> = controls.iter().map(|c| c.engage_sample).collect();
-        assert_eq!(engages, vec![21_600, 33_600, 45_600, 57_600]);
+        assert_eq!(engages, vec![9_600, 21_600, 33_600, 45_600]);
     }
 
     #[test]
@@ -7455,7 +7456,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 let start = cycle * cycle_len;
                 let end = start + cycle_len;
                 out.iter()
-                    .filter(|e| e.sample_time > start && e.sample_time <= end)
+                    .filter(|e| e.sample_time >= start && e.sample_time < end)
                     .count()
             })
             .collect();
@@ -7497,7 +7498,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 let start = cycle * cycle_len;
                 let end = start + cycle_len;
                 out.iter()
-                    .filter(|e| e.sample_time > start && e.sample_time <= end)
+                    .filter(|e| e.sample_time >= start && e.sample_time < end)
                     .count()
             })
             .collect();
@@ -7584,8 +7585,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     out.iter()
                         .filter(|e| {
                             e.event.track == Some(track)
-                                && e.sample_time > start
-                                && e.sample_time <= end
+                                && e.sample_time >= start
+                                && e.sample_time < end
                         })
                         .count()
                 })
@@ -9128,7 +9129,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let count = |t: usize| out.iter().filter(|e| e.event.track == Some(t)).count();
         assert_eq!(count(0), 10);
         // fast route: cycle 0 matches the straight route, cycle 1 is denser
-        let cycle_boundary = 66_000; // cycle 0 spans samples 12k..=60k (first boundary at 0.25 beats)
+        let cycle_boundary = 60_000; // cycle 0 spans samples 0..=48k; cycle 1 starts at 1.25 beats
         let t1_times: Vec<u64> = out
             .iter()
             .filter(|e| e.event.track == Some(1))
@@ -9247,15 +9248,15 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
         // (every 2 (shift 1)) was a silent no-op through the xf path; as a
         // post op it rotates cycle 1's left-hand events by one unit. Left-hand
-        // events sit at units [0,2,3] per cycle; the block clock's first
-        // boundary is beat 0.25 (sample 12000), so cycle 0 (unshifted) lands
-        // at [12000,36000,48000] and cycle 1 (shifted +1 unit) at
-        // [84000,108000,120000] instead of [72000,96000,108000].
+        // events sit at units [0,2,3] per cycle; tick 0 is the downbeat
+        // (sample 0), so cycle 0 (unshifted) lands at [0,24000,36000] and
+        // cycle 1 (shifted +1 unit) at [72000,96000,108000] instead of
+        // [60000,84000,96000].
         let out = run(r#"(jak "c" :16 . . - . -> 0 left (every 2 (shift 1)))"#);
         let samples: Vec<u64> = out.iter().map(|e| e.sample_time).collect();
         assert_eq!(
             samples,
-            vec![12_000, 36_000, 48_000, 84_000, 108_000, 120_000],
+            vec![0, 24_000, 36_000, 72_000, 96_000, 108_000],
             "left-every-shift"
         );
     }
@@ -9312,7 +9313,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
         // A 3-into-4 tuplet (offsets 0, 4/3, 8/3 units): the quantized arm
         // snaps to units [0,1,3], the raw arm keeps the tuplet placement.
-        // Boundary k = sample 12000*(k+1); fractional offsets add within the
+        // Boundary k = sample 12000*k; fractional offsets add within the
         // tick window (1/3 unit = 4000 samples).
         let out = run(r#"(jak "qs" :16 (fig (. . .) (% 4)) -> 0 (quant :16) -> 1)"#);
         let track = |t: usize| -> Vec<u64> {
@@ -9321,8 +9322,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .map(|e| e.sample_time)
                 .collect()
         };
-        assert_eq!(track(0), vec![12_000, 24_000, 48_000], "tuplet -> straight");
-        assert_eq!(track(1), vec![12_000, 28_000, 44_000], "raw tuplet arm");
+        assert_eq!(track(0), vec![0, 12_000, 36_000], "tuplet -> straight");
+        assert_eq!(track(1), vec![0, 16_000, 32_000], "raw tuplet arm");
 
         // Straight 16ths pushed onto a triplet grid (q = 2/3 unit):
         // units [0,1,2,3] snap to [0, 4/3, 2, 10/3].
@@ -9330,7 +9331,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let samples: Vec<u64> = out.iter().map(|e| e.sample_time).collect();
         assert_eq!(
             samples,
-            vec![12_000, 28_000, 36_000, 52_000],
+            vec![0, 16_000, 24_000, 40_000],
             "straight -> triplet"
         );
     }
@@ -9925,10 +9926,12 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut generators = crate::generator::GeneratorRuntime::default();
         generators.sync_definitions(&rt.sequencer_defs(), 0.0);
         let mut out = Vec::new();
-        generators.process_block(0.0, 2.0, 0, 48_000.0,
+        // The block starts at sample 12 000, one unit in, so there is a
+        // "before the first hit" to check.
+        generators.process_block(0.0, 2.0, 12_000, 48_000.0,
             |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"), &mut out);
-        // One unit = 12 000 samples, and this harness plays unit k at
-        // (k + 1) units; a stac'd left hit ends 3 000 in.
+        // One unit = 12 000 samples, so unit k plays at sample (k + 1) units;
+        // a stac'd left hit ends 3 000 in.
         let unit = |k: u64| (k + 1) * 12_000;
         let mask = |sample: u64| state.generator_mark_at(id, "0", sample);
         assert_eq!(mask(unit(0) - 1), None, "nothing before the first hit");
@@ -9964,12 +9967,13 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut generators = crate::generator::GeneratorRuntime::default();
         generators.sync_definitions(&rt.sequencer_defs(), 0.0);
         let mut out = Vec::new();
+        // Unit k (12 000 samples each) plays at sample k * 12 000.
         generators.process_block(0.0, 2.0, 0, 48_000.0,
             |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"), &mut out);
         // Codes: base-64 digits (element + 1) of the member's slot path
         // below its item, least significant first.
         let code = |rel: &[u64]| rel.iter().rev().fold(0u64, |acc, d| acc * 64 + d + 1) as f64;
-        let unit = |k: u64| (k + 1) * 12_000;
+        let unit = |k: u64| k * 12_000;
         let pick = |item: usize, k: u64| state.generator_mark_at(id, &format!("0.{item}"), unit(k));
         // (note (seq :hit 5 6 (7 9))): the seq is arg 1, its members start at
         // element 2; hit 2 plays the nested cycle list's member 0 (cycle 0).
@@ -10718,7 +10722,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         generators.process_block(0.0, 1.0, 0, 48_000.0,
             |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"), &mut out);
         let code = |rel: &[u64]| rel.iter().rev().fold(0u64, |acc, d| acc * 64 + d + 1) as f64;
-        let pick = |k: u64| state.generator_mark_at(id, "0.1", (k + 1) * 12_000);
+        // cycle k's hit plays at sample k * 12 000
+        let pick = |k: u64| state.generator_mark_at(id, "0.1", k * 12_000);
         // the chord list is arg 1 of item 1; member k plays on cycle k
         assert_eq!(pick(0), Some(code(&[1, 0])));
         assert_eq!(pick(1), Some(code(&[1, 1])));

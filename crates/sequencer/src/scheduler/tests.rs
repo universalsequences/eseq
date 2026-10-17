@@ -3231,18 +3231,19 @@
 
     #[test]
     fn a_neuron_on_a_jaki_restart_input_rewinds_a_looping_pattern() {
-        // The neuron fires on beat 1.5 and then every 3 units (2.25, 3.0,
-        // 3.75). The looping `. . . .` (L R L R on tracks 1 / 2) runs free
-        // until the first fire, then replays its first three units from
-        // every fire, velocity model fresh each time.
+        // The neuron is seeded by track 0's downbeat step and fires 3 units
+        // later, on beat 0.75, then every 3 units (1.5, 2.25, 3.0, 3.75). The
+        // looping `. . . .` (L R L R on tracks 1 / 2) runs free from the
+        // downbeat until the first fire, then replays its first three units
+        // from every fire, velocity model fresh each time.
         let hits = jaki_driven_by_neuron(":loop", 1, 3, true);
         let tracks: Vec<usize> = hits.iter().map(|hit| hit.track).collect();
         assert_eq!(
             tracks,
-            vec![1, 2, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2],
+            vec![1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1],
             "rewound on every fire: {hits:#?}"
         );
-        for fire_beat in [1.5_f64, 2.25, 3.0, 3.75] {
+        for fire_beat in [0.75_f64, 1.5, 2.25, 3.0, 3.75] {
             let hit = hits
                 .iter()
                 .find(|hit| hit.sample_time == (fire_beat * 24_000.0) as u64)
@@ -3412,8 +3413,7 @@
 
     #[test]
     fn a_jaki_quant_row_lands_every_hit_on_its_grid() {
-        // `. .` ×2 on sixteenths (this harness plays unit k at (k + 1) *
-        // 6000). (quant :8) snaps units 0 1 2 3 onto eighths 0 2 2 0: two
+        // `. .` ×2 on sixteenths (unit k plays at k * 6000). (quant :8) snaps units 0 1 2 3 onto eighths 0 2 2 0: two
         // hits per 4-unit cycle, both on the eighth grid, since hits snapped
         // onto one point sound once. (every-fig 2 (quant :4)) snaps only
         // figure 1 (units 2 3) onto the bar line: units 0 and 1 remain.
@@ -3425,7 +3425,7 @@
             96_000,
         );
         let times = |track: usize| -> Vec<u64> {
-            triggers.iter().filter(|(t, _)| *t == track).map(|(_, time)| *time - 6_000).collect()
+            triggers.iter().filter(|(t, _)| *t == track).map(|(_, time)| *time).collect()
         };
         assert_eq!(times(0), vec![0, 12_000, 24_000, 36_000, 48_000, 60_000, 72_000, 84_000]);
         assert_eq!(times(1), vec![0, 6_000, 24_000, 30_000, 48_000, 54_000, 72_000, 78_000]);
@@ -3989,7 +3989,7 @@
                 false,
             );
 
-            // One :4 boundary (beat 1.0 → sample 24000) fires inside the
+            // One :4 boundary (the downbeat, sample 0) fires inside the
             // horizon; both holds land in the mailbox stamped from it.
             let due = state.scheduled_mixer_controls().drain_due(u64::MAX);
             assert_eq!(due.len(), 2, "{due:?}");
@@ -3998,15 +3998,15 @@
                 due[0].target,
                 crate::mixer_control::MixerControlTarget::Track(0)
             );
-            assert_eq!(due[0].engage_sample, 24_000);
-            assert_eq!(due[0].release_sample, 30_000);
+            assert_eq!(due[0].engage_sample, 0);
+            assert_eq!(due[0].release_sample, 6_000);
             assert_eq!(due[1].op, crate::mixer_control::MixerControlOp::Solo);
             assert_eq!(
                 due[1].target,
                 crate::mixer_control::MixerControlTarget::Group("Drums".to_string())
             );
-            assert_eq!(due[1].engage_sample, 27_000);
-            assert_eq!(due[1].release_sample, 39_000);
+            assert_eq!(due[1].engage_sample, 3_000);
+            assert_eq!(due[1].release_sample, 15_000);
         });
     }
 

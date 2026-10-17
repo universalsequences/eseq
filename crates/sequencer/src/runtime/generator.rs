@@ -4,7 +4,7 @@
 //! sequencer: a self-clocked unit that the scheduler ticks on its own timebase
 //! grid each block (even with no incoming events) and that emits musical events.
 //!
-//! This module owns only the timing/ordering concerns — one [`GridBoundaryClock`]
+//! This module owns only the timing/ordering concerns — one [`DownbeatClock`]
 //! per generator, a per-generator tick counter, and a per-generator RNG seed — and
 //! is deliberately lisp-agnostic so it can be driven by a plain Rust callback in
 //! tests. The actual lisp `:tick` closure invocation lives in `lisp_host.rs`; the
@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use crate::accumulator::ResolvedStep;
 use crate::lisp_host::EmittedAccumulatorEvent;
-use super::grid_clock::{process_grid_boundaries, GridBoundaryClock};
+use super::grid_clock::{boundary_tolerance, DownbeatClock};
 
 /// Reference subdivision count used when converting a `Timebase` to beats. Only
 /// affects `Timebase::Polyrhythm`; matches the neural runtime's convention so the
@@ -242,7 +242,7 @@ pub struct MixerControlEmission {
 struct GeneratorInstance {
     id: u64,
     name: String,
-    clock: GridBoundaryClock,
+    clock: DownbeatClock,
     tick_count: u64,
     random_state: u64,
     state: HashMap<String, f64>,
@@ -294,7 +294,7 @@ impl GeneratorRuntime {
                     next.push(inst);
                 }
                 None => {
-                    let mut clock = GridBoundaryClock::new(resolution_beats);
+                    let mut clock = DownbeatClock::new(resolution_beats);
                     clock.realign(total_beats);
                     next.push(GeneratorInstance {
                         id: def.id,
@@ -323,6 +323,31 @@ impl GeneratorRuntime {
         }
     }
 
+    /// [`Self::reset`] for a loop wrap at `end_beats`: the loop's end is the
+    /// next cycle's downbeat, and a graph (whose blocks cover `(start, end]`)
+    /// fires there in the wrap chunk, before the generator ticks it. Those
+    /// queued triggers move to the new cycle's beat 0 instead of being reset
+    /// away.
+    pub fn reset_for_wrap(&mut self, end_beats: f64, samples_per_quarter: f64) {
+        let tolerance = boundary_tolerance(samples_per_quarter);
+        let carried: Vec<Vec<GateTrigger>> = self
+            .instances
+            .iter()
+            .map(|inst| {
+                inst.gate
+                    .pending
+                    .iter()
+                    .filter(|trigger| trigger.beat >= end_beats - tolerance)
+                    .map(|trigger| GateTrigger { beat: (trigger.beat - end_beats).max(0.0), ..*trigger })
+                    .collect()
+            })
+            .collect();
+        self.reset(0.0);
+        for (inst, pending) in self.instances.iter_mut().zip(carried) {
+            inst.gate.pending = pending;
+        }
+    }
+
     /// Queue a gate trigger for generator `id` (docs/jaki-trig-modes-spec.md
     /// §4); false when no generator has that id.
     pub fn push_gate_trigger(&mut self, id: u64, trigger: GateTrigger) -> bool {
@@ -335,7 +360,7 @@ impl GeneratorRuntime {
         }
     }
 
-    /// Drive every generator's clock across `(start_beats, end_beats]`, invoking
+    /// Drive every generator's clock across `[start_beats, end_beats)`, invoking
     /// `tick_fn` once per boundary crossing and resolving each emitted event to an
     /// absolute sample time. Newly produced emissions are appended to `out` and
     /// sorted by `(sample_time, generator_index)` — the determinism contract shared
@@ -410,7 +435,7 @@ impl GeneratorRuntime {
         I: Fn(u64) -> bool,
         F: FnMut(GeneratorTickInput) -> GeneratorTickResult,
     {
-        if self.instances.is_empty() || end_beats <= start_beats {
+        if self.instances.is_empty() || !(end_beats > start_beats) || !end_beats.is_finite() {
             return;
         }
         let appended_from = out.len();
@@ -426,8 +451,7 @@ impl GeneratorRuntime {
             let mut state = std::mem::take(&mut self.instances[generator_index].state);
             let mut gate = std::mem::take(&mut self.instances[generator_index].gate);
             let resolution_beats = clock.resolution_beats;
-            process_grid_boundaries(
-                &mut clock,
+            clock.process(
                 start_beats,
                 end_beats,
                 block_start_sample,
@@ -566,9 +590,10 @@ mod tests {
         );
 
         assert_eq!(out.len(), 16);
-        // First boundary at 0.25 beats -> 12000 samples; last at 4.0 -> 192000.
-        assert_eq!(out[0].sample_time, 12_000);
-        assert_eq!(out[15].sample_time, 192_000);
+        // Tick 0 on the downbeat (sample 0); the last at 3.75 -> 180000. Beat
+        // 4.0 belongs to the next block.
+        assert_eq!(out[0].sample_time, 0);
+        assert_eq!(out[15].sample_time, 180_000);
         assert!(out.iter().all(|e| e.generator_index == 0));
     }
 
@@ -622,10 +647,10 @@ mod tests {
             &mut out,
         );
 
-        // Both fire at beat 1.0 (sample 48000); ordering is by generator index.
+        // Both fire at beat 0.0 (sample 0); ordering is by generator index.
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].sample_time, 48_000);
-        assert_eq!(out[1].sample_time, 48_000);
+        assert_eq!(out[0].sample_time, 0);
+        assert_eq!(out[1].sample_time, 0);
         assert_eq!(out[0].generator_index, 0);
         assert_eq!(out[1].generator_index, 1);
     }
@@ -655,9 +680,9 @@ mod tests {
             &mut out,
         );
 
-        // boundary at beat 1.0 (48000) + 0.25 beat (12000) = 60000
+        // boundary at beat 0.0 (sample 0) + 0.25 beat (12000) = 12000
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].sample_time, 60_000);
+        assert_eq!(out[0].sample_time, 12_000);
     }
 
     #[test]
@@ -720,7 +745,7 @@ mod tests {
         }
     }
 
-    /// Run one generator over `(start, end]` and record (beat, gate) per tick.
+    /// Run one generator over `[start, end)` and record (beat, gate) per tick.
     fn gates(runtime: &mut GeneratorRuntime, start: f64, end: f64) -> Vec<(f64, GeneratorGateView)> {
         let mut seen = Vec::new();
         let mut out = Vec::new();
@@ -757,6 +782,25 @@ mod tests {
         let before = seen.iter().find(|(b, _)| *b == 0.75).unwrap().1;
         assert_eq!(before, GeneratorGateView::default(), "nothing delivered early");
         assert!(!runtime.push_gate_trigger(99, play(0.0, 1.0, 0.0, 1.0)), "unknown id");
+    }
+
+    #[test]
+    fn a_loop_wrap_carries_a_fire_on_the_loop_end_to_the_new_downbeat() {
+        let mut runtime = GeneratorRuntime::default();
+        runtime.sync_definitions(&[def(1, Timebase::Sixteenth)], 0.0);
+        // A graph fires on the loop end (beat 1.0) in the wrap chunk, and an
+        // earlier fire already played; only the loop-end one carries over.
+        runtime.push_gate_trigger(1, play(0.5, 0.25, 1.0, 0.3));
+        runtime.push_gate_trigger(1, play(1.0, 0.5, 4.0, 0.7));
+        let first = gates(&mut runtime, 0.0, 1.0);
+        assert_eq!(first.iter().filter(|(_, g)| g.epoch == 1).count(), 2, "0.5 delivered, 1.0 still queued");
+        runtime.reset_for_wrap(1.0, 48_000.0);
+        let second = gates(&mut runtime, 0.0, 1.0);
+        let downbeat = second[0];
+        assert_eq!(downbeat.0, 0.0);
+        assert_eq!((downbeat.1.epoch, downbeat.1.note, downbeat.1.velocity), (1, 4.0, 0.7));
+        let open: Vec<f64> = second.iter().filter(|(_, g)| g.open).map(|(b, _)| *b).collect();
+        assert_eq!(open, vec![0.0, 0.25], "its window carried with it");
     }
 
     #[test]

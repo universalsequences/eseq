@@ -11,8 +11,9 @@
 //! - [`graph`] — graph-mode `def-sequencer` gather/scatter node fields
 //! - [`harmony`] — pitch-class tiers behind the `lane-harmony` process
 //! - [`param_ref`] — text names for per-hit parameter targets (`ParamRef`)
-//! - [`grid_clock`] — the shared [`grid_clock::GridBoundaryClock`] timebase and
-//!   the `(sample_time, index)` determinism contract all emitters follow
+//! - [`grid_clock`] — the [`grid_clock::GridBoundaryClock`] timebase (graph,
+//!   process, neural) and generators' [`grid_clock::DownbeatClock`], plus the
+//!   `(sample_time, index)` determinism contract all emitters follow
 //!
 //! The legacy builtin neural machine (`crate::neural`) is intentionally NOT in
 //! this folder: it is not lisp-authorable (graph-mode `def-sequencer` is its

@@ -610,10 +610,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         // from its start without stale state; the wrap chunk
                         // begins exactly at the end-beat sample, so the edge
                         // trigger fires exactly once.
+                        let wrap_beats = clock.total_beats;
                         clock.reset();
                         midi_fx_quantizer_state.reset();
                         neural_runtime.reset_state(0.0);
-                        generator_runtime.reset(0.0);
+                        generator_runtime.reset_for_wrap(wrap_beats, samples_per_quarter);
                         // Hand the reads the previous run's tail first, so
                         // the reset drops it instead of the next chunk's
                         // feed replaying it into the new run.

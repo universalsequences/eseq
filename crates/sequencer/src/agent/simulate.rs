@@ -27,10 +27,8 @@ use crate::sequencer::{SequencerState, Timebase};
 
 /// Any positive rate works: results are reported in beats.
 const SAMPLES_PER_QUARTER: f64 = 24_000.0;
-/// The scheduler resets generators to beat 0 on Play and at a loop wrap,
-/// and a generator ticks on boundaries strictly after that: `gen-tick` 0 is
-/// the first step boundary *after* the downbeat (beat 0.25 at :16). Run the
-/// same way, so what this reports is what plays (bead eseq-z5x4).
+/// The scheduler resets generators to beat 0 on Play and at a loop wrap;
+/// `gen-tick` 0 falls on that downbeat.
 const START_BEATS: f64 = 0.0;
 pub const MAX_BARS: u32 = 64;
 /// Hit lines a report lists; the summary still counts them all.
@@ -193,8 +191,7 @@ impl Simulation {
     /// One line per hit and a summary: what the agent reads.
     pub fn report(&self) -> String {
         let mut lines = vec![format!(
-            "{} tick(s) over {} bar(s), {} hit(s). Position is bar.sixteenth; as on Play, \
-             gen-tick 0 is the first step boundary after the downbeat.",
+            "{} tick(s) over {} bar(s), {} hit(s). Position is bar.sixteenth; gen-tick 0 is 1.1.",
             self.ticks,
             self.bars,
             self.hits.len()
@@ -305,11 +302,11 @@ mod tests {
         assert_eq!(run.failure, None);
         assert_eq!(run.ticks, 16);
         let positions: Vec<String> = run.hits.iter().map(|hit| position(hit.beat)).collect();
-        // Ticks 0, 3, 4, 7, … at the boundaries after the downbeat.
-        assert_eq!(positions, ["1.2", "1.5", "1.6", "1.9", "1.10", "1.13", "1.14", "2.1"]);
+        // Ticks 0, 3, 4, 7, …: tick k on the k-th sixteenth.
+        assert_eq!(positions, ["1.1", "1.4", "1.5", "1.8", "1.9", "1.12", "1.13", "1.16"]);
         let first = &run.hits[0];
         assert_eq!((first.track, first.transpose, first.velocity, first.duration), (1, 3.0, 0.5, 0.25));
-        assert!(run.report().contains("1.5  track 1   +3 st  vel 0.50  dur 0.250"), "{}", run.report());
+        assert!(run.report().contains("1.4  track 1   +3 st  vel 0.50  dur 0.250"), "{}", run.report());
     }
 
     #[test]
@@ -324,9 +321,9 @@ mod tests {
         let run = simulate_instance(&state, &kind, 7, None, 2).expect("simulates");
         assert_eq!(run.hits.len(), 2, "ticks 0 and 1 played");
         let failure = run.failure.clone().expect("a failure");
-        assert_eq!((failure.tick, position(failure.beat)), (2, "1.4".to_string()));
+        assert_eq!((failure.tick, position(failure.beat)), (2, "1.3".to_string()));
         assert!(failure.error.contains("no-such-function"), "{}", failure.error);
-        assert!(run.report().contains("Tick 2 at 1.4 threw"), "{}", run.report());
+        assert!(run.report().contains("Tick 2 at 1.3 threw"), "{}", run.report());
     }
 
     #[test]

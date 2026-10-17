@@ -31,7 +31,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::grid_clock::next_grid_boundary;
+use super::grid_clock::{next_grid_boundary, sample_time_for_beat};
 use crate::neural::NeuralMaxPolySelection;
 use crate::sequencer::Timebase;
 
@@ -3446,18 +3446,6 @@ pub fn effective_delta_value(authored: f64, delta: f64, range: GraphDeltaRange) 
 
 fn grid_index_at(total_beats: f64, step_beats: f64) -> u64 {
     (total_beats / step_beats.max(1e-9)).floor().max(0.0) as u64
-}
-
-fn sample_time_for_beat(
-    start_beats: f64,
-    block_start_sample: u64,
-    samples_per_quarter: f64,
-    beat: f64,
-) -> u64 {
-    let sample_offset = ((beat - start_beats) * samples_per_quarter)
-        .round()
-        .max(0.0) as u64;
-    block_start_sample.saturating_add(sample_offset)
 }
 
 fn next_reset_beat_after(total_beats: f64, reset_interval_beats: f64) -> f64 {
