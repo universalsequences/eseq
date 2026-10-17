@@ -41,6 +41,15 @@ pub enum Entry {
     Notice(String),
 }
 
+/// `text` cut to `limit` characters, marked when cut: how a transcript is
+/// shown.
+pub fn clip(text: &str, limit: usize) -> String {
+    match text.char_indices().nth(limit) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Transcript {
     pub entries: Vec<Entry>,

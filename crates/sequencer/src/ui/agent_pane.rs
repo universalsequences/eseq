@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use eseqlisp::vm::Value;
 use eseqlisp::{Editor, Runtime};
-use sequencer::agent::harness::{AgentSession, Entry, SessionConfig, Transcript};
+use sequencer::agent::harness::{clip, AgentSession, Entry, SessionConfig, Transcript};
 
 use super::presented::present_agent_pane;
 use super::values::{list_value, map_value};
@@ -35,12 +35,8 @@ fn text(value: &str) -> Value {
     Value::String(value.to_string())
 }
 
-/// `body` cut to `limit` characters, marked when cut.
 fn clipped(body: &str, limit: usize) -> Value {
-    match body.char_indices().nth(limit) {
-        Some((end, _)) => Value::String(format!("{}…", &body[..end])),
-        None => text(body),
-    }
+    Value::String(clip(body, limit))
 }
 
 fn entry_value(entry: &Entry) -> Value {

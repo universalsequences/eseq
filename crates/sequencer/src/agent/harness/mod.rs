@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use serde_json::Value;
 
 pub use mcp_client::{McpClient, ServerHandle, ToolBackend, ToolResult};
-pub use transcript::{Entry, ToolStatus, Transcript};
+pub use transcript::{clip, Entry, ToolStatus, Transcript};
 use turn::{push_user_text, run_turn, AnthropicTransport, TurnConfig};
 
 use crate::agent::providers::AgentProviderKind;
