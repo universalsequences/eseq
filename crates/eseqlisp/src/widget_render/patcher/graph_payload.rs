@@ -82,6 +82,7 @@ enum NodeKindEntry {
     MacroDefinition,
     MacroInstance,
     CodeIsland,
+    Comment,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -392,6 +393,7 @@ fn node_entry(node: &PatchNode) -> NodeEntry {
             NodeKind::MacroDefinition => NodeKindEntry::MacroDefinition,
             NodeKind::MacroInstance => NodeKindEntry::MacroInstance,
             NodeKind::CodeIsland => NodeKindEntry::CodeIsland,
+            NodeKind::Comment => NodeKindEntry::Comment,
         },
         label: node.label.clone(),
         args: node
@@ -442,6 +444,7 @@ fn patch_node(entry: &NodeEntry) -> PatchNode {
             NodeKindEntry::MacroDefinition => NodeKind::MacroDefinition,
             NodeKindEntry::MacroInstance => NodeKind::MacroInstance,
             NodeKindEntry::CodeIsland => NodeKind::CodeIsland,
+            NodeKindEntry::Comment => NodeKind::Comment,
         },
         label: entry.label.clone(),
         inline_inputs: vec![None; args.len()],

@@ -19,6 +19,10 @@ pub enum NodeKind {
     MacroDefinition,
     MacroInstance,
     CodeIsland,
+    /// Free text annotating the patch (Max's comment box): authored as editor
+    /// text starting with `;`, no ports, never emitted to source. It lives
+    /// only in the layout sidecar's graph payload.
+    Comment,
 }
 
 #[derive(Debug, Clone, PartialEq)]

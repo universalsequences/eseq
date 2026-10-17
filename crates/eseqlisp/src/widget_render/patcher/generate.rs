@@ -340,7 +340,8 @@ impl<'a> ScopeEmitter<'a> {
                         node.label
                     ));
                 }
-                NodeKind::MacroDefinition => NodeRole::Skip,
+                // Annotation only: nothing to emit, nothing to reference.
+                NodeKind::MacroDefinition | NodeKind::Comment => NodeRole::Skip,
                 NodeKind::Param => NodeRole::Param,
                 NodeKind::In if is_macro => NodeRole::MacroParam,
                 NodeKind::In => NodeRole::Input,

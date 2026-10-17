@@ -7,6 +7,7 @@ use crate::layout::{LayoutNode, Rect};
 use crate::ui::platform::has_primary_shortcut_modifier;
 use crate::widget_render::trigger_alignment_haptic;
 
+use super::comment::{comment_body, comment_cursor_at};
 use super::alignment::{align_dragged_primary_position, clear_alignment};
 use super::assets::autocomplete_asset_paths_for_node;
 use super::connect::connection_exists;
@@ -200,7 +201,7 @@ pub(super) fn handle_patcher_pointer_down(
                 update_patcher_text_edit_pointer(
                     edit,
                     *rect,
-                    local_col,
+                    (local_col, local_row),
                     node_font_size(edit_node),
                     patcher_zoom(&pan_state),
                     false,
@@ -481,7 +482,7 @@ pub(super) fn handle_patcher_pointer_drag(
             update_patcher_text_edit_pointer(
                 edit,
                 *rect,
-                local_col,
+                (local_col, local_row),
                 node_font_size(edit_node),
                 patcher_zoom(&pan_state),
                 true,
@@ -902,7 +903,7 @@ pub(super) fn handle_patcher_pointer_up(
             update_patcher_text_edit_pointer(
                 edit,
                 *rect,
-                local_col,
+                (local_col, local_row),
                 node_font_size(edit_node),
                 patcher_zoom(&pan_state),
                 true,
@@ -1218,6 +1219,7 @@ pub(super) fn handle_patcher_double_click(
         let caret = rect.map(|rect| NodeTextCaret::AtCol {
             rect,
             local_col,
+            local_row,
             zoom: patcher_zoom(&pan_state),
         });
         if !begin_patcher_node_text_edit(
@@ -1263,7 +1265,13 @@ pub(super) enum NodeTextCaret {
     /// Under the pointer (double-click). The hit test only has glyph advances
     /// for text the measure pass has already seen; when it has none for this
     /// text the caret goes to the end rather than refusing the edit.
-    AtCol { rect: Rect, local_col: f32, zoom: f32 },
+    AtCol {
+        rect: Rect,
+        local_col: f32,
+        /// Only a comment reads it: its text wraps onto several lines.
+        local_row: f32,
+        zoom: f32,
+    },
     /// The op token selected, so typing replaces the name (context-menu
     /// Rename / Edit).
     SelectOp,
@@ -1296,10 +1304,21 @@ pub(super) fn begin_patcher_node_text_edit(
         .position(char::is_whitespace)
         .unwrap_or(text_len);
     let (cursor_pos, selection_anchor) = match caret {
+        // A comment edits its body, which is what the box draws.
+        NodeTextCaret::AtCol {
+            rect,
+            local_col,
+            local_row,
+            zoom,
+        } if patch_node.kind == NodeKind::Comment => (
+            comment_cursor_at(comment_body(&text), rect, local_col, local_row, zoom),
+            None,
+        ),
         NodeTextCaret::AtCol {
             rect,
             local_col,
             zoom,
+            ..
         } => (
             patcher_text_cursor_at_col_with_zoom(
                 rect,
@@ -1311,18 +1330,30 @@ pub(super) fn begin_patcher_node_text_edit(
             .unwrap_or(text_len),
             None,
         ),
+        // A comment has no op: Edit selects its whole body instead.
+        NodeTextCaret::SelectOp if patch_node.kind == NodeKind::Comment => {
+            let body_len = comment_body(&text).chars().count();
+            (body_len, (body_len > 0).then_some(0))
+        }
         NodeTextCaret::SelectOp => (op_len, (op_len > 0).then_some(0)),
     };
     ensure_source_node_edit(state, view_key, patch_node, text.clone());
+    let comment = patch_node.kind == NodeKind::Comment;
+    let edit_text = if comment {
+        comment_body(&text).to_string()
+    } else {
+        text
+    };
     begin_patcher_text_edit(
         state,
         node_id.to_string(),
-        text,
+        edit_text,
         cursor_pos,
         autocomplete_asset_paths_for_node(node),
     );
     if let Some(edit) = state.text_edit.as_mut() {
         edit.state.selection_anchor = selection_anchor;
+        edit.comment = comment;
     }
     true
 }
@@ -1394,6 +1425,32 @@ pub(super) fn create_patcher_node_below_anchor(
         0,
         autocomplete_asset_paths_for_node(node),
     );
+    true
+}
+
+/// Add Comment: a new comment box at the pointer (where the context menu was
+/// opened), already in its text edit.
+pub(super) fn create_patcher_comment_at_pointer(
+    node: &LayoutNode,
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+) -> bool {
+    let Ok((_, root_patch)) = load_patch_from_props(&node.props) else {
+        return false;
+    };
+    let patch = active_patcher_patch(&root_patch, state);
+    let patch = patch_with_interaction_state(patch, state, view_key);
+    let position = state.last_pointer_model_position.unwrap_or((1.0, 1.0));
+    let taken_node_ids = patch
+        .nodes
+        .iter()
+        .map(|patch_node| patch_node.id.clone())
+        .collect::<HashSet<_>>();
+    let created_id = allocate_created_node_avoiding(state, view_key, position, &taken_node_ids);
+    begin_patcher_text_edit(state, created_id, String::new(), 0, Vec::new());
+    if let Some(edit) = state.text_edit.as_mut() {
+        edit.comment = true;
+    }
     true
 }
 

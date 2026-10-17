@@ -6072,6 +6072,21 @@ fn real_patcher_lisp_menu_offers_probe_entries() {
         r#"(dict :col 1 :row 1 :node (dict :id "m" :macro? true :library-macro? true :probe-view nil) :cable nil :ghosts false)"#,
     );
     assert_eq!(library_macro, local_macro + 1, "a library macro offers Fork into Patch");
+    let comment = entry_count(
+        r#"(dict :col 1 :row 1 :node (dict :id "c" :macro? false :comment? true :probe-view nil) :cable nil :ghosts false)"#,
+    );
+    assert_eq!(
+        comment,
+        plain - 2,
+        "a comment offers neither Connect with Agent nor Encapsulate"
+    );
+    // Add Comment, Ask Agent, Paste.
+    assert_eq!(
+        entry_count(r#"(dict :col 1 :row 1 :node nil :cable nil :ghosts false)"#),
+        3
+    );
+    assert!(source.contains("\"create-comment\""));
+    assert!(crate::widget_render::patcher::PATCHER_COMMANDS.contains(&"create-comment"));
 }
 
 #[test]

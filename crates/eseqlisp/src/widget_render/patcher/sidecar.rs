@@ -843,7 +843,7 @@ fn apply_editor_text_presentation_overrides(
             view_key,
             &edit.node_id,
             &edit.node_id,
-            &edit.text,
+            &edit.node_text(),
             node_id_map,
             live_node_ids,
         );

@@ -184,6 +184,17 @@ A patch-editor tutorial is beyond the scope of this manual. Two experimental aid
 
 Instruments you build can be shared as packages; see [Packages](packages). To change how instrument panels behave or which keys do what, see [Keys and customization](customization).
 
+## Comments
+
+A comment is a box of explanatory text on the patch canvas. It has no inlets or outlets and never affects the sound.
+
+- Right-click an empty spot on the canvas and choose **Add Comment**, or type `;` as the first character of a new box. The `;` turns the box into a comment and is not shown.
+- Text wraps to the box. A new comment widens as you type, up to a limit, then wraps; drag its corner to choose the width and the height follows the text.
+- Shift-Return starts a new line. Return finishes editing.
+- Double-click a comment to edit it. Deleting all its text removes it.
+
+Comments are saved with the patch layout, not in `dsp.lisp`, so they appear in the patch editor only. A `;` comment written in **View code** is ordinary source and does not appear as a box.
+
 ## Probes
 
 A probe shows a signal inside a patch while it runs. It passes the signal through unchanged, so adding one never changes the sound. Probes work the same way in instruments and in DGenLisp effects.

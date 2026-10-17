@@ -16,7 +16,7 @@
 ;; Rebind from user lisp, for example in init.lisp:
 ;;   (eseq.patcher/bind-key "M-RET" "accept-suggestions")
 ;;   (eseq.patcher/unbind-key "Tab")
-;; Commands: create-below connect-last-two undo redo copy paste encapsulate
+;; Commands: create-below create-comment connect-last-two undo redo copy paste encapsulate
 ;; toggle-cable-style retry-bubble dismiss-bubble open-bubble connect-bubble
 ;; open-macro edit-node delete-selection accept-suggestions insert-probe
 ;; insert-scope show-as-scope show-as-number
@@ -95,16 +95,25 @@
       (if (and (not (= node nil)) (= (get node :probe-view) "scope"))
         (list (menu-entry "Show as Number" "show-as-number"))
         (list))
-      (if (not (= node nil))
-        (list (menu-entry "Connect with Agent…" "connect-bubble")
-              (menu-entry "Ask Agent…" "open-bubble"))
-        (list (menu-entry "Ask Agent…" "open-bubble")))
+      ;; A comment has no ports, so there is nothing to connect or
+      ;; encapsulate; the empty canvas offers a new one.
+      (if (= node nil)
+        (if (= cable nil)
+          (list (menu-entry "Add Comment" "create-comment")
+                (menu-entry "Ask Agent…" "open-bubble"))
+          (list (menu-entry "Ask Agent…" "open-bubble")))
+        (if (get node :comment?)
+          (list (menu-entry "Ask Agent…" "open-bubble"))
+          (list (menu-entry "Connect with Agent…" "connect-bubble")
+                (menu-entry "Ask Agent…" "open-bubble"))))
       (if (and (not (= event nil)) (get event :ghosts))
         (list (menu-entry "Accept Suggested Cables" "accept-suggestions"))
         (list))
+      (if (and (not (= node nil)) (not (get node :comment?)))
+        (list (menu-entry "Encapsulate" "encapsulate"))
+        (list))
       (if (not (= node nil))
-        (list (menu-entry "Encapsulate" "encapsulate")
-              (menu-entry "Copy" "copy"))
+        (list (menu-entry "Copy" "copy"))
         (list))
       (list (menu-entry "Paste" "paste"))
       (if (not (= cable nil))

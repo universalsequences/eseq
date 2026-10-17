@@ -220,13 +220,14 @@ fn emit_patch_writeback_result_for_root_patch(
                 node_id: text_edit.node_id.clone(),
                 reason: "active text edit targets a missing source node".to_string(),
             })?;
-        if text_edit.text.trim() != node_display_label(node).trim() {
+        let text = text_edit.node_text();
+        if text.trim() != node_display_label(node).trim() {
             apply_node_text_edit(
                 &mut document,
                 &effective_root_patch,
                 &active_view_key,
                 node,
-                &text_edit.text,
+                &text,
             )?;
         }
     }

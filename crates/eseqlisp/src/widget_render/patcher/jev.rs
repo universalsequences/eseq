@@ -222,7 +222,10 @@ pub(super) fn build_request(
     // already fed from the other direction.
     let mut inlet_criteria = JsonMap::new();
     for other in &others {
-        if matches!(other.kind, NodeKind::MacroDefinition | NodeKind::CodeIsland) {
+        if matches!(
+            other.kind,
+            NodeKind::MacroDefinition | NodeKind::CodeIsland | NodeKind::Comment
+        ) {
             continue;
         }
         let label = node_display_label(other);
@@ -465,7 +468,7 @@ fn sync_selection(
     };
     if matches!(
         node.kind,
-        NodeKind::MacroDefinition | NodeKind::CodeIsland | NodeKind::Constant
+        NodeKind::MacroDefinition | NodeKind::CodeIsland | NodeKind::Constant | NodeKind::Comment
     ) {
         return clear(state);
     }

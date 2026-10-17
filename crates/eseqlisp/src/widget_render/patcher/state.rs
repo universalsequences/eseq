@@ -594,6 +594,21 @@ pub(super) struct PatcherTextEdit {
     pub(super) original_text: String,
     pub(super) state: TextInputState,
     pub(super) autocomplete_selected: usize,
+    /// Editing a comment: `text` is the comment's prose alone, and the `;`
+    /// marker that makes the node a comment is added back by `node_text`, so
+    /// the box looks the same in and out of the edit.
+    pub(super) comment: bool,
+}
+
+impl PatcherTextEdit {
+    /// The node text this edit stands for.
+    pub(super) fn node_text(&self) -> String {
+        if self.comment {
+            super::comment::comment_node_text(&self.text)
+        } else {
+            self.text.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1813,7 +1828,7 @@ pub(super) fn patch_scope_with_interaction_state(
             .as_ref()
             .filter(|edit| edit.node_id == node.id)
         {
-            apply_node_text_override(node, &edit.text, macro_signatures);
+            apply_node_text_override(node, &edit.node_text(), macro_signatures);
             expand_node_for_autocomplete(node, edit);
         }
     }
@@ -1848,7 +1863,7 @@ pub(super) fn patch_scope_with_interaction_state(
             .as_ref()
             .filter(|text_edit| text_edit.node_id == edit.id)
         {
-            text = edit.text.clone();
+            text = edit.node_text();
         }
         patch.nodes.push(node_from_editor_text(
             &edit.id,
@@ -2844,6 +2859,27 @@ pub(super) fn node_from_editor_text(
     is_editing: bool,
 ) -> PatchNode {
     let trimmed = text.trim();
+    if super::comment::is_comment_text(trimmed) {
+        // Mid-edit the box sizes on the raw text, trailing spaces and all, so
+        // a space typed at a line's end wraps the same way the caret draws it.
+        let label = if is_editing { text.trim_start() } else { trimmed };
+        return PatchNode {
+            id: id.to_string(),
+            op: "comment".to_string(),
+            kind: NodeKind::Comment,
+            label: label.to_string(),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            position,
+            width: None,
+            height: None,
+            param: None,
+            inline_inputs: Vec::new(),
+            synthesized: false,
+            diagnostic: None,
+            source: None,
+        };
+    }
     if trimmed.is_empty() || is_editing {
         return PatchNode {
             id: id.to_string(),

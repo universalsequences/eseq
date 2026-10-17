@@ -2188,6 +2188,7 @@ fn patcher_small_patch_enter_latency() {
             original_text: "sin 440".to_string(),
             state: TextInputState::default(),
             autocomplete_selected: 0,
+            comment: false,
         });
         set_patcher_interaction_state(key, state);
         let start = Instant::now();
@@ -15942,6 +15943,7 @@ fn actively_edited_created_nodes_suppress_unknown_operator_diagnostics() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     });
 
     let patch = patch_with_interaction_state(Patch::default(), &state, "root");
@@ -16159,6 +16161,7 @@ fn patcher_reports_text_capture_only_while_node_text_edit_is_active() {
         original_text: String::new(),
         state: TextInputState::default(),
         autocomplete_selected: 0,
+        comment: false,
     });
     set_patcher_interaction_state(key, state);
     assert!(patcher_has_text_edit(&node));
@@ -16191,6 +16194,7 @@ fn patcher_autocomplete_completes_attributes_for_the_active_operator() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     };
 
     assert_eq!(
@@ -16231,6 +16235,7 @@ fn patcher_attribute_autocomplete_is_filtered_by_operator_and_replaces_the_token
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     };
     assert!(patcher_autocomplete_suggestions(&edit, &[], &[]).is_empty());
 
@@ -16272,6 +16277,7 @@ fn patcher_autocomplete_completes_file_attribute_values_after_bracketed_attribut
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     };
 
     assert_eq!(
@@ -16401,6 +16407,7 @@ fn patcher_autocomplete_documents_adsrexp_preamble_macro() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     };
     let suggestions = patcher_autocomplete_suggestions(&edit, &[], &[]);
     let adsrexp = suggestions
@@ -16451,6 +16458,7 @@ fn patcher_autocomplete_documents_patcher_only_history_node() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     };
     let suggestions = patcher_autocomplete_suggestions(&edit, &[], &[]);
     let history = suggestions
@@ -16508,6 +16516,7 @@ fn patcher_text_edit_tab_autocompletes_operator_without_committing() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     });
     set_patcher_interaction_state(key, state);
 
@@ -16605,6 +16614,7 @@ fn patcher_text_edit_tab_autocompletes_local_defmacro() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     });
     set_patcher_interaction_state(key, state);
 
@@ -16644,6 +16654,7 @@ fn patcher_text_edit_arrow_keys_cycle_autocomplete_selection() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     });
     set_patcher_interaction_state(key, state);
 
@@ -16705,6 +16716,7 @@ fn patcher_text_edit_consumes_tab_even_without_autocomplete_match() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     });
     set_patcher_interaction_state(key, state);
 
@@ -16741,6 +16753,7 @@ fn created_node_reedit_updates_same_node_edit_text() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     });
     commit_patcher_text_edit(&mut state, "root", |_, _| {
         unreachable!("ordinary node text never collects probe ids")
@@ -16764,6 +16777,7 @@ fn created_node_reedit_updates_same_node_edit_text() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     });
     commit_patcher_text_edit(&mut state, "root", |_, _| {
         unreachable!("ordinary node text never collects probe ids")
@@ -17024,6 +17038,7 @@ fn writeback_active_edit_inside_created_macro_updates_default_body() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     });
 
     assert_eq!(
@@ -19026,6 +19041,7 @@ fn metal_render_suppresses_resize_handles_for_active_text_edit() {
         original_text: String::new(),
         state: TextInputState::default(),
         autocomplete_selected: 0,
+        comment: false,
     });
     let patch = patch_with_interaction_state(Patch::default(), &state, "root");
     let mut prims = Vec::new();
@@ -19198,6 +19214,7 @@ fn metal_render_emits_edit_cursor_as_foreground_overlay() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     });
 
     let patch = patch_with_interaction_state(Patch::default(), &state, "root");
@@ -19725,6 +19742,7 @@ fn active_attribute_autocomplete_expands_the_node_to_fit_ghost_text() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     });
 
     let patch = patch_with_interaction_state(Patch::default(), &state, "root");
@@ -19792,6 +19810,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     });
 
     let patch = patch_with_interaction_state(Patch::default(), &state, "root");
@@ -19966,6 +19985,7 @@ fn metal_render_wraps_selected_autocomplete_documentation() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     });
 
     let patch = patch_with_interaction_state(Patch::default(), &state, "root");
@@ -20039,6 +20059,7 @@ fn metal_render_uses_single_text_run_for_active_node_edit_with_spaces() {
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     });
 
     let patch = patch_with_interaction_state(Patch::default(), &state, "root");
@@ -22845,6 +22866,7 @@ fn retyping_an_encapsulated_instance_renames_the_macro() {
         original_text: "sub1".to_string(),
         state: TextInputState::default(),
         autocomplete_selected: 0,
+        comment: false,
     });
     assert!(commit_active_patcher_text_edit(&node, &mut state, "root"));
 
@@ -25902,6 +25924,7 @@ fn type_and_commit_node(
         original_text: String::new(),
         state: TextInputState::default(),
         autocomplete_selected: 0,
+        comment: false,
     });
     commit_active_patcher_text_edit(node, &mut state, view_key);
     set_patcher_interaction_state(key, state);
@@ -25994,6 +26017,7 @@ fn generated_probe_ids_are_unique_in_the_source_and_stable_across_edits() {
             original_text: committed_node_text(&node, "root", &first),
             state: TextInputState::default(),
             autocomplete_selected: 0,
+            comment: false,
         });
         commit_active_patcher_text_edit(&node, &mut state, "root");
         set_patcher_interaction_state(key, state);
@@ -27792,4 +27816,266 @@ fn macro_instances_wear_a_badge_saying_whether_the_library_or_the_patch_owns_the
     set_patcher_interaction_state(key, state);
     let prims = build_primitives_for_patcher(&node, breadcrumb_test_viewport());
     assert_eq!(badges(&prims), (0, 2), "a forked macro belongs to the patch");
+}
+
+// ── Comment boxes ──
+
+fn test_viewport() -> WidgetViewport {
+    WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 100.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    }
+}
+
+fn set_created_node_width(node: &LayoutNode, view_key: &str, node_id: &str, width: f32) {
+    let key = patcher_state_key(node);
+    let mut state = get_patcher_interaction_state(key);
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(view_key, node_id))
+        .expect("created node edit")
+        .width = Some(width);
+    set_patcher_interaction_state(key, state);
+}
+
+#[test]
+fn comment_text_projects_as_a_portless_comment_node() {
+    let node = node_from_editor_text(
+        "c",
+        "  ;  explains the filter  ",
+        (0.0, 0.0),
+        &HashMap::new(),
+        false,
+    );
+    assert_eq!(node.kind, NodeKind::Comment);
+    assert_eq!(node.label, ";  explains the filter");
+    assert!(node.args.is_empty() && node.outputs.is_empty(), "a comment has no ports");
+    assert!(node.diagnostic.is_none(), "a comment is never an unknown operator");
+    assert_eq!(node_display_label(&node), node.label, "edits round-trip the marker");
+    assert_eq!(comment::comment_body(&node.label), "explains the filter");
+
+    let editing = node_from_editor_text("c", "; trailing ", (0.0, 0.0), &HashMap::new(), true);
+    assert_eq!(editing.kind, NodeKind::Comment, "it is a comment while still being typed");
+    assert_eq!(editing.label, "; trailing ", "mid-edit sizing keeps trailing spaces");
+}
+
+#[test]
+fn comment_widens_with_its_text_then_wraps_and_grows_taller() {
+    let comment = |text: &str, width: Option<f32>| {
+        let mut node = node_from_editor_text("c", text, (0.0, 0.0), &HashMap::new(), false);
+        node.width = width;
+        node
+    };
+    let (short_width, short_height) = node_size(&comment("; hi", None));
+    assert!(short_width < comment::COMMENT_AUTO_MAX_WIDTH, "a short comment is snug");
+    assert_eq!(short_height, NODE_HEIGHT, "one line is a node's height");
+
+    let long_text = format!("; {}", "word ".repeat(40));
+    let (long_width, long_height) = node_size(&comment(&long_text, None));
+    assert_eq!(long_width, comment::COMMENT_AUTO_MAX_WIDTH, "auto width caps, then wraps");
+    assert!(long_height > NODE_HEIGHT * 2.0, "wrapped lines grow the box: {long_height}");
+
+    let (narrow_width, narrow_height) = node_size(&comment(&long_text, Some(10.0)));
+    assert_eq!(narrow_width, 10.0, "a resized comment keeps the dragged width");
+    assert!(narrow_height > long_height, "narrower wraps onto more lines");
+
+    let (_, broken_height) = node_size(&comment("; one\ntwo\nthree", None));
+    assert_eq!(
+        broken_height,
+        comment::comment_height_for_lines(3),
+        "hard line breaks are lines"
+    );
+    let (min_width, _) = node_size(&comment("; hi", Some(0.5)));
+    assert_eq!(min_width, comment::COMMENT_MIN_WIDTH);
+}
+
+#[test]
+fn comment_cursor_maps_pointer_rows_onto_wrapped_lines() {
+    let text = "alpha beta gamma";
+    let rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 9.0,
+        height: 10.0,
+    };
+    let lines = comment::comment_lines_in_rect(text, rect, 1.0);
+    assert!(lines.len() >= 2, "narrow box wraps: {lines:?}");
+    let second = &lines[1];
+    let (col, row) = comment::comment_line_origin(rect, 1, 1.0);
+    let at = comment::comment_cursor_at(text, rect, col, row + 0.5, 1.0);
+    assert_eq!(at, second.start, "the start of line two, not of the text");
+    let past_end = comment::comment_cursor_at(text, rect, 100.0, 100.0, 1.0);
+    assert_eq!(past_end, text.chars().count(), "below and right of it is the end");
+    let (line, offset) = comment::comment_caret_line_offset(text, &lines, second.start + 1);
+    assert_eq!(line, 1);
+    assert!(offset > 0.0);
+}
+
+#[test]
+fn comment_is_never_emitted_and_survives_save_and_reload() {
+    let (path, node) = probe_fixture_node("comment-persist", PROBE_FIXTURE_SOURCE);
+    let original = generate::generate_patch_source(
+        &parse_patch_source(PROBE_FIXTURE_SOURCE, PatcherIntent::Instrument).unwrap(),
+        PatcherIntent::Instrument,
+    )
+    .unwrap()
+    .source;
+    let created = type_and_commit_node(&node, "root", "; the phasor\nsets the pitch", None);
+    set_created_node_width(&node, "root", &created, 14.0);
+
+    let (source, layout) = persistence_payload_source_and_layout(&node, "comment");
+    assert_eq!(source, original, "a comment adds nothing to the source");
+    assert!(layout.contains("the phasor"), "the payload carries the text:\n{layout}");
+    fs::write(&path, &source).unwrap();
+    fs::write(sidecar::sidecar_path_for_source(&path), &layout).unwrap();
+    set_patcher_interaction_state(patcher_state_key(&node), PatcherInteractionState::default());
+
+    let (_, reloaded) = load_patch_from_props(&node.props).unwrap();
+    let comments = reloaded
+        .nodes
+        .iter()
+        .filter(|patch_node| patch_node.kind == NodeKind::Comment)
+        .collect::<Vec<_>>();
+    let [comment] = comments.as_slice() else {
+        panic!("exactly one comment reloads: {comments:?}");
+    };
+    assert_eq!(comment.label, "; the phasor\nsets the pitch");
+    assert_eq!(comment.position, (4.0, 8.0));
+    assert_eq!(comment.width, Some(14.0), "the dragged width persists");
+    assert!(
+        reloaded.connections.iter().all(|connection| connection.from_node != comment.id
+            && connection.to_node != comment.id)
+    );
+    assert_eq!(
+        generate::generate_patch_source(&reloaded, PatcherIntent::Instrument)
+            .unwrap()
+            .source,
+        source,
+        "the reloaded model regenerates byte-identical source"
+    );
+}
+
+#[test]
+fn committing_a_blank_comment_removes_the_box() {
+    let (_path, node) = probe_fixture_node("comment-blank", PROBE_FIXTURE_SOURCE);
+    let created = type_and_commit_node(&node, "root", ";   ", None);
+    let state = get_patcher_interaction_state(patcher_state_key(&node));
+    assert!(
+        !state
+            .edit_state
+            .nodes
+            .contains_key(&node_edit_key("root", &created)),
+        "a comment with nothing after its marker is an empty box"
+    );
+}
+
+#[test]
+fn add_comment_opens_an_edit_that_takes_shift_return_line_breaks() {
+    let (_path, node) = probe_fixture_node("comment-command", PROBE_FIXTURE_SOURCE);
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    state.last_pointer_model_position = Some((12.0, 3.0));
+    set_patcher_interaction_state(key, state);
+
+    assert!(run_patcher_command(&node, "create-comment").is_some());
+    let state = get_patcher_interaction_state(key);
+    let edit = state.text_edit.as_ref().expect("comment opens in its text edit");
+    assert!(edit.comment);
+    assert_eq!(edit.text, "", "the edit shows only the prose, never the marker");
+    let created = edit.node_id.clone();
+    assert_eq!(
+        state.edit_state.nodes[&node_edit_key("root", &created)].position,
+        (12.0, 3.0),
+        "placed where the menu was opened"
+    );
+
+    let press = |code: KeyCode, modifiers: KeyModifiers| {
+        press_patcher_key(&node, WidgetKeyEvent { code, modifiers })
+    };
+    press(KeyCode::Char('a'), KeyModifiers::NONE);
+    press(KeyCode::Enter, KeyModifiers::SHIFT);
+    press(KeyCode::Char('b'), KeyModifiers::NONE);
+    assert_eq!(
+        get_patcher_interaction_state(key).text_edit.unwrap().text,
+        "a\nb",
+        "Shift+Return breaks the line instead of committing"
+    );
+    assert!(
+        patcher_autocomplete_suggestions(
+            get_patcher_interaction_state(key).text_edit.as_ref().unwrap(),
+            &[],
+            &[],
+        )
+        .is_empty(),
+        "comment text is prose, not an operator to complete"
+    );
+    press(KeyCode::Enter, KeyModifiers::NONE);
+    let state = get_patcher_interaction_state(key);
+    assert!(state.text_edit.is_none(), "plain Return commits");
+    assert_eq!(state.edit_state.nodes[&node_edit_key("root", &created)].text, "; a\nb");
+}
+
+#[test]
+fn comment_renders_wrapped_body_lines_without_the_marker() {
+    let (_path, node) = probe_fixture_node("comment-render", PROBE_FIXTURE_SOURCE);
+    let created = type_and_commit_node(&node, "root", "; alpha beta gamma delta", None);
+    set_created_node_width(&node, "root", &created, 8.0);
+    let prims = build_primitives_for_patcher(&node, test_viewport());
+    let texts = prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            GpuPrimitive::ProportionalText(text)
+                if ["alpha", "beta", "gamma", "delta"]
+                    .iter()
+                    .any(|word| text.text.contains(word)) =>
+            {
+                Some((text.text.clone(), text.row))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(texts.len() >= 2, "the body wraps onto several lines: {texts:?}");
+    assert!(texts.iter().all(|(text, _)| !text.contains(';')), "{texts:?}");
+    let rows = texts.iter().map(|(_, row)| row.to_bits()).collect::<HashSet<_>>();
+    assert_eq!(rows.len(), texts.len(), "each line on its own row: {texts:?}");
+}
+
+#[test]
+fn semicolon_opening_an_empty_box_makes_it_a_comment_without_showing_the_marker() {
+    let (_path, node) = probe_fixture_node("comment-semicolon", PROBE_FIXTURE_SOURCE);
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    let created = allocate_created_node(&mut state, "root", (2.0, 2.0));
+    super::text::begin_patcher_text_edit(&mut state, created.clone(), String::new(), 0, Vec::new());
+    set_patcher_interaction_state(key, state);
+    let press = |code: KeyCode| {
+        press_patcher_key(&node, WidgetKeyEvent { code, modifiers: KeyModifiers::NONE })
+    };
+    press(KeyCode::Char(';'));
+    let edit = get_patcher_interaction_state(key).text_edit.unwrap();
+    assert!(edit.comment, "`;` first makes the box a comment");
+    assert_eq!(edit.text, "", "and is consumed rather than shown");
+    for ch in "hi".chars() {
+        press(KeyCode::Char(ch));
+    }
+    press(KeyCode::Enter);
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(state.edit_state.nodes[&node_edit_key("root", &created)].text, "; hi");
+
+    // Reopening edits the prose alone, with the whole body selected by Edit.
+    assert!(run_patcher_command(&node, "edit-node").is_some());
+    let edit = get_patcher_interaction_state(key).text_edit.unwrap();
+    assert!(edit.comment);
+    assert_eq!(edit.text, "hi");
+    assert_eq!((edit.state.selection_anchor, edit.state.cursor_pos), (Some(0), 2));
 }

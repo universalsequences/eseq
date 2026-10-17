@@ -134,20 +134,37 @@ pub(super) fn wrap_measured_text(
     max_width_cells: f32,
     font_size: f32,
 ) -> Option<Vec<MeasuredLine>> {
-    let widths = GLYPH_ADVANCES.with(|cache| {
+    let widths = measured_glyph_widths(text, font_size)?;
+    Some(wrap_text_with_widths(text, &widths, max_width_cells))
+}
+
+/// Per-glyph advances of `text` in layout cells, as the measure pass cached
+/// them.
+pub(super) fn measured_glyph_widths(text: &str, font_size: f32) -> Option<Vec<f32>> {
+    GLYPH_ADVANCES.with(|cache| {
         cache
             .borrow()
             .get(&(font_size.to_bits(), text.to_string()))
             .cloned()
-    })?;
+    })
+}
+
+/// Greedy word wrap of `text` against `widths` (one advance per char): breaks
+/// after the last whitespace that fits, mid-word only when a word is wider
+/// than the line, and always at `\n`.
+pub(super) fn wrap_text_with_widths(
+    text: &str,
+    widths: &[f32],
+    max_width_cells: f32,
+) -> Vec<MeasuredLine> {
     let max_width_cells = max_width_cells.max(0.25);
     let chars = text.chars().collect::<Vec<_>>();
     if chars.is_empty() {
-        return Some(vec![MeasuredLine {
+        return vec![MeasuredLine {
             start: 0,
             end: 0,
             text: String::new(),
-        }]);
+        }];
     }
 
     let mut lines = Vec::new();
@@ -169,7 +186,7 @@ pub(super) fn wrap_measured_text(
             continue;
         }
 
-        let next_width = width + widths[idx];
+        let next_width = width + widths.get(idx).copied().unwrap_or(0.0);
         if idx > start && next_width > max_width_cells {
             let break_after = last_break_after
                 .filter(|break_after| *break_after > start)
@@ -197,5 +214,5 @@ pub(super) fn wrap_measured_text(
         end: chars.len(),
         text: chars[start..].iter().collect(),
     });
-    Some(lines)
+    lines
 }

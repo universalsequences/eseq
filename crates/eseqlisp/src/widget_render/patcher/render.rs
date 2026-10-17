@@ -17,6 +17,10 @@ use crate::layout::{Rect, f64_to_f32};
 use crate::theme;
 use crate::vm::Value;
 
+use super::comment::{
+    COMMENT_FONT_SIZE, COMMENT_LINE_H, COMMENT_PAD_X, comment_caret_line_offset,
+    comment_drawn_text, comment_line_origin, comment_lines_in_rect,
+};
 use super::display::{build_node_header_label, node_font_size, preview};
 use super::geometry::{
     connection_cable_edit_points, connection_endpoints_at, node_resize_handle_centers,
@@ -2650,6 +2654,20 @@ fn push_node(
     probe_frame: Option<std::sync::Arc<crate::live_audio::ProbeFrame>>,
     library_macro: bool,
 ) {
+    if node.kind == NodeKind::Comment {
+        push_comment_node(
+            prims,
+            node,
+            rect,
+            viewport,
+            selected,
+            hovered,
+            edit,
+            zoom,
+            node_chrome_z,
+        );
+        return;
+    }
     let is_scope = probe.is_some_and(ProbeAttrs::is_scope);
     // A scope's header (label, value, text edit) sits in a standard-height
     // row at its top; the rest of the box is the plot.
@@ -2803,6 +2821,143 @@ fn push_node(
         node_base_z + PatcherZSlot::EditCursor as i32,
         cursor_prims,
     );
+    let mut handle_prims = Vec::new();
+    push_node_resize_handles(
+        &mut handle_prims,
+        rect,
+        selected,
+        edit.is_some(),
+        viewport,
+        zoom,
+    );
+    push_z_layered(
+        prims,
+        node_base_z + PatcherZSlot::ResizeHandles as i32,
+        handle_prims,
+    );
+}
+
+const COMMENT_FRAME_RADIUS_PX: f32 = 8.0;
+const COMMENT_FRAME_BORDER_PX: f32 = 1.5;
+
+/// A comment box: wrapped text and no ports. Like Max's, it has no chrome at
+/// rest; a hairline frame shows where the box is while it is hovered,
+/// selected or being edited, so it can still be grabbed and resized.
+#[allow(clippy::too_many_arguments)]
+fn push_comment_node(
+    prims: &mut Vec<GpuPrimitive>,
+    node: &PatchNode,
+    rect: Rect,
+    viewport: WidgetViewport,
+    selected: bool,
+    hovered: bool,
+    edit: Option<&PatcherTextEdit>,
+    zoom: f32,
+    node_chrome_z: i32,
+) {
+    let node_base_z = node_chrome_z - PatcherZSlot::NodeChrome as i32;
+    let frame = if selected || edit.is_some() {
+        Some(theme::PATCHER_NODE_SELECTED_BORDER())
+    } else if hovered {
+        Some(theme::PATCHER_NODE_HOVER_BORDER())
+    } else {
+        None
+    };
+    if let Some(border) = frame {
+        let mut chrome_prims = Vec::new();
+        push_flat_panel_chrome(
+            &mut chrome_prims,
+            rect,
+            crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+            with_alpha_scale(border, 0.6),
+            viewport,
+            zoom,
+            ui_design_px(COMMENT_FRAME_RADIUS_PX),
+            ui_design_px(COMMENT_FRAME_BORDER_PX) * zoom,
+        );
+        push_z_layered(
+            prims,
+            node_base_z + PatcherZSlot::NodeChrome as i32,
+            chrome_prims,
+        );
+    }
+
+    let text = comment_drawn_text(node, edit.map(|edit| edit.text.as_str()));
+    let lines = comment_lines_in_rect(text, rect, zoom);
+    if let Some(edit) = edit {
+        let mut selection_prims = Vec::new();
+        if let Some((start, end)) = text_selection_range(&edit.state) {
+            for (index, line) in lines.iter().enumerate() {
+                let (from, to) = (start.max(line.start), end.min(line.end));
+                if from >= to {
+                    continue;
+                }
+                let (_, from_x) = comment_caret_line_offset(text, &lines, from);
+                let (_, to_x) = comment_caret_line_offset(text, &lines, to);
+                let (col, row) = comment_line_origin(rect, index, zoom);
+                selection_prims.push(GpuPrimitive::ForegroundRect(GpuRectPrimitive {
+                    rect: Rect {
+                        row,
+                        col: col + from_x * zoom,
+                        width: (to_x - from_x).max(0.0) * zoom,
+                        height: COMMENT_LINE_H * zoom,
+                    },
+                    color: theme::PATCHER_EDIT_SELECTION(),
+                }));
+            }
+        }
+        push_z_layered(
+            prims,
+            node_base_z + PatcherZSlot::EditSelection as i32,
+            selection_prims,
+        );
+    }
+
+    let mut text_prims = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if line.text.is_empty() {
+            continue;
+        }
+        let (col, row) = comment_line_origin(rect, index, zoom);
+        text_prims.push(GpuPrimitive::ProportionalText(
+            GpuProportionalTextPrimitive {
+                // Same inset as a node label within its line box.
+                row: row + (COMMENT_LINE_H - 1.0) * 0.5 * zoom,
+                col,
+                align_width: (rect.width - COMMENT_PAD_X * 2.0 * zoom).max(0.0),
+                h_align: 0.0,
+                text: line.text.clone(),
+                font_size: COMMENT_FONT_SIZE,
+                scale: zoom,
+                // Prose, not an operator: the argument color, so a comment
+                // never reads as a node name.
+                fg: theme::PATCHER_NODE_TAIL_TEXT(),
+                bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                mono: false,
+            },
+        ));
+    }
+    push_z_layered(prims, node_base_z + PatcherZSlot::Text as i32, text_prims);
+
+    if let Some(edit) = edit {
+        let cursor = edit.state.cursor_pos.min(text.chars().count());
+        let (line_index, offset) = comment_caret_line_offset(text, &lines, cursor);
+        let (col, row) = comment_line_origin(rect, line_index, zoom);
+        push_z_layered(
+            prims,
+            node_base_z + PatcherZSlot::EditCursor as i32,
+            vec![GpuPrimitive::ForegroundRect(GpuRectPrimitive {
+                rect: Rect {
+                    row: row + 0.08 * zoom,
+                    col: col + offset * zoom,
+                    width: 0.08 * zoom,
+                    height: (COMMENT_LINE_H - 0.16) * zoom,
+                },
+                color: theme::PATCHER_EDIT_CURSOR(),
+            })],
+        );
+    }
+
     let mut handle_prims = Vec::new();
     push_node_resize_handles(
         &mut handle_prims,

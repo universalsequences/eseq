@@ -1,4 +1,5 @@
 mod alignment;
+mod comment;
 mod assets;
 mod connect;
 mod display;
@@ -1356,7 +1357,8 @@ use emit::debug_log_patch_lisp;
 use encapsulate::encapsulate_patcher_selection;
 use interaction::{
     PatcherChangeKind, connect_last_touched_nodes, copy_selected_patcher_nodes,
-    NodeTextCaret, begin_patcher_node_text_edit, create_patcher_node_below_anchor,
+    NodeTextCaret, begin_patcher_node_text_edit, create_patcher_comment_at_pointer,
+    create_patcher_node_below_anchor,
     handle_patcher_double_click, inbound_slots_for_node, handle_patcher_pointer_down,
     handle_patcher_pointer_drag, handle_patcher_pointer_moved, handle_patcher_pointer_up,
     open_selected_macro_node, pan_patcher_by_delta, pan_patcher_by_wheel, paste_patcher_clipboard,
@@ -1596,8 +1598,14 @@ impl WidgetDefinition for PatcherWidget {
             record_focus_key_target(node);
             return None;
         }
+        // A comment takes hard line breaks (Shift+Return) and keeps them in
+        // pasted text; every other box is one line.
+        let editing_comment = state.text_edit.as_ref().is_some_and(|edit| edit.comment);
         match key_event.code {
-            KeyCode::Enter if state.text_edit.is_some() => {
+            KeyCode::Enter
+                if state.text_edit.is_some()
+                    && !(editing_comment && key_event.modifiers.contains(KeyModifiers::SHIFT)) =>
+            {
                 let changed = commit_active_patcher_text_edit(node, &mut state, &view_key);
                 if changed && emit::debug_lisp_logging_enabled()
                     && let Some(patch) = debug_patch_for_state(node, &state, &view_key)
@@ -1665,9 +1673,28 @@ impl WidgetDefinition for PatcherWidget {
             }
             _ => {
                 let edit = state.text_edit.as_mut()?;
-                match apply_text_entry_key(&edit.text, &mut edit.state, key_event, false, None)? {
+                match apply_text_entry_key(
+                    &edit.text,
+                    &mut edit.state,
+                    key_event,
+                    editing_comment,
+                    None,
+                )? {
                     TextEditOutcome::Changed(new_text) => {
-                        edit.text = new_text;
+                        // `;` opening an empty box turns it into a comment;
+                        // the marker is consumed, not shown.
+                        if !edit.comment
+                            && edit.text.is_empty()
+                            && comment::is_comment_text(&new_text)
+                        {
+                            let prose = comment::comment_body(&new_text).to_string();
+                            edit.comment = true;
+                            edit.state.cursor_pos = prose.chars().count();
+                            edit.state.selection_anchor = None;
+                            edit.text = prose;
+                        } else {
+                            edit.text = new_text;
+                        }
                         clamp_patcher_autocomplete_selection_with_macros(
                             edit,
                             &autocomplete_macros,
@@ -2174,6 +2201,9 @@ fn selected_connect_target(
     let [patch_node] = selected.as_slice() else {
         return None;
     };
+    if patch_node.kind == NodeKind::Comment {
+        return None;
+    }
     let subject = if patch_node.kind == NodeKind::MacroInstance {
         let macro_name = patch_node.op.clone();
         let params = resolve_macro_params(&root_patch, state, &macro_name);
@@ -2352,6 +2382,7 @@ fn slug_agentic_macro_name(prompt: &str) -> String {
 /// of those defaults that tests drive.
 pub const PATCHER_COMMANDS: &[&str] = &[
     "create-below",
+    "create-comment",
     "connect-last-two",
     "undo",
     "redo",
@@ -2577,6 +2608,15 @@ pub fn run_patcher_command(node: &LayoutNode, name: &str) -> Option<WidgetEvent>
                 set_patcher_interaction_state(key, state.clone());
             }
             create_patcher_node_below_anchor(node, &mut state, &view_key);
+            set_patcher_interaction_state(key, state);
+            Some(patcher_semantic_event(committed))
+        }
+        "create-comment" => {
+            let committed = commit_active_patcher_text_edit(node, &mut state, &view_key);
+            if committed {
+                set_patcher_interaction_state(key, state.clone());
+            }
+            create_patcher_comment_at_pointer(node, &mut state, &view_key);
             set_patcher_interaction_state(key, state);
             Some(patcher_semantic_event(committed))
         }
@@ -2828,6 +2868,11 @@ pub(super) fn patcher_context_menu_info(
                     (
                         "macro?",
                         Value::Bool(patch_node.kind == NodeKind::MacroInstance),
+                    ),
+                    // A comment has no ports: nothing for the agent to wire.
+                    (
+                        "comment?",
+                        Value::Bool(patch_node.kind == NodeKind::Comment),
                     ),
                     // An instance of a library macro the patch has not forked:
                     // the menu offers Fork into Patch.
@@ -4510,6 +4555,14 @@ fn cache_patcher_text_widths(node: &Value, ctx: &MeasureCtx<'_>) {
     for patch_node in &patch.nodes {
         let font_size = display::node_font_size(patch_node);
         cache_text_widths(node_display_label(patch_node), font_size, ctx);
+        // A comment draws its body, the marker dropped, wrapped by these.
+        if patch_node.kind == NodeKind::Comment {
+            cache_text_widths(
+                comment::comment_body(&patch_node.label).to_string(),
+                font_size,
+                ctx,
+            );
+        }
         // What the box draws and is sized for; differs from the display label
         // only for probes (`number~` + the reserved value field).
         let probe = probe::ProbeAttrs::of(patch_node);

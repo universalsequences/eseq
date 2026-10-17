@@ -209,6 +209,7 @@ Some keys are built in and handled before any Lisp binding, so `bind-key` cannot
 The patch editor has its own table, changed with `eseq.patcher/bind-key` and `eseq.patcher/unbind-key`. In this table `P-` stands for Command. The commands are:
 
 - `create-below` (`P-RET`) and `connect-last-two` (`P-UP`)
+- `create-comment` (unbound), which opens a new comment where the pointer is; the right-click menu offers it as Add Comment
 - `undo` (`P-z`), `redo` (`P-S-z`), `copy` (`P-c`), `paste` (`P-v`)
 - `encapsulate` (`P-e`) and `toggle-cable-style` (`P-y`)
 - `open-macro` (`RET`) and `delete-selection` (Backspace or Delete)

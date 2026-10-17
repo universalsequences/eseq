@@ -2,6 +2,7 @@ use crate::layout::Rect;
 use crate::parser::{ASTParser, Expression, Parser, Token};
 use std::collections::{HashMap, HashSet};
 
+use super::comment::{comment_cursor_at, is_blank_comment_text};
 use super::super::text_input::{TextInputState, selection_range as text_selection_range};
 use super::lisp::{attribute_span_len, is_attribute_key};
 use super::metrics::{MIN_ZOOM, NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET};
@@ -84,6 +85,7 @@ pub(super) fn begin_patcher_text_edit(
             selecting: false,
         },
         autocomplete_selected: 0,
+        comment: false,
     });
     state.autocomplete_asset_paths = asset_paths;
     state.hover_back_button = false;
@@ -365,6 +367,9 @@ struct AutocompleteContext<'a> {
 }
 
 fn autocomplete_context(edit: &PatcherTextEdit) -> Option<AutocompleteContext<'_>> {
+    if edit.comment {
+        return None;
+    }
     let cursor = char_to_byte_index(&edit.text, edit.state.cursor_pos);
     if let Some((start, end)) = asset_path_value_span_at_cursor(&edit.text, cursor) {
         return Some(AutocompleteContext {
@@ -537,7 +542,10 @@ pub(super) fn commit_patcher_text_edit(
     let Some(edit) = state.text_edit.take() else {
         return false;
     };
-    let mut committed_text = edit.text.trim().to_string();
+    let mut committed_text = edit.node_text().trim().to_string();
+    if is_blank_comment_text(&committed_text) {
+        committed_text.clear();
+    }
     let key = node_edit_key(view_key, &edit.node_id);
     if is_probe_text(&committed_text)
         && let Some(node_edit) = state.edit_state.nodes.get(&key)
@@ -599,15 +607,19 @@ pub(super) fn cancel_patcher_text_edit(state: &mut PatcherInteractionState, view
 pub(super) fn update_patcher_text_edit_pointer(
     edit: &mut PatcherTextEdit,
     rect: Rect,
-    local_col: f32,
+    (local_col, local_row): (f32, f32),
     font_size: f32,
     zoom: f32,
     selecting: bool,
     release: bool,
 ) {
-    let Some(cursor_pos) =
+    // A comment wraps, so the row picks the line as well.
+    let cursor_pos = if edit.comment {
+        Some(comment_cursor_at(&edit.text, rect, local_col, local_row, zoom))
+    } else {
         patcher_text_cursor_at_col_with_font_size(rect, &edit.text, local_col, font_size, zoom)
-    else {
+    };
+    let Some(cursor_pos) = cursor_pos else {
         return;
     };
     if selecting {

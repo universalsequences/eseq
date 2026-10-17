@@ -133,6 +133,9 @@ pub(super) fn plan_encapsulation(
         .filter(|id| !hidden.contains(*id))
         .filter_map(|id| nodes_by_id.get(id.as_str()).copied())
         .filter(|node| !node_display_label(node).trim().is_empty())
+        // Comments annotate the canvas, not the graph: a marquee that caught
+        // one leaves it where it is.
+        .filter(|node| node.kind != NodeKind::Comment)
         .collect::<Vec<_>>();
     selection.sort_by(|left, right| node_order_key(left).cmp(&node_order_key(right)));
     if selection.is_empty() {
