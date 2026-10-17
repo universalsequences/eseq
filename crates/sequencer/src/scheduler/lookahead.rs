@@ -3038,7 +3038,7 @@ fn replay_retained_graph_emissions<const QUEUE_CAP: usize>(
 /// §4): emission `:track` n is member n, the same member-relative rule graph
 /// routes use, so the instance plays its own pads wherever the rack sits. A
 /// member index past the rack's size (or an untracked emission) drops.
-fn map_rack_member_emissions(
+pub(crate) fn map_rack_member_emissions(
     emitted: &mut Vec<crate::lisp_host::EmittedAccumulatorEvent>,
     members: &[usize],
 ) {

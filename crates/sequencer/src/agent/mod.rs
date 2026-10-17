@@ -9,6 +9,7 @@ pub mod model_choice;
 pub mod models;
 pub mod network;
 pub mod parse;
+pub mod simulate;
 pub mod protocol;
 pub mod providers;
 pub mod store;

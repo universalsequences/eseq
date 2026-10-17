@@ -40,6 +40,7 @@ ESEQ_CONFIG_DIR=/tmp/eseq-mcp-cfg python3 crates/sequencer/tools/mcp_session.py 
 | `define_form` | Replace or append one top-level form, write the file, reload |
 | `eval` | Evaluate forms; for questions and experiments, nothing is saved |
 | `new_instance` | Create an instance of a kind; returns its buffer |
+| `simulate` | Run an instance's tick for N bars headlessly; list its hits or the tick that threw |
 | `capture` | Render a buffer (or a keyed subtree) to PNG, with a layout report |
 
 Rules the tools hold:
@@ -55,6 +56,17 @@ Rules the tools hold:
 - **Every call answers.** Failures come back as `isError` results carrying
   the Lisp errors printed while the call ran (stdout belongs to the
   protocol; everything the app prints is captured per call).
+- **Check what a tick plays.** `simulate` runs the instance's tick through
+  the scheduler's generator runtime against a copy of its document in the
+  selected scene, from a fresh RNG and clock as on Play, merges and routes
+  the hits as the scheduler does (accents, rack pads), and lists them by bar
+  and sixteenth. It runs on a throwaway state, so nothing a tick writes
+  reaches the session; reads of other tracks' patterns see an empty project.
+  Downstream processes, groove/swing, `chan-get` values and track harmony
+  are not modelled.
+- **Views that throw are reported.** A view or effect that throws while a
+  call runs is appended to that call's result ("Render errors"), since the
+  editor otherwise keeps the last good tree and says nothing.
 - **Look at UI as data too.** `capture` lists every keyed widget's pixel
   rectangle with `clipped`, `offscreen` and `zero-size` problems, and
   overlapping siblings in stacks and grids.

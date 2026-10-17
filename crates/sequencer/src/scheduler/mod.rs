@@ -33,7 +33,8 @@ use {
 #[allow(unused_imports)]
 pub(crate) use load_meter::{scheduler_load, SchedulerLoad};
 pub use worker::spawn_scheduler_thread;
-pub(crate) use lookahead::build_scheduler_scratch_runtime;
+pub(crate) use lookahead::{build_scheduler_scratch_runtime, map_rack_member_emissions};
+pub(crate) use runtime::merge_generator_emission_accents;
 pub(crate) use worker::{SchedulerDriver, SchedulerInput};
 pub(crate) use mod_trigger::{default_mod_trigger, fit_mod_trigger_to_scale};
 

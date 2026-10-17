@@ -163,6 +163,18 @@ const HOST_TOOLS: &[HostTool] = &[
         ],
     },
     HostTool {
+        name: "simulate",
+        description: "Run a sequencer instance's tick headlessly for some bars, as Play from the \
+            top would, and list every hit it emits (bar.sixteenth, track, transpose, velocity, \
+            duration, chords, p-locks), or the tick that threw and why. Uses the instance's \
+            document in the selected scene; touches nothing live. Use it after changing a tick, the way \
+            `capture` checks a panel.",
+        params: &[
+            ("instance", "integer", "Instance id (default: the newest instance)", false),
+            ("bars", "integer", "Bars of 4/4 to run (default 2, at most 64)", false),
+        ],
+    },
+    HostTool {
         name: "capture",
         description: "Render one buffer to an image, as the app draws it, and report its layout: \
             every keyed widget's pixel rectangle and problems (clipped, offscreen, zero-size) \
@@ -227,6 +239,19 @@ pub(super) fn call(session: &mut HeadlessSession, name: &str, args: &Json) -> To
                 (Err(problem), log) => ToolOutput::error(with_log(problem, &log)),
             },
             "new_instance" => new_instance(session, &need("module")?, &need("kind")?)?,
+            "simulate" => {
+                let bars = args
+                    .get("bars")
+                    .and_then(Json::as_u64)
+                    .map(|bars| bars.min(u64::from(sequencer::agent::simulate::MAX_BARS)) as u32)
+                    .unwrap_or(2);
+                let instance = args.get("instance").and_then(Json::as_u64);
+                let (report, log) = capture_output(|| session.simulate(instance, bars));
+                match report {
+                    Ok(report) => ToolOutput::text(with_log(report, &log)),
+                    Err(problem) => ToolOutput::error(with_log(problem, &log)),
+                }
+            }
             "capture" => {
                 let number = |key: &str, default: u32| {
                     args.get(key).and_then(Json::as_u64).map(|n| n.clamp(64, 4096) as u32).unwrap_or(default)
@@ -532,7 +557,11 @@ fn new_instance(session: &mut HeadlessSession, module: &str, kind: &str) -> Resu
             &log,
         ));
     }
-    Ok(ToolOutput::text(with_log(format!("Created a `{id}` instance; its buffer: {}", buffers.join(", ")), &log)))
+    let instance = session.latest_instance_id().unwrap_or_default();
+    Ok(ToolOutput::text(with_log(
+        format!("Created `{id}` instance {instance}; its buffer: {}", buffers.join(", ")),
+        &log,
+    )))
 }
 
 fn capture(

@@ -1548,6 +1548,36 @@ impl HeadlessSession {
         self.editor.runtime_mut().take_reactive_errors()
     }
 
+    /// The newest instance's id, if any.
+    pub(crate) fn latest_instance_id(&self) -> Option<u64> {
+        self.app.instances.list.last().map(|instance| instance.id)
+    }
+
+    /// Run instance `id`'s tick (the newest instance when None) for `bars`
+    /// bars, headlessly, and report what it played (`agent::simulate`).
+    pub(crate) fn simulate(&self, id: Option<u64>, bars: u32) -> Result<String, String> {
+        let instances = &self.app.instances;
+        let instance = match id {
+            Some(id) => instances.get(id),
+            None => instances.list.last(),
+        };
+        let Some(instance) = instance else {
+            let known: Vec<String> = instances.list.iter().map(|i| format!("{} ({})", i.id, i.kind)).collect();
+            return Err(match known.is_empty() {
+                true => "no instances yet; make one with new_instance".to_string(),
+                false => format!("no instance {}; instances: {}", id.unwrap_or_default(), known.join(", ")),
+            });
+        };
+        let run = sequencer::agent::simulate::simulate_instance(
+            &self.kinds_handles.state,
+            &instance.kind,
+            instance.id,
+            instance.owner.rack(),
+            bars,
+        )?;
+        Ok(format!("Instance {} ({}).\n{}", instance.id, instance.kind, run.report()))
+    }
+
     /// Names of the editor's buffers.
     pub(crate) fn buffer_names(&self) -> Vec<String> {
         self.editor.buffers.iter().map(|buffer| buffer.name.clone()).collect()

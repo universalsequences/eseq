@@ -167,7 +167,7 @@ pub(super) fn generator_emissions_are_same_accent(
     )
 }
 
-pub(super) fn merge_generator_emission_accents(
+pub(crate) fn merge_generator_emission_accents(
     generator_emissions: Vec<crate::generator::GeneratorEmission>,
 ) -> Vec<crate::generator::GeneratorEmission> {
     let mut merged: Vec<crate::generator::GeneratorEmission> =
