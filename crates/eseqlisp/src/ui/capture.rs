@@ -111,9 +111,149 @@ pub fn keyed_region(frame: &RenderFrame, key: &str, cell: (f32, f32),
     })
 }
 
+/// One keyed node of a laid-out frame, for checking a layout as data rather
+/// than by eye (the agent `capture` tool reports these beside the image).
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyedNode {
+    pub key: String,
+    pub widget_type: String,
+    /// The node's rectangle in pixels, before clipping; None for overlays,
+    /// whose geometry is not a buffer-layout rectangle.
+    pub region: Option<PixelRegion>,
+    pub problems: Vec<LayoutProblem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutProblem {
+    ZeroSize,
+    /// Entirely outside the frame or its clipping ancestor.
+    Offscreen,
+    /// Partly hidden by a scroll, a background box or the frame edge.
+    Clipped,
+}
+
+impl std::fmt::Display for LayoutProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            LayoutProblem::ZeroSize => "zero-size",
+            LayoutProblem::Offscreen => "offscreen",
+            LayoutProblem::Clipped => "clipped",
+        })
+    }
+}
+
+/// A frame's layout as data: its keyed nodes and its overlapping siblings.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LayoutReport {
+    pub nodes: Vec<KeyedNode>,
+    /// One line per pair of overlapping siblings in a stack or grid.
+    pub overlaps: Vec<String>,
+}
+
+/// Every keyed node in the frame, in layout order, with its pixel region and
+/// what is wrong with it, and the overlapping siblings in stacks and grids (a
+/// flexed `wrap` overlapping its rows is the usual cause).
+pub fn layout_report(frame: &RenderFrame, cell: (f32, f32), size: (u32, u32))
+    -> Result<LayoutReport, String> {
+    let (cell_w, cell_h) = cell;
+    let root = frame.widget_layout.as_ref().ok_or("the buffer has no widget layout")?;
+    let viewport = Rect { col: 0.0, row: 0.0,
+        width: size.0 as f32 / cell_w, height: size.1 as f32 / cell_h };
+    let mut nodes = Vec::new();
+    visit(root, -frame.widget_layout_scroll_left,
+        -frame.widget_scroll_top - frame.text_scroll_top as f32, viewport, false,
+        &mut |node, rect, clip, overlay| {
+            let Some(key) = node.stable_key.as_deref().or(authored_key(node)) else { return };
+            let mut problems = Vec::new();
+            let region = (!overlay).then(|| {
+                let finite = [rect.col, rect.row, rect.width, rect.height].iter().all(|v| v.is_finite());
+                if !finite || rect.width <= 0.0 || rect.height <= 0.0 {
+                    problems.push(LayoutProblem::ZeroSize);
+                } else {
+                    let visible = intersection(rect, clip);
+                    if visible.width <= 0.0 || visible.height <= 0.0 {
+                        problems.push(LayoutProblem::Offscreen);
+                    } else if visible.width + 0.001 < rect.width || visible.height + 0.001 < rect.height {
+                        problems.push(LayoutProblem::Clipped);
+                    }
+                }
+                PixelRegion {
+                    x: (rect.col * cell_w).max(0.0).floor() as u32,
+                    y: (rect.row * cell_h).max(0.0).floor() as u32,
+                    width: (rect.width * cell_w).max(0.0).ceil() as u32,
+                    height: (rect.height * cell_h).max(0.0).ceil() as u32,
+                }
+            });
+            nodes.push(KeyedNode { key: key.to_string(), widget_type: node.widget_type.clone(), region, problems });
+        });
+    let mut overlaps = Vec::new();
+    sibling_overlaps(root, None, &mut overlaps);
+    Ok(LayoutReport { nodes, overlaps })
+}
+
+/// Containers that place their children side by side: two children that
+/// intersect there is a layout bug, not a design.
+const TILING_CONTAINERS: &[&str] = &["v-stack", "h-stack", "wrap", "grid", "responsive-grid", "virtual-v-stack"];
+
+fn sibling_overlaps(node: &LayoutNode, keyed_ancestor: Option<&str>, out: &mut Vec<String>) {
+    let here = node.stable_key.as_deref().or(authored_key(node)).or(keyed_ancestor);
+    if TILING_CONTAINERS.contains(&node.widget_type.as_str()) {
+        let mut children: Vec<(usize, &LayoutNode)> = node.children.iter().enumerate()
+            .filter(|(_, child)| !is_overlay_panel_widget(&child.widget_type))
+            .collect();
+        // Sweep by top edge: once a later sibling starts below `a`'s bottom,
+        // none after it can overlap `a`, so a stack of n rows costs O(n log n).
+        children.sort_by(|(_, a), (_, b)| a.rect.row.total_cmp(&b.rect.row));
+        let name = |n: &LayoutNode, index: usize| match n.stable_key.as_deref().or(authored_key(n)) {
+            Some(key) => format!("{} {key:?}", n.widget_type),
+            None => format!("{} #{index}", n.widget_type),
+        };
+        for (at, (i, a)) in children.iter().enumerate() {
+            for (j, b) in &children[at + 1..] {
+                if b.rect.row >= a.rect.row + a.rect.height {
+                    break;
+                }
+                let both = intersection(a.rect, b.rect);
+                if both.width > 0.05 && both.height > 0.05 {
+                    out.push(format!("in {} {}: {} overlaps {} by {:.1}x{:.1} cells",
+                        node.widget_type,
+                        here.map(|k| format!("{k:?}")).unwrap_or_else(|| "(unkeyed)".to_string()),
+                        name(a, *i), name(b, *j), both.width, both.height));
+                }
+            }
+        }
+    }
+    for child in &node.children {
+        sibling_overlaps(child, here, out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_report_lists_keyed_nodes_with_problems_and_sibling_overlaps() {
+        let frame = frame(r#"(effect (v-stack
+            (box :key "ok" :width 4 :height 2)
+            (box :key "empty" :width 0 :height 0)
+            (scroll :width 10 :height 3 (box :key "clipped" :width 10 :height 20))))"#);
+        let LayoutReport { nodes, overlaps } = layout_report(&frame, (10.0, 10.0), (1000, 600)).unwrap();
+        let problems = |key: &str| nodes.iter().find(|n| n.key == key).map(|n| n.problems.clone()).unwrap();
+        assert!(problems("ok").is_empty());
+        assert_eq!(problems("empty"), vec![LayoutProblem::ZeroSize]);
+        assert_eq!(problems("clipped"), vec![LayoutProblem::Clipped]);
+        assert_eq!(nodes.iter().find(|n| n.key == "ok").unwrap().region.unwrap().width, 40);
+        assert!(overlaps.is_empty(), "{overlaps:?}");
+
+        let mut node = frame.widget_layout.as_deref().unwrap().clone();
+        let first = node.children[0].rect;
+        node.children[1].rect = Rect { width: 4.0, height: 2.0, ..first };
+        let mut found = Vec::new();
+        sibling_overlaps(&node, None, &mut found);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("box \"ok\" overlaps box \"empty\""), "{found:?}");
+    }
 
     fn frame(source: &str) -> RenderFrame {
         let mut editor = crate::Editor::new(crate::Runtime::new(), crate::EditorConfig::default());

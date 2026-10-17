@@ -4418,6 +4418,19 @@ fragment float4 live_spectrogram_frag(
             show_status: bool,
             path: P,
         ) -> Result<(), BackendError> {
+            self.render_frame_region_png(frame, width_px, height_px, region, show_status)
+                .and_then(|png| std::fs::write(path, png).map_err(|_| BackendError::MetalError))
+        }
+
+        /// [`Self::render_frame_region_to_png`], returning the PNG bytes.
+        pub fn render_frame_region_png(
+            &mut self,
+            frame: &RenderFrame,
+            width_px: u32,
+            height_px: u32,
+            region: Option<crate::ui::capture::PixelRegion>,
+            show_status: bool,
+        ) -> Result<Vec<u8>, BackendError> {
             let region = region.unwrap_or(crate::ui::capture::PixelRegion {
                 x: 0, y: 0, width: width_px, height: height_px,
             });
@@ -4468,15 +4481,13 @@ fragment float4 live_spectrogram_frag(
             for px in bgra.chunks_exact(4) {
                 rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
             }
-            image::save_buffer_with_format(
-                path,
-                &rgba,
-                region.width,
-                region.height,
-                image::ColorType::Rgba8,
-                image::ImageFormat::Png,
-            )
-            .map_err(|_| BackendError::MetalError)
+            let image = image::RgbaImage::from_raw(region.width, region.height, rgba)
+                .ok_or(BackendError::MetalError)?;
+            let mut png = Vec::new();
+            image
+                .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .map_err(|_| BackendError::MetalError)?;
+            Ok(png)
         }
 
         fn render_frame_into_texture(

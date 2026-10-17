@@ -50,7 +50,7 @@ Three things carry the whole language:
 
 ```lisp
 42  1.5  -.5  1e3         ; numbers are all f64
-"a string"                ; NO escape sequences; a \" ends the string
+"a string"  "say \"hi\"\n"  ; escapes: \n \t \r \" \\ (others keep their \)
 :keyword                  ; :foo
 'sym  '(1 2 3)            ; quote
 true false nil
@@ -60,8 +60,7 @@ true false nil
 Comments run from `;` to end of line. There is no `[…]` or `{…}` syntax;
 brackets are ordinary symbol characters.
 
-Strings cannot contain a literal quote. Build such strings with `str` or
-`fmt`:
+Strings may span lines. Build strings from values with `str` or `fmt`:
 
 ```lisp
 (str "say " (source "hi"))
@@ -672,7 +671,6 @@ the project's scratch buffer.
 - **A plain argument list is fixed-arity.** Use `&optional`, `&key`, or
   `&rest` for anything else; `|x|` lambdas stay fixed.
 - **`merge` takes keyword pairs**, not a second map.
-- **No `\"` in strings.** Build the string with `str` or `fmt`.
 - **`each` for widget children, never `map`.** And give `each` a named list.
 - **`map`, `filter`, `reduce` take the function first.** `each` takes the
   list first.

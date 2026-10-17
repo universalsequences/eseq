@@ -167,6 +167,8 @@ ditto "$REPO_ROOT/docs/manual" "$RESOURCES/manual"
 # resolves them inside Resources/authoring.
 ditto "$REPO_ROOT/crates/sequencer/tools/DGenLispReadme.md" "$RESOURCES/authoring/DGenLispReadme.md"
 ditto "$REPO_ROOT/crates/sequencer/tools/dgenlisp-operators.json" "$RESOURCES/authoring/dgenlisp-operators.json"
+# The eseqlisp language guide, for `metal_seq mcp`'s `guide eseqlisp` tool.
+ditto "$REPO_ROOT/docs/eseqlisp/GUIDE.md" "$RESOURCES/authoring/eseqlisp-guide.md"
 ditto "$ICON" "$RESOURCES/AppIcon.icns"
 ditto "$FONT_DIR" "$RESOURCES/fonts"
 

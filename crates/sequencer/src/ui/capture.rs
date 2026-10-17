@@ -276,7 +276,7 @@ struct CaptureProjectSpec {
     scenes: usize,
 }
 
-struct ParsedCaptureScript {
+pub(crate) struct ParsedCaptureScript {
     project: CaptureProjectSpec,
     executable_source: String,
 }
@@ -300,7 +300,7 @@ fn parse_capture_script(path: &Path) -> Result<ParsedCaptureScript, String> {
     Ok(parsed)
 }
 
-fn parse_capture_source(source: &str) -> Result<ParsedCaptureScript, String> {
+pub(crate) fn parse_capture_source(source: &str) -> Result<ParsedCaptureScript, String> {
     let tokens = Parser::new(source.to_string())
         .parse_spanned()
         .map_err(|error| format!("tokenization failed: {error:?}"))?;
@@ -1273,269 +1273,444 @@ fn apply_capture_click_widgets(
 pub(crate) fn run(_args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     Err("metal_seq capture rendering is macOS-only for now (needs the Metal PNG path)".into())
 }
+/// A headless app: engine, project, UI runtime and editor booted the way
+/// `metal_seq capture` boots them, kept alive so a caller can evaluate Lisp,
+/// apply the host commands it queues and render frames repeatedly (the
+/// `metal_seq mcp` agent tools).
+#[cfg(target_os = "macos")]
+pub(crate) struct HeadlessSession {
+    pub(crate) editor: Editor,
+    app: app::App,
+    track: usize,
+    sample_browser: Rc<RefCell<DebouncedSampleBrowser>>,
+    menu_state: application_menu::SharedMenuState,
+    sound_palette_frame: SoundPaletteFrameState,
+    host_kinds: super::host_kinds::HostKinds,
+    kinds_handles: super::host_kinds::KindsHandles,
+    /// Made on the first `render_png` and kept: its window initialization
+    /// creates the process's one event loop, so a second backend cannot.
+    capture_backend: Option<AppBackend>,
+    // Last: the graph outlives the app and editor that reference it.
+    _graph_guard: HeadlessGraphGuard,
+}
+
+/// Push the host kinds (eseq.kinds) into the runtime, as the live loop does
+/// every tick; whether the sync pushed anything.
+#[cfg(target_os = "macos")]
+fn sync_host_kinds(
+    host_kinds: &mut super::host_kinds::HostKinds,
+    editor: &mut Editor,
+    app: &app::App,
+    handles: &super::host_kinds::KindsHandles,
+) -> bool {
+    let changed = host_kinds.sync_with(app, editor.runtime_mut(), handles, &Default::default());
+    if changed {
+        editor.refresh_runtime_side_effects();
+    }
+    changed
+}
+
+#[cfg(target_os = "macos")]
+impl HeadlessSession {
+    /// Boot from a parsed capture script: its `(capture-project …)` (or a
+    /// saved `project`) and the Lisp after it, through `capture-after-sync`.
+    pub(crate) fn boot(
+        script: &Path,
+        parsed: &ParsedCaptureScript,
+        project: Option<&Path>,
+        track: usize,
+        noui: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let engine = engine::init_headless_engine(44_100, 2)?;
+        let state = Arc::clone(&engine.state);
+        let graph = engine.lg_ptr.0;
+        let _graph_guard = HeadlessGraphGuard { graph };
+        let master_recorder = Arc::clone(&engine.master_recorder);
+        let mut app = app::App::new(
+            Arc::clone(&state),
+            engine.lg_ptr,
+            engine.sample_rate,
+            engine.buses,
+            engine.master_recorder,
+            engine.keyboard_tx,
+        );
+        if let Some(project) = &project {
+            if !parsed.project.tracks.is_empty() {
+                return Err("--project requires an empty (capture-project) declaration in the setup script".into());
+            }
+            app.queue_project_load_from_path("capture", project)?;
+            while app.has_pending_project_load() { app.advance_pending_project_load()?; }
+        } else {
+            apply_capture_project(&mut app, &parsed.project)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        }
+        if !app.tracks.is_empty() && track >= app.tracks.len() {
+            return Err(format!(
+                "capture track {} is out of range for a {}-track project",
+                track,
+                app.tracks.len()
+            )
+            .into());
+        }
+
+        let mut track_names = app.tracks.clone();
+        let track_pan_ids = Arc::new(Mutex::new(
+            app.graph
+                .track_node_ids
+                .iter()
+                .map(|node| node.pan_id)
+                .collect(),
+        ));
+        let track_collapsed = Arc::new(Mutex::new(app.track_collapsed.clone()));
+        let bus_state = Arc::new(Mutex::new(app.buses.clone()));
+        let bus_node_ids = Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
+        let current_track = Arc::new(AtomicUsize::new(track));
+        let selected_tracks = Arc::new(Mutex::new(HashSet::new()));
+        let track_groups = Arc::new(Mutex::new(app.groups.clone()));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons =
+            Arc::new(Mutex::new(BTreeSet::new()));
+        let piano_roll_selection = Arc::new(Mutex::new(HashSet::new()));
+        let piano_roll_move_state = Arc::new(Mutex::new(None));
+        let recording = Arc::new(AtomicBool::new(false));
+        let master_recording = Arc::new(AtomicBool::new(false));
+        let record_armed = Arc::new(Mutex::new(vec![false; app.tracks.len()]));
+        let armed_rack: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        let fx_epoch = Arc::new(AtomicUsize::new(0));
+        let ui_invalidations = Arc::new(UiInvalidationQueue::new());
+        let active_delete_target = Arc::new(Mutex::new(None));
+        let active_delete_target_version = Arc::new(AtomicUsize::new(0));
+        let auto_follow_override_until = Arc::new(Mutex::new(None::<Instant>));
+
+        let RuntimeInit {
+            menu_state,
+            runtime,
+            accumulator_names,
+            midi_fx_names: _,
+            sample_browser,
+            piano_roll_clipboard: _,
+            process_authoring: _,
+        } = init_runtime(
+            &app,
+            Arc::clone(&state),
+            Arc::clone(&track_pan_ids),
+            Arc::clone(&track_collapsed),
+            Arc::clone(&bus_state),
+            Arc::clone(&bus_node_ids),
+            Arc::clone(&current_track),
+            Arc::clone(&selected_tracks),
+            track_groups,
+            Arc::clone(&selected_steps),
+            Arc::clone(&piano_roll_selection),
+            piano_roll_move_state,
+            new_shared_piano_roll_focus(),
+            Arc::clone(&recording),
+            Arc::clone(&master_recording),
+            master_recorder,
+            Arc::clone(&record_armed),
+            Arc::clone(&armed_rack),
+            Arc::clone(&ui_epoch),
+            Arc::clone(&fx_epoch),
+            Arc::clone(&ui_invalidations),
+            Arc::clone(&selected_neural_neurons),
+            Arc::clone(&active_delete_target),
+            Arc::clone(&active_delete_target_version),
+            Arc::clone(&auto_follow_override_until),
+            graph,
+        );
+        // Host kinds (eseq.kinds) read these; the live loop syncs them every
+        // tick, capture at each step below.
+        let kinds_handles = super::host_kinds::KindsHandles {
+            state: Arc::clone(&state),
+            current_track: Arc::clone(&current_track),
+            selected_steps: Arc::clone(&selected_steps),
+            active_delete_target,
+            active_delete_target_version,
+            record_armed: Arc::clone(&record_armed),
+            recording,
+            master_recording,
+            selected_tracks: Arc::clone(&selected_tracks),
+            track_collapsed: Arc::clone(&track_collapsed),
+            ui_epoch: Arc::clone(&ui_epoch),
+            fx_epoch,
+            ui_invalidations,
+            step_print: Arc::new(Mutex::new(StepPrintState::default())),
+            auto_follow_override_until,
+            armed_rack,
+            bus_state: Arc::clone(&bus_state),
+            selected_neural_neurons,
+            piano_roll_selection: Arc::clone(&piano_roll_selection),
+        };
+        let mut host_kinds = super::host_kinds::HostKinds::default();
+
+        let mut editor = if noui {
+            create_editor_with_root(
+                runtime,
+                &app,
+                sequencer::paths::user_init_path(),
+                UiRoot::Bare,
+            )?
+        } else {
+            create_editor(runtime, &app)?
+        };
+        editor
+            .runtime_mut()
+            .eval_str("(def capture-after-sync () nil)")
+            .map_err(|error| format!("failed to install capture hook: {error:?}"))?;
+        editor
+            .runtime_mut()
+            .eval_source_at_path(script.to_path_buf(), &parsed.executable_source)
+            .map_err(|error| format!("capture setup Lisp failed: {error:?}"))?;
+        apply_capture_macro_host_commands(&mut editor, &mut app, &state, track)?;
+        {
+            let runtime = editor.runtime_mut();
+            record_preset_listings();
+            // This also publishes group topology, which hook gestures need to
+            // calculate the same visible track order as the rendered UI.
+            sync_track_topology_state(
+                runtime,
+                &app,
+                &state,
+                &mut track_names,
+                track,
+                &accumulator_names,
+            );
+            runtime.run_reactive_cycle();
+        }
+        editor.refresh_runtime_side_effects();
+        sync_host_kinds(&mut host_kinds, &mut editor, &app, &kinds_handles);
+        if project.is_some() {
+            // Match live project-open ordering: scripts can read the loaded
+            // topology and must restore their own buffers before the capture hook.
+            evaluate_project_scratch_on_ui_runtime(&mut editor, &app)
+                .map_err(|error| format!("capture project scripts failed: {error}"))?;
+        }
+        editor
+            .runtime_mut()
+            .eval_str("(capture-after-sync)")
+            .map_err(|error| format!("capture-after-sync failed: {error:?}"))?;
+        // Flush the hook's side effects now: a theme it applied must be current
+        // before the palette / clip-sound colors below are published, since those
+        // rows carry the theme's variant tint baked into their RGB.
+        editor.refresh_runtime_side_effects();
+        apply_capture_macro_host_commands(&mut editor, &mut app, &state, track)?;
+        // Publish the sound-palette read surfaces so capture scripts can open the
+        // palette modal via the real (seq-sound-palette-open ...) funnel.
+        let mut sound_palette_frame = SoundPaletteFrameState::default();
+        let _ = sync_sound_palette(&app, &mut sound_palette_frame, true, None);
+        publish_capture_sound_glyphs(&mut editor)?;
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        // capture-after-sync may apply a theme after the initial project sync:
+        // the host kinds re-push the tinted colors before rendering.
+        sync_host_kinds(&mut host_kinds, &mut editor, &app, &kinds_handles);
+        Ok(Self {
+            editor,
+            app,
+            track,
+            sample_browser,
+            menu_state,
+            sound_palette_frame,
+            host_kinds,
+            kinds_handles,
+            capture_backend: None,
+            _graph_guard,
+        })
+    }
+
+    pub(crate) fn sync_host_kinds(&mut self) -> bool {
+        sync_host_kinds(&mut self.host_kinds, &mut self.editor, &self.app, &self.kinds_handles)
+    }
+
+    /// Apply the host commands Lisp queued since the last drain, through the
+    /// same subset capture setup supports (instances, racks, song edits, …).
+    pub(crate) fn apply_host_commands(&mut self) -> Result<bool, String> {
+        apply_capture_macro_host_commands(&mut self.editor, &mut self.app, &self.kinds_handles.state, self.track)
+    }
+
+    /// What the live loop does after an evaluation: apply the host commands
+    /// it queued, run the reactive cycle and push the host kinds. The queue
+    /// is drained even when a command fails, so nothing leaks into the next
+    /// evaluation.
+    pub(crate) fn settle(&mut self) -> Result<(), String> {
+        let applied = self.apply_host_commands();
+        self.editor.runtime_mut().run_reactive_cycle();
+        self.editor.refresh_runtime_side_effects();
+        self.sync_host_kinds();
+        applied.map(|_| ())
+    }
+
+    /// Names of the editor's buffers.
+    pub(crate) fn buffer_names(&self) -> Vec<String> {
+        self.editor.buffers.iter().map(|buffer| buffer.name.clone()).collect()
+    }
+
+    /// Show `buffer` alone (or, with `all_panels`, in its tile of the full
+    /// layout), as a capture draws it.
+    fn isolate(&mut self, buffer: &str, hide_status: bool, all_panels: bool) -> Result<(), String> {
+        let buffer_id = self
+            .editor
+            .buffers
+            .iter()
+            .find(|candidate| candidate.name == buffer)
+            .map(|candidate| candidate.id)
+            .ok_or_else(|| {
+                format!("capture buffer {buffer:?} does not exist; buffers: {}", self.buffer_names().join(", "))
+            })?;
+        if all_panels {
+            if !self.editor.switch_active_tile_to_buffer_named(buffer) {
+                return Err(format!("capture buffer {buffer:?} is not visible in the panel layout"));
+            }
+        } else {
+            self.editor.set_active_buffer(buffer_id);
+            let isolation = if hide_status {
+                format!("(set-layout (list :buf {} :hide-status true))", eseqlisp::parser::string_literal(buffer))
+            } else {
+                "(delete-other-windows)".to_string()
+            };
+            self.editor
+                .runtime_mut()
+                .eval_str(&isolation)
+                .map_err(|error| format!("failed to isolate capture buffer: {error:?}"))?;
+        }
+        self.editor.refresh_runtime_side_effects();
+        self.editor.clear_minibuffer_message();
+        Ok(())
+    }
+
+    /// The interactive event loop polls search completions without waiting.
+    /// Headless capture must settle them before taking its frame.
+    fn settle_sample_browser(&mut self) -> Result<(), String> {
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while self.sample_browser.borrow().is_pending() {
+            let ready = publish_sample_browser_results(&mut self.editor, &self.sample_browser)
+                .map_err(|error| error.to_string())?;
+            if Instant::now() >= deadline {
+                return Err("sample browser query timed out during capture".to_string());
+            }
+            if !ready {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        Ok(())
+    }
+
+    /// Lay the editor out for a `size` frame in `backend`'s cells: the
+    /// columns, rows and cell size.
+    fn fit_viewport(&mut self, backend: &AppBackend, (width, height): (u32, u32)) -> (usize, usize, (f32, f32)) {
+        application_menu::sync_context(&self.menu_state, &mut self.editor);
+        let (cell_width, cell_height) = backend.cell_dimensions();
+        let columns = ((width as f32 / cell_width).floor() as usize).clamp(1, u16::MAX as usize);
+        let rows = ((height as f32 / cell_height).floor() as usize).clamp(1, u16::MAX as usize);
+        self.editor.set_layout_viewport(columns as u16, rows as u16);
+        self.editor.update_tile_rects(columns as u16, rows as u16);
+        (columns, rows, (cell_width, cell_height))
+    }
+
+    /// A frame of the active layout. A frame observes the kind fields its
+    /// views read; the ones computed only while observed (a sampler's media,
+    /// a sound binding) arrive with the next sync, as on the live loop's next
+    /// tick: settle them.
+    fn frame(&mut self, columns: usize, rows: usize) -> eseqlisp::backend::RenderFrame {
+        let frame = build_render_frame(&mut self.editor, columns, rows);
+        if self.sync_host_kinds() {
+            return build_render_frame(&mut self.editor, columns, rows);
+        }
+        frame
+    }
+
+    /// Send keystrokes as the live loop would, after a frame laid out at
+    /// this size (keys that page by the palette's visible rows need it).
+    fn type_keys(&mut self, keystrokes: &[KeyEvent], (cell_width, cell_height): (f32, f32), (width, height): (u32, u32)) {
+        let viewport = eseqlisp::widget_render::WidgetViewport::window(
+            cell_width, cell_height, width as f32, height as f32, 0.0,
+        );
+        for key in keystrokes {
+            if let Some(palette) = self.editor.palette_frame() {
+                eseqlisp::widget_render::command_palette::primitives(&palette, viewport);
+            }
+            self.editor.handle_key(*key);
+            // As the live tick does: the open command palette browses the
+            // selected track's sounds (Apply Sound), re-read once pushed.
+            let browse = self.editor.palette_shows_live_choices().then_some(self.track);
+            if sync_sound_palette(&self.app, &mut self.sound_palette_frame, true, browse).sounds {
+                self.sync_host_kinds();
+                self.editor.runtime_mut().run_reactive_cycle();
+                self.editor.mark_palette_choices_stale();
+                self.editor.update_timers();
+            }
+        }
+    }
+
+    /// Draw one buffer alone, as `metal_seq capture --buffer B --hide-status`
+    /// does, after typing `keys` (`--keys` spelling). Returns the PNG (cropped
+    /// to `key`'s subtree when given) and the frame's keyed layout report.
+    pub(crate) fn render_png(
+        &mut self,
+        buffer: &str,
+        key: Option<&str>,
+        size: (u32, u32),
+        keys: Option<&str>,
+    ) -> Result<(Vec<u8>, eseqlisp::ui::capture::LayoutReport), String> {
+        let keystrokes = keys.map(parse_capture_keys).transpose()?.unwrap_or_default();
+        let mut backend = match self.capture_backend.take() {
+            Some(backend) => backend,
+            None => create_capture_backend(&mut self.editor, size.0, size.1).map_err(|error| error.to_string())?,
+        };
+        let rendered = self.render_with(&mut backend, &normalize_buffer_name(buffer), key, size, &keystrokes);
+        self.capture_backend = Some(backend);
+        rendered
+    }
+
+    fn render_with(
+        &mut self,
+        backend: &mut AppBackend,
+        buffer: &str,
+        key: Option<&str>,
+        size: (u32, u32),
+        keystrokes: &[KeyEvent],
+    ) -> Result<(Vec<u8>, eseqlisp::ui::capture::LayoutReport), String> {
+        self.isolate(buffer, true, false)?;
+        self.settle_sample_browser()?;
+        let (columns, rows, cell) = self.fit_viewport(backend, size);
+        let mut frame = self.frame(columns, rows);
+        if !keystrokes.is_empty() {
+            self.type_keys(keystrokes, cell, size);
+            self.settle()?;
+            frame = self.frame(columns, rows);
+        }
+        let report = eseqlisp::ui::capture::layout_report(&frame, cell, size)?;
+        let region = key
+            .map(|key| eseqlisp::ui::capture::keyed_region(&frame, key, cell, size, 8))
+            .transpose()?;
+        let png = backend
+            .render_frame_region_png(&frame, size.0, size.1, region, false)
+            .map_err(|_| "failed to render the capture PNG".to_string())?;
+        Ok((png, report))
+    }
+}
 
 #[cfg(target_os = "macos")]
 pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let parsed = parse_capture_script(&args.script)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-    let engine = engine::init_headless_engine(44_100, 2)?;
-    let state = Arc::clone(&engine.state);
-    let graph = engine.lg_ptr.0;
-    let _graph_guard = HeadlessGraphGuard { graph };
-    let master_recorder = Arc::clone(&engine.master_recorder);
-    let mut app = app::App::new(
-        Arc::clone(&state),
-        engine.lg_ptr,
-        engine.sample_rate,
-        engine.buses,
-        engine.master_recorder,
-        engine.keyboard_tx,
-    );
-    if let Some(project) = &args.project {
-        if !parsed.project.tracks.is_empty() {
-            return Err("--project requires an empty (capture-project) declaration in the setup script".into());
-        }
-        app.queue_project_load_from_path("capture", project)?;
-        while app.has_pending_project_load() { app.advance_pending_project_load()?; }
-    } else {
-        apply_capture_project(&mut app, &parsed.project)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-    }
-    if !app.tracks.is_empty() && args.track >= app.tracks.len() {
-        return Err(format!(
-            "capture track {} is out of range for a {}-track project",
-            args.track,
-            app.tracks.len()
-        )
-        .into());
-    }
-
-    let mut track_names = app.tracks.clone();
-    let track_pan_ids = Arc::new(Mutex::new(
-        app.graph
-            .track_node_ids
-            .iter()
-            .map(|node| node.pan_id)
-            .collect(),
-    ));
-    let track_collapsed = Arc::new(Mutex::new(app.track_collapsed.clone()));
-    let bus_state = Arc::new(Mutex::new(app.buses.clone()));
-    let bus_node_ids = Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
-    let current_track = Arc::new(AtomicUsize::new(args.track));
-    let selected_tracks = Arc::new(Mutex::new(HashSet::new()));
-    let track_groups = Arc::new(Mutex::new(app.groups.clone()));
-    let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-    let selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons =
-        Arc::new(Mutex::new(BTreeSet::new()));
-    let piano_roll_selection = Arc::new(Mutex::new(HashSet::new()));
-    let piano_roll_move_state = Arc::new(Mutex::new(None));
-    let recording = Arc::new(AtomicBool::new(false));
-    let master_recording = Arc::new(AtomicBool::new(false));
-    let record_armed = Arc::new(Mutex::new(vec![false; app.tracks.len()]));
-    let armed_rack: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
-    let ui_epoch = Arc::new(AtomicUsize::new(0));
-    let fx_epoch = Arc::new(AtomicUsize::new(0));
-    let ui_invalidations = Arc::new(UiInvalidationQueue::new());
-    let active_delete_target = Arc::new(Mutex::new(None));
-    let active_delete_target_version = Arc::new(AtomicUsize::new(0));
-    let auto_follow_override_until = Arc::new(Mutex::new(None::<Instant>));
-
-    let RuntimeInit {
-        menu_state,
-        runtime,
-        accumulator_names,
-        midi_fx_names: _,
-        sample_browser,
-        piano_roll_clipboard: _,
-        process_authoring: _,
-    } = init_runtime(
-        &app,
-        Arc::clone(&state),
-        Arc::clone(&track_pan_ids),
-        Arc::clone(&track_collapsed),
-        Arc::clone(&bus_state),
-        Arc::clone(&bus_node_ids),
-        Arc::clone(&current_track),
-        Arc::clone(&selected_tracks),
-        track_groups,
-        Arc::clone(&selected_steps),
-        Arc::clone(&piano_roll_selection),
-        piano_roll_move_state,
-        new_shared_piano_roll_focus(),
-        Arc::clone(&recording),
-        Arc::clone(&master_recording),
-        master_recorder,
-        Arc::clone(&record_armed),
-        Arc::clone(&armed_rack),
-        Arc::clone(&ui_epoch),
-        Arc::clone(&fx_epoch),
-        Arc::clone(&ui_invalidations),
-        Arc::clone(&selected_neural_neurons),
-        Arc::clone(&active_delete_target),
-        Arc::clone(&active_delete_target_version),
-        Arc::clone(&auto_follow_override_until),
-        graph,
-    );
-    // Host kinds (eseq.kinds) read these; the live loop syncs them every
-    // tick, capture at each step below.
-    let kinds_handles = super::host_kinds::KindsHandles {
-        state: Arc::clone(&state),
-        current_track: Arc::clone(&current_track),
-        selected_steps: Arc::clone(&selected_steps),
-        active_delete_target,
-        active_delete_target_version,
-        record_armed: Arc::clone(&record_armed),
-        recording,
-        master_recording,
-        selected_tracks: Arc::clone(&selected_tracks),
-        track_collapsed: Arc::clone(&track_collapsed),
-        ui_epoch: Arc::clone(&ui_epoch),
-        fx_epoch,
-        ui_invalidations,
-        step_print: Arc::new(Mutex::new(StepPrintState::default())),
-        auto_follow_override_until,
-        armed_rack,
-        bus_state: Arc::clone(&bus_state),
-        selected_neural_neurons,
-        piano_roll_selection: Arc::clone(&piano_roll_selection),
-    };
-    let mut host_kinds = super::host_kinds::HostKinds::default();
-    // Whether the sync pushed anything.
-    let mut sync_host_kinds = |editor: &mut Editor, app: &app::App| {
-        let changed = host_kinds.sync_with(
-            app,
-            editor.runtime_mut(),
-            &kinds_handles,
-            &Default::default(),
-        );
-        if changed {
-            editor.refresh_runtime_side_effects();
-        }
-        changed
-    };
-
-    let mut editor = if args.noui {
-        create_editor_with_root(
-            runtime,
-            &app,
-            sequencer::paths::user_init_path(),
-            UiRoot::Bare,
-        )?
-    } else {
-        create_editor(runtime, &app)?
-    };
-    editor
-        .runtime_mut()
-        .eval_str("(def capture-after-sync () nil)")
-        .map_err(|error| format!("failed to install capture hook: {error:?}"))?;
-    editor
-        .runtime_mut()
-        .eval_source_at_path(args.script.clone(), &parsed.executable_source)
-        .map_err(|error| format!("capture setup Lisp failed: {error:?}"))?;
-    apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)?;
-    {
-        let runtime = editor.runtime_mut();
-        record_preset_listings();
-        // This also publishes group topology, which hook gestures need to
-        // calculate the same visible track order as the rendered UI.
-        sync_track_topology_state(
-            runtime,
-            &app,
-            &state,
-            &mut track_names,
-            args.track,
-            &accumulator_names,
-        );
-        runtime.run_reactive_cycle();
-    }
-    editor.refresh_runtime_side_effects();
-    sync_host_kinds(&mut editor, &app);
-    if args.project.is_some() {
-        // Match live project-open ordering: scripts can read the loaded
-        // topology and must restore their own buffers before the capture hook.
-        evaluate_project_scratch_on_ui_runtime(&mut editor, &app)
-            .map_err(|error| format!("capture project scripts failed: {error}"))?;
-    }
-    editor
-        .runtime_mut()
-        .eval_str("(capture-after-sync)")
-        .map_err(|error| format!("capture-after-sync failed: {error:?}"))?;
-    // Flush the hook's side effects now: a theme it applied must be current
-    // before the palette / clip-sound colors below are published, since those
-    // rows carry the theme's variant tint baked into their RGB.
-    editor.refresh_runtime_side_effects();
-    apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)?;
-    // Publish the sound-palette read surfaces so capture scripts can open the
-    // palette modal via the real (seq-sound-palette-open ...) funnel.
-    let mut sound_palette_frame = SoundPaletteFrameState::default();
-    let _ = sync_sound_palette(&app, &mut sound_palette_frame, true, None);
-    publish_capture_sound_glyphs(&mut editor)?;
-    editor.runtime_mut().run_reactive_cycle();
-    editor.refresh_runtime_side_effects();
-
-    // capture-after-sync may apply a theme after the initial project sync:
-    // the host kinds re-push the tinted colors before rendering.
-    sync_host_kinds(&mut editor, &app);
-
-    let buffer_id = editor
-        .buffers
-        .iter()
-        .find(|buffer| buffer.name == args.buffer)
-        .map(|buffer| buffer.id)
-        .ok_or_else(|| format!("capture buffer {:?} does not exist", args.buffer))?;
-    if args.all_panels {
-        if !editor.switch_active_tile_to_buffer_named(&args.buffer) {
-            return Err(format!("capture buffer {:?} is not visible in the panel layout", args.buffer).into());
-        }
-    } else {
-        editor.set_active_buffer(buffer_id);
-    }
-    let isolation = if args.hide_status {
-        format!("(set-layout (list :buf {} :hide-status true))", serde_json::to_string(&args.buffer)?)
-    } else {
-        "(delete-other-windows)".to_string()
-    };
-    if !args.all_panels {
-        editor
-            .runtime_mut()
-            .eval_str(&isolation)
-            .map_err(|error| format!("failed to isolate capture buffer: {error:?}"))?;
-    }
-    editor.refresh_runtime_side_effects();
-    editor.clear_minibuffer_message();
-
-    // The interactive event loop polls search completions without waiting.
-    // Headless capture must settle them before taking its single frame.
-    let browser_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while sample_browser.borrow().is_pending() {
-        let ready = publish_sample_browser_results(&mut editor, &sample_browser)?;
-        if std::time::Instant::now() >= browser_deadline {
-            return Err("sample browser query timed out during capture".into());
-        }
-        if !ready { std::thread::sleep(std::time::Duration::from_millis(1)); }
-    }
-
-    application_menu::sync_context(&menu_state, &mut editor);
-    let mut backend = create_capture_backend(&mut editor, args.width, args.height)?;
-    let (cell_width, cell_height) = backend.cell_dimensions();
-    let columns = ((args.width as f32 / cell_width).floor() as usize).clamp(1, u16::MAX as usize);
-    let rows = ((args.height as f32 / cell_height).floor() as usize).clamp(1, u16::MAX as usize);
-    editor.set_layout_viewport(columns as u16, rows as u16);
-    editor.update_tile_rects(columns as u16, rows as u16);
-    let mut frame = build_render_frame(&mut editor, columns, rows);
-    // A frame observes the kind fields its views read. The ones computed
-    // only while observed (a sampler's media, a sound binding) arrive with
-    // the next sync, as on the live loop's next tick: settle them.
-    if sync_host_kinds(&mut editor, &app) {
-        frame = build_render_frame(&mut editor, columns, rows);
-    }
-    if apply_capture_click_widgets(&mut editor, columns, rows)? {
-        frame = build_render_frame(&mut editor, columns, rows);
+    let mut session =
+        HeadlessSession::boot(&args.script, &parsed, args.project.as_deref(), args.track, args.noui)?;
+    session.isolate(&args.buffer, args.hide_status, args.all_panels)?;
+    session.settle_sample_browser()?;
+    let mut backend = create_capture_backend(&mut session.editor, args.width, args.height)?;
+    let size = (args.width, args.height);
+    let (columns, rows, (cell_width, cell_height)) = session.fit_viewport(&backend, size);
+    let mut frame = session.frame(columns, rows);
+    if apply_capture_click_widgets(&mut session.editor, columns, rows)? {
+        frame = build_render_frame(&mut session.editor, columns, rows);
     }
     if let Some(path) = &args.compile_patch {
         // The live loop compiles a patcher revision on a worker and publishes
         // its shapes when it lands; headless capture waits for that result.
-        let request = editor.capture_patcher_preview_request(path)?;
+        let request = session.editor.capture_patcher_preview_request(path)?;
         let intent = request.intent();
         let outcome = super::edit_sessions::spawn_preview_compile(
             super::edit_sessions::PreviewSource::Patch(request),
@@ -1549,31 +1724,11 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("--compile-patch: compile failed (shapes before the error are shown): {error}");
         }
         super::edit_sessions::publish_preview_shapes(outcome.shapes, path);
-        frame = build_render_frame(&mut editor, columns, rows);
+        frame = build_render_frame(&mut session.editor, columns, rows);
     }
     if !args.keystrokes.is_empty() {
-        // Lay the palette out at this window size first, as the live loop's
-        // previous frame would, so keys that page by its visible rows (and
-        // its scroll window) see the real page size.
-        let viewport = eseqlisp::widget_render::WidgetViewport::window(
-            cell_width, cell_height, args.width as f32, args.height as f32, 0.0,
-        );
-        for key in &args.keystrokes {
-            if let Some(palette) = editor.palette_frame() {
-                eseqlisp::widget_render::command_palette::primitives(&palette, viewport);
-            }
-            editor.handle_key(*key);
-            // As the live tick does: the open command palette browses the
-            // selected track's sounds (Apply Sound), re-read once pushed.
-            let browse = editor.palette_shows_live_choices().then_some(args.track);
-            if sync_sound_palette(&app, &mut sound_palette_frame, true, browse).sounds {
-                sync_host_kinds(&mut editor, &app);
-                editor.runtime_mut().run_reactive_cycle();
-                editor.mark_palette_choices_stale();
-                editor.update_timers();
-            }
-        }
-        frame = build_render_frame(&mut editor, columns, rows);
+        session.type_keys(&args.keystrokes, (cell_width, cell_height), size);
+        frame = build_render_frame(&mut session.editor, columns, rows);
     }
 
     if args.edit_frames > 0 {
@@ -1584,13 +1739,13 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         for pass in 0..2 {
             for index in 0..args.edit_frames {
                 let started = Instant::now();
-                editor.runtime_mut()
+                session.editor.runtime_mut()
                     .eval_str(&format!("(capture-edit {})", pass * args.edit_frames + index))
                     .map_err(|error| format!("capture-edit failed: {error:?}"))?;
                 let edit_ms = started.elapsed().as_secs_f64() * 1000.0;
-                editor.sync_reactive_bindings_for_visible_layouts();
+                session.editor.sync_reactive_bindings_for_visible_layouts();
                 let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(
-                    &mut editor, columns, rows);
+                    &mut session.editor, columns, rows);
                 let frame_build_ms = started.elapsed().as_secs_f64() * 1000.0;
                 let timing = backend.render_tiled_capture(&tiled, &target)
                     .map_err(|_| "failed to render tiled edit replay")?;
@@ -1636,11 +1791,11 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
                 let position = 1.0 - (phase * 2.0 - 1.0).abs();
                 let next = (args.scroll_x * position, args.scroll_y * position);
                 let started = Instant::now();
-                editor.apply_smooth_widget_scroll(previous.0 - next.0, previous.1 - next.1);
+                session.editor.apply_smooth_widget_scroll(previous.0 - next.0, previous.1 - next.1);
                 previous = next;
-                editor.sync_reactive_bindings_for_visible_layouts();
+                session.editor.sync_reactive_bindings_for_visible_layouts();
                 let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(
-                    &mut editor, columns, rows);
+                    &mut session.editor, columns, rows);
                 let frame_build_ms = started.elapsed().as_secs_f64() * 1000.0;
                 let timing = backend.render_tiled_capture(&tiled, &target)
                     .map_err(|_| "failed to render tiled scroll replay")?;

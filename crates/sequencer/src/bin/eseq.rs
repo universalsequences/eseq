@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use sequencer::agent::forms::{bracket_problem, code_only, resolve_module_file, user_module_roots};
 use sequencer::agent::verify::{verify_sources, ArtifactKind, VerifyMode};
 use sequencer::app_paths::ContentTier;
 
@@ -503,59 +504,6 @@ fn check_sequencer(module: &str, render: bool, eval: Option<&str>) -> Result<(),
     Ok(())
 }
 
-/// The file a module loads from: the first load root (Local, installed
-/// packages, factory) holding one of its candidate paths. A package root
-/// only resolves modules in its own namespace, prefix stripped.
-fn resolve_module_file(roots: &[eseqlisp::ModuleLoadRoot], module: &str) -> Option<PathBuf> {
-    roots.iter().find_map(|root| {
-        let relative = match &root.module_prefix {
-            Some(prefix) => module.strip_prefix(prefix.as_str())?.strip_prefix('.')?,
-            None => module,
-        };
-        eseqlisp::modules::module_relative_file_candidates(relative)
-            .into_iter()
-            .map(|candidate| root.path.join(candidate))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-/// Source with `;` comments dropped and string contents blanked, so neither
-/// can look like a form (a `\` escape inside a string is skipped). String state
-/// carries across lines (strings may span them); newlines are always kept so
-/// reported line numbers stay correct.
-fn code_only(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    let mut in_string = false;
-    let mut in_comment = false;
-    let mut escaped = false;
-    for ch in source.chars() {
-        match ch {
-            '\n' => {
-                in_comment = false;
-                escaped = false;
-                out.push('\n');
-            }
-            _ if in_comment => {}
-            _ if escaped => {
-                escaped = false;
-                out.push(' ');
-            }
-            '\\' if in_string => {
-                escaped = true;
-                out.push(' ');
-            }
-            '"' => {
-                in_string = !in_string;
-                out.push('"');
-            }
-            ';' if !in_string => in_comment = true,
-            _ if in_string => out.push(' '),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
 /// Bracket-check the module and every Local or installed module it imports,
 /// transitively (factory modules are eseq's own and skipped). Returns how
 /// many files were checked.
@@ -566,7 +514,7 @@ fn check_brackets_with_imports(
     path: &Path,
     source: &str,
 ) -> Result<usize, String> {
-    let user_roots = [paths.local_modules_dir(), paths.packages_dir()];
+    let user_roots = user_module_roots(paths);
     let mut pending = vec![(module.to_string(), path.to_path_buf(), source.to_string())];
     let mut seen = vec![module.to_string()];
     let mut checked = 0;
@@ -591,33 +539,6 @@ fn check_brackets_with_imports(
         let _ = name;
     }
     Ok(checked)
-}
-
-/// `LINE: reason` for the first unbalanced bracket, or None.
-fn bracket_problem(source: &str) -> Option<String> {
-    let mut open: Vec<(char, usize)> = Vec::new();
-    for (index, line) in code_only(source).lines().enumerate() {
-        let line_no = index + 1;
-        for ch in line.chars() {
-            match ch {
-                '(' | '[' => open.push((ch, line_no)),
-                ')' | ']' => {
-                    let want = if ch == ')' { '(' } else { '[' };
-                    match open.pop() {
-                        Some((got, _)) if got == want => {}
-                        Some((got, at)) => {
-                            return Some(format!(
-                                "{line_no}: `{ch}` closes the `{got}` opened on line {at}"
-                            ))
-                        }
-                        None => return Some(format!("{line_no}: `{ch}` has nothing to close")),
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    open.pop().map(|(ch, at)| format!("{at}: this `{ch}` is never closed"))
 }
 
 /// Module names in `(import NAME …)` forms.
@@ -732,10 +653,7 @@ fn render_instance(
         .collect();
     let script_path = work_dir.join(format!("{stem}.lisp"));
     let png_path = work_dir.join(format!("{stem}.png"));
-    let mut script = String::from(
-        "(capture-project\n  (track :sampler :name \"Kick\")\n  (track :sampler :name \"Snare\")\n  \
-         (track :sampler :name \"Hat\")\n  (track :sampler :name \"Perc\"))\n",
-    );
+    let mut script = String::from(sequencer::authoring_kit::SEQUENCER_CHECK_PROJECT);
     script.push_str(&format!("(import {module})\n"));
     script.push_str(&format!("(host-command \"instance-create\" (dict :kind \"{kind_id}\"))\n"));
     if let Some(form) = eval {

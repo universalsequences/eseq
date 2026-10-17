@@ -11,6 +11,7 @@ mod input;
 mod instrument_favorites;
 mod lisp_hot_reload;
 mod live_audio_analyzer;
+mod mcp;
 mod natives;
 #[cfg(target_os = "macos")]
 mod native_menu;
@@ -127,6 +128,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let capture_args = capture::CaptureArgs::parse_env()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let mcp_args = mcp::McpArgs::parse_env()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     // Read before `enter_sequencer_dir` replaces the shell's cwd.
     let noui_args = noui::NoUiArgs::parse_env()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
@@ -166,6 +169,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(args) = capture_args {
         return capture::run(args);
+    }
+    if let Some(args) = mcp_args {
+        return mcp::run(args);
     }
 
     // 1. Init audio engine
