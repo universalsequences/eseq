@@ -32943,8 +32943,16 @@ use panel_kinds_seed::*;
     fn metal_seq_fx_es_compressor_layout_contains_knobs() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        let mut mode = test_param_map("mode", 0, 0.0, 0.0, 2.0);
-        mode.insert("options".into(), Rc::new(RefCell::new(test_string_list(&["Punch", "Level", "Sustain"]))));
+        let mut mode = test_param_map("mode", 0, 0.0, 0.0, 3.0);
+        mode.insert("options".into(), Rc::new(RefCell::new(test_string_list(&["Punch", "Level", "Sustain", "Glue"]))));
+        let mut ratio = test_param_map("glue-ratio", 10, 1.0, 0.0, 2.0);
+        ratio.insert("options".into(), Rc::new(RefCell::new(test_string_list(&["2:1", "4:1", "10:1"]))));
+        let mut glue_attack = test_param_map("glue-attack", 11, 4.0, 0.0, 5.0);
+        glue_attack.insert("options".into(), Rc::new(RefCell::new(test_string_list(
+            &["0.1 ms", "0.3 ms", "1 ms", "3 ms", "10 ms", "30 ms"]))));
+        let mut glue_release = test_param_map("glue-release", 12, 0.0, 0.0, 4.0);
+        glue_release.insert("options".into(), Rc::new(RefCell::new(test_string_list(
+            &["0.1 s", "0.3 s", "0.6 s", "1.2 s", "Auto"]))));
         mode.insert("value-field".into(), Rc::new(RefCell::new(Value::String("test-es-mode".into()))));
         let mut tone = test_param_map("tone", 2, 0.0, 0.0, 100.0);
         tone.insert("value-field".into(), Rc::new(RefCell::new(Value::String("test-es-tone".into()))));
@@ -32959,7 +32967,12 @@ use panel_kinds_seed::*;
             Value::Map(test_param_map("input-db", 7, 0.0, -24.0, 24.0)),
             Value::Map(test_param_map("output-db", 8, 0.0, -48.0, 18.0)),
             Value::Map(test_param_map("detector-db", 9, 0.0, -36.0, 36.0)),
-            Value::Map(test_param_map("enabled", 10, 1.0, 0.0, 1.0)),
+            Value::Map(ratio),
+            Value::Map(glue_attack),
+            Value::Map(glue_release),
+            Value::Map(test_param_map("detector-hp", 13, 20.0, 20.0, 500.0)),
+            Value::Map(test_param_map("glue-makeup", 14, 6.0, -5.0, 15.0)),
+            Value::Map(test_param_map("enabled", 15, 1.0, 0.0, 1.0)),
         ];
         let panel_seed = PanelSeed {
             instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
@@ -33022,13 +33035,8 @@ use panel_kinds_seed::*;
             layout_contains_debug_name(&layout, "es-compressor-panel"),
             "layout should contain the ES Compressor knob panel body"
         );
-        let panel = find_layout_node_by_debug_name(&layout, "es-compressor-panel")
-            .expect("es-compressor-panel layout node");
-        assert_eq!(count_widget_type(panel, "knob-number"), 5);
-        assert_eq!(count_widget_type(panel, "number-picker"), 4);
-        assert_eq!(count_widget_type(panel, "dropdown"), 1);
         fn check_controls(node: &eseqlisp::layout::LayoutNode, panel: &eseqlisp::layout::LayoutNode) {
-            if ["knob-number", "number-picker", "dropdown"].contains(&node.widget_type.as_str()) {
+            if ["knob-number", "number-picker", "dropdown", "button"].contains(&node.widget_type.as_str()) {
                 assert_finite_nonzero_rect(node, "ES Compressor control");
                 assert!(node.rect.col >= panel.rect.col && node.rect.row >= panel.rect.row);
                 assert!(node.rect.col + node.rect.width <= panel.rect.col + panel.rect.width + 0.01);
@@ -33036,25 +33044,43 @@ use panel_kinds_seed::*;
             }
             for child in &node.children { check_controls(child, panel); }
         }
-        check_controls(panel, panel);
-        assert!(panel.rect.col >= 0.0 && panel.rect.col + panel.rect.width <= 200.0);
-        assert!(panel.rect.row >= 0.0 && panel.rect.row + panel.rect.height <= 24.0);
-        for name in ["amount", "tone", "mix", "attack", "release", "drive", "input-db", "output-db", "detector-db"] {
-            let control = find_layout_node_by_debug_name(panel, &format!("es-compressor-control-{name}")).unwrap();
-            assert_finite_nonzero_rect(control, name);
-        }
-        let tone = find_layout_node_by_debug_name(panel, "es-compressor-control-tone").unwrap();
-        assert!(matches!(tone.props.get("value"), Some(Value::ReactiveRef { .. })));
-        let selector = find_layout_node_by_debug_name(panel, "es-compressor-mode").unwrap();
-        assert_eq!(selector.props.get("value"), Some(&Value::String("Punch".into())));
-        for mode in 1..=2 {
-            set_seeded_field(&mut editor, "test-es-mode", Value::Number(mode as f64));
-            editor.runtime_mut().run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
-            let layout = editor.widget_layout().expect("updated ES Compressor layout");
-            let selector = find_layout_node_by_debug_name(&layout, "es-compressor-mode").unwrap();
+        // Punch/Level/Sustain show the shared timing knobs; Glue swaps in its
+        // own switches, makeup and sidechain HP. Neither set leaks into the other.
+        let shared = ["attack", "release"];
+        let glue = ["glue-ratio", "glue-attack", "glue-release", "glue-makeup", "detector-hp"];
+        let always = ["amount", "tone", "mix", "drive", "input-db", "output-db", "detector-db"];
+        for mode in 0..=3usize {
+            if mode > 0 {
+                set_seeded_field(&mut editor, "test-es-mode", Value::Number(mode as f64));
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+            }
+            let layout = editor.widget_layout().expect("ES Compressor layout");
+            let panel = find_layout_node_by_debug_name(&layout, "es-compressor-panel")
+                .expect("es-compressor-panel layout node");
+            let is_glue = mode == 3;
+            assert_eq!(count_widget_type(panel, "knob-number"), 5, "mode {mode}");
+            assert_eq!(count_widget_type(panel, "number-picker"), 4, "mode {mode}");
+            assert_eq!(count_widget_type(panel, "dropdown"), if is_glue { 4 } else { 1 }, "mode {mode}");
+            assert_eq!(count_widget_type(panel, "button"), 0, "mode {mode}: no preset buttons");
+            check_controls(panel, panel);
+            assert!(panel.rect.col >= 0.0 && panel.rect.col + panel.rect.width <= 200.0);
+            assert!(panel.rect.row >= 0.0 && panel.rect.row + panel.rect.height <= 24.0);
+            let (shown, hidden) = if is_glue { (&glue[..], &shared[..]) } else { (&shared[..], &glue[..]) };
+            for name in always.iter().chain(shown) {
+                let control = find_layout_node_by_debug_name(panel, &format!("es-compressor-control-{name}"))
+                    .unwrap_or_else(|| panic!("mode {mode}: missing {name}"));
+                assert_finite_nonzero_rect(control, name);
+            }
+            for name in hidden {
+                assert!(find_layout_node_by_debug_name(panel, &format!("es-compressor-control-{name}")).is_none(),
+                    "mode {mode}: {name} must be hidden");
+            }
+            let tone = find_layout_node_by_debug_name(panel, "es-compressor-control-tone").unwrap();
+            assert!(matches!(tone.props.get("value"), Some(Value::ReactiveRef { .. })));
+            let selector = find_layout_node_by_debug_name(panel, "es-compressor-mode").unwrap();
             assert_finite_nonzero_rect(selector, "mode selector");
-            assert_eq!(selector.props.get("value"), Some(&Value::String(["Punch", "Level", "Sustain"][mode].into())));
+            assert_eq!(selector.props.get("value"), Some(&Value::String(["Punch", "Level", "Sustain", "Glue"][mode].into())));
         }
     }
 

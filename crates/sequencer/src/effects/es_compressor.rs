@@ -1,4 +1,4 @@
-//! ES Compressor: three distinct dynamics architectures, hosted as bundled
+//! ES Compressor: four distinct dynamics architectures, hosted as bundled
 //! DGenLisp. No external assets or FFT services. See the effect spec for the
 //! published equations, original design choices, and numerical derivations.
 

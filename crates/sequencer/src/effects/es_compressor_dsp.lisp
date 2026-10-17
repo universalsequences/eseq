@@ -1,4 +1,4 @@
-; ES Compressor: Punch / Level / Sustain. Independently authored, asset-free.
+; ES Compressor: Punch / Level / Sustain / Glue. Independently authored, asset-free.
 ; Behavioral design, identification method and limitations:
 ; crates/sequencer/docs/es-compressor-effect-spec.md.
 ; Punch: broad soft knee, weighted RMS detector and short recovery reservoir.
@@ -6,6 +6,8 @@
 ; Both are independently authored models fitted to black-box audio measurements,
 ; not transcriptions of reference circuits, code or calibration tables.
 ; Sustain: the existing ES history/error-dependent grab-and-settle controller.
+; Glue: a feedback bus compressor with a charge/discharge dB envelope, also an
+; independently authored model fitted to black-box audio measurements.
 ; All paths stay warm; mode crossfades aligned processed audio.
 ; 8-384 kHz, fixed per instance. No FFT, external assets or oversampling.
 ; A common short delay aligns every mode and the conventional dry/wet path.
@@ -13,7 +15,7 @@
 
 (def left (in 1 @name Left))
 (def right (in 2 @name Right))
-(param mode @options ["Punch" "Level" "Sustain"] @default 0)
+(param mode @options ["Punch" "Level" "Sustain" "Glue"] @default 0)
 (param amount @min 0 @max 100 @default 50)
 (param tone @min 0 @max 100 @default 0)
 (param attack @min 1 @max 200 @default 40 @unit ms)
@@ -23,6 +25,14 @@
 (param input-db @min -24 @max 24 @default 0 @unit dB)
 (param output-db @min -48 @max 18 @default 0 @unit dB)
 (param detector-db @min -36 @max 36 @default 0 @unit dB)
+; Glue-only controls, appended so earlier parameter indices are unchanged.
+; Glue has its own stepped attack/release and a makeup that gains only the
+; compressed path; Attack, Release and Output keep their meaning across modes.
+(param glue-ratio @options ["2:1" "4:1" "10:1"] @default 1)
+(param glue-attack @options ["0.1 ms" "0.3 ms" "1 ms" "3 ms" "10 ms" "30 ms"] @default 4)
+(param glue-release @options ["0.1 s" "0.3 s" "0.6 s" "1.2 s" "Auto"] @default 0)
+(param detector-hp @min 20 @max 500 @default 20 @unit Hz)
+(param glue-makeup @min -5 @max 15 @default 6 @unit dB)
 
 ; ------------------------------------------------------------------ TUNING
 ; Static curve. u is amount mapped to 0..1 ("sustain").
@@ -94,11 +104,12 @@
 (def tone-strength (/ (smooth-control (clip tone 0 100)) 100))
 ; Smooth one-hot weights, not the mode number: Punch -> Sustain never takes
 ; a detour through Level. Normalization prevents accumulated unity drift.
-(def selected-mode (round (clip mode 0 2)))
+(def selected-mode (round (clip mode 0 3)))
 (def punch-weight (smooth-control (eq selected-mode 0)))
 (def level-weight (smooth-control (eq selected-mode 1)))
 (def sustain-weight (smooth-control (eq selected-mode 2)))
-(def weight-total (+ punch-weight level-weight sustain-weight))
+(def glue-weight (smooth-control (eq selected-mode 3)))
+(def weight-total (+ punch-weight level-weight sustain-weight glue-weight))
 (def drive-db (smooth-control (clip drive 0 24)))
 (def input-gain (exp (* db-to-ln (smooth-control (clip input-db -24 24)))))
 (def output-gain (exp (* db-to-ln (smooth-control (clip output-db -48 18)))))
@@ -212,6 +223,19 @@
   (gswitch (lt x 0.01)
     (* x (+ 1 (* x (+ -0.5 (* x (+ 0.1666666666666667 (* x -0.0416666666666667)))))))
     (- 1 (exp (- 0 x)))))
+
+; Split whole/fraction accumulator for slow dB states (see memory-envelope):
+; the 5 s Glue Auto floor stays exact at 384 kHz under fast-math.
+(defmacro split-read (whole fraction)
+  (/ (+ (read-history whole) (read-history fraction)) 16384))
+(defmacro split-add (whole fraction increment)
+  (def units (+ (read-history fraction) (* 16384 increment)))
+  (def carry (round units))
+  (def next-whole (+ (read-history whole) carry))
+  (def next-fraction (- units carry))
+  (write-history whole next-whole)
+  (write-history fraction next-fraction)
+  (/ (+ next-whole next-fraction) 16384))
 
 ; A charge reservoir remembers exposure; during release it supplies a decaying
 ; floor to the fast envelope. On attack the fast envelope follows the target
@@ -385,7 +409,137 @@
   (+ x (* level-audio-cut 1.5 band)))
 (def level-l (level-audio (* level-gain (short-delay level-source-l span))))
 (def level-r (level-audio (* level-gain (short-delay level-source-r span))))
-(def uncolored-gain (+ (* punch-weight punch-gain) (* sustain-weight sustain-gain)))
+; GLUE: feedback bus compressor. The detector reads the Glue path's own gained
+; signal, so deeper reduction slows its own onset. Behavioral model fitted to
+; black-box audio measurements; see the effect spec for derivation and limits.
+; Threshold knob c = 15 - 0.3*Amount (Amount 0 -> +15, 100 -> -15); glue-u =
+; c/15 = 1 - 2u. Per ratio, threshold H and the log of a, w and b are cubics
+; in glue-u.
+(def glue-ratio-index (round (clip glue-ratio 0 2)))
+(def glue-u (- 1 (* 2 u)))
+(defmacro glue-cubic (c3 c2 c1 c0) (+ c0 (* glue-u (+ c1 (* glue-u (+ c2 (* glue-u c3)))))))
+(defmacro glue-by-ratio (r0 r1 r2)
+  (gswitch (eq glue-ratio-index 0) r0 (gswitch (eq glue-ratio-index 1) r1 r2)))
+(def glue-threshold (glue-by-ratio
+  (glue-cubic -4.55357 3.7838 18.8498 -36.2719)
+  (glue-cubic -4.41483 -0.247852 22.9703 -25.9709)
+  (glue-cubic -3.09282 -0.510705 22.3038 -21.8751)))
+(def glue-a (exp (glue-by-ratio
+  (glue-cubic -0.034163 -1.65898 -4.76623 -2.35988)
+  (glue-cubic 0.370437 0.214307 -0.418685 0.660334)
+  (glue-cubic 0.309839 -0.177464 -0.371591 2.38575))))
+(def glue-w (exp (glue-by-ratio
+  (glue-cubic 16.2605 12.5566 -17.9155 -13.0634)
+  (glue-cubic 3.43842 1.2752 -3.32951 -2.18214)
+  (glue-cubic -0.932964 0.3911 1.25285 -4.01717))))
+(def glue-b (exp (glue-by-ratio
+  (glue-cubic 0.306976 -0.181137 0.0178515 -3.08131)
+  (glue-cubic -0.246525 0.429445 0.308642 -2.04537)
+  (glue-cubic 1.43134 0.705526 -2.16091 -2.79367))))
+
+; Timing. Each switch position selects a measured envelope time constant;
+; attack constants differ slightly per ratio.
+(def glue-attack-index (round (clip glue-attack 0 5)))
+(defmacro glue-by-attack (t0 t1 t2 t3 t4 t5)
+  (gswitch (eq glue-attack-index 0) t0 (gswitch (eq glue-attack-index 1) t1
+  (gswitch (eq glue-attack-index 2) t2 (gswitch (eq glue-attack-index 3) t3
+  (gswitch (eq glue-attack-index 4) t4 t5))))))
+(def glue-attack-ms (smooth-control (glue-by-attack
+  (glue-by-ratio 0.604 0.709 0.848) (glue-by-ratio 1.336 1.5 1.388)
+  (glue-by-ratio 3.995 4.384 3.828) (glue-by-ratio 13.104 14.127 12.323)
+  (glue-by-ratio 39.953 42.766 37.371) (glue-by-ratio 133.379 144.866 123.71))))
+(def glue-release-index (round (clip glue-release 0 4)))
+(def glue-release-ms (smooth-control
+  (gswitch (eq glue-release-index 0) 84.6 (gswitch (eq glue-release-index 1) 126.9
+  (gswitch (eq glue-release-index 2) 263.2 563.8)))))
+(def glue-auto (smooth-control (eq glue-release-index 4)))
+; Auto: measured fast drain 50.74 ms; the exposure floor charges toward 0.938
+; of the reduction (654.7 ms) and decays toward the target (5.13 s). These
+; are fitted values: substituting the published auto-release RC products
+; (91k x 0.47 uF, 750k x 6.8 uF) into this simpler two-state structure fit the
+; reference worse, especially away from the 10 ms attack.
+(def glue-auto-fast-ms 50.74)
+(def glue-auto-slow-ms 5130)
+(def glue-auto-charge-ms 654.7)
+(def glue-auto-share 0.938)
+(def glue-auto-charge-step (follower-step glue-auto-charge-ms))
+(def glue-auto-slow-step (follower-step glue-auto-slow-ms))
+
+; Detector high-pass: 2nd-order Butterworth TPT SVF. 20 Hz is off; the path
+; blends in over 20-21 Hz so the switch has no step.
+(def glue-hp-hz (smooth-control (clip detector-hp 20 500)))
+(def glue-hp-on (clip (- glue-hp-hz 20) 0 1))
+(def glue-hp-g (tan (/ (* 3.141592653589793 (min glue-hp-hz (* 0.45 samplerate))) samplerate)))
+(def glue-hp-k (+ glue-hp-g 1.4142135623730951))
+(def glue-hp-scale (/ 1 (+ 1 (* glue-hp-g glue-hp-k))))
+(defmacro glue-highpass (x)
+  (make-history s1)
+  (make-history s2)
+  (def high (* (- x (* glue-hp-k (read-history s1)) (read-history s2)) glue-hp-scale))
+  (def band (+ (* glue-hp-g high) (read-history s1)))
+  (def low (+ (* glue-hp-g band) (read-history s2)))
+  (write-history s1 (+ (* glue-hp-g high) band))
+  (write-history s2 (+ (* glue-hp-g band) low))
+  (mix x high glue-hp-on))
+
+(make-history glue-gr-whole)
+(make-history glue-gr-fraction)
+(make-history glue-floor-whole)
+(make-history glue-floor-fraction)
+(def glue-old (split-read glue-gr-whole glue-gr-fraction))
+(def glue-floor-old (split-read glue-floor-whole glue-floor-fraction))
+
+; Linked peak of the high-passed signal times the previous sample's gain. The
+; high-passed input saturates at full scale before the gain, and each peak is
+; held for one extra sample.
+(def glue-previous-gain (exp (* (- 0 db-to-ln) glue-old)))
+(def glue-detect-l (* (clip (glue-highpass aligned-l) -1 1) glue-previous-gain))
+(def glue-detect-r (* (clip (glue-highpass aligned-r) -1 1) glue-previous-gain))
+(def glue-peak-now (max (abs glue-detect-l) (abs glue-detect-r)))
+(make-history glue-peak-held)
+(def glue-peak (max glue-peak-now (read-history glue-peak-held)))
+(write-history glue-peak-held glue-peak-now)
+(def glue-level (+ (* 8.685889638065037 (log (max glue-peak 1e-20))) detector-trim))
+
+; Gain computer in output dB: T = s*(a + b*s), s = w*softplus((L-H)/w).
+; slope = dT/dL is the feedback loop gain used by the envelope step.
+(def glue-z (/ (- glue-level glue-threshold) glue-w))
+; e = exp(-|z|) serves both softplus and its derivative, the sigmoid.
+(def glue-e (exp (- 0 (min (abs glue-z) 80))))
+(def glue-soft (* glue-w (+ (max glue-z 0) (log (+ 1 glue-e)))))
+(def glue-target (* glue-soft (+ glue-a (* glue-b glue-soft))))
+(def glue-sigmoid (/ (gswitch (gte glue-z 0) 1 glue-e) (+ 1 glue-e)))
+(def glue-slope (* (+ glue-a (* 2 glue-b glue-soft)) glue-sigmoid))
+
+; Charge/discharge envelope in dB: reduction r charges toward the target with
+; the attack time while it continuously discharges toward the floor with the
+; release time, so slow attacks settle below the static target:
+;   dr/dt = max(0, T(L-r) - r)/attack - (r - floor)/release
+; The feedback is linearized per sample, giving an exponential step of rate
+; (1+slope)/attack + 1/release that is stable at every sample rate.
+; Auto: the floor is an exposure state that charges toward a share of r and
+; decays toward the target; r discharges onto it with the fast drain. Manual
+; ignores the floor, whose state stays warm so switching to Auto has no step.
+(def glue-floor (* glue-auto glue-floor-old))
+(def glue-charging (gt glue-target glue-old))
+(def glue-fall-ms (+ (* glue-auto glue-auto-fast-ms) (* (- 1 glue-auto) glue-release-ms)))
+(def glue-rate-charge (gswitch glue-charging (/ (+ 1 glue-slope) glue-attack-ms) 0))
+(def glue-rate-fall (/ 1 glue-fall-ms))
+(def glue-rate (+ glue-rate-charge glue-rate-fall))
+(def glue-drift (- (gswitch glue-charging (/ (- glue-target glue-old) glue-attack-ms) 0)
+  (* glue-rate-fall (- glue-old glue-floor))))
+(def glue-gr (split-add glue-gr-whole glue-gr-fraction
+  (* (/ glue-drift glue-rate) (follower-step (/ 1 glue-rate)))))
+(split-add glue-floor-whole glue-floor-fraction
+  (- (* glue-auto-charge-step (max 0 (- (* glue-auto-share glue-gr) glue-floor-old)))
+     (* glue-auto-slow-step (max 0 (- glue-floor-old glue-target)))))
+; Makeup gains only the compressed path, so Mix blends unity dry against the
+; made-up compressed signal; Output then trims both.
+(def glue-makeup-db (smooth-control (clip glue-makeup -5 15)))
+(def glue-gain (exp (* db-to-ln (- glue-makeup-db glue-gr))))
+
+(def uncolored-gain (+ (* punch-weight punch-gain) (* sustain-weight sustain-gain)
+  (* glue-weight glue-gain)))
 (def compressed-l (/ (+ (* aligned-l uncolored-gain) (* level-weight level-l)) weight-total))
 (def compressed-r (/ (+ (* aligned-r uncolored-gain) (* level-weight level-r)) weight-total))
 
@@ -401,10 +555,10 @@
   (def s (/ (max 0 (- a shaper-knee)) shaper-headroom))
   (def bent (/ s (pow (+ 1 (pow s shaper-hardness)) (/ 1 shaper-hardness))))
   (def shaped (* drive-post (sign driven) (+ (min a shaper-knee) (* shaper-headroom bent))))
-  ; Sustain retains its original unity-drive shaper. Punch and Level are
+  ; Sustain retains its original unity-drive shaper. Punch, Level and Glue are
   ; uncolored at Drive 0; raising Drive introduces the shaper continuously.
   (def strength (/ (+ sustain-weight
-    (* (+ punch-weight level-weight) (clip (/ drive-db 6) 0 1))) weight-total))
+    (* (+ punch-weight level-weight glue-weight) (clip (/ drive-db 6) 0 1))) weight-total))
   (mix x shaped strength))
 
 ; Scalar topology-preserving-transform filters. Fixed poles, smoothed blend:

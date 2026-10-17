@@ -58,9 +58,27 @@ fn manifest_declares_modes_and_fixed_low_latency_without_fft() {
     assert_eq!(mode["default"], 0);
     assert_eq!(
         mode["options"]["labels"],
-        serde_json::json!(["Punch", "Level", "Sustain"])
+        serde_json::json!(["Punch", "Level", "Sustain", "Glue"])
     );
-    assert_eq!(params.len(), 10);
+    // Glue's controls are appended: earlier parameter indices are unchanged.
+    let names: Vec<&str> = params.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert_eq!(names, [
+        "mode", "amount", "tone", "attack", "release", "mix", "drive", "input-db",
+        "output-db", "detector-db", "glue-ratio", "glue-attack", "glue-release", "detector-hp",
+        "glue-makeup",
+    ]);
+    let param = |name: &str| params.iter().find(|p| p["name"] == name).unwrap();
+    assert_eq!(param("glue-ratio")["options"]["labels"], serde_json::json!(["2:1", "4:1", "10:1"]));
+    assert_eq!(param("glue-ratio")["default"], 1);
+    assert_eq!(param("glue-attack")["options"]["labels"],
+        serde_json::json!(["0.1 ms", "0.3 ms", "1 ms", "3 ms", "10 ms", "30 ms"]));
+    assert_eq!(param("glue-attack")["default"], 4);
+    assert_eq!(param("glue-release")["options"]["labels"],
+        serde_json::json!(["0.1 s", "0.3 s", "0.6 s", "1.2 s", "Auto"]));
+    assert_eq!(param("glue-release")["default"], 0);
+    assert_eq!(param("glue-makeup")["default"], 6);
+    // Attack keeps its historical 1 ms floor; Glue's sub-ms steps are its own.
+    assert_eq!(param("attack")["min"], 1);
     // Prevent an accidental return to large per-instance FFT workspaces.
     assert!(manifest["totalMemorySlots"].as_u64().unwrap() < 32_768);
 }
@@ -177,7 +195,7 @@ fn sustain_controller_preserves_existing_equations() {
 #[test]
 fn modes_have_distinct_linked_responses_and_true_parallel_mix() {
     let mut wet = Vec::new();
-    for mode in 0..3 {
+    for mode in 0..4 {
         let mut o = options(48000, 16384, &[("mode", mode as f32)]);
         // Constant signals below the shaper knee isolate gain behavior.
         o.input_overrides = vec![(0, 0.1), (1, -0.05)];
@@ -197,8 +215,8 @@ fn modes_have_distinct_linked_responses_and_true_parallel_mix() {
         }
         wet.push(full.samples);
     }
-    for a in 0..3 {
-        for b in a + 1..3 {
+    for a in 0..4 {
+        for b in a + 1..4 {
             // Compare trajectories, not just their final DC gain: distinct
             // controllers can legitimately settle to similar steady levels.
             let error: f64 = wet[a]
@@ -250,7 +268,9 @@ fn automation_is_partition_invariant_and_extremes_are_finite() {
             ],
         );
         o.input_tones = vec![(0, 71.0, 0.7), (1, 997.0, 0.5)];
-        for (fraction, mode) in [(0.1, 2.0), (0.3, 1.0), (0.6, 0.0), (0.8, 2.0)] {
+        o.param_overrides.push(("glue-ratio".into(), 2.0));
+        o.param_overrides.push(("detector-hp".into(), 500.0));
+        for (fraction, mode) in [(0.1, 3.0), (0.2, 2.0), (0.3, 1.0), (0.6, 0.0), (0.7, 3.0), (0.8, 2.0)] {
             o.param_events.push(InstrumentParamEvent {
                 frame: (rate as f64 * fraction) as usize + 7,
                 name: "mode".into(),
@@ -266,6 +286,11 @@ fn automation_is_partition_invariant_and_extremes_are_finite() {
             ("output-db", -48.0),
             ("detector-db", -36.0),
             ("amount", 0.0),
+            ("glue-ratio", 0.0),
+            ("glue-attack", 0.0),
+            ("glue-release", 4.0),
+            ("glue-makeup", 15.0),
+            ("detector-hp", 20.0),
         ] {
             o.param_events.push(InstrumentParamEvent {
                 frame: rate as usize / 2 + 3,
@@ -292,14 +317,14 @@ fn mode_changes_crossfade_warm_controllers_without_resetting_them() {
     let mut o = options(48000, 12000, &[]);
     o.input_overrides = vec![(0, 0.1), (1, -0.05)];
     let mut fixed = Vec::new();
-    for mode in 0..3 {
+    for mode in 0..4 {
         o.param_overrides = vec![("mode".into(), mode as f32)];
         let out = render(dsp_source(), &o);
         assert!(out.peak < 0.75, "fixture must stay below the shaper knee");
         fixed.push(out.samples);
     }
     o.param_overrides = vec![("mode".into(), 0.0)];
-    for (frame, mode) in [(2003, 2.0), (5007, 1.0), (8009, 0.0)] {
+    for (frame, mode) in [(2003, 2.0), (5007, 3.0), (6503, 1.0), (8009, 0.0)] {
         o.param_events.push(InstrumentParamEvent {
             frame,
             name: "mode".into(),
@@ -308,13 +333,16 @@ fn mode_changes_crossfade_warm_controllers_without_resetting_them() {
     }
     let changed = render(dsp_source(), &o);
     let pole = (-100.0f64 / 48000.0).exp();
-    let mut weights = [1.0f64, 0.0, 0.0];
+    let mut weights = [1.0f64, 0.0, 0.0, 0.0];
     let mut mode = 0;
     for (i, sample) in changed.samples.chunks_exact(2).enumerate() {
         if i == 2003 {
             mode = 2;
         }
         if i == 5007 {
+            mode = 3;
+        }
+        if i == 6503 {
             mode = 1;
         }
         if i == 8009 {
@@ -325,7 +353,7 @@ fn mode_changes_crossfade_warm_controllers_without_resetting_them() {
             *w = target + pole * (*w - target);
         }
         for channel in 0..2 {
-            let expected: f64 = (0..3)
+            let expected: f64 = (0..4)
                 .map(|j| weights[j] * fixed[j][2 * i + channel] as f64)
                 .sum();
             assert!(
@@ -362,7 +390,7 @@ fn controllers_release_after_a_burst_and_silence_stays_silent() {
             "controller {c} must recover: {recovered:?}"
         );
     }
-    for mode in 0..3 {
+    for mode in 0..4 {
         let mut o = options(
             48000,
             48000,
@@ -454,4 +482,143 @@ fn tone_is_optional_and_attenuates_high_frequencies() {
     assert!(dark.left_rms < flat.left_rms * 0.1);
     assert!(dark.right_rms > flat.right_rms * 0.9);
     assert!(dark.right_rms < flat.right_rms * 1.2);
+}
+
+/// Glue's authored gain computer, from the manifest-independent constants
+/// in the DSP source (threshold knob c = 15 - 0.3*Amount, per ratio).
+fn glue_curve(ratio: usize, amount: f64) -> (f64, f64, f64, f64) {
+    const C: [[[f64; 4]; 4]; 3] = [
+        [[-4.55357, 3.7838, 18.8498, -36.2719], [-0.034163, -1.65898, -4.76623, -2.35988],
+         [16.2605, 12.5566, -17.9155, -13.0634], [0.306976, -0.181137, 0.0178515, -3.08131]],
+        [[-4.41483, -0.247852, 22.9703, -25.9709], [0.370437, 0.214307, -0.418685, 0.660334],
+         [3.43842, 1.2752, -3.32951, -2.18214], [-0.246525, 0.429445, 0.308642, -2.04537]],
+        [[-3.09282, -0.510705, 22.3038, -21.8751], [0.309839, -0.177464, -0.371591, 2.38575],
+         [-0.932964, 0.3911, 1.25285, -4.01717], [1.43134, 0.705526, -2.16091, -2.79367]],
+    ];
+    let u = (15.0 - 0.3 * amount) / 15.0;
+    let cubic = |c: [f64; 4]| c[3] + u * (c[2] + u * (c[1] + u * c[0]));
+    let c = C[ratio];
+    (cubic(c[0]), cubic(c[1]).exp(), cubic(c[2]).exp(), cubic(c[3]).exp())
+}
+
+#[test]
+fn glue_feedback_envelope_matches_double_precision_reference() {
+    // The detector level is observed (it already includes the feedback gain
+    // of the previous sample); the gain computer and the charge/discharge
+    // step are integrated independently in f64 from the documented equations.
+    let source = gated_observation("glue-level", "glue-gr", 0.25);
+    for (rate, attack, release, ratio, amount) in [
+        (8000, 0, 0, 2, 100.0),
+        (48000, 4, 0, 1, 83.333),
+        (48000, 2, 2, 0, 50.0),
+        (384000, 5, 3, 2, 100.0),
+    ] {
+        let params = [("mode", 3.0), ("glue-attack", attack as f32), ("glue-release", release as f32),
+            ("glue-ratio", ratio as f32), ("amount", amount as f32)];
+        let out = render(&source, &tone_options(rate, rate as usize, &params, 1000.0, 0.7));
+        let (threshold, a, w, b) = glue_curve(ratio, amount);
+        let attack_table = [[0.604, 1.336, 3.995, 13.104, 39.953, 133.379],
+            [0.709, 1.5, 4.384, 14.127, 42.766, 144.866], [0.848, 1.388, 3.828, 12.323, 37.371, 123.71]];
+        let attack_ms: f64 = attack_table[ratio][attack];
+        let release_ms: f64 = [84.6, 126.9, 263.2, 563.8][release];
+        let dt_ms = 1000.0 / rate as f64;
+        let mut gr = 0.0f64;
+        let mut peak = 0.0f64;
+        for (i, frame) in out.samples.chunks_exact(2).enumerate() {
+            let z = (frame[0] as f64 - threshold) / w;
+            let soft = w * (z.max(0.0) + (-z.abs()).exp().ln_1p());
+            let target = soft * (a + b * soft);
+            let slope = (a + 2.0 * b * soft) / (1.0 + (-z).exp());
+            let charge = if target > gr { (1.0 + slope) / attack_ms } else { 0.0 };
+            let rate_sum = charge + 1.0 / release_ms;
+            let drift = if target > gr { (target - gr) / attack_ms } else { 0.0 } - gr / release_ms;
+            gr += drift / rate_sum * -(-dt_ms * rate_sum).exp_m1();
+            peak = peak.max(gr);
+            assert!((frame[1] as f64 - gr).abs() < 0.002 + 1e-4 * gr,
+                "rate={rate} frame={i}: {} vs {gr}", frame[1]);
+        }
+        assert!(peak > 3.0 && peak < 80.0, "rate={rate}: Glue must engage boundedly: {peak}");
+        assert!(gr < 0.5 * peak, "rate={rate}: Glue must release during the silent tail: {gr}");
+    }
+}
+
+fn glue_reduction(params: &[(&str, f32)], hz: f32, peak_db: f32) -> f64 {
+    let mut all = vec![("mode", 3.0)];
+    all.extend_from_slice(params);
+    let out = render(&observation("glue-gr", "glue-floor-old"),
+        &tone_options(48000, 96000, &all, hz, 10.0f32.powf(peak_db / 20.0)));
+    out.samples[2 * 72000..].chunks_exact(2).map(|f| f[0] as f64).sum::<f64>() / 24000.0
+}
+
+#[test]
+fn glue_amount_ratio_and_detector_high_pass_behave_monotonically() {
+    // Functional voicing bounds on generated tones; no reference renders.
+    let mut previous = -1.0;
+    for amount in [0.0, 25.0, 50.0, 75.0, 100.0] {
+        let reduction = glue_reduction(&[("amount", amount)], 1000.0, -6.0);
+        assert!(reduction > previous + 1.0, "Amount must deepen Glue: {amount} -> {reduction}");
+        previous = reduction;
+    }
+    // Amount 0 is the +15 end of the threshold scale: peaks above about
+    // -8 dBFS still compress at 4:1; quieter material is untouched.
+    assert!(glue_reduction(&[("amount", 0.0)], 1000.0, -14.0) < 0.05);
+    assert!(glue_reduction(&[("amount", 0.0)], 1000.0, 0.0) > 1.0);
+    let hot = |ratio: f32| glue_reduction(&[("amount", 83.333), ("glue-ratio", ratio)], 1000.0, 0.0);
+    let (gentle, medium, hard) = (hot(0.0), hot(1.0), hot(2.0));
+    assert!(gentle + 1.0 < medium && medium + 1.0 < hard, "ratio order: {gentle} {medium} {hard}");
+    // The 2nd-order detector high-pass desensitizes bass, not mids.
+    let bass_off = glue_reduction(&[("detector-hp", 20.0)], 60.0, -6.0);
+    let bass_on = glue_reduction(&[("detector-hp", 250.0)], 60.0, -6.0);
+    let mid_off = glue_reduction(&[("detector-hp", 20.0)], 2000.0, -6.0);
+    let mid_on = glue_reduction(&[("detector-hp", 250.0)], 2000.0, -6.0);
+    assert!(bass_on < bass_off - 6.0, "detector HP must ignore bass: {bass_off} -> {bass_on}");
+    assert!((mid_on - mid_off).abs() < 0.3, "detector HP must keep mids: {mid_off} -> {mid_on}");
+    // Slower attack settles below the static target (charge/discharge balance).
+    let fast = glue_reduction(&[("glue-attack", 0.0)], 1000.0, -6.0);
+    let slow = glue_reduction(&[("glue-attack", 5.0)], 1000.0, -6.0);
+    assert!(slow < fast - 2.0, "attack balance: {fast} vs {slow}");
+}
+
+#[test]
+fn glue_auto_release_remembers_exposure_and_manual_does_not() {
+    let tail = |release: f32, seconds: f64| {
+        let source = gated_observation("glue-gr", "glue-floor-old", seconds);
+        let out = render(&source, &tone_options(48000, ((seconds + 1.5) * 48000.0) as usize,
+            &[("mode", 3.0), ("glue-release", release), ("glue-attack", 2.0)],
+            1000.0, 0.5));
+        let at = |t: f64| out.samples[2 * ((seconds + t) * 48000.0) as usize] as f64;
+        (at(0.3), at(1.4))
+    };
+    let manual_late = |seconds: f64| {
+        let source = gated_observation("glue-gr", "glue-floor-old", seconds);
+        let out = render(&source, &tone_options(48000, ((seconds + 1.5) * 48000.0) as usize,
+            &[("mode", 3.0), ("glue-attack", 2.0)], 1000.0, 0.5));
+        out.samples[2 * ((seconds + 1.0) * 48000.0) as usize] as f64
+    };
+    let (short_auto, _) = tail(4.0, 0.02);
+    let (long_auto, long_late) = tail(4.0, 2.0);
+    let long_manual = manual_late(2.0);
+    assert!(long_auto > short_auto + 3.0, "Auto must hold after long exposure: {short_auto} {long_auto}");
+    assert!(long_late < long_auto && long_late > 0.5, "Auto floor decays slowly: {long_auto} {long_late}");
+    assert!(long_manual < 0.1, "Manual release keeps no exposure memory: {long_manual}");
+}
+
+#[test]
+fn glue_makeup_gains_only_the_compressed_path() {
+    // A -40 dBFS DC input sits far below every Glue threshold, so the
+    // compressed path is the dry signal times makeup; Mix blends it with the
+    // unity dry path and Output trims both.
+    for (makeup, mix, output) in [(-5.0_f32, 1.0_f32, 0.0_f32), (6.0, 1.0, 0.0), (15.0, 1.0, 0.0),
+        (15.0, 0.0, 0.0), (6.0, 0.5, 0.0), (6.0, 1.0, -6.0)] {
+        let mut o = options(48000, 4800, &[("mode", 3.0), ("amount", 0.0), ("glue-makeup", makeup),
+            ("mix", mix), ("output-db", output)]);
+        o.input_overrides = vec![(0, 0.01), (1, -0.01)];
+        let report = render(dsp_source(), &o);
+        let db = |d: f32| 10.0_f32.powf(d / 20.0);
+        let gain = db(output) * ((1.0 - mix) + mix * db(makeup));
+        for frame in report.samples.chunks_exact(2).skip(2400) {
+            assert!((frame[0] - 0.01 * gain).abs() < 2e-5 && (frame[1] + 0.01 * gain).abs() < 2e-5,
+                "makeup {makeup} mix {mix} output {output}: {frame:?} vs {}", 0.01 * gain);
+        }
+    }
 }

@@ -1,5 +1,6 @@
-;; ES Compressor: three architectures, shared timing/gain controls and a
-;; manifest-backed, p-lock-aware mode selector. No private study assets.
+;; ES Compressor: four architectures, shared timing/gain controls and a
+;; manifest-backed, p-lock-aware mode selector. Glue swaps in its own stepped
+;; ratio/attack/release, makeup and detector high-pass. No private study assets.
 (module eseq.effects.builtin.es-compressor)
 
 (import eseq.effects.builtin.filter-core :refer (builtin-fx-param))
@@ -84,18 +85,46 @@
   (box :width width :padding 0.24 :background-color surface :corner-radius 7 :border-width 1
     body))
 
-(def es-compressor-mode (fx p)
-  (subtree :key (str "es-compressor-mode-" (get p :idx) (pc/param-control-key-mode fx p))
-    (dropdown :debug-name "es-compressor-mode"
+;; Manifest-backed option dropdown with the full p-lock contract.
+(def es-compressor-dropdown (fx p debug-name width height font-size)
+  (subtree :key (str "es-compressor-option-" (get p :idx) (pc/param-control-key-mode fx p))
+    (dropdown :debug-name debug-name
       :value (pc/fx-param-text-value-for fx p)
       :options (get p :options)
-      :width 9 :height 1.1 :font-size 10
+      :width width :height height :font-size font-size
       :bg-color :mixer-strip-bg :border-color :mixer-strip-border
       :plock-active (pc/param-plock-active-prop fx p)
       :plock-color-r (pc/param-plock-color-r)
       :plock-color-g (pc/param-plock-color-g)
       :plock-color-b (pc/param-plock-color-b)
       :on-change (lambda (v) (pc/param-set-option fx p v)))))
+
+(def es-compressor-mode (fx p)
+  (es-compressor-dropdown fx p "es-compressor-mode" 9 1.1 10))
+
+;; Labelled selector for a Glue-only enum param.
+(def es-compressor-glue-option (fx label-text p width)
+  (v-stack :width width :gap 0.06 :align :start
+    (label label-text :font-size 9 :width width :height 0.78 :color :dim :bg :transparent)
+    (es-compressor-dropdown fx p (str "es-compressor-control-" (get p :name)) width 1.0 9.5)))
+
+;; Glue's response surface: the three switches above makeup, sidechain HP
+;; and tone. Shown in place of the attack/release knobs only in Glue mode.
+(def es-compressor-glue-response (fx glue-ratio-p attack-p release-p glue-makeup-p hp-p tone-p)
+  (v-stack :gap 0.18 :align :start
+    (h-stack :gap 0.3 :align :start
+      (es-compressor-glue-option fx "ratio" glue-ratio-p 7.4)
+      (es-compressor-glue-option fx "attack" attack-p 7.4)
+      (es-compressor-glue-option fx "release" release-p 7.4))
+    (h-stack :gap 0.3 :align :start
+      (es-compressor-knob fx "makeup / dB" glue-makeup-p 1 "linear")
+      (es-compressor-knob fx "sc hp / Hz" hp-p 0 "log")
+      (es-compressor-knob fx "tone / %" tone-p 0 "linear"))
+    (es-compressor-caption
+      ;; Release option 4 is Auto (manifest order 0.1/0.3/0.6/1.2 s/Auto).
+      (if (= (pc/fx-param-numeric-value-for fx release-p) 4)
+        "feedback glue · auto release · sc hp 20 = off"
+        "feedback glue · sc hp 20 = off"))))
 
 (def es-compressor-ui (fx)
   (let ((params (get fx :params)))
@@ -108,8 +137,14 @@
           (input-p (eseq.effects.builtin.filter-core/builtin-fx-param params "input-db"))
           (drive-p (eseq.effects.builtin.filter-core/builtin-fx-param params "drive"))
           (detector-p (eseq.effects.builtin.filter-core/builtin-fx-param params "detector-db"))
-          (output-p (eseq.effects.builtin.filter-core/builtin-fx-param params "output-db")))
-      (if (and mode-p tone-p amount-p mix-p attack-p release-p input-p drive-p detector-p output-p)
+          (output-p (eseq.effects.builtin.filter-core/builtin-fx-param params "output-db"))
+          (glue-ratio-p (eseq.effects.builtin.filter-core/builtin-fx-param params "glue-ratio"))
+          (glue-attack-p (eseq.effects.builtin.filter-core/builtin-fx-param params "glue-attack"))
+          (glue-release-p (eseq.effects.builtin.filter-core/builtin-fx-param params "glue-release"))
+          (detector-hp-p (eseq.effects.builtin.filter-core/builtin-fx-param params "detector-hp"))
+          (glue-makeup-p (eseq.effects.builtin.filter-core/builtin-fx-param params "glue-makeup")))
+      (if (and mode-p tone-p amount-p mix-p attack-p release-p input-p drive-p detector-p output-p
+               glue-ratio-p glue-attack-p glue-release-p detector-hp-p glue-makeup-p)
         (h-stack :gap 0.35 :align :stretch :debug-name "es-compressor-panel"
           (es-compressor-surface 16 :instrument-group-bg
             (v-stack :gap 0.18 :align :start
@@ -121,15 +156,19 @@
           (es-compressor-surface 23.8 :instrument-group-bg
             (v-stack :gap 0.18 :align :start
               (box :height 1.1 (es-compressor-heading "RESPONSE / COLOR"))
-              (h-stack :gap 0.3 :align :start
-                (es-compressor-knob fx "attack / ms" attack-p 1 "log")
-                (es-compressor-knob fx "release / ms" release-p 0 "log")
-                (es-compressor-knob fx "tone / %" tone-p 0 "linear"))
-              (es-compressor-caption
-                (let ((mode-value (pc/fx-param-numeric-value-for fx mode-p)))
-                  (if (= mode-value 1) "leveling · +8.5 dB nominal gain"
-                    (if (= mode-value 2) "grab-and-settle · automatic makeup"
-                      "broad-knee punch · manual output makeup"))))))
+              (let ((mode-value (pc/fx-param-numeric-value-for fx mode-p)))
+                (if (= mode-value 3)
+                  (es-compressor-glue-response fx glue-ratio-p glue-attack-p glue-release-p
+                    glue-makeup-p detector-hp-p tone-p)
+                  (v-stack :gap 0.18 :align :start
+                    (h-stack :gap 0.3 :align :start
+                      (es-compressor-knob fx "attack / ms" attack-p 1 "log")
+                      (es-compressor-knob fx "release / ms" release-p 0 "log")
+                      (es-compressor-knob fx "tone / %" tone-p 0 "linear"))
+                    (es-compressor-caption
+                      (if (= mode-value 1) "leveling · +8.5 dB nominal gain"
+                        (if (= mode-value 2) "grab-and-settle · automatic makeup"
+                          "broad-knee punch · manual output makeup"))))))))
           (es-compressor-surface 8 :instrument-control-bg
             (v-stack :gap 0.18 :align :start
               (es-compressor-heading "GAIN")

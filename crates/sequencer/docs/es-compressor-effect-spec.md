@@ -1,4 +1,4 @@
-# ES Compressor — Punch / Level / Sustain
+# ES Compressor — Punch / Level / Sustain / Glue
 
 Builtin stereo effect implemented in `src/effects/es_compressor_dsp.lisp`,
 registered by `src/effects/es_compressor.rs`, with its panel in
@@ -10,7 +10,7 @@ normalized-photocarrier Level designs. Mathematical validity of those designs
 did not establish the musical behavior the owner wanted. Sustain's controller
 is unchanged.
 
-All three paths run continuously. Mode changes crossfade aligned **audio**, not
+All four paths run continuously. Mode changes crossfade aligned **audio**, not
 controller state; Level has its own audio conditioning, so a gain-only crossfade
 would be incorrect. No external assets, calibration files, FFTs or oversampling
 are needed. Supported rates are **8–384 kHz**, fixed per instance.
@@ -220,20 +220,167 @@ reset on mode change, or hidden output limiter.
 
 These controller equations are unchanged. Amount 0 is not bypass in Sustain.
 
+## Glue — feedback bus compressor with charge/discharge envelope
+
+Glue (mode index 3, appended) is a stereo bus compressor for drum-bus
+cohesion and audible pumping. It is an independently authored **behavioral
+model fitted to black-box audio measurements** of a sealed reference
+(`glue-study-slam-v1`, a compiled DGenLisp study supplied as macOS dylibs with
+public controls only). The reference was used only through audio input/output
+and its documented controls: no decompilation, state inspection, source, or
+prior research. The reference itself derives from earlier analysis of a
+commercial plugin, and its author had seen that study: this is **not** a
+clean-room legal certification. The implementer's persistent notes did record
+behavior of an unrelated private study (the Sustain predecessor); that study
+was not read or used. Neither the reference nor its break recordings ship or
+appear in tests. Public background: Giannoulis, Massberg and Reiss (JAES
+60(6), 2012) for feedback/feedforward topologies, smoothing placement and the
+decoupled charge/discharge detector; Zavalishin, *The Art of VA Filter
+Design*, for the TPT state-variable high-pass.
+
+**Post-freeze disclosure.** After the DSP below was frozen and the holdout
+scored, the owner asked for a comparison against the reference's source. That
+source was read and rendered only to measure this model's error (below); its
+gain-computer and detector equations were not adopted. One later product
+change follows it: makeup now gains only the compressed path, so Mix blends
+unity dry against the made-up wet signal. The published auto-release RC pairs
+(91k x 0.47 uF, 750k x 6.8 uF, from public clone documentation) were tried in
+place of the fitted Auto constants and rejected: in this two-state structure
+they fit the reference worse (2–4 dB at attack settings other than 10 ms).
+
+### What the measurements established
+
+- **Feedback topology.** Attack time scales with the inverse of the static
+  slope (≈2:1, 4:1, 10:1 → 1.7 : 1 : 0.4) and partial release is faster than
+  full release; release to silence is a pure dB exponential independent of
+  level and ratio.
+- **Charge/discharge envelope in dB.** Settled reduction on DC depends on the
+  attack setting (slower attack settles lower), so release acts continuously,
+  not only when the target falls.
+- **Peak detector, linked on the louder channel**, with a one-sample hold:
+  sine excess over DC at 1–5 kHz scales with f/fs (halves at 96 kHz) and is
+  reproduced exactly by `max(|y[n]|, |y[n-1]|)`.
+- **Detector saturation:** reduction stops growing above 0 dBFS; the
+  high-passed input clips at full scale before the feedback gain (verified on
+  hot, bass-heavy material with the detector HP on).
+- **Detector HP:** 2nd-order Butterworth (−3.01 dB at fc, −12.3 dB at fc/2).
+- The audio path is linear (null < 3e-9 below threshold), zero latency, with
+  makeup/trim as pure post gains and a linear wet/dry mix.
+
+### Equations
+
+`c = 15 − 0.3·Amount` is the reference's threshold-knob scale (Amount 0 → +15,
+100 → −15), `u = c/15`. Per ratio, `H` and `ln a`, `ln w`, `ln b` are cubics in
+`u` (coefficients in source). With `L` the held detector peak in dB plus the
+Detector trim:
+
+```
+s     = w * softplus((L − H)/w)
+T     = s * (a + b*s)                              target reduction, dB
+slope = (a + 2*b*s) * sigmoid((L − H)/w)           dT/dL
+dr/dt = max(0, T − r)/τa − (r − floor)/τr
+```
+
+`L` is measured on `clip(HP(x), ±1) * 10^(−r_prev/20)`: the output of the
+previous sample's gain. Each sample takes the exact exponential step of the
+loop linearized around `r` (rate `(1+slope)/τa + 1/τr` while charging, else
+`1/τr`), which is stable at every sample rate. The quadratic term was required
+by single-sample burst measurements, which show reduction growing faster than
+any curve fitted to DC sweeps alone once the output overshoots threshold by
+tens of dB.
+
+`τa` and `τr` are fitted time constants at the reference's discrete settings,
+selected by Glue's own stepped Attack and Release switches:
+
+| Attack label (ms) | 0.1 | 0.3 | 1 | 3 | 10 | 30 |
+|---|---:|---:|---:|---:|---:|---:|
+| τa 2:1 (ms) | 0.604 | 1.336 | 3.995 | 13.104 | 39.953 | 133.379 |
+| τa 4:1 (ms) | 0.709 | 1.500 | 4.384 | 14.127 | 42.766 | 144.866 |
+| τa 10:1 (ms) | 0.848 | 1.388 | 3.828 | 12.323 | 37.371 | 123.710 |
+
+| Release label (ms) | 100 | 300 | 600 | 1200 |
+|---|---:|---:|---:|---:|
+| τr (ms) | 84.6 | 126.9 | 263.2 | 563.8 |
+
+**Auto release** (Glue Release = Auto). An exposure floor `f` charges toward `0.938·r`
+with τ = 0.655 s and decays toward `T` with τ = 5.13 s; `r` discharges onto `f`
+with τ = 50.7 ms. Long passages therefore recover slowly, isolated hits fast.
+Both states use the split whole/fraction accumulator described below.
+
+### Controls
+
+- Amount: monotonic strength macro over the reference's full threshold range.
+  **Amount 0** is the +15 end, not bypass: at 4:1 it leaves material below
+  about −8 dBFS untouched and still compresses hotter peaks.
+- Glue Ratio (2:1 / 4:1 / 10:1), Glue Attack (0.1 / 0.3 / 1 / 3 / 10 / 30 ms),
+  Glue Release (0.1 / 0.3 / 0.6 / 1.2 s / Auto), Detector HP (20–500 Hz,
+  20 = off, blended in over 20–21 Hz) and Glue Makeup (−5…+15 dB, default
+  +6): appended parameters, used only by Glue. The panel shows them in place
+  of the shared Attack/Release knobs only while Glue is selected, so the
+  shared knobs keep their 1 ms floor and meaning in the other modes.
+- **Makeup gains only the compressed path**: output =
+  `Output · ((1 − Mix)·dry + Mix·Makeup·compressed)`. Input drives everything,
+  Detector trims only the detector. Drive/Tone keep their shared meaning;
+  Glue is uncolored at Drive 0. There are no preset buttons; a fresh Glue
+  instance starts at 4:1, 10 ms, 0.1 s, +6 dB makeup.
+- Not implemented: the reference's analog noise/mains and auto-fade, and a
+  gain-reduction meter (ES Compressor has no meter path for DGen builtins yet).
+
+### Measured error (private corpus, frozen DSP sha256 512f080b…)
+
+Ten private `breaks`+`classic` library recordings (44.1 kHz, never shipped):
+six development, two validation, two holdout scored once after freezing.
+Each case: two discarded cyclic passes, third scored, candidate aligned by the
+declared 11-sample latency, raw unnormalized output. Five public preset
+configurations (slam, gentle, hard, auto, detector-hp) × input −12/−6/0/+6 dB,
+plus +12 dB as a separate stress case. 5 ms envelope errors use a −60 dBFS
+floor. These are error metrics, not perceptual similarity.
+
+The later stepped-switch/makeup refactor re-scores within 1e-5 dB of the frozen
+model at Mix 1.
+
+| Split (core −12..+6 dB) | Cases | Median 5 ms env. error | Worst per-case p95 | Max settled level error |
+|---|---:|---:|---:|---:|
+| Development | 120 | 0.121 dB | 0.57 dB | 0.36 dB |
+| Validation | 40 | 0.123 dB | 0.49 dB | 0.42 dB |
+| Holdout | 40 | 0.118 dB | 0.61 dB | 0.44 dB |
+
+Weakest: Gentle (2:1, Auto, slow attack) on hot input, −0.44 dB level at
++6 dB on holdout and −0.60 dB in the +12 dB stress case (over-compressing), and
+Auto at −12 dB (+0.29 dB, under-compressing). 2:1's static fit is the loosest
+(≤0.97 dB at the lowest thresholds on DC sweeps). Above ~7 kHz the reference
+reads 0.15–0.27 dB hotter on sustained sines than the one-sample hold. Fitting
+was at 44.1/48 kHz; the high-frequency hold behavior scales with the sample
+rate in both the reference and this model. Owner listening approval is
+pending.
+
+Against the reference's source on generated signals (post-freeze, ours −
+reference): static curve 0.01–0.19 dB typical, worst +0.86 dB (2:1 at
+threshold −15); manual release trajectory within 0.02 dB before settling;
+Auto holds ≈0.5 dB more reduction throughout recovery; 14–18 kHz sines read
+up to 0.40 dB light (the reference's detector also estimates the inter-sample
+peak); on a 40 dB step the onset over-compresses by up to 2–3 dB for the first
+1–8 ms, converging by ≈30 ms.
+
 ## Controls and shared audio path
 
 | Parameter | Range | Default | Meaning |
 |---|---|---|---|
-| Mode | Punch / Level / Sustain | Punch | Manifest-backed discrete choice, supports p-locks. |
+| Mode | Punch / Level / Sustain / Glue | Punch | Manifest-backed discrete choice, supports p-locks. |
 | Amount | 0–100 | 50 | Mode-specific threshold/curve macro. |
 | Tone | 0–100 | 0 | Common wet-path flat-to-dark blend; not a detector EQ. |
-| Attack | 1–200 ms | 40 | Mode-specific onset time scale; exponential knob travel. |
-| Release | 20–2000 ms | 120 | Mode-specific recovery time scale; exponential knob travel. |
+| Attack | 1–200 ms | 40 | Punch/Level/Sustain onset time scale; exponential knob travel. |
+| Release | 20–2000 ms | 120 | Punch/Level/Sustain recovery time scale; exponential knob travel. |
 | Mix | 0–1 | 1 | Linear dry/wet with identical declared alignment. |
 | Drive | 0–24 dB | 0 | Shared nonlinear shaper drive; 70% post-compensation. |
 | Input | -24–24 dB | 0 | Before all detectors and the dry/wet split. |
-| Output | -48–18 dB | 0 | Final trim; Punch makeup is manual, Level includes nominal gain. |
+| Output | -48–18 dB | 0 | Final trim on dry and wet; Punch makeup is manual, Level includes nominal gain. |
 | Detector | -36–36 dB | 0 | Detector-only trim, no direct audio gain. |
+| Glue Ratio | 2:1 / 4:1 / 10:1 | 4:1 | Glue only. |
+| Glue Attack | 0.1 / 0.3 / 1 / 3 / 10 / 30 ms | 10 ms | Glue only. |
+| Glue Release | 0.1 / 0.3 / 0.6 / 1.2 s / Auto | 0.1 s | Glue only. |
+| Detector HP | 20–500 Hz | 20 (off) | Glue only; 2nd-order Butterworth on the detector. |
+| Glue Makeup | −5–15 dB | 6 | Glue only; gains the compressed path before Mix. |
 
 Continuous controls retain 10 ms dezippering initialized to the first value.
 Three one-hot mode weights are smoothed and normalized; Punch-to-Sustain does
@@ -252,7 +399,7 @@ Output can exceed full scale. There is still no dedicated gain-reduction meter.
 Declared latency is unchanged: `max(1, min(127, round(0.00025*fs)))` samples,
 **12 samples at 48 kHz**, common to all modes and dry. Filter phase is not a
 compensatable fixed delay. No performance claim is inferred from offline render
-wall times; all three modes continue running.
+wall times; all four modes continue running.
 
 ## Regression coverage
 
@@ -266,9 +413,15 @@ wall times; all three modes continue running.
 - Exposure-dependent recovery and effective Attack/Release controls.
 - Preserved Sustain equations, stereo linking, exact dry and affine parallel mix.
 - Warm mode changes, output-trim range, burst recovery, silence, optional Tone.
+- Glue's detector-observed envelope against independent f64 integration of the
+  documented gain computer and charge/discharge step at 8/48/384 kHz; Amount,
+  ratio, detector-HP and attack-balance monotonicity; Auto exposure memory;
+  makeup on the compressed path only, against Mix and Output.
 - Finite output and exact 31/128-frame automation partitioning across
   8/44.1/48/96/192/384 kHz and control extremes.
 
 `state_values::tests::metal_seq_fx_es_compressor_layout_contains_knobs` protects
-finite nonzero control geometry and reactive mode selection. The production
-capture fixture is `ui/capture-fixtures/es-compressor-panel.lisp`.
+finite nonzero control geometry, reactive mode selection, and that Glue's
+controls replace Attack/Release only in Glue mode. Capture fixtures:
+`ui/capture-fixtures/es-compressor-panel.lisp` and
+`ui/capture-fixtures/es-compressor-glue-panel.lisp`.
