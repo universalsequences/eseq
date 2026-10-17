@@ -1,0 +1,233 @@
+; ======================================================================
+; Exciters (elements/dsp/exciter.cc), the blown tube (tube.cc) and the
+; blow diffuser (fx/diffuser.h).
+; - Bow: Exciter in FLOW mode, parameter 0.7, then the exciter low-pass.
+; - Blow: GRANULAR_SAMPLE_PLAYER over the module's noise recording.
+; - Strike: META picks SAMPLE_PLAYER / MALLET / PLECTRUM / PARTICLES (FLOW
+;   at the very top), PARAMETER is the fractional part.
+; Flags are block-latched: `rising`, `gate_f` (and the strike's falling
+; behaviour follows !gate_f). Each exciter takes its own uniform noise
+; draws u, u2, u3 in [0, 1).
+; Host-rate rules (kr = 32000 / samplerate): per-sample probabilities and
+; decay factors are rescaled to keep their rates; recorded samples advance
+; kr samples per host sample; single-sample impulses are scaled by 1 / kr
+; and white noise by 1 / sqrt(kr) (the same impulse area and noise density
+; as at 32 kHz), so the excitation reaching the resonator keeps its level.
+; ======================================================================
+(def exc_lut_gain (tensor @shape [257 1] @file "lut_approx_svf_gain.json"))
+(def exc_lut_g (tensor @shape [257 1] @file "lut_approx_svf_g.json"))
+(def exc_noise_sample (tensor @shape [40963 1] @file "smp_noise_sample.json"))
+(def exc_samples (tensor @shape [128013 1] @file "smp_sample_data.json"))
+
+; The exciter low-pass coefficient lut_approx_svf_g[timbre], at the host rate.
+(defmacro exc-lp-g (timbre)
+  (el-hold (el-g-host (el-lut-int exc_lut_g timbre 256))))
+
+; Exciter low-pass (set_g_r_h(lut_approx_svf_g[timbre], 2, lut_approx_svf_h)).
+(defmacro exc-lp (x timbre)
+  (def g (exc-lp-g timbre))
+  (def h (el-hold (el-svf-h g 2)))
+  (def (lp bp hp) (el-svf x g 2 h))
+  lp)
+
+; FLOW: a random telegraph signal plus scaled white noise.
+(defmacro exc-flow (rising parameter u)
+  (make-history ready)
+  (make-history h_ps)
+  (def scale (el-hold (* parameter parameter parameter parameter)))
+  (def threshold (el-hold (* kr (+ 0.0001 (* scale 0.125)))))
+  (def ps0 (gswitch (* bstart rising) 0.5 (el-rd h_ps ready 0.5)))
+  (def ps (gswitch (lt u threshold) (- ps0) ps0))
+  (write-history ready 1)
+  (write-history h_ps ps)
+  (+ (* ps (- 1 scale)) (* (- u 0.5) scale (sqrt (/ 1 kr)))))
+
+; Bow exciter: flow (parameter 0.7) through the exciter low-pass.
+(defmacro exc-bow (rising timbre u)
+  (exc-lp (exc-flow rising 0.7 u) timbre))
+
+; GRANULAR_SAMPLE_PLAYER over smp_noise_sample (phase in recording samples,
+; wrapping like the module's 15.17 fixed-point phase).
+(defmacro exc-granular (parameter timbre signature u)
+  (make-history h_pi)
+  (make-history h_pf)
+  (def restart (el-hold (floor (* parameter 32767))))
+  ; increment in recording samples, 17-bit fixed point at 32 kHz
+  (def inc_fx (el-hold (floor (* 131072 kr (el-semi-ratio (- (* 72 timbre) 60))))))
+  (def inc_i (el-hold (floor (/ inc_fx 131072))))
+  (def inc_f (el-hold (/ (- inc_fx (* inc_i 131072)) 131072)))
+  (def base (el-hold (floor (* signature 8192))))
+  (def pi (read-history h_pi))
+  (def pf (read-history h_pf))
+  (def a (peek exc_noise_sample (+ base pi) 0))
+  (def b (peek exc_noise_sample (+ base pi 1) 0))
+  (def f1 (+ pf inc_f))
+  (def carry (gte f1 1))
+  (def restart_now (lt u (* 0.01 kr)))
+  (write-history h_pi (gswitch restart_now restart (el-imod (+ pi inc_i carry) 32768)))
+  (write-history h_pf (gswitch restart_now 0 (- f1 carry)))
+  (/ (+ a (* (- b a) pf)) 32768))
+
+; Strike exciter. Returns (tuple out damping): out after the exciter filter,
+; damping = Exciter::damping() for this block.
+(defmacro exc-strike (rising gate_f meta timbre signature u u2 u3)
+  (def m (gswitch (lte meta 0.4) (* meta 0.625) (- (* meta 1.25) 0.25)))
+  (def mm (* m 4))
+  (def model (el-hold (min (+ 1 (floor mm)) 6)))
+  (def param (el-hold (- mm (floor mm))))
+  (def is_smp (eq model 1))
+  (def is_mal (eq model 2))
+  (def is_plk (eq model 3))
+  (def is_prt (eq model 4))
+  (def is_flw (eq model 5))
+  (def rise_b (* bstart rising))
+  (def amp (el-hold (el-lut-int exc_lut_gain timbre 256)))
+  (make-history h_damp)
+  (make-history h_pdel)
+  (make-history h_ps)
+  (make-history h_range)
+  (make-history h_delay)
+  (make-history ready)
+  ; ---- damp_state_ (block rate; shared by sample player, mallet, plectrum)
+  (def damp0 (read-history h_damp))
+  (def damp_r (gswitch rising 0 damp0))
+  (def damp_g (gswitch gate_f damp_r (- 1 (* (pow 0.95 tb) (- 1 damp_r)))))
+  ; ---- SAMPLE_PLAYER
+  (def sidx (- 8 (* param 8)))
+  (def si0 (floor sidx))
+  (def si (el-hold (min si0 7)))
+  (def sfrac (el-hold (gswitch (gte si0 8) 1 (- sidx si0))))
+  (def off1 (el-hold (selector (+ si 1) 0 17099 20852 30369 63050 85807 95952 106297)))
+  (def off2 (el-hold (selector (+ si 1) 17099 20852 30369 63050 85807 95952 106297 117606)))
+  (def off3 (el-hold (selector (+ si 1) 20852 30369 63050 85807 95952 106297 117606 128013)))
+  (def len1 (- off2 off1 1))
+  (def len2 (- off3 off2 1))
+  (def sinc_fx (el-hold (floor (* 65536 kr (el-semi-ratio (- (* 72 timbre) 29))))))
+  (def sinc_i (el-hold (floor (/ sinc_fx 65536))))
+  (def sinc_f (el-hold (/ (- sinc_fx (* sinc_i 65536)) 65536)))
+  (make-history h_spi)
+  (make-history h_spf)
+  (def reset_s (* rise_b is_smp))
+  (def spi (gswitch reset_s 0 (read-history h_spi)))
+  (def spf (gswitch reset_s 0 (read-history h_spf)))
+  (def in1 (lt spi len1))
+  (def in2 (lt spi len2))
+  (def a1 (peek exc_samples (+ off1 (* in1 spi)) 0))
+  (def b1 (peek exc_samples (+ off1 (* in1 spi) 1) 0))
+  (def a2 (peek exc_samples (+ off2 (* in2 spi)) 0))
+  (def b2 (peek exc_samples (+ off2 (* in2 spi) 1) 0))
+  (def smp1 (* in1 (+ a1 (* (- b1 a1) spf))))
+  (def smp2 (* in2 (+ a2 (* (- b2 a2) spf))))
+  (def smp_out (/ (+ smp1 (* (- smp2 smp1) sfrac)) 65536))
+  (def sstep (* is_smp (max in1 in2)))
+  (def sf1 (+ spf (* sstep sinc_f)))
+  (def scarry (gte sf1 1))
+  (write-history h_spi (+ spi (* sstep sinc_i) scarry))
+  (write-history h_spf (- sf1 scarry))
+  (def smp_damp (* damp_g (gswitch (gte param 0.8) (- (* param 5) 4) 0)))
+  ; ---- MALLET
+  (def mal_out (/ (* rise_b amp) kr))
+  (def mal_damp (* damp_g (- 1 param)))
+  ; ---- PLECTRUM: per-sample damp, kept here as block-end values
+  (def pdel0 (gswitch (* rise_b is_plk) (floor (/ (+ (floor (* 4096 param param)) 64) kr))
+                      (read-history h_pdel)))
+  (def pdel1 (gswitch is_plk (max (- pdel0 1) 0) pdel0))
+  (def plk_out (/ (+ (* rise_b (- amp) (+ 0.05 (* signature 0.2)))
+                        (* (gt pdel0 0) (eq pdel1 0) amp)) kr))
+  (write-history h_pdel pdel1)
+  (def n1 (min pdel0 blk))
+  (def plk_d1 (- 1 (* (- 1 damp0) (pow 0.997 (* kr n1)))))
+  (def plk_damp_end (* plk_d1 (pow 0.9 (* kr (- blk n1)))))
+  ; ---- PARTICLES
+  (def range0 (gswitch (* rise_b is_prt) 1 (read-history h_range)))
+  (def ps_init (- 1 (* 0.6 u3 u3)))
+  (def ps0 (gswitch (* rise_b (max is_prt is_flw))
+                    (gswitch is_prt ps_init 0.5)
+                    (el-rd h_ps ready 0.5)))
+  (def delay0 (gswitch (* rise_b is_prt) 0 (read-history h_delay)))
+  (def fire (* is_prt gate_f (eq delay0 0)))
+  (def amount (+ 1.05 (* 0.5 u u)))
+  (def go_up (gt u2 0.7))
+  (def go_dn (* (- 1 go_up) (lt u3 0.3)))
+  (def ps_up (min (* ps0 amount) (+ range0 0.25)))
+  (def ps_dn (max (/ ps0 amount) 0.02))
+  (def ps_new (gswitch go_up ps_up (gswitch go_dn ps_dn ps0)))
+  (def prt_gain (* (- 1 range0) (- 1 range0)))
+  (def prt_out (/ (* fire ps_new amp (- 1 prt_gain)) kr))
+  (def decay_factor (- 1 param))
+  (def range1 (gswitch fire (* range0 (- 1 (* decay_factor decay_factor 0.5))) range0))
+  (def delay1 (gswitch fire (floor (* ps_new 0.15 samplerate))
+                (gswitch (* is_prt gate_f) (- delay0 1) delay0)))
+  (write-history h_range range1)
+  (write-history h_delay delay1)
+  ; ---- FLOW (strike at META = 1)
+  (def fscale (el-hold (* param param param param)))
+  (def fthreshold (el-hold (* kr (+ 0.0001 (* fscale 0.125)))))
+  (def fps (gswitch (lt u fthreshold) (- ps0) ps0))
+  (def flw_out (+ (* fps (- 1 fscale)) (* (- u 0.5) fscale (sqrt (/ 1 kr)))))
+  (def ps1 (gswitch fire ps_new (gswitch is_flw fps ps0)))
+  (write-history h_ps ps1)
+  (write-history ready 1)
+  ; ---- block-rate damp_state_ update and damping()
+  (def damp_end (gswitch is_plk plk_damp_end (gswitch (max is_smp is_mal) damp_g damp0)))
+  (write-history h_damp (gswitch bstart damp_end damp0))
+  (def damping (el-hold (gswitch is_smp smp_damp (gswitch is_mal mal_damp
+                          (gswitch is_plk (* plk_damp_end 0.5) 0)))))
+  ; ---- output, through the exciter low-pass except for the sample player
+  (def raw (selector model smp_out mal_out plk_out prt_out flw_out 0))
+  (def g (exc-lp-g timbre))
+  (def h (el-hold (el-svf-h g 2)))
+  (make-history s1)
+  (make-history s2)
+  (def st1 (read-history s1))
+  (def st2 (read-history s2))
+  (def hp (* (- raw (* 2 st1) (* g st1) st2) h))
+  (def bp (+ (* g hp) st1))
+  (def lp (+ (* g bp) st2))
+  (write-history s1 (gswitch is_smp st1 (+ (* g hp) bp)))
+  (write-history s2 (gswitch is_smp st2 (+ (* g bp) lp)))
+  (tuple (gswitch is_smp smp_out lp) damping))
+
+; Blown tube (tube.cc): a reed-like nonlinearity in a delay-line loop
+; (2048-sample line at 32 kHz, kept in time at the host rate).
+(def tube_line (tensor @shape [8192]))
+(defmacro exc-tube (frequency envelope damping timbre in gain)
+  (make-history h_c)
+  (make-history h_zero)
+  (make-history h_pole)
+  ; 1 / frequency, halved until it fits the 2048-sample line
+  (def d0 (/ 1 frequency))
+  (def halvings (max 0 (+ (floor (- (/ (log d0) 0.69314718) 11)) 1)))
+  (def delay (el-hold (/ d0 (pow 2 halvings) kr)))
+  (def di (floor delay))
+  (def df (- delay di))
+  (def env (el-hold (min envelope 1)))
+  (def damp (el-hold (- 3.6 (* damping 1.8))))
+  (def lpf (el-hold (el-coef (min (* frequency (+ 1 (* timbre timbre 256))) 0.995))))
+  (def c (read-history h_c))
+  (def breath (+ (* in damp) 0.8))
+  (def a (peek tube_line (el-imod (- c di) 8192)))
+  (def b (peek tube_line (el-imod (- c di 1) 8192)))
+  (def tin (+ a (* (- b a) df)))
+  (def pd (- (* -0.95 (+ (* tin env) (read-history h_zero))) breath))
+  (def reed (+ (* pd -0.2) 0.8))
+  (def out (clip (+ (* pd reed) breath) -5 5))
+  (def pole (+ (read-history h_pole) (* lpf (- out (read-history h_pole)))))
+  (def res (seq (poke tube_line c (* out 0.5))
+                (+ in (* gain env pole))))
+  (write-history h_zero tin)
+  (write-history h_pole pole)
+  (write-history h_c (el-imod (+ c 1) 8192))
+  res)
+
+; FxEngine all-pass (32-bit memory) of a `len`-slot line at 32 kHz.
+(defmacro exc-allpass (x len g)
+  (make-history h)
+  (def r (delay (read-history h) (- (/ (- len 1) kr) 1) @max-delay 2048))
+  (def w (+ x (* r g)))
+  (write-history h w)
+  (+ (* w (- g)) r))
+
+; Diffuser (fx/diffuser.h): four all-passes, 0.625.
+(defmacro exc-diffuser (x)
+  (exc-allpass (exc-allpass (exc-allpass (exc-allpass x 126 0.625) 180 0.625) 269 0.625) 444 0.625))
