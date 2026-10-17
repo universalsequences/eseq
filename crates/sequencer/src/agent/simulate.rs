@@ -144,6 +144,7 @@ pub fn simulate_instance(
                     result
                 }
                 Err(error) => {
+                    let error = with_requires_hint(error, &published.requires);
                     failure = Some(TickFailure { tick: index, beat: beat.max(0.0), error });
                     skipped(random_state)
                 }
@@ -170,6 +171,27 @@ pub fn simulate_instance(
         })
         .collect();
     Ok(Simulation { bars, ticks, hits, failure })
+}
+
+/// A tick that calls `module/name` it cannot see is usually a module left
+/// out of `:requires` (the scheduler's runtime loads only those) or a name
+/// the module does not export; say which.
+fn with_requires_hint(error: String, requires: &[String]) -> String {
+    // Anywhere in the text: a macro-expanded failure wraps it in ExpandedFrom.
+    const MARK: &str = "UnknownVariable(\"";
+    let Some(name) = error
+        .find(MARK)
+        .map(|at| &error[at + MARK.len()..])
+        .and_then(|rest| rest.split_once('"').map(|(name, _)| name.to_string()))
+    else {
+        return error;
+    };
+    let Some((module, _)) = name.rsplit_once('/') else { return error };
+    if requires.iter().any(|required| required == module) {
+        format!("{error}: `{module}` is in :requires, so is `{name}` defined and exported there?")
+    } else {
+        format!("{error}: the tick calls into `{module}`, which is not in the kind's :generator :requires")
+    }
 }
 
 /// `bar.sixteenth` (1-based) for a beat, with the remainder when it is off
@@ -341,6 +363,18 @@ mod tests {
         assert_eq!(run.hits.len(), 16, "two hits per tick merge into one");
         assert!((run.hits[0].velocity - 0.8).abs() < 1e-6, "{:?}", run.hits[0]);
         assert!(state.generator_mark_keys().is_empty(), "the live state saw no gen-mark");
+    }
+
+    #[test]
+    fn an_unknown_qualified_name_says_whether_its_module_is_required() {
+        let requires = vec!["my.core".to_string()];
+        assert!(with_requires_hint("UnknownVariable(\"other.core/tick\")".into(), &requires)
+            .ends_with("which is not in the kind's :generator :requires"));
+        assert!(with_requires_hint("UnknownVariable(\"my.core/tock\")".into(), &requires)
+            .contains("is `my.core/tock` defined and exported there?"));
+        assert_eq!(with_requires_hint("IncorrectType".into(), &requires), "IncorrectType");
+        let expanded = "ExpandedFrom { error: UnknownVariable(\"other.core/x\"), diagnostic: \"…\" }";
+        assert!(with_requires_hint(expanded.into(), &requires).contains("which is not in the kind's"));
     }
 
     #[test]

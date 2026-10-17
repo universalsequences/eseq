@@ -69,9 +69,15 @@ module with `outline`, then `form_source` for the forms you need.\n\
 Your work lives on disk, in a Local module: start it with `create_module`, then add or \
 replace one top-level form at a time with `define_form`, which writes the file and reloads \
 the module (a failed reload restores the file and returns the errors). `eval` is for \
-questions and experiments; nothing it defines is saved. Look at any UI you build with \
-`capture`, which returns the image and a layout report (clipped, offscreen and overlapping \
-widgets); fix what it reports before calling the UI done.";
+questions and experiments; nothing it defines is saved, and `write_module` replaces a whole \
+file.\n\
+\n\
+Check your work here rather than as the guides describe for the command line: `new_instance` \
+makes an instance of your kind; `simulate` runs its tick for a few bars and lists every hit \
+(instead of asking the user to press Play); `capture` draws its panel and reports clipped, \
+offscreen and overlapping widgets (instead of `eseq sequencer check`), and with `click` and \
+`keys` it operates the panel so you can confirm an edit changed the document. Fix what they \
+report before calling the work done.";
 
     pub(crate) fn run(args: McpArgs) -> Result<(), Box<dyn std::error::Error>> {
         let mut out = BufWriter::new(stdio::take_stdout()?);

@@ -1201,6 +1201,20 @@ fn publish_capture_sound_glyphs(editor: &mut Editor) -> Result<(), String> {
 /// the first widget of each named type. This lets fixtures capture state that
 /// only opens through input, such as a dropdown's menu overlay. Returns true
 /// if any click was dispatched (the frame must then be rebuilt).
+/// A left click (press and release) at cell `(col, row)` of a
+/// `columns`x`rows` layout, through the editor's own mouse path.
+fn click_cell(editor: &mut Editor, columns: usize, rows: usize, (col, row): (f32, f32)) {
+    for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)] {
+        let event = MouseEvent {
+            kind,
+            column: col.floor() as u16,
+            row: row.floor() as u16,
+            modifiers: KeyModifiers::NONE,
+        };
+        editor.handle_mouse_precise(event, 0, 0, columns as u16, rows as u16, col, row);
+    }
+}
+
 fn apply_capture_click_widgets(
     editor: &mut Editor,
     columns: usize,
@@ -1243,25 +1257,7 @@ fn apply_capture_click_widgets(
             .ok_or_else(|| format!("capture-click-widgets: no {name:?} widget in the layout"))?;
         let col = node.rect.col + node.rect.width * 0.5;
         let row = node.rect.row + node.rect.height * 0.5;
-        for kind in [
-            MouseEventKind::Down(MouseButton::Left),
-            MouseEventKind::Up(MouseButton::Left),
-        ] {
-            editor.handle_mouse_precise(
-                MouseEvent {
-                    kind,
-                    column: col.floor() as u16,
-                    row: row.floor() as u16,
-                    modifiers: KeyModifiers::NONE,
-                },
-                0,
-                0,
-                columns as u16,
-                rows as u16,
-                col,
-                row,
-            );
-        }
+        click_cell(editor, columns, rows, (col, row));
         editor.refresh_runtime_side_effects();
     }
     Ok(true)
@@ -1688,6 +1684,7 @@ impl HeadlessSession {
         buffer: &str,
         key: Option<&str>,
         size: (u32, u32),
+        click: Option<&str>,
         keys: Option<&str>,
     ) -> Result<(Vec<u8>, eseqlisp::ui::capture::LayoutReport), String> {
         let keystrokes = keys.map(parse_capture_keys).transpose()?.unwrap_or_default();
@@ -1695,7 +1692,7 @@ impl HeadlessSession {
             Some(backend) => backend,
             None => create_capture_backend(&mut self.editor, size.0, size.1).map_err(|error| error.to_string())?,
         };
-        let rendered = self.render_with(&mut backend, &normalize_buffer_name(buffer), key, size, &keystrokes);
+        let rendered = self.render_with(&mut backend, &normalize_buffer_name(buffer), key, size, click, &keystrokes);
         self.capture_backend = Some(backend);
         rendered
     }
@@ -1706,6 +1703,7 @@ impl HeadlessSession {
         buffer: &str,
         key: Option<&str>,
         size: (u32, u32),
+        click: Option<&str>,
         keystrokes: &[KeyEvent],
     ) -> Result<(Vec<u8>, eseqlisp::ui::capture::LayoutReport), String> {
         self.isolate(buffer, true, false)?;
@@ -1715,6 +1713,12 @@ impl HeadlessSession {
         self.settle_sample_browser()?;
         let (columns, rows, cell) = self.fit_viewport(backend, size);
         let mut frame = self.frame(columns, rows);
+        if let Some(target) = click {
+            let center = eseqlisp::ui::capture::keyed_cell_center(&frame, target, (columns as f32, rows as f32))?;
+            click_cell(&mut self.editor, columns, rows, center);
+            self.settle()?;
+            frame = self.frame(columns, rows);
+        }
         if !keystrokes.is_empty() {
             self.type_keys(keystrokes, cell, size);
             self.settle()?;

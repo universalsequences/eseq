@@ -146,6 +146,17 @@ const HOST_TOOLS: &[HostTool] = &[
         ],
     },
     HostTool {
+        name: "write_module",
+        description: "Replace a whole module file with `source` (which must begin with its \
+            `(module NAME)` form) and reload it, for a rewrite too large for `define_form`. \
+            Same rules: only Local modules and installed packages; a failed reload restores the \
+            old file and returns the errors.",
+        params: &[
+            ("module", "string", "Module to rewrite", true),
+            ("source", "string", "The complete new file", true),
+        ],
+    },
+    HostTool {
         name: "eval",
         description: "Evaluate eseqlisp forms in eseq's UI runtime and return the last value \
             printed, with any errors logged while they ran. Host commands they queue (creating \
@@ -178,11 +189,14 @@ const HOST_TOOLS: &[HostTool] = &[
         name: "capture",
         description: "Render one buffer to an image, as the app draws it, and report its layout: \
             every keyed widget's pixel rectangle and problems (clipped, offscreen, zero-size) \
-            and overlapping siblings in stacks and grids. `key` crops to one keyed subtree; \
-            `keys` types keystrokes first (`DOWN*3 RET`). Without `buffer`, lists the buffers.",
+            and overlapping siblings in stacks and grids. `key` crops to one keyed subtree. To \
+            operate the panel first, `click` clicks the center of a keyed widget, then `keys` \
+            types keystrokes (`UP*3 RET`); check the effect with `eval` or `simulate`. Without \
+            `buffer`, lists the buffers.",
         params: &[
             ("buffer", "string", "Buffer name, e.g. `*pulse · pulse 1*`", false),
             ("key", "string", "Crop to the widget with this :key", false),
+            ("click", "string", "Click the center of the widget with this :key first", false),
             ("width", "integer", "Pixels (default 1600)", false),
             ("height", "integer", "Pixels (default 900)", false),
             ("keys", "string", "Keystrokes to send first, bindings spelling", false),
@@ -234,6 +248,7 @@ pub(super) fn call(session: &mut HeadlessSession, name: &str, args: &Json) -> To
             "form_source" => form_source(session, &need("module")?, &need("name")?)?,
             "create_module" => create_module(session, &need("module")?, str_arg("source").as_deref())?,
             "define_form" => define_form(session, &need("module")?, &need("source")?)?,
+            "write_module" => write_module(session, &need("module")?, &need("source")?)?,
             "eval" => match run_lisp(session, &need("code")?) {
                 (Ok(value), log) => ToolOutput::text(with_log(format!("=> {value}"), &log)),
                 (Err(problem), log) => ToolOutput::error(with_log(problem, &log)),
@@ -263,6 +278,7 @@ pub(super) fn call(session: &mut HeadlessSession, name: &str, args: &Json) -> To
                         &buffer,
                         str_arg("key").as_deref(),
                         (number("width", DEFAULT_CAPTURE_SIZE.0), number("height", DEFAULT_CAPTURE_SIZE.1)),
+                        str_arg("click").as_deref(),
                         str_arg("keys").as_deref(),
                     ),
                 }
@@ -487,7 +503,8 @@ impl Drop for RestoreFile<'_> {
     }
 }
 
-fn define_form(session: &mut HeadlessSession, module: &str, form: &str) -> Result<ToolOutput, String> {
+/// A user-tier module's file and text, or why the agent may not write it.
+fn writable_module(session: &HeadlessSession, module: &str) -> Result<(PathBuf, String), String> {
     let (path, before) = module_source(session, module)?;
     let paths = sequencer::app_paths::app_paths();
     if !forms::is_under_any(&path, &forms::user_module_roots(paths)) {
@@ -496,12 +513,48 @@ fn define_form(session: &mut HeadlessSession, module: &str, form: &str) -> Resul
             path.display()
         ));
     }
+    Ok((path, before))
+}
+
+fn define_form(session: &mut HeadlessSession, module: &str, form: &str) -> Result<ToolOutput, String> {
+    let (path, before) = writable_module(session, module)?;
     let (after, defined) = forms::define_form(&before, form)?;
-    let mut guard = RestoreFile { path: &path, before: &before, armed: true };
-    std::fs::write(&path, &after).map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    let place = match defined {
+        forms::Defined::Replaced { line } => format!("Replaced the form at line {line} of"),
+        forms::Defined::Appended { line } => format!("Appended at line {line} of"),
+    };
+    rewrite_and_reload(session, module, &path, &before, &after, &place)
+}
+
+fn write_module(session: &mut HeadlessSession, module: &str, source: &str) -> Result<ToolOutput, String> {
+    let (path, before) = writable_module(session, module)?;
+    forms::top_level_forms(source).map_err(|error| format!("source, line {error}"))?;
+    // The first form names it, and the loader (which takes the last plain
+    // `(module NAME)`) must agree.
+    let loaded_as = eseqlisp::modules::inspect_exports(source).ok().and_then(|(name, _)| name);
+    if forms::declared_module(source).as_deref() != Some(module) || loaded_as.as_deref() != Some(module) {
+        return Err(format!("the source must begin with (module {module})"));
+    }
+    let mut after = source.trim_end().to_string();
+    after.push('\n');
+    rewrite_and_reload(session, module, &path, &before, &after, "Rewrote")
+}
+
+/// Write `after` over `before`, reload the module from disk and settle; a
+/// failed reload (or a panic in it) puts `before` back.
+fn rewrite_and_reload(
+    session: &mut HeadlessSession,
+    module: &str,
+    path: &Path,
+    before: &str,
+    after: &str,
+    what: &str,
+) -> Result<ToolOutput, String> {
+    let mut guard = RestoreFile { path, before, armed: true };
+    std::fs::write(path, after).map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     // A failed transactional reload restores the runtime's state itself.
     let (report, log) = capture_output(|| {
-        session.editor.runtime_mut().reload_paths_transactional(vec![path.clone()], Vec::new())
+        session.editor.runtime_mut().reload_paths_transactional(vec![path.to_path_buf()], Vec::new())
     });
     if !report.success {
         guard.restore()?;
@@ -512,16 +565,34 @@ fn define_form(session: &mut HeadlessSession, module: &str, form: &str) -> Resul
     }
     guard.armed = false;
     let (settled, settle_log) = capture_output(|| session.settle());
-    let place = match defined {
-        forms::Defined::Replaced { line } => format!("Replaced the form at line {line}"),
-        forms::Defined::Appended { line } => format!("Appended at line {line}"),
+    // The reload reports each name under its module and its aliases; list
+    // this module's own once (a file with no module form has only flat ones).
+    let prefix = format!("{module}/");
+    let mut changed: Vec<&str> =
+        report.changed_symbols.iter().filter_map(|name| name.strip_prefix(prefix.as_str())).collect();
+    if changed.is_empty() {
+        changed = report.changed_symbols.iter().map(String::as_str).filter(|name| !name.contains('/')).collect();
+    }
+    changed.sort_unstable();
+    changed.dedup();
+    let changed = if changed.is_empty() { String::new() } else { format!("; changed: {}", changed.join(", ")) };
+    // A reload rebinds what the file defines but does not unbind what it no
+    // longer does.
+    let defined = |text: &str| -> Vec<String> {
+        forms::top_level_forms(text).map(|forms| forms.into_iter().filter_map(|form| form.name).collect()).unwrap_or_default()
     };
-    let changed = if report.changed_symbols.is_empty() {
+    let now = defined(after);
+    let removed: Vec<String> = defined(before).into_iter().filter(|name| !now.contains(name)).collect();
+    let removed = if removed.is_empty() {
         String::new()
     } else {
-        format!("; changed: {}", report.changed_symbols.join(", "))
+        format!(
+            "\nRemoved from the file: {}. They stay bound in this session until eseq restarts, so check \
+             nothing still calls them.",
+            removed.join(", ")
+        )
     };
-    let text = format!("{place} of {} and reloaded {module}{changed}.", path.display());
+    let text = format!("{what} {} and reloaded {module}{changed}.{removed}", path.display());
     let log = format!("{log}{settle_log}");
     Ok(match settled {
         Ok(()) => ToolOutput::text(with_log(text, &log)),
@@ -569,9 +640,10 @@ fn capture(
     buffer: &str,
     key: Option<&str>,
     size: (u32, u32),
+    click: Option<&str>,
     keys: Option<&str>,
 ) -> ToolOutput {
-    let (rendered, log) = capture_output(|| session.render_png(buffer, key, size, keys));
+    let (rendered, log) = capture_output(|| session.render_png(buffer, key, size, click, keys));
     let (png, report) = match rendered {
         Ok(rendered) => rendered,
         Err(problem) => return ToolOutput::error(with_log(problem, &log)),

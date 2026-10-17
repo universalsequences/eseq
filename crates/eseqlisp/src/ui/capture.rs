@@ -62,17 +62,11 @@ pub fn layout_keys(root: &LayoutNode) -> Vec<String> {
     keys
 }
 
-pub fn keyed_region(frame: &RenderFrame, key: &str, cell: (f32, f32),
-    size: (u32, u32), padding: u32) -> Result<PixelRegion, String> {
-    let (cell_w, cell_h) = cell;
-    let (width, height) = size;
-    if !cell_w.is_finite() || !cell_h.is_finite() || cell_w <= 0.0 || cell_h <= 0.0
-        || width == 0 || height == 0 {
-        return Err("capture dimensions must be finite and positive".to_string());
-    }
+/// The layout rectangle (cells, scroll applied) of the one widget keyed
+/// `key`, refusing what a crop or a click would get wrong: no match, several,
+/// an overlay, no area, or a widget clipped or outside `viewport`.
+fn keyed_rect(frame: &RenderFrame, key: &str, viewport: Rect) -> Result<Rect, String> {
     let root = frame.widget_layout.as_ref().ok_or("capture buffer has no widget layout")?;
-    let viewport = Rect { col: 0.0, row: 0.0,
-        width: width as f32 / cell_w, height: height as f32 / cell_h };
     let mut matches = Vec::new();
     visit(root, -frame.widget_layout_scroll_left,
         -frame.widget_scroll_top - frame.text_scroll_top as f32, viewport, false,
@@ -82,9 +76,9 @@ pub fn keyed_region(frame: &RenderFrame, key: &str, cell: (f32, f32),
             }
         });
     let (rect, clip, overlay) = match matches.as_slice() {
-        [] => return Err(format!("capture key {key:?} was not found; use --list-keys")),
+        [] => return Err(format!("capture key {key:?} was not found; list the keys with --list-keys or the layout report")),
         [found] => *found,
-        _ => return Err(format!("capture key {key:?} matches {} nodes; use a unique stable key from --list-keys", matches.len())),
+        _ => return Err(format!("capture key {key:?} matches {} nodes; use a unique stable key from the key list", matches.len())),
     };
     if overlay {
         return Err(format!("capture key {key:?} belongs to an overlay; overlay geometry is not a buffer-layout rectangle"));
@@ -93,12 +87,27 @@ pub fn keyed_region(frame: &RenderFrame, key: &str, cell: (f32, f32),
         || rect.width <= 0.0 || rect.height <= 0.0 {
         return Err(format!("capture key {key:?} has no finite, nonzero layout rectangle"));
     }
-    // Refuse a misleading partial illustration. Enlarge the viewport or
-    // scroll the target into view in the fixture instead of changing layout.
+    // Refuse a misleading partial illustration (or a click that would land
+    // on whatever covers the hidden part). Enlarge the viewport or scroll the
+    // target into view instead of changing layout.
     let visible = intersection(rect, clip);
     if visible.width + 0.001 < rect.width || visible.height + 0.001 < rect.height {
         return Err(format!("capture key {key:?} is clipped or offscreen; enlarge the buffer or scroll it into view"));
     }
+    Ok(rect)
+}
+
+pub fn keyed_region(frame: &RenderFrame, key: &str, cell: (f32, f32),
+    size: (u32, u32), padding: u32) -> Result<PixelRegion, String> {
+    let (cell_w, cell_h) = cell;
+    let (width, height) = size;
+    if !cell_w.is_finite() || !cell_h.is_finite() || cell_w <= 0.0 || cell_h <= 0.0
+        || width == 0 || height == 0 {
+        return Err("capture dimensions must be finite and positive".to_string());
+    }
+    let viewport = Rect { col: 0.0, row: 0.0,
+        width: width as f32 / cell_w, height: height as f32 / cell_h };
+    let rect = keyed_rect(frame, key, viewport)?;
     let x = (rect.col * cell_w).floor().max(0.0) as u32;
     let y = (rect.row * cell_h).floor().max(0.0) as u32;
     let right = ((rect.col + rect.width) * cell_w).ceil().max(0.0) as u32;
@@ -109,6 +118,14 @@ pub fn keyed_region(frame: &RenderFrame, key: &str, cell: (f32, f32),
         width: right.saturating_add(padding).min(width) - x,
         height: bottom.saturating_add(padding).min(height) - y,
     })
+}
+
+/// The cell under the center of the widget keyed `key` in a frame of
+/// `viewport` cells (columns, rows), for a host that clicks it; refused as
+/// [`keyed_region`] refuses a crop, so a click never lands on another widget.
+pub fn keyed_cell_center(frame: &RenderFrame, key: &str, viewport: (f32, f32)) -> Result<(f32, f32), String> {
+    let rect = keyed_rect(frame, key, Rect { col: 0.0, row: 0.0, width: viewport.0, height: viewport.1 })?;
+    Ok((rect.col + rect.width * 0.5, rect.row + rect.height * 0.5))
 }
 
 /// One keyed node of a laid-out frame, for checking a layout as data rather
@@ -231,6 +248,18 @@ fn sibling_overlaps(node: &LayoutNode, keyed_ancestor: Option<&str>, out: &mut V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_click_target_is_the_center_of_its_keyed_widget() {
+        let frame = frame(r#"(effect (v-stack (box :height 3)
+            (box :key "target" :width 10 :height 4)
+            (box :key "same" :width 1 :height 1) (box :key "same" :width 1 :height 1)))"#);
+        let (col, row) = keyed_cell_center(&frame, "target", (100.0, 60.0)).unwrap();
+        assert_eq!((col, row), (5.0, 5.0));
+        assert!(keyed_cell_center(&frame, "missing", (100.0, 60.0)).unwrap_err().contains("not found"));
+        assert!(keyed_cell_center(&frame, "same", (100.0, 60.0)).unwrap_err().contains("matches 2"));
+        assert!(keyed_cell_center(&frame, "target", (100.0, 6.0)).unwrap_err().contains("clipped or offscreen"));
+    }
 
     #[test]
     fn layout_report_lists_keyed_nodes_with_problems_and_sibling_overlaps() {

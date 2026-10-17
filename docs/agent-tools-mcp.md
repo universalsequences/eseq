@@ -38,10 +38,11 @@ ESEQ_CONFIG_DIR=/tmp/eseq-mcp-cfg python3 crates/sequencer/tools/mcp_session.py 
 | `form_source` | The exact text of the forms defining a name |
 | `create_module` | A new Local module (`a/b.lisp` under Local packages), imported |
 | `define_form` | Replace or append one top-level form, write the file, reload |
+| `write_module` | Replace a whole module file and reload it (same restore-on-failure rule) |
 | `eval` | Evaluate forms; for questions and experiments, nothing is saved |
 | `new_instance` | Create an instance of a kind; returns its buffer |
 | `simulate` | Run an instance's tick for N bars headlessly; list its hits or the tick that threw |
-| `capture` | Render a buffer (or a keyed subtree) to PNG, with a layout report |
+| `capture` | Render a buffer (or a keyed subtree) to PNG, with a layout report; `click` a keyed widget and type `keys` first to operate the panel |
 
 Rules the tools hold:
 

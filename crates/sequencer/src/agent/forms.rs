@@ -138,6 +138,16 @@ pub fn define_form(source: &str, form: &str) -> Result<(String, Defined), String
     }
 }
 
+/// The name in the source's first form when that form is `(module NAME)`.
+pub fn declared_module(source: &str) -> Option<String> {
+    let exprs = parse(source).ok()?;
+    let ExprKind::List(items) = &exprs.first()?.kind else { return None };
+    match items.as_slice() {
+        [head, name, ..] if symbol(head) == Some("module") => symbol(name).map(str::to_string),
+        _ => None,
+    }
+}
+
 /// The exact text of the forms that define `name`, each preceded by its
 /// line number.
 pub fn form_source(source: &str, name: &str) -> Result<Vec<(usize, String)>, String> {
@@ -391,6 +401,14 @@ mod tests {
         assert_eq!(bracket_problem("(def a \"(\")"), None, "brackets in strings do not count");
         assert_eq!(bracket_problem("(def a \"say \\\"(\\\" \")"), None, "an escaped quote stays in the string");
         assert_eq!(bracket_problem("; (\n(def a 1)"), None, "brackets in comments do not count");
+    }
+
+    #[test]
+    fn the_declared_module_is_the_first_forms_name() {
+        assert_eq!(declared_module(SOURCE).as_deref(), Some("my.pulse"));
+        assert_eq!(declared_module(";; (module fake)\n(module real.one) ; c\n").as_deref(), Some("real.one"));
+        assert_eq!(declared_module("(def x 1)\n(module late)"), None);
+        assert_eq!(declared_module("(module \"quoted\")"), None);
     }
 
     #[test]
