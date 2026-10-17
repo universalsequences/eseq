@@ -3892,6 +3892,13 @@ impl Runtime {
         }
     }
 
+    /// The views and effects that threw since the last call (see
+    /// [`crate::vm::VM::take_reactive_failures`]): how a host says why a
+    /// buffer did not draw.
+    pub fn take_reactive_errors(&mut self) -> Vec<String> {
+        self.vm.take_reactive_failures()
+    }
+
     fn flush_vm_reactive_sets(&mut self) {
         for (namespace, field, value) in self.vm.take_pending_reactive_sets() {
             let outcome = self.reactive_registry.set(&namespace, &field, value, false);
@@ -5823,5 +5830,23 @@ mod observer_tests {
         assert_eq!(seen.borrow().len(), 2);
         assert!(matches!(seen.borrow()[1], Value::Number(2.0)));
         assert!(runtime.take_pending_buffer_widget_trees().is_empty());
+    }
+
+    #[test]
+    fn a_view_that_throws_is_kept_for_the_host_even_when_its_eval_error_is_dropped() {
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str("(defstate broken 0)\n(effect-buffer \"*view*\" (if (> broken 0) (undefined-widget-call) (label \"ok\")))")
+            .unwrap();
+        runtime.run_reactive_cycle();
+        assert!(runtime.take_reactive_errors().is_empty());
+        // The dirty effect runs after this eval; a host that drops the
+        // eval's result still learns why the view stopped drawing.
+        let _ = runtime.eval_str("(set! broken 1)");
+        runtime.run_reactive_cycle();
+        let errors = runtime.take_reactive_errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("UnknownVariable(\"undefined-widget-call\")"), "{errors:?}");
+        assert!(runtime.take_reactive_errors().is_empty(), "taking drains");
     }
 }

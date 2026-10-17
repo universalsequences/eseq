@@ -1542,6 +1542,12 @@ impl HeadlessSession {
         applied.map(|_| ())
     }
 
+    /// Views and effects that threw since the last call (see
+    /// `Runtime::take_reactive_errors`).
+    pub(crate) fn take_reactive_errors(&mut self) -> Vec<String> {
+        self.editor.runtime_mut().take_reactive_errors()
+    }
+
     /// Names of the editor's buffers.
     pub(crate) fn buffer_names(&self) -> Vec<String> {
         self.editor.buffers.iter().map(|buffer| buffer.name.clone()).collect()
@@ -1673,6 +1679,9 @@ impl HeadlessSession {
         keystrokes: &[KeyEvent],
     ) -> Result<(Vec<u8>, eseqlisp::ui::capture::LayoutReport), String> {
         self.isolate(buffer, true, false)?;
+        // A buffer that was hidden (a new instance's view) defers its effects
+        // until it shows; run them now, as the live loop's next tick would.
+        self.settle()?;
         self.settle_sample_browser()?;
         let (columns, rows, cell) = self.fit_viewport(backend, size);
         let mut frame = self.frame(columns, rows);
@@ -1680,6 +1689,12 @@ impl HeadlessSession {
             self.type_keys(keystrokes, cell, size);
             self.settle()?;
             frame = self.frame(columns, rows);
+        }
+        if frame.widget_layout.is_none() {
+            return Err(format!(
+                "{buffer} has no widget tree: its view has not drawn. A render error reported with \
+                 this or an earlier call says why; fix the view and capture again"
+            ));
         }
         let report = eseqlisp::ui::capture::layout_report(&frame, cell, size)?;
         let region = key

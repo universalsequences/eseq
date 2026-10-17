@@ -185,6 +185,10 @@ pub(super) fn load_lisp_tools(session: &mut HeadlessSession) {
     if let Err(problem) = result {
         eprintln!("eseq mcp: the Lisp tool registry did not load: {problem} {log}");
     }
+    // Boot's own failures are the app's, not the first call's.
+    for error in session.take_reactive_errors() {
+        eprintln!("eseq mcp: at boot: {error}");
+    }
 }
 
 pub(super) fn list(session: &mut HeadlessSession) -> Vec<Json> {
@@ -241,7 +245,7 @@ pub(super) fn call(session: &mut HeadlessSession, name: &str, args: &Json) -> To
             _ => call_lisp_tool(session, name, args),
         })
     }));
-    match outcome {
+    let mut output = match outcome {
         Ok(Ok(output)) => output,
         Ok(Err(message)) => ToolOutput::error(message),
         Err(panic) => {
@@ -252,7 +256,17 @@ pub(super) fn call(session: &mut HeadlessSession, name: &str, args: &Json) -> To
                 .unwrap_or_else(|| "unknown panic".to_string());
             ToolOutput::error(format!("the tool panicked inside eseq: {message}"))
         }
+    };
+    // A view that throws leaves its last good tree (or none) and says
+    // nothing; this is where the agent learns why a buffer did not draw.
+    let errors = session.take_reactive_errors();
+    if !errors.is_empty() {
+        output.content.push(Content::Text(format!(
+            "Render errors (a view or effect threw while this call ran):\n{}",
+            errors.join("\n")
+        )));
     }
+    output
 }
 
 fn guide(topic: &str) -> ToolOutput {

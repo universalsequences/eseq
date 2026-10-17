@@ -99,6 +99,10 @@ pub enum VMError {
 
 pub type NativeFn = Rc<dyn Fn(Vec<Value>, &mut VM) -> Value>;
 
+/// How many effect failures the VM keeps for a host to read: enough to
+/// explain one evaluation, bounded for hosts that never read them.
+const MAX_REACTIVE_FAILURES: usize = 16;
+
 #[derive(Clone)]
 pub struct NativeFunction {
     name: String,
@@ -2882,6 +2886,9 @@ pub struct VM {
     reactive_function_profiles: Vec<ReactiveFunctionProfile>,
     last_reactive_error_context: Option<String>,
     last_reactive_error_detail: Option<String>,
+    /// Effects and views that threw, newest last, at most
+    /// [`MAX_REACTIVE_FAILURES`]; see [`VM::take_reactive_failures`].
+    reactive_failures: Vec<String>,
     /// Opcodes left before the running code fails with
     /// [`VMError::StepBudgetExceeded`]; `None` (the default) is unlimited.
     step_budget: Option<u64>,
@@ -5245,6 +5252,7 @@ impl VM {
             reactive_function_profiles: Vec::new(),
             last_reactive_error_context: None,
             last_reactive_error_detail: None,
+            reactive_failures: Vec::new(),
             step_budget: None,
             current_effect_source_buffer_id: None,
             current_effect_target: EffectTarget::BufferId(None),
@@ -7240,6 +7248,38 @@ impl VM {
         self.last_reactive_error_context.take()
     }
 
+    /// Record a failed effect or view run. Whoever ran the reactive pass may
+    /// drop its `Err` (a host's eval after which dirty effects ran), so the
+    /// failure is kept here for [`Self::take_reactive_failures`].
+    fn note_reactive_failure(&mut self, node_id: NodeId, label: Option<String>, error: &VMError) {
+        let context = label.unwrap_or_else(|| format!("node:{node_id}"));
+        // A macro-expanded failure reads as its own error, then where it came from.
+        let (error, origin) = match error {
+            VMError::ExpandedFrom { error, diagnostic } => (error.as_ref(), Some(diagnostic)),
+            error => (error, None),
+        };
+        let mut failure = format!("{context}: {error:?}");
+        if let Some(detail) = &self.last_reactive_error_detail {
+            failure.push_str(&format!(" ({detail})"));
+        }
+        if let Some(origin) = origin {
+            failure.push_str(&format!("\n  {origin}"));
+        }
+        self.last_reactive_error_context = Some(context);
+        if self.reactive_failures.len() == MAX_REACTIVE_FAILURES {
+            self.reactive_failures.remove(0);
+        }
+        self.reactive_failures.push(failure);
+    }
+
+    /// The effect and view failures since the last call, oldest first, each
+    /// led by its node's label (a view buffer's name, `buf#N`, `observer`,
+    /// `node:N`): `*pulse · pulse 1*: UnknownVariable("…")`. A failed run
+    /// leaves the last good tree in place and says nothing else.
+    pub fn take_reactive_failures(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.reactive_failures)
+    }
+
     /// Arm (or with `None` disarm) an evaluation step budget: every opcode
     /// the VM executes, in this call and in any nested call a native makes
     /// back into the VM, spends one step, and running out fails the call with
@@ -8567,6 +8607,8 @@ impl VM {
                             self.current_effect_reactive_reads = Some(HashSet::new());
                             self.current_effect_symbol_reads = Some(HashSet::new());
                             let label = self.reactive_node_label(node_id);
+                            // A detail belongs to the failure that set it, not to the next node.
+                            self.last_reactive_error_detail = None;
                             let started = Instant::now();
                             let profile_started = self.begin_function_profile();
                             self.tracking_stack.push(node_id);
@@ -8577,8 +8619,7 @@ impl VM {
                                 // As below: a failed render waits for an input
                                 // change rather than forcing every cycle.
                                 self.dag.clear_dirty(node_id);
-                                self.last_reactive_error_context =
-                                    label.clone().or_else(|| Some(format!("node:{node_id}")));
+                                self.note_reactive_failure(node_id, label.clone(), &error);
                                 error
                             })?;
                             let render_elapsed = started.elapsed();
@@ -8689,6 +8730,8 @@ impl VM {
                         self.detach_subtree_effects_for_current_context();
                     }
                     let label = self.reactive_node_label(node_id);
+                    // A detail belongs to the failure that set it, not to the next node.
+                    self.last_reactive_error_detail = None;
                     let started = Instant::now();
                     let profile_started = self.begin_function_profile();
                     let execute_result = self.execute_from(chunk_idx);
@@ -8707,8 +8750,7 @@ impl VM {
                         // dirty bit here so the node re-runs only once an input
                         // changes again instead of forcing every later cycle.
                         self.dag.clear_dirty(node_id);
-                        self.last_reactive_error_context =
-                            label.clone().or_else(|| Some(format!("node:{node_id}")));
+                        self.note_reactive_failure(node_id, label.clone(), &error);
                         error
                     })?;
                     let captured_reactive_reads = if capturing_effect_reads {
