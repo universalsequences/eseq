@@ -1705,7 +1705,7 @@ impl WidgetDefinition for TreeWidget {
                     scale: 1.0,
                     fg: theme::FG(),
                     bg: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 }));
             }
             let status_width = if row.status_icon.is_some() || is_loading {
@@ -1826,7 +1826,7 @@ impl WidgetDefinition for TreeWidget {
                     scale: 1.0,
                     fg,
                     bg: transparent,
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
 
@@ -1843,7 +1843,7 @@ impl WidgetDefinition for TreeWidget {
                             scale: 1.0,
                             fg: theme::list_row_fg(is_selected, detail_fg),
                             bg: transparent,
-                            mono: false,
+                            face: crate::ui::glyph_atlas::TextFace::Regular,
                         },
                     ));
                 }

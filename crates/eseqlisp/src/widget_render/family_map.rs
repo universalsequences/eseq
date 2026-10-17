@@ -716,7 +716,7 @@ fn text(row: f32, col: f32, label: String, size: f32, fg: Color) -> GpuPrimitive
         scale: 1.0,
         fg,
         bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
-        mono: false,
+        face: crate::ui::glyph_atlas::TextFace::Regular,
     })
 }
 

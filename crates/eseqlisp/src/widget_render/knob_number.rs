@@ -2600,7 +2600,7 @@ impl WidgetDefinition for KnobNumberWidget {
                         b: 0.0,
                         a: 0.0,
                     },
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }
@@ -2626,7 +2626,7 @@ impl WidgetDefinition for KnobNumberWidget {
                         b: 0.0,
                         a: 0.0,
                     },
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }

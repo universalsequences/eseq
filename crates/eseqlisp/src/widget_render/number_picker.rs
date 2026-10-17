@@ -1573,7 +1573,7 @@ impl WidgetDefinition for NumberPickerWidget {
                     scale: 1.0,
                     fg,
                     bg: transparent,
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }

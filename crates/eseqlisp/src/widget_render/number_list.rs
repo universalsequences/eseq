@@ -259,7 +259,7 @@ impl WidgetDefinition for NumberListWidget {
                 scale: 1.0,
                 fg: text_color,
                 bg: chip_color,
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             }));
         }
         prims

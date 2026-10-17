@@ -1075,7 +1075,7 @@ impl WidgetDefinition for TextInputWidget {
                     scale: 1.0,
                     fg: display_color,
                     bg: transparent,
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }
@@ -1467,7 +1467,7 @@ impl WidgetDefinition for TextboxWidget {
                     scale: 1.0,
                     fg: display_color,
                     bg: transparent,
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }

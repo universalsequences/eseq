@@ -667,7 +667,7 @@ impl WidgetDefinition for MenuItemWidget {
                         crate::theme::DROPDOWN_FG(),
                     )),
                     bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }
@@ -687,7 +687,7 @@ impl WidgetDefinition for MenuItemWidget {
                 text: "›".to_string(),
                 font_size, scale: 1.0,
                 fg: dim(crate::theme::DROPDOWN_FG()), bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             }));
         }
         if let Some(Value::String(shortcut)) = node.props.get("shortcut")
@@ -708,7 +708,7 @@ impl WidgetDefinition for MenuItemWidget {
                     scale: 1.0,
                     fg: dim(fg),
                     bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }

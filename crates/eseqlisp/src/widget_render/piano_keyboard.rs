@@ -699,7 +699,7 @@ impl WidgetDefinition for PianoKeyboardWidget {
                         scale: 1.0,
                         fg: Color::rgba(0.0, 0.0, 0.0, 0.55),
                         bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                        mono: false,
+                        face: crate::ui::glyph_atlas::TextFace::Regular,
                     }));
                 }
                 let sources = displayed_sources(&active[key.note as usize], mode);

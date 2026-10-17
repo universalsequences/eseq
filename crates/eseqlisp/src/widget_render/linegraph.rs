@@ -520,7 +520,7 @@ impl WidgetDefinition for LineGraphWidget {
                         scale: 1.0,
                         fg: axis_color,
                         bg: transparent,
-                        mono: false,
+                        face: crate::ui::glyph_atlas::TextFace::Regular,
                     },
                 ));
             }

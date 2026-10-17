@@ -848,7 +848,7 @@ fn text(row: f32, col: f32, text: String, font_size: f32, fg: Color) -> GpuPrimi
         scale: 1.0,
         fg,
         bg: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
-        mono: false,
+        face: crate::ui::glyph_atlas::TextFace::Regular,
     })
 }
 

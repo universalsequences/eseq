@@ -48,7 +48,7 @@
       ((= kind 'code) (code-chip text opts))
       ((= kind 'link) (link-label text (nth frag 2) (get opts :on-link) :blue opts))
       ((= kind 'action-link) (link-label text (nth frag 2) (get opts :on-action) :accent opts))
-      ((= kind 'b) (label text :font-size size :color :white :bg :transparent))
+      ((= kind 'b) (label text :font-size size :color :white :bold true :bg :transparent))
       ((= kind 'em) (label text :font-size size :color :cyan :bg :transparent))
       (else (label text :font-size size :color :fg :bg :transparent)))))
 

@@ -1237,7 +1237,7 @@ impl WidgetDefinition for DropdownWidget {
                     scale: 1.0,
                     fg: text_color,
                     bg: transparent,
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         } else {
@@ -1259,7 +1259,7 @@ impl WidgetDefinition for DropdownWidget {
                         scale: 1.0,
                         fg: theme::DIM(),
                         bg: transparent,
-                        mono: false,
+                        face: crate::ui::glyph_atlas::TextFace::Regular,
                     }));
                     text_right -= width + TEXT_CHEVRON_GAP;
                 }
@@ -1287,7 +1287,7 @@ impl WidgetDefinition for DropdownWidget {
                         scale: 1.0,
                         fg: text_color,
                         bg: transparent,
-                        mono: false,
+                        face: crate::ui::glyph_atlas::TextFace::Regular,
                     },
                 ));
                 prims.push(GpuPrimitive::PopClipRect);
@@ -1506,7 +1506,7 @@ impl WidgetDefinition for DropdownWidget {
                                     scale: 1.0,
                                     fg: if is_hovered { theme::FG() } else { theme::DIM() },
                                     bg: transparent,
-                                    mono: false,
+                                    face: crate::ui::glyph_atlas::TextFace::Regular,
                                 },
                             ));
                         }
@@ -1548,7 +1548,7 @@ impl WidgetDefinition for DropdownWidget {
                         // Popup labels are chrome, not the trigger's colored value.
                         fg,
                         bg: transparent,
-                        mono: false,
+                        face: crate::ui::glyph_atlas::TextFace::Regular,
                     },
                 ));
             }

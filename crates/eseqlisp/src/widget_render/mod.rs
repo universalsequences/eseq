@@ -828,9 +828,10 @@ pub struct GpuProportionalTextPrimitive {
     pub scale: f32,
     pub fg: Color,
     pub bg: Color,
-    /// Draw with the editor's monospace face instead of the system UI font
-    /// (`label :mono true`); digits and note names then line up by column.
-    pub mono: bool,
+    /// The face to draw with: the system UI font, the editor's monospace
+    /// face (`label :mono true`; digits and note names line up by column),
+    /// or the UI font's bold weight (`label :bold true`).
+    pub face: crate::ui::glyph_atlas::TextFace,
 }
 
 #[derive(Clone, PartialEq)]
@@ -1447,27 +1448,26 @@ pub fn proportional_text_baseline_offset(
     row_offset: f32,
     ctx: &MeasureCtx<'_>,
 ) -> f32 {
-    proportional_text_baseline_offset_face(font_size, row_offset, ctx, false)
+    proportional_text_baseline_offset_face(
+        font_size,
+        row_offset,
+        ctx,
+        crate::ui::glyph_atlas::TextFace::Regular,
+    )
 }
 
-/// `proportional_text_baseline_offset` for either face; a mono label centers
-/// the mono face's cap band.
+/// `proportional_text_baseline_offset` for any face; a mono or bold label
+/// centers its own face's cap band.
 pub fn proportional_text_baseline_offset_face(
     font_size: f32,
     row_offset: f32,
     ctx: &MeasureCtx<'_>,
-    mono: bool,
+    face: crate::ui::glyph_atlas::TextFace,
 ) -> f32 {
     let cell_h = ctx.cell_h.max(1.0);
     let cap_height = ctx
         .text_measurer
-        .map(|measurer| {
-            if mono {
-                measurer.mono_cap_height_px(font_size)
-            } else {
-                measurer.cap_height_px(font_size)
-            }
-        })
+        .map(|measurer| measurer.cap_height_face_px(font_size, face))
         .unwrap_or(cell_h * 0.7);
     row_offset + crate::ui::glyph_atlas::centered_text_baseline_px(cell_h, cap_height, 1.0) / cell_h
 }
@@ -3561,7 +3561,13 @@ pub fn get_f32_prop(props: &HashMap<String, Value>, key: &str, default: f32) -> 
 }
 
 pub fn get_bool_prop(props: &HashMap<String, Value>, key: &str, default: bool) -> bool {
-    match props.get(key) {
+    bool_prop_value(props.get(key), default)
+}
+
+/// `get_bool_prop`'s reading of one prop value, for callers that hold the
+/// value without a cloned prop map. Bound props resolve their reactive slot.
+pub fn bool_prop_value(value: Option<&Value>, default: bool) -> bool {
+    match value {
         Some(Value::Bool(b)) => *b,
         Some(Value::Number(n)) => *n > 0.5,
         Some(Value::ReactiveRef { slot, .. }) => crate::reactive::read_float_slot(slot) > 0.5,

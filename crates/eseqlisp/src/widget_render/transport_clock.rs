@@ -110,7 +110,7 @@ impl WidgetDefinition for TransportClockWidget {
                     scale: 1.0,
                     fg,
                     bg,
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }

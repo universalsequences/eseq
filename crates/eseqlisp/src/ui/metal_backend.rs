@@ -59,7 +59,7 @@ mod inner {
     use crate::glyph_atlas::{
         MetalGlyphAtlas as GlyphAtlas,
         MetalProportionalGlyphAtlas as ProportionalGlyphAtlas,
-        SizedFontCache,
+        FaceFonts, TextFace,
     };
     use crate::layout::{LayoutNode, Rect, TextMeasurer};
     use crate::live_audio;
@@ -76,16 +76,13 @@ mod inner {
     /// Lightweight TextMeasurer that delegates to `SizedFontCache` for font
     /// metrics without needing a GPU atlas. Used by the layout engine.
     pub(crate) struct PropTextMeasurer {
-        fonts: std::cell::RefCell<SizedFontCache>,
-        mono_fonts: std::cell::RefCell<Option<SizedFontCache>>,
+        fonts: std::cell::RefCell<FaceFonts>,
     }
 
     impl PropTextMeasurer {
         pub(crate) fn new(scale: f64) -> Option<Self> {
-            let fonts = SizedFontCache::new(scale)?;
             Some(Self {
-                fonts: std::cell::RefCell::new(fonts),
-                mono_fonts: std::cell::RefCell::new(SizedFontCache::new_mono(scale)),
+                fonts: std::cell::RefCell::new(FaceFonts::new(scale)?),
             })
         }
     }
@@ -96,42 +93,36 @@ mod inner {
                 return 0.0;
             }
             let size_tenths = (font_size * 10.0).round() as u16;
-            self.fonts.borrow_mut().measure_text(text, size_tenths)
+            self.fonts.borrow_mut().regular.measure_text(text, size_tenths)
         }
 
         fn line_height_px(&self, font_size: f32) -> f32 {
             let size_tenths = (font_size * 10.0).round() as u16;
-            self.fonts.borrow_mut().line_height(size_tenths)
+            self.fonts.borrow_mut().regular.line_height(size_tenths)
         }
 
         fn cap_height_px(&self, font_size: f32) -> f32 {
             let size_tenths = (font_size * 10.0).round() as u16;
-            self.fonts.borrow_mut().cap_height(size_tenths)
+            self.fonts.borrow_mut().regular.cap_height(size_tenths)
         }
         fn descent_px(&self, font_size: f32) -> f32 {
             let size_tenths = (font_size * 10.0).round() as u16;
-            self.fonts.borrow_mut().descent(size_tenths)
+            self.fonts.borrow_mut().regular.descent(size_tenths)
         }
         fn text_ink_extents_px(&self, text: &str, font_size: f32) -> (f32, f32) {
             let size_tenths = (font_size * 10.0).round() as u16;
-            self.fonts.borrow().text_ink_extents(text, size_tenths)
+            self.fonts.borrow().regular.text_ink_extents(text, size_tenths)
         }
-        fn measure_mono_text_px(&self, text: &str, font_size: f32) -> f32 {
+        fn measure_text_face_px(&self, text: &str, font_size: f32, face: TextFace) -> f32 {
             if text.is_empty() {
                 return 0.0;
             }
             let size_tenths = (font_size * 10.0).round() as u16;
-            match self.mono_fonts.borrow_mut().as_mut() {
-                Some(fonts) => fonts.measure_text(text, size_tenths),
-                None => self.fonts.borrow_mut().measure_text(text, size_tenths),
-            }
+            self.fonts.borrow_mut().get_mut(face).measure_text(text, size_tenths)
         }
-        fn mono_cap_height_px(&self, font_size: f32) -> f32 {
+        fn cap_height_face_px(&self, font_size: f32, face: TextFace) -> f32 {
             let size_tenths = (font_size * 10.0).round() as u16;
-            match self.mono_fonts.borrow_mut().as_mut() {
-                Some(fonts) => fonts.cap_height(size_tenths),
-                None => self.fonts.borrow_mut().cap_height(size_tenths),
-            }
+            self.fonts.borrow_mut().get_mut(face).cap_height(size_tenths)
         }
     }
 
@@ -1076,7 +1067,7 @@ vertex WidgetVaryings widget_vert(
                 scale: 1.0,
                 fg: Color::rgba(0.8, 0.7, 0.6, 1.0),
                 bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                mono: false,
+                face: TextFace::Regular,
             }
         }
 
@@ -1991,7 +1982,7 @@ fragment float4 live_spectrogram_frag(
     struct ProportionalTextLayoutKey {
         text: String,
         size_tenths: u16,
-        mono: bool,
+        face: TextFace,
     }
 
     #[derive(Clone, Copy)]
@@ -2018,7 +2009,7 @@ fragment float4 live_spectrogram_frag(
     struct ProportionalTextVertexKey {
         text: String,
         size_tenths: u16,
-        mono: bool,
+        face: TextFace,
         row_bits: u32,
         col_bits: u32,
         align_width_bits: u32,
@@ -2043,7 +2034,7 @@ fragment float4 live_spectrogram_frag(
             Self {
                 text: run.text.clone(),
                 size_tenths: (run.font_size * 10.0).round() as u16,
-                mono: run.mono,
+                face: run.face,
                 row_bits: run.row.to_bits(),
                 col_bits: run.col.to_bits(),
                 align_width_bits: run.align_width.to_bits(),
@@ -2116,14 +2107,14 @@ fragment float4 live_spectrogram_frag(
             let key = ProportionalTextLayoutKey {
                 text: run.text.clone(),
                 size_tenths: (run.font_size * 10.0).round() as u16,
-                mono: run.mono,
+                face: run.face,
             };
             if !self.layouts.contains_key(&key) {
                 let mut pen_x = 0.0_f32;
                 let mut glyphs = Vec::new();
                 for ch in key.text.chars() {
                     let Some(entry) =
-                        prop_atlas.get_or_rasterize_face(ch, key.size_tenths, key.mono)
+                        prop_atlas.get_or_rasterize_face(ch, key.size_tenths, key.face)
                     else {
                         continue;
                     };
@@ -2140,9 +2131,9 @@ fragment float4 live_spectrogram_frag(
                 }
                 let layout = CachedProportionalTextLayout {
                     text_width_px: pen_x,
-                    line_height_px: prop_atlas.line_height_face(key.size_tenths, key.mono),
-                    descent_px: prop_atlas.descent_face(key.size_tenths, key.mono),
-                    cap_height_px: prop_atlas.cap_height_face(key.size_tenths, key.mono),
+                    line_height_px: prop_atlas.line_height_face(key.size_tenths, key.face),
+                    descent_px: prop_atlas.descent_face(key.size_tenths, key.face),
+                    cap_height_px: prop_atlas.cap_height_face(key.size_tenths, key.face),
                     glyphs,
                     last_used_frame: self.frame_index,
                 };
@@ -6186,7 +6177,7 @@ fragment float4 live_spectrogram_frag(
                             } else {
                                 group_bg
                             },
-                            mono: false,
+                            face: TextFace::Regular,
                         },
                     ));
                     if tab.close_visible
@@ -6207,7 +6198,7 @@ fragment float4 live_spectrogram_frag(
                                 } else {
                                     group_bg
                                 },
-                                mono: false,
+                                face: TextFace::Regular,
                             },
                         ));
                     }

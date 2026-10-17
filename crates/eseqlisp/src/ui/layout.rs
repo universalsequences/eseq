@@ -176,12 +176,18 @@ pub trait TextMeasurer {
     fn text_ink_extents_px(&self, _text: &str, font_size: f32) -> (f32, f32) {
         (self.cap_height_px(font_size), self.descent_px(font_size))
     }
-    /// Monospace-face variants for `label :mono true`. Measurers without a
-    /// mono face answer with the proportional metrics.
-    fn measure_mono_text_px(&self, text: &str, font_size: f32) -> f32 {
+    /// Per-face variants for `label :mono true` / `label :bold true`.
+    /// Measurers without a face answer with the regular metrics, the same
+    /// fallback the glyph atlas draws with.
+    fn measure_text_face_px(
+        &self,
+        text: &str,
+        font_size: f32,
+        _face: crate::ui::glyph_atlas::TextFace,
+    ) -> f32 {
         self.measure_text_px(text, font_size)
     }
-    fn mono_cap_height_px(&self, font_size: f32) -> f32 {
+    fn cap_height_face_px(&self, font_size: f32, _face: crate::ui::glyph_atlas::TextFace) -> f32 {
         self.cap_height_px(font_size)
     }
 }

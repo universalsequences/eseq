@@ -218,7 +218,7 @@ pub(crate) fn text_primitive(
         scale: 1.0,
         fg,
         bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
-        mono: false,
+        face: crate::ui::glyph_atlas::TextFace::Regular,
     }
 }
 

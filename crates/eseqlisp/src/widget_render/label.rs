@@ -12,6 +12,7 @@ use crate::layout::{
     get_prop_str, usize_to_f32,
 };
 use crate::theme;
+use crate::ui::glyph_atlas::TextFace;
 use crate::vm::Value;
 
 pub struct LabelWidget;
@@ -63,13 +64,14 @@ fn underline_rect(
     h_align: f32,
     font_size: f32,
     viewport: super::WidgetViewport,
+    face: TextFace,
 ) -> Rect {
     let cell_w = viewport.cell_w.max(1.0);
     let cell_h = viewport.cell_h.max(1.0);
     let (text_px, cap_height_px) = super::with_render_text_measurer(|measurer| {
         (
-            measurer.measure_text_px(line, font_size),
-            measurer.cap_height_px(font_size),
+            measurer.measure_text_face_px(line, font_size, face),
+            measurer.cap_height_face_px(font_size, face),
         )
     })
     .unwrap_or((line.chars().count() as f32 * cell_w, cell_h * 0.7));
@@ -85,12 +87,25 @@ fn underline_rect(
     }
 }
 
-pub(crate) fn mono_enabled(props: &HashMap<String, Value>) -> bool {
-    matches!(props.get("mono"), Some(Value::Bool(true)))
+/// The face a label draws and measures with, from `:mono` / `:bold`.
+/// Both props are bindable, so a bound value resolves like any bool prop.
+pub(crate) fn text_face(props: &HashMap<String, Value>) -> TextFace {
+    TextFace::from_flags(
+        get_bool_prop(props, "mono", false),
+        get_bool_prop(props, "bold", false),
+    )
 }
 
-fn node_mono_enabled(node: &Value) -> bool {
-    get_map(node).is_some_and(|props| mono_enabled(&props))
+/// `text_face` read straight off a node, without cloning its prop map.
+fn node_text_face(node: &Value) -> TextFace {
+    let Value::Map(map) = node else {
+        return TextFace::Regular;
+    };
+    let flag = |key: &str| {
+        map.get(key)
+            .is_some_and(|value| super::bool_prop_value(Some(&value.borrow()), false))
+    };
+    TextFace::from_flags(flag("mono"), flag("bold"))
 }
 
 fn wrap_enabled(props: &HashMap<String, Value>) -> bool {
@@ -159,6 +174,7 @@ fn measure_wrapped_text_lines(
     max_width_cells: f32,
     font_size: f32,
     ctx: &MeasureCtx<'_>,
+    face: TextFace,
 ) -> Vec<String> {
     let width_cells = max_width_cells.max(1.0);
     let Some(measurer) = ctx.text_measurer else {
@@ -175,21 +191,21 @@ fn measure_wrapped_text_lines(
             } else {
                 format!("{current} {word}")
             };
-            if measurer.measure_text_px(&candidate, font_size) <= max_px || current.is_empty() {
+            if measurer.measure_text_face_px(&candidate, font_size, face) <= max_px || current.is_empty() {
                 current = candidate;
             } else {
                 lines.push(std::mem::take(&mut current));
                 current.push_str(word);
             }
 
-            while measurer.measure_text_px(&current, font_size) > max_px
+            while measurer.measure_text_face_px(&current, font_size, face) > max_px
                 && current.chars().count() > 1
             {
                 let mut fit = String::new();
                 let mut rest = String::new();
                 for ch in current.chars() {
                     let next = format!("{fit}{ch}");
-                    if !fit.is_empty() && measurer.measure_text_px(&next, font_size) > max_px {
+                    if !fit.is_empty() && measurer.measure_text_face_px(&next, font_size, face) > max_px {
                         rest.push(ch);
                     } else {
                         fit.push(ch);
@@ -273,6 +289,72 @@ mod tests {
         props.insert("active".to_string(), Value::Bool(false));
         assert_eq!(resolve_color(&props, false), theme::DIM());
     }
+    #[test]
+    fn bold_label_measures_and_draws_with_the_bold_face() {
+        struct Font;
+        impl crate::layout::TextMeasurer for Font {
+            fn measure_text_px(&self, text: &str, _: f32) -> f32 { text.chars().count() as f32 * 4.0 }
+            fn measure_text_face_px(&self, text: &str, size: f32, face: TextFace) -> f32 {
+                let scale = if face == TextFace::Bold { 1.5 } else { 1.0 };
+                self.measure_text_px(text, size) * scale
+            }
+            fn line_height_px(&self, _: f32) -> f32 { 10.0 }
+        }
+        let label = |bold: Value| {
+            let props: HashMap<String, Value> = [
+                ("text".into(), Value::String("bold".into())),
+                ("bold".into(), bold),
+            ].into_iter().collect();
+            let value = Value::Map(props.iter().map(|(key, value)|
+                (key.clone(), std::rc::Rc::new(std::cell::RefCell::new(value.clone())))).collect());
+            (props, value)
+        };
+        let ctx = MeasureCtx { text_measurer: Some(&Font), cell_w: 4.0, cell_h: 20.0, inherited_font_size: 10.0 };
+        let constraints = Constraints {
+            min_width: 0.0, max_width: 100.0, min_height: 0.0, max_height: 100.0, aspect: 0.5,
+        };
+        // `:bold` is bindable: a bound value reads through its slot.
+        let bound = |on: bool| Value::ReactiveRef {
+            namespace: "test".into(),
+            field: "bold".into(),
+            index: None,
+            kind: crate::vm::BindingKind::Float,
+            slot: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+                if on { 1.0_f64 } else { 0.0 }.to_bits(),
+            )),
+        };
+        let mut width = |bold: Value| {
+            let (props, value) = label(bold);
+            let measured = LABEL_WIDGET.measure(&value, &[], constraints, &ctx, &mut |_, _| None).unwrap().width;
+            (props, measured)
+        };
+        let (_, regular_width) = width(Value::Bool(false));
+        let (bold_props, bold_width) = width(Value::Bool(true));
+        assert_eq!((regular_width, bold_width), (4.0, 6.0));
+        let (bound_off_props, bound_off_width) = width(bound(false));
+        let (bound_on_props, bound_on_width) = width(bound(true));
+        assert_eq!((bound_off_width, bound_on_width), (4.0, 6.0));
+        assert_eq!(text_face(&bound_off_props), TextFace::Regular);
+        assert_eq!(text_face(&bound_on_props), TextFace::Bold);
+
+        let node = crate::layout::LayoutNode {
+            widget_id: 1, stable_widget_id: None, subtree_root_id: None,
+            parent_subtree_root_id: None, stable_key: None, widget_type: "label".into(),
+            rect: Rect { col: 0.0, row: 0.0, width: bold_width, height: 1.0 },
+            props: bold_props, children: vec![], focusable: false, animation: Default::default(),
+        };
+        let primitives = LABEL_WIDGET.build_primitives("label", &node, super::super::WidgetViewport {
+            cell_w: 4.0, cell_h: 20.0, vp_w: 1000.0, vp_h: 800.0,
+            time_seconds: 0.0, focused_widget_id: None, focused_branch: false,
+            overlay_viewport_bottom: 40.0, scroll_top: 0.0, scroll_left: 0.0, inherited_hover: false,
+        });
+        let faces: Vec<_> = primitives.iter().filter_map(|p| match p {
+            GpuPrimitive::ProportionalText(t) => Some(t.face), _ => None,
+        }).collect();
+        assert_eq!(faces, vec![TextFace::Bold]);
+        assert_eq!(TextFace::from_flags(true, true), TextFace::Mono, "mono wins over bold");
+    }
+
     #[test]
     fn wrapped_gpu_lines_match_measured_proportional_width_and_height() {
         struct Font;
@@ -419,7 +501,7 @@ impl WidgetDefinition for LabelWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["text", "width", "height", "font-size", "wrap", "mono"]
+        &["text", "width", "height", "font-size", "wrap", "mono", "bold"]
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
@@ -430,6 +512,7 @@ impl WidgetDefinition for LabelWidget {
         &[
             "text", "color", "active", "active-color", "hover-color", "bg", "font-size",
             "width", "height", "wrap", "h-align", "v-align", "underline", "on-click", "mono",
+            "bold",
         ]
     }
 
@@ -450,7 +533,7 @@ impl WidgetDefinition for LabelWidget {
             && (explicit_width.is_some() || constraints.max_width.is_finite())
         {
             let width = explicit_width.unwrap_or(constraints.max_width).max(1.0);
-            let line_count = measure_wrapped_text_lines(&text, width, font_size, ctx).len();
+            let line_count = measure_wrapped_text_lines(&text, width, font_size, ctx, node_text_face(node)).len();
             let line_height = ctx
                 .text_measurer
                 .map(|measurer| measurer.line_height_px(font_size) / ctx.cell_h)
@@ -468,10 +551,8 @@ impl WidgetDefinition for LabelWidget {
             let px_width = if let Some(explicit_w) = explicit_width {
                 // Explicit width is in cell units, convert to pixels.
                 explicit_w * ctx.cell_w
-            } else if node_mono_enabled(node) {
-                measurer.measure_mono_text_px(&text, font_size)
             } else {
-                measurer.measure_text_px(&text, font_size)
+                measurer.measure_text_face_px(&text, font_size, node_text_face(node))
             };
             let px_height = measurer.line_height_px(font_size);
             return Some(Size {
@@ -510,7 +591,7 @@ impl WidgetDefinition for LabelWidget {
             font_size,
             row_offset,
             ctx,
-            node_mono_enabled(node),
+            node_text_face(node),
         ))
     }
 
@@ -648,6 +729,7 @@ impl WidgetDefinition for LabelWidget {
                 color: bg,
             }));
         }
+        let face = text_face(&node.props);
         let (lines, line_height) = if wrap_enabled(&node.props) {
             // Use the same font metrics and wrapping as measure(). Monospace
             // column counts or a one-cell advance can clip proportional lines.
@@ -658,7 +740,7 @@ impl WidgetDefinition for LabelWidget {
                     cell_h: viewport.cell_h,
                     inherited_font_size: font_size,
                 };
-                (measure_wrapped_text_lines(text, node.rect.width, font_size, &ctx),
+                (measure_wrapped_text_lines(text, node.rect.width, font_size, &ctx, face),
                     measurer.line_height_px(font_size) / viewport.cell_h)
             }).unwrap_or_else(|| (
                 wrap_text_by_columns(text, node.rect.width.floor().max(1.0) as usize), 1.0,
@@ -669,7 +751,6 @@ impl WidgetDefinition for LabelWidget {
         let start_row = label_text_row(&node.props, node.rect);
         let h_align = resolve_h_align(&node.props);
         let underline = underline_enabled(&node.props);
-        let mono = mono_enabled(&node.props);
         for (line_idx, line) in lines.into_iter().enumerate() {
             let row = start_row + line_idx as f32 * line_height;
             if row >= node.rect.row + node.rect.height {
@@ -685,6 +766,7 @@ impl WidgetDefinition for LabelWidget {
                         h_align,
                         font_size,
                         viewport,
+                        face,
                     ),
                     color: fg,
                 }));
@@ -700,7 +782,7 @@ impl WidgetDefinition for LabelWidget {
                     scale: 1.0,
                     fg,
                     bg,
-                    mono,
+                    face,
                 },
             ));
         }

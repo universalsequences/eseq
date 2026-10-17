@@ -211,7 +211,7 @@ impl WidgetDefinition for NumberLabelWidget {
                 scale: 1.0,
                 fg,
                 bg,
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             },
         ));
         prims

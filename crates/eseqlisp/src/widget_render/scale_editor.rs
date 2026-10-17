@@ -540,7 +540,7 @@ impl WidgetDefinition for ScaleEditorWidget {
                     scale: 1.0,
                     fg: if degrees.enabled[degree] { text } else { with_alpha(text, 0.4) },
                     bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 }));
             }
         }
