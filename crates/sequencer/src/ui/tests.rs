@@ -1543,6 +1543,52 @@
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Code-surface Save decides the sidecar now that the Patch → Code switch
+    /// writes nothing: untouched generated code keeps its patch, edited code
+    /// demotes the item to code (layout kept for re-promotion).
+    #[test]
+    fn code_surface_save_keeps_patch_only_for_untouched_code() {
+        let dir = std::env::temp_dir().join(format!(
+            "eseq-code-save-sidecar-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dsp_path = dir.join("dsp.lisp");
+        let source = "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)";
+        std::fs::write(&dsp_path, source).unwrap();
+        let intent = eseqlisp::widget_render::patcher::PatcherIntent::Instrument;
+        eseqlisp::widget_render::patcher::promote_source_to_patch(&dsp_path, source, intent)
+            .unwrap();
+        let layout = std::fs::read_to_string(
+            crate::agent_finalize::patcher_layout_sidecar_path_for_dsp(&dsp_path),
+        )
+        .unwrap();
+        use crate::edit_sessions::{EjectedPatch, sync_sidecar_for_code_save};
+        let ejected = EjectedPatch { source: source.to_string(), layout: Some(layout) };
+
+        sync_sidecar_for_code_save(&dsp_path, source, Some(&ejected)).unwrap();
+        assert_eq!(
+            editor_surface_for_existing(&dsp_path, source, intent),
+            EditorSurface::Patch,
+            "saving untouched code from the Code view keeps the patch"
+        );
+
+        let edited = format!("{source}\n; hand edit");
+        std::fs::write(&dsp_path, &edited).unwrap();
+        sync_sidecar_for_code_save(&dsp_path, &edited, Some(&ejected)).unwrap();
+        assert_eq!(
+            editor_surface_for_existing(&dsp_path, &edited, intent),
+            EditorSurface::Code,
+            "saving edited code demotes the item to code"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn code_buffer_names_are_distinct_from_patcher_buffers() {
         assert_eq!(

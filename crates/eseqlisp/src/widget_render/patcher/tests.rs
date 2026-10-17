@@ -20642,6 +20642,168 @@ fn eject_then_promote_keeps_positions_of_nodes_created_and_moved_in_the_editor()
     assert_positions("eject → promote");
 }
 
+/// Regression: Patch → Code → Patch with untouched code re-projected the
+/// generated source, so every summing inlet's `(+ …)` came back as a new,
+/// auto-laid-out `+` node with segmented cables — and the switch wrote both
+/// dsp.lisp and the sidecar, so even Done-without-saving kept the damage.
+/// The switch is now a view change: the patch is staged from the layout's
+/// graph payload and nothing reaches disk.
+#[test]
+fn code_round_trip_restores_summed_patch_exactly_without_touching_disk() {
+    let path = temp_patcher_dsp_path("patcher-code-round-trip-summing");
+    fs::write(
+        &path,
+        "(def pitch (in 1 @name pitch))\n(def gain (* pitch pitch))\n(out gain 1 @name audio)\n",
+    )
+    .unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    reset_patcher_widget_state(key);
+
+    let mut state = get_patcher_interaction_state(key);
+    let a = allocate_created_text_node(&mut state, "root", "phasor");
+    let b = allocate_created_text_node(&mut state, "root", "cycle");
+    connect_output_to_input(&mut state, "root", "pitch", &a, 0);
+    connect_output_to_input(&mut state, "root", "pitch", &b, 0);
+    connect_output_to_input(&mut state, "root", &a, "gain", 1);
+    connect_output_to_input(&mut state, "root", &b, "gain", 1);
+    for (index, id) in [&a, &b].into_iter().enumerate() {
+        state
+            .edit_state
+            .nodes
+            .get_mut(&node_edit_key("root", id))
+            .unwrap()
+            .position = (41.0 + index as f32 * 7.0, 13.0 + index as f32 * 5.0);
+    }
+    set_patcher_interaction_state(key, state);
+    let Value::Map(writeback) = patcher_writeback_payload(&node) else {
+        panic!("expected writeback payload map");
+    };
+    let string_field = |map: &HashMap<String, Rc<RefCell<Value>>>, field: &str| match map
+        .get(field)
+        .map(|value| value.borrow().clone())
+    {
+        Some(Value::String(text)) => text,
+        other => panic!("payload `{field}` missing: {other:?}"),
+    };
+    let source = string_field(&writeback, "source");
+    let layout = string_field(&writeback, "layout");
+    assert!(source.contains("(+ "), "two cables on one inlet must emit a sum:\n{source}");
+
+    // Save, then reopen: the reference patch.
+    fs::write(&path, &source).unwrap();
+    fs::write(sidecar::sidecar_path_for_source(&path), &layout).unwrap();
+    reset_patcher_widget_state(key);
+    let saved = load_patch_from_props(&node.props).unwrap().1;
+    let shape = |patch: &Patch| {
+        let mut nodes = patch
+            .nodes
+            .iter()
+            .map(|node| (node.op.clone(), node.position))
+            .collect::<Vec<_>>();
+        nodes.sort_by(|left, right| left.0.cmp(&right.0));
+        (nodes, patch.connections.len())
+    };
+    let disk_before = (
+        fs::read(&path).unwrap(),
+        fs::read(sidecar::sidecar_path_for_source(&path)).unwrap(),
+    );
+
+    // Code → Patch over untouched code.
+    let staged_layout =
+        stage_promoted_patch(&path, &source, Some(&layout), true, PatcherIntent::Instrument)
+            .unwrap();
+    let restored = load_patch_from_props(&node.props).unwrap().1;
+    assert_eq!(
+        shape(&restored),
+        shape(&saved),
+        "untouched code must bring back the same patch, no phantom `+` node"
+    );
+    assert!(sidecar::patch_from_layout_json(&staged_layout).is_some());
+    assert_eq!(
+        (
+            fs::read(&path).unwrap(),
+            fs::read(sidecar::sidecar_path_for_source(&path)).unwrap(),
+        ),
+        disk_before,
+        "switching surfaces must not write dsp.lisp or its sidecar"
+    );
+
+    // Closing the editor (reset) drops the staged model: disk is the truth.
+    reset_patcher_state_for_path(&path, PatcherIntent::Instrument);
+    assert_eq!(shape(&load_patch_from_props(&node.props).unwrap().1), shape(&saved));
+
+    // Edited code is projected; the layout only contributes positions, and
+    // the generator's `(+ …)` folds back into cables on the summing inlet.
+    let edited = source.replace("(def gain", "(def gain-renamed").replace(" gain ", " gain-renamed ");
+    assert_ne!(edited, source);
+    stage_promoted_patch(&path, &edited, Some(&layout), false, PatcherIntent::Instrument)
+        .unwrap();
+    let projected = load_patch_from_props(&node.props).unwrap().1;
+    assert!(
+        !projected.nodes.iter().any(|node| node.op == "+"),
+        "a summing inlet must come back as cables, not a `+` box: {:?}",
+        shape(&projected)
+    );
+    let summed_terms = projected
+        .connections
+        .iter()
+        .filter(|edge| edge.to_node == "gain-renamed" && edge.to_input == 1)
+        .count();
+    assert_eq!(summed_terms, 3, "pitch + both created oscillators feed the inlet");
+    for op in ["phasor", "cycle"] {
+        let position = |patch: &Patch| {
+            patch.nodes.iter().find(|node| node.op == op).map(|node| node.position)
+        };
+        assert_eq!(position(&projected), position(&saved), "`{op}` keeps its place");
+    }
+    let regenerated =
+        generate::generate_patch_source(&projected, PatcherIntent::Instrument).unwrap().source;
+    assert!(regenerated.contains("(+ "), "the cables still emit a sum:\n{regenerated}");
+    reset_patcher_state_for_path(&path, PatcherIntent::Instrument);
+}
+
+#[test]
+fn promotion_keeps_named_sums_as_nodes() {
+    let path = temp_patcher_dsp_path("patcher-promote-named-sum");
+    let source = "(def a (in 1 @name a))\n(def b (in 2 @name b))\n\
+        (def sum (+ a b))\n(out (* sum (+ a b)) 1 @name audio)\n";
+    fs::write(&path, source).unwrap();
+    stage_promoted_patch(&path, source, None, false, PatcherIntent::Instrument).unwrap();
+    let node = patcher_test_node(&path);
+    let patch = load_patch_from_props(&node.props).unwrap().1;
+    let sums = patch.nodes.iter().filter(|node| node.op == "+").map(|node| node.id.as_str());
+    assert_eq!(
+        sums.collect::<Vec<_>>(),
+        vec!["sum"],
+        "the named sum stays a node; the inline one becomes cables"
+    );
+    reset_patcher_state_for_path(&path, PatcherIntent::Instrument);
+}
+
+#[test]
+fn promotion_collapses_nested_inline_sums_in_any_order() {
+    let path = temp_patcher_dsp_path("patcher-promote-nested-sum");
+    let source = "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def c (in 3 @name c))\n\
+        (out (+ c (+ a b)) 1 @name audio)\n";
+    fs::write(&path, source).unwrap();
+    stage_promoted_patch(&path, source, None, false, PatcherIntent::Instrument).unwrap();
+    let node = patcher_test_node(&path);
+    let patch = load_patch_from_props(&node.props).unwrap().1;
+    assert!(
+        !patch.nodes.iter().any(|node| node.op == "+"),
+        "inner and outer sums both fold into the out inlet"
+    );
+    let out = patch.nodes.iter().find(|node| node.kind == NodeKind::Out).unwrap();
+    let terms = patch
+        .connections
+        .iter()
+        .filter(|edge| edge.to_node == out.id && edge.to_input == 0)
+        .count();
+    assert_eq!(terms, 3);
+    reset_patcher_state_for_path(&path, PatcherIntent::Instrument);
+}
+
 // ── Created-node identity vs source bindings (regression: node-splice bug) ──
 //
 // Older generated sources persisted interaction ids (`created-N`) as binding

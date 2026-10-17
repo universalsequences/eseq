@@ -1066,6 +1066,16 @@ pub(super) fn handle(
                                     return;
                                 }
                             }
+                            if code_surface {
+                                if let Err(e) = sync_sidecar_for_code_save(
+                                    &target.source_path,
+                                    &source_to_save,
+                                    session.ejected_patch.as_ref(),
+                                ) {
+                                    editor_error(editor, format!("Failed to save layout: {e}"));
+                                    return;
+                                }
+                            }
 
                             if stay {
                                 let session = ctx
@@ -1570,9 +1580,10 @@ pub(super) fn handle(
         }
 
         "promote-editor-to-patch" => {
-            // §3.3 "Open as patch": parse-check the CURRENT buffer text; on a
-            // clean projection, persist it, stamp the authored sidecar, and
-            // reopen the item in the patch editor.
+            // §3.3 "Open as patch": project the CURRENT buffer text (or, when
+            // untouched since the switch to code, restore the patch it came
+            // from) and reopen the patch editor on it, staged in memory. Disk
+            // changes only on an explicit Save.
             if let Some(session) = ctx.sessions.instrument_edit_session.as_mut() {
                 if session.surface != EditorSurface::Code {
                     return;
@@ -1584,22 +1595,24 @@ pub(super) fn handle(
                     )));
                     return;
                 };
-                if let Err(error) = std::fs::write(&session.path, &source) {
-                    editor.handle_host_event(HostEvent::Error(format!(
-                        "Failed to save before promotion: {error}"
-                    )));
-                    return;
-                }
-                if let Err(error) =
-                    eseqlisp::widget_render::patcher::promote_source_to_patch(
-                        &session.path,
-                        &source,
-                        eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
-                    )
-                {
-                    editor_error(editor, error);
-                    return;
-                }
+                // A view switch, not a save: the patch is staged in memory
+                // and nothing reaches disk until an explicit Save.
+                let (layout, unchanged) =
+                    layout_for_promote(session.ejected_patch.as_ref(), &source, &session.path);
+                reset_instrument_patcher_state(&session.path);
+                let layout = match eseqlisp::widget_render::patcher::stage_promoted_patch(
+                    &session.path,
+                    &source,
+                    layout.as_deref(),
+                    unchanged,
+                    eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+                ) {
+                    Ok(layout) => layout,
+                    Err(error) => {
+                        editor_error(editor, error);
+                        return;
+                    }
+                };
                 let old_buf = session.buffer_name.clone();
                 let buf_name = format!("*instrument-patcher:{}*", session.name);
                 editor.remove_buffer_by_name(&buf_name);
@@ -1610,15 +1623,16 @@ pub(super) fn handle(
                     editor.handle_host_event(HostEvent::Error(format!(
                         "Failed to build patch editor: {error:?}"
                     )));
+                    reset_instrument_patcher_state(&session.path);
                     editor.remove_buffer_by_name(&buf_name);
                     return;
                 }
-                reset_instrument_patcher_state(&session.path);
                 let layout_source = show_instrument_patcher_layout_source(&buf_name);
                 if let Err(error) = editor.runtime_mut().eval_str(&layout_source) {
                     editor.handle_host_event(HostEvent::Error(format!(
                         "Failed to show patch editor: {error:?}"
                     )));
+                    reset_instrument_patcher_state(&session.path);
                     editor.remove_buffer_by_name(&buf_name);
                     return;
                 }
@@ -1627,6 +1641,9 @@ pub(super) fn handle(
                 session.buffer_name = buf_name.clone();
                 session.surface = EditorSurface::Patch;
                 session.last_valid_source = source;
+                // Save writes this authored layout, promoting the item on disk.
+                session.last_valid_layout = Some(layout);
+                session.ejected_patch = None;
                 session.visible_revision_valid = true;
                 ctx.sessions.editor_buffer_name = Some(buf_name.clone());
                 let rt = editor.runtime_mut();
@@ -1651,22 +1668,24 @@ pub(super) fn handle(
                     )));
                     return;
                 };
-                if let Err(error) = std::fs::write(&session.path, &source) {
-                    editor.handle_host_event(HostEvent::Error(format!(
-                        "Failed to save before promotion: {error}"
-                    )));
-                    return;
-                }
-                if let Err(error) =
-                    eseqlisp::widget_render::patcher::promote_source_to_patch(
-                        &session.path,
-                        &source,
-                        eseqlisp::widget_render::patcher::PatcherIntent::Effect,
-                    )
-                {
-                    editor_error(editor, error);
-                    return;
-                }
+                // A view switch, not a save: the patch is staged in memory
+                // and nothing reaches disk until an explicit Save.
+                let (layout, unchanged) =
+                    layout_for_promote(session.ejected_patch.as_ref(), &source, &session.path);
+                reset_effect_patcher_state(&session.path);
+                let layout = match eseqlisp::widget_render::patcher::stage_promoted_patch(
+                    &session.path,
+                    &source,
+                    layout.as_deref(),
+                    unchanged,
+                    eseqlisp::widget_render::patcher::PatcherIntent::Effect,
+                ) {
+                    Ok(layout) => layout,
+                    Err(error) => {
+                        editor_error(editor, error);
+                        return;
+                    }
+                };
                 let old_buf = session.buffer_name.clone();
                 let buf_name = format!("*effect-patcher:{}*", session.name);
                 editor.remove_buffer_by_name(&buf_name);
@@ -1677,15 +1696,16 @@ pub(super) fn handle(
                     editor.handle_host_event(HostEvent::Error(format!(
                         "Failed to build patch editor: {error:?}"
                     )));
+                    reset_effect_patcher_state(&session.path);
                     editor.remove_buffer_by_name(&buf_name);
                     return;
                 }
-                reset_effect_patcher_state(&session.path);
                 let layout_source = show_instrument_patcher_layout_source(&buf_name);
                 if let Err(error) = editor.runtime_mut().eval_str(&layout_source) {
                     editor.handle_host_event(HostEvent::Error(format!(
                         "Failed to show patch editor: {error:?}"
                     )));
+                    reset_effect_patcher_state(&session.path);
                     editor.remove_buffer_by_name(&buf_name);
                     return;
                 }
@@ -1694,6 +1714,9 @@ pub(super) fn handle(
                 session.buffer_name = buf_name.clone();
                 session.surface = EditorSurface::Patch;
                 session.last_valid_source = source;
+                // Save writes this authored layout, promoting the item on disk.
+                session.last_valid_layout = Some(layout);
+                session.ejected_patch = None;
                 session.visible_revision_valid = true;
                 ctx.sessions.editor_buffer_name = Some(buf_name.clone());
                 let rt = editor.runtime_mut();
@@ -1711,9 +1734,9 @@ pub(super) fn handle(
         }
 
         "eject-editor-to-code" => {
-            // §3.4 "Eject to code": persist the canonical generated source,
-            // flip the sidecar's authored flag (keeping layout data for
-            // re-promotion), and reopen in the code editor. Edit-existing
+            // §3.4 "Eject to code": reopen the canonical generated source in
+            // the code editor. A view switch — nothing is written; a Save from
+            // the code surface decides the sidecar (sync_sidecar_for_code_save). Edit-existing
             // sessions only — drafts must be finalized first.
             if let Some(session) = ctx.sessions.instrument_edit_session.as_mut() {
                 if session.surface != EditorSurface::Patch {
@@ -1725,33 +1748,14 @@ pub(super) fn handle(
                     ));
                     return;
                 }
+                // A view switch, not a save: nothing is written. What the
+                // patch was is kept so switching back restores it exactly.
                 let source = session.last_valid_source.clone();
-                if let Err(error) = std::fs::write(&session.path, &source) {
-                    editor.handle_host_event(HostEvent::Error(format!(
-                        "Failed to save before eject: {error}"
-                    )));
-                    return;
-                }
-                if let Some(layout) = session.last_valid_layout.as_deref() {
-                    if let Err(error) =
-                        write_patcher_layout_sidecar(&session.path, layout)
-                    {
-                        editor.handle_host_event(HostEvent::Error(format!(
-                            "Failed to save layout before eject: {error}"
-                        )));
-                        return;
-                    }
-                }
-                if let Err(error) =
-                    eseqlisp::widget_render::patcher::eject_patch_authored_sidecar(
-                        &session.path,
-                    )
-                {
-                    editor.handle_host_event(HostEvent::Error(format!(
-                        "Failed to eject to code: {error}"
-                    )));
-                    return;
-                }
+                let layout = layout_for_eject(
+                    session.last_valid_layout.as_deref(),
+                    session.visible_revision_valid,
+                    &session.path,
+                );
                 let old_buf = session.buffer_name.clone();
                 let buf_name = instrument_code_buffer_name(&session.name);
                 editor.remove_buffer_by_name(&buf_name);
@@ -1768,11 +1772,10 @@ pub(super) fn handle(
                 editor.remove_buffer_by_name(&old_buf);
                 session.buffer_name = buf_name.clone();
                 session.surface = EditorSurface::Code;
-                // Every patcher-produced layout carries `authored: true`, so a
-                // later save that re-stamped this one would undo the eject and
-                // route the instrument straight back into the patch editor.
-                // The sidecar on disk keeps the layout data for re-promotion.
+                // A code-surface Save decides the sidecar from `ejected_patch`
+                // (sync_sidecar_for_code_save), never from this layout.
                 session.last_valid_layout = None;
+                session.ejected_patch = Some(EjectedPatch { source, layout });
                 ctx.sessions.editor_buffer_name = Some(buf_name.clone());
                 let rt = editor.runtime_mut();
                 present_editor(rt, |e| {
@@ -1795,33 +1798,14 @@ pub(super) fn handle(
                     ));
                     return;
                 }
+                // A view switch, not a save: nothing is written. What the
+                // patch was is kept so switching back restores it exactly.
                 let source = session.last_valid_source.clone();
-                if let Err(error) = std::fs::write(&session.path, &source) {
-                    editor.handle_host_event(HostEvent::Error(format!(
-                        "Failed to save before eject: {error}"
-                    )));
-                    return;
-                }
-                if let Some(layout) = session.last_valid_layout.as_deref() {
-                    if let Err(error) =
-                        write_patcher_layout_sidecar(&session.path, layout)
-                    {
-                        editor.handle_host_event(HostEvent::Error(format!(
-                            "Failed to save layout before eject: {error}"
-                        )));
-                        return;
-                    }
-                }
-                if let Err(error) =
-                    eseqlisp::widget_render::patcher::eject_patch_authored_sidecar(
-                        &session.path,
-                    )
-                {
-                    editor.handle_host_event(HostEvent::Error(format!(
-                        "Failed to eject to code: {error}"
-                    )));
-                    return;
-                }
+                let layout = layout_for_eject(
+                    session.last_valid_layout.as_deref(),
+                    session.visible_revision_valid,
+                    &session.path,
+                );
                 let old_buf = session.buffer_name.clone();
                 let buf_name = effect_code_buffer_name(&session.name);
                 editor.remove_buffer_by_name(&buf_name);
@@ -1838,9 +1822,9 @@ pub(super) fn handle(
                 editor.remove_buffer_by_name(&old_buf);
                 session.buffer_name = buf_name.clone();
                 session.surface = EditorSurface::Code;
-                // Same as the instrument arm: keeping the authored layout
-                // around would let the next save re-promote the ejected effect.
+                // Same as the instrument arm.
                 session.last_valid_layout = None;
+                session.ejected_patch = Some(EjectedPatch { source, layout });
                 ctx.sessions.editor_buffer_name = Some(buf_name.clone());
                 let rt = editor.runtime_mut();
                 present_editor(rt, |e| {
@@ -2676,6 +2660,16 @@ pub(super) fn handle(
                 .filter(|_| !code_surface)
             {
                 if let Err(e) = write_patcher_layout_sidecar(session.save_target(), layout) {
+                    editor_error(editor, format!("Failed to save layout: {e}"));
+                    return;
+                }
+            }
+            if code_surface {
+                if let Err(e) = sync_sidecar_for_code_save(
+                    session.save_target(),
+                    &source_to_save,
+                    session.ejected_patch.as_ref(),
+                ) {
                     editor_error(editor, format!("Failed to save layout: {e}"));
                     return;
                 }

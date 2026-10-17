@@ -144,17 +144,7 @@ pub fn promote_source_to_patch(
     source: &str,
     intent: PatcherIntent,
 ) -> Result<(), String> {
-    let mut patch = parse_source_with_default_library(source, intent)?;
-    if !patch_is_fully_projectable(&patch) {
-        let mut diagnostics = patch.diagnostics.clone();
-        for macro_patch in &patch.macros {
-            diagnostics.extend(macro_patch.patch.diagnostics.iter().cloned());
-        }
-        if diagnostics.is_empty() {
-            diagnostics.push("source contains code the patch editor cannot represent".to_string());
-        }
-        return Err(format!("Cannot open as patch: {}", diagnostics.join("; ")));
-    }
+    let mut patch = project_for_promotion(source, intent)?;
     sidecar::apply_or_materialize(source_path, &mut patch)?;
     sidecar::write_authored_layout(source_path, &patch)
 }
@@ -167,6 +157,74 @@ pub fn eject_patch_authored_sidecar(source_path: &Path) -> Result<(), String> {
     sidecar::set_sidecar_authored(source_path, false)
 }
 
+/// Code-surface Save of edited code: demote an authored sidecar to code
+/// (layout kept for re-promotion). A missing or already-ejected sidecar is
+/// left untouched, so plain code saves never rewrite it.
+pub fn demote_authored_sidecar(source_path: &Path) -> Result<(), String> {
+    if !sidecar::sidecar_is_authored(source_path) {
+        return Ok(());
+    }
+    sidecar::set_sidecar_authored(source_path, false)
+}
+
+thread_local! {
+    /// Patch models the editor's Code → Patch switch staged for a path. The
+    /// switch is a view change, not a save: the patcher loads its base model
+    /// from here instead of from disk until the next reset or save rebase.
+    static STAGED_PATCHES: RefCell<HashMap<PathBuf, Patch>> = RefCell::new(HashMap::new());
+}
+
+fn staged_patch_for_path(path: &Path) -> Option<Patch> {
+    STAGED_PATCHES.with(|staged| staged.borrow().get(path).cloned())
+}
+
+fn clear_staged_patch_for_path(path: &Path) {
+    STAGED_PATCHES.with(|staged| staged.borrow_mut().remove(path));
+}
+
+/// The in-memory Code → Patch switch: build the patch editor's model for
+/// `source` and stage it as the base the patcher at `source_path` opens on,
+/// writing nothing to disk. Returns the authored layout JSON for the host to
+/// persist on the next explicit Save.
+///
+/// `layout` is the patch editor's layout JSON from before the switch to code.
+/// When `source_unchanged` (the code buffer still holds exactly the source
+/// that layout's model generated) its graph payload IS the model: reparsing
+/// would turn every summing inlet into a fresh `(+ …)` node and every inline
+/// literal into a constant node, all auto-laid-out. Edited code has to be
+/// projected, and then the layout only contributes positions by node id.
+pub fn stage_promoted_patch(
+    source_path: &Path,
+    source: &str,
+    layout: Option<&str>,
+    source_unchanged: bool,
+    intent: PatcherIntent,
+) -> Result<String, String> {
+    let from_payload = layout
+        .filter(|_| source_unchanged)
+        .and_then(sidecar::patch_from_layout_json)
+        .map(|patch| resolve_payload_patch(patch, intent));
+    let patch = match from_payload {
+        Some(patch) => patch,
+        None => {
+            let mut patch = project_for_promotion(source, intent)?;
+            // Positions are best effort, as on any projecting open.
+            if let Some(Err(error)) = layout
+                .map(|layout| sidecar::apply_layout_json(layout, "editor layout", &mut patch))
+            {
+                eprintln!("patcher layout ignored for '{}': {error}", source_path.display());
+            }
+            patch
+        }
+    };
+    let layout =
+        sidecar::current_layout_json(&patch, &state::PatcherInteractionState::default())?;
+    STAGED_PATCHES.with(|staged| {
+        staged.borrow_mut().insert(source_path.to_path_buf(), patch);
+    });
+    Ok(layout)
+}
+
 fn parse_source_with_default_library(source: &str, intent: PatcherIntent) -> Result<Patch, String> {
     match crate::defmacro_library::default_library_root() {
         Some(root) => {
@@ -175,6 +233,84 @@ fn parse_source_with_default_library(source: &str, intent: PatcherIntent) -> Res
         }
         None => parse_patch_source(source, intent),
     }
+}
+
+/// Promotion: turn each anonymous `(+ …)` that feeds one inlet back into
+/// several cables on that inlet. That is how the generator spells a summing
+/// inlet, and projecting it literally puts a `+` box nobody drew on the
+/// canvas. An authored inline `+` collapses the same way (deliberately — the
+/// cables read cleaner); a named `(def sum (+ …))` keeps its node.
+fn collapse_inline_sums(patch: &mut Patch) {
+    loop {
+        let candidate = patch.nodes.iter().find_map(|node| {
+            let anonymous = matches!(
+                node.source.as_ref().map(|source| &source.owner),
+                Some(SourceOwner::NestedExpr { .. })
+            );
+            if node.op != "+" || node.kind != NodeKind::Builtin || !anonymous || node.args.len() < 2 {
+                return None;
+            }
+            if node.args.iter().any(|arg| matches!(arg, ArgValue::Literal(_))) {
+                return None;
+            }
+            let mut outgoing = patch.connections.iter().filter(|edge| edge.from_node == node.id);
+            let out = outgoing.next()?;
+            if outgoing.next().is_some()
+                || out.kind != ConnectionKind::Forward
+                || out.presentation != model::InputPresentation::Cable
+            {
+                return None;
+            }
+            // Every term must arrive as plain cables (several already sum,
+            // e.g. once a nested `+` feeding this one has collapsed).
+            let all_cabled = (0..node.args.len()).all(|slot| {
+                let mut terms = patch
+                    .connections
+                    .iter()
+                    .filter(|edge| edge.to_node == node.id && edge.to_input == slot)
+                    .peekable();
+                terms.peek().is_some()
+                    && terms.all(|edge| edge.presentation == model::InputPresentation::Cable)
+            });
+            all_cabled.then(|| (node.id.clone(), out.to_node.clone(), out.to_input))
+        });
+        let Some((sum_id, to_node, to_input)) = candidate else {
+            break;
+        };
+        patch.connections.retain(|edge| edge.from_node != sum_id);
+        for edge in &mut patch.connections {
+            if edge.to_node == sum_id {
+                edge.to_node = to_node.clone();
+                edge.to_input = to_input;
+                // It pointed into the `+` call's argument list.
+                edge.source = None;
+            }
+        }
+        patch.nodes.retain(|node| node.id != sum_id);
+    }
+    for macro_patch in &mut patch.macros {
+        if macro_patch.origin == MacroOrigin::Local {
+            collapse_inline_sums(&mut macro_patch.patch);
+        }
+    }
+}
+
+/// Project `source` for the patch editor, refusing code islands with the
+/// projector diagnostics, and fold summing inlets back into cables.
+fn project_for_promotion(source: &str, intent: PatcherIntent) -> Result<Patch, String> {
+    let mut patch = parse_source_with_default_library(source, intent)?;
+    if !patch_is_fully_projectable(&patch) {
+        let mut diagnostics = patch.diagnostics.clone();
+        for macro_patch in &patch.macros {
+            diagnostics.extend(macro_patch.patch.diagnostics.iter().cloned());
+        }
+        if diagnostics.is_empty() {
+            diagnostics.push("source contains code the patch editor cannot represent".to_string());
+        }
+        return Err(format!("Cannot open as patch: {}", diagnostics.join("; ")));
+    }
+    collapse_inline_sums(&mut patch);
+    Ok(patch)
 }
 
 fn patch_is_fully_projectable(patch: &Patch) -> bool {
@@ -398,6 +534,7 @@ pub fn reset_patcher_state_for_path(path: impl AsRef<std::path::Path>, intent: P
     ]);
     let key = state::patcher_state_key_from_parts(None, &props);
     state::reset_patcher_widget_states_for_path(path, key);
+    clear_staged_patch_for_path(path);
 }
 
 /// The macro view currently open in the patcher for `path`, if any
@@ -698,13 +835,18 @@ pub fn resolve_agentic_bubble_macro_edit(
 /// The authored model for `path`, library macros and operator diagnostics
 /// resolved — `None` when the item is not patch-authored or predates v3.
 fn authored_patch_for_path(path: &std::path::Path, intent: PatcherIntent) -> Option<Patch> {
-    let mut patch = sidecar::load_authored_patch(path)?;
+    sidecar::load_authored_patch(path).map(|patch| resolve_payload_patch(patch, intent))
+}
+
+/// A graph-payload model with library macros and operator kinds settled
+/// against the default library (payloads store neither; spec §4.1b).
+fn resolve_payload_patch(mut patch: Patch, intent: PatcherIntent) -> Patch {
     if let Some(root) = crate::defmacro_library::default_library_root() {
         let (_, library) = cached_defmacro_library(&root);
         lisp::resolve_library_macros(&mut patch, &library, intent);
     }
     lisp::resolve_node_operators(&mut patch);
-    Some(patch)
+    patch
 }
 
 /// Persist layout for a model whose macro scope was just rewritten. Every
@@ -4450,6 +4592,10 @@ pub(super) fn load_patch_from_props(
         .or_else(|| prop_str(props, "file"))
         .ok_or_else(|| "patcher requires :path".to_string())?;
     let path = PathBuf::from(path);
+    // An unsaved Code → Patch switch outranks the files on disk.
+    if let Some(patch) = staged_patch_for_path(&path) {
+        return Ok((path, patch));
+    }
     let intent = patcher_intent_from_props(props);
     let library_root = defmacro_library_root_for_props(props);
     let library_fingerprint = library_root

@@ -91,6 +91,69 @@ pub(super) struct ForkRestore {
     pub(super) persisted_source: String,
 }
 
+/// What the Patch → Code switch left behind for switching back. The switch is
+/// a view change that writes nothing; this is what lets the patch come back
+/// exactly as it was instead of being re-projected from the generated code.
+#[derive(Debug, Clone)]
+pub(super) struct EjectedPatch {
+    /// The generated source the code buffer was opened with.
+    pub(super) source: String,
+    /// The patch editor's layout JSON (graph payload included) at the switch;
+    /// `None` when the patch had none or it did not describe `source`.
+    pub(super) layout: Option<String>,
+}
+
+/// The layout a Patch → Code switch hands to [`EjectedPatch`]: the patcher's
+/// latest, or the saved sidecar when nothing was edited since opening.
+pub(super) fn layout_for_eject(
+    last_valid_layout: Option<&str>,
+    visible_revision_valid: bool,
+    path: &Path,
+) -> Option<String> {
+    if !visible_revision_valid {
+        // The patcher's model is ahead of `last_valid_source`; its payload
+        // would not describe the code the buffer opens with.
+        return None;
+    }
+    last_valid_layout.map(str::to_string).or_else(|| read_layout_sidecar(path))
+}
+
+/// Code-surface Save: the sidecar must agree with the code saved next to it.
+/// Untouched generated code keeps the patch it came from (authored layout);
+/// anything else demotes the item to code, keeping layout for re-promotion.
+pub(super) fn sync_sidecar_for_code_save(
+    target: &Path,
+    source: &str,
+    ejected: Option<&EjectedPatch>,
+) -> Result<(), String> {
+    if let Some(layout) = ejected
+        .filter(|ejected| ejected.source == source)
+        .and_then(|ejected| ejected.layout.as_deref())
+    {
+        return super::agent_finalize::write_patcher_layout_sidecar(target, layout)
+            .map_err(|error| error.to_string());
+    }
+    eseqlisp::widget_render::patcher::demote_authored_sidecar(target)
+}
+
+/// The layout a Code → Patch switch rebuilds from, and whether `source` is
+/// still exactly the code the patch generated (its payload is then the model).
+/// Without a prior Patch → Code switch, the saved sidecar supplies positions.
+pub(super) fn layout_for_promote(
+    ejected: Option<&EjectedPatch>,
+    source: &str,
+    path: &Path,
+) -> (Option<String>, bool) {
+    match ejected {
+        Some(ejected) => (ejected.layout.clone(), ejected.source == source),
+        None => (read_layout_sidecar(path), false),
+    }
+}
+
+fn read_layout_sidecar(path: &Path) -> Option<String> {
+    std::fs::read_to_string(super::agent_finalize::patcher_layout_sidecar_path_for_dsp(path)).ok()
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum InstrumentEditMode {
     EditExisting {
@@ -116,6 +179,8 @@ pub(super) struct InstrumentEditSession {
     pub(super) preview_generation: u64,
     pub(super) run_mode: CustomInstrumentRunMode,
     pub(super) surface: EditorSurface,
+    /// Set while the Code surface shows a patch switched away from.
+    pub(super) ejected_patch: Option<EjectedPatch>,
     pub(super) mode: InstrumentEditMode,
     /// `Some` only for drafts produced by forking a live edit session.
     pub(super) fork_restore: Option<ForkRestore>,
@@ -170,6 +235,7 @@ impl InstrumentEditSession {
             surface,
             mode: InstrumentEditMode::EditExisting { persisted_source },
             fork_restore: None,
+            ejected_patch: None,
             learn_target_path: None,
             learn_target_name: None,
             persisted_run_mode: run_mode,
@@ -210,6 +276,7 @@ impl InstrumentEditSession {
                 original_track,
             },
             fork_restore: None,
+            ejected_patch: None,
             learn_target_path: None,
             learn_target_name: None,
             persisted_run_mode: run_mode,
@@ -498,6 +565,8 @@ pub(super) struct EffectEditSession {
     pub(super) visible_revision_valid: bool,
     pub(super) preview_generation: u64,
     pub(super) surface: EditorSurface,
+    /// Set while the Code surface shows a patch switched away from.
+    pub(super) ejected_patch: Option<EjectedPatch>,
     pub(super) mode: EffectEditMode,
     /// `Some` only for drafts produced by forking a live edit session.
     pub(super) fork_restore: Option<ForkRestore>,
@@ -528,6 +597,7 @@ impl EffectEditSession {
             surface,
             mode: EffectEditMode::EditExisting { persisted_source },
             fork_restore: None,
+            ejected_patch: None,
             save_path: None,
             saved_draft_dir: None,
         }
@@ -554,6 +624,7 @@ impl EffectEditSession {
             surface,
             mode: EffectEditMode::CreateDraft { temp_dir },
             fork_restore: None,
+            ejected_patch: None,
             save_path: None,
             saved_draft_dir: None,
         }
