@@ -4197,7 +4197,7 @@ impl Runtime {
                 SymbolMetadata { signature: header.signature.clone(), docs, keyword_args: Vec::new() },
             );
         }
-        for (name, definition) in &self.vm.macros {
+        for (name, definition) in self.vm.macros.iter() {
             let display = crate::modules::strip_implicit(name);
             metadata.entry(display.to_string()).or_insert_with(|| {
                 let mut signature = format!("({display}");

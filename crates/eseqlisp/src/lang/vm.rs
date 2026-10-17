@@ -1,6 +1,7 @@
 use super::SOURCE_ORIGIN_NATIVE;
 use crate::compiler::{
-    Chunk, Compiler, CompilerError, ExpansionOrigin, LambdaList, MacroCompilerState, MacroDef,
+    Chunk, Compiler, CompilerError, ExpansionOrigin, GlobalNames, LambdaList, MacroCompilerState,
+    MacroDef,
     MacroExpansionSite, OpCode,
 };
 use crate::host::BufferId;
@@ -2839,7 +2840,7 @@ pub struct VM {
     pub chunks: Vec<Chunk>,
     current_chunk: usize,
     globals: Vec<Option<Rc<RefCell<Value>>>>,
-    pub global_names: Vec<String>,
+    pub global_names: GlobalNames,
     pub pending_widget_trees: Vec<PendingUiUpdate>,
     pending_inline_widgets: Vec<Value>,
     registering_static_inline_widget: bool,
@@ -2848,12 +2849,6 @@ pub struct VM {
     tracking_stack: Vec<NodeId>,
     pub reactive_namespaces: HashSet<String>,
     pub writable_reactive_namespaces: HashSet<String>,
-    /// Self-validating name -> `global_names` index cache for reactive
-    /// namespace maps. `global_names` is a flat Vec that several paths take
-    /// and replace wholesale, so every entry is re-checked against the live
-    /// Vec before it is used and recomputed on a miss; a stale cache can only
-    /// cost one extra scan, never return a wrong slot.
-    reactive_namespace_indices: RefCell<HashMap<String, usize>>,
     pub(crate) reactive_float_slots: crate::reactive::ReactiveBindingStore,
     /// Instance fields with binding slots (`#'x.field`, kind-bindings spec
     /// §7.1) and their binding kind. Like the slots this is not eval state:
@@ -2906,7 +2901,7 @@ pub struct VM {
     /// re-registers a clean keyed subtree with unchanged inputs. Never
     /// snapshotted: transactional-eval rollback clears it instead.
     subtree_render_cache: HashMap<u64, SubtreeRenderCache>,
-    pub macros: HashMap<String, MacroDef>,
+    pub macros: Rc<HashMap<String, MacroDef>>,
     /// [`VM::definition_generation`].
     definition_generation: u64,
     /// Latest definition header per qualified global
@@ -2948,7 +2943,7 @@ pub struct VM {
     pub declared_modules: HashMap<String, Option<std::path::PathBuf>>,
     /// Per-module visibility. Absence means not loaded; a loaded named module
     /// exports exactly the names in its record.
-    pub module_exports: crate::modules::ModuleExportRegistry,
+    pub module_exports: Rc<crate::modules::ModuleExportRegistry>,
     /// Module name → the import pass that last evaluated it (spec §4, §11
     /// q4). `import` is load-once *per pass*, not forever: hot reload
     /// re-evaluates a changed file's owner root, and since the root reaches
@@ -2982,7 +2977,7 @@ pub struct VmStateSnapshot {
     chunks: Vec<Chunk>,
     current_chunk: usize,
     globals: Vec<Option<Rc<RefCell<Value>>>>,
-    global_names: Vec<String>,
+    global_names: GlobalNames,
     pending_widget_trees: Vec<PendingUiUpdate>,
     pending_inline_widgets: Vec<Value>,
     registering_static_inline_widget: bool,
@@ -3006,7 +3001,8 @@ pub struct VmStateSnapshot {
     current_effect_symbol_reads: Option<HashSet<String>>,
     current_subtree_capture_stack: Vec<SubtreeCaptureContext>,
     current_subtree_reactive_reads: HashMap<u64, HashSet<ReactiveFieldKey>>,
-    macros: HashMap<String, MacroDef>,
+    /// Shared with each segment's compiler; see `module_exports`.
+    macros: Rc<HashMap<String, MacroDef>>,
     definition_headers: HashMap<String, crate::lang::def_header::DefinitionHeader>,
     source_manager: SourceManager,
     source_load_errors: Vec<String>,
@@ -3016,7 +3012,10 @@ pub struct VmStateSnapshot {
     disabled_override_modules: HashSet<String>,
     custom_declarations: HashMap<String, CustomDeclaration>,
     declared_modules: HashMap<String, Option<std::path::PathBuf>>,
-    module_exports: crate::modules::ModuleExportRegistry,
+    /// Shared with each segment's compiler, which only reads it: every
+    /// top-level import starts a segment, and a deep copy per segment cost
+    /// boot tens of milliseconds. Writers go through `Rc::make_mut`.
+    module_exports: Rc<crate::modules::ModuleExportRegistry>,
     imported_at_epoch: HashMap<String, u64>,
     import_pass_epoch: u64,
     instances: instances::InstanceStore,
@@ -3665,7 +3664,7 @@ pub fn register_core_natives(vm: &mut VM) {
         };
         let path = vm.current_source_file();
         vm.declared_modules.insert(name.clone(), path);
-        vm.module_exports.entry(name.clone()).or_default();
+        Rc::make_mut(&mut vm.module_exports).entry(name.clone()).or_default();
         let custom_prefix = format!("{name}/");
         let retired = &mut vm.retired_custom_defaults;
         vm.custom_declarations.retain(|custom_name, declaration| {
@@ -3696,7 +3695,7 @@ pub fn register_core_natives(vm: &mut VM) {
             };
             names.push(name.clone());
         }
-        vm.module_exports
+        Rc::make_mut(&mut vm.module_exports)
             .entry(module.clone())
             .or_default()
             .append(names);
@@ -5227,8 +5226,7 @@ impl VM {
             chunks,
             current_chunk: 0,
             globals: vec![None; 4096],
-            global_names: vec![],
-            reactive_namespace_indices: RefCell::new(HashMap::new()),
+            global_names: GlobalNames::default(),
             pending_widget_trees: Vec::new(),
             pending_inline_widgets: Vec::new(),
             registering_static_inline_widget: false,
@@ -5268,7 +5266,7 @@ impl VM {
             current_subtree_capture_stack: Vec::new(),
             current_subtree_reactive_reads: HashMap::new(),
             subtree_render_cache: HashMap::new(),
-            macros: HashMap::new(),
+            macros: Rc::default(),
             definition_generation: 0,
             definition_headers: HashMap::new(),
             source_manager: SourceManager::new(),
@@ -5282,7 +5280,7 @@ impl VM {
             custom_declarations: HashMap::new(),
             retired_custom_defaults: HashMap::new(),
             declared_modules: HashMap::new(),
-            module_exports: crate::modules::ModuleExportRegistry::new(),
+            module_exports: Rc::default(),
             imported_at_epoch: HashMap::new(),
             import_pass_epoch: 1,
             active_expander: None,
@@ -5903,8 +5901,11 @@ impl VM {
             let source_label = self
                 .current_effect_source_buffer_id
                 .map(|buffer_id| format!("buf#{buffer_id}"));
-            let module_exports = self.module_exports.clone();
             let compile_result = {
+                // Scoped to the compile so no extra reference survives into
+                // execution, where a module declaration or export would
+                // otherwise deep-copy the registry on write.
+                let module_exports = Rc::clone(&self.module_exports);
                 let mut compiler = Compiler::new_repl(
                     exprs,
                     existing,
@@ -6034,7 +6035,7 @@ impl VM {
             let next = crate::modules::ModuleExports::new(
                 export_declarations.iter().map(|entry| entry.name.clone()),
             );
-            self.module_exports.insert(module.clone(), next)
+            Rc::make_mut(&mut self.module_exports).insert(module.clone(), next)
         });
         let mut defined_symbols = extract_defined_symbols_from_source(source).map_err(|error| {
             self.source_load_errors
@@ -6109,10 +6110,10 @@ impl VM {
             if let Some(module) = declared_module {
                 match previous_exports {
                     Some(exports) => {
-                        self.module_exports.insert(module, exports);
+                        Rc::make_mut(&mut self.module_exports).insert(module, exports);
                     }
                     None => {
-                        self.module_exports.remove(&module);
+                        Rc::make_mut(&mut self.module_exports).remove(&module);
                     }
                 }
             }
@@ -6415,12 +6416,7 @@ impl VM {
     }
 
     fn ensure_global(&mut self, name: &str) -> usize {
-        if let Some(idx) = self.global_names.iter().position(|n| n == name) {
-            return idx;
-        }
-        let idx = self.global_names.len();
-        self.global_names.push(name.to_string());
-        idx
+        self.global_names.intern(name.to_string())
     }
 
     /// Runtime by-name resolution ladder (module-system spec §3, slice 0),
@@ -6430,7 +6426,7 @@ impl VM {
     /// host-registered globals). Keep the two in sync.
     fn resolve_global_read_index(&self, name: &str) -> Option<usize> {
         if crate::modules::is_qualified(name) {
-            let exact = self.global_names.iter().position(|n| n == name);
+            let exact = self.global_names.position(name);
             if exact.is_some() {
                 return exact;
             }
@@ -6440,7 +6436,7 @@ impl VM {
                 if crate::modules::CORE_NAMESPACES.contains(&ns)
                     || ns == crate::modules::IMPLICIT_MODULE
                 {
-                    return self.global_names.iter().position(|n| n == base);
+                    return self.global_names.position(base);
                 }
             }
             return None;
@@ -6450,35 +6446,16 @@ impl VM {
         // by-name writes must never divert into a qualified slot. Mirrors
         // the compiler ladder's reactive_namespaces exemption.
         if self.reactive_namespaces.contains(name) {
-            return self.reactive_namespace_global_index(name);
+            return self.global_names.position(name);
         }
         let qualified = crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name);
         self.global_names
-            .iter()
-            .position(|n| *n == qualified)
-            .or_else(|| self.global_names.iter().position(|n| n == name))
+            .position(&qualified)
+            .or_else(|| self.global_names.position(name))
     }
 
     pub fn has_global(&self, name: &str) -> bool {
         self.resolve_global_read_index(name).is_some()
-    }
-
-    /// `global_names` index of a reactive namespace map, memoised. Reactive
-    /// reads are the hottest lookup in the UI (every bound widget prop and
-    /// every `NS.field` read), and the flat `global_names` Vec grows with the
-    /// total amount of loaded Lisp, so the linear scan this replaces cost
-    /// more as more instrument/effect UIs were installed.
-    fn reactive_namespace_global_index(&self, name: &str) -> Option<usize> {
-        if let Some(idx) = self.reactive_namespace_indices.borrow().get(name).copied() {
-            if self.global_names.get(idx).is_some_and(|n| n == name) {
-                return Some(idx);
-            }
-        }
-        let idx = self.global_names.iter().position(|n| n == name)?;
-        self.reactive_namespace_indices
-            .borrow_mut()
-            .insert(name.to_string(), idx);
-        Some(idx)
     }
 
     /// Effective cell for a cached global index. The empty-registry branch is
@@ -6601,7 +6578,7 @@ impl VM {
             candidates.push(base.to_string());
         }
         for candidate in candidates {
-            if let Some(candidate_idx) = self.global_names.iter().position(|n| *n == candidate)
+            if let Some(candidate_idx) = self.global_names.position(&candidate)
                 && candidate_idx != idx
                 && let Some(Some(cell)) = self.globals.get(candidate_idx).cloned()
             {
@@ -6621,10 +6598,10 @@ impl VM {
     /// the flat slot's cell so early-compiled references see the live map.
     pub fn alias_stale_qualified_slot(&mut self, name: &str) {
         let qualified = crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name);
-        let Some(qualified_idx) = self.global_names.iter().position(|n| *n == qualified) else {
+        let Some(qualified_idx) = self.global_names.position(&qualified) else {
             return;
         };
-        let Some(flat_idx) = self.global_names.iter().position(|n| n == name) else {
+        let Some(flat_idx) = self.global_names.position(name) else {
             return;
         };
         if let Some(Some(cell)) = self.globals.get(flat_idx).cloned() {
@@ -9453,7 +9430,7 @@ impl VM {
                     let namespace = self.chunks[self.current_chunk].strings[ns_idx].clone();
                     let field = self.chunks[self.current_chunk].strings[field_idx].clone();
                     self.record_reactive_read(&namespace, &field);
-                    let Some(global_idx) = self.reactive_namespace_global_index(&namespace)
+                    let Some(global_idx) = self.global_names.position(&namespace)
                     else {
                         return Err(VMError::UnknownVariable(namespace));
                     };
@@ -9482,7 +9459,7 @@ impl VM {
                     };
                     let index_value = self.binding_ref_operand(index_value)?;
                     self.record_reactive_read(&namespace, &field);
-                    let Some(global_idx) = self.reactive_namespace_global_index(&namespace)
+                    let Some(global_idx) = self.global_names.position(&namespace)
                     else {
                         return Err(VMError::UnknownVariable(namespace));
                     };
@@ -9527,7 +9504,7 @@ impl VM {
                     let namespace = self.chunks[self.current_chunk].strings[ns_idx].clone();
                     let field = self.chunks[self.current_chunk].strings[field_idx].clone();
                     self.record_reactive_read(&namespace, &field);
-                    let Some(global_idx) = self.reactive_namespace_global_index(&namespace)
+                    let Some(global_idx) = self.global_names.position(&namespace)
                     else {
                         return Err(VMError::UnknownVariable(namespace));
                     };

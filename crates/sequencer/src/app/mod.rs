@@ -72,7 +72,6 @@ pub mod take_recording;
 pub mod song_transport;
 mod synth;
 
-pub use browser::BrowserNode;
 pub use effect_params::effect_param_macro_key;
 pub use params::SoloAudibility;
 pub use synth::{instrument_param_macro_key, rack_macro_shown_value};
@@ -613,13 +612,6 @@ pub struct EditorState {
     last_hook_step_16th: Option<u64>,
 }
 
-pub struct BrowserState {
-    pub tree: Vec<BrowserNode>,
-    pub cursor: usize,
-    pub filter: String,
-    pub scroll_offset: usize,
-}
-
 pub struct PresetBrowserState {
     pub cursor: usize,
     pub filter: String,
@@ -1040,7 +1032,6 @@ pub struct App {
     project_saves: project_save::ProjectSaves,
     pub ui: UiState,
     pub editor: EditorState,
-    pub browser: BrowserState,
     pub preset_browser: PresetBrowserState,
     pub agent_panel: AgentPanelState,
     pub agent_store: ConversationStore,
@@ -2797,7 +2788,6 @@ impl App {
             }
         };
         let load_error = catalog_error.or_else(|| AgentToolRuntime::load_default().err());
-        let browser_tree = BrowserNode::scan_root(crate::app_paths::app_paths().samples_dir());
 
         let mut app = Self {
             state,
@@ -2905,12 +2895,6 @@ impl App {
                 next_hook_id: 1,
                 next_hook_callback_id: 1,
                 last_hook_step_16th: None,
-            },
-            browser: BrowserState {
-                tree: browser_tree,
-                cursor: 0,
-                filter: String::new(),
-                scroll_offset: 0,
             },
             preset_browser: PresetBrowserState {
                 cursor: 0,

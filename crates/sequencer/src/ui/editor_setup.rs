@@ -4,7 +4,7 @@ use eseqlisp::{Editor, EditorConfig, Runtime};
 use sequencer::app;
 
 use super::constants::{noui_entrypoint_path, ui_entrypoint_path};
-use super::custom_ui::reload_custom_instrument_ui;
+use super::custom_ui::CustomUiSources;
 use super::state_values::push_project_scratch_to_named_buffer;
 
 pub(crate) const METAL_SEQ_TEXT_FONT_SIZE_PT: f64 = 13.0;
@@ -93,7 +93,9 @@ pub(crate) fn create_editor_with_root(
         editor.handle_host_event(eseqlisp::HostEvent::Error(message));
     }
 
-    reload_custom_instrument_ui(&mut editor);
+    // The generated custom UI sources read only disk; build them while the
+    // UI entrypoint evaluates and load them once its modules are in place.
+    let custom_ui_sources = CustomUiSources::spawn_build(&editor);
     super::host_kinds::reserve_kind_names(editor.runtime_mut());
     let ui_entrypoint = match root {
         UiRoot::Distro => ui_entrypoint_path(),
@@ -117,7 +119,10 @@ pub(crate) fn create_editor_with_root(
     // Both roots import eseq.kinds; the host must publish exactly its fields.
     super::host_kinds::check_schema_at_startup(editor.runtime());
     editor.refresh_runtime_side_effects();
-    reload_custom_instrument_ui(&mut editor);
+    custom_ui_sources
+        .join()
+        .map_err(|_| "custom UI source build panicked".to_string())?
+        .load(&mut editor);
     push_project_scratch_to_named_buffer(&mut editor, &app);
     load_user_init(&mut editor, user_init_path.as_deref());
     if root == UiRoot::Distro {

@@ -63,7 +63,7 @@ pub(crate) fn record_kit_presets() {
     let files = kits
         .into_iter()
         .filter_map(|path| {
-            let kit = sequencer::project::load_kit_preset(&path).ok()?;
+            let kit = sequencer::project::load_kit_preset_summary(&path).ok()?;
             let name = if kit.metadata.name.trim().is_empty() {
                 path.file_stem()?.to_str()?.to_string()
             } else {
@@ -74,7 +74,7 @@ pub(crate) fn record_kit_presets() {
                 icon: "sampler",
                 name,
                 path: path.to_string_lossy().to_string(),
-                pads: kit.pads.len(),
+                pads: kit.pad_count,
                 author: kit.metadata.author,
                 tags: kit.metadata.tags,
             })

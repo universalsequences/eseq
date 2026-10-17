@@ -386,9 +386,66 @@ pub struct MacroDef {
     pub function_chunk: usize,
 }
 
+/// Global slot names in slot order, indexed by name. Every global reference
+/// the compiler resolves looks several spellings up, and the table holds
+/// thousands of names, so lookups go through the index instead of a scan.
+/// Slots are append-only.
+#[derive(Clone, Debug, Default)]
+pub struct GlobalNames {
+    names: Vec<String>,
+    index: HashMap<String, usize>,
+}
+
+impl GlobalNames {
+    /// The first slot named `name`, as a front-to-back scan would find.
+    pub fn position(&self, name: &str) -> Option<usize> {
+        self.index.get(name).copied()
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.index.contains_key(name)
+    }
+
+    /// Append a slot named `name` and return it.
+    fn push(&mut self, name: String) -> usize {
+        let idx = self.names.len();
+        self.index.entry(name.clone()).or_insert(idx);
+        self.names.push(name);
+        idx
+    }
+
+    /// Drop every slot from `len` on (rolling back a failed compile).
+    pub fn truncate(&mut self, len: usize) {
+        if len >= self.names.len() {
+            return;
+        }
+        for name in self.names.drain(len..) {
+            if self.index.get(&name).is_some_and(|&idx| idx >= len) {
+                self.index.remove(&name);
+            }
+        }
+    }
+
+    /// The slot named `name`, appending one if there is none.
+    pub fn intern(&mut self, name: String) -> usize {
+        match self.position(&name) {
+            Some(idx) => idx,
+            None => self.push(name),
+        }
+    }
+}
+
+impl std::ops::Deref for GlobalNames {
+    type Target = [String];
+
+    fn deref(&self) -> &[String] {
+        &self.names
+    }
+}
+
 pub struct MacroCompilerState {
     pub chunks: Vec<Chunk>,
-    pub global_symbols: Vec<String>,
+    pub global_symbols: GlobalNames,
 }
 
 type MacroEvaluator<'a> = dyn FnMut(
@@ -416,7 +473,7 @@ pub struct Compiler<'a> {
     chunks: Vec<Chunk>,
     scopes: Vec<Scope>,
     current_chunk: usize,
-    global_symbols: Vec<String>,
+    global_symbols: GlobalNames,
     reactive_namespaces: HashSet<String>,
     derived_bindings: HashMap<String, u32>,
     state_bindings: HashMap<String, u32>,
@@ -444,7 +501,7 @@ pub struct Compiler<'a> {
     /// §3 escape hatch may define into a module before it exists).
     known_namespaces: std::collections::HashSet<String>,
     /// Export visibility of modules already evaluated by this VM.
-    module_exports: super::modules::ModuleExportRegistry,
+    module_exports: std::rc::Rc<super::modules::ModuleExportRegistry>,
     /// Non-fatal compile diagnostics (visibility references, escape-hatch
     /// defs). Drained by the VM into the diagnostics channel.
     warnings: Vec<String>,
@@ -463,7 +520,9 @@ pub struct Compiler<'a> {
     /// Removed legacy names this unit loads as globals, checked when the
     /// unit finishes (a later `def` in the same unit may still define one).
     removed_form_uses: Vec<(&'static str, usize)>,
-    pub macros: HashMap<String, MacroDef>,
+    /// Shared with the VM until this unit defines a macro (copy on write):
+    /// the VM hands its table to the compiler of every segment.
+    pub macros: std::rc::Rc<HashMap<String, MacroDef>>,
     macro_evaluator: Option<Box<MacroEvaluator<'a>>>,
     next_macro_expansion_ordinal: usize,
     compiling_macro_body: usize,
@@ -937,19 +996,13 @@ fn collect_pattern_symbols(pattern: &Expression, symbols: &mut Vec<String>) {
     }
 }
 
-fn extract_if_statement(list: &[Expression]) -> Option<(Expression, Expression, Expression)> {
-    match (list.first(), list.get(1), list.get(2), list.get(3)) {
-        (Some(Expression::Symbol(s)), Some(condition), Some(then_body), Some(else_body))
-            if s == "if" =>
-        {
-            Some((condition.clone(), then_body.clone(), else_body.clone()))
-        }
-        (Some(Expression::Symbol(s)), Some(condition), Some(then_body), None) if s == "if" => {
-            Some((
-                condition.clone(),
-                then_body.clone(),
-                Expression::Symbol("nil".to_string()),
-            ))
+/// `(if cond then [else])` parts, borrowed; a missing else is `None` (nil).
+fn extract_if_statement(
+    list: &[Expression],
+) -> Option<(&Expression, &Expression, Option<&Expression>)> {
+    match list {
+        [Expression::Symbol(s), condition, then_body, rest @ ..] if s == "if" => {
+            Some((condition, then_body, rest.first()))
         }
         _ => None,
     }
@@ -1071,7 +1124,7 @@ impl<'a> Compiler<'a> {
             chunks: vec![],
             scopes: vec![],
             current_chunk: 0,
-            global_symbols: vec![],
+            global_symbols: GlobalNames::default(),
             reactive_namespaces: HashSet::new(),
             derived_bindings: HashMap::new(),
             state_bindings: HashMap::new(),
@@ -1085,14 +1138,14 @@ impl<'a> Compiler<'a> {
             import_aliases: HashMap::new(),
             refers: HashMap::new(),
             known_namespaces: std::collections::HashSet::new(),
-            module_exports: super::modules::ModuleExportRegistry::new(),
+            module_exports: Default::default(),
             warnings: Vec::new(),
             definition_headers: Vec::new(),
             errors: Vec::new(),
             initial_global_count: 0,
             defined_globals: HashSet::new(),
             removed_form_uses: Vec::new(),
-            macros: HashMap::new(),
+            macros: Default::default(),
             macro_evaluator: None,
             next_macro_expansion_ordinal: 0,
             compiling_macro_body: 0,
@@ -1106,13 +1159,13 @@ impl<'a> Compiler<'a> {
     pub fn new_repl(
         expressions: Vec<Expression>,
         existing_chunks: Vec<Chunk>,
-        existing_global_names: Vec<String>,
+        existing_global_names: GlobalNames,
         reactive_namespaces: HashSet<String>,
         derived_bindings: HashMap<String, u32>,
         state_bindings: HashMap<String, u32>,
         scene_bindings: HashSet<String>,
         next_node_id: u32,
-        macros: HashMap<String, MacroDef>,
+        macros: std::rc::Rc<HashMap<String, MacroDef>>,
         source_file: Option<PathBuf>,
         source_label: Option<String>,
     ) -> Self {
@@ -1136,7 +1189,7 @@ impl<'a> Compiler<'a> {
             import_aliases: HashMap::new(),
             refers: HashMap::new(),
             known_namespaces: std::collections::HashSet::new(),
-            module_exports: super::modules::ModuleExportRegistry::new(),
+            module_exports: Default::default(),
             warnings: Vec::new(),
             definition_headers: Vec::new(),
             errors: Vec::new(),
@@ -1205,7 +1258,7 @@ impl<'a> Compiler<'a> {
         std::mem::take(&mut self.definition_headers)
     }
 
-    pub fn set_module_exports(&mut self, exports: super::modules::ModuleExportRegistry) {
+    pub fn set_module_exports(&mut self, exports: std::rc::Rc<super::modules::ModuleExportRegistry>) {
         self.module_exports = exports;
     }
 
@@ -1827,11 +1880,11 @@ impl<'a> Compiler<'a> {
 
     /// Consume the compiler and return the final global symbol table,
     /// so the VM can sync its own name→index mapping.
-    pub fn into_global_names(self) -> Vec<String> {
+    pub fn into_global_names(self) -> GlobalNames {
         self.global_symbols
     }
 
-    pub fn global_names(&self) -> Vec<String> {
+    pub fn global_names(&self) -> GlobalNames {
         self.global_symbols.clone()
     }
 
@@ -1842,7 +1895,7 @@ impl<'a> Compiler<'a> {
         std::mem::take(&mut self.chunks)
     }
 
-    pub fn take_global_names(&mut self) -> Vec<String> {
+    pub fn take_global_names(&mut self) -> GlobalNames {
         std::mem::take(&mut self.global_symbols)
     }
 
@@ -1858,7 +1911,7 @@ impl<'a> Compiler<'a> {
         std::mem::take(&mut self.scene_bindings)
     }
 
-    pub fn take_macros(&mut self) -> HashMap<String, MacroDef> {
+    pub fn take_macros(&mut self) -> std::rc::Rc<HashMap<String, MacroDef>> {
         std::mem::take(&mut self.macros)
     }
 
@@ -2931,12 +2984,7 @@ impl<'a> Compiler<'a> {
 
     fn use_global(&mut self, name: &str) -> usize {
         let resolved = self.resolve_global_name(name);
-        if let Some(index) = self.global_symbols.iter().position(|r| *r == resolved) {
-            return index;
-        }
-        let idx = self.global_symbols.len();
-        self.global_symbols.push(resolved);
-        idx
+        self.global_symbols.intern(resolved)
     }
 
     /// Resolution ladder for global names (module-system spec §3).
@@ -2990,8 +3038,8 @@ impl<'a> Compiler<'a> {
             // no qualified one exists (mirrors VM::resolve_global_read_index).
             if (super::modules::CORE_NAMESPACES.contains(&full_ns.as_str())
                 || full_ns == super::modules::IMPLICIT_MODULE)
-                && !self.global_symbols.iter().any(|s| *s == resolved)
-                && self.global_symbols.iter().any(|s| s == base)
+                && !self.global_symbols.contains(&resolved)
+                && self.global_symbols.contains(base)
             {
                 return base.to_string();
             }
@@ -3003,17 +3051,17 @@ impl<'a> Compiler<'a> {
         // AFTER compat aliases below, because a converted symbol's stale
         // vanilla slot (left interned from before the conversion) is
         // exactly what an alias exists to supersede.
-        if self.declared_module().is_some() && self.global_symbols.iter().any(|s| *s == qualified)
+        if self.declared_module().is_some() && self.global_symbols.contains(&qualified)
         {
             return qualified;
         }
         if let Some(target) = self.refers.get(name) {
             return target.clone();
         }
-        if self.global_symbols.iter().any(|s| *s == qualified) {
+        if self.global_symbols.contains(&qualified) {
             return qualified;
         }
-        if self.global_symbols.iter().any(|s| *s == name) {
+        if self.global_symbols.contains(name) {
             return name.to_string();
         }
         qualified
@@ -3296,8 +3344,7 @@ impl<'a> Compiler<'a> {
         let candidates = [Some(name), Some(qualified.as_str()), self.refers.get(name).map(String::as_str)];
         candidates.into_iter().flatten().any(|candidate| {
             self.global_symbols
-                .iter()
-                .position(|symbol| symbol == candidate)
+                .position(candidate)
                 .is_some_and(|idx| idx < self.initial_global_count || self.defined_globals.contains(&idx))
         })
     }
@@ -3309,7 +3356,7 @@ impl<'a> Compiler<'a> {
         {
             return self.use_global(name);
         }
-        if self.global_symbols.iter().any(|s| s == name) {
+        if self.global_symbols.contains(name) {
             let module = self.current_module.clone();
             self.warn_once(format!(
                 "warning: (def {name} …) in {module} does not replace the \
@@ -3318,12 +3365,7 @@ impl<'a> Compiler<'a> {
             ));
         }
         let qualified = super::modules::qualify(&self.current_module, name);
-        if let Some(index) = self.global_symbols.iter().position(|r| *r == qualified) {
-            return index;
-        }
-        let idx = self.global_symbols.len();
-        self.global_symbols.push(qualified);
-        idx
+        self.global_symbols.intern(qualified)
     }
 
     fn compile_macro_quasiquote(&mut self, expr: &Expression) -> Result<(), CompilerError> {
@@ -3591,20 +3633,23 @@ impl<'a> Compiler<'a> {
 
     pub fn compile_if_statement(
         &mut self,
-        condition: Expression,
-        then_body: Expression,
-        else_body: Expression,
+        condition: &Expression,
+        then_body: &Expression,
+        else_body: Option<&Expression>,
     ) -> Result<(), CompilerError> {
-        self.compile_expression(&condition)?;
+        self.compile_expression(condition)?;
         let jump_op_idx = self.op_idx();
         self.emit(OpCode::JumpIfFalse(0));
-        self.compile_expression(&then_body)?;
+        self.compile_expression(then_body)?;
         let then_end_idx = self.op_idx();
         self.emit(OpCode::Jump(0));
         let else_begin_idx = self.op_idx();
         let jump_false_increment = else_begin_idx - jump_op_idx;
         self.chunk_mut().unwrap().ops[jump_op_idx] = OpCode::JumpIfFalse(jump_false_increment);
-        self.compile_expression(&else_body)?;
+        match else_body {
+            Some(else_body) => self.compile_expression(else_body)?,
+            None => self.compile_expression(&Expression::Symbol("nil".to_string()))?,
+        }
         let else_end_idx = self.op_idx();
         self.chunk_mut().unwrap().ops[then_end_idx] = OpCode::Jump(else_end_idx - then_end_idx);
         Ok(())
@@ -4247,7 +4292,7 @@ impl<'a> Compiler<'a> {
                     rest_param.as_deref(),
                     &list[3],
                 )?;
-                self.macros.insert(
+                std::rc::Rc::make_mut(&mut self.macros).insert(
                     key,
                     MacroDef {
                         params,

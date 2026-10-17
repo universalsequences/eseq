@@ -800,41 +800,60 @@ pub(crate) fn build_custom_audio_fx_ui_source_with_overlay(
     format!("{functions}\n(def custom-audio-fx-ui (fx) {dispatch})\n")
 }
 
+/// The generated custom instrument, MIDI FX and audio effect UI sources,
+/// built from disk. Building reads no editor or runtime state beyond the
+/// overlays, so boot builds them on a worker while the UI entrypoint
+/// evaluates ([`CustomUiSources::spawn_build`]).
+pub(crate) struct CustomUiSources {
+    instrument: String,
+    midi_fx: String,
+    audio_fx: String,
+}
+
+type CustomUiOverlays = [Option<(String, String, String)>; 3];
+
+impl CustomUiSources {
+    fn overlays(editor: &Editor) -> CustomUiOverlays {
+        [
+            active_custom_ui_buffer_overlay(editor),
+            active_custom_midi_fx_ui_buffer_overlay(editor),
+            active_custom_audio_fx_ui_buffer_overlay(editor),
+        ]
+    }
+
+    fn build([instrument, midi_fx, audio_fx]: CustomUiOverlays) -> Self {
+        Self {
+            instrument: build_custom_instrument_ui_source_with_overlay(instrument),
+            midi_fx: build_custom_midi_fx_ui_source_with_overlay(midi_fx),
+            audio_fx: build_custom_audio_fx_ui_source_with_overlay(audio_fx),
+        }
+    }
+
+    pub(crate) fn spawn_build(editor: &Editor) -> std::thread::JoinHandle<Self> {
+        let overlays = Self::overlays(editor);
+        std::thread::Builder::new()
+            .name("custom-ui-build".into())
+            .spawn(move || Self::build(overlays))
+            .expect("spawn custom UI source build")
+    }
+
+    pub(crate) fn load(self, editor: &mut Editor) -> bool {
+        let mut ok = true;
+        for (source, path, label) in [
+            (self.instrument, GENERATED_INSTRUMENT_UI_PATH, "custom instrument UI"),
+            (self.midi_fx, GENERATED_MIDI_FX_UI_PATH, "custom MIDI FX UI"),
+            (self.audio_fx, GENERATED_AUDIO_FX_UI_PATH, "custom audio effect UI"),
+        ] {
+            if !source.is_empty() {
+                ok &= reload_custom_ui_source(editor, path, &source, label);
+            }
+        }
+        ok
+    }
+}
+
 pub(crate) fn reload_custom_instrument_ui(editor: &mut Editor) -> bool {
-    let mut ok = true;
-    let custom_ui_source =
-        build_custom_instrument_ui_source_with_overlay(active_custom_ui_buffer_overlay(editor));
-    if !custom_ui_source.is_empty() {
-        ok &= reload_custom_ui_source(
-            editor,
-            GENERATED_INSTRUMENT_UI_PATH,
-            &custom_ui_source,
-            "custom instrument UI",
-        );
-    }
-    let custom_midi_fx_source = build_custom_midi_fx_ui_source_with_overlay(
-        active_custom_midi_fx_ui_buffer_overlay(editor),
-    );
-    if !custom_midi_fx_source.is_empty() {
-        ok &= reload_custom_ui_source(
-            editor,
-            GENERATED_MIDI_FX_UI_PATH,
-            &custom_midi_fx_source,
-            "custom MIDI FX UI",
-        );
-    }
-    let custom_audio_fx_source = build_custom_audio_fx_ui_source_with_overlay(
-        active_custom_audio_fx_ui_buffer_overlay(editor),
-    );
-    if !custom_audio_fx_source.is_empty() {
-        ok &= reload_custom_ui_source(
-            editor,
-            GENERATED_AUDIO_FX_UI_PATH,
-            &custom_audio_fx_source,
-            "custom audio effect UI",
-        );
-    }
-    ok
+    CustomUiSources::build(CustomUiSources::overlays(editor)).load(editor)
 }
 
 fn reload_custom_ui_source(editor: &mut Editor, path: &str, source: &str, label: &str) -> bool {

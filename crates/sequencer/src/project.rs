@@ -3731,6 +3731,10 @@ pub fn save_kit_preset(name: &str, kit: &ProjectKitPreset) -> std::io::Result<Pa
 }
 
 pub fn load_kit_preset(path: &Path) -> std::io::Result<ProjectKitPreset> {
+    read_kit_json(path)
+}
+
+fn read_kit_json<T: serde::de::DeserializeOwned>(path: &Path) -> std::io::Result<T> {
     let src = std::fs::read_to_string(path)?;
     serde_json::from_str(&src).map_err(|error| {
         std::io::Error::new(
@@ -3738,6 +3742,25 @@ pub fn load_kit_preset(path: &Path) -> std::io::Result<ProjectKitPreset> {
             format!("Failed to parse kit '{}': {error}", path.display()),
         )
     })
+}
+
+/// What the browser lists for a kit, read without building its pads: kits
+/// embed their pads' full state and run to megabytes each.
+pub struct KitPresetSummary {
+    pub metadata: ProjectSoundMetadata,
+    pub pad_count: usize,
+}
+
+pub fn load_kit_preset_summary(path: &Path) -> std::io::Result<KitPresetSummary> {
+    #[derive(Deserialize)]
+    #[allow(dead_code)] // Required, as the full load requires it.
+    struct Summary {
+        version: u32,
+        metadata: ProjectSoundMetadata,
+        pads: Vec<serde::de::IgnoredAny>,
+    }
+    let summary: Summary = read_kit_json(path)?;
+    Ok(KitPresetSummary { metadata: summary.metadata, pad_count: summary.pads.len() })
 }
 
 pub fn list_kit_presets() -> std::io::Result<Vec<PathBuf>> {
