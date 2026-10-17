@@ -5450,6 +5450,7 @@ fn encode_track_params(snapshot: &TrackParamsSnapshot) -> Vec<u8> {
         voice_priority,
         mute_group,
         global_transpose,
+        mod_roles,
     } = snapshot;
     let mut bytes = WitnessBytes::default();
     bytes.bool(*gate);
@@ -5514,6 +5515,7 @@ fn encode_track_params(snapshot: &TrackParamsSnapshot) -> Vec<u8> {
     bytes.u32(*voice_priority as u32);
     bytes.u32(*mute_group as u32);
     bytes.bool(*global_transpose);
+    bytes.u32(mod_roles.pack());
     bytes.0
 }
 
@@ -6012,6 +6014,7 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
         | AppCommand::SetTrackAccumMode { .. }
         | AppCommand::SetTrackMuteGroup { .. }
         | AppCommand::SetTrackGlobalTranspose { .. }
+        | AppCommand::SetTrackModRoles { .. }
         | AppCommand::SetInstrumentBaseNoteOffset { .. }
         | AppCommand::MacroCreate { .. }
         | AppCommand::MacroCreateScene { .. }
@@ -6105,7 +6108,8 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         | AppCommand::AdjustTrackAccumLimit { track, .. }
         | AppCommand::SetTrackAccumMode { track, .. }
         | AppCommand::SetTrackMuteGroup { track, .. }
-        | AppCommand::SetTrackGlobalTranspose { track, .. } => {
+        | AppCommand::SetTrackGlobalTranspose { track, .. }
+        | AppCommand::SetTrackModRoles { track, .. } => {
             capture_track_params_witness(app, *track)
         }
 
@@ -8549,6 +8553,7 @@ fn track_params_command_track(cmd: &AppCommand) -> Option<usize> {
         | AppCommand::SetTrackAccumMode { track, .. }
         | AppCommand::SetTrackMuteGroup { track, .. }
         | AppCommand::SetTrackGlobalTranspose { track, .. }
+        | AppCommand::SetTrackModRoles { track, .. }
         | AppCommand::SetInstrumentBaseNoteOffset { track, .. } => Some(*track),
         _ => None,
     }
@@ -8595,6 +8600,7 @@ fn track_params_label(cmd: &AppCommand) -> &'static str {
         AppCommand::SetTrackAccumMode { .. } => "Set accumulator mode",
         AppCommand::SetTrackMuteGroup { .. } => "Set track mute group",
         AppCommand::SetTrackGlobalTranspose { .. } => "Set global transpose",
+        AppCommand::SetTrackModRoles { .. } => "Set mod input roles",
         AppCommand::SetInstrumentBaseNoteOffset { .. } => "Set instrument base note",
         _ => "Set track parameters",
     }
@@ -15734,6 +15740,17 @@ mod tests {
             AppCommand::SetTrackGlobalTranspose {
                 track: 0,
                 enabled: false,
+            },
+            AppCommand::SetTrackModRoles {
+                track: 0,
+                edit: crate::app::ModRolesEdit::Role {
+                    input: 2,
+                    role: crate::sequencer::ModInputRole::Trigger,
+                },
+            },
+            AppCommand::SetTrackModRoles {
+                track: 0,
+                edit: crate::app::ModRolesEdit::Steps(crate::sequencer::ModSteps::Latch),
             },
             AppCommand::SetInstrumentBaseNoteOffset {
                 track: 0,

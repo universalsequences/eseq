@@ -220,7 +220,7 @@
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-          :width 6.6 :height 1.05 :font-size 9.0)
+          :width 8.0 :height 1.05 :font-size 9.0)
         (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "freq" (param params band "freq"))
         (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "gain" (param params band "gain"))
         (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "q" (param params band "q"))))))

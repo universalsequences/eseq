@@ -296,6 +296,7 @@
             voice_priority: crate::sequencer::VoicePriority::Last,
             mute_group: (id % 9) as u8,
             global_transpose: id % 2 == 0,
+            mod_roles: Default::default(),
         }
     }
 
@@ -2442,6 +2443,7 @@
         second.track_bits[0][0] = 99;
         second.track_bits[1][0] = 199;
         let route = ModConnection {
+            source_output: 0,
             source_track: 0,
             destination: ModDestination::Track(1),
             dest_input: 2,
@@ -2508,6 +2510,7 @@
     fn project_scenes_new_scene_forks_current_effective_pattern_per_track() {
         let first = sample_pattern_snapshot(2);
         let route = ModConnection {
+            source_output: 0,
             source_track: 0,
             destination: ModDestination::Track(1),
             dest_input: 3,
@@ -2804,16 +2807,19 @@
         let mut snapshot = sample_pattern_snapshot(4);
         snapshot.mod_connections = vec![
             ModConnection {
+                source_output: 0,
                 source_track: 1,
                 destination: ModDestination::Track(3),
                 dest_input: 2,
             },
             ModConnection {
+                source_output: 0,
                 source_track: 0,
                 destination: ModDestination::Track(2),
                 dest_input: 1,
             },
             ModConnection {
+                source_output: 0,
                 source_track: 2,
                 destination: ModDestination::Track(1),
                 dest_input: 3,
@@ -2825,6 +2831,7 @@
         assert_eq!(
             snapshot.mod_connections,
             vec![ModConnection {
+                source_output: 0,
                 source_track: 0,
                 destination: ModDestination::Track(1),
                 dest_input: 1,
@@ -2837,11 +2844,13 @@
         let mut snapshot = sample_pattern_snapshot(4);
         snapshot.mod_connections = vec![
             ModConnection {
+                source_output: 0,
                 source_track: 2,
                 destination: ModDestination::Bus(BusId(42)),
                 dest_input: 1,
             },
             ModConnection {
+                source_output: 0,
                 source_track: 1,
                 destination: ModDestination::Bus(BusId(42)),
                 dest_input: 2,
@@ -2853,6 +2862,7 @@
         assert_eq!(
             snapshot.mod_connections,
             vec![ModConnection {
+                source_output: 0,
                 source_track: 1,
                 destination: ModDestination::Bus(BusId(42)),
                 dest_input: 1,
@@ -4568,6 +4578,7 @@
     fn clone_pattern_preserves_mod_connections_on_source_and_clone() {
         let state = make_state_with_tracks(2);
         let route = ModConnection {
+            source_output: 0,
             source_track: 0,
             destination: ModDestination::Track(1),
             dest_input: 2,
@@ -4600,6 +4611,7 @@
         state.pattern.step_data[0].set(5, StepParam::Velocity, 0.75);
         state.pattern.chord_data[0].add_note(5, 7.0);
         let route = ModConnection {
+            source_output: 0,
             source_track: 0,
             destination: ModDestination::Track(1),
             dest_input: 3,
@@ -4649,6 +4661,7 @@
     fn delete_pattern_preserves_remaining_pattern_mod_connections() {
         let state = make_state_with_tracks(2);
         let route = ModConnection {
+            source_output: 0,
             source_track: 0,
             destination: ModDestination::Track(1),
             dest_input: 1,
@@ -6997,6 +7010,7 @@
     fn publish_scheduler_snapshot_captures_current_pattern_mod_connections() {
         let state = make_state_with_tracks(2);
         let route = ModConnection {
+            source_output: 0,
             source_track: 0,
             destination: ModDestination::Track(1),
             dest_input: 2,

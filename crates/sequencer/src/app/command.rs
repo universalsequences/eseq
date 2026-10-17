@@ -287,6 +287,28 @@ impl TuningEdit {
     }
 }
 
+/// A single edit to a track's `ModInputRoles`, applied to the roles current
+/// when the command lands so two quick edits never overwrite each other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModRolesEdit {
+    Role { input: usize, role: crate::sequencer::ModInputRole },
+    Steps(crate::sequencer::ModSteps),
+}
+
+impl ModRolesEdit {
+    pub fn apply(self, mut roles: crate::sequencer::ModInputRoles) -> crate::sequencer::ModInputRoles {
+        match self {
+            Self::Role { input, role } => {
+                if let Some(slot) = roles.roles.get_mut(input) {
+                    *slot = role;
+                }
+            }
+            Self::Steps(steps) => roles.steps = steps,
+        }
+        roles
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub enum AppCommand {
@@ -636,6 +658,11 @@ pub enum AppCommand {
     SetTrackGlobalTranspose {
         track: usize,
         enabled: bool,
+    },
+    /// One mod input role or the steps mode (docs/mod-input-roles-spec.md).
+    SetTrackModRoles {
+        track: usize,
+        edit: ModRolesEdit,
     },
 
     // ── Effect params ─────────────────────────────────────────────────────────
@@ -1117,7 +1144,8 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::SetTrackAccumIdx { .. }
         | AppCommand::SetTrackAccumMode { .. }
         | AppCommand::SetTrackMuteGroup { .. }
-        | AppCommand::SetTrackGlobalTranspose { .. } => HistoryPolicy::Record,
+        | AppCommand::SetTrackGlobalTranspose { .. }
+        | AppCommand::SetTrackModRoles { .. } => HistoryPolicy::Record,
 
         AppCommand::SetTrackTuning { track, edit, .. } => match edit {
             TuningEdit::Offset(degree) => HistoryPolicy::Coalesce(
@@ -3651,6 +3679,11 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
 
         AppCommand::SetTrackGlobalTranspose { track, enabled } => {
             app.state.pattern.track_params[track].set_global_transpose(enabled);
+        }
+
+        AppCommand::SetTrackModRoles { track, edit } => {
+            let params = &app.state.pattern.track_params[track];
+            params.set_mod_roles(edit.apply(params.mod_roles()));
         }
 
         // ── Effect params ─────────────────────────────────────────────────

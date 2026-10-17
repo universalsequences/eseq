@@ -6,12 +6,13 @@ impl GraphController<'_> {
         let connections = self.app.state.current_mod_connections();
         let mut desired: Vec<(i32, i32)> = Vec::with_capacity(connections.len());
         for connection in connections {
+            // A route from an output or into an input the strip no longer
+            // shows (the patch declares fewer/more outputs now) stays in the
+            // scene but carries nothing until the port comes back.
             if connection.source_track >= track_count
                 || connection.dest_input >= EXT_MOD_INPUT_COUNT
-                || !self
-                    .app
-                    .graph
-                    .track_exposes_mod_output(connection.source_track)
+                || connection.source_output >= self.app.graph.track_mod_output_count(connection.source_track)
+                || !self.mod_destination_input_shown(connection.destination, connection.dest_input)
             {
                 continue;
             }
@@ -19,7 +20,8 @@ impl GraphController<'_> {
             {
                 continue;
             }
-            let source_id = self.app.graph.track_node_ids[connection.source_track].mod_out_id;
+            let source_id =
+                self.app.graph.track_node_ids[connection.source_track].mod_out_ids[connection.source_output];
             let Some(dest_id) =
                 self.resolve_mod_destination_input(connection.destination, connection.dest_input)
             else {
@@ -66,6 +68,32 @@ impl GraphController<'_> {
         }
     }
 
+    /// Point every track's mod input clips at its own `mod_trigger_lanes`
+    /// lanes again after the tracks from `first_track` on shifted down
+    /// (docs/mod-input-roles-spec.md §6). Creation sets the lane through the
+    /// clip's initial state; only a delete reindexes tracks.
+    pub(super) fn sync_mod_trigger_publish_targets(&mut self, first_track: usize) {
+        for (track, nodes) in self.app.graph.track_node_ids.iter().enumerate().skip(first_track) {
+            for (input, &clip_id) in nodes.mod_in_clip_ids.iter().enumerate() {
+                if clip_id <= 0 {
+                    continue;
+                }
+                unsafe {
+                    crate::audiograph::params_push_wrapper(
+                        self.app.graph.lg.0,
+                        crate::audiograph::ParamMsg {
+                            idx: crate::instruments::track_modulator::MOD_IN_CLIP_STATE_PUBLISH as u64,
+                            logical_id: clip_id as u64,
+                            fvalue: crate::instruments::track_modulator::mod_in_clip_publish_value(
+                                track, input,
+                            ),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     pub(super) fn resolve_mod_destination_input(
         &self,
         destination: ModDestination,
@@ -91,6 +119,17 @@ impl GraphController<'_> {
         }
     }
 
+    /// Whether `destination` shows mod input `input`: a track gives up
+    /// inputs to its extra outputs; a bus shows all four.
+    fn mod_destination_input_shown(&self, destination: ModDestination, input: usize) -> bool {
+        match destination {
+            ModDestination::Track(track) => {
+                input < self.app.graph.track_visible_mod_inputs(track)
+            }
+            ModDestination::Bus(_) => input < EXT_MOD_INPUT_COUNT,
+        }
+    }
+
     pub(super) fn validate_mod_destination(
         &self,
         source_track: usize,
@@ -107,6 +146,13 @@ impl GraphController<'_> {
                 }
                 if source_track == dest_track {
                     return Err("mod route cannot connect a track to itself".to_string());
+                }
+                if !self.mod_destination_input_shown(destination, dest_input) {
+                    return Err(format!(
+                        "track {} has no Ext{} input beside its mod outputs",
+                        dest_track + 1,
+                        dest_input + 1
+                    ));
                 }
             }
             ModDestination::Bus(bus_id) => {
@@ -127,6 +173,7 @@ impl GraphController<'_> {
     pub fn set_mod_route_to_destination(
         &mut self,
         source_track: usize,
+        source_output: usize,
         destination: ModDestination,
         dest_input: usize,
     ) -> Result<(), String> {
@@ -137,9 +184,16 @@ impl GraphController<'_> {
         if !self.app.graph.track_exposes_mod_output(source_track) {
             return Err("mod route source track has no mod output".to_string());
         }
+        if source_output >= self.app.graph.track_mod_output_count(source_track) {
+            return Err(format!(
+                "mod route source track has no mod output {}",
+                source_output + 1
+            ));
+        }
         self.validate_mod_destination(source_track, destination, dest_input)?;
         self.app.state.edit_current_mod_connections(|connections| {
             let connection = crate::sequencer::ModConnection {
+                source_output,
                 source_track,
                 destination,
                 dest_input,
@@ -161,6 +215,7 @@ impl GraphController<'_> {
     ) -> Result<(), String> {
         self.set_mod_route_to_destination(
             source_track,
+            0,
             ModDestination::Track(dest_track),
             dest_input,
         )
@@ -169,12 +224,14 @@ impl GraphController<'_> {
     pub fn delete_mod_route_to_destination(
         &mut self,
         source_track: usize,
+        source_output: usize,
         destination: ModDestination,
         dest_input: usize,
     ) -> Result<(), String> {
         self.app.state.edit_current_mod_connections(|connections| {
             connections.retain(|connection| {
                 connection.source_track != source_track
+                    || connection.source_output != source_output
                     || connection.destination != destination
                     || connection.dest_input != dest_input
             });
@@ -192,6 +249,7 @@ impl GraphController<'_> {
     ) -> Result<(), String> {
         self.delete_mod_route_to_destination(
             source_track,
+            0,
             ModDestination::Track(dest_track),
             dest_input,
         )

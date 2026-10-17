@@ -1475,6 +1475,7 @@ pub(super) fn seed_app_panels(editor: &mut Editor, app: &app::App, track: usize)
                 set_field(rt, m, "index", Value::Number(index as f64));
                 set_field(rt, m, "slot", Value::Number(modulator.slot as f64));
                 set_field(rt, m, "label", Value::String(modulator.label.clone()));
+                set_field(rt, m, "ext", Value::Number(modulator.ext.unwrap_or(0) as f64));
                 m
             })
             .collect();

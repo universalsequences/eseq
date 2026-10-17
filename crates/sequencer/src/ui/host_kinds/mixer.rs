@@ -142,6 +142,11 @@ impl HostKinds {
         let mut keys = Vec::new();
         let mut connections = Vec::new();
         for connection in app.state.current_mod_connections() {
+            // Routes between ports the strips don't show carry nothing and
+            // draw nothing until the ports come back.
+            if !route_ports_shown(app, &connection) {
+                continue;
+            }
             let Some(key) = RouteKey::of(&connection, track_ids) else {
                 continue;
             };
@@ -181,6 +186,7 @@ impl HostKinds {
                 f::ROUTE_INPUT,
                 number(connection.dest_input as f64 + 1.0),
             );
+            pusher.push(id, f::ROUTE_OUTPUT, number(connection.source_output as f64 + 1.0));
         }
         if let Some(project) = pusher.singleton(PROJECT) {
             let list = listed_instances(&routes);
@@ -287,6 +293,7 @@ impl HostKinds {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct RouteKey {
     source: u64,
+    output: usize,
     dest: RouteDest,
     input: usize,
 }
@@ -312,8 +319,22 @@ impl RouteKey {
         };
         Some(Self {
             source: track_ids.get(connection.source_track)?.0,
+            output: connection.source_output,
             dest,
             input: connection.dest_input,
         })
     }
+}
+
+/// Whether `connection` runs between ports the mixer shows: its source's
+/// output and, on a track, an input that output ports have not taken.
+fn route_ports_shown(app: &app::App, connection: &sequencer::sequencer::ModConnection) -> bool {
+    let graph = &app.graph;
+    connection.source_output < graph.track_mod_output_count(connection.source_track).max(1)
+        && match connection.destination {
+            sequencer::sequencer::ModDestination::Track(track) => {
+                connection.dest_input < graph.track_visible_mod_inputs(track)
+            }
+            sequencer::sequencer::ModDestination::Bus(_) => true,
+        }
 }

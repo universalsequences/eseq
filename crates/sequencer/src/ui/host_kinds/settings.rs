@@ -12,7 +12,7 @@
 
 use super::*;
 use sequencer::scale::TrackTuning;
-use sequencer::sequencer::{MonoTrigger, SwingResolution, TrackOutput, VoicePriority};
+use sequencer::sequencer::{ModInputRoles, MonoTrigger, SwingResolution, TrackOutput, VoicePriority};
 
 /// One track's settings as last pushed.
 #[derive(Clone, PartialEq)]
@@ -23,6 +23,7 @@ pub(super) struct TrackSettings {
     supports_mono_trigger: bool,
     voice_priority: VoicePriority,
     mono_trigger: MonoTrigger,
+    mod_roles: ModInputRoles,
     mute_group: u8,
     swing: f32,
     swing_resolution: SwingResolution,
@@ -31,6 +32,10 @@ pub(super) struct TrackSettings {
     accum_mode: u32,
     accum_limit: f32,
     mod_output: bool,
+    mod_outputs: usize,
+    mod_output_names: Vec<String>,
+    module: bool,
+    ext_input_names: Vec<String>,
 }
 
 impl TrackSettings {
@@ -44,6 +49,7 @@ impl TrackSettings {
             supports_mono_trigger: track_supports_mono_trigger(app, track),
             voice_priority: tp.get_voice_priority(),
             mono_trigger: tp.get_mono_trigger(),
+            mod_roles: tp.mod_roles(),
             mute_group: tp.get_mute_group().min(8),
             swing: tp.get_swing(),
             swing_resolution: tp.get_swing_resolution(),
@@ -51,6 +57,10 @@ impl TrackSettings {
             accum_mode: tp.get_accum_mode(),
             accum_limit: tp.get_accum_limit(),
             mod_output: app.graph.track_exposes_mod_output(track),
+            mod_outputs: app.graph.track_mod_output_count(track),
+            mod_output_names: app.graph.track_mod_output_names(track),
+            module: app.graph.track_is_module(track),
+            ext_input_names: app.graph.track_ext_input_names(track),
         }
     }
 
@@ -67,6 +77,9 @@ impl TrackSettings {
         pusher.push(id, f::TRACK_VOICE_PRIORITY, priority);
         let trigger = text(mono_trigger_label(self.mono_trigger));
         pusher.push(id, f::TRACK_MONO_TRIGGER, trigger);
+        let roles = list_value(self.mod_roles.roles.iter().map(|role| text(role.label())));
+        pusher.push(id, f::TRACK_MOD_ROLES, roles);
+        pusher.push(id, f::TRACK_MOD_STEPS, text(self.mod_roles.steps.label()));
         pusher.push(id, f::TRACK_MUTE_GROUP, number(self.mute_group));
         pusher.push(id, f::TRACK_SWING, number(self.swing));
         let resolution = text(self.swing_resolution.label());
@@ -81,6 +94,12 @@ impl TrackSettings {
         );
         pusher.push(id, f::TRACK_ACCUM_LIMIT, number(self.accum_limit));
         pusher.push(id, f::TRACK_MOD_OUTPUT, Value::Bool(self.mod_output));
+        pusher.push(id, f::TRACK_MOD_OUTPUTS, number(self.mod_outputs as f64));
+        let names = list_value(self.mod_output_names.iter().map(|name| text(name)));
+        pusher.push(id, f::TRACK_MOD_OUTPUT_NAMES, names);
+        pusher.push(id, f::TRACK_MODULE, Value::Bool(self.module));
+        let names = list_value(self.ext_input_names.iter().map(|name| text(name)));
+        pusher.push(id, f::TRACK_EXT_INPUT_NAMES, names);
     }
 }
 

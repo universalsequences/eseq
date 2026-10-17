@@ -201,8 +201,8 @@
       :status-pos-bg     '(0.075 0.095 0.122)
       :status-accent     '(0.54 0.60 0.66)
 
-      :border-active   '(0.40 0.48 0.58)
-      :border-inactive '(0.035 0.048 0.064)
+      :border-active   '(0.212 0.263 0.328 1.0)
+      :border-inactive '(0.153 0.18 0.212 1.0)
 
       ;; Browser tree icons (solid colored silhouettes; the rail keeps white strokes)
       :list-icon-detail     '(0.07 0.09 0.12)   ; cutouts match the row bg
@@ -231,7 +231,7 @@
       :mixer-strip-selected-bg '(0.135 0.168 0.210)
       :mixer-strip-muted-bg '(0.045 0.058 0.074)
       :mixer-strip-border '(0.075 0.098 0.125)
-      :mixer-strip-selected-border '(0.82 0.88 0.93)
+      :mixer-strip-selected-border '(0.604 0.604 0.604 1.0)
       :mixer-control-bg  '(0.036 0.048 0.062)
       :mixer-label-bg    '(0.075 0.096 0.122)
       :mixer-label-muted-bg '(0.045 0.056 0.070)

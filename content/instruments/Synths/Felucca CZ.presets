@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "engine_name": "Synths/Felucca CZ/",
+  "source_file": "instruments/Synths/Felucca CZ/dsp.lisp",
+  "presets": [
+    {
+      "id": "Brass",
+      "name": "Brass",
+      "base_note_offset": 0.0,
+      "params": {
+        "wave": 0.0,
+        "wave2": 0.0,
+        "dcw": 0.2362,
+        "env_amt": 0.7087,
+        "dtn": 0.0,
+        "line": 0.0,
+        "sub": 0.0,
+        "amp_attack_ms": 1.8,
+        "amp_decay_ms": 160.2,
+        "amp_sustain": 0.7087,
+        "amp_release_ms": 18.2,
+        "gain": 0.5
+      }
+    },
+    {
+      "id": "Organ",
+      "name": "Organ",
+      "base_note_offset": 0.0,
+      "params": {
+        "wave": 3.0,
+        "wave2": 0.0,
+        "dcw": 0.315,
+        "env_amt": 0.0,
+        "dtn": 0.0,
+        "line": 0.0,
+        "sub": 0.0,
+        "amp_attack_ms": 1.0,
+        "amp_decay_ms": 10000.0,
+        "amp_sustain": 1.0,
+        "amp_release_ms": 8.8,
+        "gain": 0.5
+      }
+    },
+    {
+      "id": "String",
+      "name": "String",
+      "base_note_offset": 0.0,
+      "params": {
+        "wave": 0.0,
+        "wave2": 4.0,
+        "dcw": 0.3937,
+        "env_amt": 0.315,
+        "dtn": 12.0,
+        "line": 0.0,
+        "sub": 0.0,
+        "amp_attack_ms": 18.2,
+        "amp_decay_ms": 683.4,
+        "amp_sustain": 0.7874,
+        "amp_release_ms": 160.2,
+        "gain": 0.5
+      }
+    },
+    {
+      "id": "Reso",
+      "name": "Reso",
+      "base_note_offset": 0.0,
+      "params": {
+        "wave": 5.0,
+        "wave2": 0.0,
+        "dcw": 0.4724,
+        "env_amt": 0.4724,
+        "dtn": 0.0,
+        "line": 0.0,
+        "sub": 0.0,
+        "amp_attack_ms": 1.0,
+        "amp_decay_ms": 160.2,
+        "amp_sustain": 0.2362,
+        "amp_release_ms": 77.6,
+        "gain": 0.5
+      }
+    },
+    {
+      "id": "Bell",
+      "name": "Bell",
+      "base_note_offset": 0.0,
+      "params": {
+        "wave": 6.0,
+        "wave2": 0.0,
+        "dcw": 0.6299,
+        "env_amt": 0.3937,
+        "dtn": 0.0,
+        "line": 0.0,
+        "sub": 0.0,
+        "amp_attack_ms": 1.0,
+        "amp_decay_ms": 982.0,
+        "amp_sustain": 0.0,
+        "amp_release_ms": 683.4,
+        "gain": 0.5
+      }
+    },
+    {
+      "id": "Wire",
+      "name": "Wire",
+      "base_note_offset": 0.0,
+      "params": {
+        "wave": 4.0,
+        "wave2": 7.0,
+        "dcw": 0.5512,
+        "env_amt": 0.315,
+        "dtn": 7.0,
+        "line": 0.0,
+        "sub": 0.0,
+        "amp_attack_ms": 2.1,
+        "amp_decay_ms": 330.9,
+        "amp_sustain": 0.6299,
+        "amp_release_ms": 77.6,
+        "gain": 0.5
+      }
+    }
+  ]
+}

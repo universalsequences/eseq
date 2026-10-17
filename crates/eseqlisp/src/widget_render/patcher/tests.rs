@@ -20,8 +20,8 @@ use super::project::{dgenlisp_operator_documentation, dgenlisp_operator_names};
 use super::render::*;
 use super::state::*;
 use super::text::{
-    apply_patcher_autocomplete, commit_patcher_text_edit, patcher_autocomplete_ghost_text,
-    patcher_autocomplete_suggestions,
+    apply_patcher_autocomplete, autocomplete_symbols_for_patch, commit_patcher_text_edit,
+    patcher_autocomplete_ghost_text, patcher_autocomplete_suggestions,
 };
 use super::text_metrics::{cache_text_widths, measured_cursor_offset, measured_text_width};
 use super::writeback::{
@@ -12727,6 +12727,68 @@ fn effect_signature_modulator_inputs_are_hidden_boilerplate() {
 }
 
 #[test]
+fn instrument_writeback_created_ext_node_inserts_host_modulator_inputs() {
+    let node = node_from_editor_text("draft", "ext 1", (0.0, 0.0), &HashMap::new(), false);
+    assert_eq!(node.diagnostic, None);
+    assert_eq!(node.outputs.len(), 1);
+    assert_eq!(node.args, vec![ArgValue::Literal("1".to_string())], "the slot is a creation argument");
+
+    let source = r#"
+        (def gate (in 1 @name gate))
+        (out gate 1 @name audio)
+    "#;
+    // gate -> audio becomes gate * (ext 1) -> audio: a VCA on ext 1.
+    let root_patch = parse_patch_source(source, PatcherIntent::Instrument).unwrap();
+    let mut state = PatcherInteractionState::default();
+    let ext = allocate_created_text_node(&mut state, "root", "ext 1");
+    let vca = allocate_created_text_node(&mut state, "root", "*");
+    let old = source_connection_for_input(&root_patch, "audio", 0);
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key("root", &source_connection_id(old)));
+    connect_output_to_input(&mut state, "root", "gate", &vca, 0);
+    connect_output_to_input(&mut state, "root", &ext, &vca, 1);
+    connect_output_to_input(&mut state, "root", &vca, "audio", 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+
+    let mod1_index = emitted
+        .find("(def mod1 (in 6 @name mod1 @modulator 1))")
+        .unwrap_or_else(|| panic!("instrument mod1 input should be inserted at channel 6:\n{emitted}"));
+    let ext_index = emitted.find("(ext 1.0)").unwrap_or_else(|| panic!("created ext node should be emitted:\n{emitted}"));
+    assert!(mod1_index < ext_index, "{emitted}");
+    compile_patch_source_with_dgenlisp(&emitted).unwrap();
+}
+
+/// Module strips label an ext input from its use site: the patcher has no
+/// other place to name one, so `ext 1 @name freq` must reach the code.
+#[test]
+fn writeback_created_ext_node_keeps_its_name_attribute() {
+    let node = node_from_editor_text("draft", "ext 1 @name freq", (0.0, 0.0), &HashMap::new(), false);
+    assert_eq!(node.diagnostic, None);
+    assert_eq!(node.args, vec![ArgValue::Literal("1".to_string())], "@name is not an argument");
+
+    let source = r#"
+        (def gate (in 1 @name gate))
+        (out gate 1 @name audio @modulator 1)
+    "#;
+    let root_patch = parse_patch_source(source, PatcherIntent::Instrument).unwrap();
+    let mut state = PatcherInteractionState::default();
+    let ext = allocate_created_text_node(&mut state, "root", "ext 1 @name freq");
+    let old = source_connection_for_input(&root_patch, "audio", 0);
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key("root", &source_connection_id(old)));
+    connect_output_to_input(&mut state, "root", &ext, "audio", 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(emitted.contains("(ext 1.0 @name freq)"), "{emitted}");
+    compile_patch_source_with_dgenlisp(&emitted).unwrap();
+}
+
+#[test]
 fn effect_writeback_created_modulatable_param_inserts_host_modulator_inputs() {
     let source = r#"
         (def input_l (in 1 @name Left))
@@ -16198,7 +16260,7 @@ fn patcher_autocomplete_completes_attributes_for_the_active_operator() {
     };
 
     assert_eq!(
-        patcher_autocomplete_suggestions(&edit, &[], &[])
+        patcher_autocomplete_suggestions(&edit, &[], &[], &[])
             .into_iter()
             .map(|suggestion| suggestion.name)
             .collect::<Vec<_>>(),
@@ -16208,19 +16270,81 @@ fn patcher_autocomplete_completes_attributes_for_the_active_operator() {
     edit.text = "tensor @sh".to_string();
     edit.state.cursor_pos = 10;
     assert_eq!(
-        patcher_autocomplete_suggestions(&edit, &[], &[])
+        patcher_autocomplete_suggestions(&edit, &[], &[], &[])
             .into_iter()
             .map(|suggestion| suggestion.name)
             .collect::<Vec<_>>(),
         vec!["@shape"]
     );
     assert_eq!(
-        patcher_autocomplete_ghost_text(&edit, &[]).as_deref(),
+        patcher_autocomplete_ghost_text(&edit, &[], &[]).as_deref(),
         Some("ape")
     );
-    assert!(apply_patcher_autocomplete(&mut edit, &[], &[]));
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &[], &[]));
     assert_eq!(edit.text, "tensor @shape ");
     assert_eq!(edit.state.cursor_pos, 14);
+}
+
+#[test]
+fn patcher_autocomplete_completes_param_symbols_in_argument_position() {
+    let patch = parse(
+        r#"
+            (param wetness @min 0 @max 1)
+            (param attack @group amp @default 5)
+            (param fm.cutoff @group fm @default 2)
+            (param amp.cutoff @group amp @default 3)
+            (def mixed (mix 0 0 wetness))
+            (out mixed 1)
+        "#,
+    );
+    let wetness_id = patch
+        .nodes
+        .iter()
+        .find(|node| node.param.as_ref().is_some_and(|param| param.name == "wetness"))
+        .map(|node| node.id.clone())
+        .expect("wetness param node");
+    // Grouped params always offer their dotted spelling, plus the bare short
+    // name when no other group shares it. The param being edited never offers
+    // its own name.
+    assert_eq!(
+        autocomplete_symbols_for_patch(&patch, "mixed"),
+        vec!["amp.attack", "amp.cutoff", "attack", "fm.cutoff", "wetness"]
+    );
+    assert!(!autocomplete_symbols_for_patch(&patch, &wetness_id).contains(&"wetness".to_string()));
+
+    let symbols = autocomplete_symbols_for_patch(&patch, "mixed");
+    let mut edit = PatcherTextEdit {
+        node_id: "mixed".to_string(),
+        text: "mix ? wetnes".to_string(),
+        original_text: String::new(),
+        state: TextInputState {
+            cursor_pos: 12,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+        comment: false,
+    };
+    assert_eq!(
+        patcher_autocomplete_suggestions(&edit, &[], &[], &symbols)
+            .into_iter()
+            .map(|suggestion| suggestion.name)
+            .collect::<Vec<_>>(),
+        vec!["wetness"]
+    );
+    assert_eq!(
+        patcher_autocomplete_ghost_text(&edit, &[], &symbols).as_deref(),
+        Some("s")
+    );
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &[], &symbols));
+    assert_eq!(edit.text, "mix ? wetness ");
+
+    // Numbers and `?` placeholders are not symbol prefixes.
+    edit.text = "mix ? 0".to_string();
+    edit.state.cursor_pos = 7;
+    assert!(patcher_autocomplete_suggestions(&edit, &[], &[], &symbols).is_empty());
+    edit.state.cursor_pos = 5;
+    assert!(patcher_autocomplete_suggestions(&edit, &[], &[], &symbols).is_empty());
 }
 
 #[test]
@@ -16237,11 +16361,11 @@ fn patcher_attribute_autocomplete_is_filtered_by_operator_and_replaces_the_token
         autocomplete_selected: 0,
         comment: false,
     };
-    assert!(patcher_autocomplete_suggestions(&edit, &[], &[]).is_empty());
+    assert!(patcher_autocomplete_suggestions(&edit, &[], &[], &[]).is_empty());
 
     edit.text = "tensor @fi [512]".to_string();
     edit.state.cursor_pos = 10;
-    let suggestions = patcher_autocomplete_suggestions(&edit, &[], &[]);
+    let suggestions = patcher_autocomplete_suggestions(&edit, &[], &[], &[]);
     assert_eq!(
         suggestions
             .iter()
@@ -16250,10 +16374,10 @@ fn patcher_attribute_autocomplete_is_filtered_by_operator_and_replaces_the_token
         vec!["@file"]
     );
     assert!(
-        patcher_autocomplete_ghost_text(&edit, &[]).is_none(),
+        patcher_autocomplete_ghost_text(&edit, &[], &[]).is_none(),
         "ghost text must not obscure an authored suffix"
     );
-    assert!(apply_patcher_autocomplete(&mut edit, &[], &[]));
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &[], &[]));
     assert_eq!(edit.text, "tensor @file [512]");
     assert_eq!(edit.state.cursor_pos, 13);
 }
@@ -16281,13 +16405,13 @@ fn patcher_autocomplete_completes_file_attribute_values_after_bracketed_attribut
     };
 
     assert_eq!(
-        patcher_autocomplete_suggestions(&edit, &[], &asset_paths)
+        patcher_autocomplete_suggestions(&edit, &[], &asset_paths, &[])
             .into_iter()
             .map(|suggestion| suggestion.name)
             .collect::<Vec<_>>(),
         vec!["\"wavetables/bright bank.json\""]
     );
-    assert!(apply_patcher_autocomplete(&mut edit, &[], &asset_paths));
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &asset_paths, &[]));
     assert_eq!(
         edit.text,
         "tensor @shape [512 448] @file \"wavetables/bright bank.json\" "
@@ -16296,7 +16420,7 @@ fn patcher_autocomplete_completes_file_attribute_values_after_bracketed_attribut
     edit.text = "tensor @shape [512 448] @default-file ".to_string();
     edit.state.cursor_pos = edit.text.chars().count();
     assert_eq!(
-        patcher_autocomplete_suggestions(&edit, &[], &asset_paths)
+        patcher_autocomplete_suggestions(&edit, &[], &asset_paths, &[])
             .into_iter()
             .map(|suggestion| suggestion.name)
             .collect::<Vec<_>>(),
@@ -16409,7 +16533,7 @@ fn patcher_autocomplete_documents_adsrexp_preamble_macro() {
         autocomplete_selected: 0,
         comment: false,
     };
-    let suggestions = patcher_autocomplete_suggestions(&edit, &[], &[]);
+    let suggestions = patcher_autocomplete_suggestions(&edit, &[], &[], &[]);
     let adsrexp = suggestions
         .iter()
         .find(|suggestion| suggestion.name == "adsrexp")
@@ -16442,7 +16566,7 @@ fn patcher_autocomplete_documents_adsrexp_preamble_macro() {
             "fall_curve",
         ]
     );
-    assert!(apply_patcher_autocomplete(&mut edit, &[], &[]));
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &[], &[]));
     assert_eq!(edit.text, "adsrexp ");
 }
 
@@ -16460,7 +16584,7 @@ fn patcher_autocomplete_documents_patcher_only_history_node() {
         autocomplete_selected: 0,
         comment: false,
     };
-    let suggestions = patcher_autocomplete_suggestions(&edit, &[], &[]);
+    let suggestions = patcher_autocomplete_suggestions(&edit, &[], &[], &[]);
     let history = suggestions
         .iter()
         .find(|suggestion| suggestion.name == "history")
@@ -16481,7 +16605,7 @@ fn patcher_autocomplete_documents_patcher_only_history_node() {
         !dgenlisp_operator_names().contains("history"),
         "history is a patcher graph convenience, not a DGenLisp operator"
     );
-    assert!(apply_patcher_autocomplete(&mut edit, &[], &[]));
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &[], &[]));
     assert_eq!(edit.text, "history ");
 }
 
@@ -21413,6 +21537,70 @@ fn deleting_inline_mod_consumer_drops_the_hidden_mod_node() {
     assert!(
         !reparsed.nodes.iter().any(|node| node.op == "mod"),
         "reparsing the regenerated source must not surface a mod node:\n{}",
+        generated.source
+    );
+}
+
+/// Deleting the `gain` param along with (or before) the node that read
+/// `gain~` must drop the hidden accessor too: once its param is gone it can no
+/// longer be recognized by the param it reads, and was persisted as a bare
+/// `(def mod-0 (mod))` that fails to compile ("Unknown operator: mod").
+#[test]
+fn deleting_inline_mod_param_and_consumer_drops_the_hidden_mod_node() {
+    for selections in [
+        vec![vec!["scaled", "gain"]],
+        vec![vec!["gain"], vec!["scaled"]],
+    ] {
+        let root_patch = parse(INLINE_MOD_CONSUMER_SOURCE);
+        let gain_id = root_patch
+            .nodes
+            .iter()
+            .find(|node| node.param.as_ref().is_some_and(|param| param.name == "gain"))
+            .unwrap()
+            .id
+            .clone();
+        let mut state = PatcherInteractionState::default();
+        for selection in &selections {
+            state.selected_nodes.clear();
+            for id in selection {
+                let id = if *id == "gain" { gain_id.clone() } else { id.to_string() };
+                state.selected_nodes.insert(id);
+            }
+            assert!(delete_selected_nodes(&mut state, "root"));
+        }
+        let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+        let generated =
+            generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+        assert!(
+            !generated.source.contains("(mod"),
+            "{selections:?}: orphaned accessor must not be persisted:\n{}",
+            generated.source
+        );
+        assert!(
+            !parse(&generated.source).nodes.iter().any(|node| node.op == "mod"),
+            "{selections:?}: no mod node may reappear:\n{}",
+            generated.source
+        );
+    }
+}
+
+/// An authored `mod` node whose param cable was cut is dead and incomplete: it
+/// stays in the payload but is never emitted as an uncompilable `(mod)`.
+#[test]
+fn unfed_dead_mod_node_is_not_emitted() {
+    let mut patch = parse(
+        r#"
+(def signal (in 1))
+(param gain @default 0.5 @mod true @mod-mode additive)
+(def gmod (mod gain))
+(out signal 1)
+"#,
+    );
+    patch.connections.retain(|connection| connection.to_node != "gmod");
+    let generated = generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    assert!(
+        !generated.source.contains("(mod"),
+        "an unfed mod node must not be emitted:\n{}",
         generated.source
     );
 }
@@ -27823,6 +28011,100 @@ fn a_node_diagnostic_sits_beside_its_own_node_clear_of_the_node_below() {
     )));
 }
 
+/// Every `@attribute` the shipped DGen sources put on an operator must be in
+/// that operator's manifest attribute list, or the patcher never offers it as
+/// an autocomplete. The manifest only scrapes attributes the compiler reads
+/// through `attrValue`; host-read ones (`out @amp`, `param @options`, …) are
+/// curated in `CURATED_OPERATOR_ATTRIBUTES` in tools/generate_dgenlisp_api.py.
+#[test]
+fn every_attribute_used_in_shipped_dsp_sources_is_in_the_operator_manifest() {
+    fn lisp_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                lisp_files(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "lisp") {
+                out.push(path);
+            }
+        }
+    }
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    for dir in [
+        "content/instruments",
+        "content/effects",
+        "content/defmacros",
+        "crates/sequencer/src",
+    ] {
+        lisp_files(&repo_root.join(dir), &mut files);
+    }
+    assert!(!files.is_empty(), "no DSP sources found under {repo_root:?}");
+
+    let attributes = super::project::dgenlisp_operator_attributes();
+    let mut missing = std::collections::BTreeMap::<(String, String), String>::new();
+    for path in &files {
+        let source = fs::read_to_string(path).unwrap();
+        // Innermost open form's head symbol; `None` until the head is read.
+        let mut heads: Vec<Option<String>> = Vec::new();
+        let mut chars = source.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                ';' => {
+                    while chars.next_if(|c| *c != '\n').is_some() {}
+                }
+                '"' => {
+                    while let Some(c) = chars.next() {
+                        match c {
+                            '\\' => {
+                                chars.next();
+                            }
+                            '"' => break,
+                            _ => {}
+                        }
+                    }
+                }
+                '(' => heads.push(None),
+                ')' => {
+                    heads.pop();
+                }
+                c if c.is_whitespace() || c == '[' || c == ']' || c == '\'' => {}
+                c => {
+                    let mut token = c.to_string();
+                    while let Some(next) = chars.next_if(|n| {
+                        !n.is_whitespace() && !matches!(n, '(' | ')' | '[' | ']' | '"' | ';')
+                    }) {
+                        token.push(next);
+                    }
+                    let Some(head) = heads.last_mut() else {
+                        continue;
+                    };
+                    match head {
+                        None => *head = Some(token),
+                        Some(operator) if token.len() > 1 && token.starts_with('@') => {
+                            if let Some(known) = attributes.get(operator.as_str())
+                                && !known.contains(&token)
+                            {
+                                missing
+                                    .entry((operator.clone(), token))
+                                    .or_insert_with(|| path.display().to_string());
+                            }
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "attributes used in shipped DSP sources but missing from the operator manifest \
+         (curate them in tools/generate_dgenlisp_api.py and regenerate): {missing:#?}"
+    );
+}
+
 /// A patcher on `dsp.lisp` that calls the library macro `dif`, whose body has
 /// a scalar history, with the library on its props.
 fn library_history_macro_node(name: &str) -> (LayoutNode, DefmacroLibrary) {
@@ -27983,6 +28265,79 @@ fn macro_instances_wear_a_badge_saying_whether_the_library_or_the_patch_owns_the
     set_patcher_interaction_state(key, state);
     let prims = build_primitives_for_patcher(&node, breadcrumb_test_viewport());
     assert_eq!(badges(&prims), (0, 2), "a forked macro belongs to the patch");
+}
+
+
+/// The host saves the patcher's emission over the file the patcher reads (an
+/// in-place Save that keeps the editor open). The saved file already holds
+/// every pending edit, so the patcher must not replay them on the reload: a
+/// node created since the last save would come back twice (`param mpex` and
+/// `mpex-2`, a duplicate-param compile error). Undo must not bring the old
+/// edits back either, and the open macro view stays open.
+#[test]
+fn saving_over_the_patchers_own_file_does_not_replay_its_edits() {
+    let path = temp_patcher_dsp_path("save-in-place-rebase");
+    fs::write(
+        &path,
+        "(defmacro twice (x) (* x 2))\n(param factor @min -1 @max 1 @default 0.5)\n\
+         (def t (twice factor))\n(out t 1)",
+    )
+    .unwrap();
+    let node = patcher_test_node(&path);
+    save_layout_sidecar_for(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    let id = state::allocate_created_node_avoiding(&mut state, "root", (40.0, 40.0), &HashSet::new());
+    state.edit_state.nodes.get_mut(&node_edit_key("root", &id)).unwrap().text =
+        "param mpex @min 0 @max 1".to_string();
+    set_patcher_interaction_state(key, state);
+    let mut state = get_patcher_interaction_state(key);
+    state.active_macro = Some("twice".to_string());
+    set_patcher_interaction_state(key, state);
+    let payload = patcher_writeback_payload(&node);
+    let saved = payload_text(&payload, "source");
+    assert_eq!(saved.matches("param mpex").count(), 1, "{saved}");
+
+    fs::write(&path, &saved).unwrap();
+    fs::write(sidecar::sidecar_path_for_source(&path), payload_text(&payload, "layout")).unwrap();
+    super::rebase_patcher_state_on_saved_source_for_path(&path);
+
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(state.active_macro.as_deref(), Some("twice"), "the open view survives");
+    assert!(state.edit_state.nodes.is_empty(), "{:?}", state.edit_state.nodes);
+    let payload = patcher_writeback_payload(&node);
+    assert_eq!(payload_text(&payload, "diagnostic"), "", "{payload:?}");
+    let source = payload_text(&payload, "source");
+    assert_eq!(source.matches("param mpex").count(), 1, "{source}");
+    assert!(!source.contains("mpex-2"), "{source}");
+
+    // The undo snapshots were taken against the old file: replaying one
+    // would re-create the saved node on top of its saved copy.
+    super::run_patcher_command(&node, "undo");
+    let source = payload_text(&patcher_writeback_payload(&node), "source");
+    assert_eq!(source.matches("mpex").count(), 1, "{source}");
+}
+
+/// A macro-library action rewrites the patch source and reloads the macro
+/// view; the edits it baked in must not come back through undo.
+#[test]
+fn reloading_a_macro_view_after_a_library_action_cannot_undo_into_old_edits() {
+    let path = temp_patcher_dsp_path("reload-macro-view-undo");
+    fs::write(&path, "(defmacro twice (x) (* x 2))\n(def i (in 1))\n(out (twice i) 1)").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let mut state = get_patcher_interaction_state(key);
+    let id = state::allocate_created_node_avoiding(&mut state, "root", (40.0, 40.0), &HashSet::new());
+    state.edit_state.nodes.get_mut(&node_edit_key("root", &id)).unwrap().text =
+        "param mpex @min 0 @max 1".to_string();
+    set_patcher_interaction_state(key, state);
+
+    super::reload_patcher_macro_view_for_path(&path, "twice");
+    super::run_patcher_command(&node, "undo");
+    let state = get_patcher_interaction_state(key);
+    assert!(state.edit_state.nodes.is_empty(), "{:?}", state.edit_state.nodes);
+    assert_eq!(state.active_macro.as_deref(), Some("twice"));
 }
 
 // ── Comment boxes ──
@@ -28180,6 +28535,7 @@ fn add_comment_opens_an_edit_that_takes_shift_return_line_breaks() {
     assert!(
         patcher_autocomplete_suggestions(
             get_patcher_interaction_state(key).text_edit.as_ref().unwrap(),
+            &[],
             &[],
             &[],
         )

@@ -101,6 +101,7 @@ pub(crate) fn mod_route_delete_target(
 ) -> ActiveDeleteTarget {
     ActiveDeleteTarget::ModRoute {
         source: connection.source_track,
+        output: connection.source_output,
         destination: connection.destination,
         input: connection.dest_input,
     }

@@ -166,10 +166,11 @@
 ;; pickers — same control the Compressor uses for its sidechain source).
 (def option (fx p w h fs)
   (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
-        :value-index (eseq.effects.param-controls/param-option-index fx p)
+    :value-index (eseq.effects.param-controls/param-option-index fx p)
     :options (get p :options)
     :bg-color :mixer-strip-selected-bg
     :border-color :mixer-strip-border
+    :chevron-color :fg
     :badge-color :transparent
     :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx p v))
     :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)

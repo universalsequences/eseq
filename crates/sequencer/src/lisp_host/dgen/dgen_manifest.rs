@@ -230,6 +230,9 @@ pub struct DGenModulator {
     pub slot: usize,
     pub input_channel: usize,
     pub name: String,
+    /// The patch read this slot with `(ext N)`: the slot is pinned to ext
+    /// input N instead of a configurable source.
+    pub ext: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -321,6 +324,45 @@ pub(crate) fn test_loaded_dgen_lib() -> LoadedDGenLib {
 
 // ── Compile result (for async compilation) ──
 
+
+/// Label ext inputs from their use site: `(ext 1 @name freq)` names the
+/// modulator slot ext 1 reads. The compiler accepts the attribute but keeps
+/// the slot's declared name (`modN` in patcher output, which has no other
+/// place to put one), so the host reads it from the source. A source that
+/// does not parse leaves the manifest alone.
+pub fn apply_ext_input_names(manifest: &mut DGenManifest, source: &str) {
+    use eseqlisp::parser::{ASTParser, Expression, Parser};
+    let Some(exprs) = Parser::new(source.to_string())
+        .parse()
+        .ok()
+        .and_then(|tokens| ASTParser::new(tokens).parse().ok())
+    else {
+        return;
+    };
+    let mut pending: Vec<&Expression> = exprs.iter().collect();
+    while let Some(expr) = pending.pop() {
+        let Expression::List(items) = expr else { continue };
+        pending.extend(items.iter());
+        let (Some(Expression::Symbol(head)), Some(Expression::Number(ext))) = (items.first(), items.get(1)) else {
+            continue;
+        };
+        if head != "ext" {
+            continue;
+        }
+        let name = items.windows(2).find_map(|pair| match pair {
+            [Expression::Symbol(attr), Expression::Symbol(name) | Expression::String(name)] if attr == "@name" => {
+                Some(name.clone())
+            }
+            _ => None,
+        });
+        let Some(name) = name else { continue };
+        for modulator in &mut manifest.modulators {
+            if modulator.ext == Some(*ext as usize) {
+                modulator.name = name.clone();
+            }
+        }
+    }
+}
 
 pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
     parse_manifest_with_base(json, &output_dir())
@@ -436,6 +478,7 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
                     slot: m["slot"].as_u64().unwrap_or(0) as usize,
                     input_channel: m["inputChannel"].as_u64().unwrap_or(0) as usize,
                     name: m["name"].as_str().unwrap_or("").to_string(),
+                    ext: m["ext"].as_u64().map(|ext| ext as usize),
                 })
                 .collect()
         })
@@ -632,6 +675,15 @@ pub fn instrument_descriptor_from_manifest(
     );
     desc.params
         .extend(crate::instruments::voice_modulator::ui_param_descriptors());
+    // A claimed slot's source param is unused (the voice modulator pins it),
+    // but a fresh track should still read the source it actually gets.
+    for modulator in &manifest.modulators {
+        let Some(ext) = modulator.ext else { continue };
+        let name = format!("mod{}_source", modulator.slot);
+        if let Some(source) = desc.params.iter_mut().find(|param| param.name == name) {
+            source.default = crate::instruments::voice_modulator::ext_source_value(ext);
+        }
+    }
 
     append_dgen_modulator_descriptors(&mut desc, manifest);
     append_dgen_modulation_target_params(&mut desc, manifest);
@@ -727,6 +779,7 @@ pub fn append_effect_host_modulation_controls(
         .map(|slot| crate::effects::InstrumentModulatorDescriptor {
             slot,
             label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+            ext: None,
         })
         .collect();
     append_dgen_modulation_target_params(desc, manifest);
@@ -743,6 +796,7 @@ pub(in crate::lisp_host) fn append_dgen_modulator_descriptors(
         .map(|m| crate::effects::InstrumentModulatorDescriptor {
             slot: m.slot,
             label: crate::instruments::voice_modulator::modulator_slot_label(m.slot, &m.name),
+            ext: m.ext,
         })
         .collect();
 }

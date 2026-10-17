@@ -64,7 +64,10 @@ use super::state::{
     set_patcher_pan_state, set_selected_asset_for_key, source_connection_id,
     sync_patcher_z_order,
 };
-use super::text::{patcher_autocomplete_ghost_text, patcher_autocomplete_suggestions};
+use super::text::{
+    autocomplete_symbols_for_patch, patcher_autocomplete_ghost_text,
+    patcher_autocomplete_suggestions,
+};
 use super::text_metrics::{measured_cursor_offset, measured_text_width, wrap_measured_text};
 
 /// The `@file`/`@default-file` reference of the selected tensor node, when
@@ -1315,6 +1318,11 @@ fn draw_patch_with_view_key(
 ) {
     // Each probe node's `@id`/`@view`, parsed once for this paint.
     let probe_attrs = probe_attrs_by_node(patch);
+    let autocomplete_symbols = interaction_state
+        .text_edit
+        .as_ref()
+        .map(|edit| autocomplete_symbols_for_patch(patch, &edit.node_id))
+        .unwrap_or_default();
     let node_rects =
         super::geometry::patch_node_rects_with_probes(patch, rect, pan_state, &probe_attrs);
     let origin = super::geometry::patcher_origin(rect, pan_state);
@@ -1494,8 +1502,9 @@ fn draw_patch_with_view_key(
         if let Some(edit) = active_edit {
             active_edit_panel = Some((rect, edit));
         }
-        let autocomplete_ghost = active_edit
-            .and_then(|edit| patcher_autocomplete_ghost_text(edit, &autocomplete_macros));
+        let autocomplete_ghost = active_edit.and_then(|edit| {
+            patcher_autocomplete_ghost_text(edit, &autocomplete_macros, &autocomplete_symbols)
+        });
         let highlighted_inputs = highlighted_inputs_for_node(&interaction_state.drag, &node.id);
         let highlighted_outputs = highlighted_outputs_for_node(&interaction_state.drag, &node.id);
         push_node(
@@ -1540,6 +1549,7 @@ fn draw_patch_with_view_key(
             edit,
             &autocomplete_macros,
             &interaction_state.autocomplete_asset_paths,
+            &autocomplete_symbols,
             viewport,
             zoom,
         );
@@ -1889,10 +1899,11 @@ fn push_autocomplete_panel(
     edit: &PatcherTextEdit,
     local_macros: &[super::model::MacroPatch],
     asset_paths: &[String],
+    symbols: &[String],
     viewport: WidgetViewport,
     zoom: f32,
 ) {
-    let suggestions = patcher_autocomplete_suggestions(edit, local_macros, asset_paths);
+    let suggestions = patcher_autocomplete_suggestions(edit, local_macros, asset_paths, symbols);
     if suggestions.is_empty() {
         return;
     }

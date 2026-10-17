@@ -125,10 +125,13 @@
 ;; Keep only the section identity and effect owner: instrument routing is
 ;; already in p, and retaining the entire instrument here would make every
 ;; subtree compare every instrument parameter when checking cached inputs.
+;; The effect owner is its address only (pc/fx-address): the panel dict
+;; holds every sibling param, which each knob's closures, subtree inputs and
+;; props would then copy and compare on every render of the panel.
 ;; merge creates a descriptor without mutating the host-published parameter.
 (def scoped-param (scope p)
   (if p
-    (merge p :custom-ui-owner (dict :name (get scope :name) :fx (fx-in-scope scope)))
+    (merge p :custom-ui-owner (dict :name (get scope :name) :fx (pc/fx-address (fx-in-scope scope))))
     false))
 
 (def param-owner (p)

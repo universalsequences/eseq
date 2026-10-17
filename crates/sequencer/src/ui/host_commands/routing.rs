@@ -153,11 +153,20 @@ pub(super) fn handle(
                         _ => None,
                     })
                     .unwrap_or(0);
+                // Which of the source's mod outputs, from 0 (absent = the first).
+                let output = map
+                    .get("output")
+                    .and_then(|cell| match &*cell.borrow() {
+                        Value::Number(n) if *n >= 0.0 => Some(*n as usize),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
                 if let (Some(source), Some(destination)) = (source, destination) {
                     match app.apply_recorded_scene_structure_mutation(
                         "Connect modulation route",
                         |app| app.graph_controller().set_mod_route_to_destination(
                             source,
+                            output,
                             destination,
                             input,
                         ),
@@ -166,8 +175,9 @@ pub(super) fn handle(
                             let dest_label =
                                 mod_route_destination_status_label(&app, destination);
                             let message = format!(
-                                "Connected mod route: track {} out -> {} Ext{}",
+                                "Connected mod route: track {} out{} -> {} Ext{}",
                                 source + 1,
+                                mod_output_label(output),
                                 dest_label,
                                 input + 1
                             );
@@ -220,11 +230,20 @@ pub(super) fn handle(
                         _ => None,
                     })
                     .unwrap_or(0);
+                // Which of the source's mod outputs, from 0 (absent = the first).
+                let output = map
+                    .get("output")
+                    .and_then(|cell| match &*cell.borrow() {
+                        Value::Number(n) if *n >= 0.0 => Some(*n as usize),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
                 if let (Some(source), Some(destination)) = (source, destination) {
                     match app.apply_recorded_scene_structure_mutation(
                         "Delete modulation route",
                         |app| app.graph_controller().delete_mod_route_to_destination(
                             source,
+                            output,
                             destination,
                             input,
                         ),
@@ -233,8 +252,9 @@ pub(super) fn handle(
                             let dest_label =
                                 mod_route_destination_status_label(&app, destination);
                             let message = format!(
-                                "Disconnected mod route: track {} out -> {} Ext{}",
+                                "Disconnected mod route: track {} out{} -> {} Ext{}",
                                 source + 1,
+                                mod_output_label(output),
                                 dest_label,
                                 input + 1
                             );
@@ -916,4 +936,9 @@ pub(crate) fn apply_bus_routing_command(name: &str, payload: &Value, app: &mut a
     let source = extract_usize_from_payload(payload, "bus-id").ok_or("Missing source bus id")?;
     let target = extract_usize_from_payload(payload, "destination-id").ok_or("Missing destination bus id")?;
     app.set_bus_output_recorded(sequencer::sequencer::BusId(source as u64), sequencer::sequencer::BusId(target as u64))
+}
+
+/// " 2".." 4" for a track's later mod outputs; nothing for the first.
+fn mod_output_label(output: usize) -> String {
+    if output == 0 { String::new() } else { format!(" {}", output + 1) }
 }

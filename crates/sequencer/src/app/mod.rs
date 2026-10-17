@@ -76,7 +76,7 @@ pub use effect_params::effect_param_macro_key;
 pub use params::SoloAudibility;
 pub use synth::{instrument_param_macro_key, rack_macro_shown_value};
 #[allow(unused_imports)]
-pub use command::{apply_command, AppCommand, TuningEdit};
+pub use command::{apply_command, AppCommand, ModRolesEdit, TuningEdit};
 pub use edit::try_apply_command;
 
 const BAR_HEIGHT: usize = 8;
@@ -397,6 +397,7 @@ impl EngineRegistry {
         if engine_id < self.engines.len() {
             let descriptor =
                 crate::lisp_host::instrument_descriptor_from_manifest(&entry.name, &entry.manifest);
+            publish_ext_claims(engine_id, &entry.manifest);
             self.engines[engine_id] = entry;
             self.instrument_descriptors[engine_id] = descriptor;
             self.epoch += 1;
@@ -416,21 +417,30 @@ impl EngineRegistry {
         let descriptor =
             crate::lisp_host::instrument_descriptor_from_manifest(&entry.name, &entry.manifest);
         self.epoch += 1;
-        if !entry.shared_runtime {
-            self.engines.push(entry);
-            self.instrument_descriptors.push(descriptor);
-            return self.engines.len() - 1;
-        }
-        if let Some(existing_idx) = self.find_by_name_and_source(&entry.name, &entry.source) {
-            self.engines[existing_idx] = entry;
-            self.instrument_descriptors[existing_idx] = descriptor;
-            existing_idx
+        let existing = entry
+            .shared_runtime
+            .then(|| self.find_by_name_and_source(&entry.name, &entry.source))
+            .flatten();
+        let engine_id = existing.unwrap_or(self.engines.len());
+        publish_ext_claims(engine_id, &entry.manifest);
+        if existing.is_some() {
+            self.engines[engine_id] = entry;
+            self.instrument_descriptors[engine_id] = descriptor;
         } else {
             self.engines.push(entry);
             self.instrument_descriptors.push(descriptor);
-            self.engines.len() - 1
         }
+        engine_id
     }
+}
+
+/// Tell the voice modulators which of the engine's slots its patch claimed
+/// with `(ext N)`.
+fn publish_ext_claims(engine_id: usize, manifest: &DGenManifest) {
+    crate::instruments::voice_modulator::set_custom_engine_ext_claims(
+        engine_id,
+        manifest.modulators.iter().filter(|m| m.ext.is_some()).map(|m| m.slot),
+    );
 }
 
 #[cfg(test)]
@@ -556,6 +566,10 @@ pub struct EngineNodeIds {
     pub synth_outputs: usize,
     pub audio_output_channels: Vec<usize>,
     pub mod_output_channels: Vec<usize>,
+    /// Declared names of `mod_output_channels`, in the same order.
+    pub mod_output_names: Vec<String>,
+    /// Labels of ext inputs 1-4 (empty when the patch names none).
+    pub ext_input_names: [String; crate::sequencer::EXT_MOD_INPUT_COUNT],
     pub gatepitch_ids: Vec<i32>,
     pub modulator_ids: Vec<i32>,
     pub route_gain_ids: Vec<Vec<[i32; 2]>>,
@@ -677,6 +691,66 @@ pub struct GraphState {
 }
 
 impl GraphState {
+    /// The custom engine a track plays, if any.
+    fn track_engine(&self, track: usize) -> Option<&EngineNodeIds> {
+        self.track_engine_ids
+            .get(track)
+            .and_then(|engine_id| *engine_id)
+            .and_then(|engine_id| self.engine_node_ids.get(engine_id))
+            .and_then(|engine| engine.as_ref())
+    }
+
+    /// Mod output ports the track's strip shows: 1 for a Modulator, one per
+    /// declared `@modulator` output (at most `MAX_TRACK_MOD_OUTPUTS`) for a
+    /// custom instrument, else 0.
+    pub fn track_mod_output_count(&self, track: usize) -> usize {
+        match self.track_instrument_types.get(track).copied() {
+            Some(InstrumentType::Modulator) => 1,
+            Some(InstrumentType::Custom) => self.track_engine(track).map_or(0, |engine| {
+                engine.mod_output_channels.len().min(crate::sequencer::MAX_TRACK_MOD_OUTPUTS)
+            }),
+            _ => 0,
+        }
+    }
+
+    /// The names of `track_mod_output_count`'s outputs (empty for a Modulator).
+    pub fn track_mod_output_names(&self, track: usize) -> Vec<String> {
+        let count = self.track_mod_output_count(track);
+        self.track_engine(track)
+            .map(|engine| engine.mod_output_names.iter().take(count).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The labels of the track's ext inputs 1-4 (empty when unnamed).
+    pub fn track_ext_input_names(&self, track: usize) -> Vec<String> {
+        self.track_engine(track)
+            .map(|engine| engine.ext_input_names.to_vec())
+            .unwrap_or_else(|| vec![String::new(); crate::sequencer::EXT_MOD_INPUT_COUNT])
+    }
+
+    /// Whether the track is a module: it makes no audio, only mod outputs (a
+    /// Modulator, or a patch whose every output is a `@modulator` output).
+    /// Its strip drops the audio controls and shows labeled jacks instead.
+    pub fn track_is_module(&self, track: usize) -> bool {
+        match self.track_instrument_types.get(track).copied() {
+            Some(InstrumentType::Modulator) => true,
+            Some(InstrumentType::Custom) => self.track_engine(track).is_some_and(|engine| {
+                engine.audio_output_channels.is_empty() && !engine.mod_output_channels.is_empty()
+            }),
+            _ => false,
+        }
+    }
+
+    /// Mod inputs the track's strip shows: the ports its outputs leave
+    /// (docs/mod-input-roles-spec.md). A Modulator shows them too, for
+    /// trigger/value roles. A module's strip has room for all four.
+    pub fn track_visible_mod_inputs(&self, track: usize) -> usize {
+        if self.track_is_module(track) {
+            return crate::sequencer::EXT_MOD_INPUT_COUNT;
+        }
+        crate::sequencer::visible_mod_inputs(self.track_mod_output_count(track))
+    }
+
     pub fn track_exposes_mod_output(&self, track: usize) -> bool {
         match self.track_instrument_types.get(track).copied() {
             Some(InstrumentType::Modulator) => true,
@@ -767,7 +841,9 @@ pub struct TrackNodeIds {
     /// before this pad. Sidechains and post-FX analyzers tap pdc after it.
     pub pdc_id: i32,
     pub send_id: i32,
-    pub mod_out_id: i32,
+    /// One mod output hub per possible `@modulator` output, in declaration
+    /// order (a built-in Modulator uses the first).
+    pub mod_out_ids: [i32; crate::sequencer::MAX_TRACK_MOD_OUTPUTS],
     pub mod_in_clip_ids: [i32; crate::sequencer::EXT_MOD_INPUT_COUNT],
     pub mod_env_id: i32,
     pub bus_send_ids: Vec<BusSendNodeIds>,

@@ -2,7 +2,7 @@
 (module eseq.effects.track-panels)
 
 (import eseq.kinds :refer (selection transport project mute-group-options lock-param!
-                           unlock-param! lock-rack-macro! unlock-rack-macro! stamp-variant!))
+                           mod-role-options mod-steps-options unlock-param! lock-rack-macro! unlock-rack-macro! stamp-variant!))
 (import eseq.view-kit :refer (index-of color-rgba track-color-part))
 (import eseq.effects.state :as st)
 (import eseq.effects.devices :as dv)
@@ -21,6 +21,7 @@
         track-plocks-panel
         step-parameters-panel
         track-parameters-panel
+        open-mod-roles
         toggle-polyphony
         open-polyphony-menu
         apply-polyphony-to-all-scenes
@@ -556,7 +557,7 @@
   (subtree :key "track-swing-resolution-control"
     (let ((lock (setting-lock t "swing-resolution")))
       (v-stack :align :center :gap 0.15
-        (label "swg res" :font-size 8 :color :dim :bg :transparent :v-align :center)
+        (label "swing res" :font-size 8 :color :dim :bg :transparent :v-align :center)
         (dropdown :value (if lock (get lock :value) t.swing-resolution)
           :key "track-swing-resolution"
           :options '("1/16" "1/8" "1/4" "1/2")
@@ -565,7 +566,7 @@
           :plock-color-r (pc/param-plock-color-r)
           :plock-color-g (pc/param-plock-color-g)
           :plock-color-b (pc/param-plock-color-b)
-          :width 5.0 :height 1.0 :font-size 9)))))
+          :width 6.0 :height 1.0 :font-size 9)))))
 
 (def swing-control (t)
   (subtree :key "track-swing-control"
@@ -575,7 +576,7 @@
         (number-picker :value (if lock (get lock :value) #'t.swing) :min 50 :max 75 :decimals 1
           :key "track-swing"
           :border-color :none
-          :noui false :font-size 8 :text-color :dim
+          :noui false :font-size 10 :text-color :dim
           :plock-active (if lock 1 0)
           :plock-default t.swing
           :plock-color-r (pc/param-plock-color-r)
@@ -602,7 +603,86 @@
 (def track-parameters-panel ()
   (if (se/editor-open?)
     (se/scale-editor-panel)
-    (track-settings-strip)))
+    (if mod-roles-view.open
+      (mod-roles-panel)
+      (track-settings-strip))))
+
+;; Mod input roles (docs/mod-input-roles-spec.md): the "mods" button swaps
+;; the settings strip for a table of the track's four ext mod inputs, each
+;; one a modulator (the default) or a trigger / value the track plays from.
+(def-kind mod-roles-view
+  :key ()
+  :state ((open false)))
+
+(def mod-role-keys '(:mod-role-1 :mod-role-2 :mod-role-3 :mod-role-4))
+
+;; Whether any ext input of `t` does more than modulate.
+(def mods-in-use? (t)
+  (> (len (filter (lambda (role) (not (= role "modulator"))) (or t.mod-roles '()))) 0))
+
+(def open-mod-roles () (set! mod-roles-view.open true))
+
+;; Lit while any input does more than modulate; opens the role table.
+(def mods-button (t)
+  (let ((on (mods-in-use? t)))
+    (v-stack :align :center :gap 0.15
+      (label "mods" :font-size 8 :color :dim :bg :transparent :v-align :center)
+      (button (if on "ON" "OFF")
+        :key "track-mod-roles-open"
+        :debug-name "track-mod-roles-open"
+        :width 3.0 :height 1.0 :font-size 10
+        :border-color :none
+        :background-color (if on :control-on-bg :poly-off-bg)
+        :color (if on :control-on-fg :poly-off-fg)
+        :on-click |x y r| (open-mod-roles)))))
+
+;; Inputs the mixer strip shows: extra mod outputs take their ports.
+(def shown-mod-inputs (t) (min 4 (- 5 (max 1 (or t.mod-outputs 0)))))
+
+(def mod-role-row (t index)
+  (if (>= index (shown-mod-inputs t))
+    (box :width 0 :height 0)
+    (mod-role-row-shown t index)))
+
+(def mod-role-row-shown (t index)
+  (h-stack :gap 0.4 :align :center
+    (label (str "ext" (+ index 1)) :font-size 9 :color :dim :bg :transparent
+      :width 2.2 :v-align :center)
+    (dropdown :value (nth (or t.mod-roles '()) index)
+      :key (str "track-mod-role-" (+ index 1))
+      :options mod-role-options
+      :on-change (lambda (v) (seq-set-track-param (nth mod-role-keys index) v))
+      :width 8.6 :height 1.0 :font-size 9)))
+
+;; Header (close, title, steps mode) over a 2x2 grid of the four inputs:
+;; the table fits the settings strip's height.
+(def mod-roles-panel ()
+  (let ((t selection.track))
+    (if t
+      (box :debug-name "mod-roles-panel" :padding 0.0
+        (v-stack :gap 0.3
+          (h-stack :gap 0.4 :align :center
+            (button "‹"
+              :key "mod-roles-close"
+              :debug-name "mod-roles-close"
+              :variant :ghost
+              :width 1.6 :height 1.0 :font-size 12
+              :on-click |x y r| (set! mod-roles-view.open false))
+            (label "step trigger behavior:" :font-size 9 :color :dim :bg :transparent :v-align :center)
+            (dropdown :value t.mod-steps
+              :key "track-mod-steps"
+              :options mod-steps-options
+              :on-change (lambda (v) (seq-set-track-param :mod-steps v))
+              :width 7.4 :height 1.0 :font-size 9))
+          (h-stack :gap 1.2 :align :top
+            (v-stack :gap 0.3
+              (mod-role-row t 0)
+              (mod-role-row t 2))
+            (v-stack :gap 0.3
+              (mod-role-row t 1)
+              (mod-role-row t 3)))
+        ))
+    (box :width 0 :height 0))))
 
 (def track-settings-strip ()
   (let ((t selection.track))
@@ -619,7 +699,7 @@
                         (label "steps" :font-size 8 :color :dim :bg :transparent :v-align :center)
                         (number-picker :value #'t.num-steps :min 1 :max 256 :decimals 0
                           :border-color :none
-                          :noui false :font-size 8 :text-color :fg
+                          :noui false :font-size 10 :text-color :fg
                           :tri-color :fg
                           :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :num-steps v)))
                           :width 4.2 :height 1.0))
@@ -638,7 +718,7 @@
                         (label "voices" :font-size 8 :color :dim :bg :transparent :v-align :center)
                         (number-picker :value (voices) :min 1 :max 12 :decimals 0
                           :border-color :none
-                          :noui false :font-size 8 :text-color :fg :tri-color :fg
+                          :noui false :font-size 10 :text-color :fg :tri-color :fg
                           :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow)
                               (if (settings-rack-slot)
                                 (host-command "set-rack-slot-max-polyphony"
@@ -661,8 +741,7 @@
                             :on-change (lambda (v)
                               (seq-set-track-param :mono-trigger (if (= v "legato") 1 0)))
                             :width 6.0 :height 1.0 :font-size 9)))
-                      
-                      
+                      (if (= t.instrument-type "modulator") nil (mods-button t))
                       )
                     (h-stack :gap 1.05 :align :center
                       (swing-resolution-control t)
@@ -672,7 +751,7 @@
                       (timebase-control t)
                       
                       (v-stack :align :center :gap 0.15
-                        (label "mute grp" :font-size 8 :color :dim :bg :transparent :v-align :center)
+                        (label "mute group" :font-size 8 :color :dim :bg :transparent :v-align :center)
                         (dropdown :value (nth mute-group-options t.mute-group)
                           :options mute-group-options
                           :on-change (lambda (v)

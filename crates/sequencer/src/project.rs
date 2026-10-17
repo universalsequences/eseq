@@ -333,6 +333,8 @@ pub enum ProjectKitModDestination {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectKitModConnection {
     pub source_pad: usize,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub source_output: usize,
     pub destination: ProjectKitModDestination,
     #[serde(default)]
     pub dest_input: usize,
@@ -1553,6 +1555,10 @@ pub struct RackClipGroove {
     pub settings: RackGrooveSettings,
 }
 
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
@@ -2327,6 +2333,9 @@ pub struct ProjectPattern {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectModConnection {
     pub source_track: usize,
+    /// Which mod output of the source; omitted for the first.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub source_output: usize,
     #[serde(default)]
     pub destination: Option<ProjectModDestination>,
     #[serde(default)]
@@ -2394,6 +2403,10 @@ pub struct ProjectTrackParams {
     pub mute_group: u8,
     #[serde(default = "default_true")]
     pub global_transpose: bool,
+    /// Mod input roles + steps mode (docs/mod-input-roles-spec.md); omitted
+    /// while every input is a plain modulator.
+    #[serde(default, skip_serializing_if = "crate::sequencer::ModInputRoles::is_default")]
+    pub mod_roles: crate::sequencer::ModInputRoles,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2901,6 +2914,7 @@ impl From<TrackParamsSnapshot> for ProjectTrackParams {
             voice_priority: value.voice_priority,
             mute_group: value.mute_group.min(8),
             global_transpose: value.global_transpose,
+            mod_roles: value.mod_roles,
         }
     }
 }
@@ -2942,6 +2956,7 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
             voice_priority: value.voice_priority,
             mute_group: value.mute_group.min(8),
             global_transpose: value.global_transpose,
+            mod_roles: value.mod_roles,
         }
     }
 }
@@ -3493,6 +3508,7 @@ impl From<ModConnection> for ProjectModConnection {
         };
         Self {
             source_track: value.source_track,
+            source_output: value.source_output,
             destination: Some(destination),
             dest_track: None,
             dest_input: value.dest_input,
@@ -3509,6 +3525,7 @@ impl From<ProjectModConnection> for ModConnection {
         };
         Self {
             source_track: value.source_track,
+            source_output: value.source_output.min(crate::sequencer::MAX_TRACK_MOD_OUTPUTS - 1),
             destination,
             dest_input: value.dest_input,
         }
@@ -4678,6 +4695,26 @@ mod tests {
     }
 
     #[test]
+    fn mod_roles_roundtrip_with_project_and_are_omitted_while_default() {
+        use crate::sequencer::{ModInputRole, ModInputRoles, ModSteps, TrackParamsSnapshot};
+        let plain = serde_json::to_value(super::ProjectTrackParams::from(TrackParamsSnapshot::default())).unwrap();
+        assert!(plain.get("mod_roles").is_none(), "untouched tracks serialize as before");
+        let restored: super::ProjectTrackParams = serde_json::from_value(plain).unwrap();
+        assert!(TrackParamsSnapshot::from(restored).mod_roles.is_default());
+
+        let roles = ModInputRoles {
+            roles: [ModInputRole::Trigger, ModInputRole::Note, ModInputRole::Modulator, ModInputRole::Duration],
+            steps: ModSteps::Latch,
+        };
+        let snapshot = TrackParamsSnapshot { mod_roles: roles, ..TrackParamsSnapshot::default() };
+        let value = serde_json::to_value(super::ProjectTrackParams::from(snapshot)).unwrap();
+        assert_eq!(value["mod_roles"]["roles"][0], "trigger");
+        assert_eq!(value["mod_roles"]["steps"], "latch");
+        let restored: super::ProjectTrackParams = serde_json::from_value(value).unwrap();
+        assert_eq!(TrackParamsSnapshot::from(restored).mod_roles, roles);
+    }
+
+    #[test]
     fn mono_trigger_roundtrips_with_project_and_defaults_when_absent() {
         use crate::sequencer::{MonoTrigger, TrackParamsSnapshot};
         let snapshot = TrackParamsSnapshot {
@@ -4982,6 +5019,7 @@ mod tests {
                         voice_priority: crate::sequencer::VoicePriority::Last,
                         mute_group: 3,
                         global_transpose: true,
+                        mod_roles: Default::default(),
                     },
                     ProjectTrackParams {
                         gate: false,
@@ -5012,6 +5050,7 @@ mod tests {
                         voice_priority: crate::sequencer::VoicePriority::Last,
                         mute_group: 0,
                         global_transpose: true,
+                        mod_roles: Default::default(),
                     },
                 ],
                 effect_slots: vec![vec![], vec![]],
@@ -5087,6 +5126,7 @@ mod tests {
                     ProjectCustomInstrumentRunMode::Instrument,
                 ],
                 mod_connections: vec![ProjectModConnection {
+                    source_output: 0,
                     source_track: 0,
                     destination: Some(ProjectModDestination::Track(1)),
                     dest_track: None,
@@ -6724,6 +6764,7 @@ mod tests {
         assert_eq!(
             restored.patterns[0].mod_connections,
             vec![ProjectModConnection {
+                source_output: 0,
                 source_track: 0,
                 destination: Some(ProjectModDestination::Track(1)),
                 dest_track: None,
@@ -7302,6 +7343,7 @@ mod tests {
     #[test]
     fn project_mod_connection_roundtrip_preserves_bus_destination() {
         let connection = ModConnection {
+            source_output: 0,
             source_track: 2,
             destination: ModDestination::Bus(BusId(77)),
             dest_input: 3,
@@ -7930,6 +7972,7 @@ mod tests {
             }),
             kit_version: KIT_PRESET_VERSION,
             mod_connections: vec![ProjectKitModConnection {
+                source_output: 0,
                 source_pad: 1,
                 destination: ProjectKitModDestination::RackBus,
                 dest_input: 2,

@@ -87,6 +87,7 @@ pub(super) fn remap_mod_connection_after_track_delete(
         } else {
             connection.source_track
         },
+        source_output: connection.source_output,
         destination,
         dest_input: connection.dest_input,
     })

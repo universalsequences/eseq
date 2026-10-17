@@ -91,7 +91,7 @@ impl GraphController<'_> {
             &track_name,
             track_nodes.voice_sum_id,
             track_nodes.voice_sum_r_id,
-            track_nodes.mod_out_id,
+            track_nodes.mod_out_ids,
             track_nodes.mod_in_clip_ids,
         )?;
 

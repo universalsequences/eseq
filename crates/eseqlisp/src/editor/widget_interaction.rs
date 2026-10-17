@@ -275,6 +275,7 @@ enum PatchPortDirection {
 struct PatchPortLayout {
     direction: PatchPortDirection,
     track: usize,
+    source: usize,
     dest_kind: String,
     dest: usize,
     input: usize,
@@ -346,6 +347,7 @@ fn collect_patch_port_layouts(node: &LayoutNode, ports: &mut Vec<PatchPortLayout
             ports.push(PatchPortLayout {
                 direction,
                 track: track.unwrap_or(track_or_dest),
+                source: node_usize_prop(node, "source").unwrap_or(track.unwrap_or(track_or_dest)),
                 dest_kind,
                 dest: dest.unwrap_or(track_or_dest),
                 input: node_usize_prop(node, "input").unwrap_or(0),
@@ -399,7 +401,7 @@ fn patch_cable_click_output(
         // Match build_mod_patch_cables: retained routes from unavailable
         // outputs are not drawn and must not intercept clicks on widgets.
         .filter(|port| port.direction == PatchPortDirection::Out && port.active)
-        .map(|port| (port.track, (port.center.0 * cell_w, port.center.1 * cell_h)))
+        .map(|port| (port.source, (port.center.0 * cell_w, port.center.1 * cell_h)))
         .collect();
     let point_px = (layout_col * cell_w, layout_row * cell_h);
 
@@ -457,7 +459,7 @@ fn patch_cancel_output(layout: &LayoutNode) -> Option<crate::widget_render::Even
     let callback = source.on_patch_cancel.clone()?;
     Some(crate::widget_render::EventOutput {
         callback,
-        args: vec![Value::Number(source.track as f64)],
+        args: vec![Value::Number(source.source as f64)],
     })
 }
 
@@ -501,7 +503,7 @@ fn patch_drop_output(
     Some(crate::widget_render::EventOutput {
         callback: dest.on_patch_drop.clone()?,
         args: vec![
-            Value::Number(source.track as f64),
+            Value::Number(source.source as f64),
             Value::Number(dest.dest as f64),
             Value::Number(dest.input as f64),
         ],
@@ -744,6 +746,43 @@ mod tests {
 
         source.props.insert("active".into(), Value::Bool(false));
         assert!(click(source).is_none(), "an invisible cable must not intercept clicks");
+    }
+
+    /// A track with several mod outputs gives each out port its own
+    /// `:source` id: drops and cable clicks report that id, and a drop
+    /// still refuses the track's own inputs.
+    #[test]
+    fn out_ports_with_a_source_id_are_distinct_cable_ends() {
+        let out = |source: usize, center: (f32, f32), pending: bool| {
+            let mut node = port(PatchPortDirection::Out, 2, 0, center, pending);
+            node.props.insert("source".into(), Value::Number(source as f64));
+            node
+        };
+        let root = layout(vec![
+            out(8, (2.0, 2.0), false),
+            out(9, (4.0, 2.0), true),
+            port(PatchPortDirection::In, 1, 3, (20.0, 2.0), false),
+        ]);
+        let output = patch_drop_output(&root, 20.4, 2.2).expect("drop output");
+        assert!(matches!(
+            output.args.as_slice(),
+            [Value::Number(source), Value::Number(dest), _] if *source == 9.0 && *dest == 1.0
+        ));
+        let own_input = layout(vec![
+            out(9, (4.0, 2.0), true),
+            port(PatchPortDirection::In, 2, 3, (20.0, 2.0), false),
+        ]);
+        let output = patch_drop_output(&own_input, 20.4, 2.2).expect("cancel output");
+        assert!(matches!(output.callback, Value::String(ref value) if value == "cancel"));
+
+        let mut dest = port(PatchPortDirection::In, 1, 3, (20.0, 2.0), false);
+        dest.props.insert("connected-sources".into(), Value::List(vec![
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(9.0))),
+        ]));
+        dest.props.insert("on-cable-click".into(), Value::String("select".into()));
+        let root = layout(vec![out(8, (2.0, 2.0), false), out(9, (2.0, 2.0), false), dest]);
+        let output = patch_cable_click_output(&root, 11.0, 3.7745, 10.0, 20.0).expect("cable");
+        assert_eq!(output.args[0], Value::Number(9.0));
     }
 }
 

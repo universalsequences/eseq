@@ -29,6 +29,14 @@
         ]
       },
       {
+        "name": "@amp",
+        "summary": "Marks an out as the voice amp envelope; the host releases a voice once it decays to silence.",
+        "type": "bool",
+        "used_by": [
+          "out"
+        ]
+      },
+      {
         "name": "@attack",
         "summary": "Compressor attack time.",
         "type": "signal|float",
@@ -328,6 +336,14 @@
         ]
       },
       {
+        "name": "@mod-unit",
+        "summary": "Host-visible unit label for a modulatable param's modulation depth.",
+        "type": "string",
+        "used_by": [
+          "param"
+        ]
+      },
+      {
         "name": "@mode",
         "summary": "Operator mode selector. Meaning is operator-specific.",
         "type": "enum|signal|float",
@@ -338,10 +354,11 @@
       },
       {
         "name": "@modulator",
-        "summary": "Marks an input as a modulation source slot.",
+        "summary": "Marks an in or out as a modulation source slot.",
         "type": "int",
         "used_by": [
-          "in"
+          "in",
+          "out"
         ]
       },
       {
@@ -399,6 +416,14 @@
         "used_by": [
           "audio-tensor",
           "ir"
+        ]
+      },
+      {
+        "name": "@options",
+        "summary": "Enumerated param: option labels, indexed from 0 by the param value.",
+        "type": "string[]",
+        "used_by": [
+          "param"
         ]
       },
       {
@@ -3040,6 +3065,46 @@
       {
         "aliases": [],
         "arity": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "attribute_docs": [],
+        "attributes": [],
+        "category": "io",
+        "documentation": {
+          "port_docs": "curated-from-signature",
+          "source": "curated"
+        },
+        "implementation": {
+          "function": "evalExt",
+          "source_file": "LispEvaluator.swift"
+        },
+        "input_count": {
+          "maximum": 0,
+          "minimum": 0
+        },
+        "inputs": [],
+        "name": "ext",
+        "output_count": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "outputs": [
+          {
+            "index": 0,
+            "kind": "value",
+            "name": "out",
+            "summary": "Operator result."
+          }
+        ],
+        "signatures": [
+          "(ext slot)"
+        ],
+        "summary": "The host's raw ext input N, read through the declared @modulator N input. Claims mod slot N: the host pins that slot's source to ext N."
+      },
+      {
+        "aliases": [],
+        "arity": {
           "maximum": null,
           "minimum": 1
         },
@@ -3664,7 +3729,7 @@
         "attribute_docs": [
           {
             "name": "@modulator",
-            "summary": "Marks an input as a modulation source slot.",
+            "summary": "Marks an in or out as a modulation source slot.",
             "type": "int"
           },
           {
@@ -4888,12 +4953,24 @@
         },
         "attribute_docs": [
           {
+            "name": "@amp",
+            "summary": "Marks an out as the voice amp envelope; the host releases a voice once it decays to silence.",
+            "type": "bool"
+          },
+          {
+            "name": "@modulator",
+            "summary": "Marks an in or out as a modulation source slot.",
+            "type": "int"
+          },
+          {
             "name": "@name",
             "summary": "Host-visible parameter, input, output, or tensor name.",
             "type": "string"
           }
         ],
         "attributes": [
+          "@amp",
+          "@modulator",
           "@name"
         ],
         "category": "io",
@@ -5127,9 +5204,19 @@
             "type": "symbol"
           },
           {
+            "name": "@mod-unit",
+            "summary": "Host-visible unit label for a modulatable param's modulation depth.",
+            "type": "string"
+          },
+          {
             "name": "@modulator-slot",
             "summary": "Generated modulation depth parameter slot.",
             "type": "int"
+          },
+          {
+            "name": "@options",
+            "summary": "Enumerated param: option labels, indexed from 0 by the param value.",
+            "type": "string[]"
           },
           {
             "name": "@role",
@@ -5163,7 +5250,9 @@
           "@mod-depth-min",
           "@mod-mode",
           "@mod-resolved-symbol",
+          "@mod-unit",
           "@modulator-slot",
+          "@options",
           "@role",
           "@unit"
         ],

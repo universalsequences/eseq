@@ -962,7 +962,7 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
     }
     for &(source, dest, input) in &project.mod_routes {
         app.graph_controller().set_mod_route_to_destination(
-            source, sequencer::sequencer::ModDestination::Track(dest), input,
+            source, 0, sequencer::sequencer::ModDestination::Track(dest), input,
         ).map_err(|error| format!("capture modulation route {source} -> {dest}: {error}"))?;
     }
     Ok(())

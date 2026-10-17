@@ -181,8 +181,8 @@
         :plock-color-r (pc/param-plock-color-r)
         :plock-color-g (pc/param-plock-color-g)
         :plock-color-b (pc/param-plock-color-b)
-        :width 4.7 :height 2.8
-        :knob-size 1.7
+        :width 5.5 :height 2.8
+        :knob-size 2.0
         :on-change (lambda (v) (pc/instrument-set-param-control-value p v))))))
 
 
@@ -236,7 +236,7 @@
         :plock-color-g (pc/param-plock-color-g)
         :plock-color-b (pc/param-plock-color-b)
         :on-change (lambda (v) (pc/fx-set-instrument-option p v))
-        :width 5.8 :height 1.0 :font-size 9))))
+        :width 6.8 :height 1.0 :font-size 9))))
 
 (def sampler-gate-button ()
   (let ((t selection.track)
@@ -390,24 +390,12 @@
           :plock-color-r (pc/param-plock-color-r)
           :plock-color-g (pc/param-plock-color-g)
           :plock-color-b (pc/param-plock-color-b)
-          :width 4.0 :height 2.70
-          :knob-size 1.7
+          :width 6.0 :height 2.80
+          :knob-size 2.0
           :on-change (lambda (v) (pc/instrument-set-param-control-value p v)))))
-    (v-stack :gap 0.12 :align :center
-      (box :height 0.02)
-      (v-stack :gap 0.2
-        (button "1/2"
-          :width 2.45 :height 1.22 :padding 0 :font-size 8
-          :background-color :mixer-strip-bg :color :dim
-          :border-color :transparent
-          :on-click |x y r| (pc/fx-set-instrument-value p
-                              (min 400 (* (pc/instrument-param-base-value p) 2))))
-        (button "2x"
-          :width 2.45 :height 1.22 :padding 0 :font-size 8
-          :border-color :transparent
-          :background-color :mixer-strip-bg :color :dim
-          :on-click |x y r| (pc/fx-set-instrument-value p
-                              (max 20 (/ (pc/instrument-param-base-value p) 2))))))))
+   
+    )
+  )
 
 (def sampler-param-pickers (params inst)
   (h-stack :debug-name "sampler-small-param-row" :gap 0.85 :padding 0.55 :align :center
@@ -422,18 +410,19 @@
     (box :width 0.01 :height 0.01)))
 
 (def sampler-param-knobs (params inst)
-  (h-stack :debug-name "sampler-main-param-row" :gap 0.85 :padding 0.13 :align :start
+  (h-stack :debug-name "sampler-main-param-row" :gap 0.45 :padding 0.13 :align :start
     (box :width 0.1)
     (sampler-gate-button)
     (each (sampler-main-params params) |p pi|
       (sampler-param-control p))
     (sampler-slice-controls params)
-    (sampler-param-control (sampler-param-by-name params "warp"))
-    (sampler-param-control (sampler-param-by-name params "mode"))
-    (sampler-param-control (sampler-param-by-name params "preserve"))
-    (sampler-param-control (sampler-param-by-name params "fill"))
-    (sampler-param-control (sampler-param-by-name params "decay"))
-    (sampler-bpm-control (sampler-param-by-name params "bpm"))))
+      (sampler-param-control (sampler-param-by-name params "warp"))
+      (sampler-param-control (sampler-param-by-name params "mode"))
+      (sampler-param-control (sampler-param-by-name params "preserve"))
+      (sampler-param-control (sampler-param-by-name params "fill"))
+      (sampler-param-control (sampler-param-by-name params "decay"))
+      (sampler-bpm-control (sampler-param-by-name params "bpm"))
+      ))
 
 ;; Slice markers (none outside slice mode).
 (def sampler-visible-slices (slicing d)
@@ -460,7 +449,7 @@
   (let ((duration d.sample-duration)
         (slicing (sampler-slice-active? (get inst :synth))))
     (subtree :key (str "sampler-waveform-" d.sample-buffer)
-      (box :width 77.0 :height 5.2 :padding 0.2
+      (box :width 89.7 :height 5.2 :padding 0.2
         (waveform
           :height 3.6
           :header-height 0.3
@@ -495,20 +484,20 @@
 
 (def sampler-panel-content (inst)
   (let ((d (dv/inst-device inst))
-        (body
-          (v-stack
-            (box :background-color :instrument-control-bg :corner-radius 10
-              (v-stack :gap 0.0
-                (box :height 0.01)
-                (h-stack :debug-name "sampler-waveform-row" :gap 0.35 :align :start
-                  (sampler-mode-switch (get inst :synth))
-                  (v-stack :gap 0.0
-                    (if (and d d.sample-buffer)
-                      (sampler-waveform inst d)
-                      (box :width 75 :height 4.2 :h-align :center :v-align :center
-                        (label "No sample" :font-size 12 :color :dim :bg :transparent)))
-                    (sampler-param-pickers (get inst :synth) inst)))))
-            (sampler-param-knobs (get inst :synth) inst))))
+      (body
+        (v-stack :gap 0.2
+          (box :background-color :instrument-control-bg :corner-radius 10
+            (v-stack :gap 0.0
+              (box :height 0.01)
+              (h-stack :debug-name "sampler-waveform-row" :gap 0.35 :align :start
+                (sampler-mode-switch (get inst :synth))
+                (v-stack :gap 0.0
+                  (if (and d d.sample-buffer)
+                    (sampler-waveform inst d)
+                    (box :width 75 :height 4.2 :h-align :center :v-align :center
+                      (label "No sample" :font-size 12 :color :dim :bg :transparent)))
+                  (sampler-param-pickers (get inst :synth) inst)))))
+          (sampler-param-knobs (get inst :synth) inst))))
     (if instrument-view.mods-open
       (h-stack :debug-name "sampler-mods-inline-body" :height :fill :gap 0.45 :align :stretch
         (im/mod-control-panel inst)

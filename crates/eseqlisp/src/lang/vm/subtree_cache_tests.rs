@@ -26,6 +26,44 @@ fn removed_descendants_release_their_render_cache() {
     }
 }
 
+#[test]
+fn rerendered_parent_reuses_its_clean_nested_subtrees() {
+    // A parent subtree re-rendering (a custom UI's section change) must not
+    // rebuild a nested subtree whose inputs and dependencies are unchanged.
+    let mut vm = VM::new(Vec::new());
+    register_core_natives(&mut vm);
+    let parent_renders = Rc::new(std::cell::Cell::new(0));
+    let child_renders = Rc::new(std::cell::Cell::new(0));
+    let parent_count = parent_renders.clone();
+    vm.register_native("count-parent", move |_| {
+        parent_count.set(parent_count.get() + 1);
+        Value::Nil
+    });
+    let child_count = child_renders.clone();
+    vm.register_native("count-child", move |_| {
+        child_count.set(child_count.get() + 1);
+        Value::Nil
+    });
+    vm.eval_str(r#"
+        (def panel (generation)
+          (subtree :key "parent"
+            (do
+              (count-parent)
+              (dict :type :box :text (str generation)
+                    :children (list
+                      (subtree :key "child"
+                        (do (count-child) (dict :type :label :text "fixed"))))))))
+    "#).unwrap();
+    for generation in 0..5 {
+        vm.eval_str(&format!("(panel {generation})")).unwrap();
+    }
+    assert_eq!(parent_renders.get(), 5, "the parent's captured input changes every call");
+    assert_eq!(child_renders.get(), 1, "the clean nested subtree is reused, not rebuilt");
+    assert_eq!(vm.subtree_render_cache.len(), 2);
+    assert!(vm.subtree_render_cache.keys()
+        .all(|root| vm.dag.effect_id_for_subtree_root(*root).is_some()));
+}
+
 // Pre-optimization comparator, retained only as a benchmark/semantic oracle.
 /// Equality for cached subtree captured inputs. Deliberately stricter than
 /// `Value::PartialEq`: callables compare by chunk index only there, which

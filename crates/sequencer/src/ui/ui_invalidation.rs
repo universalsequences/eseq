@@ -217,6 +217,7 @@ pub(crate) enum TrackParamInvalidation {
     VoicePriority,
     MuteGroup,
     GlobalTranspose,
+    ModRoles,
     Timebase,
     SwingResolution,
     Fts,

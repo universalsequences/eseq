@@ -84,7 +84,7 @@
       :eq8-spectrum-min                     '(0.03 0.035 0.04 1.0)
       :eq8-default-curve                    '(1.0 0.58 0.18 1.0)
       :eq8-inactive                         '(0.50 0.52 0.54 0.72)
-      :eq8-grid                             '(0.42 0.43 0.45 0.34)
+      :eq8-grid                             '(0.241 0.243 0.248 0.34)
       :filter-table-editor-bg               '(0.030 0.040 0.055 1.0)
       :filter-table-editor-grid             '(0.30 0.32 0.36 0.5)
       :filter-table-wave                    '(1.0 0.62 0.25 1.0)
@@ -96,27 +96,27 @@
       :filterbank-control-on                '(0.98 0.78 0.14 1.0)
       :filterbank-readout                   '(0.93 0.88 0.72 1.0)
       ;; Semantic control roles preserve the original UI independently of accent.
-      :scene-active-base              '(0.00 0.01 0.42 1.0)
+      :scene-active-base              '(0.362 0.363 0.365 1.0)
       :scene-hover-base               '(0.10 0.10 0.12 0.72)
-      :scene-push-base                '(0.04 0.24 0.88 1.0)
+      :scene-push-base                '(0.839 0.85 0.887 1.0)
       :scene-queued-base              '(0.01 0.03 0.38 1.0)
       :scene-queued-pulse             '(0.04 0.10 0.30 0.0)
       :scene-bank-indicator           '(0.20 0.52 1.0 1.0)
-      :scene-action-base              '(0.00 0.01 0.02 1.0)
+      :scene-action-base              '(0.403 0.403 0.403 1.0)
       :scene-active-fg                '(0.114 0.114 0.122)
       :scene-clip-bg                  '(0.52 0.56 0.62 1.0)
       :scene-clip-fg                  '(0.2 0.2 0.2 1.0)
       :clip-label-fg                  '(0.2 0.2 0.2 1.0)
-      :icon-fg                        '(0.75 0.75 0.78 1.0)
+      :icon-fg                        '(0.169 0.169 0.185 1.0)
       :icon-active-fg                 '(1.0 1.0 1.0 1.0)
-      :save-icon-fg                   '(0.92 0.92 0.96 1.0)
+      :save-icon-fg                   '(0.123 0.123 0.131 1.0)
       :play-active-base               '(0.05 0.28 0.03 1.0)
       :arrangement-return-base        '(0.80 0.38 0.16 1.0)
       :arrangement-return-fg          '(0.10 0.045 0.02 1.0)
       :record-active-base             '(0.12 0.001 0.001 1.0)
       :record-idle-fg                 '(0.65 0.18 0.18 1.0)
-      :clock-fg                       '(0.85 0.85 0.85 1.0)
-      :transport-led-bg               '(0.784 0.784 0.791 1.0)  ; LED panel: well below the playback container
+      :clock-fg                       '(0.229 0.213 0.213 1.0)
+      :transport-led-bg               '(1.0 1.0 1.0 1.0)  ; LED panel: well below the playback container
       :transport-controls-bg          '(0.884 0.884 0.891 1.0)  ; playback buttons: a shade darker than :bg
       :preset-save-bg                 '(0.08 0.08 0.01 1.0)
       :preset-save-active-bg          '(0.00 0.35 0.82 1.0)
@@ -127,14 +127,14 @@
       :sequencer-solo-on-fg            '(0.114 0.114 0.122)
       :sampler-toggle-off-bg          '(0.1 0.1 0.1 0.5)
       :poly-off-bg                    '(0.1 0.1 0.1 1.0)
-      :poly-off-fg                    '(0.114 0.114 0.122)
-      :sampler-dropdown-bg            '(0.1 0.1 0.1 0.3)
+      :poly-off-fg                    '(1.0 1.0 1.0 1.0)
+      :sampler-dropdown-bg            '(0.915 0.915 0.915 0.3)
       :effect-mode-on-bg               '(1.0 0.62 0.25 1.0)
       :delay-reverb-mode-on-bg        '(0.36 0.80 0.50 1.0)
       :delay-mode-readout-fg          '(0.93 0.88 0.78 1.0)
       :number-slider-fill             '(0.1 0.2 0.6 1.0)
-      :sequencer-volume-handle        '(0.90 0.91 0.93 0.64)
-      :mixer-volume-handle            '(0.78 0.80 0.83 1.0)
+      :sequencer-volume-handle        '(0.944 0.944 0.944 0.816)
+      :mixer-volume-handle            '(0.041 0.045 0.05 1.0)
       :arrangement-loop               '(0.92 0.72 0.25 1.0)
       :arrangement-cursor             '(0.32 0.78 0.94 1.0)
       :piano-white-key              '(0.985 0.985 0.990 1.0)
@@ -162,14 +162,14 @@
       :accent         '(0.00 0.478 1.00)       ; #007aff — system blue
       :bg             '(0.961 0.961 0.969)     ; #f5f5f7 — grouped background
       :text-buffer-bg :transparent
-      :fg             '(0.114 0.114 0.122)     ; #1d1d1f — primary label
-      :fg-muted       '(0.353 0.353 0.373)     ; Strong secondary label
-      :dim            '(0.365 0.365 0.384)     ; Survives disabled-state opacity
+      :fg             '(0.05 0.05 0.052 1.0)     ; #1d1d1f — primary label
+      :fg-muted       '(0.383 0.383 0.436 1.0)     ; Strong secondary label
+      :dim            '(0.316 0.293 0.293 1.0)     ; Survives disabled-state opacity
       :dimmer         '(0.524 0.524 0.541)     ; Between :gray and :dim
-      :black          '(0.114 0.114 0.122)
+      :black          '(0.815 0.815 0.827 1.0)
       :red            '(1.00 0.231 0.188)      ; #ff3b30
       :green          '(0.204 0.780 0.349)     ; #34c759
-      :yellow         '(1.00 0.800 0.00)       ; #ffcc00
+      :yellow         '(0.064 0.024 0.839 1.0)       ; #ffcc00
       :blue           '(0.00 0.478 1.00)       ; #007aff
       :magenta        '(0.686 0.322 0.871)     ; #af52de
       :cyan           '(0.353 0.784 0.980)     ; #5ac8fa
@@ -206,7 +206,7 @@
 
       ;; Status bar and completion UI
       :status-fg         '(0.286 0.286 0.302)
-      :status-bg         '(0.925 0.925 0.937)
+      :status-bg         '(0.797 0.797 0.834 1.0)
       :status-edge       '(0.776 0.776 0.792)
       :status-chip-bg    '(0.867 0.867 0.882)
       :status-mode-bg    '(0.765 0.867 1.000)
@@ -218,7 +218,7 @@
       :status-dirty-bg   '(1.00 0.929 0.722)
       :status-dirty-fg   '(0.420 0.247 0.000)
       :status-pos-bg     '(0.867 0.867 0.882)
-      :status-accent     '(0.000 0.337 0.714)
+      :status-accent     '(0.543 0.56 0.58 1.0)
       :comp-selected-bg  '(0.765 0.867 1.000)
       :comp-unselected-bg '(0.969 0.969 0.976)
       :comp-border       '(0.710 0.710 0.729)
@@ -244,16 +244,16 @@
       :fx-panel-header-selected-bg     '(0.765 0.867 1.000)
       :fx-panel-border                 '(0.776 0.776 0.792)
       :instrument-panel-bg             '(0.949 0.949 0.957)
-      :instrument-control-bg           '(0.875 0.875 0.890)
+      :instrument-control-bg           '(0.889 0.889 0.889 1.0)
       :instrument-group-bg             '(0.914 0.914 0.925)
       :instrument-group-selected-bg    '(0.820 0.902 1.000)
-      :mixer-strip-bg                  '(0.949 0.949 0.957)
-      :mixer-strip-selected-bg         '(1.00 1.00 1.00)
+      :mixer-strip-bg                  '(0.882 0.882 0.887 1.0)
+      :mixer-strip-selected-bg         '(0.997 0.997 0.997 1.0)
       :mixer-strip-muted-bg            '(0.867 0.867 0.882)
-      :mixer-strip-border              '(0.776 0.776 0.792)
+      :mixer-strip-border              '(0.824 0.824 0.824 1.0)
       :mixer-strip-selected-border     '(0.00 0.478 1.00)
-      :mixer-control-bg                '(0.890 0.890 0.902)
-      :mixer-label-bg                  '(0.914 0.914 0.925)
+      :mixer-control-bg                '(0.833 0.833 0.833 1.0)
+      :mixer-label-bg                  '(0.868 0.868 0.868 1.0)
       :mixer-label-muted-bg            '(0.835 0.835 0.851)
 
       ;; Buttons use subtle macOS-style bevel and shadow layers
@@ -261,19 +261,19 @@
       :button-primary-fg   '(1.00 1.00 1.00)
       :button-secondary-bg '(0.902 0.902 0.914)
       :button-secondary-fg '(0.114 0.114 0.122)
-      :button-ghost-bg     '(0.949 0.949 0.957)
+      :button-ghost-bg     '(0.827 0.827 0.843 1.0)
       :button-ghost-fg     '(0.114 0.114 0.122)
       :button-danger-bg    '(1.00 0.231 0.188)
       :button-danger-fg    '(1.00 1.00 1.00)
-      :button-border       '(0.600 0.600 0.620 0.60)
+      :button-border       '(0.611 0.611 0.641 0.6)
       :button-highlight    '(1.00 1.00 1.00 0.90)
       :button-shadow       '(0.00 0.00 0.00 0.14)
 
       ;; Dropdowns and inspector overlays
-      :dropdown-bg          '(0.902 0.902 0.914)
+      :dropdown-bg          '(0.814 0.814 0.82 1.0)
       :dropdown-fg          '(0.114 0.114 0.122)
       :dropdown-ring        '(0.00 0.478 1.00)
-      :dropdown-chevron     '(0.286 0.286 0.302)
+      :dropdown-chevron     '(0.994 0.994 1.0 1.0)
       :dropdown-badge-bg    '(0.00 0.478 1.00)
       :dropdown-border      '(0.0 0.0 0.0 0.16)
       :dropdown-badge-border '(0.0 0.0 0.0 0.10)
@@ -286,13 +286,13 @@
       :inspect-overlay-border '(0.00 0.337 0.714 0.92)
 
       ;; Sliders, knobs, and toggles
-      :widget-focus-bg       '(0.765 0.867 1.000 1.00)
-      :widget-label-fg       '(0.114 0.114 0.122)
+      :widget-focus-bg       '(0.0 0.434 1.0 1.0)
+      :widget-label-fg       '(0.214 0.213 0.213 1.0)
       :widget-slider-filled  '(0.00 0.478 1.00)
       :widget-slider-track   '(0.776 0.776 0.792)
       :widget-slider-dot     '(0.431 0.431 0.451)
-      :widget-knob-filled    '(0.00 0.478 1.00)
-      :widget-knob-track     '(0.710 0.710 0.729)
+      :widget-knob-filled    '(0.36 0.887 1.0 1.0)
+      :widget-knob-track     '(0.315 0.315 0.315 1.0)
       :widget-knob-mod-dot   '(0.00 0.55 0.62)
       :widget-plock-accent   '(0.11 0.48 0.56)
       :widget-toggle-on      '(0.204 0.780 0.349)
@@ -381,7 +381,7 @@
       :list-icon-midi-fx    '(0.20 0.18 0.92)
       :list-icon-preset     '(0.96 0.79 0.10)
       :list-icon-lfo        '(0.68 0.17 0.94)
-      :list-icon-misc       '(0.35 0.35 0.37)
+      :list-icon-misc       '(0.809 0.809 0.826 1.0)
       )))
 
 (mac-osx-light-theme)

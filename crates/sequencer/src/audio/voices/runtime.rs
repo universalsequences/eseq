@@ -936,6 +936,7 @@ fn reconcile_audio_runtime_after_track_delete(
     }
 
     data.pressure.delete_track(deleted_track);
+    data.mod_triggers.reset();
     for track in deleted_track..num_tracks {
         data.voice_pools.swap(track, track + 1);
         data.active_keyboard_notes.swap(track, track + 1);

@@ -42,7 +42,7 @@ The factory instruments come in three folders, the first two divided into sub-fo
 
 - **Drums** (16). Kicks: 808 Kick, 909 Kick, Boom Bap Kick, Break Kick, Modal Kick, Virus B BassDrum 23. Snares: Digi Snare, Membrane Snare, Modal Snare. Claps: 808 Clap, Digi Clap. Hats & Cymbals: 909 Open Hat, Digi Cymbal, Digi Hat. Toms: 808 Tom, Orbit Tom 66.
 - **Physical Models** (15). Winds: PM Clarinet, PM Flute, PM Saxophone. Strings: PM Cello, PM Electric Bass. Keys: PM Piano. Cymbals: PM Crash, PM Hi-Hat, PM Ride. Gamelan: PM Bonang, PM Kempyang, PM Kethuk, PM Saron, PM Slenthem, PM Slenthem Slendro. The six Gamelan models are Javanese gamelan instruments.
-- **Synths** (9): Digi FM, Digi Syn, Digi Wave, Grit, Heat, Melt, Poseidon, Revsynt and Vox.
+- **Synths** (11): Digi FM, Digi Syn, Digi Wave, Felucca CZ, Felucca FM6, Grit, Heat, Melt, Poseidon, Revsynt and Vox. Felucca CZ and Felucca FM6 are ports of the phase-distortion and six-operator FM engines of the Felucca firmware for the FM-1 (GPL-3.0, by Leo Kuroshita of Hügelton Instruments); FM6's synthesis is msfa, the core of Dexed (Apache-2.0).
 
 Every compiled instrument, factory or not, is the same kind of object: DGenLisp source plus a panel description. A factory instrument has no privileges that one of yours lacks.
 

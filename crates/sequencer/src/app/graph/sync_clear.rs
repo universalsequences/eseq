@@ -209,7 +209,9 @@ impl GraphController<'_> {
                 for &mod_in_clip_id in &track.mod_in_clip_ids {
                     crate::audiograph::delete_node(self.app.graph.lg.0, mod_in_clip_id);
                 }
-                crate::audiograph::delete_node(self.app.graph.lg.0, track.mod_out_id);
+                for &mod_out_id in &track.mod_out_ids {
+                    crate::audiograph::delete_node(self.app.graph.lg.0, mod_out_id);
+                }
                 crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, track.delay_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.delay_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.pdc_id);

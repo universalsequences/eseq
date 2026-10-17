@@ -225,6 +225,23 @@ fn transform_audio_fx_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
     }
 }
 
+/// The generated function rendering one MIDI/audio effect's custom UI
+/// (`kind` "midi-fx" or "audio-fx"). The body, and the read of the selected
+/// section it highlights, live in a keyed subtree of their own: a section
+/// change (every knob edit in an unselected section selects it) re-runs the
+/// body alone, not the effect panel around it, which rebuilds the effect's
+/// whole panel dict (every param). The subtree re-sets the ambient render
+/// globals, which belong to whichever panel rendered last when it re-runs
+/// alone.
+fn effect_ui_function_source(fn_name: &str, kind: &str, name_literal: &str, body: &str) -> String {
+    let globals = format!(
+        "(set! {kind}-ui-current-fx fx) (set! {kind}-ui-current-name {name_literal}) (set! custom-ui-current-kind \"{kind}\")"
+    );
+    format!(
+        "\n(def {fn_name} (fx) (do {globals} (subtree :key (str \"custom-ui-body-\" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) \"-\" (get fx :track-idx) \"-\" (get fx :rack-slot)) (do {globals} (set! custom-ui-selected-section (eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope)) {body}))))\n"
+    )
+}
+
 fn safe_lisp_ident(value: &str) -> String {
     value
         .chars()
@@ -232,38 +249,46 @@ fn safe_lisp_ident(value: &str) -> String {
         .collect()
 }
 
-fn local_helper_names(exprs: &[eseqlisp::parser::Expression]) -> BTreeSet<String> {
+/// A UI file's own top-level names, which get namespaced per file. `widgets`
+/// is the `defwidget` subset: those are also named by string, as a box's
+/// `:background "name"` or a tab's `:icon "name"`.
+struct LocalHelpers {
+    names: BTreeSet<String>,
+    widgets: BTreeSet<String>,
+}
+
+fn local_helper_names(exprs: &[eseqlisp::parser::Expression]) -> LocalHelpers {
     use eseqlisp::parser::Expression;
 
-    exprs
-        .iter()
-        .filter_map(|expr| match expr {
-            Expression::List(items)
-                if matches!(
-                    items.first(),
-                    Some(Expression::Symbol(head))
-                        if matches!(head.as_str(), "def" | "defmacro" | "defwidget")
-                ) =>
-            {
-                match items.get(1) {
-                    Some(Expression::Symbol(name)) => Some(name.clone()),
-                    _ => None,
-                }
+    let mut helpers = LocalHelpers { names: BTreeSet::new(), widgets: BTreeSet::new() };
+    for expr in exprs {
+        let Expression::List(items) = expr else { continue };
+        let (Some(Expression::Symbol(head)), Some(Expression::Symbol(name))) =
+            (items.first(), items.get(1))
+        else {
+            continue;
+        };
+        match head.as_str() {
+            "def" | "defmacro" => {}
+            "defwidget" => {
+                helpers.widgets.insert(name.clone());
             }
-            _ => None,
-        })
-        .collect()
+            _ => continue,
+        }
+        helpers.names.insert(name.clone());
+    }
+    helpers
 }
 
 fn namespace_local_helpers(
     expr: &eseqlisp::parser::Expression,
-    helpers: &BTreeSet<String>,
+    helpers: &LocalHelpers,
     prefix: &str,
 ) -> eseqlisp::parser::Expression {
     use eseqlisp::parser::Expression;
 
     let rename_symbol = |name: &str| {
-        if helpers.contains(name) {
+        if helpers.names.contains(name) {
             format!("{prefix}{}", safe_lisp_ident(name))
         } else {
             name.to_string()
@@ -292,7 +317,17 @@ fn namespace_local_helpers(
         Expression::List(items) => Expression::List(
             items
                 .iter()
-                .map(|item| namespace_local_helpers(item, helpers, prefix))
+                .enumerate()
+                .map(|(index, item)| match (index.checked_sub(1).map(|i| &items[i]), item) {
+                    // A local widget named by string follows its renamed definition.
+                    (Some(Expression::Keyword(key)), Expression::String(name))
+                        if matches!(key.as_str(), "background" | "icon")
+                            && helpers.widgets.contains(name) =>
+                    {
+                        Expression::String(rename_symbol(name))
+                    }
+                    _ => namespace_local_helpers(item, helpers, prefix),
+                })
                 .collect(),
         ),
     }
@@ -673,9 +708,11 @@ pub(crate) fn build_custom_midi_fx_ui_source_with_overlay(
         for helper in helpers {
             functions.push_str(&format!("\n{helper}\n"));
         }
-        functions.push_str(&format!(
-            "\n(def {fn_name} (fx) (do (set! midi-fx-ui-current-fx fx) (set! midi-fx-ui-current-name {}) (set! custom-ui-current-kind \"midi-fx\") (set! custom-ui-selected-section (eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope)) {body}))\n",
-            lisp_string_literal(&fx_name)
+        functions.push_str(&effect_ui_function_source(
+            &fn_name,
+            "midi-fx",
+            &lisp_string_literal(&fx_name),
+            &body.to_string(),
         ));
         dispatch = format!(
             "(if (or (= (get fx :name) {}) (= (get fx :name) {})) ({fn_name} fx) {dispatch})",
@@ -786,9 +823,11 @@ pub(crate) fn build_custom_audio_fx_ui_source_with_overlay(
         for helper in helpers {
             functions.push_str(&format!("\n{helper}\n"));
         }
-        functions.push_str(&format!(
-            "\n(def {fn_name} (fx) (do (set! audio-fx-ui-current-fx fx) (set! audio-fx-ui-current-name {}) (set! custom-ui-current-kind \"audio-fx\") (set! custom-ui-selected-section (eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope)) {body}))\n",
-            lisp_string_literal(&fx_name)
+        functions.push_str(&effect_ui_function_source(
+            &fn_name,
+            "audio-fx",
+            &lisp_string_literal(&fx_name),
+            &body.to_string(),
         ));
         dispatch = format!(
             "(if (or (= (get fx :name) {}) (= (get fx :name) {})) ({fn_name} fx) {dispatch})",
@@ -934,6 +973,31 @@ mod tests {
                 "{kind} authored source was not preflighted before transformation",
             );
         }
+    }
+
+    #[test]
+    fn local_widget_named_by_string_follows_its_namespaced_definition() {
+        use eseqlisp::parser::{ASTParser, Parser};
+        use super::{local_helper_names, expr_to_lisp, namespace_local_helpers};
+        let authored = r#"
+            (def panel-bg () 1)
+            (defwidget bg :width 4 :height 2 :shader (sdf/layer (sdf/fill (sdf/rect width height) :red)))
+            (box :background "bg" :icon "bg" :label "bg"
+              (box :background "pattern-pill-bg")
+              (box :background "panel-bg"))
+        "#;
+        let exprs = ASTParser::new(Parser::new(authored.to_string()).parse().unwrap()).parse().unwrap();
+        let helpers = local_helper_names(&exprs);
+        let source = exprs.iter()
+            .map(|expr| expr_to_lisp(&namespace_local_helpers(expr, &helpers, "fx_")))
+            .collect::<Vec<_>>().join("\n");
+        assert!(source.contains("(defwidget fx_bg"), "{source}");
+        assert!(source.contains(r#":background "fx_bg""#), "{source}");
+        assert!(source.contains(r#":icon "fx_bg""#), "{source}");
+        // Other props, global widgets and non-widget helpers keep their strings.
+        assert!(source.contains(r#":label "bg""#), "{source}");
+        assert!(source.contains(r#":background "pattern-pill-bg""#), "{source}");
+        assert!(source.contains(r#":background "panel-bg""#), "{source}");
     }
 
     #[test]

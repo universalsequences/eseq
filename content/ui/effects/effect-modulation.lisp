@@ -33,7 +33,7 @@
         (dropdown :value (if source-p (pc/fx-param-text-value-for fx source-p) "off")
           :options (if source-p (get source-p :options) '())
           :on-change (lambda (v) (if source-p (pc/param-set-option fx source-p v) false))
-          :width 4.8 :height 1.1 :font-size 8.5)))))
+          :width 6.0 :height 1.1 :font-size 8.5)))))
 
 (def mod-selector (fx)
   (box :debug-name "effect-mod-selector"

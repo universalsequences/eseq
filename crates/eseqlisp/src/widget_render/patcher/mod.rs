@@ -650,13 +650,19 @@ pub fn reload_patcher_macro_view_for_path(
 ) {
     let macro_name = macro_name.into();
     for key in state::patcher_keys_for_path(path.as_ref()) {
-        state::set_patcher_interaction_state(
-            key,
-            state::PatcherInteractionState {
-                active_macro: Some(macro_name.clone()),
-                ..state::PatcherInteractionState::default()
-            },
-        );
+        state::rebase_patcher_state(key, Some(macro_name.clone()));
+    }
+}
+
+/// The host saved the patcher's emission over the file the patcher edits:
+/// drop the edits that file now contains (and the undo history built on the
+/// old source), keeping the open view. Without this the reload replays every
+/// node created since the last save on top of the saved copy of it.
+pub fn rebase_patcher_state_on_saved_source_for_path(path: impl AsRef<std::path::Path>) {
+    // The saved file now holds everything a staged Code → Patch base did.
+    clear_staged_patch_for_path(path.as_ref());
+    for key in state::patcher_keys_for_path(path.as_ref()) {
+        state::rebase_patcher_state(key, state::active_macro_for_key(key));
     }
 }
 
@@ -1703,12 +1709,12 @@ impl WidgetDefinition for PatcherWidget {
         let key = patcher_state_key(node);
         let mut state = get_patcher_interaction_state(key);
         let view_key = active_patcher_view_key(&state);
-        let autocomplete_macros = if state.text_edit.is_some()
+        let (autocomplete_macros, autocomplete_symbols) = if state.text_edit.is_some()
             && !matches!(key_event.code, KeyCode::Enter | KeyCode::Esc)
         {
-            autocomplete_macros_for_state(node, &state, &view_key)
+            autocomplete_scope_for_state(node, &state, &view_key)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let autocomplete_asset_paths = state.autocomplete_asset_paths.clone();
         if let Ok((path, _)) = load_patch_from_props(&node.props) {
@@ -1768,6 +1774,7 @@ impl WidgetDefinition for PatcherWidget {
                         edit,
                         &autocomplete_macros,
                         &autocomplete_asset_paths,
+                        &autocomplete_symbols,
                     );
                 }
                 set_patcher_interaction_state(key, state);
@@ -1779,6 +1786,7 @@ impl WidgetDefinition for PatcherWidget {
                         edit,
                         &autocomplete_macros,
                         &autocomplete_asset_paths,
+                        &autocomplete_symbols,
                     )
                 }) =>
             {
@@ -1787,6 +1795,7 @@ impl WidgetDefinition for PatcherWidget {
                         edit,
                         &autocomplete_macros,
                         &autocomplete_asset_paths,
+                        &autocomplete_symbols,
                         1,
                     );
                 }
@@ -1799,6 +1808,7 @@ impl WidgetDefinition for PatcherWidget {
                         edit,
                         &autocomplete_macros,
                         &autocomplete_asset_paths,
+                        &autocomplete_symbols,
                     )
                 }) =>
             {
@@ -1807,6 +1817,7 @@ impl WidgetDefinition for PatcherWidget {
                         edit,
                         &autocomplete_macros,
                         &autocomplete_asset_paths,
+                        &autocomplete_symbols,
                         -1,
                     );
                 }
@@ -1841,6 +1852,7 @@ impl WidgetDefinition for PatcherWidget {
                             edit,
                             &autocomplete_macros,
                             &autocomplete_asset_paths,
+                            &autocomplete_symbols,
                         );
                         set_patcher_interaction_state(key, state);
                         Some(WidgetEvent::Custom(Value::Nil))
@@ -4481,13 +4493,18 @@ fn debug_patch_for_state(
     Some(patch_with_interaction_state(patch, state, view_key))
 }
 
-fn autocomplete_macros_for_state(
+/// The macros and argument symbols an open text edit can complete to.
+fn autocomplete_scope_for_state(
     node: &LayoutNode,
     state: &state::PatcherInteractionState,
     view_key: &str,
-) -> Vec<MacroPatch> {
+) -> (Vec<MacroPatch>, Vec<String>) {
     let patch = debug_patch_for_state(node, state, view_key);
-    autocomplete_macros_for_patch(&node.props, patch.as_ref())
+    let symbols = match (patch.as_ref(), state.text_edit.as_ref()) {
+        (Some(patch), Some(edit)) => text::autocomplete_symbols_for_patch(patch, &edit.node_id),
+        _ => Vec::new(),
+    };
+    (autocomplete_macros_for_patch(&node.props, patch.as_ref()), symbols)
 }
 
 pub(super) fn autocomplete_macros_for_patch(

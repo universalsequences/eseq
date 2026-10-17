@@ -520,17 +520,7 @@ fn inline_mod_accessor_param<'a>(
     node_id: &str,
 ) -> Option<(&'a ParamNodeInfo, &'a PatchConnection)> {
     let mod_node = patch.nodes.iter().find(|node| node.id == node_id)?;
-    if mod_node.op != "mod" {
-        return None;
-    }
-    // A user-authored `(def m (mod gain))` is a BindingValue, not a nested
-    // expression: it is a real node and must never be garbage-collected.
-    let is_synthesized = mod_node.synthesized
-        || matches!(
-            mod_node.source.as_ref().map(|source| &source.owner),
-            Some(SourceOwner::NestedExpr { .. })
-        );
-    if !is_synthesized {
+    if !is_synthesized_mod_accessor(mod_node) {
         return None;
     }
     let inbound = patch
@@ -546,21 +536,36 @@ fn inline_mod_accessor_param<'a>(
     param.modulatable.then_some((param, inbound))
 }
 
-/// Synthesized `param~` accessors that no longer have any consumer — their
-/// only reason to exist died with the node whose expression contained them.
-/// See docs/patch-vs-code-editor-spec.md §4.2b: synthesized helper nodes are
-/// never persisted when orphaned.
+/// A `mod` node the projector synthesized for `param~` sugar. A user-authored
+/// `(def m (mod gain))` is a BindingValue, not a nested expression: it is a
+/// real node and must never be garbage-collected.
+fn is_synthesized_mod_accessor(node: &PatchNode) -> bool {
+    node.op == "mod"
+        && (node.synthesized
+            || matches!(
+                node.source.as_ref().map(|source| &source.owner),
+                Some(SourceOwner::NestedExpr { .. })
+            ))
+}
+
+/// Synthesized `param~` accessors that lost either end: no consumer left (the
+/// node whose expression contained them was deleted), or no param left to read
+/// (the param was deleted). Either way the helper the user never authored has
+/// no reason to exist; kept, it surfaced as a bare `(def mod-0 (mod))` that
+/// fails to compile. See docs/patch-vs-code-editor-spec.md §4.2b: synthesized
+/// helper nodes are never persisted when orphaned.
 pub fn orphaned_inline_mod_node_ids(patch: &Patch) -> HashSet<String> {
     patch
         .nodes
         .iter()
+        .filter(|node| is_synthesized_mod_accessor(node))
         .filter(|node| {
-            !patch
+            let consumed = patch
                 .connections
                 .iter()
-                .any(|connection| connection.from_node == node.id)
+                .any(|connection| connection.from_node == node.id);
+            !consumed || inline_mod_accessor_param(patch, &node.id).is_none()
         })
-        .filter(|node| inline_mod_accessor_param(patch, &node.id).is_some())
         .map(|node| node.id.clone())
         .collect()
 }

@@ -6167,7 +6167,7 @@ mod tests {
             filter_id: 0,
             delay_id: 0,
             send_id: 0,
-            mod_out_id: 0,
+            mod_out_ids: [0; crate::sequencer::MAX_TRACK_MOD_OUTPUTS],
             mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
             mod_env_id: 0,
             bus_send_ids: Vec::new(),
@@ -6217,7 +6217,7 @@ mod tests {
             filter_id: 0,
             delay_id: 0,
             send_id: 0,
-            mod_out_id: 0,
+            mod_out_ids: [0; crate::sequencer::MAX_TRACK_MOD_OUTPUTS],
             mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
             mod_env_id: 0,
             bus_send_ids: Vec::new(),
@@ -6342,7 +6342,7 @@ mod tests {
             filter_id: 0,
             delay_id: 0,
             send_id: 0,
-            mod_out_id: 0,
+            mod_out_ids: [0; crate::sequencer::MAX_TRACK_MOD_OUTPUTS],
             mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
             mod_env_id: 0,
             bus_send_ids: Vec::new(),
@@ -6435,7 +6435,7 @@ mod tests {
             filter_id: 0,
             delay_id: 0,
             send_id: 0,
-            mod_out_id: 0,
+            mod_out_ids: [0; crate::sequencer::MAX_TRACK_MOD_OUTPUTS],
             mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
             mod_env_id: 0,
             bus_send_ids: Vec::new(),
@@ -9173,13 +9173,13 @@ mod tests {
         );
         // Two internal cables and one leaving the rack.
         app.graph_controller()
-            .set_mod_route_to_destination(lfo, ModDestination::Track(kick), 0)
+            .set_mod_route_to_destination(lfo, 0, ModDestination::Track(kick), 0)
             .expect("lfo -> kick");
         app.graph_controller()
-            .set_mod_route_to_destination(lfo, ModDestination::Bus(rack_bus), 1)
+            .set_mod_route_to_destination(lfo, 0, ModDestination::Bus(rack_bus), 1)
             .expect("lfo -> rack bus");
         app.graph_controller()
-            .set_mod_route_to_destination(lfo, ModDestination::Track(outsider), 2)
+            .set_mod_route_to_destination(lfo, 0, ModDestination::Track(outsider), 2)
             .expect("lfo -> outsider");
 
         let name = format!("kit-modulator-patch-{}", std::process::id());
@@ -9203,11 +9203,13 @@ mod tests {
             kit.mod_connections,
             vec![
                 crate::project::ProjectKitModConnection {
+                    source_output: 0,
                     source_pad: 1,
                     destination: crate::project::ProjectKitModDestination::Pad(0),
                     dest_input: 0,
                 },
                 crate::project::ProjectKitModConnection {
+                    source_output: 0,
                     source_pad: 1,
                     destination: crate::project::ProjectKitModDestination::RackBus,
                     dest_input: 1,
@@ -9235,8 +9237,8 @@ mod tests {
         let restored = app2.effective_instrument_param_value(lfo2, param_idx).expect("param");
         assert!((restored - changed).abs() < 1e-5, "modulator setting restored: {restored} vs {changed}");
         let expected = vec![
-            ModConnection { source_track: lfo2, destination: ModDestination::Track(kick2), dest_input: 0 },
-            ModConnection { source_track: lfo2, destination: ModDestination::Bus(BusId(group.bus_id)), dest_input: 1 },
+            ModConnection { source_output: 0, source_track: lfo2, destination: ModDestination::Track(kick2), dest_input: 0 },
+            ModConnection { source_output: 0, source_track: lfo2, destination: ModDestination::Bus(BusId(group.bus_id)), dest_input: 1 },
         ];
         app2.state.with_scenes(|scenes| {
             assert_eq!(scenes.scenes.len(), 2);
@@ -10582,7 +10584,7 @@ mod tests {
             filter_id: 0,
             delay_id,
             send_id: 0,
-            mod_out_id: 0,
+            mod_out_ids: [0; crate::sequencer::MAX_TRACK_MOD_OUTPUTS],
             mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
             mod_env_id: 0,
             bus_send_ids: Vec::new(),
@@ -10765,7 +10767,7 @@ mod tests {
             filter_id: 0,
             delay_id,
             send_id: 0,
-            mod_out_id: 0,
+            mod_out_ids: [0; crate::sequencer::MAX_TRACK_MOD_OUTPUTS],
             mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
             mod_env_id: 0,
             bus_send_ids: Vec::new(),

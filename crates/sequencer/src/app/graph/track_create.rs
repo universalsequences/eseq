@@ -268,7 +268,7 @@ impl GraphController<'_> {
             &track_name,
             shell.voice_sum_id,
             shell.voice_sum_r_id,
-            shell.mod_out_id,
+            shell.mod_out_ids,
             shell.mod_in_clip_ids,
         )?;
         self.finish_track_registration(TrackRegistration {
@@ -451,7 +451,7 @@ impl GraphController<'_> {
                 &track_name,
                 track_nodes.voice_sum_id,
                 track_nodes.voice_sum_r_id,
-                track_nodes.mod_out_id,
+                track_nodes.mod_out_ids,
                 track_nodes.mod_in_clip_ids,
             )?;
 
@@ -497,6 +497,8 @@ impl GraphController<'_> {
         }
         self.app.set_automatic_track_name(track, instrument_display_name(instrument_name));
         self.finish_track_instrument_source_change(track);
+        // The new patch may declare other mod outputs: park or revive routes.
+        self.sync_current_pattern_mod_routes();
         Ok(reset_summary)
     }
 
@@ -646,7 +648,7 @@ impl GraphController<'_> {
             &old_track_name,
             track_nodes.voice_sum_id,
             track_nodes.voice_sum_r_id,
-            track_nodes.mod_out_id,
+            track_nodes.mod_out_ids,
             track_nodes.mod_in_clip_ids,
         )?;
         self.delete_sampler_voice_nodes(&track_nodes);
@@ -774,7 +776,7 @@ impl GraphController<'_> {
             &old_track_name,
             track_nodes.voice_sum_id,
             track_nodes.voice_sum_r_id,
-            track_nodes.mod_out_id,
+            track_nodes.mod_out_ids,
             track_nodes.mod_in_clip_ids,
         )?;
         self.delete_rack_effect_chains(track, batch.serial)?;
@@ -1114,7 +1116,7 @@ impl GraphController<'_> {
                         &slot_name,
                         mixer.slot_sum_l_id,
                         mixer.slot_sum_r_id,
-                        shell.mod_out_id,
+                        shell.mod_out_ids,
                         shell.mod_in_clip_ids,
                     )?;
                     let engine = self.app.graph.engine_node_ids[custom.engine_id]

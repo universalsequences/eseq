@@ -1076,6 +1076,7 @@ pub(super) fn handle(
                                     return;
                                 }
                             }
+                            rebase_patcher_after_save(&session.path, &target.source_path);
 
                             if stay {
                                 let session = ctx
@@ -2674,6 +2675,7 @@ pub(super) fn handle(
                     return;
                 }
             }
+            rebase_patcher_after_save(&session.path, session.save_target());
             if stay {
                 let session = ctx.sessions.effect_edit_session.as_mut().expect("session exists");
                 session.mode = EffectEditMode::EditExisting {

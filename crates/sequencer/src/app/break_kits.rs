@@ -346,6 +346,7 @@ impl App {
                 continue;
             };
             let cable = ProjectKitModConnection {
+                source_output: 0,
                 source_pad,
                 destination,
                 dest_input: connection.dest_input,
@@ -396,7 +397,7 @@ impl App {
                 if destination == ModDestination::Track(source_track) {
                     return None;
                 }
-                Some(ModConnection { source_track, destination, dest_input: cable.dest_input })
+                Some(ModConnection { source_output: 0, source_track, destination, dest_input: cable.dest_input })
             })
             .collect();
         if resolved.is_empty() {

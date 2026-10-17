@@ -392,7 +392,9 @@ impl GraphController<'_> {
             for &mod_in_clip_id in &track.mod_in_clip_ids {
                 crate::audiograph::delete_node(self.app.graph.lg.0, mod_in_clip_id);
             }
-            crate::audiograph::delete_node(self.app.graph.lg.0, track.mod_out_id);
+            for &mod_out_id in &track.mod_out_ids {
+                crate::audiograph::delete_node(self.app.graph.lg.0, mod_out_id);
+            }
             crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, track.delay_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, track.delay_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, track.pdc_id);
@@ -487,12 +489,12 @@ impl GraphController<'_> {
         route_idx: usize,
         track_idx: usize,
     ) {
-        let track_mod_out_id = self
+        let track_mod_out_ids = self
             .app
             .graph
             .track_node_ids
             .get(track_idx)
-            .map(|nodes| nodes.mod_out_id);
+            .map(|nodes| nodes.mod_out_ids);
         let Some(engine) = self
             .app
             .graph
@@ -512,19 +514,18 @@ impl GraphController<'_> {
                     && custom_route_parent_track(idx) == Some(track_idx)
             });
         if !has_sibling_route {
-            if let (Some(track_mod_out_id), Some(mod_output_channel)) = (
-                track_mod_out_id,
-                engine.mod_output_channels.first().copied(),
-            ) {
-                for &synth_id in &engine.synth_ids {
-                    unsafe {
-                        crate::audiograph::graph_disconnect(
-                            self.app.graph.lg.0,
-                            synth_id,
-                            mod_output_channel as i32,
-                            track_mod_out_id,
-                            0,
-                        );
+            if let Some(hubs) = track_mod_out_ids {
+                for (mod_output_channel, hub) in mod_output_routes(&engine.mod_output_channels, hubs) {
+                    for &synth_id in &engine.synth_ids {
+                        unsafe {
+                            crate::audiograph::graph_disconnect(
+                                self.app.graph.lg.0,
+                                synth_id,
+                                mod_output_channel as i32,
+                                hub,
+                                0,
+                            );
+                        }
                     }
                 }
             }
@@ -591,12 +592,12 @@ impl GraphController<'_> {
         route_idx: usize,
         track_idx: usize,
     ) -> Option<DeferredEngineRouteGeneration> {
-        let track_mod_out_id = self
+        let track_mod_out_ids = self
             .app
             .graph
             .track_node_ids
             .get(track_idx)
-            .map(|nodes| nodes.mod_out_id)?;
+            .map(|nodes| nodes.mod_out_ids)?;
         let engine = self
             .app
             .graph
@@ -614,14 +615,14 @@ impl GraphController<'_> {
                     && custom_route_parent_track(idx) == Some(track_idx)
             });
         if !has_sibling_route {
-            if let Some(mod_output_channel) = engine.mod_output_channels.first().copied() {
+            for (mod_output_channel, hub) in mod_output_routes(&engine.mod_output_channels, track_mod_out_ids) {
                 for &synth_id in &engine.synth_ids {
                     unsafe {
                         crate::audiograph::graph_disconnect(
                             self.app.graph.lg.0,
                             synth_id,
                             mod_output_channel as i32,
-                            track_mod_out_id,
+                            hub,
                             0,
                         );
                     }
@@ -1083,6 +1084,7 @@ impl GraphController<'_> {
         }
         self.app.sampler_paths.remove(track_idx);
         self.app.graph.track_node_ids.remove(track_idx);
+        self.sync_mod_trigger_publish_targets(track_idx);
         self.app.graph.track_buffer_ids.remove(track_idx);
         self.app.graph.track_sample_rates.remove(track_idx);
         self.app.graph.track_voice_lids.remove(track_idx);

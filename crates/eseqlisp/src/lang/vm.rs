@@ -2901,6 +2901,13 @@ pub struct VM {
     /// re-registers a clean keyed subtree with unchanged inputs. Never
     /// snapshotted: transactional-eval rollback clears it instead.
     subtree_render_cache: HashMap<u64, SubtreeRenderCache>,
+    /// Monotonic clock stamped on a keyed subtree root each time a render
+    /// registers or reuses it ([`VM::touch_subtree_root`]). A subtree owner's
+    /// rerender keeps its previous descendants alive while its body runs, so
+    /// clean nested subtrees can be reused, and prunes only those its body
+    /// did not touch.
+    subtree_touch_clock: u64,
+    subtree_touched_at: HashMap<u64, u64>,
     pub macros: Rc<HashMap<String, MacroDef>>,
     /// [`VM::definition_generation`].
     definition_generation: u64,
@@ -5196,25 +5203,6 @@ impl ReactiveDag {
         ids
     }
 
-    pub fn remove_descendant_subtree_effects(&mut self, subtree_root_id: u64) -> HashSet<u64> {
-        let descendants = self
-            .descendant_subtree_effect_ids(subtree_root_id)
-            .into_iter()
-            .filter_map(|id| {
-                let root = match self.nodes.get(&id) {
-                    Some(ReactiveNode::Effect {
-                        subtree_root_id: Some(root),
-                        ..
-                    }) => Some(*root),
-                    _ => None,
-                };
-                self.remove_node(id);
-                root
-            })
-            .collect::<HashSet<_>>();
-        descendants
-    }
-
     pub fn effect_id_for_subtree_root(&self, subtree_root_id: u64) -> Option<NodeId> {
         self.subtree_effects.get(&subtree_root_id).copied()
     }
@@ -5266,6 +5254,8 @@ impl VM {
             current_subtree_capture_stack: Vec::new(),
             current_subtree_reactive_reads: HashMap::new(),
             subtree_render_cache: HashMap::new(),
+            subtree_touch_clock: 0,
+            subtree_touched_at: HashMap::new(),
             macros: Rc::default(),
             definition_generation: 0,
             definition_headers: HashMap::new(),
@@ -7605,6 +7595,7 @@ impl VM {
             Value::Closure(chunk_idx, _) => *chunk_idx,
             _ => 0,
         };
+        self.touch_subtree_root(root_id);
         let node_id = self
             .dag
             .effect_id_for_subtree_root(root_id)
@@ -7632,22 +7623,58 @@ impl VM {
         }
     }
 
+    fn touch_subtree_root(&mut self, root_id: u64) {
+        self.subtree_touch_clock += 1;
+        self.subtree_touched_at.insert(root_id, self.subtree_touch_clock);
+    }
+
+    /// Remove the nested subtree effects (and their render caches and pending
+    /// replacements) among `descendants` that no render touched after
+    /// `since`: the rerendered owner's body no longer contains them.
+    fn prune_untouched_subtree_descendants(&mut self, descendants: &[NodeId], since: u64) {
+        let mut removed = HashSet::new();
+        for &id in descendants {
+            let Some(ReactiveNode::Effect {
+                subtree_root_id: Some(root),
+                ..
+            }) = self.dag.nodes.get(&id)
+            else {
+                continue;
+            };
+            let root = *root;
+            if self
+                .subtree_touched_at
+                .get(&root)
+                .is_some_and(|touched| *touched > since)
+            {
+                continue;
+            }
+            self.dag.remove_node(id);
+            self.subtree_render_cache.remove(&root);
+            self.subtree_touched_at.remove(&root);
+            removed.insert(root);
+        }
+        if !removed.is_empty() {
+            self.pending_widget_trees.retain(|pending| match pending {
+                PendingUiUpdate::ReplaceSubtree {
+                    subtree_root_id, ..
+                } => !removed.contains(subtree_root_id),
+                PendingUiUpdate::FullTree(_) => true,
+            });
+        }
+    }
+
     fn render_registered_subtree_owner(
         &mut self,
         owner: &RegisteredSubtreeOwner,
     ) -> Result<Value, VMError> {
-        let removed_descendants = self.dag.remove_descendant_subtree_effects(owner.root_id);
-        if !removed_descendants.is_empty() {
-            for root in &removed_descendants {
-                self.subtree_render_cache.remove(root);
-            }
-            self.pending_widget_trees.retain(|pending| match pending {
-                PendingUiUpdate::ReplaceSubtree {
-                    subtree_root_id, ..
-                } => !removed_descendants.contains(subtree_root_id),
-                PendingUiUpdate::FullTree(_) => true,
-            });
-        }
+        // The previous render's nested subtrees stay registered (with their
+        // render caches) while the body runs, so a clean nested subtree with
+        // unchanged inputs is reused instead of rebuilt (a custom UI's section
+        // change re-ran every knob and its 224-cell matrix). The ones the
+        // body no longer registers are pruned afterwards.
+        let render_started_at = self.subtree_touch_clock;
+        let previous_descendants = self.dag.descendant_subtree_effect_ids(owner.root_id);
         self.dag.clear_dependencies_of(owner.node_id);
         self.current_subtree_reactive_reads
             .insert(owner.root_id, HashSet::new());
@@ -7661,6 +7688,7 @@ impl VM {
         let result = self.invoke(owner.callable.clone(), vec![]);
         let _ = self.tracking_stack.pop();
         let _ = self.current_subtree_capture_stack.pop();
+        self.prune_untouched_subtree_descendants(&previous_descendants, render_started_at);
         result.map(|value| {
             annotate_explicit_subtree_root(
                 &value.unwrap_or(Value::Nil),
@@ -7698,6 +7726,14 @@ impl VM {
             );
             for id in self.dag.descendant_subtree_effect_ids(root_id) {
                 self.dag.attach_subtree_effect(id);
+                if let Some(ReactiveNode::Effect {
+                    subtree_root_id: Some(descendant_root),
+                    ..
+                }) = self.dag.nodes.get(&id)
+                {
+                    let descendant_root = *descendant_root;
+                    self.touch_subtree_root(descendant_root);
+                }
             }
             return Ok(cached);
         }

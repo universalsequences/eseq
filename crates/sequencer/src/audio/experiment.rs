@@ -124,6 +124,7 @@ impl EventTiming {
             },
             BlockEventKind::GateOff(event) => ("gate_off", event.track_idx, None),
             BlockEventKind::Retrig(event) => ("retrig", event.track_idx, Some(event.step)),
+            BlockEventKind::ModTrigger(event) => ("mod_trigger", event.track_idx, None),
         };
         Self { kind, track, step, frame_offset: event.frame_offset, elapsed_us: 0.0 }
     }

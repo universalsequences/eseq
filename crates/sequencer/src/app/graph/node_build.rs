@@ -59,34 +59,40 @@ impl GraphController<'_> {
         )?;
         // The mod output hub and the four mod input clips are watched taps:
         // the mixer reads their block peaks at meter rate to light the ports.
-        let mod_out_name = CString::new(format!("{}_mod_out", name))
-            .map_err(|_| "create_track_shell mod output: node name contains NUL".to_string())?;
-        let mod_out_id = unsafe {
-            crate::audiograph::add_node(
-                self.app.graph.lg.0,
-                crate::instruments::track_modulator::mod_out_tap_vtable(),
-                crate::instruments::track_modulator::MOD_OUT_TAP_STATE_SIZE
-                    * std::mem::size_of::<f32>(),
-                mod_out_name.as_ptr(),
-                1,
-                1,
-                std::ptr::null(),
-                0,
-            )
-        };
-        if mod_out_id < 0 {
-            return Err(format!(
-                "create_track_shell mod output: failed to queue tap node '{}_mod_out'",
-                name
-            ));
-        }
-        unsafe {
-            crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, mod_out_id);
+        let mut mod_out_ids = [0; crate::sequencer::MAX_TRACK_MOD_OUTPUTS];
+        for (output, mod_out_id) in mod_out_ids.iter_mut().enumerate() {
+            let label = if output == 0 { String::new() } else { (output + 1).to_string() };
+            let mod_out_name = CString::new(format!("{}_mod_out{}", name, label))
+                .map_err(|_| "create_track_shell mod output: node name contains NUL".to_string())?;
+            *mod_out_id = unsafe {
+                crate::audiograph::add_node(
+                    self.app.graph.lg.0,
+                    crate::instruments::track_modulator::mod_out_tap_vtable(),
+                    crate::instruments::track_modulator::MOD_OUT_TAP_STATE_SIZE
+                        * std::mem::size_of::<f32>(),
+                    mod_out_name.as_ptr(),
+                    1,
+                    1,
+                    std::ptr::null(),
+                    0,
+                )
+            };
+            if *mod_out_id < 0 {
+                return Err(format!(
+                    "create_track_shell mod output: failed to queue tap node '{}_mod_out{}'",
+                    name, label
+                ));
+            }
+            unsafe {
+                crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, *mod_out_id);
+            }
         }
         let mod_in_clip_ids: [i32; crate::sequencer::EXT_MOD_INPUT_COUNT] =
             std::array::from_fn(|input| {
                 let mod_in_name =
                     CString::new(format!("{}_mod_in{}_clip", name, input + 1)).unwrap();
+                let initial =
+                    crate::instruments::track_modulator::ModInClipInitialState::for_track_input(idx, input);
                 unsafe {
                     crate::audiograph::add_node(
                         self.app.graph.lg.0,
@@ -96,8 +102,9 @@ impl GraphController<'_> {
                         mod_in_name.as_ptr(),
                         1,
                         1,
-                        std::ptr::null(),
-                        0,
+                        (&initial as *const crate::instruments::track_modulator::ModInClipInitialState)
+                            .cast(),
+                        std::mem::size_of_val(&initial),
                     )
                 }
             });
@@ -141,7 +148,7 @@ impl GraphController<'_> {
             delay_id: fx_out_id,
             pdc_id,
             send_id,
-            mod_out_id,
+            mod_out_ids,
             mod_in_clip_ids,
             mod_env_id,
         })
@@ -358,7 +365,7 @@ impl GraphController<'_> {
             delay_id: shell.delay_id,
             pdc_id: shell.pdc_id,
             send_id: shell.send_id,
-            mod_out_id: shell.mod_out_id,
+            mod_out_ids: shell.mod_out_ids,
             mod_in_clip_ids: shell.mod_in_clip_ids,
             mod_env_id: shell.mod_env_id,
             bus_send_ids: Vec::new(),
@@ -862,6 +869,8 @@ impl GraphController<'_> {
             synth_outputs: audio_output_channels.len(),
             audio_output_channels,
             mod_output_channels,
+            mod_output_names: manifest_mod_output_names(manifest),
+            ext_input_names: manifest_ext_input_names(manifest),
             gatepitch_ids,
             modulator_ids,
             route_gain_ids: (0..crate::sequencer::MAX_SAMPLER_POOLS)

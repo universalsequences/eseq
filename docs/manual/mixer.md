@@ -103,12 +103,31 @@ The small ports near the foot of each strip route modulation signals between tra
 
 - The **output port**, on the left of a track strip, is active only on a track that can produce a modulation signal: a track playing the built-in **Modulator**, or an instrument that declares a modulation output.
 - The four **input ports** on a track strip, and on each group and bus strip other than Main, are the destination's external modulation inputs 1 to 4. A Modulator track has no inputs.
+- A free patch can declare up to four modulation outputs (outputs marked `@modulator`). Its strip then shows one output port per declared output, then the inputs that still fit in the row of five: two outputs leave Ext1 to Ext3, four leave only Ext1. Pressing an output port names it in the status line. A patch whose outputs are all `@modulator` outputs makes no sound of its own.
 
 To connect a cable, drag from an active output port to an input port, or click the output port and then the input port. A track cannot modulate itself. A port lights with the signal passing through it.
 
 A cable delivers a signal; it does not decide what the signal changes. At the destination, set a modulation slot of the instrument or of an effect to the matching source, **ext1** to **ext4**, and map that slot to the parameter. On a bus or group, the inputs reach the effects in its chain. See [Instruments](instruments) and [Audio effects](effects) for modulation slots.
 
+A free patch can also read an input directly, with no slot to set up: `(ext 1)` to `(ext 4)` in its code, or an **ext 1** node in the patcher, is that input's raw signal (0 to 1). Reading `(ext N)` takes over modulation slot N: the **mods** tab shows it as **extN (patch)**, and its source can't be changed. That makes small utility patches easy. For example, `(* (ext 1) gate)` sent out of a `@modulator` output is a VCA that passes the incoming cable only while the track's own steps hold the gate open.
+
 To remove a cable, click it to select it, then press Backspace. Modulation routings belong to the scene, so each scene can wire them differently.
+
+If a patch changes so that a cable's output or input port disappears, the cable stops carrying a signal and is hidden, but it is kept. It comes back if the port returns.
+
+### Sequencing a track from its inputs
+
+A cable can also play a track. In the *track* buffer, click **mods** to open the track's input table, and give each input **ext1** to **ext4** a role:
+
+- **modulator** (the default): the input only feeds modulation slots, as above.
+- **trigger**: each time the signal rises past 0.5, the track plays a note. It must fall below 0.25 before it can trigger again.
+- **velocity**, **duration**, **note**: sampled at the moment of each trigger. Velocity is the signal itself (0 to 1). Duration runs from 1/16 of a step at 0, through one step at 0.5, to 16 steps at 1. Note is a transpose of ±24 semitones with 0.5 at the root, fitted to the track's scale.
+
+Every role still feeds the modulation slots, so one cable can trigger and modulate at once. The **mods** button lights while any input does more than modulate.
+
+A trigger plays the track's most recent sequenced step again: its note, chord, velocity, length and parameter locks. Any value roles replace the matching parts. Before any step has played, it plays the track's defaults at the root. Set **steps** to **latch** and the track's own steps stop sounding; they only set what the cable plays, so the steps become a melody that the cable's rhythm walks through.
+
+Triggers sound only while the transport plays. A triggered note lands one audio block (about 11 ms) after the edge that caused it. The spacing between triggered notes is exact. The roles are saved with the track's other settings in each pattern.
 
 ## Who recalls what
 

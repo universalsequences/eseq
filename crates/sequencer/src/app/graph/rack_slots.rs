@@ -236,7 +236,7 @@ impl GraphController<'_> {
             &slot_name,
             mixer.slot_sum_l_id,
             mixer.slot_sum_r_id,
-            track_nodes.mod_out_id,
+            track_nodes.mod_out_ids,
             track_nodes.mod_in_clip_ids,
         )?;
 

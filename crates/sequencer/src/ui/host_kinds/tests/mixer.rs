@@ -651,7 +651,7 @@ fn seed_meters(h: &mut Harness) {
     meters.cached_bus_peak_levels = vec![UNPOLLED; buses];
     meters.cached_modulator_phases = vec![UNPOLLED; tracks];
     meters.cached_modulator_levels = vec![UNPOLLED; tracks];
-    meters.cached_mod_port_levels.track_outputs = vec![UNPOLLED; tracks];
+    meters.cached_mod_port_levels.track_outputs = vec![[UNPOLLED; sequencer::sequencer::MAX_TRACK_MOD_OUTPUTS]; tracks];
 }
 
 /// Which meter caches the tick rewrote since [`seed_meters`].
@@ -662,7 +662,7 @@ fn polled_meters(h: &Harness) -> MeterDemand {
         tracks: meters.cached_track_peak_levels[0] != UNPOLLED,
         buses: meters.cached_bus_peak_levels[0] != UNPOLLED,
         modulators: meters.cached_modulator_phases[0] != UNPOLLED,
-        mod_levels: meters.cached_mod_port_levels.track_outputs[0] != UNPOLLED,
+        mod_levels: meters.cached_mod_port_levels.track_outputs[0][0] != UNPOLLED,
     }
 }
 
@@ -750,7 +750,7 @@ fn the_tick_polls_each_meter_only_while_a_kind_field_observes_it() {
     assert_eq!(h.meters.cached_peak_l_level, 0.0);
     assert!(h.meters.cached_track_peak_levels.iter().all(|level| *level == 0.0));
     assert!(h.meters.cached_bus_peak_levels.iter().all(|level| *level == 0.0));
-    assert!(h.meters.cached_mod_port_levels.track_outputs.iter().all(|level| *level == 0.0));
+    assert!(h.meters.cached_mod_port_levels.track_outputs.iter().flatten().all(|level| *level == 0.0));
     seed_meters(&mut h);
     meter_cadence_due(&mut h, true);
     h.tick();

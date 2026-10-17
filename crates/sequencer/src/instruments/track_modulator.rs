@@ -40,7 +40,34 @@ pub const MODULATOR_ENVELOPE_STATE_SIZE: usize =
 /// Both mod-port tap nodes keep one float: the block peak of what they just
 /// passed, read at meter rate by the UI to light the port (eseq mod-port glow).
 pub const MOD_TAP_STATE_LEVEL: usize = 0;
-pub const MOD_IN_CLIP_STATE_SIZE: usize = 1;
+/// Track mod input clips add one cell: the `mod_trigger_lanes` lane this
+/// clip publishes to, plus one (0 = never publishes, as on buses). Set from
+/// `ModInClipInitialState` at creation and re-pushed after a track reindex.
+pub const MOD_IN_CLIP_STATE_PUBLISH: usize = 1;
+pub const MOD_IN_CLIP_STATE_SIZE: usize = 2;
+
+/// `add_node` initial state for a track's mod input clip.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ModInClipInitialState {
+    pub level: f32,
+    pub publish: f32,
+}
+
+const _: () = assert!(
+    std::mem::size_of::<ModInClipInitialState>() == MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>()
+);
+
+impl ModInClipInitialState {
+    pub fn for_track_input(track: usize, input: usize) -> Self {
+        Self { level: 0.0, publish: mod_in_clip_publish_value(track, input) }
+    }
+}
+
+/// The `MOD_IN_CLIP_STATE_PUBLISH` value for a track's mod input.
+pub fn mod_in_clip_publish_value(track: usize, input: usize) -> f32 {
+    super::mod_trigger_lanes::lane_index(track, input).map_or(0.0, |lane| (lane + 1) as f32)
+}
 pub const MOD_OUT_TAP_STATE_SIZE: usize = 1;
 
 const DISPLAY_START_X: f32 = 0.18;
@@ -239,10 +266,23 @@ unsafe extern "C" fn mod_in_clip_process(
     state: *mut c_void,
     _buffers: *mut c_void,
 ) {
+    // Mod input roles (docs/mod-input-roles-spec.md): an armed track's clips
+    // hand their block to the audio callback for trigger detection.
+    let publish_lane = if state.is_null() {
+        None
+    } else {
+        let cell = *(state as *const f32).add(MOD_IN_CLIP_STATE_PUBLISH);
+        (cell >= 1.0)
+            .then(|| cell as usize - 1)
+            .filter(|lane| super::mod_trigger_lanes::lane_armed(*lane))
+    };
     if crate::effects::silence::inputs_silent() {
         crate::effects::silence::emit(out, 1, nframes);
         if !state.is_null() {
             *(state as *mut f32).add(MOD_TAP_STATE_LEVEL) = 0.0;
+        }
+        if let Some(lane) = publish_lane {
+            super::mod_trigger_lanes::publish(lane, None);
         }
         return;
     }
@@ -257,6 +297,29 @@ unsafe extern "C" fn mod_in_clip_process(
     if !state.is_null() {
         *(state as *mut f32).add(MOD_TAP_STATE_LEVEL) = peak;
     }
+    if let Some(lane) = publish_lane {
+        super::mod_trigger_lanes::publish(
+            lane,
+            Some(std::slice::from_raw_parts(output, nframes as usize)),
+        );
+    }
+}
+
+unsafe extern "C" fn mod_in_clip_init(
+    state: *mut c_void,
+    _sample_rate: c_int,
+    _max_block: c_int,
+    init_msg: *const c_void,
+) {
+    if state.is_null() {
+        return;
+    }
+    let initial = if init_msg.is_null() {
+        ModInClipInitialState::default()
+    } else {
+        *(init_msg as *const ModInClipInitialState)
+    };
+    *(state as *mut ModInClipInitialState) = ModInClipInitialState { level: 0.0, ..initial };
 }
 
 /// Track modulation output hub: every mod route fans out from here. A plain
@@ -296,7 +359,7 @@ pub fn modulator_envelope_vtable() -> NodeVTable {
 pub fn mod_in_clip_vtable() -> NodeVTable {
     NodeVTable {
         process: Some(mod_in_clip_process),
-        init: Some(mod_tap_init),
+        init: Some(mod_in_clip_init),
         reset: None,
         migrate: None,
         ..NodeVTable::default()

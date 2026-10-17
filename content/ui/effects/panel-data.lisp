@@ -122,13 +122,18 @@
 
 ;; The modulation sources' settings (`:sources`, one section per source
 ;; 1-4): its type param (`:source-param`) and the settings its type uses,
-;; each made by `make`.
+;; each made by `make`. `:ext` is the ext input the patch pinned the slot
+;; to with (ext N), 0 while its source is configurable.
+(def claimed-ext (d slot)
+  (let ((m (first (filter (lambda (m) (= m.slot slot)) d.modulators))))
+    (if m m.ext 0)))
+
 (def source-sections (d make)
   (let ((settings (filter (lambda (prm) prm.visible) (params-in d "source"))))
     (map (lambda (slot)
            (let ((own (filter (lambda (prm) (= prm.mod-slot slot)) settings)))
              (let ((type-param (first (filter (lambda (prm) (= prm.label "type")) own))))
-               (dict :name (str "Mod " slot) :slot slot
+               (dict :name (str "Mod " slot) :slot slot :ext (claimed-ext d slot)
                      :source-param (if type-param (make type-param) nil)
                      :params (map make (filter (lambda (prm) (not (= prm.label "type"))) own))))))
          (list 1 2 3 4))))
@@ -137,7 +142,7 @@
 
 ;; d's fixed modulation sources.
 (def modulators-of (d)
-  (map (lambda (m) (dict :slot m.slot :label m.label)) d.modulators))
+  (map (lambda (m) (dict :slot m.slot :label m.label :ext m.ext)) d.modulators))
 
 (def tensors-of (d)
   (map (lambda (tz) (dict :idx tz.index :name tz.name :rows tz.rows :cols tz.cols

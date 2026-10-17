@@ -29,8 +29,9 @@
 (def-kind patch-toolbar
   :key ()
   :state ((name "")
-          ;; The buffer the name was typed for: a new session starts with an
-          ;; empty name instead of the last one's.
+          ;; The session (buffer and mode, see session-key) the name was
+          ;; typed for: a new session starts with an empty name instead of
+          ;; the last one's.
           (buffer "")
           (confirming-done false)
           ;; The Save-as-name modal a draft's Save opens, and whether its
@@ -64,16 +65,28 @@
   (or editor.canceling
       (= editor.error "Preview compiling...")))
 
+;; A session is its buffer AND its mode. Every draft patch buffer is named
+;; `*instrument-patcher:new-instrument*`, and a draft saved in place keeps that
+;; buffer as it turns into an edit, so Save as… on it forks into a draft with
+;; the very same buffer name: keyed on the buffer alone, the fork looked like
+;; the same session and its naming modal never opened.
+(def session-key ()
+  (str editor.buffer "|" editor.mode))
+
 ;; Reset the typed name when a different session opens.
 (def sync-session! ()
-  (if (= patch-toolbar.buffer editor.buffer)
+  (if (= patch-toolbar.buffer (session-key))
     nil
     (do
-      (set! patch-toolbar.buffer editor.buffer)
+      (set! patch-toolbar.buffer (session-key))
       (set! patch-toolbar.name "")
       (set! patch-toolbar.confirming-done false)
       (set! patch-toolbar.naming-done false)
-      (set! patch-toolbar.naming (and patch-toolbar.name-after-fork (draft?)))
+      ;; Mode and buffer may land in separate updates, each a session
+      ;; change: a naming modal the fork opened on the first must survive the
+      ;; second. Leaving drafts (Done, a save that stays) always closes it.
+      (set! patch-toolbar.naming
+        (and (draft?) (or patch-toolbar.name-after-fork patch-toolbar.naming)))
       (if (draft?) (set! patch-toolbar.name-after-fork false) nil))))
 
 ;; ── Actions ──
@@ -189,10 +202,11 @@
 
 (def segment (text on on-click)
   (button text
-    :background-color (if on :mixer-strip-selected-bg :transparent)
-    :border-color :mixer-strip-border
+    :background-color (if on :mixer-strip-bg :transparent)
+    :border-color :dim
     :border-width 1
-    :height 1.4
+    :corner-radius 24
+    :height 1.3
     :font-size 10.5
     :on-click on-click
     :color (if on :fg :dim)))

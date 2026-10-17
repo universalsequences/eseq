@@ -255,6 +255,9 @@ pub(super) struct AudioCallbackData {
     /// brand-new voice and both fall silent; a track that triggered at the
     /// same sample is skipped by the choke pass instead.
     pub(super) rack_choke_last_trigger: [u64; MAX_TRACKS],
+    /// Mod input roles: detection state, pending cable triggers and latches
+    /// (docs/mod-input-roles-spec.md).
+    pub(super) mod_triggers: Box<ModTriggerRuntime>,
     /// Bit per rack slot that the last seen scheduler snapshot had disabled
     /// (eseq-bw9v). A slot whose bit newly sets has its sounding voices
     /// released, so parking a slot mid-note cannot leave it ringing dry

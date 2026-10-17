@@ -302,6 +302,8 @@ pub(crate) mod f {
     pub(crate) const TRACK_SUPPORTS_MONO_TRIGGER: FieldKey = (TRACK, "supports-mono-trigger");
     pub(crate) const TRACK_VOICE_PRIORITY: FieldKey = (TRACK, "voice-priority");
     pub(crate) const TRACK_MONO_TRIGGER: FieldKey = (TRACK, "mono-trigger");
+    pub(crate) const TRACK_MOD_ROLES: FieldKey = (TRACK, "mod-roles");
+    pub(crate) const TRACK_MOD_STEPS: FieldKey = (TRACK, "mod-steps");
     pub(crate) const TRACK_MUTE_GROUP: FieldKey = (TRACK, "mute-group");
     pub(crate) const TRACK_SWING: FieldKey = (TRACK, "swing");
     pub(crate) const TRACK_SWING_RESOLUTION: FieldKey = (TRACK, "swing-resolution");
@@ -313,6 +315,21 @@ pub(crate) mod f {
     pub(crate) const TRACK_OUTPUT: FieldKey = (TRACK, "output");
     pub(crate) const TRACK_MOD_OUTPUT: FieldKey = (TRACK, "mod-output");
     pub(crate) const TRACK_MOD_OUT_LEVEL: FieldKey = (TRACK, "mod-out-level");
+    /// Signal level of each mod output port (`mod-out-level` is the first).
+    pub(crate) const TRACK_MOD_OUT: [FieldKey; 4] = [
+        (TRACK, "mod-out-1"),
+        (TRACK, "mod-out-2"),
+        (TRACK, "mod-out-3"),
+        (TRACK, "mod-out-4"),
+    ];
+    /// How many mod output ports the strip shows (0 when it has none).
+    pub(crate) const TRACK_MOD_OUTPUTS: FieldKey = (TRACK, "mod-outputs");
+    /// The declared `@modulator` output names, in port order.
+    pub(crate) const TRACK_MOD_OUTPUT_NAMES: FieldKey = (TRACK, "mod-output-names");
+    /// Makes no audio, only mod outputs: the strip shows labeled jacks.
+    pub(crate) const TRACK_MODULE: FieldKey = (TRACK, "module");
+    /// Labels of ext inputs 1-4, "" when the patch names none.
+    pub(crate) const TRACK_EXT_INPUT_NAMES: FieldKey = (TRACK, "ext-input-names");
     pub(crate) const TRACK_MOD_IN: [FieldKey; 4] = [
         (TRACK, "mod-in-1"),
         (TRACK, "mod-in-2"),
@@ -973,6 +990,7 @@ pub(crate) mod f {
     pub(crate) const ROUTE_DEST: FieldKey = (ROUTE, "dest");
     pub(crate) const ROUTE_DEST_BUS: FieldKey = (ROUTE, "dest-bus");
     pub(crate) const ROUTE_INPUT: FieldKey = (ROUTE, "input");
+    pub(crate) const ROUTE_OUTPUT: FieldKey = (ROUTE, "output");
     pub(crate) const ROUTE_SELECTED: FieldKey = (ROUTE, "selected");
 
     pub(crate) const GROUP_INDEX: FieldKey = (GROUP, "index");
@@ -1065,6 +1083,7 @@ pub(crate) mod f {
     pub(crate) const MODULATOR_INDEX: FieldKey = (MODULATOR, "index");
     pub(crate) const MODULATOR_SLOT: FieldKey = (MODULATOR, "slot");
     pub(crate) const MODULATOR_LABEL: FieldKey = (MODULATOR, "label");
+    pub(crate) const MODULATOR_EXT: FieldKey = (MODULATOR, "ext");
 
     pub(crate) const TABLE_EDITOR_DEVICE: FieldKey = (TABLE_EDITOR, "device");
     pub(crate) const TABLE_EDITOR_OPEN: FieldKey = (TABLE_EDITOR, "open");
@@ -1323,6 +1342,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_SUPPORTS_MONO_TRIGGER, ":bool", Model),
     (f::TRACK_VOICE_PRIORITY, ":string", Model),
     (f::TRACK_MONO_TRIGGER, ":string", Model),
+    (f::TRACK_MOD_ROLES, "(list-of :string)", Model),
+    (f::TRACK_MOD_STEPS, ":string", Model),
     (f::TRACK_MUTE_GROUP, ":int", Model),
     (f::TRACK_SWING, ":number", Model),
     (f::TRACK_SWING_RESOLUTION, ":string", Model),
@@ -1333,7 +1354,15 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_ACCUM_LIMIT, ":number", Model),
     (f::TRACK_OUTPUT, "bus", Model),
     (f::TRACK_MOD_OUTPUT, ":bool", Model),
+    (f::TRACK_MOD_OUTPUTS, ":int", Model),
+    (f::TRACK_MOD_OUTPUT_NAMES, "(list-of :string)", Model),
+    (f::TRACK_MODULE, ":bool", Model),
+    (f::TRACK_EXT_INPUT_NAMES, "(list-of :string)", Model),
     (f::TRACK_MOD_OUT_LEVEL, ":number", Live),
+    (f::TRACK_MOD_OUT[0], ":number", Live),
+    (f::TRACK_MOD_OUT[1], ":number", Live),
+    (f::TRACK_MOD_OUT[2], ":number", Live),
+    (f::TRACK_MOD_OUT[3], ":number", Live),
     (f::TRACK_MOD_IN[0], ":number", Live),
     (f::TRACK_MOD_IN[1], ":number", Live),
     (f::TRACK_MOD_IN[2], ":number", Live),
@@ -1601,6 +1630,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::MODULATOR_INDEX, ":int", Model),
     (f::MODULATOR_SLOT, ":int", Model),
     (f::MODULATOR_LABEL, ":string", Model),
+    (f::MODULATOR_EXT, ":int", Model),
     // The Filter Table response editor session (`table_editor`): the one
     // global session, read per tick while observed when its revision (or
     // the device sources) moved.
@@ -1792,6 +1822,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::ROUTE_DEST, "track", Model),
     (f::ROUTE_DEST_BUS, "bus", Model),
     (f::ROUTE_INPUT, ":int", Model),
+    (f::ROUTE_OUTPUT, ":int", Model),
     (f::ROUTE_SELECTED, ":bool", Live),
     (f::GROUP_INDEX, ":int", Model),
     (f::GROUP_GID, ":int", Model),

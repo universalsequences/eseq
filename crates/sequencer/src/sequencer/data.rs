@@ -287,11 +287,25 @@ pub enum ModDestination {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ModConnection {
     pub source_track: usize,
+    /// Which of the source's mod outputs (0 for the first, and for every
+    /// single-output track).
+    pub source_output: usize,
     pub destination: ModDestination,
     pub dest_input: usize,
 }
 
 pub const EXT_MOD_INPUT_COUNT: usize = 4;
+/// A track strip has `MOD_PORT_COUNT` mod ports: its outputs first, then the
+/// inputs that fit. A patch declaring several `@modulator` outputs trades
+/// inputs for them, keeping at least one input.
+pub const MOD_PORT_COUNT: usize = EXT_MOD_INPUT_COUNT + 1;
+pub const MAX_TRACK_MOD_OUTPUTS: usize = MOD_PORT_COUNT - 1;
+
+/// Mod inputs a track shows beside `outputs` mod outputs (a track with no
+/// output still shows all four).
+pub fn visible_mod_inputs(outputs: usize) -> usize {
+    EXT_MOD_INPUT_COUNT.min(MOD_PORT_COUNT - outputs.clamp(1, MAX_TRACK_MOD_OUTPUTS))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
@@ -1177,6 +1191,116 @@ impl VoicePriority {
     }
 }
 
+/// What one of a track's ext mod inputs does besides modulating
+/// (docs/mod-input-roles-spec.md). Every role still feeds the voice
+/// modulators; the others additionally sequence the track.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[repr(u32)]
+pub enum ModInputRole {
+    #[default]
+    Modulator = 0,
+    /// A rising edge fires a note.
+    Trigger = 1,
+    /// Sampled at each trigger: the note's velocity.
+    Velocity = 2,
+    /// Sampled at each trigger: the note's length.
+    Duration = 3,
+    /// Sampled at each trigger: the note's transpose.
+    Note = 4,
+}
+
+impl ModInputRole {
+    pub const ALL: [Self; 5] =
+        [Self::Modulator, Self::Trigger, Self::Velocity, Self::Duration, Self::Note];
+
+    pub fn from_index(index: u32) -> Self {
+        Self::ALL.get(index as usize).copied().unwrap_or_default()
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Modulator => "modulator",
+            Self::Trigger => "trigger",
+            Self::Velocity => "velocity",
+            Self::Duration => "duration",
+            Self::Note => "note",
+        }
+    }
+}
+
+/// Whether a track with a `trigger` mod input still sounds its own steps, or
+/// only uses them to set what the cable triggers play.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[repr(u32)]
+pub enum ModSteps {
+    #[default]
+    Play = 0,
+    Latch = 1,
+}
+
+impl ModSteps {
+    pub fn from_index(index: u32) -> Self {
+        match index {
+            1 => Self::Latch,
+            _ => Self::Play,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Play => "play",
+            Self::Latch => "latch",
+        }
+    }
+}
+
+/// A track's mod input roles plus its steps mode. Packs into one `u32`
+/// (4 bits per role, then the steps bit) so the audio thread reads it with
+/// a single atomic load.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ModInputRoles {
+    pub roles: [ModInputRole; EXT_MOD_INPUT_COUNT],
+    pub steps: ModSteps,
+}
+
+impl ModInputRoles {
+    const STEPS_SHIFT: u32 = 4 * EXT_MOD_INPUT_COUNT as u32;
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn pack(self) -> u32 {
+        let roles = self
+            .roles
+            .iter()
+            .enumerate()
+            .fold(0u32, |bits, (input, role)| bits | ((*role as u32) << (4 * input)));
+        roles | ((self.steps as u32) << Self::STEPS_SHIFT)
+    }
+
+    pub fn unpack(bits: u32) -> Self {
+        Self {
+            roles: std::array::from_fn(|input| ModInputRole::from_index((bits >> (4 * input)) & 0xF)),
+            steps: ModSteps::from_index((bits >> Self::STEPS_SHIFT) & 1),
+        }
+    }
+
+    /// Whether any input fires notes: only then do the other roles, the
+    /// steps mode and the latch mean anything.
+    pub fn has_trigger(&self) -> bool {
+        self.roles.contains(&ModInputRole::Trigger)
+    }
+
+    /// The first input carrying `role`, if any.
+    pub fn input_for(&self, role: ModInputRole) -> Option<usize> {
+        self.roles.iter().position(|candidate| *candidate == role)
+    }
+}
+
 /// Longest sampler/track amp attack, in ms. Shared by the sampler descriptor,
 /// `seq-set-track-param :attack`, and `TrackParams::set_attack_ms`.
 pub const TRACK_ATTACK_MAX_MS: f32 = 5000.0;
@@ -1216,6 +1340,8 @@ pub struct TrackParams {
     pub voice_priority: AtomicU32,
     pub mute_group: AtomicU32,
     pub global_transpose: AtomicBool,
+    /// `ModInputRoles::pack` bits (docs/mod-input-roles-spec.md).
+    pub mod_roles: AtomicU32,
 }
 
 impl TrackParams {
@@ -1250,6 +1376,7 @@ impl TrackParams {
             voice_priority: AtomicU32::new(VoicePriority::Last as u32),
             mute_group: AtomicU32::new(0),
             global_transpose: AtomicBool::new(true),
+            mod_roles: AtomicU32::new(0),
         }
     }
 
@@ -1501,6 +1628,12 @@ impl TrackParams {
     pub fn set_global_transpose(&self, enabled: bool) {
         self.global_transpose.store(enabled, Ordering::Relaxed);
     }
+    pub fn mod_roles(&self) -> ModInputRoles {
+        ModInputRoles::unpack(self.mod_roles.load(Ordering::Relaxed))
+    }
+    pub fn set_mod_roles(&self, roles: ModInputRoles) {
+        self.mod_roles.store(roles.pack(), Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1547,6 +1680,7 @@ pub struct TrackParamsSnapshot {
     pub voice_priority: VoicePriority,
     pub mute_group: u8,
     pub global_transpose: bool,
+    pub mod_roles: ModInputRoles,
 }
 
 impl Default for TrackParamsSnapshot {
@@ -1579,6 +1713,7 @@ impl Default for TrackParamsSnapshot {
             voice_priority: VoicePriority::Last,
             mute_group: 0,
             global_transpose: true,
+            mod_roles: ModInputRoles::default(),
         }
     }
 }

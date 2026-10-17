@@ -3388,6 +3388,7 @@
           :collapsed g.collapsed
           :col 0.9
           :surface-alpha 1.0
+          :height 1.25
           :stroke-width 0.12
           :focusable true
           ;; An SDF widget calls :on-click with (sx sy region).

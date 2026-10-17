@@ -49,6 +49,8 @@
     :key "track-scale-editor-open"
     :debug-name "track-scale-editor-open"
     :icon :sliders
+    :corner-radius 24
+    :color :dim
     :variant :ghost
     :width 3.6 :height 1.0
     :on-click |x y r| (open-scale-editor)))

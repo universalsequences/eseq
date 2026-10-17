@@ -435,6 +435,7 @@ pub fn compile_and_load_instrument_with_origin(
         eseqlisp::widget_render::patcher::register_asset_source_root(base)
     });
     super::instrument_storage::apply_instrument_voice_metadata(&mut result.manifest, asset_base)?;
+    super::dgen_manifest::apply_ext_input_names(&mut result.manifest, source);
     Ok(result)
 }
 
@@ -449,6 +450,7 @@ pub fn compile_and_load_instrument_uncached_with_asset_base(
         eseqlisp::widget_render::patcher::register_asset_source_root(base)
     });
     super::instrument_storage::apply_instrument_voice_metadata(&mut manifest, asset_base)?;
+    super::dgen_manifest::apply_ext_input_names(&mut manifest, source);
     let lib = load_dylib_prewarmed(&manifest)?;
     Ok(CompileResult {
         manifest,

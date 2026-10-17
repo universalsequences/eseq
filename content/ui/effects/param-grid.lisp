@@ -84,7 +84,7 @@
                 :plock-color-r (pc/param-plock-color-r)
                 :plock-color-g (pc/param-plock-color-g)
                 :plock-color-b (pc/param-plock-color-b)
-                :width 5.8 :height 1.2 :font-size 11)
+                :width 8.8 :height 1.2 :font-size 11)
               (number-picker :value (pc/fx-param-value-for fx p)
                 :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
                 :decimals (if (get p :integer-option-fallback) 0 2)

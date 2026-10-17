@@ -170,9 +170,10 @@
 (def gvr-matrix-column-gap 0.35)
 (def gvr-route-bar-width 0.28)
 (def gvr-node-width 1.4)
-(def gvr-control-width 6.0)
+(def gvr-route-control-width 7.5)
+(def gvr-control-width 5.5)
 (def gvr-seed-control-width 4.8)
-(def gvr-group-width 4.0)
+(def gvr-group-width 5.0)
 
 (def gvr-matrix-data-height (count)
   (+ (* count gvr-row-height)
@@ -184,8 +185,6 @@
 (def gvr-num (key value lo hi stp dec on-change)
   (number-picker
     :key key
-    :border-color :dim
-    :background-color :mixer-strip-bg
     :value value :min lo :max hi :step stp :decimals dec
     :width gvr-control-width :height gvr-row-height :font-size 9
     :on-change on-change))
@@ -194,14 +193,15 @@
   (dropdown
     :key key
     :value value :options options
-    :badge-color :transparent
-    :bg-color :mixer-strip-bg
-    :border-color :mixer-strip-selected-bg
+    ;:badge-color :d$mixer-strip-selected-bg
+    ;:chevron-color :fg
+    ;:bg-color :mixer-strip-bg
+    ;:border-color :mixer-strip-selected-bg
     :width width :height gvr-row-height :font-size 8
     :on-change on-change))
 
 (def gvr-pick (key value options on-change)
-  (gvr-pick-sized key value options gvr-control-width on-change))
+  (gvr-pick-sized key value options gvr-route-control-width on-change))
 
 (def gvr-toggle-sized (key width value on-change)
   (box
@@ -342,19 +342,19 @@
   (h-stack :gap 0.4 :align :center
     (label "" :width gvr-route-bar-width :height 1.0 :font-size 1 :bg :transparent)
     (gvr-header-label "node" gvr-node-width)
-    (gvr-header-label "route" gvr-control-width)
+    (gvr-header-label "route" gvr-route-control-width)
     (gvr-header-label "grp" gvr-group-width)
     (gvr-header-label "seed rt" gvr-seed-control-width)
     (gvr-header-label "rst seed" gvr-seed-control-width)
     (gvr-header-label "delay" gvr-control-width)
-    (gvr-header-label "transp" gvr-control-width)
-    (gvr-header-label "trn rst" gvr-control-width)
-    (gvr-header-label "vel x" gvr-control-width)
-    (gvr-header-label "vel rst" gvr-control-width)
+    (gvr-header-label "transpose" gvr-control-width)
+    (gvr-header-label "trn reset" gvr-control-width)
+    (gvr-header-label "velocity" gvr-control-width)
+    (gvr-header-label "vel reset" gvr-control-width)
     (gvr-header-label "dampen" gvr-control-width)
     (gvr-header-label "recover" gvr-control-width)
-    (gvr-header-label "res" gvr-control-width)
-    (gvr-header-label "quant" gvr-control-width)
+    (gvr-header-label "delay resolution" gvr-route-control-width)
+    (gvr-header-label "quantization" gvr-route-control-width)
     (gvr-header-label "proc" gvr-expand-width)
     (label "playing" :width gvr-sounding-width :height 1.0 :font-size 8 :h-align :left :color :dim :bg :transparent)))
 

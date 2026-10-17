@@ -2466,7 +2466,8 @@ fn created_node_requires_host_modulator_inputs(edit: &super::state::PatcherNodeE
         return false;
     };
     match symbol_at(&items, 0) {
-        Some("mod") => true,
+        // `(ext N)` reads the `@modulator N` input, so it needs them too.
+        Some("mod") | Some("ext") => true,
         Some("param") => expression_has_true_attribute(&items, "@mod"),
         _ => false,
     }
@@ -2517,7 +2518,7 @@ fn expression_requires_host_modulation(expr: &Expression) -> bool {
             {
                 return true;
             }
-            if symbol_at(items, 0) == Some("mod") {
+            if matches!(symbol_at(items, 0), Some("mod") | Some("ext")) {
                 return true;
             }
             items.iter().any(expression_requires_host_modulation)

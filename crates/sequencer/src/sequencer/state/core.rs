@@ -1004,6 +1004,7 @@ pub(super) fn capture_track_params_snapshot(track_params: &TrackParams) -> Track
         voice_priority: track_params.get_voice_priority(),
         mute_group: track_params.get_mute_group(),
         global_transpose: track_params.uses_global_transpose(),
+        mod_roles: track_params.mod_roles(),
     }
 }
 
@@ -1035,6 +1036,7 @@ pub(super) fn restore_track_params_snapshot(track_params: &TrackParams, snapshot
     track_params.set_voice_priority(snapshot.voice_priority);
     track_params.set_mute_group(snapshot.mute_group);
     track_params.set_global_transpose(snapshot.global_transpose);
+    track_params.set_mod_roles(snapshot.mod_roles);
 }
 
 #[cfg(test)]

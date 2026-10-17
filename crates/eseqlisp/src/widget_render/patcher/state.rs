@@ -30,7 +30,7 @@ use super::model::{
     refresh_patch_inline_inputs,
 };
 use super::project::dgenlisp_operator_names;
-use super::text::patcher_autocomplete_ghost_text;
+use super::text::{autocomplete_symbols_for_patch, patcher_autocomplete_ghost_text};
 use super::prop_str;
 
 const DEBUG_EDITS_ENV: &str = "ESEQ_PATCHER_DEBUG_EDITS";
@@ -941,6 +941,22 @@ pub(super) fn next_patcher_clipboard_paste() -> Option<PatcherClipboard> {
     })
 }
 
+/// Start a fresh edit epoch after the patcher's source was rewritten from its
+/// own emission (a save in place, a macro-library action). Every pending edit
+/// is in the file now, so replaying them on the reloaded patch would apply
+/// each created node a second time; the undo snapshots belong to the old
+/// source for the same reason. Pan and the open view survive.
+pub(super) fn rebase_patcher_state(key: u64, active_macro: Option<String>) {
+    PATCHER_HISTORIES.with(|histories| histories.borrow_mut().remove(&key));
+    set_patcher_interaction_state_without_history(
+        key,
+        PatcherInteractionState {
+            active_macro,
+            ..PatcherInteractionState::default()
+        },
+    );
+}
+
 pub(super) fn reset_patcher_widget_states_for_path(path: impl AsRef<Path>, fallback_key: u64) {
     let path = path.as_ref().to_string_lossy().to_string();
     let mut keys =
@@ -1751,8 +1767,8 @@ pub(super) fn last_rendered_patcher() -> Option<(String, u64)> {
     LAST_RENDERED_PATCHER.with(|cell| cell.borrow().clone())
 }
 
-fn expand_node_for_autocomplete(node: &mut PatchNode, edit: &PatcherTextEdit) {
-    let Some(ghost) = patcher_autocomplete_ghost_text(edit, &[]) else {
+fn expand_node_for_autocomplete(node: &mut PatchNode, edit: &PatcherTextEdit, symbols: &[String]) {
+    let Some(ghost) = patcher_autocomplete_ghost_text(edit, &[], symbols) else {
         return;
     };
     let completed_label = format!("{}{}", edit.text, ghost);
@@ -1829,7 +1845,6 @@ pub(super) fn patch_scope_with_interaction_state(
             .filter(|edit| edit.node_id == node.id)
         {
             apply_node_text_override(node, &edit.node_text(), macro_signatures);
-            expand_node_for_autocomplete(node, edit);
         }
     }
     for connection in &mut patch.connections {
@@ -1878,13 +1893,14 @@ pub(super) fn patch_scope_with_interaction_state(
         if let Some(node) = patch.nodes.last_mut() {
             node.width = edit.width;
             node.height = edit.height;
-            if let Some(text_edit) = interaction_state
-                .text_edit
-                .as_ref()
-                .filter(|text_edit| text_edit.node_id == edit.id)
-            {
-                expand_node_for_autocomplete(node, text_edit);
-            }
+        }
+    }
+    // After created nodes land, so a `param` added this session already
+    // counts as a completable symbol.
+    if let Some(text_edit) = interaction_state.text_edit.as_ref() {
+        let symbols = autocomplete_symbols_for_patch(&patch, &text_edit.node_id);
+        if let Some(node) = patch.nodes.iter_mut().find(|node| node.id == text_edit.node_id) {
+            expand_node_for_autocomplete(node, text_edit, &symbols);
         }
     }
     patch.connections.extend(

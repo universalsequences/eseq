@@ -143,7 +143,7 @@
   '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
 
 ;; Matches a standard built-in FX panel with four parameter rows.
-(def fx-fixed-panel-height 10.8)
+(def fx-fixed-panel-height 11.2)
 (def fx-panel-header-height 1.0)
 (def fx-panel-body-padding 0.25)
 (def fx-panel-body-top-spacer-height 0.16)

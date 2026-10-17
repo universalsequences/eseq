@@ -120,7 +120,9 @@ impl HostKinds {
         let in_use_bit = TRACK_LIVE.bit(f::TRACK_STEP_PARAMS_IN_USE);
         let variants_bit = TRACK_LIVE.bit(f::TRACK_VARIANTS);
         let notes_bit = TRACK_LIVE.bit(f::TRACK_ACTIVE_NOTES);
-        let mod_bits = TRACK_LIVE.bits(&f::TRACK_MOD_IN) | TRACK_LIVE.bit(f::TRACK_MOD_OUT_LEVEL);
+        let mod_bits = TRACK_LIVE.bits(&f::TRACK_MOD_IN)
+            | TRACK_LIVE.bits(&f::TRACK_MOD_OUT)
+            | TRACK_LIVE.bit(f::TRACK_MOD_OUT_LEVEL);
         let mut peaks_observed = false;
         let mut mod_levels_observed = false;
         for index in 0..self.track_ids.len() {

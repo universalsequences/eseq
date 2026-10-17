@@ -9,7 +9,7 @@ impl GraphController<'_> {
         track_name: &str,
         voice_sum_id: i32,
         voice_sum_r_id: i32,
-        track_mod_out_id: i32,
+        track_mod_out_ids: [i32; crate::sequencer::MAX_TRACK_MOD_OUTPUTS],
         track_mod_in_clip_ids: [i32; EXT_MOD_INPUT_COUNT],
     ) -> Result<(), String> {
         self.ensure_engine_slot(engine_id);
@@ -60,7 +60,7 @@ impl GraphController<'_> {
                         && custom_route_parent_track(idx) == Some(track_idx)
                 });
         let audio_output_channels = existing_engine.audio_output_channels.clone();
-        let primary_mod_output_channel = existing_engine.mod_output_channels.first().copied();
+        let mod_output_channels = existing_engine.mod_output_channels.clone();
         let modulator_ids = existing_engine.modulator_ids.clone();
         if synth_ids.len() != MAX_VOICES {
             return Err(format!(
@@ -177,15 +177,15 @@ impl GraphController<'_> {
             route_ids.push(route_pair);
 
             if !has_sibling_route {
-                if let Some(src_channel) = primary_mod_output_channel {
+                for (src_channel, hub) in mod_output_routes(&mod_output_channels, track_mod_out_ids) {
                     transaction.connect(
                         synth_ids[v],
                         src_channel as i32,
-                        track_mod_out_id,
+                        hub,
                         0,
                         &format!(
-                            "connect_engine_to_track mod output engine {} track {} voice {}",
-                            engine_id, track_idx, v
+                            "connect_engine_to_track mod output {} engine {} track {} voice {}",
+                            src_channel, engine_id, track_idx, v
                         ),
                     )?;
                 }
@@ -348,7 +348,6 @@ impl GraphController<'_> {
 
         let audio_output_channels = manifest.audio_output_channels();
         let mod_output_channels = manifest_mod_output_channels(manifest);
-        let primary_mod_output_channel = mod_output_channels.first().copied();
 
         // Published before the voice registry swaps libraries below; renders
         // of the old library fail the new set's process_fn check.
@@ -477,24 +476,26 @@ impl GraphController<'_> {
                     }
                 }
             }
-            if let Some(src_channel) = primary_mod_output_channel {
-                for bound_track in 0..self.app.graph.track_engine_ids.len() {
-                    if self.app.graph.track_engine_ids.get(bound_track) == Some(&Some(engine_id)) {
-                        let Some(track_nodes) = self.app.graph.track_node_ids.get(bound_track)
-                        else {
-                            continue;
-                        };
-                        self.graph_connect_checked(
-                            synth_id,
-                            src_channel as i32,
-                            track_nodes.mod_out_id,
-                            0,
-                            &format!(
-                                "rebuild_custom_engine_runtime engine {} voice {} track {} mod output {}",
-                                engine_id, v, bound_track, src_channel
-                            ),
-                        )?;
-                    }
+            for bound_track in 0..self.app.graph.track_engine_ids.len() {
+                if self.app.graph.track_engine_ids.get(bound_track) != Some(&Some(engine_id)) {
+                    continue;
+                }
+                let Some(hubs) =
+                    self.app.graph.track_node_ids.get(bound_track).map(|nodes| nodes.mod_out_ids)
+                else {
+                    continue;
+                };
+                for (src_channel, hub) in mod_output_routes(&mod_output_channels, hubs) {
+                    self.graph_connect_checked(
+                        synth_id,
+                        src_channel as i32,
+                        hub,
+                        0,
+                        &format!(
+                            "rebuild_custom_engine_runtime engine {} voice {} track {} mod output {}",
+                            engine_id, v, bound_track, src_channel
+                        ),
+                    )?;
                 }
             }
             for (input, ext_route_id) in engine
@@ -536,6 +537,8 @@ impl GraphController<'_> {
         engine.synth_outputs = audio_output_channels.len();
         engine.audio_output_channels = audio_output_channels;
         engine.mod_output_channels = mod_output_channels;
+        engine.mod_output_names = manifest_mod_output_names(manifest);
+        engine.ext_input_names = manifest_ext_input_names(manifest);
         for (v, &mid) in engine.modulator_ids.iter().enumerate() {
             self.app.state.runtime.engine_modulator_node_ids[engine_id][v]
                 .store(mid as u32, Ordering::Release);
@@ -548,6 +551,8 @@ impl GraphController<'_> {
         }
         self.silence_engine_routes(engine_id, &engine);
         self.app.graph.engine_node_ids[engine_id] = Some(engine);
+        // A recompile may change the declared mod outputs.
+        self.sync_current_pattern_mod_routes();
         Ok(())
     }
 

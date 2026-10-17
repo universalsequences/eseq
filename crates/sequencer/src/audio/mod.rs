@@ -46,6 +46,7 @@ mod fire;
 mod graph_dispatch;
 pub(crate) mod live_params;
 mod metrics;
+mod mod_trigger;
 #[cfg(target_os = "macos")]
 mod workgroup;
 mod params;
@@ -72,8 +73,8 @@ pub use voices::{DEFAULT_RACK_SLOT_MAX_POLYPHONY, MAX_VOICES};
 // single-file audio.rs.
 #[allow(unused_imports)]
 use {
-    callback::*, device::*, events::*, fire::*, graph_dispatch::*, params::*, rack::*, render::*,
-    state::*, session::*, stream::*, voices::*,
+    callback::*, device::*, events::*, fire::*, graph_dispatch::*, mod_trigger::*, params::*, rack::*,
+    render::*, state::*, session::*, stream::*, voices::*,
 };
 
 use arrayvec::ArrayVec;

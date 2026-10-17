@@ -338,7 +338,6 @@
             :detail gr.grid
             :options (row-labels rows)
             :headers (filter (lambda (i) (get (nth rows i) :header)) (range 0 (len rows)))
-            :badge-color :transparent
             :bg-color :mixer-strip-bg
             :details (map (lambda (row) (get row :detail)) rows)
             :filterable true
@@ -364,7 +363,7 @@
 ;; (effects/track-panels.lisp `step-param-picker`): name left, value right.
 ;; `amount` is the groove field, `value` its binding.
 (def amount-picker (g amount title value max-value grooved)
-  (box :flex 1 :corner-radius 16 :padding 0.2 :background-color :mixer-strip-bg
+  (box :flex 1 :corner-radius 16 :padding 0.4 :background-color :mixer-strip-bg
     (h-stack :align :center :gap 0.24
       (box :width 0.3)
       (label title :font-size 9 :color :dim :bg :transparent :v-align :center :flex 1)
@@ -401,7 +400,7 @@
         :debug-name "rack-groove-scale"
         :value (scale-label gr.scale)
         :options scale-options
-        :width 4.2 :height 1.1 :font-size 9
+        :width 6.0 :height 1.2 :font-size 9
         :bg-color :mixer-strip-bg
         :text-color (if grooved :white :dim)
         :on-change (lambda (label) (edit-groove! g "scale" (scale-value label)))))))

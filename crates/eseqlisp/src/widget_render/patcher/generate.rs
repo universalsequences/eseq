@@ -153,7 +153,7 @@ fn host_modulator_inputs(patch: &Patch, intent: PatcherIntent) -> Vec<HostModula
         declared.sort_by_key(|input| (input.slot, input.channel));
         return declared;
     }
-    if !patch_has_modulatable_param(patch) {
+    if !patch_has_modulatable_param(patch) && !patch_reads_ext(patch) {
         return Vec::new();
     }
     let first_channel = match intent {
@@ -167,6 +167,17 @@ fn host_modulator_inputs(patch: &Patch, intent: PatcherIntent) -> Vec<HostModula
             slot,
         })
         .collect()
+}
+
+/// An `(ext N)` node reads the `@modulator N` input, so it needs the inputs
+/// declared just like a modulatable param does.
+fn patch_reads_ext(patch: &Patch) -> bool {
+    let scope_reads_ext = |scope: &Patch| scope.nodes.iter().any(|node| node.op == "ext");
+    scope_reads_ext(patch)
+        || patch
+            .macros
+            .iter()
+            .any(|macro_patch| scope_reads_ext(&macro_patch.patch))
 }
 
 /// Root scope or any macro body — a defmacro-internal `@mod` param needs the
@@ -1318,6 +1329,11 @@ fn node_call_is_incomplete(
     // a dangling probe is still emitted once something feeds it (every probe
     // is a compiler root), but until then it lives only in the payload.
     if super::probe::is_probe_node(node) && !slot_filled(0) {
+        return true;
+    }
+    // Likewise `(mod)` with no param named: the compiler reads it as an unknown
+    // operator rather than a missing argument.
+    if node.op == "mod" && !slot_filled(0) {
         return true;
     }
     let mut last_filled: Option<usize> = None;

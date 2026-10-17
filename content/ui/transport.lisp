@@ -47,6 +47,10 @@
 ;; loaded before this body ever runs. Safe to import: eseq.seq-step-tabs is a
 ;; state/accessor hub with no `effect-buffer`, not one of the four UI roots.
 (import eseq.seq-step-tabs :as tabs)
+;; Same hazard for the three panel toggles in `titlebar-leading`: their
+;; `:active` reads the `seq-*-toggle-on?` readers at render time. seq-panels
+;; imports only seq-core-state and kinds and has no effect-buffer.
+(import eseq.seq-panels)
 
 ;; Shared scene-bank view state (see that module's header). A state/accessor
 ;; hub with no effect-buffer, and ui/main.lisp reaches it through this import
@@ -751,7 +755,8 @@
         :bg-color :transport-led-bg
         :border-color :bg
         :badge-color :transparent
-        :width 4.2 :height 0.5 :font-size 10))))
+        :chevron-color :fg
+        :width 5.0 :height 0.5 :font-size 10))))
 
 ;; A new scene at the end of the viewed bank.
 (def seq-clone-pattern ()
@@ -964,7 +969,7 @@
 
 ;; A label on a pill: white while on (a value or a #' binding), else gray.
 (def pill-label (text on &key (font 9))
-  (label text :font-size font :color :dimmer :active on :active-color :white
+  (label text :font-size font :color :dimmer :active on :active-color :arrangement-return-fg
     :height :fill
     :h-align :center
     :v-align :center
@@ -1080,24 +1085,26 @@
           :border-color :bg
           :text-color :clock-fg
           :badge-color :transparent
+          :chevron-color :fg
           :key "transport-scene-launch-quantize-dropdown"
           :debug-name "transport-scene-launch-quantize"
           :value (launch-quantize)
           :options launch-quantize-options
           :on-change seq-set-scene-launch-quantize
-          :width 5.2 :height 1.0 :font-size 9))
+          :width 6 :height 1.0 :font-size 9))
       (subtree :key "transport-record-quantize"
         (dropdown
           :bg-color :transport-led-bg
           :border-color :bg
           :badge-color :transparent
+          :chevron-color :fg
           :text-color :clock-fg
           :key "transport-record-quantize-dropdown"
           :debug-name "transport-record-quantize"
           :value (label-or transport.record-quantize "1/16")
           :options record-quantize-options
           :on-change seq-set-record-quantize
-          :width 5.2 :height 1.0 :font-size 9))
+          :width 6 :height 1.0 :font-size 9))
       (box :width 0.4)
       (subtree :key "transport-metronome-toggle"
         (box :debug-name "transport-metronome-toggle"

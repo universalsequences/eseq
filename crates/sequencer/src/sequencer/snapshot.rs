@@ -457,6 +457,7 @@ fn capture_live_track(
         voice_priority: tp.get_voice_priority(),
         mute_group: tp.get_mute_group(),
         global_transpose: tp.uses_global_transpose(),
+        mod_roles: tp.mod_roles(),
     };
     let instrument_type = InstrumentType::from_runtime_flag(
         state.runtime.instrument_type_flags[track].load(Ordering::Relaxed),

@@ -1497,7 +1497,7 @@ Previews each preset as you move through the list; Esc puts the loaded one back.
           (if (= (len items) 0)
             (empty-message
               (if (and (= browser-view.search "") (= (len sample-pick.tags) 0) (= (len sample-pick.origins) 0))
-                "Choose a tag or search samples."
+                ""
                 "No samples found."))
             (scroll :key "samples-tab-scroll" :width :fill :flex 1
               (tree

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "name": "polyblep-tri",
+  "params": [
+    "phase",
+    "freq"
+  ],
+  "outputs": [
+    "out"
+  ],
+  "summary": "Anti-aliased triangle (polyBLAMP-corrected corners, stateless). Pass a phasor phase in 0..1 and its frequency in Hz; output -1..1, starts at 0 rising.",
+  "tags": [
+    "oscillator",
+    "synth"
+  ]
+}

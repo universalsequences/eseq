@@ -175,6 +175,7 @@ pub fn descriptor() -> EffectDescriptor {
             .map(|slot| InstrumentModulatorDescriptor {
                 slot,
                 label: voice_modulator::modulator_slot_label(slot, ""),
+                ext: None,
             })
             .collect(),
         instrument_modulation_targets: targets,

@@ -1890,7 +1890,7 @@ fn track_params_heap_bytes(snapshot: &TrackParamsSnapshot) -> usize {
         volume: _, pan: _, mute: _, send: _, output: _, sends, polyphonic: _,
         max_polyphony: _, mono_trigger: _, voice_priority: _, timebase: _, accumulator_idx: _, script_accumulator_name,
         midi_fx_chain, midi_fx_position: _, accum_limit: _, accum_mode: _, fts_scale: _, tuning,
-        mute_group: _, global_transpose: _,
+        mute_group: _, global_transpose: _, mod_roles: _,
     } = snapshot;
     sends.capacity() * std::mem::size_of::<crate::sequencer::TrackSendSnapshot>()
         + script_accumulator_name

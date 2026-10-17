@@ -1618,6 +1618,10 @@ fn output_config_rejects_when_default_and_fallback_rates_lack_f32_support() {
 }
 
 fn test_block_trigger(seq: u64, track: usize) -> BlockEvent {
+    test_block_trigger_with(seq, track, 0.0, 1.0)
+}
+
+pub(super) fn test_block_trigger_with(seq: u64, track: usize, transpose: f32, velocity: f32) -> BlockEvent {
     BlockEvent {
         frame_offset: 128,
         seq,
@@ -1634,11 +1638,11 @@ fn test_block_trigger(seq: u64, track: usize) -> BlockEvent {
                 samples_per_step: 1024.0,
                 resolved: ResolvedStep {
                     duration: 1.0,
-                    velocity: 1.0,
+                    velocity,
                     speed: 1.0,
                     aux_a: 0.0,
                     aux_b: 0.0,
-                    transpose: 0.0,
+                    transpose,
                     pan: 0.0,
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),

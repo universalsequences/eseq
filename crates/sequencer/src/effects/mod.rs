@@ -337,6 +337,9 @@ fn normalized_param_tags(tags: Vec<String>) -> Vec<String> {
 pub struct InstrumentModulatorDescriptor {
     pub slot: usize,
     pub label: String,
+    /// The ext input (1-4) the patch pinned this slot to with `(ext N)`;
+    /// `None` while its source is configurable.
+    pub ext: Option<usize>,
 }
 
 /// How a destination combines its modulation with the base value. The host
@@ -3902,6 +3905,7 @@ impl EffectDescriptor {
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+                    ext: None,
                 })
                 .collect(),
             declared_latency_samples: None,
@@ -4327,6 +4331,7 @@ impl EffectDescriptor {
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+                    ext: None,
                 })
                 .collect(),
             declared_latency_samples: None,
@@ -4718,6 +4723,7 @@ impl EffectDescriptor {
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+                    ext: None,
                 })
                 .collect(),
             declared_latency_samples: None,
@@ -5209,6 +5215,7 @@ impl EffectDescriptor {
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+                    ext: None,
                 })
                 .collect(),
             declared_latency_samples: None,
@@ -5776,6 +5783,7 @@ impl EffectDescriptor {
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+                    ext: None,
                 })
                 .collect(),
             declared_latency_samples: None,
@@ -6040,6 +6048,7 @@ impl EffectDescriptor {
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+                    ext: None,
                 })
                 .collect(),
             declared_latency_samples: None,
@@ -6817,6 +6826,7 @@ impl EffectDescriptor {
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+                    ext: None,
                 })
                 .collect(),
             declared_latency_samples: None,
@@ -6924,6 +6934,7 @@ impl EffectDescriptor {
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+                    ext: None,
                 })
                 .collect(),
             declared_latency_samples: None,
@@ -7179,6 +7190,7 @@ impl EffectDescriptor {
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+                    ext: None,
                 })
                 .collect(),
             declared_latency_samples: None,
@@ -7443,6 +7455,7 @@ impl EffectDescriptor {
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+                    ext: None,
                 })
                 .collect(),
             declared_latency_samples: None,
@@ -8975,6 +8988,7 @@ impl EffectDescriptor {
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+                    ext: None,
                 })
                 .collect(),
             instrument_modulation_targets,

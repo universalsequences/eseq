@@ -208,11 +208,13 @@ fn kit_drops_non_factory_pads_and_renumbers_cables() {
     ]);
     kit.mod_connections = vec![
         ProjectKitModConnection {
+            source_output: 0,
             source_pad: 2,
             destination: ProjectKitModDestination::Pad(1),
             dest_input: 0,
         },
         ProjectKitModConnection {
+            source_output: 0,
             source_pad: 2,
             destination: ProjectKitModDestination::Pad(0),
             dest_input: 0,

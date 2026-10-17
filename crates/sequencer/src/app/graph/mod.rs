@@ -163,7 +163,7 @@ struct TrackShell {
     delay_id: i32,
     pdc_id: i32,
     send_id: i32,
-    mod_out_id: i32,
+    mod_out_ids: [i32; crate::sequencer::MAX_TRACK_MOD_OUTPUTS],
     mod_in_clip_ids: [i32; EXT_MOD_INPUT_COUNT],
     mod_env_id: i32,
 }
@@ -314,15 +314,54 @@ fn custom_host_input_routes(
     Ok(routes)
 }
 
+/// The engine's mod output channels, each with the track's hub node for it.
+/// Outputs past `MAX_TRACK_MOD_OUTPUTS` have no port and stay unrouted.
+fn mod_output_routes(
+    channels: &[usize],
+    hubs: [i32; crate::sequencer::MAX_TRACK_MOD_OUTPUTS],
+) -> impl Iterator<Item = (usize, i32)> + '_ {
+    channels.iter().copied().zip(hubs)
+}
+
 fn manifest_mod_output_channels(manifest: &DGenManifest) -> Vec<usize> {
+    manifest_mod_outputs(manifest).into_iter().map(|output| output.channel).collect()
+}
+
+/// `manifest_mod_output_channels`' outputs' declared names, in order.
+fn manifest_mod_output_names(manifest: &DGenManifest) -> Vec<String> {
+    manifest_mod_outputs(manifest).into_iter().map(|output| output.name.clone()).collect()
+}
+
+/// The labels of ext inputs 1-4: the `@name` of the modulator slot a patch
+/// reads with `(ext N)`, else empty. The patcher declares every slot as
+/// `modN`, so that generic name labels nothing.
+fn manifest_ext_input_names(manifest: &DGenManifest) -> [String; crate::sequencer::EXT_MOD_INPUT_COUNT] {
+    std::array::from_fn(|input| {
+        manifest
+            .modulators
+            .iter()
+            .find(|modulator| modulator.ext == Some(input + 1))
+            .map(|modulator| modulator.name.as_str())
+            .filter(|name| !is_generic_modulator_name(name))
+            .unwrap_or_default()
+            .to_string()
+    })
+}
+
+fn is_generic_modulator_name(name: &str) -> bool {
+    name.strip_prefix("mod").is_some_and(|digits| digits.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// The declared mod outputs with a real channel, first declaration of each.
+fn manifest_mod_outputs(manifest: &DGenManifest) -> Vec<&crate::lisp_host::DGenModOutput> {
     let output_count = manifest.n_outputs.max(1);
-    let mut channels = Vec::new();
+    let mut outputs: Vec<&crate::lisp_host::DGenModOutput> = Vec::new();
     for output in &manifest.mod_outputs {
-        if output.channel < output_count && !channels.contains(&output.channel) {
-            channels.push(output.channel);
+        if output.channel < output_count && !outputs.iter().any(|seen| seen.channel == output.channel) {
+            outputs.push(output);
         }
     }
-    channels
+    outputs
 }
 
 fn stereo_route_source_channel(audio_channels: &[usize], route_idx: usize) -> Option<usize> {
@@ -345,7 +384,7 @@ fn engine_route_build_capacities(engine: &EngineNodeIds) -> (usize, usize) {
     let connections_per_voice = 2
         + usize::from(stereo_route_source_channel(&engine.audio_output_channels, 0).is_some())
         + usize::from(stereo_route_source_channel(&engine.audio_output_channels, 1).is_some())
-        + usize::from(!engine.mod_output_channels.is_empty())
+        + engine.mod_output_channels.len().min(crate::sequencer::MAX_TRACK_MOD_OUTPUTS)
         + if engine.modulator_ids.is_empty() {
             0
         } else {
@@ -399,11 +438,8 @@ fn engine_route_delete_command_count(engine: &EngineNodeIds, track: usize) -> us
         .get(track)
         .map(|routes| positive_ext_route_node_count(routes))
         .unwrap_or(0);
-    let mod_output_disconnects = if engine.mod_output_channels.is_empty() {
-        0
-    } else {
-        engine.synth_ids.len()
-    };
+    let mod_output_disconnects = engine.synth_ids.len()
+        * engine.mod_output_channels.len().min(crate::sequencer::MAX_TRACK_MOD_OUTPUTS);
     route_nodes + ext_route_nodes + mod_output_disconnects
 }
 
@@ -479,3 +515,5 @@ fn delete_without_shift_enabled() -> bool {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod mod_output_tests;

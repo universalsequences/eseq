@@ -333,7 +333,7 @@
 ;; count, and ×.
 (def jk-figure-box (self k index figure)
   (box :key (jk-key k (str "jaki-figure-" index))
-    :width 13.6 :height jk-row-height :padding 0.1
+    :width 13.6 :height jk-row-height :padding 0.3
     :background-color :bg  :corner-radius 16
     (h-stack :gap 0.1 :align :center
       (dropdown
@@ -342,7 +342,7 @@
                                (alez.jaki.doc/figure-label figure)))
         :options alez.jaki.doc/figure-option-labels
         :filterable true
-        :badge-color :transparent :bg-color :bg :border-color :transparent
+         :bg-color :bg :border-color :transparent
         :width 7.8 :height 1.0 :font-size 13
         :on-change (lambda (label) (jk-replace-figure self k index label)))
       (number-picker
@@ -476,8 +476,7 @@
           :key (jk-key k (str "jaki-route-" index))
           :value-index (jk-route-index row (len routes))
           :options (jk-route-options routes)
-          :badge-color :transparent :bg-color :mixer-strip-bg
-          :border-color :mixer-strip-selected-bg
+           :bg-color :mixer-strip-bg
           :width 8 :height jk-row-height :font-size 9
           :on-change (lambda (label)
             (jk-set-route self k index (jk-route-of-label self label))))
@@ -651,8 +650,8 @@
               :key "jaki-mode"
               :value-index (jk-mode-index self)
               :options alez.jaki.doc/mode-labels
-              :badge-color :transparent :bg-color :mixer-strip-bg
-              :border-color :mixer-strip-selected-bg
+              :bg-color :mixer-strip-bg
+              ;:border-color :mixer-strip-selected-bg
               :width 7 :height jk-row-height :font-size 9
               :on-change (lambda (label) (jk-set-mode self label))))
           (v-stack :gap 1.2

@@ -16,6 +16,7 @@ mod geometry;
 mod load_meter;
 mod lookahead;
 mod midi_fx;
+mod mod_trigger;
 mod node_process;
 mod params;
 mod process;
@@ -34,6 +35,7 @@ pub(crate) use load_meter::{scheduler_load, SchedulerLoad};
 pub use worker::spawn_scheduler_thread;
 pub(crate) use lookahead::build_scheduler_scratch_runtime;
 pub(crate) use worker::{SchedulerDriver, SchedulerInput};
+pub(crate) use mod_trigger::{default_mod_trigger, fit_mod_trigger_to_scale};
 
 use std::cell::RefCell;
 use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap};

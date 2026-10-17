@@ -3300,6 +3300,41 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn ext_claimed_modulator_pins_its_slot_in_the_instrument_descriptor() {
+        let manifest = parse_manifest(
+            r#"
+            {
+              "processAbi": "dgen-host-abi-v1",
+              "totalMemorySlots": 128,
+              "params": [],
+              "inputs": [
+                { "channel": 0, "name": "gate" },
+                { "channel": 5, "name": "mod1" },
+                { "channel": 6, "name": "mod2" }
+              ],
+              "outputs": [{ "channel": 0, "name": "audio" }],
+              "modulators": [
+                { "slot": 1, "inputChannel": 5, "name": "mod1" },
+                { "slot": 2, "inputChannel": 6, "name": "mod2", "ext": 2 }
+              ],
+              "modDestinations": [],
+              "tensors": [],
+              "tensorInitData": []
+            }
+            "#,
+        )
+        .expect("manifest parses");
+
+        assert_eq!(manifest.modulators.iter().map(|m| m.ext).collect::<Vec<_>>(), [None, Some(2)]);
+        let desc = crate::lisp_host::instrument_descriptor_from_manifest("vca", &manifest);
+        let claims: Vec<_> = desc.instrument_modulators.iter().map(|m| (m.slot, m.ext)).collect();
+        assert_eq!(claims, [(1, None), (2, Some(2))]);
+        let source_default = |name: &str| desc.params.iter().find(|p| p.name == name).unwrap().default;
+        assert_eq!(source_default("mod2_source"), crate::instruments::voice_modulator::ext_source_value(2));
+        assert_ne!(source_default("mod1_source"), crate::instruments::voice_modulator::ext_source_value(1));
+    }
+
+    #[test]
     fn effect_host_modulation_can_coexist_with_named_sidechain_input() {
         let manifest = parse_manifest(
             r#"
@@ -16125,6 +16160,71 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         // user-library ancestor spent its first note with no tail because a
         // zero-initialised smoother drove the delay time to zero.
         assert!(report.rms > 0.01, "expected the reverb tail on the first note, got report: {report:?}");
+    }
+
+    #[test]
+    fn factory_felucca_cz_renders_audible_signal_at_defaults() {
+        let name = "Synths/Felucca CZ/";
+        let source = super::load_instrument_source(name).unwrap();
+        let report = super::render_instrument_source_for_test(
+            &source,
+            None,
+            &super::InstrumentRenderOptions {
+                sample_rate: 48_000,
+                block_size: 128,
+                frames: 24_000,
+                midi_note: 57.0,
+                velocity: 1.0,
+                gate_frames: 24_000,
+                voice_index: 0,
+                param_overrides: Vec::new(),
+                param_events: Vec::new(),
+                input_overrides: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.non_finite_samples, 0, "finite output, got {report:?}");
+        assert!(report.peak > 0.01, "expected audible peak, got report: {report:?}");
+        assert!(report.rms > 0.01, "expected audible rms, got report: {report:?}");
+    }
+
+    #[test]
+    fn factory_felucca_fm6_renders_every_preset() {
+        let name = "Synths/Felucca FM6/";
+        let source = super::load_instrument_source(name).unwrap();
+        let bank: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../content/instruments/Synths/Felucca FM6.presets"),
+        ).unwrap()).unwrap();
+        let presets = bank["presets"].as_array().unwrap();
+        assert_eq!(presets.len(), 9, "Init Voice and Felucca's eight factory patches");
+        for preset in presets {
+        let param_overrides = preset["params"].as_object().unwrap().iter()
+            .map(|(name, value)| (name.clone(), value.as_f64().unwrap() as f32)).collect();
+        let report = super::render_instrument_source_for_test(
+            &source,
+            None,
+            &super::InstrumentRenderOptions {
+                sample_rate: 48_000,
+                block_size: 128,
+                frames: 24_000,
+                midi_note: 57.0,
+                velocity: 1.0,
+                gate_frames: 24_000,
+                voice_index: 0,
+                param_overrides,
+                param_events: Vec::new(),
+                input_overrides: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let name = &preset["name"];
+        assert_eq!(report.non_finite_samples, 0, "{name}: finite output, got {report:?}");
+        assert!(report.peak > 0.01, "{name}: expected audible peak, got report: {report:?}");
+        assert!(report.rms > 0.003, "{name}: expected audible rms, got report: {report:?}");
+        }
     }
 
     #[test]

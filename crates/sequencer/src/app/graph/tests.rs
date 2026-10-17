@@ -512,7 +512,7 @@
     struct RouteTargets {
         voice_sum_id: i32,
         voice_sum_r_id: i32,
-        track_mod_out_id: i32,
+        track_mod_out_ids: [i32; crate::sequencer::MAX_TRACK_MOD_OUTPUTS],
         track_mod_in_clip_ids: [i32; EXT_MOD_INPUT_COUNT],
     }
 
@@ -685,6 +685,8 @@
             synth_outputs: 0,
             audio_output_channels: Vec::new(),
             mod_output_channels: Vec::new(),
+            mod_output_names: Vec::new(),
+            ext_input_names: Default::default(),
             gatepitch_ids: Vec::new(),
             modulator_ids: Vec::new(),
             route_gain_ids: Vec::new(),
@@ -784,7 +786,9 @@
                 filter_id: graph.add_gain(1.0, &format!("track_{track}_filter")),
                 delay_id: graph.add_gain(1.0, &format!("track_{track}_delay")),
                 send_id: graph.add_gain(1.0, &format!("track_{track}_send")),
-                mod_out_id: graph.add_gain(1.0, &format!("track_{track}_mod_out")),
+                mod_out_ids: std::array::from_fn(|output| {
+                    graph.add_gain(1.0, &format!("track_{track}_mod_out_{output}"))
+                }),
                 mod_in_clip_ids: std::array::from_fn(|input| {
                     graph.add_gain(1.0, &format!("track_{track}_mod_in_{input}"))
                 }),
@@ -804,7 +808,7 @@
                         &format!("Track {}", track + 1),
                         nodes.voice_sum_id,
                         nodes.voice_sum_r_id,
-                        nodes.mod_out_id,
+                        nodes.mod_out_ids,
                         nodes.mod_in_clip_ids,
                     )
                     .expect("old engine route should connect");
@@ -875,6 +879,8 @@
             synth_outputs: 1,
             audio_output_channels: vec![0],
             mod_output_channels: vec![0],
+            mod_output_names: Vec::new(),
+            ext_input_names: Default::default(),
             gatepitch_ids: Vec::new(),
             modulator_ids,
             route_gain_ids: (0..crate::sequencer::MAX_SAMPLER_POOLS)
@@ -887,7 +893,7 @@
         RouteTargets {
             voice_sum_id: graph.add_gain(1.0, "test_voice_sum"),
             voice_sum_r_id: graph.add_gain(1.0, "test_voice_sum_r"),
-            track_mod_out_id: graph.add_gain(1.0, "test_track_mod_out"),
+            track_mod_out_ids: std::array::from_fn(|output| graph.add_gain(1.0, &format!("test_track_mod_out_{output}"))),
             track_mod_in_clip_ids: std::array::from_fn(|input| {
                 graph.add_gain(1.0, &format!("test_track_mod_in_{input}"))
             }),
@@ -902,7 +908,7 @@
             "Test Track",
             targets.voice_sum_id,
             targets.voice_sum_r_id,
-            targets.track_mod_out_id,
+            targets.track_mod_out_ids,
             targets.track_mod_in_clip_ids,
         )
     }
@@ -2903,6 +2909,58 @@
         assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
         for _ in 0..4 { render_peak(); }
         assert!(render_peak() > 0.01, "redo must restore playable routing");
+    }
+
+    /// eseq-5e9f: a patch that reads `(ext 1)` hears its track's ext 1 input
+    /// raw. The DSP reads the slot directly, with no depth lane leasing it, so
+    /// the claim is what keeps the slot running.
+    #[test]
+    fn ext_op_patch_hears_a_cable_on_its_ext_input() {
+        let engine = crate::audio::engine::init_headless_engine(44_100, 2).unwrap();
+        struct HeadlessGuard(LiveGraphPtr);
+        impl Drop for HeadlessGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    crate::audiograph::engine_stop_workers();
+                    crate::audiograph::destroy_live_graph(self.0.0);
+                }
+            }
+        }
+        let _guard = HeadlessGuard(engine.lg_ptr);
+        let mut app = App::new(engine.state, engine.lg_ptr, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        app.start_new_project();
+        app.state.transport.playing.store(true, Ordering::Release);
+
+        let source = "(out 0 1 @name audio) (out 0.5 2 @name level @modulator 1)";
+        let compiled = lisp_host::compile_and_load_instrument(source, 44_100).unwrap();
+        app.swap_track_to_compiled_saved_instrument_sync(
+            0, "ext-op-source", source, CustomInstrumentRunMode::FreePatch, compiled,
+        ).unwrap();
+        let vca = "(def mod1 (in 6 @name mod1 @modulator 1)) (out (* 0.4 (ext 1)) 1 @name audio)";
+        let compiled = lisp_host::compile_and_load_instrument(vca, 44_100).unwrap();
+        assert_eq!(compiled.manifest.modulators[0].ext, Some(1));
+        app.swap_track_to_compiled_saved_instrument_sync(
+            1, "ext-op-vca", vca, CustomInstrumentRunMode::FreePatch, compiled,
+        ).unwrap();
+        app.graph_controller()
+            .set_mod_route_to_destination(0, 0, ModDestination::Track(1), 0)
+            .unwrap();
+
+        let render_peak = || {
+            let mut output = [0.0_f32; 1024];
+            unsafe { engine.lg_ptr.process_next_block(output.as_mut_ptr(), 512); }
+            output.iter().fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
+        };
+        for _ in 0..8 { render_peak(); }
+        let peak = render_peak();
+        assert!(peak > 0.05, "the cable's level reaches the VCA's output: peak={peak}");
+
+        // Without the claim nothing leases the slot, so it renders off.
+        let vca_engine = app.graph.track_engine_ids[1].unwrap();
+        crate::instruments::voice_modulator::set_custom_engine_ext_claims(vca_engine, []);
+        for _ in 0..8 { render_peak(); }
+        assert!(render_peak() < peak * 0.01, "the claim is what keeps the slot running");
     }
 
     /// eseq-63j4.4: a coding agent edits a user instrument's dsp.lisp while it

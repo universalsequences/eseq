@@ -34,7 +34,7 @@
 (import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of prop-if
                               rgb-part color-rgba track-color-part))
 (import eseq.kinds :refer (track tracks buses groups routes graphs selection master project
-                           mod-in-level launch-cell! launch-rack-clip! save-rack-clip-as!
+                           mod-in-level mod-out-signal launch-cell! launch-rack-clip! save-rack-clip-as!
                            convert-rack-to-clips!))
 
 (export render-order
@@ -160,11 +160,12 @@
   :key ()
   :state ((anchor track :default nil)))
 
-;; A mod cable being drawn: the track whose OUT port was pressed, nil when
-;; none is.
+;; A mod cable being drawn: the track whose OUT port was pressed (and which
+;; of its outputs, from 0), nil when none is.
 (def-kind mod-patch
   :key ()
-  :state ((source track :default nil)))
+  :state ((source track :default nil)
+          (output 0)))
 
 ;; Data, rather than menu-specific control flow, is the extension seam for
 ;; Duplicate/Delete/Group/color actions added later.
@@ -435,28 +436,42 @@
 
 ;; ── Mod routes ──
 ;; Port props speak the host's patch-cable addresses: track positions, bus
-;; ids and inputs 0-3 (route.input is 1-4).
+;; ids and inputs 0-3 (route.input is 1-4). A cable's source end is a
+;; `source key`, track * 4 + output (outputs from 0; route.output is 1-4),
+;; so each of a track's mod outputs is its own cable end.
 
 (def track-mod-output? (t)
   (or (= t.instrument-type "modulator") t.mod-output))
+
+(def source-key (track-index output) (+ (* track-index 4) output))
+(def key-track (key) (floor (/ key 4)))
+(def key-output (key) (- key (* (key-track key) 4)))
+;; An unset output (0) is the first.
+(def route-source-key (r) (source-key r.source.index (max 0 (- r.output 1))))
+
+;; Output ports the strip shows (one inactive port when it has none), and
+;; the inputs left beside them. A Modulator has no voice modulators to feed,
+;; but its inputs still take trigger/velocity/duration/note roles.
+(def mod-out-count (t) (max 1 (or t.mod-outputs 0)))
+(def mod-in-count (t) (if t.module 4 (min 4 (- 5 (mod-out-count t)))))
 
 (def route-into? (r dest input)
   (and (= r.input (+ input 1))
        (if r.dest (= r.dest dest) (= r.dest-bus dest))))
 
-;; Source track positions of the routes into `dest` (a track or a bus) at
-;; `input`; only the selected ones with `selected`.
+;; Source keys of the routes into `dest` (a track or a bus) at `input`; only
+;; the selected ones with `selected`.
 (def route-sources (dest input selected)
-  (map (lambda (r) r.source.index)
+  (map route-source-key
     (filter (lambda (r) (and (route-into? r dest input) (or (not selected) r.selected)))
       (routes))))
 
-;; The route between track positions / a bus id, if any.
-(def route-at (source dest-kind dest input)
+;; The route from source key `key` into a track position / bus id, if any.
+(def route-at (key dest-kind dest input)
   (first
     (filter
       (lambda (r)
-        (and (= r.source.index source)
+        (and (= (route-source-key r) key)
              (= r.input (+ input 1))
              (if (= dest-kind "bus")
                (and r.dest-bus (= r.dest-bus.bid dest))
@@ -464,47 +479,55 @@
       (routes))))
 
 ;; Only a connected OUT port lights with its signal.
-(def track-mod-out-connected? (t)
-  (> (len (filter (lambda (r) (= r.source t)) (routes))) 0))
+(def mod-out-connected? (t output)
+  (> (len (filter (lambda (r) (and (= r.source t) (= (max 1 r.output) (+ output 1)))) (routes))) 0))
 
-(def mod-out-level (t)
-  (if (track-mod-out-connected? t) #'t.mod-out-level 0))
+(def mod-out-port-level (t output)
+  (if (mod-out-connected? t output) (mod-out-signal t (+ output 1)) 0))
 
-(def select-mod-route (source dest-kind dest input)
-  (let ((r (route-at source dest-kind dest input)))
+;; "out" for a single output, "out 2" (and its declared name) for the rest.
+(def mod-out-label (t output)
+  (let ((name (nth (or t.mod-output-names '()) output)))
+    (str (if (> (mod-out-count t) 1) (str "out " (+ output 1)) "out")
+         (if (and name (not (= name ""))) (str " (" name ")") ""))))
+
+(def select-mod-route (key dest-kind dest input)
+  (let ((r (route-at key dest-kind dest input)))
     (when r
       (set! r.selected true)
       (status (if (= dest-kind "bus")
-        (str "Selected mod route: track " (+ source 1) " out -> group Ext" (+ input 1))
-        (str "Selected mod route: track " (+ source 1) " out -> track " (+ dest 1) " Ext" (+ input 1)))))))
+        (str "Selected mod route: track " (+ (key-track key) 1) " " (mod-out-label r.source (key-output key)) " -> group Ext" (+ input 1))
+        (str "Selected mod route: track " (+ (key-track key) 1) " " (mod-out-label r.source (key-output key)) " -> track " (+ dest 1) " Ext" (+ input 1)))))))
 
-(def mod-out-click (t)
+(def mod-out-click (t output)
   (clear-delete-target)
   (if (track-mod-output? t)
     (do
       (set! mod-patch.source t)
-      (status (str "Mod out: track " (+ t.index 1))))
+      (set! mod-patch.output output)
+      (status (str "Mod " (mod-out-label t output) ": track " (+ t.index 1))))
     (status "This track has no mod output")))
 
 (def cancel-mod-draw ()
   (set! mod-patch.source nil)
   true)
 
-(def connect-mod-route (source dest-kind dest input)
+(def connect-mod-route (key dest-kind dest input)
   (clear-delete-target)
-  (if (and (= dest-kind "track") (= source dest))
+  (if (and (= dest-kind "track") (= (key-track key) dest))
     (status "Mod self-routes are not allowed")
-    (if (route-at source dest-kind dest input)
+    (if (route-at key dest-kind dest input)
       (status "Mod route already connected")
       (host-command "set-mod-route"
-        (dict :source source :dest-kind dest-kind :dest dest :input input)))))
+        (dict :source (key-track key) :output (key-output key)
+              :dest-kind dest-kind :dest dest :input input)))))
 
 ;; Release over an input port while a cable is drawn.
 (def mod-in-click (dest-kind dest input)
   (let ((source mod-patch.source))
     (if (and source (listed? source (tracks)))
       (do
-        (connect-mod-route source.index dest-kind dest input)
+        (connect-mod-route (source-key source.index mod-patch.output) dest-kind dest input)
         (set! mod-patch.source nil))
       false)))
 
@@ -738,29 +761,30 @@
   (box :height 0.8 :width :fill
     (h-stack :key (str "mod-ports-" t.index)
       :width 9.8 :height 0.1 :gap 0.42 :align :center
-      (mixer-v2-mod-port
-        :key (str "mod-out-" t.index)
-        :patch-port true
-        :direction :out
-        :track t.index
-        :active (track-mod-output? t)
-        :pending (= mod-patch.source t)
-        :output true
-        :selected false
-        :level (mod-out-level t)
-        :style (if (track-mod-output? t) mod-output-style nil)
-        :on-click |x y r| (mod-out-click t)
-        :on-mouse-down |x y r| (mod-out-click t)
-        :on-patch-cancel (lambda (source) (cancel-mod-draw))
-        :on-patch-miss (lambda () (clear-delete-target)))
-      (if (= t.instrument-type "modulator")
-        (each (range 0 4) |input|
-          (box :key (str "mod-in-spacer-" t.index "-" input)
-            :width 1.05 :height 1.05))
-        (each (range 0 4) |input|
-          (mod-in-port t "track" t.index input
-            :key (str "mod-in-" t.index "-" input)
-            :track t.index))))))
+      (each (range 0 (mod-out-count t)) |output|
+        (mixer-v2-mod-port
+          :key (if (= output 0) (str "mod-out-" t.index) (str "mod-out-" t.index "-" output))
+          :patch-port true
+          :direction :out
+          :track t.index
+          :source (source-key t.index output)
+          :active (track-mod-output? t)
+          :pending (and (= mod-patch.source t) (= mod-patch.output output))
+          :output true
+          :selected false
+          :level (mod-out-port-level t output)
+          :style (if (track-mod-output? t) mod-output-style nil)
+          :on-click |x y r| (mod-out-click t output)
+          :on-mouse-down |x y r| (mod-out-click t output)
+          :on-patch-cancel (lambda (source) (cancel-mod-draw))
+          :on-patch-miss (lambda () (clear-delete-target))))
+      ;; Outputs left of the rule, inputs right of it.
+      (box :key (str "mod-port-divider-" t.index)
+        :width 0.08 :height 0.28 :background-color :dim)
+      (each (range 0 (mod-in-count t)) |input|
+        (mod-in-port t "track" t.index input
+          :key (str "mod-in-" t.index "-" input)
+          :track t.index)))))
 
 (def bus-mod-port-row (b)
   (subtree :key (str "mixer-v2-bus-mod-port-row-" b.bid)
@@ -927,15 +951,15 @@
 
 (def track-output-dropdown (t)
   (subtree :key (str "mixer-v2-track-output-sub-" t.index)
-    (dropdown :value (track-output-label t.output)
+    (box :width :fill :h-align :center (dropdown :value (track-output-label t.output)
       :key (str "track-output-" t.index)
       :options (track-output-options)
       :on-change (lambda (v)
         (clear-delete-target)
         (let ((b (track-output-of v)))
           (when (or b (= v "sends only")) (set! t.output b))))
-      :width :fill :height 1.2 :font-size 10
-      :corner-radius (eseq.seq-core-state/radius 20))))
+      :width (* track-strip-width 0.85) :height 1.1 :font-size 10
+      :corner-radius (eseq.seq-core-state/radius 20)))))
 
 ;; The bus names more than one bus has (read once per dropdown).
 (def shared-bus-names ()
@@ -954,17 +978,19 @@
 (def bus-output-dropdown (b)
   (subtree :key (str "mixer-bus-output-" (if b b.index -1))
     (let ((options (if b b.output-options (list)))
-          (shared (if (> (len options) 0) (shared-bus-names) (list)))
-          (label-of (lambda (x) (bus-output-label x shared))))
+        (shared (if (> (len options) 0) (shared-bus-names) (list)))
+        (label-of (lambda (x) (bus-output-label x shared))))
       (if (> (len options) 0)
-        (dropdown :key (str "bus-output-" b.index)
-          :value (if b.output (label-of b.output) "main")
-          :options (map label-of options)
-          :width :fill :height 1.2 :font-size 10
-          :corner-radius (eseq.seq-core-state/radius 20)
-          :on-change (lambda (label)
-            (let ((dest (first (filter (lambda (o) (= (label-of o) label)) options))))
-              (when dest (set! b.output dest)))))
+        (box  :h-align :center :width :fill 
+          (dropdown :key (str "bus-output-" b.index)
+            :value (if b.output (label-of b.output) "main")
+            :options (map label-of options)
+            :width 8.5 :height 1.1 :font-size 10
+            :corner-radius (eseq.seq-core-state/radius 30)
+            :on-change (lambda (label)
+              (let ((dest (first (filter (lambda (o) (= (label-of o) label)) options))))
+                (when dest (set! b.output dest)))))
+          )
         (box :height 1.2 :width :fill)))))
 
 ;; A track's strip frame, `width` by `height`: lit while the track is in
@@ -1004,7 +1030,7 @@
 (def track-strip (t)
   ;; Grouped strips drop the output dropdown, so they are shorter to avoid
   ;; dead space at the bottom inside the group container.
-  (track-frame t track-strip-width (if t.group (grouped-strip-height) (strip-height)) 4 16
+  (track-frame t track-strip-width (if t.group (grouped-strip-height) (strip-height)) 2 12
     (track-strip-props t)
     (v-stack :gap 0.18 :width :fill
       ;; Grouped tracks drop the output dropdown (their output is the group
@@ -1027,7 +1053,7 @@
             :min -1 :max 1 :origin 0 :decimals 2
             :font-size 9 :label-font-size 8
             :text-color :dim :label-color :dim
-            :width 6.5 :height 2.35 :knob-size 2.58
+            :width 4.5 :height 2.35 :knob-size 2.58
             :on-change (lambda (v)
               (clear-delete-target)
               (set! t.pan v))))
@@ -1067,6 +1093,108 @@
       :on-click (lambda (event) (activate-track-control) (toggle! t.soloed)))
     (strip-button "R" #'t.armed :color :black :active-bg arm-color
       :on-click (lambda (event) (activate-track-control) (toggle! t.armed)))))
+
+;; ── Module strips ──
+
+;; A module makes no audio, only mod outputs (`t.module`: a modulator, or a
+;; patch whose every out is `@modulator`). Its strip trades the output,
+;; sends, pan and meter for labeled jacks, like a VCV Rack panel: inputs in
+;; a row, outputs in a dark inset below them. Labels come from the patch:
+;; the `@name` of the slot it reads with `(ext N)`, and each `@modulator`
+;; output's `@name`.
+
+(def module-jack-width 2.35)
+
+(def module-label-text (text) (substring text 0 7))
+
+;; Ext input i's label: its name, else its role when it does more than
+;; modulate, else ext1-4.
+(def module-in-label (t input)
+  (let ((name (nth (or t.ext-input-names '()) input))
+        (role (nth (or t.mod-roles '()) input)))
+    (if (and name (not (= name "")))
+      name
+      (if (and role (not (= role "modulator")))
+        role
+        (str "ext" (+ input 1))))))
+
+(def module-out-label (t output)
+  (let ((name (nth (or t.mod-output-names '()) output)))
+    (if (and name (not (= name "")))
+      name
+      (if (> (mod-out-count t) 1) (str "out" (+ output 1)) "out"))))
+
+;; A jack with its label above it.
+(def module-jack (text port)
+  (v-stack :align :center :gap 0.08 :width module-jack-width
+    (label (module-label-text text)
+      :font-size 7 :color :dim :bg :transparent
+      :h-align :center :v-align :center
+      :width module-jack-width :height 0.55)
+    port))
+
+(def module-out-port (t output)
+  (mixer-v2-mod-port
+    :key (if (= output 0) (str "mod-out-" t.index) (str "mod-out-" t.index "-" output))
+    :patch-port true
+    :direction :out
+    :track t.index
+    :source (source-key t.index output)
+    :active true
+    :pending (and (= mod-patch.source t) (= mod-patch.output output))
+    :output true
+    :selected false
+    :level (mod-out-port-level t output)
+    :style mod-output-style
+    :on-click |x y r| (mod-out-click t output)
+    :on-mouse-down |x y r| (mod-out-click t output)
+    :on-patch-cancel (lambda (source) (cancel-mod-draw))
+    :on-patch-miss (lambda () (clear-delete-target))))
+
+;; Its own subtree, like the plain strip's port row: a patch or a rename of
+;; a port re-renders the jacks alone.
+(def module-jacks (t)
+  (subtree :key (str "mixer-v2-module-jacks-" t.index)
+    (v-stack :gap 0.3 :align :center :width :fill
+      (h-stack :key (str "module-ins-" t.index) :gap 0.15 :align :center
+        (each (range 0 4) |input|
+          (module-jack (module-in-label t input)
+            (mod-in-port t "track" t.index input
+              :key (str "mod-in-" t.index "-" input)
+              :track t.index))))
+      (box :key (str "module-outs-" t.index)
+        :width :fill :padding 0.2
+        :background-color :mixer-control-bg
+        :corner-radius (eseq.seq-core-state/radius 10)
+        (h-stack :gap 0.2 :align :center :width :fill
+          (box :flex 1 :height 0.1)
+          (each (range 0 (mod-out-count t)) |output|
+            (module-jack (module-out-label t output) (module-out-port t output)))
+          (box :flex 1 :height 0.1))))))
+
+;; A module has no audio, so mute (an audio-path gate) and solo do nothing
+;; useful on it; record arm still plays notes into its pattern.
+(def module-strip-buttons (t)
+  (h-stack :gap 0.35
+    (strip-button (str (+ t.index 1)) true)
+    (strip-button "R" #'t.armed :color :black :active-bg arm-color
+      :on-click (lambda (event) (activate-track-control) (toggle! t.armed)))))
+
+(def module-strip (t)
+  (track-frame t track-strip-width (if t.group (grouped-strip-height) (strip-height)) 2 12
+    (track-strip-props t)
+    (v-stack :gap 0.18 :width :fill :height :fill
+      ;; Holds the output dropdown's place: the clip grid stays level with
+      ;; the other strips'.
+       (if t.group nil (box :width :fill :height 0.2 :bg :transparent))
+      (if (compact?) nil (track-pattern-grid t))
+      (box :width :fill :flex 1)
+      (module-jacks t)
+      (subtree :key (str "mixer-v2-strip-buttons-" t.index)
+        (module-strip-buttons t))
+      (box :width :fill :flex 1)
+      (subtree :key (str "mixer-v2-strip-label-" t.index)
+        (strip-label t)))))
 
 ;; ── Menus and renames ──
 
@@ -1479,68 +1607,70 @@
 ;; them selects that bus. With the clip column above, the meter gives up the
 ;; spacer that kept it level.
 (def group-header-slot (g)
-                            (let ((b g.bus)
-                                (bus-idx (if b b.index -1))
-                                ;; Compact mode has no clip area for the column to stand in.
-                                (show-clips (and (not (compact?)) (has-clips? g))))
-                              (box :key (str "group-bus-strip-" bus-idx)
-                                :width 10.2 :height (group-bus-strip-height)
-                                :corner-radius (eseq.seq-core-state/radius 12)
-                                :padding 0.1
-                                :background-color :mixer-strip-bg
-                                :drop-hover-border-color :mixer-strip-selected-border
-                                :drop-types (if b
-                                  (list "sample" "instrument" "instrument-preset" "audio-effect")
-                                  (list))
-                                :drop-meta (dict :kind "bus" :bus bus-idx)
-                                :on-drop (lambda (event) (drop-on-group-header event g))
-                                (v-stack :gap 0.3 :align :center
-                                  (bus-output-dropdown b)
-                                  ;; Where a plain track strip shows its pattern grid, a clip-bearing
-                                  ;; rack shows its clip run vertically (§6.2). Everything else keeps the
-                                  ;; spacer that levels the meters.
-                                  (if show-clips (rack-clip-column g) (clip-growth-spacer))
-                                  (if b
-                                    (v-stack :gap 0.4 :align :center
-                                      (box :width :fill :height (if (compact?) 4.1 (if show-clips 3.9 8.1))
-                                        (if show-clips
-                                          (bus-meter-control-with-spacer b true 0.0)
-                                          (bus-meter-control b true))))
-                                    (nothing))
-                                  (if b
-                                    (h-stack :gap 0.35 :align :left :padding 0.1 :width :fill
-                                      (bus-buttons b g))
-                                    (nothing))
-                                  (if b (bus-mod-port-row b) nil)
-                                  (box :corner-radius (eseq.seq-core-state/radius 34) :background-color g.color :width 9.5 :padding 0.1
-                                    :key (str "group-badge-" g.gid)
-                                    :selected #'g.delete-target
-                                    :selected-background-color :fx-panel-header-selected-bg
-                                    :on-click (lambda (event) (select-group-delete-target g))
-                                    :on-double-click (lambda (event) (eseq.sequencer/show-fx-for-group g))
-                                    :on-right-click (lambda (event) (open-strip-menu event nil g))
-                                    (h-stack :gap 0.2 :align :center
-                                      (box :width 0.05)
-                                      (box :background "disclosure-button"
-                                        :width 1.7 :height 0.8
-                                        :collapsed g.collapsed
-                                        :stroke-width 0.1
-                                        :surface-alpha 0.35
-                                        :col 0.1
-                                        :on-click (lambda (event)
-                                          (select-group g)
-                                          (toggle! g.collapsed)))
-                                      (box :width 0.05)
-                                      (if (= strip-rename.group g)
-                                        (group-rename-input g)
-                                        (apply label (substring g.name 0 (name-chars 10))
-                                          :key (str "group-name-label-" g.gid)
-                                          :font-size 11
-                                          :height 0.9
-                                          :v-align :center
-                                          :h-align :center
-                                          :color :black
-                                          bare-text))))))))
+  (let ((b g.bus)
+      (bus-idx (if b b.index -1))
+      ;; Compact mode has no clip area for the column to stand in.
+      (show-clips (and (not (compact?)) (has-clips? g))))
+    (box :key (str "group-bus-strip-" bus-idx)
+      :width 10.2 :height (group-bus-strip-height)
+      :corner-radius (eseq.seq-core-state/radius 12)
+      :padding 0.1
+      :background-color :mixer-strip-bg
+      :drop-hover-border-color :mixer-strip-selected-border
+      :drop-types (if b
+        (list "sample" "instrument" "instrument-preset" "audio-effect")
+        (list))
+      :drop-meta (dict :kind "bus" :bus bus-idx)
+      :on-drop (lambda (event) (drop-on-group-header event g))
+      (v-stack :gap 0.175 :align :center
+        (box :height 0 :width 0)
+        (bus-output-dropdown b)
+        ;; Where a plain track strip shows its pattern grid, a clip-bearing
+        ;; rack shows its clip run vertically (§6.2). Everything else keeps the
+        ;; spacer that levels the meters.
+        (if show-clips (rack-clip-column g) (clip-growth-spacer))
+        (if b
+          (v-stack :gap 0.4 :align :center
+            (box :width :fill :height (if (compact?) 4.1 (if show-clips 3.9 8.1))
+              (if show-clips
+                (bus-meter-control-with-spacer b true 0.0)
+                (bus-meter-control b true))))
+          (nothing))
+        (if b
+          (h-stack :gap 0.35 :align :left :padding 0.1 :width :fill
+            (bus-buttons b g))
+          (nothing))
+        (if b (bus-mod-port-row b) nil)
+        (box :width 0 :height 0.4)
+        (box :corner-radius (eseq.seq-core-state/radius 34) :background-color g.color :width 9.5 :padding 0.1
+          :key (str "group-badge-" g.gid)
+          :selected #'g.delete-target
+          :selected-background-color :fx-panel-header-selected-bg
+          :on-click (lambda (event) (select-group-delete-target g))
+          :on-double-click (lambda (event) (eseq.sequencer/show-fx-for-group g))
+          :on-right-click (lambda (event) (open-strip-menu event nil g))
+          (h-stack :gap 0.2 :align :center
+            (box :width 0.05)
+            (box :background "disclosure-button"
+              :width 1.7 :height 0.8
+              :collapsed g.collapsed
+              :stroke-width 0.1
+              :surface-alpha 0.35
+              :col 0.1
+              :on-click (lambda (event)
+                (select-group g)
+                (toggle! g.collapsed)))
+            (box :width 0.05)
+            (if (= strip-rename.group g)
+              (group-rename-input g)
+              (apply label (substring g.name 0 (name-chars 10))
+                :key (str "group-name-label-" g.gid)
+                :font-size 11
+                :height 0.9
+                :v-align :center
+                :h-align :center
+                :color :black
+                bare-text))))))))
 
 (def drop-new-track-into-group (event g)
   (let ((payload event.payload)
@@ -1572,7 +1702,9 @@
     (drop-new-track-into-group event g)))
 
 (def track-strip-of (t)
-  (if t.collapsed (track-collapsed-strip t) (track-strip t)))
+  (if t.collapsed
+    (track-collapsed-strip t)
+    (if t.module (module-strip t) (track-strip t))))
 
 ;; A group rendered as a real container: a colored box wrapping the group's
 ;; channel slot and its member strips, with a top spacer so the color shows
@@ -1721,7 +1853,7 @@
 ;; function, so a package can replace the strip-per-track view with its own
 ;; (e.g. a grid of compact channels) via (override eseq.mixer/mixer-body …).
 (def mixer-body ()
-  (h-stack :padding 0.2 :gap 1.5
+  (h-stack :padding 0.75 :gap 1.5
     (h-stack :gap 0.5
       (each (render-order) |item|
         (render-item item)))

@@ -64,6 +64,7 @@ pub(super) fn sync_device_modulators(
                 f::MODULATOR_LABEL,
                 Value::String(modulator.label.clone()),
             );
+            store.push(id, f::MODULATOR_EXT, number(modulator.ext.unwrap_or(0) as f64));
         },
     );
     pusher.push(device, f::DEVICE_MODULATORS, instance_list(ids));

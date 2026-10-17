@@ -322,7 +322,7 @@
       :patcher-marquee-fill '(0.150 0.640 0.580 0.13)
       :patcher-marquee-border '(0.150 0.640 0.580 0.74)
       :patcher-node-bg      '(0.130 0.264 0.313)
-      :patcher-node-border  '(0.149 0.296 0.350)
+      :patcher-node-border  '(0.218 0.324 0.363 1.0)
       :patcher-node-text    '(0.400 0.800 0.640)
       :patcher-node-tail-text '(0.92 0.94 0.99)
       :patcher-io-node-bg   '(0.130 0.264 0.313)
@@ -366,6 +366,7 @@
       :patcher-back-button-hover-border '(0.150 0.640 0.580)
       :patcher-back-button-text '(0.513 0.681 0.742)
       :patcher-back-button-hover-text '(0.950 0.987 1.000)
+      :patcher-macro-node-text        '(0.783 0.488 1.0 1.0)
       )))
 
 (tahoe-terminal-theme)

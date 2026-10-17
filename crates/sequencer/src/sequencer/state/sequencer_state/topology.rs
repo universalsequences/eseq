@@ -104,6 +104,7 @@ impl SequencerState {
         params.set_voice_priority(defaults.voice_priority);
         params.set_mute_group(defaults.mute_group);
         params.set_global_transpose(defaults.global_transpose);
+        params.set_mod_roles(defaults.mod_roles);
     }
 
     pub fn clear_live_track_state(&self, track_count: usize) {

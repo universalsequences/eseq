@@ -123,6 +123,8 @@ pub(super) enum BlockEventKind {
     Scheduled(CallbackScheduledEvent),
     GateOff(GateOffEvent),
     Retrig(RetrigEvent),
+    /// A cable trigger from a `trigger` mod input (docs/mod-input-roles-spec.md).
+    ModTrigger(ModTriggerEvent),
 }
 
 #[derive(Debug)]
@@ -572,6 +574,8 @@ pub(super) fn block_event_priority(kind: &BlockEventKind) -> u8 {
             | ScheduledEventKind::EffectParams { .. }
             | ScheduledEventKind::RackParams { .. }) => 1,
         BlockEventKind::Scheduled(_) | BlockEventKind::Retrig(_) => 2,
+        // After a step on the same frame, so a coinciding step latches first.
+        BlockEventKind::ModTrigger(_) => 3,
     }
 }
 
@@ -884,6 +888,7 @@ pub(super) fn mute_group_winner_for_block_events(
         .iter()
         .filter_map(|event| match &event.kind {
             BlockEventKind::Scheduled(scheduled) => scheduled_trigger_track(scheduled),
+            BlockEventKind::ModTrigger(trigger) => Some(trigger.track_idx),
             BlockEventKind::GateOff(_) | BlockEventKind::Retrig(_) => None,
         })
         .filter(|&candidate| track_mute_groups(candidate) == group)
@@ -906,6 +911,7 @@ pub(super) fn dispatch_block_events_until(
             BlockEventKind::Scheduled(note) => note.event.audition_generation,
             BlockEventKind::GateOff(gate) => gate.audition_generation,
             BlockEventKind::Retrig(retrig) => retrig.audition_generation,
+            BlockEventKind::ModTrigger(_) => 0,
         };
         if data.state.note_audition.is_current(scope) { return true; }
         if matches!(event.kind, BlockEventKind::GateOff(_)) {
@@ -953,6 +959,7 @@ pub(super) fn dispatch_block_events_until(
             for event in group {
                 let Some(track) = (match &event.kind {
                     BlockEventKind::Scheduled(scheduled) => scheduled_trigger_track(scheduled),
+                    BlockEventKind::ModTrigger(trigger) => Some(trigger.track_idx),
                     BlockEventKind::GateOff(_) | BlockEventKind::Retrig(_) => None,
                 }) else {
                     continue;
@@ -1006,8 +1013,18 @@ pub(super) fn dispatch_block_events_until(
                         Some(_) => false,
                         None => true,
                     };
-                    if dispatch {
+                    if dispatch && data.mod_triggers.note_scheduled_trigger(&scheduled) {
                         dispatch_scheduled_event(data, &scheduled, frame_offset);
+                    }
+                }
+                BlockEventKind::ModTrigger(trigger) => {
+                    let track = trigger.track_idx;
+                    let dispatch = track < data.state.active_track_count() && {
+                        let group = data.state.pattern.track_params[track].get_mute_group();
+                        group == 0 || winning_group_tracks[track]
+                    };
+                    if dispatch {
+                        dispatch_mod_trigger(data, frame_offset, trigger);
                     }
                 }
                 BlockEventKind::GateOff(gate_off) => {

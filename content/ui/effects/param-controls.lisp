@@ -23,6 +23,7 @@
 (export instrument-rack-target?
         param-owner-fx
         with-param-owners
+        fx-address
         process-map
         process-map-active?
         process-map-port-active?
@@ -419,15 +420,25 @@
   (let ((owner (get p :custom-ui-owner)))
     (if owner (get owner :fx) false)))
 
+;; Effect panel dict fx's address (which effect it is), without its params,
+;; sources or meter: what a param's owner (param-owner-fx) keeps. A param
+;; carrying the whole panel dict carries every sibling param, and every
+;; closure, subtree input and widget prop holding the param then copies and
+;; compares all of them (a 249-param custom effect: ~4ms per knob).
+(def fx-address (fx)
+  (if fx
+    (dict :name (get fx :name) :slot-idx (get fx :slot-idx)
+          :track-idx (get fx :track-idx) :bus-idx (get fx :bus-idx)
+          :rack-slot (get fx :rack-slot) :rack-fx (get fx :rack-fx)
+          :bus-fx (get fx :bus-fx) :midi-fx (get fx :midi-fx))
+    false))
+
 ;; fx with each of its params resolved once (`:prm`, eseq.effects.devices'
 ;; with-prm) and owned by it (param-owner-fx), for a panel that hands bare
 ;; param dicts to the one-argument forms. The owner is fx's address only, so
 ;; a param never carries its siblings.
 (def with-param-owners (fx)
-  (let ((owner (dict :fx (dict :name (get fx :name) :slot-idx (get fx :slot-idx)
-                               :track-idx (get fx :track-idx) :bus-idx (get fx :bus-idx)
-                               :rack-slot (get fx :rack-slot) :rack-fx (get fx :rack-fx)
-                               :bus-fx (get fx :bus-fx) :midi-fx (get fx :midi-fx)))))
+  (let ((owner (dict :fx (fx-address fx))))
     (merge fx :params
       (map (lambda (p) (merge (dv/with-prm fx p) :custom-ui-owner owner)) (get fx :params)))))
 

@@ -2044,8 +2044,10 @@ fn parse_delete_target(kind: &Value, payload: &Value) -> Result<ActiveDeleteTarg
             };
             let input = value_number_field(payload, "input")
                 .ok_or_else(|| "mod-route delete target expects :input".to_string())?;
+            let output = value_number_field(payload, "output").unwrap_or(0);
             Ok(ActiveDeleteTarget::ModRoute {
                 source,
+                output,
                 destination,
                 input,
             })
@@ -2306,6 +2308,7 @@ mod delete_target_tests {
             .expect("mod route target"),
             ActiveDeleteTarget::ModRoute {
                 source: 0,
+                output: 0,
                 destination: sequencer::sequencer::ModDestination::Track(3),
                 input: 1,
             }
@@ -3356,6 +3359,7 @@ pub(crate) fn init_runtime(
             }
             ActiveDeleteTarget::ModRoute {
                 source,
+                output,
                 destination,
                 input,
             } => {
@@ -3364,6 +3368,7 @@ pub(crate) fn init_runtime(
                 }
                 let route_exists = st.current_mod_connections().iter().any(|route| {
                     route.source_track == source
+                        && route.source_output == output
                         && route.destination == destination
                         && route.dest_input == input
                 });
@@ -3400,6 +3405,10 @@ pub(crate) fn init_runtime(
                 map.insert(
                     "input".to_string(),
                     Rc::new(RefCell::new(Value::Number(input as f64))),
+                );
+                map.insert(
+                    "output".to_string(),
+                    Rc::new(RefCell::new(Value::Number(output as f64))),
                 );
                 ctx.enqueue_command(HostCommand::Custom {
                     name: "delete-mod-route".to_string(),
@@ -5652,6 +5661,56 @@ pub(crate) fn init_runtime(
                 (
                     TrackParamInvalidation::GlobalTranspose,
                     Ok(Value::Bool(enabled)),
+                )
+            }
+            // Mod input roles (docs/mod-input-roles-spec.md): `:mod-role-N`
+            // takes a role label or index, `:mod-steps` "play"/"latch" or 0/1.
+            name if name.starts_with("mod-role-") => {
+                let input = name["mod-role-".len()..]
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|input| (1..=sequencer::sequencer::EXT_MOD_INPUT_COUNT).contains(input))
+                    .ok_or_else(|| format!("seq-set-track-param: unknown param :{name}"))?
+                    - 1;
+                let role = match param_value {
+                    Value::String(label) => sequencer::sequencer::ModInputRole::ALL
+                        .into_iter()
+                        .find(|role| role.label() == label.as_str()),
+                    Value::Number(index) if *index >= 0.0 => sequencer::sequencer::ModInputRole::ALL
+                        .get(*index as usize)
+                        .copied(),
+                    _ => None,
+                }
+                .ok_or_else(|| {
+                    format!("seq-set-track-param: :{name} expects one of mod-role-options")
+                })?;
+                ctx.enqueue_command(slice3_numeric_history_command(
+                    "mod-role",
+                    Some(track),
+                    (input * 16 + role as usize) as f64,
+                ));
+                (
+                    TrackParamInvalidation::ModRoles,
+                    Ok(Value::String(role.label().to_string())),
+                )
+            }
+            "mod-steps" => {
+                let steps = match param_value {
+                    Value::String(label) if label == "latch" => sequencer::sequencer::ModSteps::Latch,
+                    Value::String(label) if label == "play" => sequencer::sequencer::ModSteps::Play,
+                    Value::Number(index) if *index == 0.0 || *index == 1.0 => {
+                        sequencer::sequencer::ModSteps::from_index(*index as u32)
+                    }
+                    _ => return Err("seq-set-track-param: :mod-steps expects \"play\" or \"latch\"".into()),
+                };
+                ctx.enqueue_command(slice3_numeric_history_command(
+                    "mod-steps",
+                    Some(track),
+                    steps as u32 as f64,
+                ));
+                (
+                    TrackParamInvalidation::ModRoles,
+                    Ok(Value::String(steps.label().to_string())),
                 )
             }
             other => return Err(format!("seq-set-track-param: unknown param :{other}").into()),

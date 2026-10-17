@@ -162,11 +162,12 @@
 (def ggm-row-gap 0.2)
 (def ggm-row-panel-padding 1.0)
 (def ggm-matrix-column-gap 0.35)
-(def ggm-route-bar-width 0.28)
+(def ggm-route-bar-width 0.48)
 (def ggm-node-width 1.4)
-(def ggm-control-width 6.0)
+(def ggm-control-width 8.0)
+(def ggm-num-control-width 5.0)
 (def ggm-seed-control-width 4.8)
-(def ggm-group-width 3.0)
+(def ggm-group-width 5.0)
 
 (def ggm-matrix-data-height (count)
   (+ (* count ggm-row-height)
@@ -214,7 +215,7 @@
     :border-color :dim
     :background-color :mixer-strip-bg
     :value value :min lo :max hi :step stp :decimals dec
-    :width ggm-control-width :height ggm-row-height :font-size 9
+    :width ggm-num-control-width :height ggm-row-height :font-size 9
     :on-change on-change))
 
 (def ggm-pick-sized (key value options width on-change)
@@ -224,7 +225,7 @@
     :badge-color :transparent
     :bg-color :mixer-strip-bg
     :border-color :mixer-strip-selected-bg
-    :width width :height ggm-row-height :font-size 6
+    :width width :height ggm-row-height :font-size 9
     :on-change on-change))
 
 (def ggm-pick (key value options on-change)
@@ -344,13 +345,13 @@
     (ggm-header-label "grp" ggm-group-width)
     (ggm-header-label "seed rt" ggm-seed-control-width)
     (ggm-header-label "rst seed" ggm-seed-control-width)
-    (ggm-header-label "delay" ggm-control-width)
-    (ggm-header-label "transp" ggm-control-width)
+    (ggm-header-label "delay" ggm-num-control-width)
+    (ggm-header-label "transp" ggm-num-control-width)
     (ggm-header-label "trn rst" ggm-control-width)
-    (ggm-header-label "vel x" ggm-control-width)
+    (ggm-header-label "vel x" ggm-num-control-width)
     (ggm-header-label "vel rst" ggm-control-width)
-    (ggm-header-label "dampen" ggm-control-width)
-    (ggm-header-label "recover" ggm-control-width)
+    (ggm-header-label "dampen" ggm-num-control-width)
+    (ggm-header-label "recover" ggm-num-control-width)
     (ggm-header-label "res" ggm-control-width)
     (ggm-header-label "quant" ggm-control-width)))
 

@@ -60,6 +60,11 @@
             (mod-row params p
               (str "instrument-mod-row-" ci "-param-" (get p :idx)))))))))
 
+;; The ext input a section's slot is pinned to by the patch, 0 when none.
+(def claimed-ext-of (section)
+  (let ((ext (get section :ext)))
+    (if ext ext 0)))
+
 (def mod-selector-row (modulator)
   (let ((slot (get modulator :slot))
         (label-text (if (get modulator :name) (get modulator :name) (get modulator :label)))
@@ -75,10 +80,13 @@
             :instrument-control-bg)
           :color (if (= instrument-view.mod-slot slot) :white :dim)
           :on-click (lambda (info) (set! instrument-view.mod-slot slot)))
-        (dropdown :value (if source-p (pc/fx-param-text-value-for false source-p) "off")
-          :options (if source-p (get source-p :options) '())
-          :on-change (lambda (v) (if source-p (pc/fx-set-instrument-option source-p v) false))
-          :width 4.8 :height 1.1 :font-size 8.5)))))
+        (if (> (claimed-ext-of modulator) 0)
+          (label (str "ext" (claimed-ext-of modulator) " (patch)")
+            :width 4.8 :height 1.1 :font-size 8.5 :color :dim :bg :transparent :v-align :center)
+          (dropdown :value (if source-p (pc/fx-param-text-value-for false source-p) "off")
+            :options (if source-p (get source-p :options) '())
+            :on-change (lambda (v) (if source-p (pc/fx-set-instrument-option source-p v) false))
+            :width 5.8 :height 1.1 :font-size 8.5))))))
 
 (def mod-selector-sections (inst)
   (if (> (len (get inst :sources)) 0)
@@ -267,6 +275,10 @@
           (let ((source-p (get section :source-param))
                 (kind (if source-p (pc/fx-param-text-value-for false source-p) "off")))
             (v-stack :width :fill :height 4 :gap 0.3 :align :start
+              (if (> (claimed-ext-of section) 0)
+                (box :width :fill :height 5 :h-align :center :v-align :center
+                  (label (str "ext" (claimed-ext-of section) " — set by the patch")
+                    :font-size 12 :color :dim :bg :transparent))
               (if (= kind "env")
                 (env-source-editor section)
                 (if (= kind "lfo")
@@ -274,7 +286,7 @@
                   (if (or (= kind "rand") (= kind "drift"))
                     (pg/fx-param-grid (get section :params) false)
                     (box :width :fill :height 5 :h-align :center :v-align :center
-                      (label "no source controls" :font-size 12 :color :dim :bg :transparent)))))))
+                      (label "no source controls" :font-size 12 :color :dim :bg :transparent))))))))
           (box :width :fill :height :fill :h-align :center :v-align :center
             (label "no source controls" :font-size 12 :color :dim :bg :transparent)))))))
 

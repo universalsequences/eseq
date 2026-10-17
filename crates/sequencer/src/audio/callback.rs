@@ -698,10 +698,13 @@ pub(super) fn render_audio_block(
                 pool.invalidate_sound_cache();
             }
             data.pending_accum_reset = [true; MAX_TRACKS];
+            data.mod_triggers.clear_latches();
         }
         if !playing && data.last_playing {
             data.scheduled_events.clear();
             clear_transport_countdown_events(data);
+            data.mod_triggers.clear_latches();
+            data.mod_triggers.clear_pending();
         }
         data.last_playing = playing;
         data.last_pattern = pattern;
@@ -779,6 +782,7 @@ pub(super) fn render_audio_block(
     let mut event_clock = phase_clock;
     #[cfg(feature = "audio-experiments")]
     { data.event_profile = super::experiment::EventProfile::default(); }
+    begin_mod_trigger_block(data, num_tracks, transport_playing);
     collect_due_countdown_events(data, nframes, current_pattern_epoch);
     #[cfg(feature = "audio-experiments")]
     { data.event_profile.countdown_us = super::experiment::phase_elapsed(&mut event_clock); }
@@ -825,6 +829,7 @@ pub(super) fn render_audio_block(
     #[cfg(feature = "audio-experiments")]
     let voice_retirement_us = super::experiment::phase_elapsed(&mut phase_clock);
     render_chunk(data, output);
+    detect_mod_triggers(data, num_tracks, nframes, transport_playing);
     #[cfg(feature = "audio-experiments")]
     let render_us = super::experiment::phase_elapsed(&mut phase_clock);
     if let Some(render_start) = render_start {

@@ -2475,6 +2475,20 @@
     }
 
     #[test]
+    #[ignore = "release-mode perf probe: custom audio-fx knob press + first drag in an UNSELECTED lego section (section select inside the timed region) versus warm drags in the selected section; ESEQ_PROBE_CUSTOM_FX names the effect (default pin-matrix)"]
+    fn project_92_full_layout_custom_fx_section_knob_drag_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-full-layout-custom-fx-section-probe".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| {
+                project_92_ui_performance_probe_impl(Project92UiProbe::CustomFxSectionKnobDrag)
+            })
+            .expect("spawn project 92 custom-fx section knob probe")
+            .join()
+            .expect("project 92 custom-fx section knob probe should pass");
+    }
+
+    #[test]
     #[ignore = "eseq-oja8: release-mode perf probe: one p-lock printing frame (play+record, no selection) from a real set-instrument-param dispatch through tick_step_print, invalidation apply, reactive cycle, frame and retained update, against the same knob tick with recording off"]
     fn project_92_full_layout_print_plock_knob_drag_end_to_end_perf() {
         std::thread::Builder::new()
@@ -2634,6 +2648,12 @@
         /// costs the other probes deliberately pay outside their clocks are
         /// exactly what this probe measures.
         InstrumentKnobColdFocusDrag,
+        /// A custom audio effect (ESEQ_PROBE_CUSTOM_FX, default
+        /// `pin-matrix`) on track 0: each round presses + first-drags a lego
+        /// knob in a section that is NOT selected, so the knob's on-change
+        /// selects its section inside the timed region; the warm drags stay
+        /// in the now-selected section.
+        CustomFxSectionKnobDrag,
         /// One p-lock PRINTING frame (eseq-oja8): transport playing, record
         /// armed, no selection, so `set-instrument-param` stops authoring a
         /// base value and latches a print target instead, and every UI frame
@@ -2721,6 +2741,7 @@
                 | Project92UiProbe::GroupTrackSelection
                 | Project92UiProbe::GroupTrackSelectionSmoke
                 | Project92UiProbe::InstrumentKnobColdFocusDrag
+                | Project92UiProbe::CustomFxSectionKnobDrag
                 | Project92UiProbe::PrintPlockKnobDrag
                 | Project92UiProbe::RackSlotPlockKnobDrag
                 | Project92UiProbe::TritonAdsrDrag
@@ -2814,6 +2835,7 @@
         } else if matches!(
             probe,
             Project92UiProbe::InstrumentKnobColdFocusDrag
+                | Project92UiProbe::CustomFxSectionKnobDrag
                 | Project92UiProbe::PrintPlockKnobDrag
                 | Project92UiProbe::RackSlotPlockKnobDrag
                 | Project92UiProbe::TritonAdsrDrag
@@ -3102,6 +3124,16 @@
                 pool_sizes.iter().all(|len| *len >= POOL_CLIPS_PER_TRACK),
                 "launch fixture must grow every pool to {POOL_CLIPS_PER_TRACK} clips, got {pool_sizes:?}"
             );
+        }
+
+        if probe == Project92UiProbe::CustomFxSectionKnobDrag {
+            // The custom audio effect under test, on track 0 (the panel the
+            // *fx* tile shows), added before the prologue's syncs.
+            let name = std::env::var("ESEQ_PROBE_CUSTOM_FX")
+                .unwrap_or_else(|_| "pin-matrix".to_string());
+            app.add_saved_effect_sync(0, &name)
+                .unwrap_or_else(|error| panic!("add custom audio fx {name:?}: {error}"));
+            eprintln!("[custom-fx-section-probe-effect] {name}");
         }
 
         if matches!(
@@ -4865,6 +4897,7 @@
         if matches!(
             probe,
             Project92UiProbe::InstrumentKnobColdFocusDrag
+                | Project92UiProbe::CustomFxSectionKnobDrag
                 | Project92UiProbe::TritonAdsrDrag
                 | Project92UiProbe::PrintPlockKnobDrag
                 | Project92UiProbe::RackSlotPlockKnobDrag
@@ -4876,7 +4909,12 @@
             let triton_probe = probe == Project92UiProbe::TritonAdsrDrag;
             let print_probe = probe == Project92UiProbe::PrintPlockKnobDrag;
             let rack_probe = probe == Project92UiProbe::RackSlotPlockKnobDrag;
-            let probe_prefix = if triton_probe {
+            let fx_section_probe = probe == Project92UiProbe::CustomFxSectionKnobDrag;
+            let custom_fx_name = std::env::var("ESEQ_PROBE_CUSTOM_FX")
+                .unwrap_or_else(|_| "pin-matrix".to_string());
+            let probe_prefix = if fx_section_probe {
+                "project-92-fullayout-custom-fx-section-knob"
+            } else if triton_probe {
                 "project-92-fullayout-triton-adsr"
             } else if print_probe {
                 "project-92-fullayout-print-plock"
@@ -4964,14 +5002,90 @@
                 "production layout must show the *transport* bar"
             );
 
-            {
-            }
+            // The panels read the host kinds (`project.tracks`, devices,
+            // params); the live loop syncs them every tick, so the probe does
+            // too, inside the visible update below.
+            let kinds_handles = super::host_kinds::KindsHandles {
+                state: state.clone(),
+                current_track: current_track.clone(),
+                selected_steps: selected_steps.clone(),
+                active_delete_target: active_delete_target.clone(),
+                active_delete_target_version: active_delete_target_version.clone(),
+                record_armed: record_armed.clone(),
+                recording: recording.clone(),
+                master_recording: master_recording.clone(),
+                selected_tracks: selected_tracks.clone(),
+                track_collapsed: track_collapsed.clone(),
+                ui_epoch: ui_epoch.clone(),
+                fx_epoch: fx_epoch.clone(),
+                ui_invalidations: ui_invalidations.clone(),
+                step_print: Default::default(),
+                auto_follow_override_until: auto_follow_override_until.clone(),
+                armed_rack: Arc::new(Mutex::new(None)),
+                bus_state: bus_state.clone(),
+                selected_neural_neurons: selected_neural_neurons.clone(),
+                piano_roll_selection: piano_roll_selection.clone(),
+            };
+            let mut host_kinds = super::host_kinds::HostKinds::default();
 
             app.sync_track_sound_bindings();
+            host_kinds.sync_with(&app, editor.runtime_mut(), &kinds_handles, &Default::default());
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             editor.update_tile_rects(vp_cols, vp_rows);
 
+            if fx_section_probe {
+                // The custom effect sits after the instrument and the
+                // track's other effects: scroll the *fx* tile so its panel
+                // starts at the tile's left edge, as the user would.
+                let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                    &mut editor,
+                    vp_cols as usize,
+                    vp_rows as usize,
+                );
+                let fx = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*fx*")
+                    .expect("visible fx tile");
+                let layout = fx.frame.widget_layout.as_ref().expect("fx layout");
+                let mut panels = Vec::new();
+                collect_layout_nodes(
+                    layout,
+                    &mut |node| {
+                        node.stable_key.as_deref().is_some_and(|key| {
+                            key.starts_with("audio-fx-panel-") && key.ends_with(custom_fx_name.as_str())
+                        })
+                    },
+                    &mut panels,
+                );
+                let panel_col = panels
+                    .first()
+                    .map(|node| node.rect.col)
+                    .unwrap_or_else(|| panic!("no audio-fx-panel for {custom_fx_name}"));
+                let fx_buffer_idx = editor
+                    .buffers
+                    .iter()
+                    .position(|buffer| buffer.name == "*fx*")
+                    .expect("fx buffer index");
+                let fx_tile_id = editor
+                    .tile_root
+                    .leaf_ids()
+                    .into_iter()
+                    .find(|tile_id| {
+                        editor
+                            .tile_root
+                            .find_leaf(*tile_id)
+                            .is_some_and(|leaf| leaf.buffer_idx == fx_buffer_idx)
+                    })
+                    .expect("fx tile");
+                editor
+                    .tile_root
+                    .find_leaf_mut(fx_tile_id)
+                    .expect("fx leaf")
+                    .widget_scroll_left = (panel_col - 1.0).max(0.0);
+                eprintln!("[{probe_prefix}-scroll] fx scroll_left={panel_col:.1}");
+            }
             let initial_frame = eseqlisp::frame::build_tiled_render_frame_borderless(
                 &mut editor,
                 vp_cols as usize,
@@ -5153,6 +5267,7 @@
              -> ColdUpdate {
                 let started = Instant::now();
                 app.sync_track_sound_bindings();
+                host_kinds.sync_with(app, editor.runtime_mut(), &kinds_handles, &Default::default());
                 let tick_sync_done = Instant::now();
                 let invalidations = ui_invalidations.drain();
                 if !invalidations.is_empty() {
@@ -5317,6 +5432,7 @@
                         .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_digit()))
                 })
             };
+            let fx_section_round = std::cell::Cell::new(0usize);
             let locate_target = |editor: &mut Editor| -> (f32, f32, u64) {
                 let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
                     editor,
@@ -5329,7 +5445,93 @@
                     .find(|tile| tile.frame.buffer_name == "*fx*")
                     .expect("visible fx tile");
                 let layout = fx.frame.widget_layout.as_ref().expect("fx layout");
-                let (local_col, local_row, widget_id) = if triton_probe {
+                let (local_col, local_row, widget_id) = if fx_section_probe {
+                    // Alternate between the first and the last on-screen lego
+                    // knob of the custom effect (different sections), so each
+                    // round's press lands in an unselected section.
+                    let mut nodes = Vec::new();
+                    collect_layout_nodes(
+                        layout,
+                        &mut |node| {
+                            node.widget_type == "knob-number"
+                                && node.stable_key.as_deref().is_some_and(|key| {
+                                    key.starts_with("custom-ui-lego-knob-")
+                                })
+                        },
+                        &mut nodes,
+                    );
+                    // Scroll as this frame has it (a panel rerun may move it).
+                    let cur_scroll_left = fx.frame.widget_layout_scroll_left;
+                    let cur_scroll_top =
+                        fx.frame.widget_scroll_top + fx.frame.text_scroll_top as f32;
+                    let cur_origin_col = fx.body_rect.col.floor();
+                    let cur_origin_row = fx.body_rect.row.floor();
+                    let on_screen: Vec<_> = nodes
+                        .iter()
+                        .filter(|node| {
+                            let center_col = cur_origin_col + node.rect.col
+                                + node.rect.width * 0.5
+                                - cur_scroll_left;
+                            let center_row = cur_origin_row + node.rect.row
+                                + node.rect.height * 0.5
+                                - cur_scroll_top;
+                            center_col >= fx_body_rect.col
+                                && center_col < fx_body_rect.col + fx_body_rect.width
+                                && center_row >= fx_body_rect.row
+                                && center_row < fx_body_rect.row + fx_body_rect.height
+                        })
+                        .copied()
+                        .collect();
+                    if on_screen.len() < 2 {
+                        let mut all = Vec::new();
+                        collect_layout_nodes(layout, &mut |_| true, &mut all);
+                        let mut hist = std::collections::BTreeMap::<String, usize>::new();
+                        for node in &all {
+                            *hist.entry(node.widget_type.clone()).or_default() += 1;
+                        }
+                        eprintln!("[{probe_prefix}-types] {hist:?}");
+                        eprintln!(
+                            "[{probe_prefix}-labels] {:?}",
+                            all.iter().filter_map(|node| node.stable_key.clone()).take(80).collect::<Vec<_>>()
+                        );
+                    }
+                    assert!(
+                        on_screen.len() >= 2,
+                        "need two on-screen lego knobs of {custom_fx_name}, found {} of {}",
+                        on_screen.len(),
+                        nodes.len()
+                    );
+                    let round = fx_section_round.get();
+                    fx_section_round.set(round + 1);
+                    let pick = |var: &str, fallback: usize| {
+                        std::env::var(var)
+                            .ok()
+                            .and_then(|name| {
+                                on_screen.iter().position(|node| {
+                                    node.stable_key.as_deref().is_some_and(|key| key.ends_with(&format!("-{name}")))
+                                })
+                            })
+                            .unwrap_or(fallback)
+                    };
+                    let node = if round % 2 == 0 {
+                        on_screen[pick("ESEQ_PROBE_KNOB_A", 0)]
+                    } else {
+                        on_screen[pick("ESEQ_PROBE_KNOB_B", on_screen.len() - 1)]
+                    };
+                    eprintln!(
+                        "[{probe_prefix}-target] round={round} key={:?} knobs_on_screen={} total={} scroll_left={cur_scroll_left:.1} (initial {fx_scroll_left:.1})",
+                        node.stable_key, on_screen.len(), nodes.len()
+                    );
+                    // Re-expressed against the initial frame's origin/scroll,
+                    // which the shared conversion below applies.
+                    (
+                        cur_origin_col - fx_origin_col + node.rect.col + node.rect.width * 0.5
+                            - cur_scroll_left + fx_scroll_left,
+                        cur_origin_row - fx_origin_row + node.rect.row + node.rect.height * 0.5
+                            - cur_scroll_top + fx_scroll_top,
+                        node.widget_id,
+                    )
+                } else if triton_probe {
                     let mut nodes = Vec::new();
                     collect_layout_nodes(
                         layout,
@@ -6353,12 +6555,23 @@
 
                 // --- cold: press + immediate first drag, all inside the
                 // timed region ------------------------------------------
-                let cold_offset = if round % 2 == 0 { 1.2 } else { -1.2 };
+                let cold_offset = if fx_section_probe {
+                    // Each knob is hit every other round: alternate its
+                    // direction per visit so it never pins at a range end.
+                    if (round / 2) % 2 == 0 { 1.2 } else { -1.2 }
+                } else if round % 2 == 0 {
+                    1.2
+                } else {
+                    -1.2
+                };
                 let (drag_col, drag_row) = if triton_probe {
                     (down_col + cold_offset, down_row)
                 } else {
                     (down_col, down_row + cold_offset)
                 };
+                if fx_section_probe {
+                    eprintln!("[{probe_prefix}-mark] round={round} press");
+                }
                 let started = Instant::now();
                 editor.handle_tiled_mouse_precise(
                     mouse_event(
@@ -6372,6 +6585,9 @@
                 );
                 let down_commands = editor.drain_host_commands();
                 let down_done = Instant::now();
+                if fx_section_probe {
+                    eprintln!("[{probe_prefix}-mark] round={round} first-drag");
+                }
                 editor.handle_tiled_mouse_precise(
                     mouse_event(
                         MouseEventKind::Drag(MouseButton::Left),
@@ -6459,10 +6675,39 @@
                         );
                     }
                 }
+                if fx_section_probe {
+                    eprintln!("[{probe_prefix}-mark] round={round} host");
+                    for command in &commands {
+                        if let HostCommand::Custom { name, payload } = command {
+                            eprintln!("[{probe_prefix}-command] round={round} {name} {}", format!("{payload:?}").chars().take(300).collect::<String>());
+                        }
+                    }
+                }
                 apply_host_commands(&mut editor, &mut app, commands);
                 let host_done = Instant::now();
+                if fx_section_probe {
+                    eprintln!("[{probe_prefix}-mark] round={round} visible-update");
+                }
                 let update = finish_visible_update(&mut editor, &mut app, &mut tile_retained);
                 let cold_total = duration_ms(started.elapsed());
+                if fx_section_probe {
+                    let selected = editor
+                        .runtime_mut()
+                        .eval_str("eseq.vanilla/custom-ui-selected-section");
+                    eprintln!("[{probe_prefix}-section] round={round} {selected:?}");
+                    eprintln!(
+                        "[{probe_prefix}-round] round={round} total_ms={cold_total:.2} down_ms={:.2} first_drag_ms={:.2} host_ms={:.2} tick_sync_ms={:.2} invalidation_ms={:.2} reactive_ms={:.2} frame_ms={:.2} retained_ms={:.2} scene_ms={:.2}",
+                        duration_ms(down_done - started),
+                        duration_ms(dispatch_done - down_done),
+                        duration_ms(host_done - dispatch_done),
+                        update.tick_sync_ms,
+                        update.invalidation_ms,
+                        update.reactive_ms,
+                        update.frame_ms,
+                        update.retained_ms,
+                        update.scene_ms,
+                    );
+                }
                 samples.cold_total.push(cold_total);
                 samples
                     .cold_dispatch
@@ -6498,6 +6743,10 @@
                     );
                     let commands = editor.drain_host_commands();
                     let dispatch_done = Instant::now();
+                    if fx_section_probe && commands.is_empty() {
+                        // A stepped knob pinned at a range end emits nothing.
+                        continue;
+                    }
                     assert!(
                         !commands.is_empty(),
                         "round {round}: warm drag {iteration} must emit a host command"
@@ -14071,7 +14320,7 @@
             filter_id: 0,
             delay_id: 0,
             send_id: 0,
-            mod_out_id: 0,
+            mod_out_ids: [0; sequencer::sequencer::MAX_TRACK_MOD_OUTPUTS],
             mod_in_clip_ids: [0; sequencer::sequencer::EXT_MOD_INPUT_COUNT],
             mod_env_id: 0,
             bus_send_ids: Vec::new(),

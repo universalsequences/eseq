@@ -30,6 +30,8 @@ pub(crate) enum ActiveDeleteTarget {
     },
     ModRoute {
         source: usize,
+        /// The source's mod output, from 0.
+        output: usize,
         destination: sequencer::sequencer::ModDestination,
         input: usize,
     },
@@ -1427,6 +1429,18 @@ pub(super) fn reset_effect_patcher_state(path: &Path) {
         path,
         eseqlisp::widget_render::patcher::PatcherIntent::Effect,
     );
+}
+
+/// After a Save wrote `saved_path`: when that is the file the patcher edits
+/// (`patcher_path`), the saved source already holds every pending patcher
+/// edit, so the patcher starts a fresh edit epoch on it. A save elsewhere (a
+/// draft's home) leaves the patcher's file, and so its edits, as they were.
+pub(super) fn rebase_patcher_after_save(patcher_path: &Path, saved_path: &Path) {
+    if patcher_path == saved_path {
+        eseqlisp::widget_render::patcher::rebase_patcher_state_on_saved_source_for_path(
+            patcher_path,
+        );
+    }
 }
 
 pub(super) fn escape_lisp_string(value: &str) -> String {

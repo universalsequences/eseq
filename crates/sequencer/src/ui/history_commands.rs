@@ -595,6 +595,21 @@ pub(super) fn slice3_command(
             track: track_required()?,
             enabled: value()? != 0.0,
         },
+        // value = input * 16 + role index (docs/mod-input-roles-spec.md).
+        "mod-role" => {
+            let packed = value()?.max(0.0) as u32;
+            app::AppCommand::SetTrackModRoles {
+                track: track_required()?,
+                edit: app::ModRolesEdit::Role {
+                    input: (packed / 16) as usize,
+                    role: sequencer::sequencer::ModInputRole::from_index(packed % 16),
+                },
+            }
+        }
+        "mod-steps" => app::AppCommand::SetTrackModRoles {
+            track: track_required()?,
+            edit: app::ModRolesEdit::Steps(sequencer::sequencer::ModSteps::from_index(value()? as u32)),
+        },
         "base-note" => app::AppCommand::SetInstrumentBaseNoteOffset {
             track: track_required()?,
             value: value()? as f32,

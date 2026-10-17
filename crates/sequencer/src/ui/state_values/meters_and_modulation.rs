@@ -210,7 +210,7 @@ pub(crate) struct ModPortLevels {
     /// Per track: the four IN clip peaks.
     pub(crate) track_inputs: Vec<[f64; sequencer::sequencer::EXT_MOD_INPUT_COUNT]>,
     /// Per track: the OUT hub peak.
-    pub(crate) track_outputs: Vec<f64>,
+    pub(crate) track_outputs: Vec<[f64; sequencer::sequencer::MAX_TRACK_MOD_OUTPUTS]>,
     /// Per bus (keyed by bus id): the four IN clip peaks.
     pub(crate) bus_inputs: Vec<(u64, [f64; sequencer::sequencer::EXT_MOD_INPUT_COUNT])>,
 }
@@ -228,7 +228,7 @@ pub(crate) fn read_mod_port_levels(
         );
         levels
             .track_outputs
-            .push(read_mod_tap_level(lg, nodes.mod_out_id));
+            .push(nodes.mod_out_ids.map(|node_id| read_mod_tap_level(lg, node_id)));
     }
     for bus in &app.graph.bus_node_ids {
         levels.bus_inputs.push((

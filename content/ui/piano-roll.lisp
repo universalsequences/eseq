@@ -432,6 +432,7 @@
             :width clip-panel-width
             :height 1.0
             :padding 0
+            :corner-radius 0
             :font-size 10
             :h-align :left
             :background-color (color-rgba t.color 1.0)

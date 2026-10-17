@@ -3649,6 +3649,50 @@ use panel_kinds_seed::*;
         }
     }
 
+    /// A draft saved in place keeps its `*instrument-patcher:new-instrument*`
+    /// buffer as it becomes an edit, and Save as… forks it into a draft with
+    /// that same buffer name. The modal must still open (it keyed on the
+    /// buffer name alone and never did).
+    #[test]
+    fn metal_seq_patch_toolbar_save_as_on_a_saved_draft_opens_the_naming_modal() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let draft_buffer = "*instrument-patcher:new-instrument*";
+        patch_toolbar_tree(
+            &mut editor,
+            &[
+                ("mode", Value::String("new-instrument".into())),
+                ("buffer", Value::String(draft_buffer.into())),
+                ("dirty", Value::Bool(true)),
+            ],
+        );
+        // Saved in place: same buffer, now an edit of the saved instrument.
+        let tree = patch_toolbar_tree(
+            &mut editor,
+            &[
+                ("mode", Value::String("edit-instrument".into())),
+                ("title", Value::String("wetbass".into())),
+                ("dirty", Value::Bool(false)),
+            ],
+        );
+        assert!(value_contains_string(&tree, "Save as…"));
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.patch-toolbar/save-as!)")
+            .expect("save as");
+        // The host forks into a draft session under the same buffer name.
+        let tree = patch_toolbar_tree(
+            &mut editor,
+            &[
+                ("mode", Value::String("new-instrument".into())),
+                ("buffer", Value::String(draft_buffer.into())),
+                ("dirty", Value::Bool(true)),
+            ],
+        );
+        for text in ["instrument name", "Cancel"] {
+            assert!(value_contains_string(&tree, text), "Save as… must ask the fork's name: {text}");
+        }
+    }
+
     #[test]
     fn metal_seq_patch_toolbar_save_as_on_a_draft_asks_its_name_at_once() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -39209,6 +39253,255 @@ use panel_kinds_seed::*;
         }
     }
 
+    /// Felucca CZ's real instrument source: every knob in the default view, the
+    /// wave display and dropdowns on PHASE, LINE's mode and ENVELOPE's editor.
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_felucca_cz_panel() {
+        fn find_param<'a>(node: &'a eseqlisp::layout::LayoutNode, suffix: &str)
+            -> Option<&'a eseqlisp::layout::LayoutNode>
+        {
+            if node.stable_key.as_deref().is_some_and(|key| key.ends_with(suffix)) {
+                return Some(node);
+            }
+            node.children.iter().find_map(|child| find_param(child, suffix))
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../content/instruments/Synths/Felucca CZ");
+        let dsp = std::fs::read_to_string(root.join("dsp.lisp")).unwrap();
+        let ui = std::fs::read_to_string(root.join("ui.lisp")).unwrap();
+        // Every top-level `(param …)` of the shipped source, in manifest order,
+        // so the panel is laid out against the real parameter set.
+        let names: Vec<String> = dsp.lines().filter(|line| line.starts_with("(param "))
+            .map(|line| line.split_whitespace().nth(1).unwrap().to_string()).collect();
+        let params = dsp.lines().filter(|line| line.starts_with("(param "))
+            .enumerate().map(|(index, line)| {
+                let words: Vec<_> = line.trim_end_matches(')').split_whitespace().collect();
+                let number = |key| {
+                    let pos = words.iter().position(|word| *word == key).unwrap();
+                    words[pos + 1].parse::<f64>().unwrap()
+                };
+                Value::Map(test_param_map(words[1], index, number("@default"), number("@min"), number("@max")))
+            }).collect();
+        let mut inst = test_instrument_map();
+        inst.insert("synth".to_string(), Rc::new(RefCell::new(test_list(params))));
+        let custom_ui = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(), root.join("ui.lisp").display().to_string(), ui,
+        )));
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 24);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(inst)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
+        seed_values(vec![
+        ]);
+        editor.runtime_mut().eval_str(r#"
+            (def eseq.seq-core-state/selected-bus-name () "Mix")
+            (def seq-has-selection? () false)
+            (def eseq.browser/clear-editor-name! () nil)
+            (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+            (def custom-midi-fx-ui (fx) false)
+            (def custom-audio-fx-ui (fx) false)
+            (defstate eseq.seq-core-state/selected-bus -1)
+        "#).unwrap();
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&custom_ui).expect("load Felucca CZ UI");
+        editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap()).unwrap();
+        seed_panel_kinds(&mut editor, &panel_seed);
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("Felucca CZ fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
+        editor.set_active_buffer(fx_id);
+
+        // Default view: the PHASE page plus every knob panel. The wave
+        // selectors live on PHASE, LINE's mode on LINE and the decay and
+        // sustain fields on ENVELOPE.
+        let layout = editor.widget_layout().expect("default Felucca CZ layout");
+        let panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(panel.rect.width > 70.0 && panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}", panel.rect);
+        let display = find_layout_node_by_debug_name(&layout, "mnm-display").expect("detail display");
+        assert_finite_nonzero_rect(display, "mnm-display");
+        for section in 0..4 {
+            let node = find_layout_node_by_debug_name(&layout, &format!("mnm-panel-{section}"))
+                .unwrap_or_else(|| panic!("mnm-panel-{section}"));
+            assert_finite_nonzero_rect(node, "mnm-panel");
+        }
+        for name in names.iter().filter(|n| !matches!(n.as_str(),
+            "wave" | "wave2" | "line" | "amp_decay_ms" | "amp_sustain"))
+        {
+            let control = find_param(&layout, name)
+                .unwrap_or_else(|| panic!("missing default-view control for {name}"));
+            assert_finite_nonzero_rect(control, name);
+        }
+        for name in ["fcz-wave", "mnm-option-wave", "mnm-option-wave2"] {
+            let node = find_layout_node_by_debug_name(&layout, name)
+                .unwrap_or_else(|| panic!("missing PHASE page node {name}"));
+            assert_finite_nonzero_rect(node, name);
+        }
+
+        // Pages are selected through the real per-scope state (the scope name
+        // is the instrument name the overlay registered): a reactive write,
+        // so the memoized panel subtree re-renders.
+        editor.runtime_mut()
+            .eval_str(r#"(eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope (dict :name "test-instrument") 1)"#)
+            .expect("select the LINE section");
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("Felucca CZ LINE layout");
+        assert_finite_nonzero_rect(
+            find_layout_node_by_debug_name(&layout, "mnm-option-line").expect("line mode dropdown"),
+            "mnm-option-line",
+        );
+
+        // ENVELOPE page: the envelope editor and its four number fields.
+        editor.runtime_mut()
+            .eval_str(r#"(eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope (dict :name "test-instrument") 2)"#)
+            .expect("select the ENVELOPE section");
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("Felucca CZ ENVELOPE layout");
+        let adsr = find_layout_node_by_debug_name(&layout, "fcz-amp").expect("amp adsr editor");
+        assert!(adsr.rect.width > 8.0 && adsr.rect.height > 2.0 && adsr.rect.height <= 4.0,
+            "ADSR editor should stay constrained in the detail display, got {:?}", adsr.rect);
+        // Non-modulatable params get no keyed mod wrapper, so the page's
+        // number fields are found by the picker's debug name.
+        for name in ["amp_attack_ms", "amp_decay_ms", "amp_sustain", "amp_release_ms"] {
+            let control = find_layout_node_by_debug_name(&layout, &format!("mnm-num-{name}"))
+                .unwrap_or_else(|| panic!("missing ENVELOPE page control for {name}"));
+            assert_finite_nonzero_rect(control, name);
+        }
+    }
+
+    /// Felucca FM6's generated source: every knob and operator box in the default
+    /// view, and each display page's controls once its panel is selected.
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_felucca_fm6_panel() {
+        fn find_param<'a>(node: &'a eseqlisp::layout::LayoutNode, suffix: &str)
+            -> Option<&'a eseqlisp::layout::LayoutNode>
+        {
+            if node.stable_key.as_deref().is_some_and(|key| key.ends_with(suffix)) {
+                return Some(node);
+            }
+            node.children.iter().find_map(|child| find_param(child, suffix))
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../content/instruments/Synths/Felucca FM6");
+        let dsp = std::fs::read_to_string(root.join("dsp.lisp")).unwrap();
+        let ui = std::fs::read_to_string(root.join("ui.lisp")).unwrap();
+        // Every top-level `(param …)` of the shipped source, in manifest order,
+        // so the panel is laid out against the real parameter set.
+        let names: Vec<String> = dsp.lines().filter(|line| line.starts_with("(param "))
+            .map(|line| line.split_whitespace().nth(1).unwrap().to_string()).collect();
+        let params = dsp.lines().filter(|line| line.starts_with("(param "))
+            .enumerate().map(|(index, line)| {
+                let words: Vec<_> = line.trim_end_matches(')').split_whitespace().collect();
+                let number = |key| {
+                    let pos = words.iter().position(|word| *word == key).unwrap();
+                    words[pos + 1].parse::<f64>().unwrap()
+                };
+                Value::Map(test_param_map(words[1], index, number("@default"), number("@min"), number("@max")))
+            }).collect();
+        let mut inst = test_instrument_map();
+        inst.insert("synth".to_string(), Rc::new(RefCell::new(test_list(params))));
+        let custom_ui = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(), root.join("ui.lisp").display().to_string(), ui,
+        )));
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 24);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(inst)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
+        seed_values(vec![
+        ]);
+        editor.runtime_mut().eval_str(r#"
+            (def eseq.seq-core-state/selected-bus-name () "Mix")
+            (def seq-has-selection? () false)
+            (def eseq.browser/clear-editor-name! () nil)
+            (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+            (def custom-midi-fx-ui (fx) false)
+            (def custom-audio-fx-ui (fx) false)
+            (defstate eseq.seq-core-state/selected-bus -1)
+        "#).unwrap();
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&custom_ui).expect("load Felucca FM6 UI");
+        editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap()).unwrap();
+        seed_panel_kinds(&mut editor, &panel_seed);
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("Felucca FM6 fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
+        editor.set_active_buffer(fx_id);
+
+        // Default view: the ALGORITHM page, the knob panels and the six
+        // operator boxes; every other control lives on a display page.
+        let layout = editor.widget_layout().expect("default Felucca FM6 layout");
+        let panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(panel.rect.width > 70.0 && panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}", panel.rect);
+        assert_finite_nonzero_rect(
+            find_layout_node_by_debug_name(&layout, "mnm-display").expect("detail display"), "mnm-display");
+        for section in [0, 7, 8, 9] {
+            let node = find_layout_node_by_debug_name(&layout, &format!("mnm-panel-{section}"))
+                .unwrap_or_else(|| panic!("mnm-panel-{section}"));
+            assert_finite_nonzero_rect(node, "mnm-panel");
+        }
+        for name in ["algorithm", "feedback", "gain", "mod_level", "mod_env", "detune_spread",
+            "lfo_speed", "lfo_pmd", "peg_level1", "peg_rate1"]
+        {
+            let control = find_param(&layout, name)
+                .unwrap_or_else(|| panic!("missing default-view knob for {name}"));
+            assert_finite_nonzero_rect(control, name);
+        }
+        for op in 1..=6 {
+            for name in [format!("fz-op-{op}"), format!("fz-num-op{op}_out")] {
+                let node = find_layout_node_by_debug_name(&layout, &name)
+                    .unwrap_or_else(|| panic!("missing operator box node {name}"));
+                assert_finite_nonzero_rect(node, &name);
+            }
+        }
+        assert!(names.len() == 150, "the generated source declares 150 params, got {}", names.len());
+
+        // Each page, selected through the real per-scope state (the scope
+        // name is the instrument name the overlay registered): a reactive
+        // write, so the memoized panel subtree re-renders.
+        let op_fields = ["rate1", "rate2", "rate3", "rate4", "level1", "level2", "level3", "level4", "out",
+            "coarse", "fine", "detune", "fixed", "vel", "ams", "rate_scale", "break", "ldepth", "rdepth",
+            "lcurve", "rcurve"];
+        let mut pages: Vec<(usize, Vec<String>)> = (1..=6).map(|op| (op, std::iter::once(format!("fz-env-op{op}_"))
+            .chain(op_fields.iter().map(|field| format!("fz-num-op{op}_{field}"))).collect())).collect();
+        pages.push((7, ["mod_level", "mod_ratio", "mod_env", "mod_vel", "detune_spread"]
+            .iter().map(|name| format!("fz-num-{name}")).collect()));
+        pages.push((8, ["mnm-option-lfo_wave", "mnm-option-lfo_sync", "fz-num-lfo_speed", "fz-num-lfo_delay",
+            "fz-num-lfo_pmd", "fz-num-lfo_amd", "fz-num-lfo_pms"].iter().map(|name| name.to_string()).collect()));
+        pages.push((9, std::iter::once("fz-env-peg_".to_string()).chain(["peg_rate1", "peg_rate2", "peg_rate3",
+            "peg_rate4", "peg_level1", "peg_level2", "peg_level3", "peg_level4", "transpose"]
+            .iter().map(|name| format!("fz-num-{name}"))).collect()));
+        for (section, nodes) in pages {
+            editor.runtime_mut()
+                .eval_str(&format!(r#"(eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope (dict :name "test-instrument") {section})"#))
+                .expect("select a section");
+            editor.refresh_runtime_side_effects();
+            let layout = editor.widget_layout().expect("Felucca FM6 page layout");
+            let display = find_layout_node_by_debug_name(&layout, "mnm-display").expect("detail display");
+            for name in nodes {
+                let node = find_layout_node_by_debug_name(&layout, &name)
+                    .unwrap_or_else(|| panic!("page {section}: missing {name}"));
+                assert_finite_nonzero_rect(node, &name);
+                assert!(node.rect.row + node.rect.height <= display.rect.row + display.rect.height + 0.01,
+                    "page {section}: {name} spills below the display, {:?} / {:?}", node.rect, display.rect);
+            }
+        }
+    }
+
     #[test]
     fn heat_ui_sections_have_visible_parameter_controls() {
         fn find_param<'a>(node: &'a eseqlisp::layout::LayoutNode, suffix: &str)
@@ -39816,6 +40109,158 @@ use panel_kinds_seed::*;
                 "{suffix} should be laid out exactly once (no repeated knobs/panels), got {count}"
             );
         }
+    }
+
+    /// Lays out a factory synth's custom panel in the *fx* buffer with every
+    /// `(param …)` from its dsp.lisp, checks each control is laid out exactly
+    /// once inside the visible instrument panel, and returns the layout.
+    fn lay_out_factory_synth_panel(name: &str) -> std::sync::Arc<eseqlisp::layout::LayoutNode> {
+        fn count_stable_key_suffix(node: &eseqlisp::layout::LayoutNode, suffix: &str) -> usize {
+            if node.stable_key.as_deref().is_some_and(|key| key.ends_with(suffix)) {
+                return 1;
+            }
+            node.children.iter().map(|child| count_stable_key_suffix(child, suffix)).sum()
+        }
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.stable_key.as_deref().is_some_and(|key| key.ends_with(suffix)) {
+                return Some(node);
+            }
+            node.children.iter().find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
+        let ui_path = format!("instruments/Synths/{name}/ui.lisp");
+        let ui = read_factory_source(&ui_path).unwrap_or_else(|err| panic!("read {name} ui: {err}"));
+        let custom_ui_source =
+            build_custom_instrument_ui_source_with_overlay(Some(("test-instrument".to_string(), ui_path, ui)));
+        let dsp = read_factory_source(&format!("instruments/Synths/{name}/dsp.lisp"))
+            .unwrap_or_else(|err| panic!("read {name} dsp: {err}"));
+        let params: Vec<(String, f64, f64, f64)> = dsp
+            .lines()
+            .map(|line| line.split(';').next().unwrap().trim())
+            .filter(|line| line.starts_with("(param "))
+            .map(|line| {
+                let words: Vec<_> = line.trim_end_matches(')').split_whitespace().collect();
+                let number = |key| words[words.iter().position(|word| *word == key).unwrap() + 1].parse::<f64>().unwrap();
+                (words[1].to_string(), number("@default"), number("@min"), number("@max"))
+            })
+            .collect();
+        assert!(!params.is_empty(), "{name} dsp.lisp should declare params");
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(
+                params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (param, value, min, max))| {
+                        Value::Map(test_param_map(param, index, *value, *min, *max))
+                    })
+                    .collect(),
+            ))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(inst)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
+        seed_values(vec![]);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def eseq.browser/clear-editor-name! () nil)
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate eseq.seq-core-state/selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&custom_ui_source).expect("load custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor, &panel_seed);
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("{name} fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor.widget_layout().expect("factory synth layout should build");
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(
+            instrument_panel.rect.width > 50.0 && instrument_panel.rect.height > 8.0,
+            "{name} instrument panel should occupy visible measured space, got {:?}",
+            instrument_panel.rect
+        );
+        for (suffix, ..) in &params {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{name}: {suffix} control should be present in layout"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 0.0,
+                "{name}: {suffix} should have a finite nonzero rect, got {:?}",
+                node.rect
+            );
+            assert!(
+                node.rect.row >= instrument_panel.rect.row
+                    && node.rect.row + node.rect.height
+                        <= instrument_panel.rect.row + instrument_panel.rect.height,
+                "{name}: {suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+                node.rect,
+                instrument_panel.rect
+            );
+            assert_eq!(
+                count_stable_key_suffix(&layout, suffix),
+                1,
+                "{name}: {suffix} should be laid out exactly once"
+            );
+        }
+        layout
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_beads_columns() {
+        let layout = lay_out_factory_synth_panel("Beads");
+        let viewer = find_layout_node_by_widget_type(&layout, "wavetable-viewer").expect("wavetable viewer");
+        assert!(
+            viewer.rect.width > 10.0 && viewer.rect.height > 4.0,
+            "wavetable viewer should have a finite nonzero rect, got {:?}",
+            viewer.rect
+        );
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_plaits_columns() {
+        lay_out_factory_synth_panel("Plaits");
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_rings_columns() {
+        lay_out_factory_synth_panel("Rings");
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_elements_columns() {
+        lay_out_factory_synth_panel("Elements");
     }
 
     #[test]
@@ -42554,10 +42999,12 @@ use panel_kinds_seed::*;
             set_field(rt, into_track, "source", Value::Instance(track0));
             set_field(rt, into_track, "dest", Value::Instance(track1));
             set_field(rt, into_track, "input", Value::Number(3.0));
+            set_field(rt, into_track, "output", Value::Number(1.0));
             let into_bus = rt.register_keyed_instance("eseq.kinds:route", &[1]).unwrap();
             set_field(rt, into_bus, "source", Value::Instance(track0));
             set_field(rt, into_bus, "dest-bus", Value::Instance(bus_b));
             set_field(rt, into_bus, "input", Value::Number(2.0));
+            set_field(rt, into_bus, "output", Value::Number(1.0));
             let project = kind_singleton_rt(rt, "project");
             set_field(rt, project, "routes", instance_list([into_track, into_bus]));
             rt.run_reactive_cycle();

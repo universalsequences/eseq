@@ -103,7 +103,7 @@ impl DeviceDescriptor {
             && (mine.instrument_modulators.len()) == desc.instrument_modulators.len()
             && (mine.instrument_modulators.iter())
                 .zip(&desc.instrument_modulators)
-                .all(|(a, b)| a.slot == b.slot && a.label == b.label)
+                .all(|(a, b)| a.slot == b.slot && a.label == b.label && a.ext == b.ext)
             && (mine.instrument_modulation_targets.len())
                 == desc.instrument_modulation_targets.len()
             && (mine.instrument_modulation_targets.iter())

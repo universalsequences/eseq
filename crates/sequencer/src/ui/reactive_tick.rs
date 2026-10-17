@@ -863,7 +863,7 @@ pub(crate) fn poll_observed_meters(app: &app::App, ctx: &mut LoopCtx<'_>, ct: us
     if was.mod_levels && !demand.mod_levels {
         let levels = &mut meters.cached_mod_port_levels;
         levels.track_inputs.iter_mut().for_each(|inputs| inputs.fill(0.0));
-        levels.track_outputs.fill(0.0);
+        levels.track_outputs.iter_mut().for_each(|outputs| outputs.fill(0.0));
         levels.bus_inputs.iter_mut().for_each(|(_, inputs)| inputs.fill(0.0));
     }
     // Effective (post-modulation) param values (eseq-dtx.13, generalized in

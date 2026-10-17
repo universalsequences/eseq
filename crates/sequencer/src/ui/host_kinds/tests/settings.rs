@@ -753,6 +753,8 @@ fn routes_and_bus_outputs_read_set_and_keep_identity() {
     assert_eq!(h.eval_7i("r.dest"), h.eval_7i("(track 0)"));
     assert_eq!(h.eval_7i("r.dest-bus"), Value::Nil);
     assert_eq!(h.eval_7i("r.input"), Value::Number(2.0), "inputs are 1-4");
+    assert_eq!(h.eval_7i("r.output"), Value::Number(1.0), "outputs are 1-4");
+    assert_eq!(h.eval_7i("m.mod-outputs"), Value::Number(1.0));
     assert_eq!(h.eval_7i("rb.dest"), Value::Nil);
     assert_eq!(h.eval_7i("rb.dest-bus.bid"), Value::Number(a.0 as f64));
     assert_eq!(h.eval_7i("rb.input"), Value::Number(4.0));
@@ -943,7 +945,7 @@ fn new_live_fields_are_computed_only_while_observed() {
     h.eval_7i("(def t0 (track 0)) (def r (first (routes))) (def fx (nth (buses) 1))");
     let levels = |level: f64, h: &Harness| ModPortLevels {
         track_inputs: vec![[level; 4]; h.app.tracks.len()],
-        track_outputs: vec![level; h.app.tracks.len()],
+        track_outputs: vec![[level; sequencer::sequencer::MAX_TRACK_MOD_OUTPUTS]; h.app.tracks.len()],
         bus_inputs: h
             .app
             .buses
@@ -1090,4 +1092,39 @@ fn step_timebase_locks_take_labels_in_any_case_and_reject_unknown_ones() {
     h.eval_7i("(set! s3.timebase \"\")");
     h.drain_and_sync_7i();
     assert_eq!(h.shared.state.pattern.timebase_plocks[0].get(3), None);
+}
+
+#[test]
+fn mod_roles_set_through_history_and_read_on_the_track() {
+    use sequencer::sequencer::{ModInputRole, ModSteps};
+    let mut h = Harness::new();
+    h.shared.current_track.store(1, Ordering::Relaxed);
+    h.sync();
+    h.eval_7i("(def t1 (track 1))");
+    assert_eq!(
+        h.eval_7i("t1.mod-roles"),
+        h.eval_7i(r#"(list "modulator" "modulator" "modulator" "modulator")"#)
+    );
+    assert_eq!(h.eval_7i("t1.mod-steps"), s("play"));
+    let undo = h.app.history.undo_len();
+    h.eval_7i(
+        r#"(seq-set-track-param :mod-role-1 "trigger")
+           (seq-set-track-param :mod-role-3 3)
+           (seq-set-track-param :mod-steps "latch")"#,
+    );
+    h.drain_and_sync_7i();
+    let roles = h.app.state.pattern.track_params[1].mod_roles();
+    assert_eq!(
+        roles.roles,
+        [ModInputRole::Trigger, ModInputRole::Modulator, ModInputRole::Duration, ModInputRole::Modulator],
+        "each edit lands on the roles current when it applies"
+    );
+    assert_eq!(roles.steps, ModSteps::Latch);
+    assert_eq!(h.eval_7i("(nth t1.mod-roles 0)"), s("trigger"));
+    assert_eq!(h.eval_7i("(nth t1.mod-roles 2)"), s("duration"));
+    assert_eq!(h.eval_7i("t1.mod-steps"), s("latch"));
+    assert_eq!(h.app.history.undo_len(), undo + 3);
+    assert!(h.app.state.pattern.track_params[0].mod_roles().is_default());
+    h.native_fails("(seq-set-track-param :mod-role-5 \"trigger\")", "mod-role-5");
+    h.native_fails("(seq-set-track-param :mod-role-1 \"gate\")", "mod-role-options");
 }

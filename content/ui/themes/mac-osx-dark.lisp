@@ -210,7 +210,7 @@
       :status-accent     '(0.58 0.58 0.60)   ; Gray accent, not blue
       
       ;; Tile borders
-      :border-active   '(0.42 0.42 0.44)     ; Lighter gray for active tile
+      :border-active   '(0.196 0.196 0.202 1.0)     ; Lighter gray for active tile
       :border-inactive '(0.15 0.15 .155)    ; Match buffer background
       
       :list-selected-fg '(0.9 0.9 0.9)

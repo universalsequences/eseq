@@ -91,6 +91,7 @@ pub struct SeqParams {
     pub fts_scale: usize,
     pub tuning: crate::scale::TrackTuning,
     pub global_transpose: bool,
+    pub mod_roles: crate::sequencer::ModInputRoles,
 }
 
 /// Display metadata for one pool entity (§17.11): an auto-assigned name
@@ -407,6 +408,7 @@ impl TrackPatternData {
                 fts_scale: track_params.fts_scale,
                 tuning: track_params.tuning.clone(),
                 global_transpose: track_params.global_transpose,
+                mod_roles: track_params.mod_roles,
             },
             chord_snapshot,
             rack_macro_plocks,
@@ -495,6 +497,7 @@ impl TrackPatternData {
                 tuning: seq.params.tuning.clone(),
                 mute_group: patch.params.mute_group,
                 global_transpose: seq.params.global_transpose,
+                mod_roles: seq.params.mod_roles,
             },
             effect_slots: patch.effect_slots.clone(),
             midi_fx_slots: patch.midi_fx_slots.clone(),

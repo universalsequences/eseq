@@ -118,6 +118,13 @@ CURATED_OPERATORS = {
     },
     "in": {"category": "io", "summary": "Audio input channel.", "signatures": ["(in channel @name string)", "(in channel @name mod1 @modulator 1)"], "arity": {"minimum": 1, "maximum": None}},
     "out": {"category": "io", "summary": "Audio output channel.", "signatures": ["(out expr channel @name string)"], "arity": {"minimum": 2, "maximum": None}},
+    "ext": {
+        "category": "io",
+        "summary": "The host's raw ext input N, read through the declared @modulator N input. Claims mod slot N: the host pins that slot's source to ext N.",
+        "signatures": ["(ext slot)"],
+        "arity": {"minimum": 1, "maximum": 1},
+        "input_count": {"minimum": 0, "maximum": 0},
+    },
     "probe": {
         "category": "io",
         "summary": "Identity passthrough that exposes a scalar signal to the host as a live probe (patcher number~/scope~/spectrogram~ views). Every probe is a graph root, so a dangling probe still compiles. Scalar signals only.",
@@ -237,6 +244,7 @@ for _name, _updates in CURATED_OPERATOR_UPDATES.items():
 
 
 ATTRIBUTE_SPECS = {
+    "@amp": {"type": "bool", "summary": "Marks an out as the voice amp envelope; the host releases a voice once it decays to silence."},
     "@N": {"type": "int", "summary": "FFT/window size for spectral operators.", "aliases": ["@n"]},
     "@n": {"type": "int", "summary": "Lowercase alias for @N.", "aliases": ["@N"]},
     "@attack": {"type": "signal|float", "summary": "Compressor attack time."},
@@ -272,12 +280,14 @@ ATTRIBUTE_SPECS = {
     "@mod-active-param": {"type": "symbol", "summary": "Generated modulation active parameter name."},
     "@mod-depth-max": {"type": "float", "summary": "Upper bound for generated modulation depth control."},
     "@mod-depth-min": {"type": "float", "summary": "Lower bound for generated modulation depth control."},
+    "@mod-unit": {"type": "string", "summary": "Host-visible unit label for a modulatable param's modulation depth."},
     "@mod-mode": {"type": "enum", "values": ["additive", "multiplicative", "semitone"], "summary": "Modulation mode for a modulatable param."},
     "@mod-resolved-symbol": {"type": "symbol", "summary": "Generated resolved modulation symbol name."},
-    "@modulator": {"type": "int", "summary": "Marks an input as a modulation source slot."},
+    "@modulator": {"type": "int", "summary": "Marks an in or out as a modulation source slot."},
     "@modulator-slot": {"type": "int", "summary": "Generated modulation depth parameter slot."},
     "@mono": {"type": "bool", "summary": "Load audio as mono when no explicit channel is selected."},
     "@name": {"type": "string", "summary": "Host-visible parameter, input, output, or tensor name."},
+    "@options": {"type": "string[]", "summary": "Enumerated param: option labels, indexed from 0 by the param value."},
     "@normalize": {"type": "enum", "values": ["peak"], "summary": "Audio load normalization mode."},
     "@padding": {"type": "range[]", "summary": "Per-axis padding for pad, e.g. [1:1,0:0]."},
     "@q": {"type": "signal|float", "summary": "Biquad resonance / Q."},
@@ -309,7 +319,7 @@ CURATED_OPERATOR_ATTRIBUTES = {
     "ir": ["@file", "@channel", "@mono", "@start", "@end", "@normalize", "@name"],
     "make-tensor-history": ["@shape", "@data"],
     "noise": ["@size", "@hop", "@hopSize"],
-    "out": ["@name"],
+    "out": ["@name", "@amp", "@modulator"],
     "param": [
         "@default",
         "@min",
@@ -323,6 +333,8 @@ CURATED_OPERATOR_ATTRIBUTES = {
         "@mod-mode",
         "@mod-depth-min",
         "@mod-depth-max",
+        "@mod-unit",
+        "@options",
         "@mod-active-param",
         "@mod-resolved-symbol",
         "@generated",
@@ -419,6 +431,8 @@ CURATED_OPERATOR_INPUTS = {
     ],
     "tensor": [],
     "tensor-param": [],
+    # No signal inlets: the slot is a creation argument (see its summary).
+    "ext": [],
     "sample": [
         {"name": "tensor", "kind": "value", "summary": "Tensor to read from.", "required": True},
         {"name": "phase", "kind": "signal|float", "summary": "Normalized phase in 0..1. Wrapped, then scaled by the tensor's compile-time shape[0].", "required": True},
@@ -835,6 +849,7 @@ def describe_token(name: str) -> str:
         "sidechain": "Sidechain signal.",
         "time_in_samples": "Delay time in samples.",
         "channel": "One-based channel number in Lisp source.",
+        "slot": "Modulator slot, 1-4.",
         "tensor": "Tensor input.",
         "kernel": "Convolution kernel tensor.",
         "index": "Lookup index.",
@@ -1035,7 +1050,9 @@ def build_operators(operator_map, attrs_by_fn, preserved_preamble_operators=None
                 "summary": curated.get("summary", "Operator implemented in DGenLisp evaluator."),
                 "signatures": signatures,
                 "arity": arity,
-                "input_count": arity,
+                # Signal inlets; an operator whose arguments are creation
+                # arguments (`ext`) curates it apart from its arity.
+                "input_count": curated.get("input_count", arity),
                 "output_count": {"minimum": len(outputs), "maximum": len(outputs)},
                 "inputs": inputs,
                 "outputs": outputs,

@@ -45,9 +45,9 @@
         set-tensor-cell! stamp-variant! stamp-key-variant!
         lock-none lock-seq lock-variant
         reset-tuning! justify-tuning! randomize-tuning! stretch-tuning! clear-degree!
-        set-bar-transpose! mod-in-level
+        set-bar-transpose! mod-in-level mod-out-signal
         mute-group-options accum-mode-options tuning-root-options tuning-mode-options
-        voice-priority-options mono-trigger-options swing-resolution-options
+        voice-priority-options mono-trigger-options mod-role-options mod-steps-options swing-resolution-options
         roll-rate-options launch-quantize-options record-quantize-options
         launch-cell! select-region! clear-region! take-none take-governed take-latched
         pad-role-options groove-scale-options set-clip-groove!
@@ -83,6 +83,8 @@
 (def tuning-mode-options '("Snap" "Map"))
 (def voice-priority-options '("Last" "High" "Low"))
 (def mono-trigger-options '("retrig" "legato"))
+(def mod-role-options '("modulator" "trigger" "velocity" "duration" "note"))
+(def mod-steps-options '("play" "latch"))
 (def swing-resolution-options '("1/16" "1/8" "1/4" "1/2"))
 ;; track.timebase's and step.timebase's choices.
 (def timebase-options '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
@@ -173,7 +175,8 @@
   (set-delete-target :mixer-group (dict :group-id g.gid) v))
 (def route-target (r)
   (dict :source r.source.index :dest-kind (if r.dest "track" "bus")
-        :dest (if r.dest r.dest.index r.dest-bus.bid) :input (- r.input 1)))
+        :dest (if r.dest r.dest.index r.dest-bus.bid) :input (- r.input 1)
+        :output (max 0 (- r.output 1))))
 (def set-route-selected (r v) (set-delete-target :mod-route (route-target r) v))
 ;; The step cursor: makes s's track the current one and moves the grid's
 ;; cursor to s, as a click on the step does.
@@ -737,7 +740,8 @@
   :host ((device device)
          (index  :int)
          (slot   :int    :doc "The modulation source (1-4) it is")
-         (label  :string :doc "The name the panel shows")))
+         (label  :string :doc "The name the panel shows")
+         (ext    :int    :doc "The ext input (1-4) the patch pinned this slot to with (ext N); 0 while its source is configurable")))
 
 ;; The Filter Table response editor session: one at a time, bound to one
 ;; Filter Table device ((table-editor-open! d)); its edits are the
@@ -1107,6 +1111,10 @@
                     :default "Last" :doc "One of voice-priority-options")
          (mono-trigger :string :set (track-setting "mono-trigger") :options mono-trigger-options
                     :default "retrig" :doc "One of mono-trigger-options")
+         (mod-roles (list-of :string)
+                    :doc "Role of each ext mod input (ext1..ext4), each one of mod-role-options; set with (seq-set-track-param :mod-role-N role)")
+         (mod-steps :string :options mod-steps-options :default "play"
+                    :doc "play, or latch: the track's steps only set what its trigger mod inputs play; set with (seq-set-track-param :mod-steps v)")
          (mute-group :int   :range (0 8) :set (track-setting "mute-group") :options mute-group-options :default 0
                     :doc "0 for none, else the group; (nth mute-group-options g) is its label")
          (swing     :number :range (50 75) :default 50 :set (track-setting "swing")
@@ -1122,7 +1130,15 @@
          (output    bus     :set set-track-output
                     :doc "The bus the track's audio goes to (the main mix bus for main); nil for sends only. One of project.output-options")
          (mod-output :bool  :doc "Has a mod output (a modulator, or an instrument exposing one)")
-         (mod-out-level :number :range (0 1) :doc "Mod output port level")
+         (mod-out-level :number :range (0 1) :doc "Mod output port level (the first output's)")
+         (mod-outputs :int  :doc "Mod output ports the strip shows: 0, 1, or one per declared @modulator output (at most 4); it shows 5 - mod-outputs inputs (all 4 when 0)")
+         (mod-output-names (list-of :string) :doc "The declared @modulator output names, in port order")
+         (module    :bool  :doc "Makes no audio, only mod outputs (a modulator, or a patch whose every out is @modulator): the mixer shows it as a module with labeled jacks and all four inputs")
+         (ext-input-names (list-of :string) :doc "Labels of ext inputs 1-4: the @name of the (in ... @modulator N) slot a patch reads with (ext N), empty when unnamed")
+         (mod-out-1 :number :range (0 1) :doc "Mod output port levels, outputs 1-4; (mod-out-signal t i) binds output i")
+         (mod-out-2 :number :range (0 1))
+         (mod-out-3 :number :range (0 1))
+         (mod-out-4 :number :range (0 1))
          (mod-in-1  :number :range (0 1) :doc "Mod input port levels, inputs 1-4 (Ext1-4); (mod-in-level t i) binds input i")
          (mod-in-2  :number :range (0 1))
          (mod-in-3  :number :range (0 1))
@@ -1322,6 +1338,7 @@
          (dest     track  :doc "The modulated track, or nil for a bus")
          (dest-bus bus    :doc "The modulated bus, or nil for a track")
          (input    :int   :doc "The destination's mod input, 1-4 (Ext1-4), as in mod-in-1")
+         (output   :int   :doc "The source's mod output, 1-4, as in mod-out-1")
          (selected :bool  :set set-route-selected :doc "Selected as the mixer's delete target")))
 
 ;; A track group (or drum rack) and the bus it routes to.
@@ -2123,6 +2140,14 @@
         ((= i 3) #'x.mod-in-3)
         ((= i 4) #'x.mod-in-4)
         (else (seq-error (str "mod-in-level: no input " i " (inputs are 1-4)")))))
+
+;; A binding to mod output i (1-4, as in mod-out-1) of track t.
+(def mod-out-signal (t i)
+  (cond ((= i 1) #'t.mod-out-1)
+        ((= i 2) #'t.mod-out-2)
+        ((= i 3) #'t.mod-out-3)
+        ((= i 4) #'t.mod-out-4)
+        (else (seq-error (str "mod-out-signal: no output " i " (outputs are 1-4)")))))
 
 ;; ── Drum racks ──
 

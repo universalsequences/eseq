@@ -667,8 +667,7 @@ pub(super) fn live_value<S: KindStore>(
                             .mod_ports
                             .track_outputs
                             .get(track)
-                            .copied()
-                            .unwrap_or(0.0),
+                            .map_or(0.0, |outputs| outputs[0]),
                     )
                 }
                 f::TRACK_BAR_TRANSPOSES => {
@@ -692,6 +691,12 @@ pub(super) fn live_value<S: KindStore>(
                     owner_variants(store, sources, shared, (id, id), track, VariantScope::Steps)
                 }
                 f::TRACK_ACTIVE_NOTES => graph_live_value(store, sources, shared, id, key)?,
+                key if mod_input(&f::TRACK_MOD_OUT, key).is_some() => {
+                    let output = mod_input(&f::TRACK_MOD_OUT, key)?;
+                    let shared = shared.borrow();
+                    let outputs = shared.mod_ports.track_outputs.get(track);
+                    number(outputs.map_or(0.0, |outputs| outputs[output]))
+                }
                 key => {
                     let input = mod_input(&f::TRACK_MOD_IN, key)?;
                     let shared = shared.borrow();

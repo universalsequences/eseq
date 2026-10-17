@@ -4,9 +4,9 @@ use std::collections::{HashMap, HashSet};
 
 use super::comment::{comment_cursor_at, is_blank_comment_text};
 use super::super::text_input::{TextInputState, selection_range as text_selection_range};
-use super::lisp::{attribute_span_len, is_attribute_key};
+use super::lisp::{attribute_span_len, is_attribute_key, param_short_name};
 use super::metrics::{MIN_ZOOM, NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET};
-use super::model::MacroPatch;
+use super::model::{MacroPatch, Patch};
 use super::probe::{
     PROBE_OP, canonical_probe_text, is_probe_text, probe_alias_names, probe_id_from_text,
 };
@@ -96,8 +96,9 @@ pub(super) fn patcher_autocomplete_matches(
     edit: &PatcherTextEdit,
     local_macros: &[MacroPatch],
     asset_paths: &[String],
+    symbols: &[String],
 ) -> Vec<String> {
-    patcher_autocomplete_suggestions(edit, local_macros, asset_paths)
+    patcher_autocomplete_suggestions(edit, local_macros, asset_paths, symbols)
         .into_iter()
         .map(|suggestion| suggestion.name)
         .collect()
@@ -107,6 +108,7 @@ pub(super) fn patcher_autocomplete_suggestions(
     edit: &PatcherTextEdit,
     local_macros: &[MacroPatch],
     asset_paths: &[String],
+    symbols: &[String],
 ) -> Vec<PatcherAutocompleteSuggestion> {
     let Some(context) = autocomplete_context(edit) else {
         return Vec::new();
@@ -155,6 +157,14 @@ pub(super) fn patcher_autocomplete_suggestions(
                 );
             }
         }
+        AutocompleteKind::Symbol => {
+            candidates.extend(
+                symbols
+                    .iter()
+                    .filter(|name| name.to_lowercase().starts_with(&prefix))
+                    .map(|name| (name.clone(), Some(param_symbol_documentation()))),
+            );
+        }
         AutocompleteKind::AssetPath => {
             let path_prefix = prefix.strip_prefix('"').unwrap_or(&prefix);
             let path_prefix = path_prefix.strip_suffix('"').unwrap_or(path_prefix);
@@ -181,6 +191,46 @@ pub(super) fn patcher_autocomplete_suggestions(
     });
     matches.truncate(PATCHER_AUTOCOMPLETE_MAX_ITEMS);
     matches
+}
+
+/// Names an argument can refer to: every `param` declared in the visible
+/// patch except the one being edited, whose own name is not a reference.
+/// A grouped param is always offered by its dotted `allpass.size` spelling,
+/// and by the bare `size` too when no other group shares that short name (the
+/// same rule `param_reference_aliases` resolves references by).
+pub(super) fn autocomplete_symbols_for_patch(patch: &Patch, editing_node: &str) -> Vec<String> {
+    let params = patch
+        .nodes
+        .iter()
+        .filter_map(|node| Some((node.id.as_str(), node.param.as_ref()?.name.as_str())))
+        .collect::<Vec<_>>();
+    let mut short_counts: HashMap<&str, usize> = HashMap::new();
+    for (_, name) in &params {
+        *short_counts.entry(param_short_name(name)).or_default() += 1;
+    }
+    let mut names = params
+        .iter()
+        .filter(|(id, _)| *id != editing_node)
+        .flat_map(|(_, name)| {
+            let short = param_short_name(name);
+            let unique_short = (short != *name && short_counts.get(short) == Some(&1))
+                .then(|| short.to_string());
+            std::iter::once(name.to_string()).chain(unique_short)
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn param_symbol_documentation() -> OperatorDocumentation {
+    OperatorDocumentation {
+        category: Some("param".to_string()),
+        summary: None,
+        signatures: Vec::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+    }
 }
 
 fn patcher_history_documentation() -> OperatorDocumentation {
@@ -250,17 +300,19 @@ pub(super) fn patcher_autocomplete_is_open(
     edit: &PatcherTextEdit,
     local_macros: &[MacroPatch],
     asset_paths: &[String],
+    symbols: &[String],
 ) -> bool {
-    !patcher_autocomplete_matches(edit, local_macros, asset_paths).is_empty()
+    !patcher_autocomplete_matches(edit, local_macros, asset_paths, symbols).is_empty()
 }
 
 pub(super) fn move_patcher_autocomplete_selection(
     edit: &mut PatcherTextEdit,
     local_macros: &[MacroPatch],
     asset_paths: &[String],
+    symbols: &[String],
     delta: isize,
 ) -> bool {
-    let matches = patcher_autocomplete_matches(edit, local_macros, asset_paths);
+    let matches = patcher_autocomplete_matches(edit, local_macros, asset_paths, symbols);
     if matches.is_empty() {
         edit.autocomplete_selected = 0;
         return false;
@@ -275,12 +327,13 @@ pub(super) fn apply_patcher_autocomplete(
     edit: &mut PatcherTextEdit,
     local_macros: &[MacroPatch],
     asset_paths: &[String],
+    symbols: &[String],
 ) -> bool {
     let Some(context) = autocomplete_context(edit) else {
         return false;
     };
     let (start, end) = (context.start, context.end);
-    let matches = patcher_autocomplete_matches(edit, local_macros, asset_paths);
+    let matches = patcher_autocomplete_matches(edit, local_macros, asset_paths, symbols);
     if matches.is_empty() {
         edit.autocomplete_selected = 0;
         return false;
@@ -315,18 +368,22 @@ pub(super) fn apply_patcher_autocomplete(
 pub(super) fn patcher_autocomplete_ghost_text(
     edit: &PatcherTextEdit,
     local_macros: &[MacroPatch],
+    symbols: &[String],
 ) -> Option<String> {
     if edit.state.selection_anchor.is_some() {
         return None;
     }
     let context = autocomplete_context(edit)?;
-    if !matches!(context.kind, AutocompleteKind::Attribute { .. })
+    if !matches!(
+        context.kind,
+        AutocompleteKind::Attribute { .. } | AutocompleteKind::Symbol
+    )
         || context.cursor != context.end
         || context.end != edit.text.len()
     {
         return None;
     }
-    let matches = patcher_autocomplete_matches(edit, local_macros, &[]);
+    let matches = patcher_autocomplete_matches(edit, local_macros, &[], symbols);
     let selected = matches.get(edit.autocomplete_selected.min(matches.len().saturating_sub(1)))?;
     let prefix_chars = context.prefix.chars().count();
     let remainder = selected.chars().skip(prefix_chars).collect::<String>();
@@ -334,15 +391,16 @@ pub(super) fn patcher_autocomplete_ghost_text(
 }
 
 pub(super) fn clamp_patcher_autocomplete_selection(edit: &mut PatcherTextEdit) {
-    clamp_patcher_autocomplete_selection_with_macros(edit, &[], &[]);
+    clamp_patcher_autocomplete_selection_with_macros(edit, &[], &[], &[]);
 }
 
 pub(super) fn clamp_patcher_autocomplete_selection_with_macros(
     edit: &mut PatcherTextEdit,
     local_macros: &[MacroPatch],
     asset_paths: &[String],
+    symbols: &[String],
 ) {
-    let len = patcher_autocomplete_matches(edit, local_macros, asset_paths).len();
+    let len = patcher_autocomplete_matches(edit, local_macros, asset_paths, symbols).len();
     if len == 0 {
         edit.autocomplete_selected = 0;
     } else {
@@ -354,6 +412,8 @@ pub(super) fn clamp_patcher_autocomplete_selection_with_macros(
 enum AutocompleteKind<'a> {
     Operator,
     Attribute { operator: &'a str },
+    /// A bare argument naming something the patch declares (a `param`).
+    Symbol,
     AssetPath,
 }
 
@@ -389,13 +449,14 @@ fn autocomplete_context(edit: &PatcherTextEdit) -> Option<AutocompleteContext<'_
     let first_token = first_token_byte_span(&edit.text)?;
     let kind = if (start, end) == first_token {
         AutocompleteKind::Operator
-    } else {
-        if !prefix.starts_with('@') {
-            return None;
-        }
+    } else if prefix.starts_with('@') {
         AutocompleteKind::Attribute {
             operator: &edit.text[first_token.0..first_token.1],
         }
+    } else if prefix.starts_with(|ch: char| ch.is_alphabetic() || ch == '_') {
+        AutocompleteKind::Symbol
+    } else {
+        return None;
     };
     Some(AutocompleteContext {
         kind,
