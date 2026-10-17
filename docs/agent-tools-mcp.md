@@ -34,6 +34,7 @@ ESEQ_CONFIG_DIR=/tmp/eseq-mcp-cfg python3 crates/sequencer/tools/mcp_session.py 
 | `apropos` | Names containing every query word, with signature and first doc line |
 | `describe` | One name's signature and docs; a kind's fields |
 | `list_modules` | Module names on the load path |
+| `search_source` | Grep over every loaded module: matching lines with module, line and the definition around them |
 | `outline` | A module's top-level forms: lines, head, name, first doc line |
 | `form_source` | The exact text of the forms defining a name |
 | `create_module` | A new Local module (`a/b.lisp` under Local packages), imported |

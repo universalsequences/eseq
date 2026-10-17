@@ -16,6 +16,7 @@ use eseqlisp::lang::def_header::first_doc_line;
 use eseqlisp::vm::{VMError, Value};
 use serde_json::{json, Value as Json};
 
+use sequencer::agent::harness::clip;
 use sequencer::agent::forms;
 use sequencer::agent::protocol::ToolSpec;
 
@@ -105,6 +106,19 @@ const HOST_TOOLS: &[HostTool] = &[
         description: "Module names on the load path containing `filter`: your Local modules, \
             installed packages (`author.name.*`) and the factory (`eseq.*`).",
         params: &[("filter", "string", "Substring to match (default: all)", false)],
+    },
+    HostTool {
+        name: "search_source",
+        description: "Search the source of every loaded module (your Local modules, installed \
+            packages, the factory), like grep: each matching line with its module, line number \
+            and the definition it sits in. Use it to find where something is drawn, set or \
+            called, then `form_source` that definition. Case-insensitive.",
+        params: &[
+            ("query", "string", "Text to find, or a regex when `regex` is true", true),
+            ("filter", "string", "Only modules whose name contains this, e.g. `mixer`", false),
+            ("regex", "boolean", "Treat `query` as a regular expression (default false)", false),
+            ("limit", "integer", "Most lines to return (default 40, at most 200)", false),
+        ],
     },
     HostTool {
         name: "outline",
@@ -244,6 +258,12 @@ pub(super) fn call(session: &mut HeadlessSession, name: &str, args: &Json) -> To
             }
             "describe" => describe(session, &need("name")?),
             "list_modules" => list_modules(session, str_arg("filter").as_deref().unwrap_or("")),
+            "search_source" => {
+                let limit = args.get("limit").and_then(Json::as_u64).unwrap_or(40).clamp(1, 200) as usize;
+                let regex = args.get("regex").and_then(Json::as_bool).unwrap_or(false);
+                let filter = str_arg("filter").unwrap_or_default();
+                search_source(session, &need("query")?, &filter, regex, limit)?
+            }
             "outline" => outline(session, &need("module")?)?,
             "form_source" => form_source(session, &need("module")?, &need("name")?)?,
             "create_module" => create_module(session, &need("module")?, str_arg("source").as_deref())?,
@@ -384,14 +404,13 @@ fn describe(session: &mut HeadlessSession, name: &str) -> ToolOutput {
     ToolOutput::text(text)
 }
 
+/// Module names on the load path containing `filter`.
+fn modules_matching(session: &mut HeadlessSession, filter: &str) -> Vec<String> {
+    session.editor.runtime_mut().module_completions().into_iter().filter(|module| module.contains(filter)).collect()
+}
+
 fn list_modules(session: &mut HeadlessSession, filter: &str) -> ToolOutput {
-    let modules: Vec<String> = session
-        .editor
-        .runtime_mut()
-        .module_completions()
-        .into_iter()
-        .filter(|module| module.contains(filter))
-        .collect();
+    let modules = modules_matching(session, filter);
     ToolOutput::text(if modules.is_empty() {
         format!("No modules contain {filter:?}.")
     } else {
@@ -416,6 +435,51 @@ fn module_source(session: &HeadlessSession, module: &str) -> Result<(PathBuf, St
         .module_source_for_navigation(module, None, Vec::new())
         .map(|source| (source.path, source.text))
         .map_err(|_| format!("no file for module `{module}`; `list_modules` shows what exists"))
+}
+
+/// Longest matched line shown; the definition is a `form_source` away.
+const SEARCH_LINE_CHARS: usize = 160;
+
+fn search_source(
+    session: &mut HeadlessSession,
+    query: &str,
+    filter: &str,
+    is_regex: bool,
+    limit: usize,
+) -> Result<ToolOutput, String> {
+    if query.trim().is_empty() {
+        return Err("`query` is empty".to_string());
+    }
+    let pattern = regex::RegexBuilder::new(&if is_regex { query.to_string() } else { regex::escape(query) })
+        .case_insensitive(true)
+        .build()
+        .map_err(|error| format!("`query` is not a valid regex: {error}"))?;
+    let modules = modules_matching(session, filter);
+    let mut files = std::collections::HashSet::new();
+    let (mut shown, mut total, mut matched_modules) = (Vec::new(), 0, 0);
+    for module in modules {
+        let Ok((path, source)) = module_source(session, &module) else { continue };
+        if !files.insert(path) {
+            continue;
+        }
+        let found = forms::search(&source, &pattern, limit.saturating_sub(shown.len()));
+        matched_modules += usize::from(found.count > 0);
+        total += found.count;
+        for hit in found.hits {
+            let form = match hit.form {
+                Some((head, Some(name))) => format!("  [{head} {name}]"),
+                Some((head, None)) => format!("  [{head}]"),
+                None if !found.parsed => "  [unparsed]".to_string(),
+                None => String::new(),
+            };
+            shown.push(format!("{module}:{}{form}  {}", hit.line, clip(&hit.text, SEARCH_LINE_CHARS)));
+        }
+    }
+    if total == 0 {
+        return Ok(ToolOutput::text(format!("No line matches {query:?}.")));
+    }
+    let more = if total > shown.len() { format!(" (showing {}; narrow with `filter` or raise `limit`)", shown.len()) } else { String::new() };
+    Ok(ToolOutput::text(format!("{total} line(s) in {matched_modules} module(s){more}:\n{}", shown.join("\n"))))
 }
 
 fn outline(session: &HeadlessSession, module: &str) -> Result<ToolOutput, String> {

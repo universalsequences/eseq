@@ -28,7 +28,7 @@ const DEFAULT_MODEL: &str = "claude-opus-5-5";
 /// Authoring is agentic work: Claude Opus 5.5 defaults to `medium`.
 const DEFAULT_EFFORT: &str = "high";
 const MAX_TOKENS: u32 = 64_000;
-const MAX_TOOL_ROUNDS: usize = 40;
+const MAX_TOOL_ROUNDS: usize = 100;
 
 const PREAMBLE: &str = "You are the agent inside eseq, a music sequencer. The user talks to you \
 in a pane beside their project and sees your tool calls as they run.\n\

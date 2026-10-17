@@ -64,7 +64,8 @@ session keeps its state between calls.\n\
 \n\
 Before writing code, read `guide` (topic `sequencer` for sequencers, `eseqlisp` for the \
 language). Never guess a name: find it with `apropos`, read it with `describe`, and read a \
-module with `outline`, then `form_source` for the forms you need.\n\
+module with `outline`, then `form_source` for the forms you need. To find where something \
+is drawn, set or called, `search_source` searches every module's source.\n\
 \n\
 Your work lives on disk, in a Local module: start it with `create_module`, then add or \
 replace one top-level form at a time with `define_form`, which writes the file and reloads \

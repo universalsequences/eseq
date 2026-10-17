@@ -3499,6 +3499,7 @@ dependencies = [
  "objc2-foundation",
  "object",
  "pipewire",
+ "regex",
  "reqwest",
  "rtsan-standalone",
  "rusqlite",

@@ -160,6 +160,55 @@ pub fn form_source(source: &str, name: &str) -> Result<Vec<(usize, String)>, Str
         .collect())
 }
 
+/// A source line `search` matched: its number, the top-level form around
+/// it (`(def track-strip …)` as head and name) and the line itself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceHit {
+    pub line: usize,
+    pub form: Option<(String, Option<String>)>,
+    pub text: String,
+}
+
+/// What `search` found in one source.
+#[derive(Debug, Default, PartialEq)]
+pub struct SourceMatches {
+    /// Every matching line, shown or not.
+    pub count: usize,
+    /// The first matches, up to the budget.
+    pub hits: Vec<SourceHit>,
+    /// False when the source does not parse: its hits carry no form.
+    pub parsed: bool,
+}
+
+/// The lines of `source` that `pattern` matches: all of them counted, the
+/// first `budget` returned with the top-level form each sits in. The source
+/// is only parsed when there is something to return.
+pub fn search(source: &str, pattern: &regex::Regex, budget: usize) -> SourceMatches {
+    let lines: Vec<(usize, &str)> =
+        source.lines().enumerate().filter(|(_, line)| pattern.is_match(line)).map(|(index, line)| (index + 1, line)).collect();
+    if lines.is_empty() || budget == 0 {
+        return SourceMatches { count: lines.len(), hits: Vec::new(), parsed: true };
+    }
+    let forms = top_level_forms(source);
+    let parsed = forms.is_ok();
+    let forms = forms.unwrap_or_default();
+    let hits = lines
+        .iter()
+        .take(budget)
+        .map(|&(line, text)| {
+            // Forms are in source order: the candidate is the last one starting at or before `line`.
+            let before = forms.partition_point(|form| form.line <= line);
+            let form = before.checked_sub(1).map(|index| &forms[index]).filter(|form| line <= form.end_line);
+            SourceHit {
+                line,
+                form: form.map(|form| (form.head.clone(), form.name.clone())),
+                text: text.trim().to_string(),
+            }
+        })
+        .collect();
+    SourceMatches { count: lines.len(), hits, parsed }
+}
+
 /// The file a module loads from: the first load root (Local, installed
 /// packages, factory) holding one of its candidate paths. A package root
 /// only resolves modules in its own namespace, prefix stripped.
@@ -294,6 +343,26 @@ fn line_of(line_starts: &[usize], byte: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_search_names_the_form_around_each_matching_line() {
+        let source = "(module my.mix)\n\n(def strip (t)\n  (v-stack :height 20\n    (label t.name)))\n\n;; height of the panel\n(def panel-height () 20)\n";
+        let found = search(source, &regex::Regex::new("height").unwrap(), 10);
+        assert_eq!((found.count, found.parsed), (3, true));
+        assert_eq!(
+            found.hits,
+            vec![
+                SourceHit { line: 4, form: Some(("def".into(), Some("strip".into()))), text: "(v-stack :height 20".into() },
+                SourceHit { line: 7, form: None, text: ";; height of the panel".into() },
+                SourceHit { line: 8, form: Some(("def".into(), Some("panel-height".into()))), text: "(def panel-height () 20)".into() },
+            ]
+        );
+        assert_eq!(search(source, &regex::Regex::new("absent").unwrap(), 10), SourceMatches { parsed: true, ..Default::default() });
+        let counted = search(source, &regex::Regex::new("height").unwrap(), 1);
+        assert_eq!((counted.count, counted.hits.len()), (3, 1), "past the budget lines are only counted");
+        let broken = search("(def a (\n  height", &regex::Regex::new("height").unwrap(), 10);
+        assert_eq!((broken.count, broken.parsed, broken.hits[0].form.clone()), (1, false, None));
+    }
 
     const SOURCE: &str = "(module my.pulse)\n\
 (import eseq.kinds :refer (tracks))\n\
