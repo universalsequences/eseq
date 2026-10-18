@@ -247,6 +247,30 @@ impl WidgetDefinition for BoxWidget {
         &["box"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A one-child container that paints a background, border and rounded corners, and the \
+usual target for pointer handlers and drag and drop. It lays out ONLY its first \
+child; wrap several in a v-stack or h-stack. :padding insets the child; :align \
+(default :stretch, the child fills the inner area) or the per-axis :h-align / \
+:v-align (:start, :center, :end, :stretch) place it. Without :width/:height the box \
+is its child's size plus padding; :width N with :aspect R (pixel width over height) \
+derives the height. Look: :background-color, :border-color, :border-width (px, \
+default 1, drawn only when a border colour is set), :corner-radius (px); :selected \
+true or :muted true switch to :selected-background-color / :muted-background-color \
+and the matching -border-color; :background \"name\" paints a defwidget instead of a \
+flat colour. :on-click, :on-mouse-down, :on-drag, :on-mouse-up, :on-right-click \
+(ctrl+click too) and :on-double-click each receive one pointer event map (e.phase, \
+e.u, e.v, e.x, e.y, e.at, e.shift, e.cmd ...). :on-click fires on press, and when \
+:on-mouse-down is also set only :on-mouse-down runs; :focusable true lets \
+Enter/Space fire :on-click. Drag and drop: :drag-type \"t\" with :drag-payload makes \
+the box a drag source (:drag-modifier :shift, :alt, :ctrl or :cmd requires that \
+key); a box with :on-drop and :drop-types (list \"t\") accepts it, highlights with \
+:drop-hover-background-color, and :on-drop receives the pointer map plus :drag-type, \
+:payload and :target (its own :drop-meta). Example: (box :padding 0.5 :corner-radius \
+6 :background-color :buffer-bg :on-click (lambda (e) (select! i)) (v-stack (label \
+name) (label detail :color :dim)))"
+    }
+
     fn is_container(&self) -> bool {
         true
     }
@@ -270,6 +294,7 @@ impl WidgetDefinition for BoxWidget {
             "drop-hover-border-color", "drag-type", "drag-payload", "drag-modifier",
             "capture-pointer", "focusable", "key", "on-click", "on-right-click",
             "on-double-click", "on-drag", "on-drop", "on-mouse-down", "on-mouse-up",
+            "drop-types", "drop-meta", "macro-owned", "plock-any",
         ]
     }
 

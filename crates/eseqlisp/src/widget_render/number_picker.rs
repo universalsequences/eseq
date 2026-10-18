@@ -850,6 +850,28 @@ impl WidgetDefinition for NumberPickerWidget {
         ]
     }
 
+    fn doc(&self) -> &'static str {
+        "A compact numeric field you drag or type into (BPM, a step count, a time in \
+ms): a pill with a small triangle and the value. :value is a number in :min..:max \
+(default 0..1); :decimals (default 2) sets the digits shown, and with 0 decimals \
+the value snaps to whole numbers; :step snaps explicitly. :unit is appended to the \
+readout, :value-scale multiplies what is shown and typed, and :value-labels names \
+special values, e.g. '((0 \"Off\") (-1 \"inf\")). Drag up or down to change it: \
+dragging up toward the top of the view reaches :max (:drag-rows N pins the \
+travel instead, and :taper \"log\"/\"square\"/\"cube\" bends it); :drag :relative \
+moves :drag-step per row instead (Shift is 10x) with :min/:max open unless given. \
+When focused, typing digits starts an edit, Enter commits (or starts editing), Esc \
+cancels. :on-change receives one number, already clamped and snapped; \
+:on-release receives no arguments when a drag ends. :mode :slider draws a filled \
+bar instead of the triangle; :noui true draws only the text. Colours: \
+:text-color, :background-color, :border-color, :fill-color (slider mode), \
+:tri-color, :edit-color; :corner-radius in pixels (default 12). :plock-active 1 \
+marks a parameter lock (:plock-style :underline for just a line). It is 8 by 1.4 \
+cells by default. The -tri and -slider names are internal draw passes. Example: \
+(number-picker :value bpm :min 40 :max 240 :decimals 0 :unit \"bpm\" \
+:on-change (lambda (v) (set! bpm v)))"
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "value",

@@ -204,6 +204,29 @@ impl WidgetDefinition for PhaserNotchWidget {
         &["phaser-notch"]
     }
 
+    fn doc(&self) -> &'static str {
+        "Specific to the built-in Phaser-Flanger effect: its animated display strip, \
+mirroring the DSP's own math. :mode 0 (phaser) draws one marker per notch on a log \
+frequency axis over a live spectrum of :source; modes 1 (flanger) and 2 (doubler) draw \
+the left/right delay dots on a log time axis with their sweep range. Display only, no \
+callbacks. Bind each prop to the effect's effective param value so it follows knobs \
+and modulation: :mode, :circuit, :notches, :center (Hz), :spread, :blend, \
+:flanger-time, :doubler-time (ms), :amount, :stereo (deg), :sync, :rate (Hz), \
+:sync-div, :lfo-shape, :bpm. The spectrum takes :source/:tap-point and the \
+spectrogram analysis props. Colours: :background-color, :grid-color, :left-color, \
+:right-color. \
+Example: (phaser-notch :source (analyzer-source fx) :mode mode :center center :bpm #'transport.bpm :width 14.9 :height 3)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "mode", "circuit", "notches", "center", "spread", "blend", "flanger-time",
+            "doubler-time", "amount", "stereo", "sync", "rate", "sync-div", "lfo-shape", "bpm",
+            "source", "tap-point", "fft-size", "time-slices", "min-db", "max-db", "smoothing",
+            "background-color", "grid-color", "left-color", "right-color", "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

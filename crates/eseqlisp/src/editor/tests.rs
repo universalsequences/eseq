@@ -8985,6 +8985,30 @@ fn hidden_ui_only_status_bar_reappears_in_inspect_mode() {
 }
 
 #[test]
+fn describe_shows_a_widgets_doc_and_props() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    let text = editor.describe_function_text("matrix");
+    assert!(text.contains("An editable grid of numbers"), "{text}");
+    assert!(text.contains("Props: :value :rows :cols"), "{text}");
+    assert!(text.contains("Every widget also takes :key"), "{text}");
+}
+
+/// The agent learns widgets from `describe`: a widget without a doc or a
+/// props list is one it will rebuild from boxes.
+#[test]
+fn every_builtin_widget_documents_itself_and_its_props() {
+    let undocumented: Vec<&str> = crate::widgets::BUILTIN_WIDGET_NAMES
+        .iter()
+        .copied()
+        .filter(|name| {
+            crate::widget_render::widget_definition(name)
+                .is_some_and(|definition| definition.doc().is_empty() || definition.completion_props().is_empty())
+        })
+        .collect();
+    assert!(undocumented.is_empty(), "widgets missing a doc or completion_props: {undocumented:?}");
+}
+
+#[test]
 fn explicit_source_navigation_reuses_the_inspect_source_pane() {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

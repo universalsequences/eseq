@@ -38,6 +38,25 @@ impl WidgetDefinition for ModulatorCurveWidget {
         &["modulator-curve"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A read-only picture of a rise/fall (attack/release) envelope shape, used by \
+envelope-follower style modulators. :rise and :fall are times in milliseconds \
+(drawn on a square-root scale up to :max-ms, default 5000); :level (0..1, default \
+1) scales the curve height. :phase (0..1 across the plot) places a live marker \
+dot on the curve; a negative :phase (default -1) hides it. Bind :phase and \
+:level to reactive fields to animate without re-rendering. No callbacks. \
+Colours: :background-color, :grid-color, :curve-color, :fill-color. Default \
+height 4 cells, full available width. Example: (modulator-curve :width 12 \
+:height 5 :rise 10 :fall 200 :phase #'d.modulator-phase)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "rise", "fall", "max-ms", "level", "phase", "background-color", "grid-color",
+            "curve-color", "fill-color", "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

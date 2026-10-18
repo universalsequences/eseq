@@ -578,6 +578,36 @@ impl WidgetDefinition for AdsrEditorWidget {
         &["adsr-editor"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A draggable envelope editor: drag the handles on the curve to shape an envelope. \
+Times are milliseconds, levels 0..1. :mode picks the shape (default ADSR, props \
+:attack :decay :sustain :release); :ahd uses :attack :hold :decay (:hold-editable \
+false locks the hold handle); :ade uses :delay :attack :decay and an :end level, \
+with :gated true waiting at the peak until note-off and :hold-on-release true \
+freezing on release; :decay is a one-shot bipolar decay with :initial \
+(:initial-min..:initial-max, default -1..1; :initial-editable false locks it), \
+:time (up to :time-max) and optional :decay-db (draw time as a T-dB measurement). \
+Each time handle's range is :attack-max/:decay-max (5000) and :release-max \
+(10000), :delay-max and :hold-max in their modes. :on-change receives one map \
+holding every value of the current mode (for ADSR {:attack :decay :sustain \
+:release :active}); :active is the keyword of the handle being dragged during \
+the drag, and false on the final call sent at mouse-up (treat that as the commit). \
+Colours: :background-color, :grid-color, :curve-color, :point-color. Default \
+height 5 cells, full available width. Example: (adsr-editor :width :fill :height \
+5 :attack a :decay d :sustain s :release r :on-change (lambda (env) (set-env! \
+env.attack env.decay env.sustain env.release)))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "mode", "attack", "decay", "sustain", "release", "hold", "delay", "end", "initial",
+            "time", "attack-max", "decay-max", "release-max", "hold-max", "delay-max", "time-max",
+            "initial-min", "initial-max", "initial-editable", "hold-editable", "gated",
+            "hold-on-release", "decay-db", "on-change", "background-color", "grid-color",
+            "curve-color", "point-color", "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

@@ -109,6 +109,30 @@ impl WidgetDefinition for SoundGlyphWidget {
     fn names(&self) -> &'static [&'static str] {
         &["sound-glyph"]
     }
+
+    fn doc(&self) -> &'static str {
+        "A sound's identity glyph: a small shaded blob picture the host derives from a \
+patch or pattern so similar sounds look related, as on the sound palette cards and \
+mixer pattern cells. Display only, no callbacks. :source is a glyph key string the \
+host publishes (entry.glyph-key from the sound palette, or \
+\"pattern-glyph:track:T:pattern:P\"); an unknown key draws nothing, so this is not for \
+arbitrary data. :play true/false overrides the host's playing indicator, drawn in \
+:play-color, while :play-glyph-padding and :play-glyph-opacity shrink and dim the \
+glyph when playing. :pixelate N quantizes it to an N-cell grid for small sizes; \
+:tint-r/:tint-g/:tint-b (0..1) tint the body. The remaining numeric props are shader \
+tuning whose defaults are the house look. The glyph is drawn square. \
+Example: (sound-glyph :key (str \"glyph-\" entry.patch-id) :source entry.glyph-key :height 4.2)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "source", "play", "play-color", "play-glyph-padding", "play-glyph-opacity",
+            "pixelate", "tint-r", "tint-g", "tint-b", "height-amp", "height-pow", "height-in",
+            "height-out", "normal-eps", "edge-soft", "white-damp", "diffuse", "spec-pow",
+            "crease-scale", "rim-width", "rim-gain", "glow-width", "glow-gain",
+            "interior-shade", "interior-width", "width", "height",
+        ]
+    }
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

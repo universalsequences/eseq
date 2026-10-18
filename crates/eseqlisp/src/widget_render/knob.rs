@@ -126,6 +126,22 @@ impl WidgetDefinition for KnobWidget {
         &["size"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A small rotary knob for one continuous value. :value is a number in \
+:min..:max (default 0..1); the arc shows how far along it is. For `knob`, pressing \
+or dragging sets the value from the pointer's height inside the knob (top = :max, \
+bottom = :min). `inline-knob` is the knob that `~knob` places in source code: it \
+is relative instead, dragging up (or right, more slowly) from the starting value, \
+8 cells of travel per full range. Either way :on-change receives one number, \
+clamped to :min..:max and not rounded; feed it back into :value. Colours come from \
+the theme. It is :size cells wide (default 2) and drawn round. Example: \
+(knob :value drive :min 0 :max 10 :size 3 :on-change (lambda (v) (set! drive v)))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &["value", "min", "max", "size", "on-change"]
+    }
+
     fn measure(
         &self,
         node: &Value,

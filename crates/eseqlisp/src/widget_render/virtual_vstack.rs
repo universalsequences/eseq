@@ -188,6 +188,33 @@ impl WidgetDefinition for VirtualVStackWidget {
         &["virtual-v-stack"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A v-stack for long lists that builds only the children near the visible part of the \
+scroll around it; put it directly inside a scroll (outside one it builds \
+everything). A child not yet seen counts as :estimated-item-height tall (default 3 \
+cells) and afterwards as its last measured height, so the scrollbar settles as you \
+scroll. :overscan N (default 4) builds N estimated rows beyond each edge of the \
+viewport. :gap (default 0) and :padding work as in v-stack; :align places children \
+horizontally (:start default, :center, :end, :stretch). Children are measured at the \
+full inner width with unbounded height; :flex, :justify and :shrink do not apply. It \
+takes the parent's width unless :width is set. Give each child a stable :key (or \
+wrap it in subtree :key) so cached heights follow the item when the list changes, \
+and build children with each. Example: (scroll :key \"rows\" :width :fill :flex 1 \
+(virtual-v-stack :estimated-item-height 2 :gap 0.2 (each rows |row i| (subtree :key \
+(str \"row-\" i) (row-view row)))))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "padding",
+            "gap",
+            "align",
+            "width",
+            "estimated-item-height",
+            "overscan",
+        ]
+    }
+
     fn is_container(&self) -> bool {
         true
     }

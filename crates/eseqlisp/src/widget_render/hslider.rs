@@ -141,11 +141,27 @@ impl WidgetDefinition for HorizontalSliderWidget {
         ]
     }
 
+    fn doc(&self) -> &'static str {
+        "A horizontal fader for one continuous value; `slider` and `hslider` are the \
+same widget. :value is a number in :min..:max (default 0..1); the bar fills from \
+the left and a row of dots marks the empty part. Dragging along it calls \
+:on-change with one number, the value under the pointer (min + (max - min) * \
+position, not rounded); feed it back into :value (or use :bind). Colours: :fill \
+for the bar, :dot-color for the dots; :plock-active 1 with :plock-color-r/-g/-b \
+(0..1) recolours the bar to show a parameter lock. :material takes an SDF \
+material for a custom-drawn slider. A trackpad tick fires as the value crosses \
+each whole number; :haptic-value with :haptic-min/:haptic-max ticks on that scale \
+instead. It is 16 cells wide and 1 \
+tall by default. Example: \
+(slider :value cutoff :min 20 :max 20000 :width 24 :on-change (lambda (v) (set! cutoff v)))"
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "value", "min", "max", "width", "fill", "dot-color", "haptic-min",
             "haptic-max", "haptic-value", "on-change", "material", "plock-active", "plock-color-r",
-            "plock-color-g", "plock-color-b",
+            "plock-color-g", "plock-color-b", "haptic-pivot-position", "haptic-pivot-value",
+            "haptic-exponent",
         ]
     }
 

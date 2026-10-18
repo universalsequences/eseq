@@ -145,6 +145,46 @@ impl WidgetDefinition for WaveformWidget {
         &["waveform"]
     }
 
+    fn doc(&self) -> &'static str {
+        "An interactive sample waveform with a time ruler, zoom/scroll, a start/end \
+selection, slice markers, a cursor and a playhead, as in the sampler and resample \
+panels. :buffer is a sample-buffer map from the host (e.g. d.sample-buffer, the \
+browser's p.buffer; it names a registered sample via :registry-key/:path/:id, or \
+carries :sample-rate :duration :peaks itself). All times are in seconds. The view is \
+controlled: :view-start and :view-duration pick the visible window and the widget \
+never changes them itself; :zoom-min-duration/:zoom-max-duration bound zoom requests. \
+:selection-start/:selection-end draw the selection (with :marker-selection true as \
+grabbable start/end handles, :active-marker :start or :end highlighting one); \
+:playhead-time and :cursor-time draw lines (bind the playhead live, e.g. \
+#'browser.preview-position; -1 hides it). :slices is a list of slice times, \
+:slice-active a parallel list of 0/1, :active-slice the selected index, and \
+:slice-select true turns clicks into slice picking (shift-click adds a slice, \
+alt-click deletes one). Every interaction calls :on-action with one map (event) \
+whose :type is :set-cursor (:time), :set-selection (:start :end), :clear-selection, \
+:begin-marker-drag (:marker), :end-marker-drag, :select-slice / :add-slice / \
+:move-slice / :delete-slice (:index and/or :time), :end-slice-drag, :scroll-view \
+(:delta-time) or :zoom-view (:anchor-time :factor); the caller updates its state. \
+:header-height sets the ruler strip (0.5; 0 hides it), :time-ruler (dict :mode \
+:seconds). Set :focusable true for keyboard zoom, scroll, Esc and Delete. \
+Example: (waveform :buffer buf :view-start v.start :view-duration v.dur \
+:selection-start v.a :selection-end v.b :marker-selection true :height 5 \
+:on-action (lambda (event) (handle-wave-event event)))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "buffer", "on-action", "view-start", "view-duration", "zoom-min-duration",
+            "zoom-max-duration", "selection-start", "selection-end", "marker-selection",
+            "active-marker", "playhead-time", "cursor-time", "slices", "slice-active",
+            "active-slice", "slice-select", "header-height", "sidebar-width", "time-ruler",
+            "ruler-font-size", "ruler-color", "ruler-bg", "grid-major-color",
+            "grid-minor-color", "bg", "background-color", "waveform-color",
+            "inactive-waveform-color", "marker-color", "active-marker-color",
+            "selection-color", "cursor-color", "playhead-color", "focusable", "width",
+            "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height", "header-height", "sidebar-width"]
     }

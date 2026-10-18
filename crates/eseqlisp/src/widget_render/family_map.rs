@@ -783,6 +783,21 @@ impl WidgetDefinition for FamilyMapWidget {
         ]
     }
 
+    fn doc(&self) -> &'static str {
+        "Specific to the VILLAIN drum instruments (Kick, Snare, Hat): plots the \
+instrument's family of fitted hits as dots on its two main axes (dot size = third axis), \
+highlights members A and B, shows the blend point on the A-B line and where \
+Exaggerate and the axis offsets push it, and previews the morph in a strip below. \
+:file is the instrument's family.json sidecar (nothing draws without it). Bind the \
+instrument's params: :a and :b (member indices), :blend 0..1, :exaggerate, :pc1 :pc2 \
+:pc3 (axis offsets) and the voice params (:spread, :beat, :tilt, :drop-time, :decay, \
+:bend, :body, :ring, :tune) for the preview. Clicking a dot calls :on-pick with \
+(index slot): slot is :armed (0 = A, 1 = B), flipped when Shift is held. :x-label and \
+:y-label name the axes; :accent colours A and the morph marker. \
+Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-label \"deep\" \
+:y-label \"swell\" :on-pick (lambda (index slot) (set-member! slot index)))"
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "file",

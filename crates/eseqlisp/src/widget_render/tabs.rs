@@ -166,6 +166,33 @@ impl WidgetDefinition for TabsWidget {
         &["tabs"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A tab bar over a set of pages: :items is the list of tab labels and the children are \
+the pages, one per item in the same order; only the page at :value (a 0-based index, \
+default 0) is laid out and shown. Clicking a tab calls :on-change with that tab's \
+index (one number); the tabs do not switch on their own, so set the value in the \
+handler, or use :bind. The header is :header-height tall (default 2 cells) and by \
+default splits the full width evenly between the tabs; :compact true instead sizes \
+each tab to its label plus :tab-padding (default 0.75) per side, with :gap (default \
+0.75) between tabs and :padding before the first. Without :compact the tabs take the \
+parent's full width; the height is the header plus the shown page's natural height. \
+Example: (tabs :items (list \"Osc\" \"Filter\" \"Amp\") :bind page (osc-page) \
+(filter-page) (amp-page))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "items",
+            "value",
+            "on-change",
+            "compact",
+            "header-height",
+            "tab-padding",
+            "gap",
+            "padding",
+        ]
+    }
+
     fn is_container(&self) -> bool {
         true
     }

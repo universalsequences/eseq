@@ -84,6 +84,22 @@ impl WidgetDefinition for DeviceMeterWidget {
         &["device-meter"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A thin stereo output meter for one device (instrument, effect or rack slot), \
+like the meters between devices in the FX chain. Display only. :source names the \
+device, not a node: pass the device's :meter selector (d.meter) or a dict such as \
+(dict :kind :track-effect :index track :slot slot); other kinds are :track, \
+:rack-slot (:index :rack-slot), :rack-effect (:index :rack-slot :slot), :bus and \
+:bus-effect (:id or :index, :slot). The host meters only visible device-meters and \
+the levels repaint without rerunning the panel; no source draws an empty track. \
+:inset trims the bars top and bottom (0.2), :bar-gap separates L and R. \
+Example: (device-meter :source d.meter :width 0.7 :height 8 :inset 0.3)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &["source", "track-color", "bar-gap", "inset", "width", "height"]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

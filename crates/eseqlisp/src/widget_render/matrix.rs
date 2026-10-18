@@ -864,6 +864,35 @@ impl WidgetDefinition for MatrixWidget {
         &["value"]
     }
 
+    fn doc(&self) -> &'static str {
+        "An editable grid of numbers: weights, probabilities, a step grid, a mod matrix. \
+:value is a list of rows (each a list of numbers) or, for one column, a flat list; \
+:rows and :cols give its shape, :min and :max its range (default 0..1). Drag a cell \
+up or down to change it; :round true snaps to whole numbers; :toggle true makes a \
+click flip a cell between :min and :max (a step grid). :on-cell-change receives \
+(row col value) for the one cell that changed; :on-change instead receives the whole \
+new matrix. Any editable matrix gets a right-click menu with Clear (back to :default, \
+a number or a matrix) unless it has its own :on-right-click. :on-cell-press and \
+:on-cell-release receive (row col). :control picks the cell drawing: :circle \
+(default), :grid (filled squares), :pie (a wedge sweeping from :zero) or :line. \
+:diverging true colours values below :zero with :negative-fill-color. Colours: \
+:fill-color, :empty-fill-color, :background-color, :stroke-color. Without \
+:width it is :size cells wide (16), and without :height its cells are square. Example, a 4-state transition \
+table: (matrix :rows 4 :cols 4 :min 0 :max 8 :round true :value weights \
+:width 12 :height 12 :control :grid \
+:on-cell-change (lambda (r c v) (set-weight! r c v)))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "value", "rows", "cols", "min", "max", "round", "toggle", "default", "on-cell-change",
+            "on-change", "on-cell-press", "on-cell-release", "on-right-click", "control", "zero",
+            "diverging", "fill-color", "negative-fill-color", "empty-fill-color",
+            "background-color", "stroke-color", "stroke-width", "stroke-active-only",
+            "hover-border-color", "size", "width", "height",
+        ]
+    }
+
     fn measure(
         &self,
         node: &Value,

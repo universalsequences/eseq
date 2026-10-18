@@ -262,6 +262,36 @@ impl WidgetDefinition for ScrollWidget {
         &["scroll"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A vertically scrolling viewport around ONE child (wrap several in a v-stack). The \
+child is laid out at the scroll's width with unbounded height and clipped, with a \
+thin scrollbar on the right when it is taller than the viewport. The scroll's \
+natural height is 0, so give it :height N, or :flex 1 inside a column with room (the \
+usual form: (scroll :width :fill :flex 1 ...)), or :fit-content true to report the \
+content height so a parent sizes it to its content and clips only when space runs \
+out (pair with :shrink 1 in a v-stack). Width is :width N or the parent's width. \
+Wheel and trackpad scroll vertically only; sideways gestures pass through. \
+:stick-to-bottom true keeps the view at the end as content grows (a log) unless the \
+user has scrolled up. :center-row R (cells, a number or a bound value) scrolls so \
+the band from R to R + :center-span (default 1) is centred, only when R changes, so \
+manual scrolling is not fought; a negative R is no request. A tree child's selected \
+row is scrolled into view automatically. A child with :height :fill gets at least \
+the viewport height. Give the scroll a :key so its position survives rebuilds. \
+Example: (scroll :key \"log\" :width :fill :flex 1 :stick-to-bottom true (v-stack \
+(each lines |l i| (label l :key (str \"line-\" i)))))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "width",
+            "height",
+            "fit-content",
+            "stick-to-bottom",
+            "center-row",
+            "center-span",
+        ]
+    }
+
     fn is_container(&self) -> bool {
         true
     }

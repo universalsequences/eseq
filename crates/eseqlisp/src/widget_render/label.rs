@@ -508,11 +508,26 @@ impl WidgetDefinition for LabelWidget {
         &["active"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A line of text: titles, captions, readouts, links. The text is the first \
+argument (stored as :text; a non-string is printed). A label paints no background \
+(it shows whatever holds it) unless :bg is given; :bg :transparent also suppresses \
+the focus highlight. Without :width it is as wide as its text. A single line \
+centers vertically in its :height; :v-align :start or :end moves it (a :wrap true \
+label starts at the top). :h-align :start (default), :center or :end, or a number \
+0..1, places the text horizontally. :wrap true breaks long text into lines at the \
+available width. Styling: :color, :font-size, :bold true, :mono true, :underline \
+true, :hover-color, and :active-color (used while :active is true). :on-click, \
+:on-right-click and :on-double-click make it a link; each receives one pointer \
+event map (e.phase, e.x, e.y, e.u, e.v, e.shift, e.cmd, ...). Example: \
+(label \"Cutoff\" :color :dim :font-size 11 :h-align :center :width 10)"
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "text", "color", "active", "active-color", "hover-color", "bg", "font-size",
             "width", "height", "wrap", "h-align", "v-align", "underline", "on-click", "mono",
-            "bold",
+            "bold", "on-right-click", "on-double-click",
         ]
     }
 

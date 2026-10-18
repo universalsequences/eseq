@@ -1967,6 +1967,42 @@ impl WidgetDefinition for KnobNumberWidget {
         ]
     }
 
+    fn doc(&self) -> &'static str {
+        "The standard labelled parameter knob: a dial with a name above and its value \
+below, as on a synth panel. :value is a number in :min..:max (default 0..1); \
+:label is the name shown; :unit (e.g. \"Hz\", \"dB\", \"%\") follows the number, \
+large values compact to k/M, :decimals caps the digits (default 2, fewer for wide \
+ranges) and :value-scale multiplies what is shown and typed (0..1 shown as 0..100 \
+with :value-scale 100). Drag up (or right, more slowly) to change it, relative to \
+the starting value: :drag-cells (default 8) cells of travel cover the whole range. \
+When focused, typing digits starts an edit, Enter commits, Esc cancels, and Enter \
+alone starts editing the current value. :on-change receives one number, clamped to \
+:min..:max and snapped to :step when :step > 0. :taper \"log\" (frequencies), \
+\"square\" or \"cube\" spreads the arc unevenly; :origin sets where the arc starts \
+(e.g. 0 for a bipolar -1..1 knob). Modulation display: :base-value with \
+:mod-offset (or :mod-scale) draws a live dot, :mod-ranges (list of (dict :slot n \
+:depth d)) draws range rings, and :plock-active 1 shows a parameter lock. \
+:value-align :center puts the value under the dial; :show-value false hides it. \
+Colours: :arc-color, :track-color, :text-color, :label-color; :font-size, \
+:label-font-size. It is 5.2 by 2.8 cells by default. The -mod-range and -mod-dot \
+names are internal draw passes. Example: \
+(knob-number :label \"Cutoff\" :value cutoff :min 20 :max 20000 :taper \"log\" \
+:unit \"Hz\" :on-change (lambda (v) (set! cutoff v)))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "value", "min", "max", "label", "unit", "decimals", "value-scale", "step",
+            "taper", "origin", "drag-cells", "on-change", "show-value", "value-align",
+            "font-size", "label-font-size", "label-height", "arc-color", "track-color",
+            "text-color", "label-color", "cursor-color", "edit-color", "focus-color",
+            "base-value", "base-min", "base-max", "mod-offset", "mod-scale", "mod-ranges",
+            "selected-mod-slot", "mod-dot-color", "process-value", "plock-active",
+            "plock-default", "plock-color-r", "plock-color-g", "plock-color-b", "width",
+            "height",
+        ]
+    }
+
     fn measure(
         &self,
         node: &Value,

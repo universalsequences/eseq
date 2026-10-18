@@ -788,6 +788,29 @@ impl WidgetDefinition for DropdownWidget {
         ]
     }
 
+    fn doc(&self) -> &'static str {
+        "A pop-up menu for choosing one of several options (waveform, filter type, \
+preset). :options is a list of strings (keywords and numbers are shown as text). \
+The trigger shows :value (the selected option's text) or, for an enum stored as a \
+number, :value-index picks option number (:value-index - :value-index-offset). A \
+click or Enter opens the menu; Up/Down move, Enter or a click picks, Esc closes. \
+:on-change receives ONE string, the picked option's text, even when you display \
+with :value-index, so map it back to a number yourself. :headers '(0 4) marks \
+option indices as dimmed, unpickable section titles; :footer \"More...\" adds an \
+action row whose own text is sent to :on-change; :details (parallel to :options) \
+adds dim right-hand text per row, :detail dim text on the trigger; :filterable \
+true lets typing narrow an open menu (:filter-placeholder). `menu-button` is the \
+same menu behind an icon trigger (:icon text, default \"•••\") that does not show a \
+selection: use it for action menus. Colours: :text-color, :bg-color, \
+:border-color, :chevron-color, :menu-bg, :hover-bg, :check-color; :font-size, \
+:menu-min-width. The trigger is as wide as its text unless :width is given. \
+`describe 'select` shows this text, but `select` builds a bare leaf without this \
+menu behaviour, so use `dropdown`; dropdown-chevron and similar names are internal \
+draw passes. Example: \
+(dropdown :options '(\"sine\" \"saw\" \"square\") :value wave :width 10 \
+:on-change (lambda (w) (set! wave w)))"
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "options", "headers", "value", "value-index", "value-index-offset", "width",

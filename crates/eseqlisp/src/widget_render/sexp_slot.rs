@@ -905,6 +905,28 @@ impl WidgetDefinition for SexpSlotWidget {
         &["value", "schema", "width", "max-width", "height", "font-size", "wrap"]
     }
 
+    fn doc(&self) -> &'static str {
+        "An editor for one small, guarded piece of Lisp data: a number, a word, a list \
+of those, or a form like (every 2 (rev swap)). Numbers show as scrubbable cells, \
+words and form heads as pop-up choices, lists inside real parens with a + to \
+append. :schema is a data s-expression saying what is allowed, e.g. \
+(num :min 1 :max 16 :step 1 :decimals 0 :default 4), (word rev swap stac), \
+(or ...), (form every (num ...) (word ...)), (forms ...) for a row of forms, \
+(fixed ...) to forbid lists, (dyn SOURCE) for host-supplied names; :value is the \
+current datum. Every committed edit calls :on-change with ONE value, the whole new \
+datum (store it and pass it back as :value). The slot is a single focus stop: \
+Left/Right move between items, Up/Down leave or enter a list, digits type a \
+number, a letter or ( opens a text field with completions, Enter commits or opens \
+choices, Backspace deletes an item, Esc closes; drag a number to scrub, click a \
+word to choose. :on-hover receives the top-level item under the pointer, or nil \
+when it leaves. :wrap false keeps it on one line. :lit (a bitmask) and \
+:lit-values ring the sounding items in :lit-color; :tint-args colours chosen \
+arguments in :tint-color; :dyn-context is passed to (dyn ...) sources and names \
+they reject draw in :error-color. Example: \
+(sexp-slot :key \"mods\" :schema '(word rev swap stac) :value mod \
+:on-change (lambda (v) (set! mod v)))"
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "schema", "value", "on-change", "width", "max-width", "height", "font-size",

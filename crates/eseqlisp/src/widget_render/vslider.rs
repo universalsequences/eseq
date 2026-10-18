@@ -250,12 +250,29 @@ impl WidgetDefinition for VerticalSliderWidget {
         ]
     }
 
+    fn doc(&self) -> &'static str {
+        "A vertical fader for one continuous value (mixer level, a single step's \
+amount). :value is a number in :min..:max (default 0..1); the bar fills upward from \
+:origin (default :min; set it to the middle for a bipolar fader that fills up or \
+down from center). Dragging up or down calls :on-change with one number, the value \
+under the pointer (top = :max, not rounded); feed it back into :value. Colours: \
+:fill for the bar, :dot-color for the empty-track dots; :plock-active 1 with \
+:plock-color-r/-g/-b (0..1) recolours the bar for a parameter lock. With :items (a \
+list of strings) it instead shows item number round(:value) written vertically, in \
+:color and :font-size. :material takes an SDF material for custom drawing, which \
+can read :active and :track-r/-g/-b. A trackpad tick fires as the value crosses a \
+whole number (:haptic-value/:haptic-min/:haptic-max choose another scale). It is 2 \
+cells wide and 8 tall by default. Example: \
+(vslider :value level :height 10 :on-change (lambda (v) (set! level v)))"
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "value", "min", "max", "height", "fill", "color", "dot-color", "origin",
             "items", "font-size", "haptic-min", "haptic-max", "haptic-value", "active",
             "track-r", "track-g", "track-b", "on-change", "material", "plock-active",
-            "plock-color-r", "plock-color-g", "plock-color-b",
+            "plock-color-r", "plock-color-g", "plock-color-b", "haptic-pivot-position",
+            "haptic-pivot-value", "haptic-exponent",
         ]
     }
 

@@ -76,6 +76,36 @@ impl WidgetDefinition for ImageWidget {
         &["image"]
     }
 
+    fn doc(&self) -> &'static str {
+        "Shows an image file (PNG, JPEG and the like) from :src, a file path; it is decoded \
+in the background and picked up again when the file changes. :fit is :cover \
+(default, fills the box and crops), :contain (fits inside, letterboxed) or :stretch. \
+Size: :width N or :fill, and :height N; without a height it follows :aspect (pixel \
+width over height, default 1, square), without a width it is derived from the \
+height, and with neither it is 12 cells wide. :max-pixel-width caps the width at the \
+image's native pixel size, for screenshots in documents. :radius rounds the corners \
+(px), :clip :circle crops to a circle, :opacity (0 to 1) fades it, and :rotation \
+(radians) with :rotation-speed (radians per second) turn it, like a spinning record \
+label. Example: (image :src cover-path :width 12 :aspect 1 :clip :circle \
+:rotation-speed 0.8)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "src",
+            "width",
+            "height",
+            "aspect",
+            "max-pixel-width",
+            "fit",
+            "radius",
+            "clip",
+            "opacity",
+            "rotation",
+            "rotation-speed",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height", "aspect", "max-pixel-width"]
     }

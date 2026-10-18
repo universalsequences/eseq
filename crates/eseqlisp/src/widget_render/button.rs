@@ -817,6 +817,27 @@ impl WidgetDefinition for ButtonWidget {
         ]
     }
 
+    fn doc(&self) -> &'static str {
+        "A push button with an optional icon. The label is the first argument (stored \
+as :text). :on-click receives one pointer event map (e.phase \"click\", e.shift, \
+e.cmd, ...); Enter or Space fire it too when the button is focused, reporting the \
+top-left position. For a momentary button give :on-press and :on-release instead: \
+each receives a pointer event map (phase \"press\" / \"release\", modifiers false), \
+the release arrives even when the pointer leaves, and a button with :on-press no \
+longer fires :on-click from the mouse. :disabled true ignores input. :variant picks \
+the look: :secondary (default grey), :primary (filled accent, one per view), \
+:ghost (no fill) or :danger. :active true shows the on state of a toggle-style \
+button (with :active-color / :active-background-color); :shape :tab draws an \
+active tab. :icon names a glyph drawn left of the text (:plus, :folder, :piano, \
+:sliders, :waveform, :sine, :check, :heart, :pencil, :link, :save, ...); \
+:icon-color, or :track-r/-g/-b, fills it. Colours: :color, :background-color, \
+:border-color, :muted-color (while :muted); :corner-radius in pixels (default 9), \
+:font-size, :padding per side (default 1.9 cells), :h-align (default center). \
+`badge` looks the same but ignores clicks and keys (a tag or name chip); \
+`button-icon` is the internal icon pass. Example: \
+(button \"Save\" :variant :primary :icon :save :on-click (lambda (e) (save-preset)))"
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "text",

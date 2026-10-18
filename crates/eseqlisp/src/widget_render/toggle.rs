@@ -104,6 +104,20 @@ impl WidgetDefinition for ToggleWidget {
         &["value"]
     }
 
+    fn doc(&self) -> &'static str {
+        "An on/off switch: a pill with a sliding knob. :value is a bool (a reactive \
+number is read as on when non-zero). A click calls :on-change with one bool, the \
+opposite of the current :value; the toggle does not flip itself, so feed the new \
+value back into :value (or use :bind). Colours: :color (track when on), :off-color \
+(track when off), :knob-color and :off-knob-color. It is 4 cells wide and 1 tall \
+unless :width/:height say otherwise. Example: \
+(toggle :value osc2-on :on-change (lambda (on) (set! osc2-on on)))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &["value", "on-change", "color", "off-color", "knob-color", "off-knob-color"]
+    }
+
     fn measure(
         &self,
         _node: &Value,

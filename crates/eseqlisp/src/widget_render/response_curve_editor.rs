@@ -409,6 +409,38 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
         &["response-curve-editor"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A general filter / EQ curve editor: each band is a draggable point on a log \
+frequency axis and the widget draws the resulting magnitude response. Use it for any \
+panel that edits filter cutoff/resonance or EQ bands. :bands is a list of dicts: :id, \
+:type (\"bell\", \"lowshelf\", \"highshelf\", \"lowpass\", \"highpass\", \"bandpass\", \
+\"notch\", \"passband\"), :freq (Hz), :gain (dB), :q, :enabled, :selected, plus optional \
+:freq-min/:freq-max/:gain-min/:gain-max/:q-min/:q-max, :q-taper \"log\", :lock-y true \
+(drag moves frequency only), :freq-scale (draw at freq * scale) and \
+:q-curve-scale/:q-curve-offset/:q-curve-power (map a 0..1 resonance param to the drawn \
+Q). Bind :freq/:gain/:q to params so the curve follows them. :mode :eq (default) puts \
+gain on the vertical axis; :mode :filter puts q there. Widget-level ranges are the band \
+defaults: :freq-min/:freq-max (20..20000), :gain-min/:gain-max (-12..12), :q-min/:q-max \
+(0.5..10). Two enabled bands in :filter mode (or with :combine true) draw one summed \
+curve. :on-action receives one map (event) with :type, :id, :band-type, :freq, :gain, \
+:q, where :type is :select-band (press on a point), :change-band (while dragging) or \
+:commit-band (on release); the caller writes the params. Style: :curve-color (or \
+:stroke-color), :stroke-width (px), :point-color, :grid-color, :background-color, \
+:corner-radius. \
+Example: (response-curve-editor :mode :filter :width 35 :height 2.2 \
+:bands (list (dict :id 0 :type \"lowpass\" :freq cutoff :q res :q-min 0.5 :q-max 12)) \
+:on-action (lambda (event) (when (= (get event :type) :change-band) (set-cutoff! (get event :freq)))))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "bands", "mode", "on-action", "freq-min", "freq-max", "gain-min", "gain-max",
+            "q-min", "q-max", "combine", "curve-color", "stroke-color", "stroke-width",
+            "point-color", "grid-color", "background-color", "corner-radius", "width",
+            "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

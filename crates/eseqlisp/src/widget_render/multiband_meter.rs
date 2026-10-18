@@ -136,6 +136,29 @@ impl WidgetDefinition for MultibandMeterWidget {
         &["multiband-meter"]
     }
 
+    fn doc(&self) -> &'static str {
+        "Specific to the built-in Multiband Dynamics (OTT) effect: three rows (high, \
+mid, low) on a -80..0 dB axis, each with live L/R level bars, a marker for the gain the \
+dynamics are applying, and a lighter zone between the band's below and above \
+thresholds. Display only, no callbacks. :source is the effect selector, \
+(dict :kind :track-effect :index track :slot slot) or :bus-effect; levels come from \
+that effect's own meter output, so it shows nothing on other effects. Thresholds in \
+dB: :low-below-thr, :mid-below-thr, :high-below-thr, :low-above-thr, :mid-above-thr, \
+:high-above-thr; :low-on/:mid-on/:high-on and :low-split/:high-split (0/1) dim \
+disabled bands. Bind these to the params so dragging moves the zones. Colours: \
+:background-color, :grid-color, :level-color, :gain-color. \
+Example: (multiband-meter :source (effect-source fx) :low-below-thr lb :low-above-thr la :width 17 :height 7)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "source", "low-below-thr", "mid-below-thr", "high-below-thr", "low-above-thr",
+            "mid-above-thr", "high-above-thr", "low-on", "mid-on", "high-on", "low-split",
+            "high-split", "background-color", "grid-color", "level-color", "gain-color", "width",
+            "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

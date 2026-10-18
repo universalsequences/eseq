@@ -78,6 +78,29 @@ impl WidgetDefinition for SpectrogramWidget {
         &["spectrogram"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A live spectrum analyzer of one point in the mix. :mode :waterfall (default) \
+scrolls a colour-mapped history of the spectrum; :mode :eq \
+draws the current spectrum as a filled curve, like an EQ analyzer. Display only, no \
+callbacks. :source picks what to watch: :master (default) or a selector dict such as \
+(dict :kind :track :index 0); also :track-effect (:index :slot), :bus, :bus-effect, \
+:rack-slot, :rack-effect. :tap-point :pre-fx or :post-fx (default). Analysis: \
+:fft-size (2048, power of two 256..8192), :time-slices of history (256, 8..512), \
+:min-db/:max-db colour range (-60..0), :smoothing 0..0.98 (0.65). Display range: \
+:freq-min/:freq-max in Hz (80..16000), :freq-scale :log (default) or :linear. Colours: \
+:min-color, :mid-color, :max-color (waterfall ramp), :line-color and :fill-color (eq \
+mode), :background-color. \
+Example: (spectrogram :source :master :mode :waterfall :fft-size 2048 :min-db -64 :width 20 :height 7)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "source", "tap-point", "mode", "freq-scale", "fft-size", "time-slices", "min-db",
+            "max-db", "smoothing", "freq-min", "freq-max", "min-color", "mid-color", "max-color",
+            "line-color", "fill-color", "background-color", "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

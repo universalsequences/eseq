@@ -724,6 +724,23 @@ impl WidgetDefinition for TextInputWidget {
         &["value", "placeholder", "width", "height", "font-size"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A one-line text field (a name, a search box, a rename). :value is the current \
+string and :placeholder the dim hint shown while it is empty. The field does not \
+keep its own text: every edit calls :on-change with ONE string, the whole new \
+text, so store it and pass it back as :value. Enter calls :on-submit and Esc calls \
+:on-cancel, both with no arguments (only when given; otherwise the keys are \
+ordinary edits), and :on-blur (no arguments) fires when focus leaves. Click to \
+place the caret, drag to select; the usual editing keys work. :auto-focus true \
+focuses it when it appears and :select-all-on-focus true selects the text on \
+focus, handy for rename fields. A child widget (e.g. an icon label) is drawn as a \
+leading icon. Colours: :text-color, :placeholder-color, :bg-color (or :bg \
+:transparent), :cursor-color, :ring-color; :font-size. It fills the available \
+width (20 cells when unconstrained) and is 1.5 tall. Example: \
+(text-input :value name :placeholder \"Preset name\" :width 24 \
+:on-change (lambda (s) (set! name s)) :on-submit (lambda () (save-as name)))"
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "value", "placeholder", "width", "height", "font-size", "text-color",
@@ -1120,11 +1137,25 @@ impl WidgetDefinition for TextboxWidget {
         ]
     }
 
+    fn doc(&self) -> &'static str {
+        "A multi-line, word-wrapping text area (notes, a description, a prompt). \
+:value is the current string and :placeholder the dim hint while it is empty. Every \
+edit calls :on-change with ONE string, the whole new text; store it and pass it \
+back as :value. Enter inserts a newline (there is no :on-submit); :on-blur (no \
+arguments) fires when focus leaves and :auto-focus true focuses it on appear. \
+Without :height it grows with its wrapped text between :min-lines (default 2) and \
+:max-lines (default 6). Colours: :text-color, :placeholder-color, :bg-color, \
+:cursor-color, :ring-color; :font-size. It fills the available width (32 cells \
+when unconstrained). Example: \
+(textbox :value notes :placeholder \"Notes...\" :max-lines 10 \
+:on-change (lambda (s) (set! notes s)))"
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "value", "placeholder", "width", "height", "font-size", "min-lines", "max-lines",
             "text-color", "placeholder-color", "bg", "bg-color", "cursor-color", "ring-color",
-            "on-change",
+            "on-change", "on-blur", "auto-focus",
         ]
     }
 

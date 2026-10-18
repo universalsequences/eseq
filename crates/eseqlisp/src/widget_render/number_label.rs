@@ -149,6 +149,27 @@ impl WidgetDefinition for NumberLabelWidget {
         &["width", "height", "font-size"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A read-only numeric readout that formats a number for you, cheap to bind to a \
+live value (BPM, a parameter, a meter reading). :value is the number (bindable); \
+:decimals 0..6 (default 0) sets the digits after the point, :min-integer-digits \
+pads the whole part with spaces so the width stays steady, and :prefix / :suffix \
+(strings) wrap it, e.g. \"x\" or \" Hz\". It has no callbacks. Unlike `label`, it \
+paints the theme background unless :bg :transparent. Text sits at the top-left by \
+default; :h-align :start/:center/:end and :v-align :start/:center/:end (or 0..1) \
+move it. Styling: :color, :font-size, and :active-color while :active is true. \
+Without :width it is 4 cells wide. Example: \
+(number-label :value bpm :decimals 1 :suffix \" bpm\" :width 9 :h-align :end)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "value", "decimals", "min-integer-digits", "prefix", "suffix", "color",
+            "active", "active-color", "bg", "font-size", "h-align", "v-align", "width",
+            "height", "default-width",
+        ]
+    }
+
     fn measure(
         &self,
         node: &Value,

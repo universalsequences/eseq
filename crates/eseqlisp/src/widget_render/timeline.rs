@@ -479,6 +479,11 @@ impl WidgetDefinition for TimelineCursorMarkerWidget {
         &["timeline-cursor-marker"]
     }
 
+    fn doc(&self) -> &'static str {
+        "Internal: the playhead/cursor marker shape the timeline draws on its ruler; not \
+meant to be placed by hand (use timeline's :cursor-time)."
+    }
+
     fn measure(
         &self,
         _node: &Value,
@@ -505,6 +510,63 @@ impl WidgetDefinition for TimelineCursorMarkerWidget {
 impl WidgetDefinition for TimelineWidget {
     fn names(&self) -> &'static [&'static str] {
         &["timeline"]
+    }
+
+    fn doc(&self) -> &'static str {
+        "A horizontal clip/note editor over time, the engine of the piano roll and the \
+arrangement: lanes stacked vertically, items (clips or notes) placed on them, \
+a ruler header, playhead and cursor. Time is in steps. :lanes is a list of maps \
+{:id :label :sidebar-bg :label-fg} (one lane by default; :sidebar-width shows \
+the labels, :sidebar-style :piano draws keys). :items is a list of maps {:id \
+:lane (index) :start :end :label :color :selected} with optional :content \
+({:dots ({:offset :value :width}) :cycle :phase} note previews, {:rings ...}, \
+{:peaks ...}). The visible window is :view-start/:view-duration (default 0/16, \
+zoom clamped to :zoom-min-duration..:zoom-max-duration); bind them to reactive \
+fields to scroll several lanes together. :playhead-time and :cursor-time draw \
+lines; :time-ruler (dict :mode :bars-beats :beats-per-bar 4) or :seconds labels \
+the header (:header-height, default 1). :content-length draws a draggable loop \
+end. :tool is :pointer (default), :draw, :erase, :marquee, :pan or :scrub; :snap \
+is the step grid (:snap-mode :floor, :resize-snap :grid, :move-snap-mode \
+:alignment-helper). The widget is stateless: every gesture and key calls \
+:on-action with ONE map whose :type says what happened, e.g. :select (:ids \
+:mode :time), :set-cursor (:time), :create-item/:finish-create-item (:lane \
+:start :end), :move-items-absolute (:ids :anchor-id :start :lane) then \
+:finish-move-items, :resize-item-absolute (:id :ids :edge :time :duration) then \
+:finish-resize-items, :resize-content-length (:length), :marquee-select (:time-a \
+:time-b :lane-a :lane-b), :delete-items (:ids), :scroll-view (:view-start \
+:delta-time :delta-lanes), :zoom-view (:anchor-time :factor), :zoom-lanes, \
+:nudge-selection (:ids :delta-time :delta-lane), :copy-items, :paste-items \
+(:time), :set-tool (:tool), :clear-selection, :double-click-item (with \
+:double-click-items true); the host updates :items in response. While \
+:placement-active is 1 a ghost of :placement-item follows the pointer and a \
+click sends :place-item (:time), Esc :cancel-placement. With \
+:focusable true it takes arrows, Backspace, Cmd+C/V/A, Esc and p/d/e tool keys. \
+Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
+:view-start #'view.start :view-duration #'view.duration :on-action (lambda \
+(a) (on-roll-action a)))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "lanes", "items", "on-action", "view-start", "view-duration", "zoom-min-duration",
+            "zoom-max-duration", "playhead-time", "cursor-time", "time-ruler", "header-height",
+            "header-bottom-gutter", "sidebar-width", "sidebar-style", "tool", "snap", "snap-mode",
+            "resize-snap", "resize-snap-mode", "move-snap-mode", "marquee-snap", "min-duration",
+            "create-duration", "grid-density", "content-length", "content-length-min",
+            "content-length-max", "selection", "selection-rect", "selection-rect-style",
+            "double-click-items", "band-slide", "window-marker", "window-span", "window-repeat",
+            "lane-scroll", "lane-height", "scroll-viewport-height", "scroll-mode",
+            "scroll-passthrough", "title-bar-height", "item-corner-radius", "item-color",
+            "item-label-color", "item-label-font-size", "item-content-color", "loop-color",
+            "loop-visible", "cursor-color", "cursor-marker-visible", "cursor-line-visible",
+            "cursor-marker-scale", "cursor-marker-width-scale", "cursor-marker-height-scale",
+            "background-color", "border-top-color", "border-bottom-color", "border-width",
+            "placement-active", "placement-item", "lane-key", "cursor-lane", "selected-id",
+            "selected-lane", "bound-id", "bound-lane", "ghost-kind", "ghost-id", "ghost-time",
+            "ghost-lane-a", "ghost-lane-b", "ghost-region-a", "ghost-region-b", "region-a",
+            "region-b", "region-on", "region-lane-a", "region-lane-b", "focusable", "width",
+            "height",
+        ]
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {

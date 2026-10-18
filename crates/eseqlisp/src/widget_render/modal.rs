@@ -233,6 +233,40 @@ impl WidgetDefinition for ModalWidget {
         &["modal"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A centred dialog panel over a dimmed scrim, drawn above everything; it takes no \
+space where it is written. :is-open (a bool or bound value) shows it, and while \
+closed it builds nothing. It lays out ONLY its first child (wrap several in a \
+v-stack), inset by fixed padding and placed below the optional :title header. Size \
+is :width/:height in cells or :width-px/:height-px in design pixels, each clamped to \
+the window; without them it is 70% of the window on each axis. While open it takes \
+all pointer and keyboard input. Escape, or a click outside the panel, calls \
+:on-close with no arguments; that is only a request, and the modal closes when the \
+handler sets :is-open false. Look: :background-color, :border-color, :scrim-color, \
+:title-color, and :font-size scales the title. A dropdown or context-menu opened \
+inside it sits on top and closes first. Example: (modal :is-open dlg.open :title \
+\"Rename\" :width 40 :height 10 :on-close (lambda () (set! dlg.open false)) (v-stack \
+:gap 0.5 (text-input :bind dlg.draft) (button \"OK\" :on-click (lambda (e) \
+(commit!)))))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "is-open",
+            "title",
+            "width",
+            "height",
+            "width-px",
+            "height-px",
+            "on-close",
+            "background-color",
+            "border-color",
+            "scrim-color",
+            "title-color",
+            "font-size",
+        ]
+    }
+
     fn is_container(&self) -> bool {
         true
     }

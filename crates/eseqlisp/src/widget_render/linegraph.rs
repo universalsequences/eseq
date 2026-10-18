@@ -408,6 +408,29 @@ impl WidgetDefinition for LineGraphWidget {
         &["linegraph"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A read-only line plot of one series: a training loss curve, a process lane scope, \
+any history of numbers. :values is a list of numbers (non-numbers leave gaps; a \
+single number plots one point), drawn left to right. :total-points fixes the \
+x-axis length so a growing series fills in from the left instead of stretching \
+(default: the series length). The y range fits the data unless :min and/or :max \
+pin it; :scale :log plots log10 (falls back to linear without a positive value). \
+:y-axis true adds min/max labels in :axis-color; :grid-lines (0..12, default 3) \
+draws horizontal rules in :grid-color; :area true fills under the line \
+(:area-color). :line-color (or :color) sets the line; :background-color defaults \
+to transparent. No callbacks. Default height 4 cells, full available width. \
+Example: (linegraph :width :fill :height 3 :values losses :total-points 50 \
+:min 0 :y-axis true :area true :line-color :blue)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "values", "total-points", "min", "max", "scale", "y-axis", "grid-lines", "area",
+            "line-color", "color", "area-color", "grid-color", "axis-color", "background-color",
+            "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

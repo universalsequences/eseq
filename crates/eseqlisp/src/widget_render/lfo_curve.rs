@@ -96,6 +96,26 @@ impl WidgetDefinition for LfoCurveWidget {
         &["lfo-curve"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A read-only LFO waveform preview with an optional live phase marker. :shape is \
+a shape index: 0 triangle, 1 sine, 2 pulse, 3 saw up, 4 random step, 5 random \
+ramp, 6 clipped triangle, 7 full-width pulse, 8 saw down. :pw (0..1, default \
+0.5) is the pulse width, or the peak position for the triangle. :phase-offset \
+is in degrees (0..360); :cycles (1..8, default 1) is how many periods to draw. \
+:phase (0..1) rides a marker along the curve; a negative :phase (default -1) \
+hides it. Bind :phase to a reactive field for live motion. No callbacks. \
+Colours: :background-color, :grid-color, :curve-color, :fill-color. Default \
+height 4 cells, full available width. Example: (lfo-curve :width 30 :height 3 \
+:shape 1 :pw 0.5 :phase-offset 0 :phase #'lfo.phase)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "shape", "pw", "phase-offset", "cycles", "phase", "background-color", "grid-color",
+            "curve-color", "fill-color", "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

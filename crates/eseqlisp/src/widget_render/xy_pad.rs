@@ -87,6 +87,19 @@ impl WidgetDefinition for XyPadWidget {
         &["x", "y"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A square pad that sets two values at once with one dot (filter cutoff and \
+resonance, a pan/depth pair). :x and :y are 0..1 (default 0.5 each, bindable); x \
+grows rightward and y grows DOWNWARD (0 = top). Pressing or dragging moves the dot \
+to the pointer and calls :on-change with two numbers, (x y), each clamped to 0..1; \
+the pad does not move itself, so write them back into :x/:y. Scale to your own \
+ranges in the handler (flip y with (- 1 y) if up should be larger). Colours: \
+:accent (or :color) for the dot and crosshair, :background, :border-color; \
+:dot-size is the dot radius in pixels (default 4). It is :size cells wide (default \
+12) and square unless :height is given. Example: \
+(xy-pad :x px :y py :size 10 :on-change (lambda (x y) (set-filter-xy! x y)))"
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "x",

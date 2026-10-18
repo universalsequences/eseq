@@ -219,6 +219,25 @@ impl WidgetDefinition for ScaleEditorWidget {
         &["scale-editor"]
     }
 
+    fn doc(&self) -> &'static str {
+        "An editor for a track's tuned (microtonal) scale, one column per scale degree. \
+All pitches are in cents. :base lists each degree's base pitch above the root, \
+:offsets each degree's detune (default 0), :pitches the pitch that actually \
+sounds (default base + offset), :enabled a parallel list of booleans, :labels \
+optional degree names. The top strip draws the pitches as a staircase over \
+0..:period (default 1200, an octave); the middle draws detune bars on a \
++/- :range axis (default 100 cents); the bottom row has one on/off dot per \
+degree. :selected is the highlighted degree index. :on-change receives (kind \
+degree value): :set with the new detune in whole cents while pressing or \
+dragging the bars (shift snaps to 5), :finish with the final offset on release, \
+:clear on double-click or alt-press, :toggle when a degree's dot is pressed and \
+:select when the staircase is pressed (value 0 for the last three). Colours: \
+:color, :sharp-color, :flat-color, :grid-color, :text-color, :background; \
+:font-size and :dot-size size the labels and dots. Example: (scale-editor \
+:base (list 0 200 400 500 700 900 1100) :offsets offs :height 5 :on-change \
+(lambda (kind i v) (on-degree kind i v)))"
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }
@@ -239,7 +258,10 @@ impl WidgetDefinition for ScaleEditorWidget {
             "sharp-color",
             "flat-color",
             "grid-color",
+            "text-color",
             "background",
+            "font-size",
+            "dot-size",
             "on-change",
         ]
     }

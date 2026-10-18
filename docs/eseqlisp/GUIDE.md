@@ -270,7 +270,7 @@ A meter or a knob that follows audio should not rerun a view sixty times a
 second. Bind the prop to the field instead of reading it:
 
 ```lisp
-(meter :level #'master.peak-l)
+(mixer-meter :level-l #'master.peak-l :level-r #'master.peak-r)
 (let ((t (track i))) (slider :value #'t.volume))
 ```
 
@@ -324,28 +324,44 @@ maps, lists of maps, or `nil`; lists are flattened.
 
 Sizes are in cell units, or `:fill`. Layout containers are `v-stack`,
 `h-stack`, `wrap`, `grid`, `responsive-grid`, `scroll`, `virtual-v-stack`,
-and `box`. `:flex N` on a child takes a share of leftover space. `h-stack`
+and `box`. `box`, `scroll` and `modal` lay out only their first child: wrap
+several in a stack. `:flex N` on a child takes a share of leftover space
+(in an `h-stack` only when the row is `:width :fill`); a `scroll` needs a
+`:height` or `:flex`. `h-stack`
 defaults to gap 1, `v-stack` to gap 0.
 
 `:bind cell` is shorthand for `:value cell :on-change (lambda (v) (set! cell v))`.
 
-The full list of widget names is `BUILTIN_WIDGET_NAMES` in
-`crates/eseqlisp/src/widgets.rs`. The props each accepts are the
-`completion_props` list in the matching `crates/eseqlisp/src/widget_render/*`
-file. Do not name a `def` or a parameter after a widget: a local called
+`(describe 'matrix)` (or the `describe` tool) shows any widget's purpose,
+props and what its handlers receive; the names are listed under Reactive and
+UI below. Use a stock widget before building one from boxes: an editable
+grid of numbers is a `matrix`. Do not name a `def` or a parameter after a widget: a local called
 `label` shadows the widget and every `(label …)` below it fails.
 
 ### Handler arguments
 
 | widget | handler | receives |
 |---|---|---|
-| `box` `label` `:on-click :on-drag :on-mouse-down :on-mouse-up :on-right-click :on-double-click` | one pointer event map | see below |
+| `box` `:on-click :on-drag :on-mouse-down :on-mouse-up :on-right-click :on-double-click` | one pointer event map | see below |
+| `label` `:on-click :on-right-click :on-double-click` | one pointer event map | |
 | `button :on-click :on-press :on-release` | one pointer event map | see below |
-| `slider knob number-picker tabs :on-change` | one number | |
+| `slider knob knob-number number-picker tabs :on-change` | one number | |
+| `number-picker :on-release` | nothing | |
 | `toggle :on-change` | one bool | |
-| `dropdown :on-change` | the option string | use `:value-index` for enums |
-| `text-input :on-change :on-submit` | string, none | |
+| `dropdown :on-change` | the option string, even with `:value-index` | map it back to an index yourself |
+| `text-input :on-change :on-submit :on-cancel :on-blur` | string, then none | |
+| `color-picker :on-change` | `h s v a` | |
+| `sexp-slot :on-change` | the whole new value | |
+| `matrix :on-cell-press :on-cell-release` | `row col` | |
+| `adsr-editor :on-change` | one map of the mode's values | `:active` is the dragged handle, false on release |
+| `automation-lane scale-editor :on-change` | `kind index value` | kind `:set` `:finish` `:clear` (scale-editor also `:toggle` `:select`) |
+| `piano-keyboard :on-click` | a pointer event map with `:note` | |
+| `timeline :on-action` | one action map with a `:type` | `describe 'timeline` lists them |
+| any widget `:on-right-click` | one pointer event map | |
+| `menu-item :on-select` | one map: `:phase "select"`, `:text`, `:value` | the menu then closes |
+| `modal context-menu :on-close` | nothing | set `:is-open` false yourself |
 | `xy-pad :on-change` | `x y` | |
+| `matrix :on-cell-change` | `row col value` | `:on-change` gets the whole matrix |
 | shader widgets `:on-drag` | `sx sy region` | normalized -1..1 |
 
 ### Pointer events
@@ -660,7 +676,9 @@ between processes, sequencers, and the UI.
 `gen-phase`, `gen-rand`, `state-get`, `state-set!`, and `chan-get` are the
 vocabulary; `seq-emit` takes `:track :at :note :vel :dur :chord :quantize`.
 A `defmacro` at the top level can stamp out sequencers with parameters, as
-`content/scripts/sequencers/test-seq.lisp` does.
+`content/scripts/sequencers/test-seq.lisp` does. For states and transitions
+(Markov chains, neural networks) use a graph sequencer instead: the
+`sequencer` guide's Graph sequencers section.
 
 Attach any of these to a project by adding an `(import your.module)` line to
 the project's scratch buffer.
@@ -792,10 +810,11 @@ t.volume  (set! t.volume 0.5)   ; read (subscribes) and write a field
 
 Layout: `v-stack h-stack wrap grid responsive-grid scroll virtual-v-stack box
 modal context-menu tabs`. Controls: `label button badge toggle slider hslider
-vslider knob knob-number number-picker number-label dropdown select
-menu-button text-input textbox xy-pad`. Displays: `meter mixer-meter scope
-xy-scope spectrogram waveform linegraph matrix adsr-editor lfo-curve
-automation-lane timeline piano-keyboard image tree`. Instrument panel roots:
+vslider knob knob-number number-picker number-label number-list dropdown
+menu-button text-input textbox xy-pad matrix piano-keyboard
+adsr-editor lfo-curve automation-lane sexp-slot color-picker`. Displays:
+`mixer-meter device-meter scope xy-scope spectrogram waveform linegraph timeline
+image tree`. `describe` each for its props. Instrument panel roots:
 `defsynth-ui defeffect-ui def-midi-fx-ui`.
 
 ### Scheduler

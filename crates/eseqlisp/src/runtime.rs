@@ -2454,6 +2454,9 @@ impl Runtime {
                     keyword_args: Vec::new(),
                 });
             if let Some(definition) = definition {
+                if !definition.doc().is_empty() {
+                    metadata.docs = definition.doc().to_string();
+                }
                 let props = definition.completion_props();
                 if !props.is_empty() {
                     metadata.keyword_args = normalize_keyword_args(props.iter().copied());

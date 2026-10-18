@@ -41,6 +41,22 @@ impl WidgetDefinition for LanePreviewWidget {
         &["lane-preview"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A tiny read-only bar chart of one step lane, e.g. a thumbnail of a process or \
+automation lane. :values is a flat list of numbers (booleans count as 0/1), one \
+bar per step drawn across the full width; the range is auto-fitted to include \
+0..1 and the lane's own min/max. There are no callbacks. :active-color fills \
+the bars, :background-color the backdrop (:inactive-color is used only in the \
+text renderer). Without :height it is 4 cells tall and fills the available \
+width. Example: (lane-preview :values (list 0 0.5 1 0.25) :height 2)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "values", "active-color", "inactive-color", "background-color", "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height", "values"]
     }

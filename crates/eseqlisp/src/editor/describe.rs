@@ -45,7 +45,18 @@ impl Editor {
             return text;
         }
         match self.runtime.completion_metadata_for(name) {
-            Some(metadata) => format!("{}\n\n{}\n", metadata.signature, metadata.docs),
+            Some(metadata) => {
+                let mut text = format!("{}\n\n{}\n", metadata.signature, metadata.docs);
+                if crate::widgets::BUILTIN_WIDGET_NAMES.contains(&name) {
+                    if !metadata.keyword_args.is_empty() {
+                        text.push_str(&format!("\nProps: {}\n", metadata.keyword_args.join(" ")));
+                    }
+                    text.push_str(
+                        "Every widget also takes :key (a stable identity), :width and :height (cells, or :fill) and :flex N (a share of a stack's leftover space).\n",
+                    );
+                }
+                text
+            }
             None => format!("{name}\n\nNot documented.\n"),
         }
     }

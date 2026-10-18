@@ -522,6 +522,39 @@ impl WidgetDefinition for Eq8EditorWidget {
         &["eq8-editor"]
     }
 
+    fn doc(&self) -> &'static str {
+        "The built-in EQ Eight's editor: up to 8 bands drawn as draggable points over a \
+live spectrum (of :source), with the combined response curve. Mainly for that device \
+and the Filter Table effect; for a general filter/EQ curve editor prefer \
+response-curve-editor. :bands is a list of dicts with :id, :type (\"bell\", \
+\"lowshelf\", \"highshelf\"), :freq (Hz), :gain (dB), :q, :enabled, :selected and \
+optional per-band :freq-min/:freq-max/:gain-min/:gain-max/:q-min/:q-max; the widget-level \
+:freq-min/:freq-max (20..20000), :gain-min/:gain-max (-24..24), :q-min/:q-max (0.1..18) \
+are the defaults; :selected-band marks the selected id. Every interaction calls \
+:on-action with one map (event) holding :type, :id, :band-type, :enabled, :freq, :gain, \
+:q: :type is :select-band (click on a point), :toggle-band (right- or double-click; \
+:enabled is the new state), :change-band (while dragging; drag sets freq and gain, \
+cmd/ctrl/alt-drag sets q) or :commit-band (on release). The caller writes the params \
+itself. Spectrum: :source, :tap-point and the spectrogram analysis props (:fft-size, \
+:min-db, :max-db, :smoothing). :response-data-key with :response-frame, \
+:response-cutoff and :response-resonance draws a Filter Table response instead; \
+:response-min-db/:response-max-db set the curve's dB range. \
+Example: (eq8-editor :bands bands :selected-band sel :source src :width 38 :height 6.8 \
+:on-action (lambda (event) (handle-action event)))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "bands", "selected-band", "on-action", "freq-min", "freq-max", "gain-min",
+            "gain-max", "q-min", "q-max", "source", "tap-point", "fft-size", "time-slices",
+            "min-db", "max-db", "smoothing", "sample-rate", "response-min-db",
+            "response-max-db", "response-data-key", "response-frame", "response-cutoff",
+            "response-resonance", "background-color", "spectrum-color", "spectrum-peak-color",
+            "curve-color", "selected-color", "inactive-band-color", "grid-color", "width",
+            "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

@@ -528,6 +528,33 @@ impl WidgetDefinition for PianoKeyboardWidget {
         &["piano-keyboard"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A piano keyboard that shows which notes are sounding, optionally clickable to \
+pick notes. :start-note (MIDI, default 21 = A0) and :key-count (default 88) set \
+the range. :notes-by-track is a list with one entry per track, each a list of \
+active notes: bare MIDI numbers (full velocity), {:note n :velocity v} maps, or \
+(note velocity trigger-id) rows; a new :trigger-id re-presses an already held key. \
+:track-colors is the parallel list of colours; :tracks optionally lists which \
+track indices to show. :overlap-mode :split (default) bands simultaneous tracks \
+on one key, :loudest shows only the highest velocity. Keys animate down on \
+note-on with :press-depth (0..2, default 1). :on-click receives one pointer \
+event map (phase, u/v, modifiers) plus :note, the MIDI note under the pointer; \
+without :on-click the keyboard is display-only. :selected-notes (list of MIDI \
+notes) tints keys, :note-marks ({:note n :color c} maps) draws a strip under \
+keys, :label-octaves true prints C4 etc. on each C. Default size 80 x 6 cells. \
+Example: (piano-keyboard :start-note 48 :key-count 25 :height 4 \
+:notes-by-track (list held) :track-colors (list :blue) \
+:on-click (lambda (e) (set! root e.note)))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "notes-by-track", "track-colors", "tracks", "start-note", "key-count", "overlap-mode",
+            "press-depth", "on-click", "selected-notes", "note-marks", "label-octaves", "width",
+            "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

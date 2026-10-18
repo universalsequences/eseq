@@ -54,8 +54,11 @@ Slots (all optional except that a sequencer needs `:generator` or
   …) while the transport plays. `self.FIELD` reads document fields. `:requires`
   names every module the tick calls into; a function the tick calls must be
   reachable through them (qualified: `my.pulse-core/tick`).
-- `:sequencer (…)`: a graph sequencer body (nodes and edges), as
-  alez/neural uses. Most custom sequencers want `:generator`.
+- `:sequencer (…)`: a graph sequencer body (nodes and edges); see Graph
+  sequencers below. Use it for anything that is states and transitions (a
+  Markov chain, a neural or energy network, a state machine); use
+  `:generator` for a per-step rule (euclidean, probability per step, a
+  pattern formula).
 - `:document ((field default) …)`: the instance's saved settings. Stored per
   scene/pattern, saved with the project, undoable, copied on duplicate, and
   read by the tick as `self.field`. Values must be portable literals:
@@ -133,14 +136,84 @@ marks with `(generator-mark-named g key)`.
     (if m #'m.value 0)))
 ```
 
+## Graph sequencers
+
+A graph sequencer is a set of nodes joined by weighted edges, run by the
+engine: a node that fires plays a note on its routed track, then passes
+energy or a choice along its edges after its `:delay` steps. Markov chains
+and neural networks are a few lines of `:sequencer` instead of a tick, and
+the instance's nodes, edges and params are kind fields the panel can bind
+and edit (undoable, saved per pattern). Working examples to read with
+`form_source`: the `neural` kind in `alez.neural.variable-reset` (a full
+package with a weight matrix panel) and
+`content/scripts/sequencers/graph-markov-8x8-demo.lisp` (a Markov chain).
+
+```lisp
+(def-kind chain
+  :sequencer (:shape (line :default 8 :min 1 :max 16)  ; node count
+    :energy-decay 1
+    :reset-every 0
+    :seed-on-reset 0
+    :max-poly 4
+    :duration (steps 1)
+    (def-node state
+      :resolution :16 :delay 1 :quantize :16
+      :route 0                 ; the track it plays (a rack's k-th pad)
+      :seed-from ()            ; tracks whose steps fire it; default: its :route
+      :reduce :max :event :newest
+      :params ((transpose :int -48 48 :default 0))
+      :state ((energy :leak (per-step :energy-decay)))
+      :update (if (> (input) 0)
+        (emit :note (+ (in-note) (param :transpose)) :vel (in-vel) :dur (seed))
+        false))
+    (edges :from state :to state
+      :topology (all-to-all)
+      :distribution :weighted-choice   ; Markov: follow ONE edge, by weight
+      :gather (edge :weight)
+      :params ((weight :float 0 1 :default 0.0))))
+  :view chain-panel
+  :on-create chain-init)
+
+;; Starting weights: a ring 0 -> 1 -> … -> 0.
+(def chain-init (self)
+  (for-each (lambda (r) (graph-edge self :from r :to (mod (+ r 1) 8) :weight 1))
+    (range 0 8)))
+```
+
+- A chain starts from a seed: a step on a track a node listens to
+  (`:seed-from`, default its `:route` track) fires that node. Tell the user to
+  put a step on that track, or seed it from a track they already play.
+- `:distribution :weighted-choice` (also `:markov`) follows one outgoing edge
+  chosen by weight; the default `:broadcast` sends to every edge, which is
+  what a neural network wants (`:update` then fires when `(energy)` clears a
+  threshold).
+- Inside `:update`: `(input)`, `(energy)`, `(in-note)`, `(in-vel)`,
+  `(param :name)`, `(delay)`, `(seed)`, `(emit :note :vel :dur)`; `describe`
+  any of them.
+- In the view, `(graph-of self)` is the graph (nil until the host syncs it):
+  `g.nodes` (each `n.index`, `n.delay`, `n.route`, `n.resolution`,
+  `n.edges`), and `(graph-param-named n "transpose")` is a param whose
+  `p.value` binds (`#'p.value`) and sets. `eseq.graph-kit` has the rest:
+  `weight-rows` (the weights as rows for a `matrix`), `set-weight!`,
+  `route-options`, `node-route-label`, `set-route-label!`, `res-options`.
+- Edit the weights with a `matrix`:
+  `(matrix :rows (len g.nodes) :cols (len g.nodes) :value (weight-rows g)
+  :on-cell-change (lambda (r c v) (set-weight! g r c v)))`.
+
 ## Panels
 
 - Build from the standard widgets: `box`, `h-stack`, `v-stack` (`:gap`,
   `:align :center|:start`), `label`, `button` (`:on-click (lambda (event)
   …)`), `number-picker` (`:value :min :max :step :decimals :on-change (lambda
   (v) …)`), `dropdown` (`:options` list of strings, `:value-index`,
-  `:on-change (lambda (label) …)`), `sexp-slot` (below), and your own
-  `defwidget` shaders.
+  `:on-change (lambda (label) …)`), `knob`, `toggle`, `slider`, `matrix`
+  (an editable grid of numbers: weights, probabilities, a step grid; `:on-cell-change
+  (lambda (row col value) …)`), `xy-pad`, `piano-keyboard`, `sexp-slot`
+  (below), and your own `defwidget` shaders.
+- `describe` any widget (`matrix`, `knob`, `dropdown`, …) for what it does,
+  its props and what its handlers receive. Reach for a stock widget before
+  building one from boxes and labels: a grid of numbers is a `matrix`, not a
+  stack of boxes.
 - Children of a stack are generated with `(each LIST |i| body)`, never `map`.
 - Every interactive widget needs a unique `:key` within the panel, such as
   `(str "pulse-cell-" i)`.

@@ -49,6 +49,23 @@ impl WidgetDefinition for MixerMeterWidget {
         &["mixer-meter"]
     }
 
+    fn doc(&self) -> &'static str {
+        "The mixer channel's stereo level meter: two segmented LED bars (green, yellow \
+above 70%, red above 88%) with a fixed 0..60 dB scale printed beside them. Display only. \
+:level-l and :level-r are 0..1 bar heights; pass live bindings (e.g. #'t.peak) so the \
+meter follows audio without rebuilding the tree. :segments sets the LED count (12). \
+Default size is 2.22 x 4.24 cells. To meter a device's output by itself, use \
+device-meter instead. \
+Example: (mixer-meter :level-l #'t.peak :level-r #'t.peak :font-size 7 :label-color :dim)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "level-l", "level-r", "segments", "segment-gap", "bar-width", "bar-gap", "label-gap",
+            "label-color", "font-size", "label-height", "label-top-inset", "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height", "font-size"]
     }
