@@ -1667,7 +1667,7 @@ fn open_user_init_tab(editor: &mut Editor) -> Result<String, String> {
     open_source_tab(editor, &path, "init.lisp", false)
 }
 
-pub(super) fn user_init_path() -> PathBuf {
+pub(crate) fn user_init_path() -> PathBuf {
     sequencer::app_paths::app_paths()
         .user_lisp_root()
         .join("init.lisp")
@@ -1827,6 +1827,8 @@ pub(super) fn refresh_package_listings(editor: &mut Editor, ctx: &mut LoopCtx<'_
         refresh_packages_view(editor, ctx);
     }
     let _ = editor.runtime_mut().eval_str("(eseq.browser/refresh-buffer)");
+    // The agent pane shows whether its packages are loaded.
+    crate::agent_pane::refresh();
     editor.refresh_runtime_side_effects();
     editor.mark_needs_redraw();
 }

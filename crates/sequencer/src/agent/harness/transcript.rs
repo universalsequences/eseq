@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+use super::workspace::Artifact;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     Running,
@@ -58,11 +60,26 @@ pub struct Transcript {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
+    /// The packages this conversation wrote, as they stand.
+    pub artifacts: Vec<Artifact>,
 }
 
 impl Transcript {
     fn changed(&mut self) {
         self.generation += 1;
+    }
+
+    /// Redraw without a change here: something the pane shows beside the
+    /// conversation moved (a package was loaded into the project).
+    pub fn touch(&mut self) {
+        self.changed();
+    }
+
+    pub fn set_artifacts(&mut self, artifacts: Vec<Artifact>) {
+        if self.artifacts != artifacts {
+            self.artifacts = artifacts;
+            self.changed();
+        }
     }
 
     pub fn push(&mut self, entry: Entry) {

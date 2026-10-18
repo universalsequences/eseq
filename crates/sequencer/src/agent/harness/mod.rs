@@ -11,6 +11,7 @@ pub mod message;
 pub mod sse;
 pub mod transcript;
 pub mod turn;
+pub mod workspace;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +22,8 @@ use serde_json::Value;
 pub use mcp_client::{McpClient, ServerHandle, ToolBackend, ToolResult};
 pub use transcript::{clip, Entry, ToolStatus, Transcript};
 use turn::{push_user_text, run_turn, AnthropicTransport, TurnConfig};
+pub use workspace::{Artifact, Change, FileChange, KindDecl};
+use workspace::{Workspace, WRITE_TOOLS};
 
 use crate::agent::providers::AgentProviderKind;
 
@@ -35,8 +38,15 @@ in a pane beside their project and sees your tool calls as they run.\n\
 \n\
 Your tools run against a separate, headless eseq, not the user's open project. What you write \
 with create_module, define_form or write_module goes to the Local packages folder, which the \
-user's app reloads by itself. When you finish something, tell the user how to use it in their \
-project (for a sequencer kind: the Packages tab, then New <kind>), and keep explanations short.\n\
+user's app reloads by itself.\n\
+\n\
+Put new work in one new Local package: a short lowercase name for what it is (`euclid`), with \
+modules under it (`euclid.core`, `euclid.view`). To improve an existing package, edit its \
+modules in place. The pane shows each package you write as a card with its files and changed \
+lines and buttons to load it into the project, add its kinds, open its files, rename it or \
+reject it, so don't list files or paths: say what you built and how to try it, briefly. A \
+message may start with notes on what the user did in the pane since your last turn (renamed \
+or rejected a package); take them as the current state.\n\
 \n\
 The pane renders your replies as simple markdown: paragraphs, **bold**, `code`, fenced code \
 blocks, # headings and one level of - or 1. lists. Nested lists are not supported; keep lists \
@@ -61,6 +71,8 @@ pub struct SessionConfig {
     pub log_path: PathBuf,
     /// Where tool images are saved for the pane.
     pub image_dir: PathBuf,
+    /// The Local packages folder, whose packages the pane tracks.
+    pub local_root: PathBuf,
 }
 
 impl SessionConfig {
@@ -78,6 +90,7 @@ impl SessionConfig {
             tool_server: ToolServer { program, args: vec!["mcp".to_string()] },
             log_path: state_dir.join("agent-tools.log"),
             image_dir: state_dir.join("agent-images"),
+            local_root: crate::app_paths::app_paths().local_modules_dir(),
         })
     }
 }
@@ -99,6 +112,17 @@ struct Shared {
     /// end a call that hangs.
     server: Mutex<Option<ServerHandle>>,
     cancel: AtomicBool,
+    workspace: Mutex<Workspace>,
+    /// What the user did in the pane since the last turn, for the next
+    /// message to tell the agent.
+    notes: Mutex<Vec<String>>,
+}
+
+impl Shared {
+    fn publish_artifacts(&self) {
+        let artifacts = lock(&self.workspace).artifacts();
+        lock(&self.transcript).set_artifacts(artifacts);
+    }
 }
 
 /// One conversation with the agent. Cheap to clone; turns run on their own
@@ -112,6 +136,7 @@ impl AgentSession {
     pub fn new(config: SessionConfig) -> Self {
         // Images belong to a conversation; a new session starts without them.
         let _ = std::fs::remove_dir_all(&config.image_dir);
+        let workspace = Workspace::new(config.local_root.clone());
         Self {
             shared: Arc::new(Shared {
                 config,
@@ -120,6 +145,8 @@ impl AgentSession {
                 running: Mutex::new(None),
                 server: Mutex::new(None),
                 cancel: AtomicBool::new(false),
+                workspace: Mutex::new(workspace),
+                notes: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -152,11 +179,47 @@ impl AgentSession {
             return Err("Stop the running turn first.".to_string());
         }
         lock(&self.shared.history).clear();
+        lock(&self.shared.workspace).clear();
+        lock(&self.shared.notes).clear();
         let _ = std::fs::remove_dir_all(&self.shared.config.image_dir);
         let mut transcript = lock(&self.shared.transcript);
         let generation = transcript.generation + 1;
         *transcript = Transcript { generation, ..Transcript::default() };
         Ok(())
+    }
+
+    /// Redraw the pane: what it shows of the project changed.
+    pub fn touch(&self) {
+        lock(&self.shared.transcript).touch();
+    }
+
+    /// Put a package back as it was before this conversation wrote it (one
+    /// the agent made is deleted).
+    pub fn reject(&self, package: &str) -> Result<String, String> {
+        self.edit_workspace(|workspace| workspace.reject(package))
+    }
+
+    /// Rename a package the agent made, folder and module names.
+    pub fn rename(&self, package: &str, new_name: &str) -> Result<String, String> {
+        if package == new_name.trim() {
+            return Ok(format!("`{package}` keeps its name."));
+        }
+        self.edit_workspace(|workspace| workspace.rename(package, new_name))
+    }
+
+    fn edit_workspace(&self, edit: impl FnOnce(&mut Workspace) -> Result<String, String>) -> Result<String, String> {
+        if self.busy() {
+            return Err("Stop the running turn first.".to_string());
+        }
+        let message = edit(&mut lock(&self.shared.workspace))?;
+        // The tool server has the old modules loaded: the next turn starts
+        // a fresh one that reads the files as they are now.
+        *lock(&self.shared.server) = None;
+        *lock(&self.shared.running) = None;
+        lock(&self.shared.notes).push(message.clone());
+        lock(&self.shared.transcript).push(Entry::Notice(message.clone()));
+        self.shared.publish_artifacts();
+        Ok(message)
     }
 
     /// Send the user's message and run the turn in the background.
@@ -229,7 +292,40 @@ fn take_turn(shared: &Shared, text: &str) -> Result<(), String> {
         *running = Some(started);
     }
     let Running { transport, client, turn } = running.as_mut().expect("started above");
+    let notes = std::mem::take(&mut *lock(&shared.notes));
+    let text = if notes.is_empty() {
+        text.to_string()
+    } else {
+        format!("(Since your last turn, in the pane: {})\n\n{text}", notes.join(" "))
+    };
     let mut history = lock(&shared.history);
-    push_user_text(&mut history, text);
-    run_turn(transport, client, turn, &mut history, &shared.transcript, &shared.cancel)
+    push_user_text(&mut history, &text);
+    let mut tools = Tracking { tools: client, shared };
+    run_turn(transport, &mut tools, turn, &mut history, &shared.transcript, &shared.cancel)
+}
+
+/// The tool server, noting each package before a tool writes it and
+/// publishing what changed after.
+struct Tracking<'a> {
+    tools: &'a mut McpClient,
+    shared: &'a Shared,
+}
+
+impl ToolBackend for Tracking<'_> {
+    fn tools(&mut self) -> Result<Vec<Value>, String> {
+        self.tools.tools()
+    }
+
+    fn call(&mut self, name: &str, input: &Value) -> ToolResult {
+        let module = input["module"].as_str().filter(|_| WRITE_TOOLS.contains(&name));
+        if let Some(module) = module {
+            lock(&self.shared.workspace).before_write(name, module);
+        }
+        let result = self.tools.call(name, input);
+        // A write that failed put its file back.
+        if module.is_some() && !result.is_error {
+            self.shared.publish_artifacts();
+        }
+        result
+    }
 }

@@ -3,14 +3,16 @@
 //!
 //!   agent_session <metal_seq> <state-dir> <message>…
 //!
-//! Each further message is sent after the previous turn ends. Needs
+//! Each further message is sent after the previous turn ends; `/rename
+//! <package> <new-name>` and `/reject <package>` act as the pane's card
+//! buttons do instead (`_` names the first package the agent wrote). Needs
 //! ANTHROPIC_API_KEY; the agent writes Local packages like the pane does
 //! (set ESEQ_CONFIG_DIR to keep them out of ~/.eseq.d).
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use sequencer::agent::harness::{clip, AgentSession, Entry, SessionConfig, ToolStatus, Transcript};
+use sequencer::agent::harness::{clip, AgentSession, Artifact, Entry, SessionConfig, ToolStatus, Transcript};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -30,6 +32,18 @@ fn main() {
     let mut seen_generation = None;
     let mut turn_start_usage = (0, 0, 0);
     for message in messages {
+        let first = session.with_transcript(|t| t.artifacts.first().map(|a| a.package.clone())).unwrap_or_default();
+        let words: Vec<&str> =
+            message.split_whitespace().map(|word| if word == "_" { first.as_str() } else { word }).collect();
+        let action = match words.as_slice() {
+            ["/rename", package, new_name] => Some(session.rename(package, new_name)),
+            ["/reject", package] => Some(session.reject(package)),
+            _ => None,
+        };
+        if let Some(result) = action {
+            println!("{message}: {}", result.unwrap_or_else(|why| format!("refused: {why}")));
+            continue;
+        }
         if let Err(error) = session.send(&message) {
             eprintln!("agent_session: {error}");
             std::process::exit(2);
@@ -55,6 +69,9 @@ fn main() {
                     totals.2 - cache_read
                 );
                 turn_start_usage = totals;
+                for artifact in session.with_transcript(|t| t.artifacts.clone()) {
+                    println!("{}", render_artifact(&artifact));
+                }
                 break;
             }
         }
@@ -86,6 +103,27 @@ fn final_lines(transcript: &Transcript, printed: usize) -> Vec<String> {
         .take_while(|(index, entry)| !open(*index, entry))
         .map(|(_, entry)| render(entry))
         .collect()
+}
+
+fn render_artifact(artifact: &Artifact) -> String {
+    let mut lines = vec![format!(
+        "PACKAGE {} ({}) entries {:?} kinds {:?}",
+        artifact.package,
+        if artifact.created { "new" } else { "edited" },
+        artifact.entries,
+        artifact.kinds.iter().map(|decl| format!("{}/{}", decl.module, decl.kind)).collect::<Vec<_>>()
+    )];
+    for file in &artifact.files {
+        lines.push(format!(
+            "    {} {} {} lines +{} -{}",
+            file.change.as_str(),
+            file.name,
+            file.lines,
+            file.added,
+            file.removed
+        ));
+    }
+    lines.join("\n")
 }
 
 fn render(entry: &Entry) -> String {

@@ -6644,7 +6644,8 @@ pub(crate) fn init_runtime(
         Duration::from_millis(150),
     )));
     register_sample_browser_native(&mut runtime, sample_browser.clone());
-    super::agent_pane::register_agent_pane_natives(&mut runtime);
+    let scratch_state = state.clone();
+    super::agent_pane::register_agent_pane_natives(&mut runtime, move || scratch_state.scratch_source());
 
     let sample_db_for_tree = sample_db.clone();
     runtime.register_native("seq-sample-tree", move |_args, _ctx| {

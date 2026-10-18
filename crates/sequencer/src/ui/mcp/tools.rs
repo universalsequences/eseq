@@ -142,7 +142,7 @@ const HOST_TOOLS: &[HostTool] = &[
             `source`, then imports it. Use a two-or-more-segment name you own (not eseq.*). \
             Fails, and removes the file, when the module does not load.",
         params: &[
-            ("module", "string", "New module name, e.g. me.euclid", true),
+            ("module", "string", "New module name, e.g. euclid.core (package euclid)", true),
             ("source", "string", "Forms after the (module …) line: imports, exports, definitions", false),
         ],
     },
@@ -422,7 +422,7 @@ fn valid_module(module: &str) -> Result<(), String> {
     if eseqlisp::modules::is_valid_module_name(module) {
         Ok(())
     } else {
-        Err(format!("`{module}` is not a module name (dotted, like `me.euclid`)"))
+        Err(format!("`{module}` is not a module name (dotted, like `euclid.core`)"))
     }
 }
 
@@ -516,7 +516,7 @@ fn form_source(session: &HeadlessSession, module: &str, name: &str) -> Result<To
 fn create_module(session: &mut HeadlessSession, module: &str, source: Option<&str>) -> Result<ToolOutput, String> {
     valid_module(module)?;
     if !module.contains('.') {
-        return Err(format!("`{module}` needs two or more segments, like `me.euclid`"));
+        return Err(format!("`{module}` needs two or more segments, like `euclid.core`"));
     }
     if module.starts_with("eseq.") {
         return Err("eseq.* names are reserved for the factory".to_string());

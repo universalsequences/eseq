@@ -118,7 +118,7 @@ use panel_kinds_seed::*;
 
     fn register_agent_test_natives(runtime: &mut Runtime) {
         // The agent pane's natives are inert until the pane is used.
-        crate::agent_pane::register_agent_pane_natives(runtime);
+        crate::agent_pane::register_agent_pane_natives(runtime, String::new);
         runtime.register_native("agent/new", |_args, _ctx| Ok(Value::Number(1.0)));
         runtime.register_native("agent/send", |_args, _ctx| Ok(Value::Nil));
         runtime.register_native("agent/cancel", |_args, _ctx| Ok(Value::Nil));
