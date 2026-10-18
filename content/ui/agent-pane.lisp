@@ -9,9 +9,9 @@
 
 (module eseq.agent-pane)
 
-(import eseq.kinds :refer (agent))
+(import eseq.kinds :refer (agent project))
 (import eseq.markdown-view :as markdown-view)
-(import eseq.view-kit :refer (nothing))
+(import eseq.view-kit :refer (nothing open-menu! menu-of find))
 
 (export agent-pane-open agent-pane-close agent-pane-send)
 
@@ -41,15 +41,15 @@
         (set! draft "")
         (agent-pane/send text)))))
 
-;; Secondary text: prefixes, tool rows, the counters.
+;; Secondary text: tool rows, the counters.
 (def dim-text (text size wrap)
   (label text :font-size size :color :dim :wrap wrap :bg :transparent))
 
-(def tool-view (entry i)
+(def tool-view (entry key)
   (let ((status (get entry :status)))
-    (v-stack :key (str "entry-" i) :width :fill :gap 0.15
+    (v-stack :key key :width :fill :gap 0.15
       (h-stack :width :fill :gap 0.5
-        (dim-text (str "• " (get entry :name) (cond ((= status "failed") " failed") ((= status "running") " …") (else "")))
+        (dim-text (str (get entry :name) (cond ((= status "failed") " failed") ((= status "running") " …") (else "")))
           11 false)
         (dim-text (get entry :input) 10 false))
       (if (= (get entry :output) "")
@@ -57,11 +57,7 @@
         (dim-text (get entry :output) 10 true))
       (v-stack :width :fill :gap 0.2
         (each (get entry :images) |path j|
-          (image :key (str "entry-" i "-image-" j) :src path :width :fill :height 14))))))
-
-(def text-view (entry i prefix color size)
-  (label (str prefix (get entry :text))
-    :key (str "entry-" i) :font-size size :color color :wrap true :bg :transparent))
+          (image :key (str key "-image-" j) :src path :width :fill :height 14))))))
 
 (def open-link (target)
   (if (markdown-view/external-link? target)
@@ -69,30 +65,111 @@
     (status (str "Not a web link: " target))))
 
 ;; The agent's replies are markdown: bold, code, lists, headings.
-(def reply-view (entry i)
-  (box :key (str "entry-" i) :width :fill
+(def reply-view (entry key)
+  (box :key key :width :fill
     (markdown-view/render-markdown (get entry :text) (dict :size 12 :on-link open-link))))
 
-(def entry-view (entry i)
-  (let ((kind (get entry :kind)))
-    (cond
-      ((= kind "tool") (tool-view entry i))
-      ((= kind "user") (text-view entry i "› " :fg 12))
-      ((= kind "thinking") (text-view entry i "… " :dim 10))
-      ((= kind "notice") (text-view entry i "! " :fg 11))
-      (else (reply-view entry i)))))
+;; What you asked, in a box like the composer's.
+(def user-view (entry key)
+  (box :key key :width :fill :padding 1.0 :corner-radius 12
+    :background-color :button-ghost-bg :border-width 1 :border-color :dropdown-menu-border
+    (label (get entry :text) :font-size 12 :color :fg :wrap true :bg :transparent)))
 
-(def header (busy usage)
-  (h-stack :key "agent-pane-header" :width :fill :gap 0.5 :align :center
-    (label "Agent" :font-size 14 :color :fg :bg :transparent)
-    (dim-text (if busy "working…" "") 10 false)
-    (box :flex 1)
-    (dim-text (str (get usage :input) " in · " (get usage :output) " out") 9 false)
-    (if busy
-      (button "Stop" :key "agent-pane-stop" :variant :danger :height 1.2
-        :on-click |x y r| (agent-pane/cancel))
-      (button "New" :key "agent-pane-new" :variant :ghost :height 1.2
-        :on-click |x y r| (agent-pane/reset)))))
+;; ── Collapsed rows ──
+;;
+;; Each thought, and each run of tool calls, is one grey row that opens to
+;; show what it holds. Every row has its own `agent-row` instance, keyed by
+;; its first entry's index, so opening one redraws only that row. New bumps
+;; the epoch, so the next conversation's rows start closed.
+
+(defstate row-epoch 0)
+
+(def-kind agent-row
+  :key (epoch start)
+  :state ((open false)))
+
+(def row-state (start) (agent-row row-epoch start))
+
+;; Consecutive tool calls make one group; every other entry is its own.
+(def group-entries (entries)
+  (reverse
+    (reduce |groups i|
+      (let ((entry (nth entries i)))
+        (if (and (= (get entry :kind) "tool")
+                 (not (empty? groups))
+                 (= (get (first groups) :kind) "tool"))
+          (cons (merge (first groups) :entries (append (get (first groups) :entries) (list entry)))
+            (rest groups))
+          (cons (dict :kind (get entry :kind) :start i :entries (list entry)) groups)))
+      (list) (range (len entries)))))
+
+(def tool-summary (tools)
+  (let ((n (len tools))
+        (last-tool (nth tools (- n 1)))
+        (failed (len (filter |t| (= (get t :status) "failed") tools)))
+        (running (= (get last-tool :status) "running")))
+    (str
+      (if (= n 1)
+        (str (get last-tool :name) "  " (get last-tool :input))
+        (str "Used " n " tools" (if running (str " · " (get last-tool :name)) "")))
+      (if running " …" "")
+      (if (> failed 0) (str " · " failed " failed") ""))))
+
+;; A grey row with a chevron; open, `body` shows below it.
+(def collapsible (key start title body)
+  (let ((row (row-state start))
+        (open row.open))
+    (v-stack :key key :width :fill :gap 0.25
+      (label (str title (if open "  ▾" "  ▸"))
+        :key (str key "-title") :font-size 11 :color :dim :hover-color :fg :wrap false :bg :transparent
+        :on-click (lambda (event) (set! row.open (not row.open))))
+      (if open body (nothing)))))
+
+(def group-view (group is-last busy)
+  (let ((kind (get group :kind))
+        (start (get group :start))
+        (key (str "agent-group-" start))
+        (entry (first (get group :entries))))
+    (cond
+      ((= kind "thinking")
+        (collapsible key start (if (and is-last busy) "Thinking" "Thought")
+          (dim-text (get entry :text) 11 true)))
+      ((= kind "tool")
+        (collapsible key start (tool-summary (get group :entries))
+          (v-stack :width :fill :gap 0.4 :padding 0.3
+            (each (get group :entries) |tool j| (tool-view tool (str key "-tool-" j))))))
+      ((= kind "user") (user-view entry key))
+      ((= kind "notice") (label (str "! " (get entry :text)) :key key :font-size 11 :color :fg :wrap true :bg :transparent))
+      (else (reply-view entry key)))))
+
+;; A 3×3 grid of dots pulsing in a diagonal wave, beside "Working".
+(defwidget working-dots
+  :width 3.0 :height 1.4
+  :animates true
+  :shader
+  (let ((phase (* itime 4.0))
+        (a (+ 0.7 (* 0.3 (sin phase))))
+        (b (+ 0.7 (* 0.3 (sin (- phase 0.9)))))
+        (c (+ 0.7 (* 0.3 (sin (- phase 1.8)))))
+        (d (+ 0.7 (* 0.3 (sin (- phase 2.7)))))
+        (e (+ 0.7 (* 0.3 (sin (- phase 3.6)))))
+        (blue (vec3 0.4 0.58 1.0)))
+    (sdf/layer
+      (sdf/fill (sdf/translate -0.4 -0.4 (sdf/circle 0.15)) (material :color (rgba blue a)))
+      (sdf/fill (sdf/translate 0 -0.4 (sdf/circle 0.15)) (material :color (rgba blue b)))
+      (sdf/fill (sdf/translate 0.4 -0.4 (sdf/circle 0.15)) (material :color (rgba blue c)))
+      (sdf/fill (sdf/translate -0.4 0 (sdf/circle 0.15)) (material :color (rgba blue b)))
+      (sdf/fill (sdf/translate 0 0 (sdf/circle 0.15)) (material :color (rgba blue c)))
+      (sdf/fill (sdf/translate 0.4 0 (sdf/circle 0.15)) (material :color (rgba blue d)))
+      (sdf/fill (sdf/translate -0.4 0.4 (sdf/circle 0.15)) (material :color (rgba blue c)))
+      (sdf/fill (sdf/translate 0 0.4 (sdf/circle 0.15)) (material :color (rgba blue d)))
+      (sdf/fill (sdf/translate 0.4 0.4 (sdf/circle 0.15)) (material :color (rgba blue e))))))
+
+;; Under the last entry while a turn runs.
+(def working-row ()
+  (h-stack :key "agent-pane-working" :width :fill :gap 0.4 :align :center
+    (working-dots :width 3.0 :height 1.4)
+    (dim-text "Working" 11 false)))
 
 ;; ── What the agent built ──
 ;;
@@ -179,9 +256,22 @@
 (def small-button (text key variant action)
   (button text :key key :variant variant :height 1.0 :font-size 10 :on-click |x y r| (action)))
 
+;; Add <kind>: checked once the project has an instance of it (each click
+;; still adds another).
+(def kind-added? (id)
+  (find |instance| (= (get instance :kind) id) project.instances))
+
+(def add-kind-button (decl key)
+  (let ((added (kind-added? (get decl :id))))
+    (button (str "Add " (get decl :kind)) :key key
+      :variant (if added :secondary :primary) :icon (if added :check nil)
+      :height 1.0 :font-size 10
+      :on-click |x y r| (host-command "packages-new-instance"
+                          (dict :module (get decl :module) :kind (get decl :id))))))
+
 (def artifact-card (artifact i)
   (let ((key (str "agent-artifact-" i)) (package (get artifact :package)))
-    (box :key key :width :fill :padding 0.4 :corner-radius 6
+    (box :key key :width :fill :padding 1.0 :corner-radius 12
       :background-color :button-ghost-bg :border-width 1 :border-color :dropdown-menu-border
       (v-stack :width :fill :gap 0.3
         (h-stack :width :fill :gap 0.5 :align :center
@@ -193,9 +283,7 @@
           (each (get artifact :files) |file j| (file-row file (str key "-file-" j))))
         (wrap :width :fill :gap 0.3 :row-gap 0.3
           (each (get artifact :kinds) |decl j|
-            (small-button (str "Add " (get decl :kind)) (str key "-add-" j) :primary
-              (lambda () (host-command "packages-new-instance"
-                           (dict :module (get decl :module) :kind (get decl :kind))))))
+            (add-kind-button decl (str key "-add-" j)))
           (if (= (len (get artifact :entries)) 0)
             (nothing)
             (small-button (if (get artifact :loaded) "Unload" "Load") (str key "-load") :ghost
@@ -215,47 +303,129 @@
 
 (def empty-state ()
   (v-stack :key "agent-pane-empty" :width :fill :flex 1 :gap 0.6 :padding 1.0
-    (dim-text "Ask for a sequencer, a panel or an extension. The agent writes it as a Local module, checks how it plays and looks, and your project picks it up."
-      11 true)
-    (button "a euclidean sequencer with three rings" :key "agent-pane-example" :variant :ghost
-      :on-click |x y r| (set! draft "Build a euclidean rhythm sequencer with three rings, each routed to a track."))))
+    (dim-text "Ask for a sequencer, a panel or an extension. The agent writes it as a Local package, checks how it plays and looks, and your project picks it up."
+      11 true)))
 
 ;; The conversation, redrawn as agent.pane-generation moves while a turn
 ;; streams (and not as the composer is typed into).
 (def conversation ()
   ;; Reading the generation is what ties this subtree to the conversation.
   (let ((generation agent.pane-generation)
-        (state (agent-pane/state)))
-    (let ((entries (get state :entries)))
-      (v-stack :width :fill :flex 1 :gap 0.5
-        (header (get state :busy) (get state :usage))
-        (if (= (len entries) 0)
-          (empty-state)
-          (scroll :key "agent-pane-scroll" :width :fill :flex 1 :stick-to-bottom true
-            (v-stack :key "agent-pane-entries" :width :fill :gap 0.5 :padding 0.3
-              ;; One subtree per entry: while a reply streams only it redraws,
-              ;; the finished ones are reused.
-              (each entries |entry i|
-                (subtree :key (str "agent-entry-" i) (entry-view entry i))))))
-        (artifacts-view (get state :artifacts))))))
+        (state (agent-pane/state))
+        (busy (get state :busy))
+        (entries (get state :entries))
+        (groups (group-entries entries))
+        (last-start (if (empty? groups) -1 (get (nth groups (- (len groups) 1)) :start))))
+    (v-stack :width :fill :flex 1 :gap 0.5
+      (if (= (len entries) 0)
+        (empty-state)
+        (scroll :key "agent-pane-scroll" :width :fill :flex 1 :stick-to-bottom true
+          (v-stack :key "agent-pane-entries" :width :fill :gap 0.5 :padding 0.3
+            ;; One subtree per group: while a reply streams only it redraws,
+            ;; the finished ones are reused.
+            (each groups |group i|
+              (subtree :key (str "agent-group-tree-" (get group :start))
+                (group-view group (= (get group :start) last-start) busy)))
+            (if busy (working-row) (nothing)))))
+      ;; Its own subtree: the Add buttons read project.instances, whose
+      ;; changes need not redraw the conversation.
+      (subtree :key "agent-pane-artifacts-tree" (artifacts-view (get state :artifacts))))))
+
+;; ── The composer ──
+;;
+;; The text box with, below it, the model and effort the next turn uses
+;; (a menu) and one round button: send (shown once there is text) or, while
+;; a turn runs, stop.
+
+(def-kind agent-model-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)))
+
+(def effort-label (effort)
+  (cond
+    ((= effort "low") "Low")
+    ((= effort "medium") "Medium")
+    ((= effort "high") "High")
+    ((= effort "xhigh") "Extra high")
+    ((= effort "max") "Max")
+    (else effort)))
+
+(def pick (action)
+  (set! agent-model-menu.open false)
+  (action))
+
+(def model-menu-items (choice)
+  (append
+    (map (lambda (model)
+           (menu-item (get model :label) :key (str "agent-model-" (get model :id))
+             :checked (= (get model :id) (get choice :model))
+             :on-select (lambda (e) (pick (lambda () (agent-pane/set-model (get model :id)))))))
+      (agent-pane/models))
+    (append
+      (list (menu-separator :key "agent-model-sep"))
+      (map (lambda (effort)
+             (menu-item (effort-label effort) :key (str "agent-effort-" effort)
+               :checked (= effort (get choice :effort))
+               :on-select (lambda (e) (pick (lambda () (agent-pane/set-effort effort))))))
+        (agent-pane/efforts)))))
+
+(def model-chip (choice)
+  (box :key "agent-pane-model" :padding 0.2 :corner-radius 6
+    :on-click (lambda (event) (open-menu! agent-model-menu event))
+    (label (str (get choice :label) " · " (effort-label (get choice :effort)) " ▾")
+      :font-size 11 :color :dim :hover-color :fg :bg :transparent)))
+
+;; The round button: stop while a turn runs, send once there is text.
+(def round-button (text key action)
+  (button text :key key :width 3.2 :height 1.6 :corner-radius 32 :font-size 13
+    :background-color :fg :color :buffer-bg :on-click |x y r| (action)))
+
+(def send-or-stop (busy)
+  (cond
+    (busy (round-button "■" "agent-pane-stop" agent-pane/cancel))
+    ((= draft "") (box :width 3.2 :height 1.6))
+    (else (round-button "↑" "agent-pane-send" agent-pane-send))))
+
+;; Tokens so far and, between turns, New.
+(def usage-row (choice)
+  (let ((usage (get choice :usage)))
+    (if (not (get choice :started))
+      (nothing)
+      (h-stack :key "agent-pane-usage" :gap 0.5 :align :center
+        (if (get choice :busy)
+          (nothing)
+          (button "New" :key "agent-pane-new" :variant :ghost :height 1.2 :font-size 10
+            :on-click |x y r| (do (set! row-epoch (+ row-epoch 1)) (agent-pane/reset))))
+        (dim-text (str (get usage :input) " in · " (get usage :output) " out") 9 false)))))
 
 (def composer ()
-  (box :key "agent-pane-composer" :width :fill :padding 0.5 :corner-radius 8
-    :background-color :button-ghost-bg :border-width 1 :border-color :dropdown-menu-border
-    (v-stack :width :fill :gap 0.3
-      (textbox :key "agent-pane-input" :value draft :placeholder "Ask the agent… (C-c C-c sends)"
-        :width :fill :min-lines 2 :max-lines 8 :font-size 12 :bg :transparent
-        :on-change (lambda (v) (set! draft v)))
-      (h-stack :width :fill :gap 0.5
-        (box :flex 1)
-        (button "Send" :key "agent-pane-send" :variant :primary :height 1.2
-          :on-click |x y r| (agent-pane-send))))))
+  ;; The generation ties the button and the placeholder to the turn.
+  (let ((generation agent.pane-generation)
+        (choice (agent-pane/choice)))
+    (box :key "agent-pane-composer" :width :fill :padding 0.5 :corner-radius 12
+      :background-color :button-ghost-bg :border-width 1 :border-color :dropdown-menu-border
+      (v-stack :width :fill :gap 0.3
+        (textbox :key "agent-pane-input" :value draft
+          :placeholder (if (get choice :started) "Refine the request" "Ask the agent…")
+          :width :fill :min-lines 2 :max-lines 8 :font-size 12 :bg :transparent
+          :on-change (lambda (v) (set! draft v)))
+        (h-stack :width :fill :gap 0.6 :align :center
+          (usage-row choice)
+          (box :flex 1)
+          (model-chip choice)
+          (send-or-stop (get choice :busy)))))))
+
+(def model-menu ()
+  (let ((generation agent.pane-generation))
+    (apply menu-of agent-model-menu (model-menu-items (agent-pane/choice)))))
 
 (effect-buffer "*agent-pane*"
   (box :width :fill :height :fill :background-color :buffer-bg
     (v-stack :width :fill :height :fill :gap 0.5 :padding 0.6
       (subtree :key "agent-pane-conversation" (conversation))
-      (subtree :key "agent-pane-composer-tree" (composer)))))
+      (subtree :key "agent-pane-composer-tree" (composer))
+      (subtree :key "agent-pane-model-menu" (model-menu)))))
 
 (define-mode "eseq.agent-pane/agent-pane-mode" :read-only true)
 (mode-bind-key "eseq.agent-pane/agent-pane-mode" "C-c C-c" "eseq.agent-pane/agent-pane-send")

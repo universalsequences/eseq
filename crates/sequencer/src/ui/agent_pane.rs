@@ -8,10 +8,11 @@ use std::sync::OnceLock;
 
 use eseqlisp::vm::Value;
 use eseqlisp::{Editor, Runtime};
+use eseqlisp::package::PackageCatalog;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use sequencer::agent::harness::{clip, AgentSession, Artifact, Entry, SessionConfig, Transcript};
+use sequencer::agent::harness::{clip, AgentSession, Artifact, Entry, SessionConfig, Transcript, EFFORTS, MODELS};
 
 use super::presented::present_agent_pane;
 use super::values::{list_value, map_value};
@@ -74,7 +75,7 @@ fn loaded_modules(scratch: &str) -> HashSet<String> {
     loaded
 }
 
-fn artifact_value(artifact: &Artifact, loaded: &HashSet<String>) -> Value {
+fn artifact_value(artifact: &Artifact, loaded: &HashSet<String>, catalog: &PackageCatalog) -> Value {
     let files = artifact.files.iter().map(|file| {
         map_value([
             ("name", text(&file.name)),
@@ -88,7 +89,12 @@ fn artifact_value(artifact: &Artifact, loaded: &HashSet<String>) -> Value {
     let kinds = artifact
         .kinds
         .iter()
-        .map(|decl| map_value([("module", text(&decl.module)), ("kind", text(&decl.kind))]));
+        .map(|decl| {
+            // The registry's id for the kind, which creating an instance takes.
+            let package = catalog.package_for_module(&decl.module).map(|package| package.manifest.name.as_str());
+            let id = sequencer::lisp_host::kind_id(package, Some(&decl.module), &decl.kind);
+            map_value([("module", text(&decl.module)), ("kind", text(&decl.kind)), ("id", text(&id))])
+        });
     map_value([
         ("package", text(&artifact.package)),
         ("created", Value::Bool(artifact.created)),
@@ -113,11 +119,17 @@ fn usage_value(transcript: &Transcript) -> Value {
 /// The pane's whole view of the conversation, read under one lock;
 /// `loaded` is the modules the project imports.
 fn state_value(transcript: &Transcript, loaded: &HashSet<String>) -> Value {
+    // Read once: the catalog checks the package folders on every call.
+    let catalog = if transcript.artifacts.is_empty() {
+        Default::default()
+    } else {
+        sequencer::app_paths::app_paths().package_catalog()
+    };
     map_value([
         ("busy", Value::Bool(transcript.busy)),
         ("entries", list_value(transcript.entries.iter().map(entry_value))),
         ("usage", usage_value(transcript)),
-        ("artifacts", list_value(transcript.artifacts.iter().map(|artifact| artifact_value(artifact, loaded)))),
+        ("artifacts", list_value(transcript.artifacts.iter().map(|artifact| artifact_value(artifact, loaded, &catalog)))),
     ])
 }
 
@@ -131,6 +143,7 @@ fn string_arg(args: &[Value], index: usize, what: &str) -> Result<String, String
 /// `scratch` reads the project's evaluated scratch, whose imports are what
 /// is loaded.
 pub(crate) fn register_agent_pane_natives(runtime: &mut Runtime, scratch: impl Fn() -> String + 'static) {
+    register_choice_natives(runtime);
     let scratch = Rc::new(scratch);
     let (state_scratch, reject_scratch) = (Rc::clone(&scratch), Rc::clone(&scratch));
     runtime.register_native_with_docs(
@@ -169,7 +182,7 @@ pub(crate) fn register_agent_pane_natives(runtime: &mut Runtime, scratch: impl F
     runtime.register_native_with_docs(
         "agent-pane/state",
         "(agent-pane/state)",
-        "The conversation: (dict :busy :entries :usage :artifacts). Each entry has :kind \"user\", \"assistant\", \"thinking\", \"notice\" (and :text) or \"tool\" (:name :input :status :output :images); long text is clipped. :usage is (dict :input :output :cache-read) tokens. Each artifact is a package the agent wrote: :package :created :loaded :lines :added :removed :entries :kinds (dicts :module :kind) and :files (dicts :name :path :change :lines :added :removed). Read it under agent.pane-generation to redraw as it changes.",
+        "The conversation: (dict :busy :entries :usage :artifacts). Each entry has :kind \"user\", \"assistant\", \"thinking\", \"notice\" (and :text) or \"tool\" (:name :input :status :output :images); long text is clipped. :usage is (dict :input :output :cache-read) tokens. Each artifact is a package the agent wrote: :package :created :loaded :lines :added :removed :entries :kinds (dicts :module :kind :id, the id packages-new-instance takes) and :files (dicts :name :path :change :lines :added :removed). Read it under agent.pane-generation to redraw as it changes.",
         move |_args, _ctx| {
             let session = session()?;
             // Only cards show what is loaded; most turns have none.
@@ -207,6 +220,64 @@ pub(crate) fn register_agent_pane_natives(runtime: &mut Runtime, scratch: impl F
                 return Ok(text("Unload the package to rename it."));
             }
             Ok(text(&session()?.rename(&package, &new_name).unwrap_or_else(|why| why)))
+        },
+    );
+}
+
+/// The composer's settings: the model and effort the next turn uses,
+/// whether the conversation has started (for its placeholder), and its
+/// token counts. Cheap, unlike `state_value`: the composer reads it as a
+/// turn streams.
+fn choice_value(session: &AgentSession) -> Value {
+    let (model, effort) = session.choice();
+    let label = MODELS.iter().find(|(id, _)| *id == model).map_or(model.as_str(), |(_, label)| label);
+    map_value([
+        ("model", text(&model)),
+        ("label", text(label)),
+        ("effort", text(&effort)),
+        ("started", Value::Bool(session.with_transcript(|transcript| !transcript.entries.is_empty()))),
+        ("busy", Value::Bool(session.busy())),
+        ("usage", session.with_transcript(usage_value)),
+    ])
+}
+
+fn register_choice_natives(runtime: &mut Runtime) {
+    runtime.register_native_with_docs(
+        "agent-pane/choice",
+        "(agent-pane/choice)",
+        "The composer's settings: (dict :model :label :effort :started :busy :usage), the model id and its name, the effort, whether the conversation has entries, whether a turn runs, and the tokens so far (as agent-pane/state's :usage).",
+        |_args, _ctx| Ok(choice_value(session()?)),
+    );
+    runtime.register_native_with_docs(
+        "agent-pane/models",
+        "(agent-pane/models)",
+        "The models the agent can use: dicts :id :label.",
+        |_args, _ctx| {
+            Ok(list_value(MODELS.iter().map(|(id, label)| map_value([("id", text(id)), ("label", text(label))]))))
+        },
+    );
+    runtime.register_native_with_docs(
+        "agent-pane/efforts",
+        "(agent-pane/efforts)",
+        "The effort levels, least to most.",
+        |_args, _ctx| Ok(list_value(EFFORTS.iter().map(|effort| text(effort)))),
+    );
+    runtime.register_native_with_docs(
+        "agent-pane/set-model",
+        "(agent-pane/set-model id)",
+        "Use the model with this id from the next turn on.",
+        |args, _ctx| {
+            session()?.set_model(&string_arg(&args, 0, "a model id")?)?;
+            Ok(Value::Nil)
+        },
+    );
+    runtime.register_native_with_docs(
+        "agent-pane/set-effort",
+        "(agent-pane/set-effort effort)",
+        "Use this effort (low … max) from the next turn on.",
+        |args, _ctx| {
+            session()?.set_effort(&string_arg(&args, 0, "an effort level")?)?;
+            Ok(Value::Nil)
         },
     );
 }
@@ -255,6 +326,13 @@ mod tests {
             ],
             busy: true,
             input_tokens: 7,
+            artifacts: vec![Artifact {
+                package: "ring".into(),
+                created: true,
+                files: Vec::new(),
+                entries: vec!["ring.view".into()],
+                kinds: vec![sequencer::agent::harness::KindDecl { module: "ring.view".into(), kind: "ring".into() }],
+            }],
             ..Transcript::default()
         };
         let shown = Runtime::new().format_value(&state_value(&transcript, &HashSet::new()));
@@ -267,6 +345,9 @@ mod tests {
             ":images (\"/tmp/a.png\")",
             ":input 7",
             &format!(":input \"{}…\"", "x".repeat(INPUT_CHARS)),
+            // Add <kind> creates an instance by the registry's id, not the bare name.
+            ":id \"ring.view:ring\"",
+            ":loaded false",
         ] {
             assert!(shown.contains(part), "{part} in {shown}");
         }

@@ -14,6 +14,7 @@ pub mod turn;
 pub mod workspace;
 
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -21,13 +22,24 @@ use serde_json::Value;
 
 pub use mcp_client::{McpClient, ServerHandle, ToolBackend, ToolResult};
 pub use transcript::{clip, Entry, ToolStatus, Transcript};
-use turn::{push_user_text, run_turn, AnthropicTransport, TurnConfig};
+use turn::{push_user_text, record, run_turn, AnthropicTransport, TurnConfig};
 pub use workspace::{Artifact, Change, FileChange, KindDecl};
 use workspace::{Workspace, WRITE_TOOLS};
 
 use crate::agent::providers::AgentProviderKind;
 
 const DEFAULT_MODEL: &str = "claude-opus-5-5";
+
+/// The models the pane offers: id and the name it shows.
+pub const MODELS: &[(&str, &str)] = &[
+    ("claude-fable-5-1", "Fable 5.1"),
+    ("claude-opus-5-5", "Opus 5.5"),
+    ("claude-sonnet-5-5", "Sonnet 5.5"),
+    ("claude-haiku-5-5", "Haiku 5.5"),
+];
+
+/// Effort levels, least to most.
+pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 /// Authoring is agentic work: Claude Opus 5.5 defaults to `medium`.
 const DEFAULT_EFFORT: &str = "high";
 const MAX_TOKENS: u32 = 64_000;
@@ -69,8 +81,9 @@ pub struct SessionConfig {
     pub tool_server: ToolServer,
     /// The tool server's stderr.
     pub log_path: PathBuf,
-    /// Where tool images are saved for the pane.
-    pub image_dir: PathBuf,
+    /// One folder per conversation (named by its start, in Unix seconds):
+    /// `conversation.json`, the messages so far, and the tools' images.
+    pub conversations_dir: PathBuf,
     /// The Local packages folder, whose packages the pane tracks.
     pub local_root: PathBuf,
 }
@@ -89,7 +102,7 @@ impl SessionConfig {
             effort: DEFAULT_EFFORT.to_string(),
             tool_server: ToolServer { program, args: vec!["mcp".to_string()] },
             log_path: state_dir.join("agent-tools.log"),
-            image_dir: state_dir.join("agent-images"),
+            conversations_dir: state_dir.join("conversations"),
             local_root: crate::app_paths::app_paths().local_modules_dir(),
         })
     }
@@ -113,9 +126,13 @@ struct Shared {
     server: Mutex<Option<ServerHandle>>,
     cancel: AtomicBool,
     workspace: Mutex<Workspace>,
+    /// The model and effort the next turn uses: (model id, effort).
+    choice: Mutex<(String, String)>,
     /// What the user did in the pane since the last turn, for the next
     /// message to tell the agent.
     notes: Mutex<Vec<String>>,
+    /// This conversation's folder, named when its first turn starts.
+    conversation: Mutex<Option<PathBuf>>,
 }
 
 impl Shared {
@@ -134,9 +151,8 @@ pub struct AgentSession {
 
 impl AgentSession {
     pub fn new(config: SessionConfig) -> Self {
-        // Images belong to a conversation; a new session starts without them.
-        let _ = std::fs::remove_dir_all(&config.image_dir);
         let workspace = Workspace::new(config.local_root.clone());
+        let choice = (config.model.clone(), config.effort.clone());
         Self {
             shared: Arc::new(Shared {
                 config,
@@ -146,7 +162,9 @@ impl AgentSession {
                 server: Mutex::new(None),
                 cancel: AtomicBool::new(false),
                 workspace: Mutex::new(workspace),
+                choice: Mutex::new(choice),
                 notes: Mutex::new(Vec::new()),
+                conversation: Mutex::new(None),
             }),
         }
     }
@@ -181,10 +199,41 @@ impl AgentSession {
         lock(&self.shared.history).clear();
         lock(&self.shared.workspace).clear();
         lock(&self.shared.notes).clear();
-        let _ = std::fs::remove_dir_all(&self.shared.config.image_dir);
+        *lock(&self.shared.conversation) = None;
         let mut transcript = lock(&self.shared.transcript);
         let generation = transcript.generation + 1;
         *transcript = Transcript { generation, ..Transcript::default() };
+        Ok(())
+    }
+
+    /// This conversation's folder, once it has had a turn.
+    pub fn conversation_dir(&self) -> Option<PathBuf> {
+        lock(&self.shared.conversation).clone()
+    }
+
+    /// The model id and effort the next turn uses.
+    pub fn choice(&self) -> (String, String) {
+        lock(&self.shared.choice).clone()
+    }
+
+    /// Use `model` from the next turn on (one of [`MODELS`], or the
+    /// override the session started with).
+    pub fn set_model(&self, model: &str) -> Result<(), String> {
+        if !MODELS.iter().any(|(id, _)| *id == model) && model != self.shared.config.model {
+            return Err(format!("Unknown model {model}."));
+        }
+        lock(&self.shared.choice).0 = model.to_string();
+        self.touch();
+        Ok(())
+    }
+
+    /// Use `effort` (one of [`EFFORTS`]) from the next turn on.
+    pub fn set_effort(&self, effort: &str) -> Result<(), String> {
+        if !EFFORTS.contains(&effort) {
+            return Err(format!("Unknown effort {effort}."));
+        }
+        lock(&self.shared.choice).1 = effort.to_string();
+        self.touch();
         Ok(())
     }
 
@@ -276,7 +325,7 @@ fn start(shared: &Shared) -> Result<Running, String> {
         max_rounds: MAX_TOOL_ROUNDS,
         system: format!("{PREAMBLE}\n\n{}", client.instructions),
         tools,
-        image_dir: config.image_dir.clone(),
+        dir: PathBuf::new(),
     };
     Ok(Running { transport, client, turn })
 }
@@ -292,6 +341,13 @@ fn take_turn(shared: &Shared, text: &str) -> Result<(), String> {
         *running = Some(started);
     }
     let Running { transport, client, turn } = running.as_mut().expect("started above");
+    (turn.model, turn.effort) = lock(&shared.choice).clone();
+    turn.dir = lock(&shared.conversation)
+        .get_or_insert_with(|| {
+            let started = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
+            shared.config.conversations_dir.join(started.to_string())
+        })
+        .clone();
     let notes = std::mem::take(&mut *lock(&shared.notes));
     let text = if notes.is_empty() {
         text.to_string()
@@ -301,7 +357,9 @@ fn take_turn(shared: &Shared, text: &str) -> Result<(), String> {
     let mut history = lock(&shared.history);
     push_user_text(&mut history, &text);
     let mut tools = Tracking { tools: client, shared };
-    run_turn(transport, &mut tools, turn, &mut history, &shared.transcript, &shared.cancel)
+    let result = run_turn(transport, &mut tools, turn, &mut history, &shared.transcript, &shared.cancel);
+    record(turn, &history);
+    result
 }
 
 /// The tool server, noting each package before a tool writes it and

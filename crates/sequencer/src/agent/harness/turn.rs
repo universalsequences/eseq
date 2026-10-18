@@ -98,8 +98,8 @@ pub struct TurnConfig {
     pub system: String,
     /// Messages API tool definitions.
     pub tools: Vec<Value>,
-    /// Where tool images are saved for the pane.
-    pub image_dir: PathBuf,
+    /// The conversation's folder: `conversation.json` and the tools' images.
+    pub dir: PathBuf,
 }
 
 #[derive(Serialize)]
@@ -113,7 +113,8 @@ struct RequestBody<'a> {
     thinking: Value,
     output_config: Value,
     cache_control: Value,
-    fallbacks: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallbacks: Option<&'static str>,
 }
 
 /// The Messages API request for the conversation so far, serialized from
@@ -131,7 +132,8 @@ pub fn request_body(config: &TurnConfig, messages: &[Value]) -> Vec<u8> {
         thinking: json!({ "type": "adaptive", "display": "summarized" }),
         output_config: json!({ "effort": config.effort }),
         cache_control: json!({ "type": "ephemeral" }),
-        fallbacks: "default",
+        // The fallback models are for Opus's refusals; Haiku rejects the field.
+        fallbacks: config.model.starts_with("claude-opus").then_some("default"),
     })
     .expect("a JSON request serializes")
 }
@@ -169,6 +171,7 @@ pub fn run_turn(
         lock(transcript).fail_running_tools("Did not run.");
     };
     for _ in 0..config.max_rounds {
+        record(config, history);
         let mut message = MessageAccumulator::default();
         let mut failure = None;
         let streamed = transport.stream(request_body(config, history), &mut |event| {
@@ -221,6 +224,7 @@ pub fn run_turn(
         }
         let tool_uses = message.tool_uses();
         history.push(json!({ "role": "assistant", "content": message.content() }));
+        record(config, history);
         let unrunnable = match stop_reason {
             StopReason::ToolUse => None,
             StopReason::MaxTokens => Some("The reply reached max_tokens before this call was complete; it did not run."),
@@ -238,7 +242,7 @@ pub fn run_turn(
                 } else {
                     tools.call(&tool.name, &tool.input)
                 };
-                let images = save_images(&config.image_dir, &tool.id, &result.images);
+                let images = save_images(&config.dir.join("images"), &tool.id, &result.images);
                 let status = if result.is_error { ToolStatus::Failed } else { ToolStatus::Done };
                 let input = tool.invalid_input.clone().unwrap_or_else(|| tool.input.to_string());
                 lock(transcript).finish_tool(&tool.id, input, status, result.text(), images);
@@ -274,6 +278,37 @@ fn keep_partial(history: &mut Vec<Value>, message: &MessageAccumulator) {
     let text = message.text_blocks();
     if !text.is_empty() {
         history.push(json!({ "role": "assistant", "content": text }));
+    }
+}
+
+/// Write the conversation so far to `conversation.json` in its folder, for
+/// debugging: the messages as sent, thinking included, without image data
+/// (the images are in `images/`). Rewritten each round, so a running turn
+/// can be read too. A config with no folder records nothing.
+pub fn record(config: &TurnConfig, history: &[Value]) {
+    if config.dir.as_os_str().is_empty() {
+        return;
+    }
+    let record = json!({
+        "model": config.model,
+        "effort": config.effort,
+        "system": config.system,
+        "messages": history.iter().map(without_image_data).collect::<Vec<_>>(),
+    });
+    if std::fs::create_dir_all(&config.dir).is_ok() {
+        let json = serde_json::to_vec_pretty(&record).expect("a JSON record serializes");
+        let _ = std::fs::write(config.dir.join("conversation.json"), json);
+    }
+}
+
+fn without_image_data(value: &Value) -> Value {
+    match value {
+        Value::Object(map) if map.get("type").and_then(Value::as_str) == Some("image") => {
+            json!({ "type": "image", "data": "omitted" })
+        }
+        Value::Object(map) => Value::Object(map.iter().map(|(key, value)| (key.clone(), without_image_data(value))).collect()),
+        Value::Array(items) => Value::Array(items.iter().map(without_image_data).collect()),
+        other => other.clone(),
     }
 }
 
@@ -348,17 +383,21 @@ mod tests {
             max_rounds: 4,
             system: "sys".into(),
             tools: vec![json!({"name": "eval"})],
-            image_dir: std::env::temp_dir(),
+            dir: PathBuf::new(),
         }
     }
 
     fn run(script: Vec<Vec<Value>>) -> (Vec<Value>, Transcript, Vec<(String, Value)>) {
+        run_with(&config(), script)
+    }
+
+    fn run_with(config: &TurnConfig, script: Vec<Vec<Value>>) -> (Vec<Value>, Transcript, Vec<(String, Value)>) {
         let transport = Script(Mutex::new(script));
         let mut tools = Tools(Vec::new());
         let mut history = Vec::new();
         push_user_text(&mut history, "add 1 and 2");
         let transcript = Mutex::new(Transcript::default());
-        run_turn(&transport, &mut tools, &config(), &mut history, &transcript, &AtomicBool::new(false)).unwrap();
+        run_turn(&transport, &mut tools, config, &mut history, &transcript, &AtomicBool::new(false)).unwrap();
         (history, transcript.into_inner().unwrap(), tools.0)
     }
 
@@ -372,6 +411,26 @@ mod tests {
         assert_eq!(history[2]["content"][0]["is_error"], false);
         assert!(matches!(&transcript.entries[0], Entry::Tool { status: ToolStatus::Done, output, .. } if output == "=> 3"));
         assert_eq!(transcript.entries.last(), Some(&Entry::Assistant("It is 3.".into())));
+    }
+
+    #[test]
+    fn the_conversation_is_recorded_each_round_without_image_data() {
+        let recorded = TurnConfig {
+            dir: std::env::temp_dir().join(format!("eseq-turn-record-test-{}", std::process::id())),
+            ..config()
+        };
+        let (history, ..) =
+            run_with(&recorded, vec![tool_reply("t1", "{\"code\": \"(+ 1 2)\"}", "tool_use"), text_reply("It is 3.")]);
+        let path = recorded.dir.join("conversation.json");
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["model"], "claude-opus-5-5");
+        assert_eq!(saved["messages"], json!(history));
+
+        let image = json!({ "type": "image", "source": { "type": "base64", "data": "AAAA" } });
+        record(&recorded, &[json!({ "role": "user", "content": [{ "type": "tool_result", "content": [image] }] })]);
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["messages"][0]["content"][0]["content"][0], json!({ "type": "image", "data": "omitted" }));
+        let _ = std::fs::remove_dir_all(&recorded.dir);
     }
 
     #[test]
@@ -428,5 +487,8 @@ mod tests {
         assert_eq!(body["system"][0]["text"], "sys");
         assert_eq!(body["tools"][0]["name"], "eval");
         assert_eq!(body["messages"][0]["content"], "hi");
+        let haiku = TurnConfig { model: "claude-haiku-5-5".into(), ..config() };
+        let body: Value = serde_json::from_slice(&request_body(&haiku, &[])).unwrap();
+        assert!(body.get("fallbacks").is_none(), "only Opus has fallback models");
     }
 }

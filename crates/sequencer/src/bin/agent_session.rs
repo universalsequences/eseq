@@ -76,6 +76,9 @@ fn main() {
             }
         }
     }
+    if let Some(dir) = session.conversation_dir() {
+        println!("conversation: {}", dir.join("conversation.json").display());
+    }
 }
 
 fn usage() -> ! {
