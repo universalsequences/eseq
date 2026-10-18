@@ -1,8 +1,9 @@
 ;; ui/agent-pane.lisp — the agent pane: Claude in a side pane beside the
 ;; project, building sequencers and extensions with the authoring tools
 ;; (bead eseq-maxc.6). The conversation lives in the host (the agent-pane/…
-;; natives); this draws it, and redraws as agent.pane-generation moves while
-;; a turn streams. Open it with C-x C-a or the "Agent Pane" command.
+;; natives); this draws it, redrawing its rows as agent.pane-shape moves and
+;; the last row as agent.pane-generation moves while a turn streams. Open it
+;; with C-x C-a or the "Agent Pane" command.
 ;;
 ;; MODULE NOTE: a render root (it registers its buffer and a global key), so
 ;; only ui/main.lisp imports it.
@@ -306,26 +307,37 @@
     (dim-text "Ask for a sequencer, a panel or an extension. The agent writes it as a Local package, checks how it plays and looks, and your project picks it up."
       11 true)))
 
-;; The conversation, redrawn as agent.pane-generation moves while a turn
-;; streams (and not as the composer is typed into).
-(def conversation ()
-  ;; Reading the generation is what ties this subtree to the conversation.
+;; The last row: the only one that changes as text streams, so the only
+;; one that reads agent.pane-generation. It fetches just its own entries.
+(def tail-view (start busy)
   (let ((generation agent.pane-generation)
+        (group (first (group-entries (agent-pane/entries-from start)))))
+    (if group
+      (group-view (merge group :start start) true busy)
+      (nothing))))
+
+;; The conversation, redrawn when its rows change (agent.pane-shape), not as
+;; text streams into the last one and not as the composer is typed into.
+(def conversation ()
+  (let ((shape agent.pane-shape)
         (state (agent-pane/state))
         (busy (get state :busy))
         (entries (get state :entries))
         (groups (group-entries entries))
-        (last-start (if (empty? groups) -1 (get (nth groups (- (len groups) 1)) :start))))
+        (last-start (if (empty? groups) -1 (get (nth groups (- (len groups) 1)) :start)))
+        (settled (filter |group| (not (= (get group :start) last-start)) groups)))
     (v-stack :width :fill :flex 1 :gap 0.5
       (if (= (len entries) 0)
         (empty-state)
         (scroll :key "agent-pane-scroll" :width :fill :flex 1 :stick-to-bottom true
+          ;; Not virtual-v-stack: under :stick-to-bottom it stops short of
+          ;; the last reply (eseq-o16s).
           (v-stack :key "agent-pane-entries" :width :fill :gap 0.5 :padding 0.3
-            ;; One subtree per group: while a reply streams only it redraws,
-            ;; the finished ones are reused.
-            (each groups |group i|
+            ;; One subtree per settled row, reused until its inputs change.
+            (each settled |group i|
               (subtree :key (str "agent-group-tree-" (get group :start))
-                (group-view group (= (get group :start) last-start) busy)))
+                (group-view group false false)))
+            (subtree :key (str "agent-pane-tail-" last-start) (tail-view last-start busy))
             (if busy (working-row) (nothing)))))
       ;; Its own subtree: the Add buttons read project.instances, whose
       ;; changes need not redraw the conversation.
@@ -400,8 +412,8 @@
         (dim-text (str (get usage :input) " in · " (get usage :output) " out") 9 false)))))
 
 (def composer ()
-  ;; The generation ties the button and the placeholder to the turn.
-  (let ((generation agent.pane-generation)
+  ;; The shape ties the button, the placeholder and the counts to the turn.
+  (let ((shape agent.pane-shape)
         (choice (agent-pane/choice)))
     (box :key "agent-pane-composer" :width :fill :padding 0.5 :corner-radius 12
       :background-color :button-ghost-bg :border-width 1 :border-color :dropdown-menu-border
@@ -417,7 +429,7 @@
           (send-or-stop (get choice :busy)))))))
 
 (def model-menu ()
-  (let ((generation agent.pane-generation))
+  (let ((shape agent.pane-shape))
     (apply menu-of agent-model-menu (model-menu-items (agent-pane/choice)))))
 
 (effect-buffer "*agent-pane*"

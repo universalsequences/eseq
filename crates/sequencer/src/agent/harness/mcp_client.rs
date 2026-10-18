@@ -29,12 +29,13 @@ impl ToolResult {
 
     /// The result's text, joined.
     pub fn text(&self) -> String {
-        self.content
-            .iter()
-            .filter_map(|block| block["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
+        content_text(&self.content)
     }
+}
+
+/// The text blocks of a tool result's content, joined.
+pub fn content_text(content: &[Value]) -> String {
+    content.iter().filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n")
 }
 
 /// Where tools come from: the MCP child, or a fake in tests.

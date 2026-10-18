@@ -719,10 +719,16 @@ fn project_name_and_agent_generation() {
     present_agent(h.editor.runtime_mut(), 7);
     h.sync();
     assert_eq!(h.single(AGENT, "generation"), Value::Number(7.0));
-    present_agent_pane(3);
+    present_agent_pane(3, 2);
     h.sync();
     assert_eq!(h.single(AGENT, "pane-generation"), Value::Number(3.0));
+    assert_eq!(h.single(AGENT, "pane-shape"), Value::Number(2.0));
     assert_eq!(h.single(AGENT, "generation"), Value::Number(7.0), "the two move apart");
+    // Text streaming into the last entry moves the generation, not the shape.
+    present_agent_pane(4, 2);
+    h.sync();
+    assert_eq!(h.single(AGENT, "pane-generation"), Value::Number(4.0));
+    assert_eq!(h.single(AGENT, "pane-shape"), Value::Number(2.0));
 }
 
 #[test]

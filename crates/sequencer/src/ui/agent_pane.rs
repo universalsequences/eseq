@@ -10,6 +10,7 @@ use eseqlisp::vm::Value;
 use eseqlisp::{Editor, Runtime};
 use eseqlisp::package::PackageCatalog;
 use std::collections::HashSet;
+use std::path::Path;
 use std::rc::Rc;
 
 use sequencer::agent::harness::{clip, AgentSession, Artifact, Entry, SessionConfig, Transcript, EFFORTS, MODELS};
@@ -182,7 +183,7 @@ pub(crate) fn register_agent_pane_natives(runtime: &mut Runtime, scratch: impl F
     runtime.register_native_with_docs(
         "agent-pane/state",
         "(agent-pane/state)",
-        "The conversation: (dict :busy :entries :usage :artifacts). Each entry has :kind \"user\", \"assistant\", \"thinking\", \"notice\" (and :text) or \"tool\" (:name :input :status :output :images); long text is clipped. :usage is (dict :input :output :cache-read) tokens. Each artifact is a package the agent wrote: :package :created :loaded :lines :added :removed :entries :kinds (dicts :module :kind :id, the id packages-new-instance takes) and :files (dicts :name :path :change :lines :added :removed). Read it under agent.pane-generation to redraw as it changes.",
+        "The conversation: (dict :busy :entries :usage :artifacts). Each entry has :kind \"user\", \"assistant\", \"thinking\", \"notice\" (and :text) or \"tool\" (:name :input :status :output :images); long text is clipped. :usage is (dict :input :output :cache-read) tokens. Each artifact is a package the agent wrote: :package :created :loaded :lines :added :removed :entries :kinds (dicts :module :kind :id, the id packages-new-instance takes) and :files (dicts :name :path :change :lines :added :removed). Read it under agent.pane-shape to redraw as rows change (agent.pane-generation also moves as text streams; read the last rows with agent-pane/entries-from under it).",
         move |_args, _ctx| {
             let session = session()?;
             // Only cards show what is loaded; most turns have none.
@@ -192,6 +193,29 @@ pub(crate) fn register_agent_pane_natives(runtime: &mut Runtime, scratch: impl F
                 loaded_modules(&state_scratch())
             };
             Ok(session.with_transcript(|transcript| state_value(transcript, &loaded)))
+        },
+    );
+    runtime.register_native_with_docs(
+        "agent-pane/show-saved",
+        "(agent-pane/show-saved path)",
+        "Show a saved conversation (a conversation.json under .local/agent/conversations) in the pane, to read it back. Only shown: the next message starts a new conversation.",
+        |args, _ctx| {
+            session()?.show_saved(Path::new(&string_arg(&args, 0, "a conversation.json path")?))?;
+            Ok(Value::Nil)
+        },
+    );
+    runtime.register_native_with_docs(
+        "agent-pane/entries-from",
+        "(agent-pane/entries-from start)",
+        "The conversation's entries from index `start` on, as in agent-pane/state: for the last rows, which redraw under agent.pane-generation as text streams while the rest wait for agent.pane-shape.",
+        |args, _ctx| {
+            let start = match args.first() {
+                Some(Value::Number(start)) if *start >= 0.0 => *start as usize,
+                _ => return Err("expected an entry index".to_string()),
+            };
+            Ok(session()?.with_transcript(|transcript| {
+                list_value(transcript.entries.iter().skip(start).map(entry_value))
+            }))
         },
     );
     runtime.register_native_with_docs(
@@ -294,12 +318,12 @@ pub(crate) fn refresh() {
 /// first used.
 pub(crate) fn publish(editor: &mut Editor, seen: &mut u64) {
     let Some(Ok(session)) = SESSION.get() else { return };
-    let generation = session.generation();
+    let (generation, shape) = session.with_transcript(|transcript| (transcript.generation, transcript.shape));
     if *seen == generation {
         return;
     }
     *seen = generation;
-    present_agent_pane(generation);
+    present_agent_pane(generation, shape);
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     editor.refresh_visible_layouts_for_buffer_named("*agent-pane*");

@@ -13,7 +13,7 @@ pub mod transcript;
 pub mod turn;
 pub mod workspace;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -22,6 +22,7 @@ use serde_json::Value;
 
 pub use mcp_client::{McpClient, ServerHandle, ToolBackend, ToolResult};
 pub use transcript::{clip, Entry, ToolStatus, Transcript};
+use transcript::with_notes;
 use turn::{push_user_text, record, run_turn, AnthropicTransport, TurnConfig};
 pub use workspace::{Artifact, Change, FileChange, KindDecl};
 use workspace::{Workspace, WRITE_TOOLS};
@@ -193,17 +194,34 @@ impl AgentSession {
 
     /// Start over: an empty conversation (the tool server keeps running).
     pub fn reset(&self) -> Result<(), String> {
-        if self.busy() {
+        self.reset_to(Transcript::default())
+    }
+
+    /// Start over, showing `next`. Under the transcript lock throughout, so
+    /// no turn can start in between.
+    fn reset_to(&self, next: Transcript) -> Result<(), String> {
+        let mut transcript = lock(&self.shared.transcript);
+        if transcript.busy {
             return Err("Stop the running turn first.".to_string());
         }
         lock(&self.shared.history).clear();
         lock(&self.shared.workspace).clear();
         lock(&self.shared.notes).clear();
         *lock(&self.shared.conversation) = None;
-        let mut transcript = lock(&self.shared.transcript);
-        let generation = transcript.generation + 1;
-        *transcript = Transcript { generation, ..Transcript::default() };
+        let (generation, shape) = (transcript.generation + 1, transcript.shape + 1);
+        *transcript = Transcript { generation, shape, ..next };
         Ok(())
+    }
+
+    /// Show a saved conversation (a `conversation.json`) in the pane, to
+    /// read it back. Only shown: the next message starts a new conversation,
+    /// since the saved copy has no image data to send.
+    pub fn show_saved(&self, path: &Path) -> Result<(), String> {
+        let text = std::fs::read_to_string(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        let saved: serde_json::Value =
+            serde_json::from_str(&text).map_err(|error| format!("{} is not JSON: {error}", path.display()))?;
+        let messages = saved["messages"].as_array().ok_or_else(|| format!("{} has no messages", path.display()))?;
+        self.reset_to(Transcript::from_messages(messages))
     }
 
     /// This conversation's folder, once it has had a turn.
@@ -349,11 +367,7 @@ fn take_turn(shared: &Shared, text: &str) -> Result<(), String> {
         })
         .clone();
     let notes = std::mem::take(&mut *lock(&shared.notes));
-    let text = if notes.is_empty() {
-        text.to_string()
-    } else {
-        format!("(Since your last turn, in the pane: {})\n\n{text}", notes.join(" "))
-    };
+    let text = with_notes(&notes, text);
     let mut history = lock(&shared.history);
     push_user_text(&mut history, &text);
     let mut tools = Tracking { tools: client, shared };
