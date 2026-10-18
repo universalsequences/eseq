@@ -612,7 +612,8 @@ Example: (piano-keyboard :start-note 48 :key-count 25 :height 4 \
             return MouseEventOutcome::Ignore;
         }
         let (start_note, key_count) = prop_note_range(&node.props);
-        let Some(note) = key_at(node.rect, start_note, key_count, local_col, local_row) else {
+        let content_row = super::scroll::event_content_row(local_row);
+        let Some(note) = key_at(node.rect, start_note, key_count, local_col, content_row) else {
             return MouseEventOutcome::Ignore;
         };
         let mut info = super::pointer_event_info("click", modifiers, node, local_col, local_row);

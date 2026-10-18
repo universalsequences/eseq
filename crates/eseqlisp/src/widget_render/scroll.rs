@@ -106,6 +106,18 @@ pub fn get_scroll_state(widget_id: u64) -> ScrollState {
     SCROLL_STATES.with(|s| s.borrow().get(&widget_id).cloned().unwrap_or_default())
 }
 
+/// The inverse of `event_content_row`: a rect-space row (a widget's own
+/// top-left, reported when an activation carries no pointer position) in the
+/// viewport space pointer events arrive in.
+pub fn event_viewport_row(content_row: f32) -> f32 {
+    content_row - current_event_scroll_offset()
+}
+
+/// `get_scroll_state(key).offset_y` without cloning the state.
+pub fn scroll_offset_y(key: u64) -> f32 {
+    SCROLL_STATES.with(|s| s.borrow().get(&key).map_or(0.0, |state| state.offset_y))
+}
+
 pub fn set_scroll_state(widget_id: u64, state: ScrollState) {
     let changed = SCROLL_STATES.with(|s| {
         let mut states = s.borrow_mut();
@@ -137,6 +149,15 @@ pub fn scroll_state_key_for_value(node: &Value) -> Option<u64> {
 /// into content coordinates inside a scroll container.
 pub fn current_event_scroll_offset() -> f32 {
     CURRENT_EVENT_SCROLL_OFFSET.with(|offset| offset.borrow().unwrap_or(0.0))
+}
+
+/// A pointer row as handed to a widget event, mapped into the content space
+/// its layout rect lives in. Pointer rows arrive in the enclosing `scroll`
+/// container's viewport space (tile scroll already folded in), so any
+/// comparison against `node.rect` needs this; the pointer `:row` reported to
+/// Lisp stays unshifted, since context-menu anchors expect that space.
+pub fn event_content_row(local_row: f32) -> f32 {
+    local_row + current_event_scroll_offset()
 }
 
 pub fn set_current_event_scroll_offset(offset_y: Option<f32>) {

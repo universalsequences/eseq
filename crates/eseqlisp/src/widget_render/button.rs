@@ -1018,7 +1018,7 @@ active tab. :icon names a glyph drawn left of the text (:plus, :folder, :piano, 
         // position but no modifier state.
         let (callback_name, phase, modifiers, col, row) = match event {
             WidgetEvent::Activate(modifiers) => {
-                ("on-click", "click", modifiers, node.rect.col, node.rect.row)
+                ("on-click", "click", modifiers, node.rect.col, super::scroll::event_viewport_row(node.rect.row))
             }
             WidgetEvent::PointerDown(pe) => {
                 ("on-press", "press", KeyModifiers::empty(), pe.local_col, pe.local_row)

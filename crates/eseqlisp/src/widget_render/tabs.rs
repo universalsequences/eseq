@@ -290,6 +290,7 @@ Example: (tabs :items (list \"Osc\" \"Filter\" \"Amp\") :bind page (osc-page) \
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         // Only respond to clicks in the header area (above children)
         let header_bottom = node
             .children

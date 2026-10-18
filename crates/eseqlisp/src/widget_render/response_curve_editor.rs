@@ -498,6 +498,7 @@ Example: (response-curve-editor :mode :filter :width 35 :height 2.2 \
     }
 
     fn cursor(&self, node: &LayoutNode, local_col: f32, local_row: f32) -> WidgetCursor {
+        let local_row = super::scroll::event_content_row(local_row);
         if nearest_band(node, local_col, local_row).is_some() {
             WidgetCursor::EwResize
         } else {
@@ -512,6 +513,7 @@ Example: (response-curve-editor :mode :filter :width 35 :height 2.2 \
         local_row: f32,
         _modifiers: KeyModifiers,
     ) -> Option<Value> {
+        let local_row = super::scroll::event_content_row(local_row);
         let band_id = nearest_band(node, local_col, local_row)
             .or_else(|| selected_or_first_band(node, None).map(|band| band.id))?;
         Some(Value::Number(band_id as f64))
@@ -529,6 +531,7 @@ Example: (response-curve-editor :mode :filter :width 35 :height 2.2 \
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(id) = nearest_band(node, local_col, local_row) {

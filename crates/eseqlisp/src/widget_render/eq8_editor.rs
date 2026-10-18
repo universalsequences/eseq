@@ -620,6 +620,7 @@ Example: (eq8-editor :bands bands :selected-band sel :source src :width 38 :heig
     }
 
     fn cursor(&self, node: &LayoutNode, local_col: f32, local_row: f32) -> WidgetCursor {
+        let local_row = super::scroll::event_content_row(local_row);
         if nearest_band(node, local_col, local_row).is_some() {
             WidgetCursor::EwResize
         } else {
@@ -634,6 +635,7 @@ Example: (eq8-editor :bands bands :selected-band sel :source src :width 38 :heig
         local_row: f32,
         _modifiers: KeyModifiers,
     ) -> Option<Value> {
+        let local_row = super::scroll::event_content_row(local_row);
         let band_id = nearest_band(node, local_col, local_row)
             .or_else(|| selected_or_first_band(node, None).map(|band| band.id))?;
         Some(Value::Number(band_id as f64))
@@ -651,6 +653,7 @@ Example: (eq8-editor :bands bands :selected-band sel :source src :width 38 :heig
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(id) = nearest_band(node, local_col, local_row) {
@@ -724,6 +727,7 @@ Example: (eq8-editor :bands bands :selected-band sel :source src :width 38 :heig
         local_row: f32,
         _modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
+        let local_row = super::scroll::event_content_row(local_row);
         let id = nearest_band(node, local_col, local_row)?;
         let band = prop_bands(&node.props)
             .into_iter()

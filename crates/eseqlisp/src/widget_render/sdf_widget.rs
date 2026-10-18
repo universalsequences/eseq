@@ -520,6 +520,7 @@ fn sdf_widget_hit_region(
 /// Resolve the handle once, at pointer-down. The editor owns its lifetime.
 pub fn sdf_begin_gesture(node: &LayoutNode, col: f32, row: f32, cell_w: f32, cell_h: f32) -> Value {
     let aspect = node.rect.width * cell_w / (node.rect.height * cell_h).max(0.0001);
+    let row = super::scroll::event_content_row(row);
     let (index, name) = sdf_widget_hit_region(node, col - node.rect.col, row - node.rect.row, aspect);
     name.map(Value::Keyword).unwrap_or(Value::Number(index as f64))
 }
@@ -544,7 +545,7 @@ pub fn sdf_map_mouse_event(
     let region = gesture.cloned().unwrap_or_else(||
         sdf_begin_gesture(node, local_col, local_row, cell_w, cell_h));
     let sx = (local_col - node.rect.col) / node.rect.width * 2.0 - 1.0;
-    let sy = (local_row - node.rect.row) / node.rect.height * 2.0 - 1.0;
+    let sy = (super::scroll::event_content_row(local_row) - node.rect.row) / node.rect.height * 2.0 - 1.0;
     super::MouseEventOutcome::Dispatch(super::WidgetEvent::Custom(Value::List(
         vec![Value::Keyword(phase.into()), Value::Number(sx as f64), Value::Number(sy as f64), region]
             .into_iter().map(|v| Rc::new(RefCell::new(v))).collect(),
@@ -591,7 +592,7 @@ pub fn sdf_handle_event(
         .clone();
 
     let wc = local_col - node.rect.col;
-    let wr = local_row - node.rect.row;
+    let wr = super::scroll::event_content_row(local_row) - node.rect.row;
     let sx = (wc / node.rect.width * 2.0 - 1.0) as f64;
     let sy = (wr / node.rect.height * 2.0 - 1.0) as f64;
     let pixel_aspect = if node.rect.height > 0.0 {

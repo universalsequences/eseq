@@ -449,6 +449,7 @@ Example: (waveform :buffer buf :view-start v.start :view-duration v.dur \
         local_row: f32,
         modifiers: KeyModifiers,
     ) -> Option<Value> {
+        let local_row = super::scroll::event_content_row(local_row);
         let view = WaveformView::from_props(&node.props, node.rect);
         view.begin_gesture(local_col, local_row, modifiers)
     }
@@ -465,6 +466,7 @@ Example: (waveform :buffer buf :view-start v.start :view-duration v.dur \
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         let view = WaveformView::from_props(&node.props, node.rect);
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => view
@@ -515,6 +517,7 @@ Example: (waveform :buffer buf :view-start v.start :view-duration v.dur \
         local_row: f32,
         delta: f64,
     ) -> Option<WidgetEvent> {
+        let local_row = super::scroll::event_content_row(local_row);
         let view = WaveformView::from_props(&node.props, node.rect);
         view.handle_magnify(local_col, local_row, delta)
             .map(WidgetEvent::Custom)
@@ -528,6 +531,7 @@ Example: (waveform :buffer buf :view-start v.start :view-duration v.dur \
         delta_x: f32,
         delta_y: f32,
     ) -> Option<WidgetEvent> {
+        let local_row = super::scroll::event_content_row(local_row);
         let view = WaveformView::from_props(&node.props, node.rect);
         view.handle_touchpad_scroll(local_col, local_row, delta_x, delta_y)
             .map(WidgetEvent::Custom)

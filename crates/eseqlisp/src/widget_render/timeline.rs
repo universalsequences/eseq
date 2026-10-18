@@ -829,7 +829,7 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
         if get_num(&node.props, "placement-active", 0.0) > 0.0 {
             return Some(action_map(vec![("kind", keyword(":placement"))]));
         }
-        view.begin_gesture(local_col, scroll_adjusted_row(local_row))
+        view.begin_gesture(local_col, super::scroll::event_content_row(local_row))
     }
 
     fn mouse_event(
@@ -844,7 +844,7 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
-        let local_row = scroll_adjusted_row(local_row);
+        let local_row = super::scroll::event_content_row(local_row);
         let view = TimelineView::from_node(node);
         let placing = get_num(&node.props, "placement-active", 0.0) > 0.0;
         if placing {
@@ -913,7 +913,7 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
             return super::WidgetCursor::DragCopy;
         }
         let view = TimelineView::from_node(node);
-        match view.hit_test(local_col, scroll_adjusted_row(local_row)) {
+        match view.hit_test(local_col, super::scroll::event_content_row(local_row)) {
             Some(HitRegion::ItemEdgeEnd { .. })
             | Some(HitRegion::ItemEdgeStart { .. })
             | Some(HitRegion::ContentLengthEnd) => super::WidgetCursor::EwResize,
@@ -947,7 +947,7 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
             return None;
         }
         let view = TimelineView::from_node(node);
-        view.handle_double_click(local_col, scroll_adjusted_row(local_row))
+        view.handle_double_click(local_col, super::scroll::event_content_row(local_row))
             .map(WidgetEvent::Custom)
     }
 
@@ -959,7 +959,7 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
         delta: f64,
     ) -> Option<WidgetEvent> {
         let view = TimelineView::from_node(node);
-        view.handle_magnify(local_col, scroll_adjusted_row(local_row), delta)
+        view.handle_magnify(local_col, super::scroll::event_content_row(local_row), delta)
             .map(WidgetEvent::Custom)
     }
 
@@ -972,7 +972,7 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
         delta_y: f32,
     ) -> Option<WidgetEvent> {
         let view = TimelineView::from_node(node);
-        view.handle_touchpad_scroll(local_col, scroll_adjusted_row(local_row), delta_x, delta_y)
+        view.handle_touchpad_scroll(local_col, super::scroll::event_content_row(local_row), delta_x, delta_y)
             .map(WidgetEvent::Custom)
     }
 
@@ -4401,7 +4401,7 @@ fn marquee_from_item_body(gesture: &HashMap<String, Value>) -> bool {
 /// widget instance per track reconstructs the track span from this; a
 /// multi-lane host reads `lane-a`/`lane-b` instead and ignores it.
 ///
-/// Both rows are already scroll-adjusted (`scroll_adjusted_row`), so the
+/// Both rows are already scroll-adjusted (`scroll::event_content_row`), so the
 /// difference is free of any scroll the container did mid-drag.
 fn marquee_row_delta(gesture: &HashMap<String, Value>, local_row: f32) -> f64 {
     // A gesture map without a start row cannot say how far the pointer
@@ -4417,13 +4417,6 @@ fn vertical_scroll_passthrough(props: &HashMap<String, Value>) -> bool {
         props.get("scroll-passthrough"),
         Some(Value::Keyword(mode)) | Some(Value::String(mode)) if mode == "vertical"
     )
-}
-
-/// Pointer rows arrive in scroll-viewport coordinates when this instance
-/// lives inside a `scroll` container; node rects are in content coordinates,
-/// so shift by the per-event scroll offset (0 outside a container).
-fn scroll_adjusted_row(local_row: f32) -> f32 {
-    local_row + super::scroll::current_event_scroll_offset()
 }
 
 fn get_tool(props: &HashMap<String, Value>) -> TimelineTool {

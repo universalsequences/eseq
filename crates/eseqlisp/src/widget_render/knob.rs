@@ -177,6 +177,7 @@ the theme. It is :size cells wide (default 2) and drawn round. Example: \
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         match (node.widget_type.as_str(), mouse_kind) {
             ("inline-knob", MouseEventKind::Down(MouseButton::Left)) => MouseEventOutcome::Consume,
             ("inline-knob", MouseEventKind::Drag(MouseButton::Left)) => {
@@ -219,6 +220,7 @@ the theme. It is :size cells wide (default 2) and drawn round. Example: \
         local_row: f32,
         _modifiers: KeyModifiers,
     ) -> Option<Value> {
+        let local_row = super::scroll::event_content_row(local_row);
         Some(Value::List(vec![
             std::rc::Rc::new(std::cell::RefCell::new(Value::Number(get_f32_prop(
                 &node.props,

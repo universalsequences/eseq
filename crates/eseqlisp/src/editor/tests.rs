@@ -18570,3 +18570,184 @@ fn theme_pick_reports_theme_keywords_of_a_defwidget_background() {
     }
     assert!(!slots.contains(&"color".to_string()), "material arg keywords are not slots");
 }
+
+#[test]
+fn matrix_click_below_the_fold_hits_the_cell_under_the_pointer_when_tile_scrolled() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(20, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def weights (state (list (list 0) (list 0) (list 0) (list 0))))
+                (effect
+                  (v-stack
+                    (box :width 10 :height 20)
+                    (matrix
+                      :rows 4
+                      :cols 1
+                      :min 0
+                      :max 1
+                      :toggle true
+                      :width 4
+                      :height 8
+                      :value weights
+                      :on-change (lambda (next) (set! weights next)))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(20, 10);
+    editor.active_leaf_mut().widget_scroll_top = 18.0;
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 20, 10);
+    assert_eq!(editor.total_scroll_top(), 18.0);
+
+    // Content rows 20..28 hold the matrix; screen row 8.5 is content 26.5,
+    // i.e. the last of the four 2-row cells.
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 8),
+        0, 0, 20, 10, 1.5, 8.5,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 8),
+        0, 0, 20, 10, 1.5, 8.5,
+    );
+
+    let value = editor.runtime.eval_str("weights").unwrap().unwrap();
+    let Value::List(rows) = value else { panic!("rows") };
+    let Value::List(last) = &*rows[3].borrow() else { panic!("row 3") };
+    assert_eq!(*last[0].borrow(), Value::Number(1.0), "the cell under the pointer flips");
+}
+
+/// A 30x12 `scroll` holding a 20-row spacer then a 4x1 matrix (content rows
+/// 20..28) and a clickable box below it, scrolled 18 rows: screen row 8.5 is
+/// content row 26.5, the matrix's last cell.
+fn scrolled_container_editor() -> Editor {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 20);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def weights (state (list (list 0) (list 0) (list 0) (list 0))))
+                (def click-y (state -1))
+                (effect
+                  (scroll :key "probe-scroll" :width 30 :height 12
+                    (v-stack
+                      (box :width 10 :height 20)
+                      (matrix :rows 4 :cols 1 :min 0 :max 1 :toggle true
+                        :width 4 :height 8 :value weights
+                        :on-change (lambda (next) (set! weights next)))
+                      (box :width 10 :height 4
+                        :on-click (lambda (e) (set! click-y (get e :y)))))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(60, 20);
+    let layout = editor.widget_layout().expect("layout");
+    let scroll = find_widget_of_type(&layout, "scroll").expect("scroll");
+    crate::widget_render::scroll::set_scroll_state(
+        crate::widget_render::scroll::scroll_state_key(scroll),
+        crate::widget_render::scroll::ScrollState {
+            offset_y: 18.0,
+            viewport_height: 12.0,
+            content_height: 32.0,
+            synced_selection: None,
+            applied_center_bits: None,
+        },
+    );
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    editor
+}
+
+fn click_at(editor: &mut Editor, col: f32, row: f32) {
+    for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)] {
+        editor.handle_mouse_precise(
+            mouse_event(kind, col as u16, row as u16), 0, 0, 60, 20, col, row,
+        );
+    }
+}
+
+#[test]
+fn matrix_click_inside_scrolled_container_hits_the_cell_under_the_pointer() {
+    let mut editor = scrolled_container_editor();
+    click_at(&mut editor, 1.5, 8.5);
+    let value = editor.runtime.eval_str("weights").unwrap().unwrap();
+    let Value::List(rows) = value else { panic!("rows") };
+    let flipped: Vec<f64> = rows
+        .iter()
+        .map(|row| match &*row.borrow() {
+            Value::List(cells) => match &*cells[0].borrow() {
+                Value::Number(n) => *n,
+                other => panic!("cell {other:?}"),
+            },
+            other => panic!("row {other:?}"),
+        })
+        .collect();
+    assert_eq!(flipped, vec![0.0, 0.0, 0.0, 1.0], "only the bottom cell flips");
+}
+
+#[test]
+fn pointer_y_inside_scrolled_container_is_relative_to_the_widget() {
+    // The box spans content rows 28..32: screen row 10.5 is content 28.5.
+    let mut editor = scrolled_container_editor();
+    click_at(&mut editor, 1.5, 10.5);
+    assert!(
+        (eval_number(editor.runtime_mut(), "click-y") - 0.5).abs() < 1e-3,
+        ":y measures from the box's top edge despite the container scroll"
+    );
+}
+
+#[test]
+fn matrix_menu_inside_scrolled_container_opens_at_the_pointer() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = scrolled_container_editor();
+    right_click_at(&mut editor, 1.5, 8.5);
+    let entry = crate::widget_render::topmost_overlay().expect("matrix menu overlay");
+    assert!(
+        (entry.rect.col - 1.5).abs() < 0.5 && (entry.rect.row - 8.5).abs() < 0.5,
+        "menu {:?} opens at the pointer, not shifted by the container scroll",
+        entry.rect
+    );
+}
+
+#[test]
+fn button_click_inside_scrolled_container_reports_its_own_top_left() {
+    // A click activates the button, which reports its top-left: :y must stay
+    // 0 rather than pick up the container's scroll offset.
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 20);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def click-y (state -1))
+                (effect
+                  (scroll :key "button-scroll" :width 30 :height 10
+                    (v-stack
+                      (box :width 10 :height 20)
+                      (button "go" :width 10 :height 2
+                        :on-click (lambda (e) (set! click-y (get e :y)))))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(60, 20);
+    let layout = editor.widget_layout().expect("layout");
+    let scroll = find_widget_of_type(&layout, "scroll").expect("scroll");
+    crate::widget_render::scroll::set_scroll_state(
+        crate::widget_render::scroll::scroll_state_key(scroll),
+        crate::widget_render::scroll::ScrollState {
+            offset_y: 12.0,
+            viewport_height: 10.0,
+            content_height: 22.0,
+            synced_selection: None,
+            applied_center_bits: None,
+        },
+    );
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    // Content rows 20..22 sit at screen rows 8..10.
+    click_at(&mut editor, 2.5, 8.5);
+    assert_eq!(eval_number(editor.runtime_mut(), "click-y"), 0.0);
+}

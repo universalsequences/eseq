@@ -1213,6 +1213,7 @@ when unconstrained). Example: \
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
         #[cfg(target_os = "macos")]
         let cursor_pos =

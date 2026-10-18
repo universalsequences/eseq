@@ -997,8 +997,8 @@ they reject draw in :error-color. Example: \
         }
         let schema = parse_schema(&node.props).ok()?;
         let value = value_datum(&node.props, &schema);
-        let layout = node_layout(node, &schema, &value, &state, last_cell_w());
-        let (stop, _) = layout.stop_at(local_col - node.rect.col, local_row - node.rect.row, line_height(&node.props))?;
+        let layout = node_layout(node, &schema, &value, &state, drawn_cell_w(0.0));
+        let (stop, _) = layout.stop_at(local_col - node.rect.col, super::scroll::event_content_row(local_row) - node.rect.row, line_height(&node.props))?;
         let Stop::Item(path) = stop else { return None };
         let Some(Datum::Num(start)) = value.get(&path) else { return None };
         let cell = |v: Value| std::rc::Rc::new(RefCell::new(v));
@@ -1019,7 +1019,9 @@ they reject draw in :error-color. Example: \
         cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
-        remember_cell_w(cell_w);
+        // Hit-test the layout as drawn: the render's cell width, which can
+        // differ from the event's, decides where the pieces wrap.
+        let cell_w = drawn_cell_w(cell_w);
         let Ok(schema) = parse_schema(&node.props) else { return MouseEventOutcome::Consume };
         let value = value_datum(&node.props, &schema);
         let lookup = dyn_lookup(node);
@@ -1056,7 +1058,7 @@ they reject draw in :error-color. Example: \
                 }
                 let layout = node_layout(node, &schema, &value, &state, cell_w);
                 let line_h = line_height(&node.props);
-                let Some((stop, placed)) = layout.stop_at(local_col - node.rect.col, local_row - node.rect.row, line_h) else {
+                let Some((stop, placed)) = layout.stop_at(local_col - node.rect.col, super::scroll::event_content_row(local_row) - node.rect.row, line_h) else {
                     return MouseEventOutcome::Consume;
                 };
                 state.place(&slot, stop.clone());
@@ -1113,7 +1115,7 @@ they reject draw in :error-color. Example: \
             MouseEventKind::Moved if hover_callback(node).is_some() => {
                 let layout = node_layout(node, &schema, &value, &state, cell_w);
                 let item = layout
-                    .stop_at(local_col - node.rect.col, local_row - node.rect.row, line_height(&node.props))
+                    .stop_at(local_col - node.rect.col, super::scroll::event_content_row(local_row) - node.rect.row, line_height(&node.props))
                     .and_then(|(stop, _)| match stop {
                         Stop::Item(path) => path.first().copied(),
                         Stop::Plus(_) => None,
@@ -1449,7 +1451,7 @@ thread_local! {
     static LAST_CELL_W: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
 }
 
-/// Gestures begin without the cell width; the last one drawn or clicked is it.
+/// The cell width the last render laid slots out at.
 fn remember_cell_w(cell_w: f32) {
     if cell_w > 0.0 {
         LAST_CELL_W.with(|last| last.set(cell_w));
@@ -1458,6 +1460,14 @@ fn remember_cell_w(cell_w: f32) {
 
 fn last_cell_w() -> f32 {
     LAST_CELL_W.with(|last| last.get())
+}
+
+/// The cell width pointer events and gestures lay a slot out at: the last
+/// render's (`last_cell_w`), since they hit-test what was drawn and the
+/// event's own cell width can differ, which moves where pieces wrap;
+/// `fallback` before anything has been drawn.
+fn drawn_cell_w(fallback: f32) -> f32 {
+    Some(last_cell_w()).filter(|w| *w > 0.0).unwrap_or(fallback)
 }
 
 #[cfg(test)]
@@ -1574,6 +1584,82 @@ mod tests {
         assert!(long.width > short.width);
         let replaced = layout_slot(&slot, Some((&Stop::Item(vec![0]), "(le")), &chars, f32::INFINITY);
         assert_eq!(kinds(&replaced), vec!["[(le]", "[+]"]);
+    }
+
+    #[test]
+    fn a_click_on_a_wrapped_line_hits_the_piece_drawn_there() {
+        // One px per char per font-size point: at cell_w 8 a 10pt char is
+        // 1.25 cells wide, at cell_w 16 it is 0.625. Pointer events used to
+        // re-lay the slot out at the event's cell width, so when it differed
+        // from the render's the pieces wrapped elsewhere and a click on the
+        // second line landed on a piece of the first.
+        struct FixedMeasurer;
+        impl crate::layout::TextMeasurer for FixedMeasurer {
+            fn measure_text_px(&self, text: &str, font_size: f32) -> f32 {
+                text.chars().count() as f32 * font_size
+            }
+            fn line_height_px(&self, font_size: f32) -> f32 {
+                font_size
+            }
+        }
+        crate::widget_render::set_render_text_measurer(std::rc::Rc::new(FixedMeasurer));
+        let mut props = HashMap::new();
+        props.insert(
+            "schema".to_string(),
+            read_value(
+                "(forms (word left right accent rev stac ghost swap)
+                        (form fast (num :min 1 :max 8 :step 1 :decimals 0 :default 2)))",
+            )
+            .unwrap(),
+        );
+        props.insert("value".to_string(), read_value("(left right accent rev stac ghost swap)").unwrap());
+        props.insert("font-size".to_string(), Value::Number(10.0));
+        let node = LayoutNode {
+            widget_id: 4242,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "sexp-slot".to_string(),
+            rect: Rect { row: 0.0, col: 0.0, width: 16.0, height: 6.0 },
+            props,
+            children: Vec::new(),
+            focusable: true,
+            animation: Default::default(),
+        };
+        let viewport = WidgetViewport {
+            cell_w: 8.0,
+            cell_h: 16.0,
+            vp_w: 640.0,
+            vp_h: 360.0,
+            time_seconds: 0.0,
+            focused_widget_id: Some(node.widget_id),
+            focused_branch: false,
+            overlay_viewport_bottom: 18.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let _ = SEXP_SLOT_WIDGET.build_primitives("sexp-slot", &node, viewport);
+        let schema = parse_schema(&node.props).unwrap();
+        let value = value_datum(&node.props, &schema);
+        let drawn = node_layout(&node, &schema, &value, &SlotState::default(), 8.0);
+        assert!(drawn.lines > 1, "the slot wraps as drawn");
+        let target = drawn.placed.iter().find(|p| p.line == 1).expect("a second-line piece");
+        let Piece::Word { path, .. } = &target.piece else { panic!("{:?}", target.piece) };
+        let line_h = line_height(&node.props);
+        let _ = SEXP_SLOT_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Down(MouseButton::Left),
+            target.col + target.width * 0.5,
+            SlotLayout::line_row(1, line_h) + line_h * 0.5,
+            None,
+            None,
+            KeyModifiers::NONE,
+            16.0,
+            32.0,
+        );
+        assert_eq!(get_state(&node).cursor, Stop::Item(path.clone()));
     }
 
     #[test]

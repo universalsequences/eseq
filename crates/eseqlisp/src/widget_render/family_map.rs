@@ -893,6 +893,7 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
         cell_w: f32,
         cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         let MouseEventKind::Down(MouseButton::Left) = mouse_kind else {
             return match mouse_kind {
                 MouseEventKind::Up(MouseButton::Left) => MouseEventOutcome::Consume,

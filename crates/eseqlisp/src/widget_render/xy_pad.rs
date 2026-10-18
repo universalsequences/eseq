@@ -177,6 +177,7 @@ ranges in the handler (flip y with (- 1 y) if up should be larger). Colours: \
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) => {
                 let (x, y) = position_from_local(node, local_col, local_row);

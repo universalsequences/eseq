@@ -672,6 +672,7 @@ env.attack env.decay env.sustain env.release)))"
         local_row: f32,
         _modifiers: KeyModifiers,
     ) -> Option<Value> {
+        let local_row = super::scroll::event_content_row(local_row);
         Some(Value::Number(
             nearest_handle(node, local_col, local_row) as f64
         ))
@@ -689,6 +690,7 @@ env.attack env.decay env.sustain env.release)))"
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         let handle_idx = match gesture {
             Some(Value::Number(n)) => *n as i32,
             _ => nearest_handle(node, local_col, local_row),

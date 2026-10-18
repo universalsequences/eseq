@@ -318,13 +318,15 @@ tall enough for a square SV area unless :height is given. Example: \
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let region = region_at(node.rect, local_row);
                 MouseEventOutcome::Dispatch(pick_event(region, node, local_col, local_row))
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                let start_row = drag_start.map_or(local_row, |(_, row)| row);
+                let start_row = drag_start
+                    .map_or(local_row, |(_, row)| super::scroll::event_content_row(row));
                 let region = region_at(node.rect, start_row);
                 MouseEventOutcome::Dispatch(pick_event(region, node, local_col, local_row))
             }

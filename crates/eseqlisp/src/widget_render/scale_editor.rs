@@ -324,12 +324,15 @@ dragging the bars (shift snaps to 5), :finish with the final offset on release, 
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         let degrees = degrees(&node.props);
         let count = degrees.count();
         let bands = bands(node.rect, shows_labels(&node.props));
         let in_bars = |row: f32| row >= bands.bars.row && row <= bands.bars.row + bands.bars.height;
         // A drag keeps editing the column (and band) the press landed in.
-        let (anchor_col, anchor_row) = drag_start.unwrap_or((local_col, local_row));
+        let (anchor_col, anchor_row) = drag_start
+            .map(|(col, row)| (col, super::scroll::event_content_row(row)))
+            .unwrap_or((local_col, local_row));
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let Some(degree) = column_at(node.rect, count, local_col) else {
@@ -379,6 +382,7 @@ dragging the bars (shift snaps to 5), :finish with the final offset on release, 
         local_row: f32,
         _modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
+        let local_row = super::scroll::event_content_row(local_row);
         let degrees = degrees(&node.props);
         let bands = bands(node.rect, shows_labels(&node.props));
         if local_row < bands.bars.row || local_row > bands.bars.row + bands.bars.height {

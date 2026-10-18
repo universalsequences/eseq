@@ -818,8 +818,7 @@ pub(crate) fn tree_drop_info(
     let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
 
     let rh = row_height_from_props(&node.props);
-    let scroll_offset = find_parent_scroll_offset(node);
-    let row_relative = local_row - node.rect.row + scroll_offset;
+    let row_relative = super::scroll::event_content_row(local_row) - node.rect.row;
     let target = if row_relative >= 0.0 {
         rows.get((row_relative / rh).floor() as usize)
             .filter(|row| row.drop_target)
@@ -890,8 +889,7 @@ pub(crate) fn tree_context_menu_info(
     let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
 
     let rh = row_height_from_props(&node.props);
-    let scroll_offset = find_parent_scroll_offset(node);
-    let row_relative = local_row - node.rect.row + scroll_offset;
+    let row_relative = super::scroll::event_content_row(local_row) - node.rect.row;
     let hit = if row_relative >= 0.0 {
         let row_idx = (row_relative / rh).floor() as usize;
         rows.get(row_idx)
@@ -1185,8 +1183,7 @@ row, so put it in a scroll, which keeps the selected row in view. Example: (scro
 
         let rh = row_height_from_props(&node.props);
 
-        let scroll_offset = find_parent_scroll_offset(node);
-        let row_relative = local_row - node.rect.row + scroll_offset;
+        let row_relative = super::scroll::event_content_row(local_row) - node.rect.row;
         let row_idx = (row_relative / rh).floor() as usize;
         if row_idx >= rows.len() {
             return MouseEventOutcome::Consume;
@@ -1233,8 +1230,7 @@ row, so put it in a scroll, which keeps the selected row in view. Example: (scro
         let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
 
         let rh = row_height_from_props(&node.props);
-        let scroll_offset = find_parent_scroll_offset(node);
-        let row_relative = local_row - node.rect.row + scroll_offset;
+        let row_relative = super::scroll::event_content_row(local_row) - node.rect.row;
         let row_idx = (row_relative / rh).floor() as usize;
         let row = rows.get(row_idx)?;
         if row.has_children || !row.draggable {
@@ -1388,8 +1384,7 @@ row, so put it in a scroll, which keeps the selected row in view. Example: (scro
         let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
 
         let rh = row_height_from_props(&node.props);
-        let scroll_offset = find_parent_scroll_offset(node);
-        let row_relative = local_row - node.rect.row + scroll_offset;
+        let row_relative = super::scroll::event_content_row(local_row) - node.rect.row;
         let row_idx = (row_relative / rh).floor() as usize;
         let row = rows.get(row_idx)?;
         if !row_is_interactive(row) {
@@ -2037,11 +2032,6 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 "#,
     super::wgsl::TREE_CHEVRON_SHADER,
 );
-
-/// Find the scroll offset from the nearest parent scroll container.
-fn find_parent_scroll_offset(_node: &LayoutNode) -> f32 {
-    super::scroll::current_event_scroll_offset()
-}
 
 fn row_height_from_value(node: &Value) -> f32 {
     get_prop_num(node, "row-height")

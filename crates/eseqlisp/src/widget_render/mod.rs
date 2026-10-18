@@ -3356,7 +3356,7 @@ pub(crate) fn pointer_event_info(
         Rc::new(RefCell::new(Value::String(phase.to_string()))),
     );
     let wc = local_col - node.rect.col;
-    let wr = local_row - node.rect.row;
+    let wr = scroll::event_content_row(local_row) - node.rect.row;
     let sx = if node.rect.width > 0.0 {
         wc / node.rect.width * 2.0 - 1.0
     } else {
@@ -3377,8 +3377,10 @@ pub(crate) fn pointer_event_info(
     // frame-anchored widget reconciles the two via `current_frame_viewport`,
     // which reports the frame in this same content space.
     //
-    // Not folded in: the offset of an enclosing `scroll` WIDGET, which
-    // children read separately via `scroll::current_event_scroll_offset`.
+    // Not folded in: the offset of an enclosing `scroll` WIDGET (menus
+    // anchored inside one open at the pointer in this space). `x`/`y` and
+    // the normalized positions above do fold it in, via
+    // `scroll::event_content_row`, since they measure against the rect.
     info.insert("col".to_string(), num(local_col));
     info.insert("row".to_string(), num(local_row));
     info.insert("sx".to_string(), num(sx));

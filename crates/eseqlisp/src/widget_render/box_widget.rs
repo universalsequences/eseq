@@ -598,7 +598,10 @@ name) (label detail :color :dim)))"
         let (callback_name, arg) = match event {
             WidgetEvent::Activate(modifiers) => (
                 "on-click",
-                super::pointer_event_info("click", modifiers, node, node.rect.col, node.rect.row),
+                super::pointer_event_info(
+                    "click", modifiers, node, node.rect.col,
+                    super::scroll::event_viewport_row(node.rect.row),
+                ),
             ),
             WidgetEvent::Custom(value) => {
                 let phase = match &value {

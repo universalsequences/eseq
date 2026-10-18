@@ -306,6 +306,7 @@ cells wide and 8 tall by default. Example: \
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         match mouse_kind {
             MouseEventKind::Drag(MouseButton::Left) => {
                 let denom = node.rect.height.max(0.001);

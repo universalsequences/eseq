@@ -354,6 +354,7 @@ Example: (automation-lane :width :fill :height 3 :points pts :min 0 :max 127 \
         cell_w: f32,
         cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         // The anchor is the point hit where the press LANDED, so a drag
         // that wanders sideways keeps editing the same step.
         let anchor_col = drag_start.map(|(col, _)| col).unwrap_or(local_col);
