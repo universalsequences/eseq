@@ -9772,6 +9772,105 @@ fn eval_tabbed_test_layout(editor: &mut Editor) {
 }
 
 #[test]
+fn side_pane_survives_a_layout_change_and_keeps_its_width() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*main*", "");
+    editor.open_scratch_buffer("*fx*", "");
+    editor.open_scratch_buffer("*pane*", "");
+    let eval = |editor: &mut Editor, source: &str| {
+        editor.runtime_mut().eval_str(source).unwrap();
+        editor.refresh_runtime_side_effects();
+    };
+    let pane_split = |editor: &Editor| match &editor.tile_root.content {
+        crate::tile::TileNode::Split(split) => match &*split.b {
+            crate::tile::TileNode::Leaf(leaf) if editor.buffers[leaf.buffer_idx].name == "*pane*" => {
+                Some((split.id, split.ratio))
+            }
+            _ => None,
+        },
+        crate::tile::TileNode::Leaf(_) => None,
+    };
+
+    eval(&mut editor, r#"(set-layout (list :rows 0.6 "*main*" 0.4 "*fx*"))"#);
+    eval(&mut editor, r#"(select-window-for "*fx*")"#);
+    eval(&mut editor, r#"(show-in-side-pane "*pane*")"#);
+    let (split_id, _) = pane_split(&editor).expect("the pane opens on the right");
+    editor.tile_root.content.find_split_mut(split_id).unwrap().ratio = 0.6;
+
+    // From the pane, set-window-buffer shows the buffer in the tile used last.
+    editor.open_scratch_buffer("*other*", "");
+    eval(&mut editor, r#"(show-in-side-pane "*pane*")"#);
+    eval(&mut editor, r#"(set-window-buffer "*other*")"#);
+    let shown: Vec<&str> = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .map(|id| editor.buffers[editor.tile_root.find_leaf(id).unwrap().buffer_idx].name.as_str())
+        .collect();
+    assert_eq!(shown, ["*main*", "*other*", "*pane*"]);
+
+    // An agent-pane button that shows a buffer and re-lays the project out:
+    // the buffer lands in the project's tile and the pane stays, as wide.
+    eval(
+        &mut editor,
+        r#"(do (set-window-buffer "*fx*") (set-layout (list :rows 0.5 "*fx*" 0.5 "*main*")))"#,
+    );
+    let (_, ratio) = pane_split(&editor).expect("the pane survives the new layout");
+    assert!((ratio - 0.6).abs() < 1e-6, "pane width kept, got {ratio}");
+    assert_eq!(editor.tile_root.leaf_ids().len(), 3);
+
+    // Closed, it stays closed.
+    eval(&mut editor, r#"(close-window-for "*pane*")"#);
+    eval(&mut editor, r#"(set-layout (list :rows 0.6 "*main*" 0.4 "*fx*"))"#);
+    assert!(pane_split(&editor).is_none());
+    assert_eq!(editor.tile_root.leaf_ids().len(), 2);
+}
+
+#[test]
+fn side_pane_takes_the_layouts_tile_chrome() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*bar*", "");
+    editor.open_scratch_buffer("*main*", "");
+    editor.open_scratch_buffer("*pane*", "");
+    let eval = |editor: &mut Editor, source: &str| {
+        editor.runtime_mut().eval_str(source).unwrap();
+        editor.refresh_runtime_side_effects();
+    };
+    let pane = |editor: &Editor| match &editor.tile_root.content {
+        crate::tile::TileNode::Split(split) => match &*split.b {
+            crate::tile::TileNode::Leaf(leaf) => (
+                split.gap,
+                leaf.show_status,
+                leaf.border_radius_px,
+                leaf.border_width_px,
+                leaf.background_color_name.clone(),
+            ),
+            _ => panic!("the pane is a leaf"),
+        },
+        _ => panic!("the pane opens on the right"),
+    };
+    let layout = |radius: u32, gap: f32| {
+        format!(
+            r#"(set-layout (list :rows :gap 1 :outer-gap {gap}
+                 0.1 (list :buf "*bar*" :hide-status true :borderless true)
+                 0.9 (list :buf "*main*" :hide-status true :border-radius {radius}
+                       :border-width 3 :background-color :buffer-bg)))"#
+        )
+    };
+
+    // Beside a borderless bar and a rounded tile, the pane takes the rounded
+    // tile's chrome and the layout's tile gap, with no status line.
+    eval(&mut editor, &layout(16, 1.5));
+    eval(&mut editor, r#"(select-window-for "*bar*")"#);
+    eval(&mut editor, r#"(show-in-side-pane "*pane*")"#);
+    assert_eq!(pane(&editor), (1.5, false, 16.0, 3.0, Some("buffer-bg".to_string())));
+
+    // A new layout restyles the carried pane and sets its gap.
+    eval(&mut editor, &layout(8, 0.5));
+    assert_eq!((pane(&editor).0, pane(&editor).2), (0.5, 8.0));
+}
+
+#[test]
 fn remembered_layout_split_restores_its_user_resized_ratio() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor.open_scratch_buffer("*main*", "");

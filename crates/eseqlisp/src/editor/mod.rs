@@ -41,6 +41,8 @@ pub(crate) use commands::key_str;
 use natives::register_editor_natives;
 
 const TILE_GAP_PX_PER_UNIT: f32 = 15.0;
+/// The share of the window the layout keeps when a side pane opens.
+const SIDE_PANE_RATIO: f32 = 0.72;
 const TEXT_HORIZONTAL_SCROLL_MARGIN: usize = 3;
 
 fn tile_resize_cursor(dir: SplitDir) -> WidgetCursor {
@@ -790,6 +792,9 @@ pub struct Editor {
     inspect_hover_status: Option<String>,
     inspect_hover_rect: Option<crate::layout::Rect>,
     inspect_source_tile_id: Option<TileId>,
+    /// The last tile other than the side pane that had focus: where
+    /// `set-window-buffer` lands when it runs from the side pane.
+    last_main_tile_id: Option<TileId>,
     /// Set while inspect mode runs as a theme pick (`theme-pick-start`): a
     /// click reports the slots under the pointer to this callback instead of
     /// opening source.
@@ -961,6 +966,7 @@ impl Editor {
             inspect_hover_status: None,
             inspect_hover_rect: None,
             inspect_source_tile_id: None,
+            last_main_tile_id: None,
             inspect_theme_pick: None,
             #[cfg(test)]
             test_clipboard: None,
@@ -1554,6 +1560,9 @@ impl Editor {
         let layout_revision = target_leaf.layout_revision;
         let buffer_idx = target_leaf.buffer_idx;
         self.save_current_widget_tree();
+        if self.inspect_source_tile_id != Some(self.active_tile) {
+            self.last_main_tile_id = Some(self.active_tile);
+        }
         self.active_tile = new_tile;
         self.record_buffer_access_by_idx(buffer_idx);
         self.sync_runtime_context();
@@ -1594,23 +1603,94 @@ impl Editor {
 
     fn split_root_right_with_buffer(&mut self, new_buffer_idx: usize) -> TileId {
         self.save_current_widget_tree();
-        let split_id = self.alloc_tile_id();
         let new_tile_id = self.alloc_tile_id();
-        let existing_root = std::mem::replace(
-            &mut self.tile_root.content,
-            TileNode::Leaf(TileLeaf::new(new_tile_id, new_buffer_idx)),
-        );
+        self.wrap_root_with_side_pane(TileLeaf::new(new_tile_id, new_buffer_idx), SIDE_PANE_RATIO);
+        self.switch_active_tile(new_tile_id);
+        new_tile_id
+    }
+
+    /// Put `leaf` to the right of the whole layout, styled like its tiles.
+    fn wrap_root_with_side_pane(&mut self, leaf: TileLeaf, ratio: f32) {
+        let (split_id, side) = (self.alloc_tile_id(), leaf.id);
+        let content = std::mem::replace(&mut self.tile_root.content, TileNode::Leaf(TileLeaf::new(side, 0)));
         self.tile_root.content = TileNode::Split(TileSplit {
             id: split_id,
             dir: SplitDir::Vertical,
-            ratio: 0.72,
-            gap: 0.0,
+            ratio,
+            gap: self.tile_outer_gap,
             remember_key: None,
-            a: Box::new(existing_root),
-            b: Box::new(TileNode::Leaf(TileLeaf::new(new_tile_id, new_buffer_idx))),
+            a: Box::new(content),
+            b: Box::new(TileNode::Leaf(leaf)),
         });
-        self.switch_active_tile(new_tile_id);
-        new_tile_id
+        self.style_side_pane_like_its_neighbours(side);
+    }
+
+    /// The side pane (inspect source, `show-in-side-pane`) is in no layout
+    /// spec: carry it from `old_root` onto the new layout at the width it had,
+    /// unless the new layout shows its buffer itself.
+    fn keep_side_pane(&mut self, old_root: TileNode) {
+        let Some(id) = self.inspect_source_tile_id else {
+            return;
+        };
+        let ratio = match &old_root {
+            TileNode::Split(split) if matches!(&*split.b, TileNode::Leaf(leaf) if leaf.id == id) => {
+                split.ratio
+            }
+            _ => SIDE_PANE_RATIO,
+        };
+        let Some(leaf) = old_root.into_leaf(id) else {
+            self.inspect_source_tile_id = None;
+            return;
+        };
+        if self.tile_root.content.find_leaf_by_buffer_idx(leaf.buffer_idx).is_some() {
+            self.inspect_source_tile_id = None;
+            return;
+        }
+        self.wrap_root_with_side_pane(leaf, ratio);
+    }
+
+    /// Give the side pane the chrome of the layout's bordered tiles (radius,
+    /// border, background, hidden status line), preferring the tile it was
+    /// opened beside. A layout with no bordered tile leaves it as it is.
+    fn style_side_pane_like_its_neighbours(&mut self, side: TileId) {
+        let ids = self.tile_root.content_leaf_ids();
+        let model = [self.last_main_tile_id, Some(self.active_tile)]
+            .into_iter()
+            .flatten()
+            .chain(ids)
+            .filter(|id| *id != side)
+            .filter_map(|id| self.tile_root.find_leaf(id))
+            .find(|leaf| leaf.show_border)
+            .map(|leaf| {
+                (
+                    leaf.show_status,
+                    leaf.border_width_px,
+                    leaf.border_radius_px,
+                    leaf.background_color,
+                    leaf.background_color_name.clone(),
+                )
+            });
+        let (Some((show_status, width, radius, color, color_name)), Some(leaf)) =
+            (model, self.tile_root.find_leaf_mut(side))
+        else {
+            return;
+        };
+        leaf.show_status = show_status;
+        leaf.show_border = true;
+        leaf.border_width_px = width;
+        leaf.border_radius_px = radius;
+        leaf.background_color = color;
+        leaf.background_color_name = color_name;
+    }
+
+    /// A content tile other than the side pane, for commands that change
+    /// "the current tile" while the side pane has focus.
+    fn main_tile_beside_side_pane(&self) -> Option<TileId> {
+        let side = self.inspect_source_tile_id.filter(|id| *id == self.active_tile)?;
+        let ids = self.tile_root.content_leaf_ids();
+        self.last_main_tile_id
+            .filter(|id| *id != side && ids.contains(id))
+            .or_else(|| ids.into_iter().find(|id| *id != side))
     }
 
     fn replace_tile_buffer_and_activate(&mut self, tile_id: TileId, buffer_idx: usize) -> bool {
@@ -1968,9 +2048,11 @@ impl Editor {
                 return;
             }
         };
-        self.tile_root.content = new_root;
-        self.prune_retained_tile_layouts();
+        let old_root = std::mem::replace(&mut self.tile_root.content, new_root);
         self.tile_outer_gap = outer_gap;
+        // After the gap: the carried pane sits at the new layout's gap.
+        self.keep_side_pane(old_root);
+        self.prune_retained_tile_layouts();
         // Enforce min-size constraints on initial ratios
         self.enforce_min_sizes_recursive();
         // Preserve the active buffer when the rebuilt layout still contains it.
@@ -10142,6 +10224,11 @@ impl Editor {
                 crate::runtime::TileOp::SetTitlebar(None) => self.unmount_titlebar(),
                 crate::runtime::TileOp::SetWindowBuffer(name) => {
                     if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+                        // A click in the side pane (an agent pane button) that
+                        // shows a buffer means the project's tile, not the pane.
+                        if let Some(main) = self.main_tile_beside_side_pane() {
+                            self.switch_active_tile(main);
+                        }
                         if self.active_buffer_idx() == idx {
                             self.record_buffer_access_by_idx(idx);
                             continue;
