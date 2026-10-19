@@ -353,7 +353,7 @@ mod tests {
         }
         fn call(&mut self, name: &str, input: &Value) -> ToolResult {
             self.0.push((name.to_string(), input.clone()));
-            ToolResult { content: vec![json!({"type": "text", "text": "=> 3"})], is_error: false, images: Vec::new() }
+            ToolResult::ok("=> 3")
         }
     }
 

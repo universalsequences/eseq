@@ -3922,6 +3922,9 @@ pub fn register_core_natives(vm: &mut VM) {
             quarantined: false,
             enabled,
         });
+        // What the factory function draws changed with no reactive edge:
+        // redraw its dependents, cached subtrees included.
+        vm.mark_effects_depending_on_override_targets(&HashSet::from([name.clone()]));
         Value::Nil
     });
 
@@ -4161,7 +4164,9 @@ pub fn register_core_natives(vm: &mut VM) {
         };
         // The public contract is an immediate return to factory behavior, not
         // exposure of an older hidden advice layer.
-        vm.overrides.remove(name);
+        if vm.overrides.remove(name).is_some() {
+            vm.mark_effects_depending_on_override_targets(&HashSet::from([name.clone()]));
+        }
         Value::Nil
     });
 
@@ -6914,6 +6919,25 @@ impl VM {
             }
         }
         self.source_manager.record_render_root(node_id);
+    }
+
+    /// Drop every override written in `module`, leaving other modules' on the
+    /// same targets, and redraw what depended on them. Returns the targets
+    /// it took an override off, sorted.
+    pub fn remove_module_overrides(&mut self, module: &str) -> Vec<String> {
+        let mut touched = HashSet::new();
+        self.overrides.retain(|target, set| {
+            let before = set.entries.len();
+            set.entries.retain(|entry| entry.overriding_module != module);
+            if set.entries.len() != before {
+                touched.insert(target.clone());
+            }
+            !set.entries.is_empty()
+        });
+        self.mark_effects_depending_on_override_targets(&touched);
+        let mut targets: Vec<String> = touched.into_iter().collect();
+        targets.sort();
+        targets
     }
 
     /// Overrides never touch the factory cell, so flipping one changes what a

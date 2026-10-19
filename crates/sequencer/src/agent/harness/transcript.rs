@@ -68,6 +68,24 @@ pub enum Entry {
 
 /// `text` cut to `limit` characters, marked when cut: how a transcript is
 /// shown.
+/// One entry as a line of plain text, for drivers that print the
+/// conversation: a tool shows its input, output and images.
+pub fn render_entry(entry: &Entry) -> String {
+    match entry {
+        Entry::User(text) => format!("USER {text}"),
+        Entry::Assistant(text) => format!("CLAUDE {text}"),
+        Entry::Thinking(text) => format!("THINKING {}", clip(text, 300)),
+        Entry::Notice(text) => format!("NOTICE {text}"),
+        Entry::Tool { name, input, status, output, images, .. } => format!(
+            "TOOL {name} [{}] {}\n    -> {}{}",
+            status.as_str(),
+            clip(input, 400),
+            clip(output, 800).replace('\n', "\n       "),
+            if images.is_empty() { String::new() } else { format!("\n    images: {images:?}") }
+        ),
+    }
+}
+
 pub fn clip(text: &str, limit: usize) -> String {
     match text.char_indices().nth(limit) {
         Some((end, _)) => format!("{}…", &text[..end]),
@@ -164,6 +182,22 @@ impl Transcript {
 
     /// Redraw without a change here: something the pane shows beside the
     /// conversation moved (a package was loaded into the project).
+    /// The entries from `printed` on that will not change any more, in
+    /// order, for a driver printing the conversation as it settles: the last
+    /// one is still streaming while the turn runs, and a tool stays open
+    /// until it has run.
+    pub fn settled_from(&self, printed: usize) -> impl Iterator<Item = &Entry> {
+        let last = self.entries.len().saturating_sub(1);
+        self.entries
+            .iter()
+            .enumerate()
+            .skip(printed)
+            .take_while(move |(index, entry)| {
+                !(self.busy && *index == last) && !matches!(entry, Entry::Tool { status: ToolStatus::Running, .. })
+            })
+            .map(|(_, entry)| entry)
+    }
+
     pub fn touch(&mut self) {
         self.reshaped();
     }

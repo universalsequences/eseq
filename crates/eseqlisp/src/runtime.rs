@@ -2222,6 +2222,36 @@ impl Runtime {
         self.document_symbols([
             ("dict", "(dict :key value ...)", "Return a map from keyword/value pairs."),
             (
+                "override",
+                "(override module/name (args...) body...) | (override module/name :around (original args...) body...)",
+                "Change what a function of another module (the factory's included, exported or not) does, without editing its file. The plain form replaces it; :around receives the original first, to call or not: (override eseq.mixer/strip-buttons :around (original t) (v-stack (label \"custom\") (original t))). The target is read as syntax, so qualify it with its module (or an imported alias). The override belongs to the module it is written in: re-evaluating that module replaces it rather than stacking, a reload of the target keeps it, and the newest module's override wins when two override the same function. Undo with remove-override, or switch one off with disable-override.",
+            ),
+            (
+                "remove-override",
+                "(remove-override module/name)",
+                "Drop every override of module/name, at once: it is the factory's function again.",
+            ),
+            (
+                "disable-override",
+                "(disable-override module/name)",
+                "Switch the overrides of module/name off, keeping them for enable-override.",
+            ),
+            (
+                "enable-override",
+                "(enable-override module/name)",
+                "Switch the overrides of module/name back on.",
+            ),
+            (
+                "disable-module-overrides",
+                "(disable-module-overrides module)",
+                "Switch off every override written in `module` (a bare module name), across reloads, until enable-module-overrides.",
+            ),
+            (
+                "enable-module-overrides",
+                "(enable-module-overrides module)",
+                "Switch the overrides written in `module` back on.",
+            ),
+            (
                 "instance-ref",
                 "(instance-ref id)",
                 "The live instance with this id, as a value (what a kind's :view receives as `self`), or nil. Read and write its fields with a `let`: (let ((e (instance-ref 1))) (set! e.rings (list)) e.rings).",
@@ -2620,6 +2650,11 @@ impl Runtime {
     /// keep a stale entry from poisoning a later path-based eval.
     pub fn take_source_load_errors(&mut self) -> Vec<String> {
         self.vm.take_source_load_errors()
+    }
+
+    /// See [`crate::vm::VM::remove_module_overrides`].
+    pub fn remove_module_overrides(&mut self, module: &str) -> Vec<String> {
+        self.vm.remove_module_overrides(module)
     }
 
     /// Path-based evals judge a source by the load errors its own `import` /

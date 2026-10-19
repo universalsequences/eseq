@@ -23,6 +23,10 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
+    pub fn ok(text: impl Into<String>) -> Self {
+        Self { content: vec![json!({"type": "text", "text": text.into()})], is_error: false, images: Vec::new() }
+    }
+
     pub fn error(text: impl Into<String>) -> Self {
         Self { content: vec![json!({"type": "text", "text": text.into()})], is_error: true, images: Vec::new() }
     }

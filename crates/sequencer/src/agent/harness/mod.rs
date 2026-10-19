@@ -2,10 +2,12 @@
 //! authoring tools of a `metal_seq mcp` child process. A session holds one
 //! conversation; the UI reads its [`Transcript`] and polls the generation.
 //!
-//! The tools run against the child's own headless eseq, never the live
-//! session: what the agent builds lands in the Local packages folder, which
-//! the app's hot reload picks up.
+//! The tools run against the child's own headless eseq: what the agent
+//! builds lands in the Local packages folder, which the app's hot reload
+//! picks up. Only `try` ([`live`]) reaches the live session, through the UI
+//! thread.
 
+pub mod live;
 pub mod mcp_client;
 pub mod message;
 pub mod sse;
@@ -20,8 +22,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde_json::Value;
 
+pub use live::{LiveAction, LiveRequest};
 pub use mcp_client::{McpClient, ServerHandle, ToolBackend, ToolResult};
-pub use transcript::{clip, Entry, ToolStatus, Transcript};
+pub use transcript::{clip, render_entry, Entry, ToolStatus, Transcript};
 use transcript::with_notes;
 use turn::{push_user_text, record, run_turn, AnthropicTransport, TurnConfig};
 pub use workspace::{Artifact, Change, FileChange, KindDecl};
@@ -52,6 +55,12 @@ in a pane beside their project and sees your tool calls as they run.\n\
 Your tools run against a separate, headless eseq, not the user's open project. What you write \
 with create_module, define_form or write_module goes to the Local packages folder, which the \
 user's app reloads by itself.\n\
+\n\
+Your one tool on the user's running app is `try`: use it to show a change to how the app \
+looks or behaves (overriding a factory function, a theme tweak) on their screen, then ask \
+whether to keep it. The pane gives them Keep (into their init.lisp) and Revert; when they \
+tell you to keep it, `keep_tried` does what Keep does. A small \
+personal tweak never becomes a package; read the `customize` guide before such work.\n\
 \n\
 Put new work in one new Local package: a short lowercase name for what it is (`euclid`), with \
 modules under it (`euclid.core`, `euclid.view`). To improve an existing package, edit its \
@@ -134,6 +143,8 @@ struct Shared {
     notes: Mutex<Vec<String>>,
     /// This conversation's folder, named when its first turn starts.
     conversation: Mutex<Option<PathBuf>>,
+    /// `try` calls waiting for the UI thread.
+    live: Mutex<Vec<LiveRequest>>,
 }
 
 impl Shared {
@@ -166,6 +177,7 @@ impl AgentSession {
                 choice: Mutex::new(choice),
                 notes: Mutex::new(Vec::new()),
                 conversation: Mutex::new(None),
+                live: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -260,6 +272,19 @@ impl AgentSession {
         lock(&self.shared.transcript).touch();
     }
 
+    /// The `try` calls waiting for the app, for the UI thread to run and
+    /// answer.
+    pub fn take_live_requests(&self) -> Vec<LiveRequest> {
+        std::mem::take(&mut *lock(&self.shared.live))
+    }
+
+    /// Tell the agent, with its next message, what the user did in the pane,
+    /// and show it in the conversation.
+    pub fn note(&self, message: &str) {
+        lock(&self.shared.notes).push(message.to_string());
+        lock(&self.shared.transcript).push(Entry::Notice(message.to_string()));
+    }
+
     /// Put a package back as it was before this conversation wrote it (one
     /// the agent made is deleted).
     pub fn reject(&self, package: &str) -> Result<String, String> {
@@ -283,8 +308,7 @@ impl AgentSession {
         // a fresh one that reads the files as they are now.
         *lock(&self.shared.server) = None;
         *lock(&self.shared.running) = None;
-        lock(&self.shared.notes).push(message.clone());
-        lock(&self.shared.transcript).push(Entry::Notice(message.clone()));
+        self.note(&message);
         self.shared.publish_artifacts();
         Ok(message)
     }
@@ -335,7 +359,7 @@ fn start(shared: &Shared) -> Result<Running, String> {
     lock(&shared.transcript).push(Entry::Notice("Starting the authoring tools…".to_string()));
     let config = &shared.config;
     let mut client = McpClient::spawn(&config.tool_server.program, &config.tool_server.args, &config.log_path)?;
-    let tools = client.tools()?;
+    let tools = Tracking { tools: &mut client, shared }.tools()?;
     let turn = TurnConfig {
         model: config.model.clone(),
         effort: config.effort.clone(),
@@ -385,10 +409,15 @@ struct Tracking<'a> {
 
 impl ToolBackend for Tracking<'_> {
     fn tools(&mut self) -> Result<Vec<Value>, String> {
-        self.tools.tools()
+        let mut tools = self.tools.tools()?;
+        tools.extend(live::tools());
+        Ok(tools)
     }
 
     fn call(&mut self, name: &str, input: &Value) -> ToolResult {
+        if live::is_live_tool(name) {
+            return live::call(&self.shared.live, &self.shared.cancel, name, input);
+        }
         let module = input["module"].as_str().filter(|_| WRITE_TOOLS.contains(&name));
         if let Some(module) = module {
             lock(&self.shared.workspace).before_write(name, module);

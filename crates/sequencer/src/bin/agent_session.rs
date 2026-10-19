@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use sequencer::agent::harness::{clip, AgentSession, Artifact, Entry, SessionConfig, ToolStatus, Transcript};
+use sequencer::agent::harness::{render_entry, AgentSession, Artifact, SessionConfig, Transcript};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -55,7 +55,9 @@ fn main() {
                 continue;
             }
             seen_generation = Some(generation);
-            let (lines, busy, totals) = session.with_transcript(|t| (final_lines(t, printed), t.busy, tokens(t)));
+            let (lines, busy, totals) = session.with_transcript(|t| {
+                (t.settled_from(printed).map(render_entry).collect::<Vec<_>>(), t.busy, tokens(t))
+            });
             printed += lines.len();
             for line in lines {
                 println!("[{:>5.0}s] {line}", started.elapsed().as_secs_f64());
@@ -90,24 +92,6 @@ fn tokens(t: &Transcript) -> (u64, u64, u64) {
     (t.input_tokens, t.output_tokens, t.cache_read_tokens)
 }
 
-/// The entries after `printed` that will not change any more, in order:
-/// the last one is still streaming while the turn runs, and a tool stays
-/// open until it has run (calls run after their whole reply has streamed).
-fn final_lines(transcript: &Transcript, printed: usize) -> Vec<String> {
-    let entries = &transcript.entries;
-    let open = |index: usize, entry: &Entry| {
-        (transcript.busy && index + 1 == entries.len())
-            || matches!(entry, Entry::Tool { status: ToolStatus::Running, .. })
-    };
-    entries
-        .iter()
-        .enumerate()
-        .skip(printed)
-        .take_while(|(index, entry)| !open(*index, entry))
-        .map(|(_, entry)| render(entry))
-        .collect()
-}
-
 fn render_artifact(artifact: &Artifact) -> String {
     let mut lines = vec![format!(
         "PACKAGE {} ({}) entries {:?} kinds {:?}",
@@ -127,20 +111,4 @@ fn render_artifact(artifact: &Artifact) -> String {
         ));
     }
     lines.join("\n")
-}
-
-fn render(entry: &Entry) -> String {
-    match entry {
-        Entry::User(text) => format!("USER {text}"),
-        Entry::Assistant(text) => format!("CLAUDE {text}"),
-        Entry::Thinking(text) => format!("THINKING {}", clip(text, 300)),
-        Entry::Notice(text) => format!("NOTICE {text}"),
-        Entry::Tool { name, input, status, output, images, .. } => format!(
-            "TOOL {name} [{}] {}\n    -> {}{}",
-            status.as_str(),
-            clip(input, 400),
-            clip(output, 800).replace('\n', "\n       "),
-            if images.is_empty() { String::new() } else { format!("\n    images: {images:?}") }
-        ),
-    }
 }

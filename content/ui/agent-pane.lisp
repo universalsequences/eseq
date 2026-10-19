@@ -296,15 +296,35 @@
             (small-button "Really reject?" (str key "-reject") :danger (lambda () (press-reject artifact)))
             (small-button "Reject" (str key "-reject") :ghost (lambda () (press-reject artifact)))))))))
 
-(def artifacts-view (artifacts)
-  (if (= (len artifacts) 0)
+;; What the agent is showing in the app with `try`, not yet saved: Keep
+;; adds it to init.lisp, Revert takes it off.
+(def tried-card (tried)
+  (box :key "agent-pane-tried" :width :fill :padding 1.0 :corner-radius 12
+    :background-color :button-ghost-bg :border-width 1 :border-color :dropdown-menu-border
+    (v-stack :width :fill :gap 0.3
+      (h-stack :width :fill :gap 0.5 :align :center
+        (label "Trying in the app" :font-size 12 :color :fg :bold true :bg :transparent)
+        (box :flex 1)
+        (dim-text "not saved" 10 false))
+      (v-stack :width :fill :gap 0.05
+        (each tried |form j|
+          (label form :key (str "agent-pane-tried-" j) :font-size 10 :color :fg :mono true :bg :transparent)))
+      (wrap :width :fill :gap 0.3 :row-gap 0.3
+        (small-button "Keep in init.lisp" "agent-pane-keep" :primary
+          (lambda () (host-command "agent-pane-keep-tried" (dict))))
+        (small-button "Revert" "agent-pane-revert" :ghost
+          (lambda () (host-command "agent-pane-revert-tried" (dict))))))))
+
+(def artifacts-view (artifacts tried)
+  (if (and (= (len artifacts) 0) (empty? tried))
     (nothing)
     (v-stack :key "agent-pane-artifacts" :width :fill :gap 0.4
+      (if (empty? tried) (nothing) (tried-card tried))
       (each artifacts |artifact i| (artifact-card artifact i)))))
 
 (def empty-state ()
   (v-stack :key "agent-pane-empty" :width :fill :flex 1 :gap 0.6 :padding 1.0
-    (dim-text "Ask for a sequencer, a panel or an extension. The agent writes it as a Local package, checks how it plays and looks, and your project picks it up."
+    (dim-text "Ask for a sequencer, a panel or an extension, or for a change to how eseq looks. The agent writes new work as a Local package and shows tweaks live in the app, for you to keep or revert."
       11 true)))
 
 ;; The last row: the only one that changes as text streams, so the only
@@ -341,7 +361,7 @@
             (if busy (working-row) (nothing)))))
       ;; Its own subtree: the Add buttons read project.instances, whose
       ;; changes need not redraw the conversation.
-      (subtree :key "agent-pane-artifacts-tree" (artifacts-view (get state :artifacts))))))
+      (subtree :key "agent-pane-artifacts-tree" (artifacts-view (get state :artifacts) (agent-pane/tried))))))
 
 ;; ── The composer ──
 ;;

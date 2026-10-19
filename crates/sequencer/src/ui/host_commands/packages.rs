@@ -1545,10 +1545,6 @@ fn attach_to_user_init_at(editor: &mut Editor, path: &Path, module: &str) -> Res
     let persisted = read_user_init(path)?;
     let (source, _, already_present) = source_with_import(&persisted, module);
     if !already_present {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("Could not create '{}': {error}", parent.display()))?;
-        }
         write_text_atomically(path, &source)?;
     }
     if let Some(buffer) = editor.buffers.iter_mut().find(|buffer| buffer.path.as_deref() == Some(path)) {
@@ -1561,6 +1557,27 @@ fn attach_to_user_init_at(editor: &mut Editor, path: &Path, module: &str) -> Res
         editor.mark_needs_redraw();
     }
     Ok(already_present)
+}
+
+/// Rewrite the user init at `path` by `edit` and reload it; a reload that
+/// fails puts the old file back. Refused while the file is open with unsaved
+/// edits.
+pub(crate) fn edit_user_init(
+    editor: &mut Editor,
+    path: &Path,
+    edit: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    if editor.buffers.iter().any(|buffer| buffer.path.as_deref() == Some(path) && buffer.dirty) {
+        return Err("Save or revert your open init.lisp first.".to_string());
+    }
+    let before = read_user_init(path)?;
+    write_text_atomically(path, &edit(&before)?)?;
+    let report = editor.runtime_mut().reload_paths_transactional(vec![path.to_path_buf()], Vec::new());
+    if !report.success {
+        write_text_atomically(path, &before)?;
+        return Err(format!("init.lisp did not load with them, so it was put back:\n{}", report.diagnostics.join("\n")));
+    }
+    Ok(())
 }
 
 fn read_user_init(path: &Path) -> Result<String, String> {
@@ -1614,12 +1631,14 @@ fn detach_from_user_init_at(editor: &mut Editor, path: &Path, module: &str) -> R
     Ok(removed || draft_removed)
 }
 
-pub(super) fn write_text_atomically(path: &Path, source: &str) -> Result<(), String> {
+/// Write `source` to `path` through a temporary file, making its folder first.
+pub(crate) fn write_text_atomically(path: &Path, source: &str) -> Result<(), String> {
     use std::io::Write;
 
     let parent = path
         .parent()
         .ok_or_else(|| format!("Invalid file path: {}", path.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| format!("Could not create '{}': {error}", parent.display()))?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("System clock is before UNIX epoch: {error}"))?
@@ -1668,9 +1687,7 @@ fn open_user_init_tab(editor: &mut Editor) -> Result<String, String> {
 }
 
 pub(crate) fn user_init_path() -> PathBuf {
-    sequencer::app_paths::app_paths()
-        .user_lisp_root()
-        .join("init.lisp")
+    sequencer::paths::user_init_path().expect("the user Lisp root is always set")
 }
 
 fn buffer_source(editor: &Editor, path: &Path, name: &str) -> Option<String> {

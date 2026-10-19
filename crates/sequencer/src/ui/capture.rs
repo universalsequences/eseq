@@ -1080,6 +1080,22 @@ fn apply_capture_macro_host_commands(
             applied = true;
             continue;
         }
+        // Mixer edits (track mute, solo, volume; bus mute), so `(set! t.muted
+        // true)` or a click on a mute button lands as in the live loop.
+        let mixer_edit = match name.as_str() {
+            "slice3-history-action" => {
+                Some(crate::history_commands::apply_slice3_history_host_command(app, &payload).map(|_| ()))
+            }
+            "bus-mixer-history-action" => {
+                Some(crate::history_commands::apply_bus_mixer_history_host_command(app, &payload).map(|_| ()))
+            }
+            _ => None,
+        };
+        if let Some(result) = mixer_edit {
+            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
+            applied = true;
+            continue;
+        }
         // Sound-palette open/close so fixtures can capture the palette modal.
         if let Some(result) =
             crate::host_commands::apply_sound_palette_view_command(&name, &payload, app)
@@ -1527,7 +1543,13 @@ impl HeadlessSession {
     /// Apply the host commands Lisp queued since the last drain, through the
     /// same subset capture setup supports (instances, racks, song edits, …).
     pub(crate) fn apply_host_commands(&mut self) -> Result<bool, String> {
-        apply_capture_macro_host_commands(&mut self.editor, &mut self.app, &self.kinds_handles.state, self.track)
+        let applied =
+            apply_capture_macro_host_commands(&mut self.editor, &mut self.app, &self.kinds_handles.state, self.track);
+        // The bus kinds read the shared copy, as the live loop refreshes it.
+        if matches!(applied, Ok(true)) {
+            *self.kinds_handles.bus_state.lock().unwrap() = self.app.buses.clone();
+        }
+        applied
     }
 
     /// What the live loop does after an evaluation: apply the host commands

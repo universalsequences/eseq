@@ -2,7 +2,12 @@
 //! conversation itself is a `sequencer::agent::harness::AgentSession`, made
 //! on first use; its turns run on their own thread, so the event loop only
 //! compares the transcript's generation each frame and, when it moved,
-//! presents it as `agent.pane-generation` for the pane to redraw.
+//! presents it as `agent.pane-generation` for the pane to redraw. The
+//! agent's `try` calls are served here too, on the UI thread ([`tried`]).
+
+#[cfg(target_os = "macos")]
+pub(crate) mod bench;
+mod tried;
 
 use std::sync::OnceLock;
 
@@ -205,6 +210,12 @@ pub(crate) fn register_agent_pane_natives(runtime: &mut Runtime, scratch: impl F
         },
     );
     runtime.register_native_with_docs(
+        "agent-pane/tried",
+        "(agent-pane/tried)",
+        "What the agent is trying in the app (its `try` tool), one label per form (\"override eseq.mixer/strip-buttons\"), imports left out; empty when nothing is. Keep and Revert are the host commands agent-pane-keep-tried and agent-pane-revert-tried.",
+        |_args, _ctx| Ok(list_value(tried::shown_labels().iter().map(|label| text(label)))),
+    );
+    runtime.register_native_with_docs(
         "agent-pane/entries-from",
         "(agent-pane/entries-from start)",
         "The conversation's entries from index `start` on, as in agent-pane/state: for the last rows, which redraw under agent.pane-generation as text streams while the rest wait for agent.pane-shape.",
@@ -306,6 +317,25 @@ fn register_choice_natives(runtime: &mut Runtime) {
     );
 }
 
+const KEEP_COMMAND: &str = "agent-pane-keep-tried";
+const REVERT_COMMAND: &str = "agent-pane-revert-tried";
+/// The pane's host commands: Keep and Revert on what the agent is trying.
+pub(crate) const COMMANDS: &[&str] = &[KEEP_COMMAND, REVERT_COMMAND];
+
+pub(crate) fn handle_command(name: &str, editor: &mut Editor) {
+    let Ok(session) = session() else { return };
+    let result = match name {
+        KEEP_COMMAND => tried::keep_in_init(editor),
+        REVERT_COMMAND => tried::revert_tried(editor),
+        _ => return,
+    };
+    match result {
+        Ok(message) => session.note(&message),
+        Err(why) => editor.show_transient_message(why),
+    }
+    session.touch();
+}
+
 /// Redraw the pane (when it is in use): the project's loaded packages changed.
 pub(crate) fn refresh() {
     if let Some(Ok(session)) = SESSION.get() {
@@ -318,6 +348,15 @@ pub(crate) fn refresh() {
 /// first used.
 pub(crate) fn publish(editor: &mut Editor, seen: &mut u64) {
     let Some(Ok(session)) = SESSION.get() else { return };
+    let requests = session.take_live_requests();
+    let served = !requests.is_empty();
+    for request in requests.into_iter().filter(|request| !request.abandoned()) {
+        let result = tried::serve(editor, &request.action);
+        request.reply(result);
+    }
+    if served {
+        session.touch();
+    }
     let (generation, shape) = session.with_transcript(|transcript| (transcript.generation, transcript.shape));
     if *seen == generation {
         return;

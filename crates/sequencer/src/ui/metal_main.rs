@@ -174,6 +174,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(args) = mcp_args {
         return mcp::run(args);
     }
+    #[cfg(target_os = "macos")]
+    if let Some(messages) = agent_pane::bench::args() {
+        return agent_pane::bench::run(messages);
+    }
 
     // 1. Init audio engine
     let eng = engine::init_engine()?;

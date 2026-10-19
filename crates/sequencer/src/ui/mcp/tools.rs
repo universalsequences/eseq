@@ -80,9 +80,10 @@ const HOST_TOOLS: &[HostTool] = &[
         name: "guide",
         description: "Read an authoring guide. Topics: `sequencer` (sequencer kinds and their \
             panels: def-kind slots, tick natives, routing, packaging), `eseqlisp` (the language: \
-            syntax, reactive state, widgets, modules, gotchas), `instrument`, `effect`. Read the \
-            one for your task before writing code.",
-        params: &[("topic", "string", "sequencer, eseqlisp, instrument or effect", true)],
+            syntax, reactive state, widgets, modules, gotchas), `customize` (changing how the app \
+            itself looks or behaves: overrides, init.lisp, packages), `instrument`, `effect`. \
+            Read the one for your task before writing code.",
+        params: &[("topic", "string", "sequencer, eseqlisp, customize, instrument or effect", true)],
     },
     HostTool {
         name: "apropos",
@@ -151,7 +152,8 @@ const HOST_TOOLS: &[HostTool] = &[
         description: "Write one top-level form into a module's file and reload the module. A \
             definition (def, defstate, def-kind, defwidget, override, …) replaces the form \
             that defines the same name, or is appended when none does; any other form (bind-key, \
-            set!) is appended. Only Local modules and installed packages are writable. When the \
+            set!) is appended. Only Local modules, installed packages and `user.init` (the user's \
+            init.lisp, loaded in every project) are writable. When the \
             reload fails the file is restored and the errors are returned. This is how work \
             persists: the file is the truth.",
         params: &[
@@ -333,7 +335,7 @@ pub(super) fn call(session: &mut HeadlessSession, name: &str, args: &Json) -> To
 fn guide(topic: &str) -> ToolOutput {
     let paths = sequencer::app_paths::app_paths();
     let candidates: Vec<PathBuf> = match topic {
-        "sequencer" | "instrument" | "effect" => {
+        "sequencer" | "customize" | "instrument" | "effect" => {
             vec![paths.authoring_dir().join(format!("{topic}-reference.md"))]
         }
         // The bundle carries the language guide beside the authoring
@@ -342,7 +344,7 @@ fn guide(topic: &str) -> ToolOutput {
             paths.authoring_dir().join("eseqlisp-guide.md"),
             paths.factory_root().join("../docs/eseqlisp/GUIDE.md"),
         ],
-        _ => return ToolOutput::error(format!("no guide `{topic}`; topics: sequencer, eseqlisp, instrument, effect")),
+        _ => return ToolOutput::error(format!("no guide `{topic}`; topics: sequencer, eseqlisp, customize, instrument, effect")),
     };
     match candidates.iter().find_map(|path| std::fs::read_to_string(path).ok()) {
         Some(text) => ToolOutput::text(text),
@@ -567,13 +569,16 @@ impl Drop for RestoreFile<'_> {
     }
 }
 
-/// A user-tier module's file and text, or why the agent may not write it.
+/// A user-tier module's file and text, or why the agent may not write it:
+/// Local modules, installed packages and the user's init.lisp.
 fn writable_module(session: &HeadlessSession, module: &str) -> Result<(PathBuf, String), String> {
     let (path, before) = module_source(session, module)?;
     let paths = sequencer::app_paths::app_paths();
-    if !forms::is_under_any(&path, &forms::user_module_roots(paths)) {
+    if !forms::is_under_any(&path, &forms::user_module_roots(paths))
+        && !crate::lisp_hot_reload::same_path(&crate::host_commands::packages::user_init_path(), &path)
+    {
         return Err(format!(
-            "{} is not writable: only Local modules and installed packages are. Make your own module with `create_module`",
+            "{} is not writable: only Local modules, installed packages and user.init (init.lisp) are. Make your own module with `create_module`",
             path.display()
         ));
     }
@@ -970,6 +975,20 @@ mod coverage {
         "eseq.kinds/generator-mark-named", "eseq.view-kit/menu-of", "eseq.view-kit/open-menu!",
         "eseq.agent-tools/define-agent-tool",
     ];
+
+    #[test]
+    fn a_mute_set_from_eval_lands_in_the_headless_app() {
+        let mut session = booted();
+        let mute = "(import eseq.kinds :refer (tracks buses))\n\
+                    (let ((t (nth (tracks) 1)) (b (first (buses)))) (set! t.muted true) (set! b.muted true))";
+        run_lisp(&mut session, mute).0.unwrap();
+        let (read, _) = run_lisp(
+            &mut session,
+            "(import eseq.kinds :refer (tracks buses))\n\
+             (let ((t (nth (tracks) 1)) (b (first (buses)))) (list t.muted t.audible b.muted))",
+        );
+        assert_eq!(read.unwrap(), "(true false true)");
+    }
 
     #[test]
     fn every_name_the_sequencer_guide_teaches_is_documented() {
