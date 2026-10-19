@@ -3319,17 +3319,54 @@
 (def group-element-key (g element)
   (str (group-ui-kind g) "-" element "-" g.gid))
 
-;; Keep group fills opaque because the rounded-box renderer draws its border
-;; behind the inset fill. Reproduce the old alpha-0.22 track tint by compositing
-;; it over the active theme's buffer surface in Lisp; selection then changes
-;; only the border without changing the original fill appearance.
-(def group-container-bg (c)
-  (let ((bg THEME.buffer_bg))
-    (rgba
-      (+ (* (rgb-part c 0) 0.10) (* (nth bg 0) 0.90))
-      (+ (* (rgb-part c 1) 0.10) (* (nth bg 1) 0.9))
-      (+ (* (rgb-part c 2) 0.10) (* (nth bg 2) 0.9))
-      1.0)))
+;; Channel i of a group's fill: keep it opaque because the box's border draws
+;; behind the fill. Reproduce the old alpha-0.22 track tint by compositing it
+;; over the active theme's buffer surface in Lisp; selection then changes only
+;; the border without changing the fill.
+(def group-container-part (c i)
+  (+ (* (rgb-part c i) 0.01) (* (nth THEME.buffer_bg i) 0.99)))
+
+;; A group's enclosure: its flat fill (fill-*) given texture — a soft mottle
+;; and inner rim in the group's color (tint-*), a faint top sheen, and fine
+;; grain. Noise runs in design pixels, so the texture keeps its scale however
+;; tall the group grows. A box's :background paints over its border, so the
+;; fill is the box's inner rounded rect: inset by `surface-border` with radius
+;; `surface-radius` − `surface-border`, in the box's own design px.
+(defwidget seqv-group-surface
+  :width 4 :height 4
+  :state (fill-r fill-g fill-b tint-r tint-g tint-b surface-radius surface-border)
+  :shader
+  (let ((inset (* surface-border design-px))
+      (px (/ (+  x) design-px))
+      (py (/ (- x y) design-px))
+      (mottle (+ (* 9.2 (eseq.materials/surface-noise (/ px 110.0) (/ py 110.0)))
+          (* 3.8 (eseq.materials/surface-noise (/ px 7.0) (/ py 37.0)))))
+      (grain (- (eseq.materials/surface-hash (floor px) (floor py)) 0.5))
+      (sheen (* 0.5 (- 1.0 (/ y height))))
+      (base (vec3 fill-r fill-g fill-b))
+      (tint (vec3 (* 0.3 tint-r) (* 0.3 tint-g) (* 0.3 tint-b))))
+    (sdf/layer
+      (sdf/fill
+        (sdf/rounded-rect (- width inset) (- height inset)
+          (* (max 0.0 (- surface-radius surface-border)) design-px))
+        (material 
+          :lighting (lighting :edge-min -0.004 :edge-max 0.1 :light (vec3 1 3 4))
+          :color
+          (let ((rim (smoothstep (* -18.0 design-px) 0.1 d))
+              (lift (+ (* 0.008 sheen) (*  0.21 grain))))
+            (mix (vec4 fill-r fill-g fill-b 1)
+              (eseq.materials/color-cell 
+                (rgba (+ base
+                    (* 2.2 tint (+ (* 0.035 (- mottle 0.45)) (* 0.045 rim)))
+                    (* 0.8 (vec3 lift lift lift)))
+                  1.0)
+                (rgba (+ base
+                    (* tint (+ (* 0.035 (- mottle 0.45)) (* 0.045 rim)))
+                    (vec3 lift lift lift))
+                  1.0)              
+                )
+              0.1
+              )))))))
 
 ;; Volume/meter for a group's backing bus b; a spacer while it has none.
 (def group-volume-control (g b)
@@ -3459,8 +3496,8 @@
 ;; lit when active. They sit in a `wrap` that fills the header's right half,
 ;; so the column count follows the panel width and a long bank wraps onto
 ;; more rows rather than stretching the row past the window.
-(def rack-clip-cell-width 3.2)
-(def rack-clip-cell-height 1.6)
+(def rack-clip-cell-width 4.34)
+(def rack-clip-cell-height 2.17)
 (def rack-clip-rename-width 4.6)
 
 ;; Whether the held clip rc is still in its rack's bank (a delete, an undo or
@@ -3550,8 +3587,8 @@
           :on-cancel (lambda () (finish-clip-rename false))
           :on-blur (lambda () (finish-clip-rename true)))
         (label rc.cid
-          :color :dimmer :active #'rc.active :active-color :white
-          :font-size 10 :bg :transparent :v-align :center :h-align :center)))))
+          :color :dim :active #'rc.active :active-color :white
+          :font-size 8  :bg :transparent :v-align :center :h-align :center)))))
 
 ;; The last cell is a number picker showing the lit clip's number (0 while
 ;; the rack is silent): read it at a glance, or type/drag a number to launch
@@ -3564,7 +3601,7 @@
 
 (def rack-clip-number-run (g tinted)
   (let ((clips g.clips)
-        (playing g.rack-clip))
+      (playing g.rack-clip))
     (h-stack
       (number-picker :key (str "rack-clip-number-" g.gid)
         :width 5.2 :height rack-clip-cell-height :font-size 10
@@ -3572,12 +3609,13 @@
         ;; cell shader's 70% dark layer composited over that tint.
         :border-color (rgba (nth tinted 0) (nth tinted 1) (nth tinted 2) 1.0)
         :border-width 2
+        :height 1.5
         :background-color (rgba
           (+ (* 0.3 (nth tinted 0)) 0.014)
           (+ (* 0.3 (nth tinted 1)) 0.0175)
           (+ (* 0.3 (nth tinted 2)) 0.021)
           1.0)
-        :corner-radius 4
+        :corner-radius 16
         :value (if playing (+ playing.index 1) 0)
         :min 1 :max (max 1 (len clips)) :step 1 :decimals 0
         :on-change (lambda (v)
@@ -3598,7 +3636,7 @@
 
 (def rack-clip-grid (g)
   (let ((clips g.clips)
-        (tinted (tint g.color 0.65)))
+      (tinted (tint g.color 0.65)))
     (when (and g.rack (> (len clips) 0))
       (h-stack :key (str "rack-clip-run-" g.gid) :gap 0.4 :align :center :width :fill :flex 1
         ;; Lines the first cell up with the member rows' step grids.
@@ -3608,7 +3646,9 @@
             :width 48 :gap 0.01 :row-gap 0.01 :align :center
             (each clips |rc|
               (rack-clip-cell g rc tinted))
-            (rack-clip-number-picker g tinted)))
+            (box :width 0.3)
+            (rack-clip-number-picker g tinted)
+            ))
         (box :height 0.1 :width :fill :flex 1)
         (rack-activity-strip g)
         (box :width 1.0 :height 0.0 :bg :transparent)))))
@@ -3618,19 +3658,27 @@
     (group-header-body g)))
 
 (def group-block (g)
-  (let ((c g.color))
+  (let ((c g.color)
+        (radius (eseq.seq-core-state/radius 10))
+        (border 2))
     (box :width :fill
       :key (group-element-key g "block")
       ;; Selection visibility binds the *sel-sync* `bus-highlight`, never a
       ;; raw `selected-bus` read: this block wraps every member row, so a
       ;; render-time read re-rendered the whole group on each selection.
       :selected (eseq.seq-core-state/group-selected-ref g)
-      :background-color (group-container-bg c)
-      :selected-background-color (group-container-bg c)
-      :border-width 2
+      :bg :transparent
+      :background "seqv-group-surface"
+      :fill-r (group-container-part c 0)
+      :fill-g (group-container-part c 1)
+      :fill-b (group-container-part c 2)
+      :tint-r (rgb-part c 0) :tint-g (rgb-part c 1) :tint-b (rgb-part c 2)
+      :surface-radius radius
+      :surface-border border
+      :border-width border
       :border-color :mixer-strip-border
       :selected-border-color :mixer-strip-selected-border
-      :corner-radius (eseq.seq-core-state/radius 10)
+      :corner-radius radius
       :padding 0.345
       ;; Hit testing chooses the deepest clickable widget, so member-track
       ;; clicks keep selecting the track; only exposed container chrome reaches

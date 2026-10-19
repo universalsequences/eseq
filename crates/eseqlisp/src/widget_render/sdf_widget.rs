@@ -769,7 +769,7 @@ pub fn build_material_overlay(
             ],
             color_c: logical_uv,
             color_d: [0.0; 4],
-            corner_radius: 0.0,
+            corner_radius: sdf_design_px(node.rect, viewport),
             pixel_aspect,
         },
         is_background: false,
@@ -809,6 +809,17 @@ pub(super) fn visual_style_paint_bounds(widget_id: u64, props: &HashMap<String, 
     Some(Rect { col: rect.col - rect.width * (scale - 1.0) * 0.5,
         row: rect.row - rect.height * (scale - 1.0) * 0.5,
         width: rect.width * scale, height: rect.height * scale })
+}
+
+/// The shader's `design-px`: SDF units per design pixel for a widget laid out
+/// at `rect`. The SDF space spans 2 units across the widget's shorter side,
+/// so a shader sizes chrome in the units a box's `:corner-radius` and
+/// `:border-width` use (e.g. to match its box's rounded corners) at any
+/// window scale. Carried in the instance's `corner_radius` slot, which SDF
+/// widgets do not otherwise read.
+pub fn sdf_design_px(rect: Rect, viewport: WidgetViewport) -> f32 {
+    let short_px = (rect.width * viewport.cell_w).min(rect.height * viewport.cell_h);
+    if short_px > 0.0 { 2.0 * super::ui_design_px(1.0) / short_px } else { 0.0 }
 }
 
 pub fn sdf_widget_logical_uv_bounds(logical_rect: Rect, paint_rect: Rect) -> [f32; 4] {
@@ -1039,7 +1050,7 @@ pub fn sdf_widget_primitives(
             ],
             color_c: logical_uv_bounds,
             color_d: visual_scale,
-            corner_radius: 0.0,
+            corner_radius: sdf_design_px(node.rect, viewport),
             pixel_aspect,
         },
         is_background: false,
@@ -1122,7 +1133,7 @@ pub fn sdf_widget_background_primitives(
             ],
             color_c: logical_uv_bounds,
             color_d: visual_scale,
-            corner_radius: 0.0,
+            corner_radius: sdf_design_px(rect, viewport),
             pixel_aspect,
         },
         is_background: true,

@@ -418,9 +418,9 @@
 ;; :active).
 (def rack-slot-strip (inst slot sd)
   (let ((selected (get slot :selected))
-        (delete-target #'sd.delete-target)
-        (muted sd.muted-display)
-        (soloed sd.soloed-display))
+      (delete-target #'sd.delete-target)
+      (muted sd.muted-display)
+      (soloed sd.soloed-display))
     (box :key (str "rack-slot-row-" (get slot :idx))
       :width 34.6
       :height 1.65
@@ -456,7 +456,7 @@
           :on-click |x y r| (rack-slot-set-enabled slot (not (get slot :enabled))))
         (box :width 1)
         (box :key (str "rack-slot-label-" (get slot :idx))
-          :width 9.5 :height :fill  :padding 0
+          :width 8.0 :height :fill  :padding 0
           :selected delete-target
           :background-color :transparent
           :selected-background-color :fx-panel-header-selected-bg
@@ -467,46 +467,39 @@
             (label (substring (get slot :display-name) 0 14)
               :font-size 10.5
               :color (if (get slot :enabled) :fg :dim)
+              :v-align :baseline
               :active delete-target
               :active-color :white
               :bg :transparent)))
         
-        (rack-slot-param-wrapper inst slot sd "base-note"
-          (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
-            (label "T" :font-size 8.2 :color :dim :bg :transparent)
-            (number-picker :value #'sd.base-note-display
-              :min (get slot :base-note-min) :max (get slot :base-note-max) :decimals 0
-              :noui true :font-size 9.4
-              :text-align :center :text-color :dim :edit-color :yellow
-              :width 3.55 :height 0.84
-              :on-change (lambda (v) (rack-slot-set-base-note slot v)))))
+        
         (rack-slot-param-wrapper inst slot sd "gain"
-          (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
-            (label "G" :font-size 8.2 :color :dim :bg :transparent)
+          (v-stack :width 5.55 :height 1.9 :gap 0.05 :align :center
+            (label "Volume" :font-size 8.2 :color :dim :bg :transparent)
             (number-picker :value #'sd.gain-display
               :min (get slot :gain-min) :max (get slot :gain-max) :decimals 2
-              :noui true :font-size 9.4
+              :mode :slider :font-size 9.4
               :text-align :center :text-color :dim :edit-color :yellow
-              :width 3.55 :height 0.84
+              :width 5.55 :height 0.84
               :on-change (lambda (v) (rack-slot-set-gain slot v)))))
-        (rack-slot-param-wrapper inst slot sd "pan"
-          (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
-            (label "P" :font-size 8.2 :color :dim :bg :transparent)
+        (rack-slot-param-wrapper inst slot sd "base-note"
+          (v-stack :width 5.55 :height 1.9 :gap 0.05 :align :center
+            (label "Note" :font-size 8.2 :color :dim :bg :transparent)
+            (number-picker :value #'sd.base-note-display
+              :min (get slot :base-note-min) :max (get slot :base-note-max) :decimals 0
+              :mode :slider :font-size 9.4
+              :text-align :center :text-color :dim :edit-color :yellow
+              :width 5.55 :height 0.84
+              :on-change (lambda (v) (rack-slot-set-base-note slot v)))))        (rack-slot-param-wrapper inst slot sd "pan"
+          (v-stack :width 5.55 :height 1.9 :gap 0.05 :align :center
+            (label "Pan" :font-size 8.2 :color :dim :bg :transparent)
             (number-picker :value #'sd.pan-display
               :min (get slot :pan-min) :max (get slot :pan-max) :decimals 2
-              :noui true :font-size 9.4
+              :mode :slider :font-size 9.4
               :text-align :center :text-color :dim :edit-color :yellow
-              :width 3.55 :height 0.84
+              :width 5.55 :height 0.84
               :on-change (lambda (v) (rack-slot-set-pan slot v)))))
-        (rack-slot-param-wrapper inst slot sd "max-polyphony"
-          (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
-            (label "V" :font-size 8.2 :color :dim :bg :transparent)
-            (number-picker :value #'sd.voices-display
-              :min (get slot :max-polyphony-min) :max (get slot :max-polyphony-max) :decimals 0
-              :noui true :font-size 9.4
-              :text-align :center :text-color :dim :edit-color :yellow
-              :width 3.55 :height 0.84
-              :on-change (lambda (v) (rack-slot-set-max-polyphony slot v)))))
+        (box :flex 1 :height 1)
         (rack-slot-param-wrapper inst slot sd "mute"
           (button "M"
             :width 2.0 :height 1.02 :padding 0 :font-size 9
@@ -520,7 +513,10 @@
             :border-color :transparent
             :background-color (if soloed :control-on-bg :mixer-control-bg)
             :color (if soloed :control-on-fg :dim)
-            :on-click |x y r| (rack-slot-set-solo slot (not soloed))))))))
+            :on-click |x y r| (rack-slot-set-solo slot (not soloed)))
+          )
+        (box :width 0.2)
+        ))))
 
 (def rack-empty-selected-panel (inst)
   (box :debug-name "rack-empty-selected-panel"

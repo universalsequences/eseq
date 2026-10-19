@@ -1672,7 +1672,7 @@
         :disabled (= source nil)
         :active (if (= arr-placement.active nil) 0 1)
         :on-click |event| (begin-placement))
-      (dropdown :key "arr-placement-pattern" :width 3.5 :height 1.15 :font-size 9
+      (dropdown :key "arr-placement-pattern" :width 6.5 :height 1.15 :font-size 9
         :bg-color :mixer-strip-bg
         :border-color :mixer-strip-selected-bg
         :badge-color :transparent

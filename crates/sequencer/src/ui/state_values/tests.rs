@@ -27245,6 +27245,66 @@ use panel_kinds_seed::*;
     }
 
     #[test]
+    fn metal_seq_rack_context_menu_attaches_and_detaches_instances_of_any_kind() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mut rack = rack_group_fixture(false);
+        rack.id = 8;
+        rack.members = Vec::new();
+        seed_kind_groups(&mut editor, &[rack]);
+        let instance = |id: f64, kind: &str, label: &str, owner_rack: Option<f64>| {
+            map_value([
+                ("id", Value::Number(id)),
+                ("kind", Value::String(kind.into())),
+                ("label", Value::String(label.into())),
+                ("owner-rack", owner_rack.map_or(Value::Nil, Value::Number)),
+                ("owner-label", Value::String(String::new())),
+                ("registered?", Value::Bool(true)),
+            ])
+        };
+        // A generator kind (no graph), a graph kind on this rack, and one
+        // owned by another rack, which this rack must not offer.
+        let rt = editor.runtime_mut();
+        let project = kind_singleton_rt(rt, "project");
+        set_field(rt, project, "instances", test_list(vec![
+            instance(3.0, "local/chordchain:chordchain", "chordchain 1", None),
+            instance(4.0, "alez/neural:neural", "neural 1", Some(8.0)),
+            instance(5.0, "alez/neural:neural", "neural 2", Some(9.0)),
+        ]));
+        rt.eval_str(
+            "(let ((m eseq.mixer/strip-menu))
+               (set! m.group (first (filter (lambda (g) (= g.gid 8)) (eseq.kinds/groups)))))",
+        ).expect("target the rack");
+        let summary = rt.eval_str(
+            "(map (lambda (a) (list (get a :id) (get a :sequencer-id) (get a :label)))
+                  (filter (lambda (a) (get a :sequencer-id)) (eseq.mixer/track-context-menu-actions)))",
+        ).expect("menu actions");
+        assert_eq!(
+            format!("{summary:?}"),
+            format!("{:?}", rt.eval_str(
+                "(list (list :move-sequencer-into-rack 3 \"Attach chordchain 1 to rack\")
+                       (list :detach-sequencer 4 \"Detach neural 1\"))",
+            ).unwrap()),
+        );
+
+        editor.drain_host_commands();
+        editor.runtime_mut().eval_str(
+            "(eseq.mixer/select-track-menu-action
+               (nth (filter (lambda (a) (= (get a :id) :move-sequencer-into-rack))
+                      (eseq.mixer/track-context-menu-actions)) 0))",
+        ).expect("attach chordchain");
+        match &editor.drain_host_commands()[..] {
+            [eseqlisp::host::HostCommand::Custom { name, payload }] => {
+                assert_eq!(name, "move-sequencer-into-rack");
+                let Value::Map(payload) = payload else { panic!("{payload:?}") };
+                let field = |key: &str| payload.get(key).map(|value| value.borrow().clone());
+                assert_eq!(field("group-id"), Some(Value::Number(8.0)));
+                assert_eq!(field("sequencer-id"), Some(Value::Number(3.0)));
+            }
+            other => panic!("expected one move-sequencer-into-rack command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn metal_seq_collapsed_tracks_render_compact_mixer_strip_and_hide_sequencer_row() {
         struct TestTextMeasurer;
         impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {

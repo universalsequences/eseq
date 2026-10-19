@@ -2580,7 +2580,7 @@ fn collect_gpu_primitives_recursive(
             ..node_viewport
         };
         primitives.extend(widget_primitives_for_node(node, node_viewport));
-        primitives.push(GpuPrimitive::PushClipRect(node.rect));
+        primitives.push(GpuPrimitive::PushClipRect(box_widget::background_rect(node)));
         for child in &node.children {
             collect_gpu_primitives_recursive(
                 child,
@@ -2712,7 +2712,7 @@ fn collect_gpu_primitive_runs_recursive(
             }));
         }
         own.extend(widget_primitives_for_node(node, node_viewport));
-        own.push(GpuPrimitive::PushClipRect(node.rect));
+        own.push(GpuPrimitive::PushClipRect(box_widget::background_rect(node)));
         push_primitive_run(
             runs,
             run_ordinals,
@@ -2922,7 +2922,7 @@ fn collect_gpu_primitive_runs_retained_recursive(
                     }));
                 }
                 own.extend(widget_primitives_for_node(node, node_viewport));
-                own.push(GpuPrimitive::PushClipRect(node.rect));
+                own.push(GpuPrimitive::PushClipRect(box_widget::background_rect(node)));
                 own
             },
         );
@@ -3156,7 +3156,7 @@ fn refresh_gpu_primitive_runs_retained_in_place_recursive(
                     }));
                 }
                 own.extend(widget_primitives_for_node(node, node_viewport));
-                own.push(GpuPrimitive::PushClipRect(node.rect));
+                own.push(GpuPrimitive::PushClipRect(box_widget::background_rect(node)));
                 own
             },
         );

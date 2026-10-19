@@ -266,7 +266,9 @@ package with a weight matrix panel) and
 ## Panels
 
 - Build from the standard widgets: `box`, `h-stack`, `v-stack` (`:gap`,
-  `:align :center|:start`), `label`, `button` (`:on-click (lambda (event)
+  `:align :center|:start`), `label` (no background unless `:bg COLOR`; one
+  line centers vertically in its `:height`, `:v-align :start|:end` moves it;
+  `:wrap true` text starts at the top), `button` (`:on-click (lambda (event)
   …)`), `number-picker` (`:value :min :max :step :decimals :on-change (lambda
   (v) …)`), `dropdown` (`:options` list of strings, `:value-index`,
   `:on-change (lambda (label) …)`), `knob`, `toggle`, `slider`, `matrix`

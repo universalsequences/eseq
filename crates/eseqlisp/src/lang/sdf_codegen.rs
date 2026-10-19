@@ -221,6 +221,7 @@ impl ShaderEmitter {
         match name {
             "itime" => return "itime".to_string(),
             "aspect" => return "aspect".to_string(),
+            "design-px" => return "design_px".to_string(),
             "input-color" => return format!("{}.color_a", self.input_name()),
             "hit/hover" => {
                 return if let Some(rid) = self.current_region_id {
@@ -1519,6 +1520,7 @@ pub fn builtin_shader_symbols() -> HashSet<String> {
         "value_t".to_string(),
         "itime".to_string(),
         "aspect".to_string(),
+        "design-px".to_string(),
         "hit/hover".to_string(),
         "hit/active".to_string(),
         "hit/region".to_string(),
@@ -1643,6 +1645,9 @@ fn compile_sdf_to_metal_with_state_theme_and_options(
     .unwrap();
     writeln!(shader, "    float value_t = in.value_t;").unwrap();
     writeln!(shader, "    float itime = in.itime;").unwrap();
+    // SDF units per design pixel (`sdf_design_px`), for chrome sized like a
+    // box's :corner-radius / :border-width.
+    writeln!(shader, "    float design_px = in.corner_radius;").unwrap();
 
     if region_count > 0 {
         // Hit region uniforms packed into color_b
@@ -1788,6 +1793,7 @@ fn compile_sdf_to_wgsl_with_state_theme_and_options(
     .unwrap();
     writeln!(shader, "    let value_t: f32 = input.value_t;").unwrap();
     writeln!(shader, "    let itime: f32 = input.itime;").unwrap();
+    writeln!(shader, "    let design_px: f32 = input.corner_radius;").unwrap();
 
     if region_count > 0 {
         writeln!(shader, "    let hit_region: f32 = input.color_b.x;").unwrap();

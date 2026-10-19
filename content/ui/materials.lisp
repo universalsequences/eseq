@@ -5,7 +5,9 @@
 
 (export slider-material
         slider-muted-material
-        color)
+        color
+        surface-hash
+        surface-noise)
 
 ;; Migration compat aliases (spec §10 slice 3): every renamed macro with a
 ;; caller outside this file. `aqua-color` has ~10 call sites in
@@ -20,6 +22,29 @@
 ;; shader-compile time in a throwaway implicit-module compiler, NOT in this
 ;; module — so macro references inside them must be written qualified
 ;; (`eseq.materials/color`), bare names would not find this module's table.
+
+;; ── Surface noise ──
+
+;; A pseudo-random 0..1 for the integer lattice point (a, b). Sin-free (a
+;; large sin argument bands on the GPU), so it holds up at pixel coordinates.
+(defmacro surface-hash (a b)
+  `(let ((__ha (fract (* ,a 0.1031)))
+         (__hb (fract (* ,b 0.1030)))
+         (__hc (fract (* ,a 0.0973)))
+         (__hk (+ (* __ha (+ __hb 33.33)) (* __hb (+ __hc 33.33)) (* __hc (+ __ha 33.33)))))
+     (fract (* (+ __ha __hb __hk __hk) (+ __hc __hk)))))
+
+;; Smooth value noise at (u, v): 0..1, one lattice cell per unit.
+(defmacro surface-noise (u v)
+  `(let ((__iu (floor ,u)) (__iv (floor ,v))
+         (__fu (fract ,u)) (__fv (fract ,v))
+         (__su (* __fu __fu (- 3.0 (* 2.0 __fu))))
+         (__sv (* __fv __fv (- 3.0 (* 2.0 __fv)))))
+     (mix (mix (eseq.materials/surface-hash __iu __iv)
+               (eseq.materials/surface-hash (+ __iu 1.0) __iv) __su)
+          (mix (eseq.materials/surface-hash __iu (+ __iv 1.0))
+               (eseq.materials/surface-hash (+ __iu 1.0) (+ __iv 1.0)) __su)
+          __sv)))
 
 ;; ── Step cursor highlight ──
 
@@ -105,6 +130,24 @@
         (+ __hi __spec __bot)
         0.0))))
 
+(defmacro color-cell (base1 base2)
+  `(let ((__ny (+ (- y x) (* 3.3 (dot normal (vec3 1 1 0)))))
+      (__base (mix ,base1
+          ,base2
+          (smoothstep -1 2 __ny)))
+      (__glass (smoothstep 1.85 -1.865 __ny))
+      (__edge-fade (smoothstep 2.11 -0.16 d))
+      (__hi (* __glass __edge-fade 0.1655))
+      (__spec (* specular __edge-fade 0.1))
+      (__bot (* (smoothstep 0.49 -0.85 __ny)
+          (smoothstep -0.15 4.3 __ny)
+          __edge-fade 4.02))
+      (__rim (smoothstep 0.4 -0.06183 d)))
+    (+ (* __base (rgba __rim __rim __rim 1.0))
+      (rgba (+ __hi __spec __bot)
+        (+ __hi __spec __bot)
+        (+ __hi __spec __bot)
+        0.0))))
 
 (defmacro color-button (base1 base2)
   `(let ((__ny (+ y (* 0.3 (dot normal (vec3 0 1 0)))))

@@ -310,6 +310,10 @@ subtree key.
 A widget call is `(name [text] :prop value … children…)`. Children may be
 maps, lists of maps, or `nil`; lists are flattened.
 
+A `label` paints no background of its own (give `:bg COLOR` for one) and
+centers a single line in its `:height` (`:v-align :start` or `:end` to move
+it); a `:wrap true` label starts at the top.
+
 ```lisp
 (v-stack :gap 0.4 :padding 0.6
   (label "Filter" :font-size 11 :color :dim)
@@ -451,7 +455,10 @@ whose body is an SDF expression:
 ```
 
 `x y width height aspect` and the state names are free variables in the
-shader; `hit/hover` and `hit/active` report pointer state. The shapes live in
+shader. `design-px` is one design pixel in shader units (the unit of a box's
+`:corner-radius` and `:border-width`); a box does not clip its `:background`
+widget, which paints over the border, so the widget sizes its own rounded rect
+with it. `hit/hover` and `hit/active` report pointer state. The shapes live in
 `content/core/sdf-stdlib.lisp` as `sdf/circle`, `sdf/rect`, `sdf/translate`,
 `sdf/union`, and so on. `(sdf/region :name shape material)` makes a region
 that pointer handlers can identify.

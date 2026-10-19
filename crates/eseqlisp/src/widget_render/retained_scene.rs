@@ -454,7 +454,8 @@ impl RetainedScene {
                 head.extend(paint);
                 self.nodes[index].resources = resources;
                 if layout.widget_type == "box" && layout.props.contains_key("background") {
-                    head.push(GpuPrimitive::PushClipRect(layout.rect));
+                    head.push(GpuPrimitive::PushClipRect(
+                        self.nodes[index].box_background_rect.unwrap_or(layout.rect)));
                     tail.push(GpuPrimitive::PopClipRect);
                 }
             }
@@ -483,7 +484,8 @@ impl RetainedScene {
             // Overlay anchors are expressed in screen coordinates by painters.
             child_viewport.scroll_top += state.offset_y;
         } else if layout.widget_type == "box" && layout.props.contains_key("background") {
-            child_visible = intersection(visible, layout.rect);
+            child_visible = intersection(visible,
+                self.nodes[index].box_background_rect.unwrap_or(layout.rect));
             child_viewport.inherited_hover |=
                 sdf_widget::get_sdf_hit_state(layout.widget_id).hit_region >= 0;
         }
@@ -549,7 +551,9 @@ fn conservative_bounds(layout: &LayoutNode, children: &[usize], nodes: &[SceneNo
         return Some(bounds);
     }
     if layout.widget_type == "box" && layout.props.contains_key("background") {
-        return box_widget::paint_bounds(layout, viewport, box_background_rect?);
+        // Children are clipped to the background rect, so it bounds them too.
+        let background = box_background_rect?;
+        return box_widget::paint_bounds(layout, viewport, background).map(|paint| union(paint, background));
     }
     if matches!(layout.widget_type.as_str(), "h-stack" | "hstack" | "v-stack" | "vstack"
         | "grid" | "wrap" | "virtual-v-stack")
@@ -657,6 +661,27 @@ mod tests {
         }
         let visible = rect(0.0, 0.0, 40.0, 20.0);
         assert_eq!(cache.prepare(&root, 1, 1, &[], viewport(), visible).visited_nodes, 0);
+    }
+
+    /// Layout caps a box at the viewport width while its children run past
+    /// it, and the background paints over the children. Scrolled sideways,
+    /// a child past that capped rect must still paint, clipped to what the
+    /// background covers rather than to the capped rect.
+    #[test]
+    fn background_box_wider_than_its_rect_keeps_children_past_the_rect() {
+        let row = node(99310, "hstack", rect(0.0, 0.0, 40.0, 10.0),
+            vec![panel(99320, 0.0), panel(99330, 60.0)]);
+        let mut root = node(99300, "box", rect(0.0, 0.0, 40.0, 10.0), vec![row]);
+        root.props.insert("background".into(), Value::String("unregistered-background".into()));
+        let mut vp = viewport();
+        vp.scroll_left = 50.0;
+        let scene = RetainedScene::default().prepare(&root, 1, 1, &[], vp, rect(50.0, 0.0, 40.0, 20.0));
+        assert!(scene.runs.iter().any(|run| run.widget_id == 99331), "label past the box's rect is culled");
+        let clip = scene.runs.iter().filter(|run| run.widget_id == 99300)
+            .flat_map(|run| run.primitives.iter())
+            .find_map(|primitive| match primitive { GpuPrimitive::PushClipRect(clip) => Some(*clip), _ => None })
+            .expect("background box clips its children");
+        assert!(clip.col + clip.width >= 80.0, "clip stops at the box's rect: {clip:?}");
     }
 
     #[test]

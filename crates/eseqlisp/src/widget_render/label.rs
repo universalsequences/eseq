@@ -245,6 +245,11 @@ mod tests {
         };
         let mut props = HashMap::new();
 
+        assert_eq!(label_text_row(&props, rect), 3.0, "one line centers by default");
+        props.insert("wrap".to_string(), Value::Bool(true));
+        assert_eq!(label_text_row(&props, rect), 2.0, "wrapped text starts at the top");
+
+        props.insert("v-align".to_string(), Value::Keyword("start".to_string()));
         assert_eq!(label_text_row(&props, rect), 2.0);
 
         props.insert("v-align".to_string(), Value::Keyword("center".to_string()));
@@ -484,14 +489,35 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
 }
 
 pub fn label_text_row(props: &HashMap<String, Value>, rect: Rect) -> f32 {
-    match props.get("v-align") {
-        Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "center" => {
-            rect.row + (rect.height - 1.0) * 0.5
-        }
-        Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "end" => {
-            rect.row + rect.height - 1.0
-        }
-        _ => rect.row,
+    rect.row + v_align_offset(props, rect.height)
+}
+
+/// Rows from the top of a `height`-tall label to its (first) text line.
+/// A one-line label centers by default; a wrapping one starts at the top
+/// (centering its first line would push the rest out). `:v-align :start`
+/// (or `:top`), `:center` and `:end` choose explicitly.
+fn v_align_offset(props: &HashMap<String, Value>, height: f32) -> f32 {
+    let align = match props.get("v-align") {
+        Some(Value::Keyword(value)) | Some(Value::String(value)) => value.as_str(),
+        _ if wrap_enabled(props) => "start",
+        _ => "center",
+    };
+    match align {
+        "center" => (height - 1.0) * 0.5,
+        "end" => height - 1.0,
+        _ => 0.0,
+    }
+}
+
+/// The background a label paints, if any: none by default (labels sit on
+/// whatever holds them), the named colour of an explicit `:bg`, and the
+/// focus background inside a focused widget unless `:bg :transparent`.
+fn label_bg(props: &HashMap<String, Value>, focused_branch: bool) -> Option<Color> {
+    match props.get("bg") {
+        Some(Value::Keyword(k)) if k == "transparent" => None,
+        _ if focused_branch => Some(theme::WIDGET_FOCUS_BG()),
+        Some(value) => Some(theme::parse_color_value(value).unwrap_or_else(theme::BG)),
+        None => None,
     }
 }
 
@@ -593,15 +619,7 @@ event map (e.phase, e.x, e.y, e.u, e.v, e.shift, e.cmd, ...). Example: \
         let font_size = get_prop_num(node, "font-size")
             .map(f64_to_f32)
             .unwrap_or(ctx.inherited_font_size);
-        let row_offset = match get_map(node).and_then(|props| props.get("v-align").cloned()) {
-            Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "center" => {
-                (size.height - 1.0) * 0.5
-            }
-            Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "end" => {
-                size.height - 1.0
-            }
-            _ => 0.0,
-        };
+        let row_offset = get_map(node).map_or(0.0, |props| v_align_offset(&props, size.height));
         Some(super::proportional_text_baseline_offset_face(
             font_size,
             row_offset,
@@ -723,15 +741,10 @@ event map (e.phase, e.x, e.y, e.u, e.v, e.shift, e.cmd, ...). Example: \
             return Vec::new();
         };
         let fg = resolve_color(&node.props, viewport.inherited_hover);
-        let bg_transparent = matches!(
-            node.props.get("bg"),
-            Some(Value::Keyword(k)) if k == "transparent"
-        );
-        let bg = if viewport.focused_branch {
-            theme::WIDGET_FOCUS_BG()
-        } else {
-            theme::BG()
-        };
+        let painted = label_bg(&node.props, viewport.focused_branch);
+        // Text blends against the colour under it: the painted one, else
+        // the theme background.
+        let bg = painted.unwrap_or_else(theme::BG);
         let font_size = node
             .props
             .get("font-size")
@@ -741,11 +754,8 @@ event map (e.phase, e.x, e.y, e.u, e.v, e.shift, e.cmd, ...). Example: \
             })
             .unwrap_or(DEFAULT_FONT_SIZE);
         let mut prims = Vec::new();
-        if !bg_transparent {
-            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
-                rect: node.rect,
-                color: bg,
-            }));
+        if let Some(color) = painted {
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive { rect: node.rect, color }));
         }
         let face = text_face(&node.props);
         let (lines, line_height) = if wrap_enabled(&node.props) {
