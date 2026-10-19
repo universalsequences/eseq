@@ -767,6 +767,26 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             }
             scratch.set_scene_slot_snapshot(chunk_slots);
         }
+        // Generators fed by a track's steps (`:trigger`): which project track
+        // opens which generator's gate this chunk, read against the documents
+        // just installed. A rack-owned generator names a member of its rack.
+        let mut failed_triggers = Vec::new();
+        let generator_trigger_tracks: Vec<(u64, usize)> = match scratch_runtime.as_mut() {
+            Some(scratch) => scratch
+                .generator_trigger_tracks(&mut failed_triggers)
+                .into_iter()
+                .filter_map(|(id, track)| match generator_owner_racks.get(&id) {
+                    Some(group_id) => crate::graph::rack_members(&snapshot.rack_memberships, *group_id)
+                        .and_then(|members| members.get(track).copied())
+                        .map(|track| (id, track)),
+                    None => Some((id, track)),
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        for (id, name, error) in failed_triggers {
+            state.report_generator_tick_error(id, name, error);
+        }
         // A process roll (`roll!`) releases on its deadline beat exactly:
         // never let a chunk straddle it, so the next chunk starts on the
         // release beat and reads the pattern normally from there.
@@ -1868,10 +1888,13 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         let seed_beats = trigger.absolute_beats;
                         neural_runtime.process_seed_at(&seed_event, seed_beats);
                         if clock.graph_seed_is_new(seed_beats, samples_per_quarter.into()) {
-                            seed_graph_runtimes(
+                            seed_step_listeners(
                                 graph_runtimes,
+                                generator_runtime,
+                                &generator_trigger_tracks,
                                 &seed_event,
                                 seed_beats,
+                                trigger.boundary_beats,
                                 samples_per_quarter.into(),
                             );
                         }
@@ -1913,10 +1936,13 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         let seed_beats = trigger.absolute_beats;
                         neural_runtime.process_seed_at(&step_event, seed_beats);
                         if clock.graph_seed_is_new(seed_beats, samples_per_quarter.into()) {
-                            seed_graph_runtimes(
+                            seed_step_listeners(
                                 graph_runtimes,
+                                generator_runtime,
+                                &generator_trigger_tracks,
                                 &step_event,
                                 seed_beats,
+                                trigger.boundary_beats,
                                 samples_per_quarter.into(),
                             );
                         }
@@ -1963,10 +1989,13 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     // frontier already seeded the graphs, which were not
                     // rewound (their emissions are replayed instead).
                     if clock.graph_seed_is_new(seed_beats, samples_per_quarter.into()) {
-                        seed_graph_runtimes(
+                        seed_step_listeners(
                             graph_runtimes,
+                            generator_runtime,
+                            &generator_trigger_tracks,
                             &step_event,
                             seed_beats,
+                            trigger.boundary_beats,
                             samples_per_quarter.into(),
                         );
                     }

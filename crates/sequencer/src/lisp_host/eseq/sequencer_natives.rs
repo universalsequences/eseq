@@ -3421,6 +3421,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
             requires: Vec::new(),
             graph: Some(manifest),
             owner_rack: None,
+            trigger_source: None,
         });
     }
 
@@ -3428,6 +3429,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
     let mut tick: Option<String> = None;
     let mut prebuilt_tick_source: Option<String> = None;
     let mut requires: Vec<String> = Vec::new();
+    let mut trigger: Option<String> = None;
     let mut idx = 1;
     while idx < args.len() {
         let key = match &args[idx] {
@@ -3449,6 +3451,8 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
             },
             "init" => { /* reserved for future one-time init */ }
             "requires" => requires = parse_requires_arg(value)?,
+            // Shipped like :tick: re-read each chunk (generator kinds).
+            "trigger" => trigger = Some(sequencer_tick_source(value)),
             _ => return Err(format!("def-sequencer unknown key :{key}")),
         }
         idx += 1;
@@ -3467,6 +3471,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
         requires,
         graph: None,
         owner_rack: None,
+        trigger_source: trigger,
     })
 }
 

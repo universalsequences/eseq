@@ -423,6 +423,22 @@ pub(crate) struct ProcessEvalContext {
     pub(super) scope: ProcessEvalScope,
 }
 
+/// Compile `source` as a no-argument callable in `runtime`: a shipped tick or
+/// trigger body for generator `id` (`what` names which, for errors).
+fn compile_thunk(runtime: &mut Runtime, what: &str, id: u64, source: &str) -> Result<EValue, String> {
+    let value = runtime
+        .eval_str(&format!("(lambda () {source})"))
+        .map_err(|error| format!("failed to compile sequencer {what} {id}: {error:?}; source={source}"))?
+        .ok_or_else(|| format!("sequencer {what} {id} compilation produced no callback"))?;
+    match value {
+        EValue::Closure(_, _) | EValue::NativeFunction(_) => Ok(value),
+        other => Err(format!(
+            "sequencer {what} {id} must compile to a callable, got {}",
+            eseqlisp::vm::format_lisp_value(&other)
+        )),
+    }
+}
+
 pub struct ScratchControlRuntime {
     pub(super) runtime: Runtime,
     pub(super) context: SharedSequencerEvalContext,
@@ -441,6 +457,9 @@ pub struct ScratchControlRuntime {
     pub(super) graph_node: SharedGraphNodeContext,
     pub(super) graph_updates: HashMap<u64, CompiledGraphUpdate>,
     sequencer_tick_callbacks: HashMap<u64, CompiledSequencerTick>,
+    /// Generator id → its compiled `:trigger` (a project track index, or
+    /// negative for none), read once per chunk.
+    sequencer_triggers: HashMap<u64, CompiledSequencerTick>,
     pub(super) process_run_callbacks: HashMap<String, EValue>,
     #[cfg(test)]
     pub(super) sequencer_tick_compile_count: usize,
@@ -607,6 +626,7 @@ impl ScratchControlRuntime {
             graph_node,
             graph_updates: HashMap::new(),
             sequencer_tick_callbacks: HashMap::new(),
+            sequencer_triggers: HashMap::new(),
             process_run_callbacks: HashMap::new(),
             #[cfg(test)]
             sequencer_tick_compile_count: 0,
@@ -1112,6 +1132,7 @@ impl ScratchControlRuntime {
             graph_node,
             graph_updates: HashMap::new(),
             sequencer_tick_callbacks: HashMap::new(),
+            sequencer_triggers: HashMap::new(),
             process_run_callbacks: HashMap::new(),
             #[cfg(test)]
             sequencer_tick_compile_count: 0,
@@ -1210,25 +1231,7 @@ impl ScratchControlRuntime {
         {
             self.sequencer_tick_compile_count += 1;
         }
-        let wrapped = format!("(lambda () {source})");
-        let callback = self
-            .runtime
-            .eval_str(&wrapped)
-            .map_err(|error| {
-                format!("failed to compile sequencer tick {id}: {error:?}; source={source}")
-            })
-            .and_then(|value| {
-                value.ok_or_else(|| {
-                    format!("sequencer tick {id} compilation produced no callback")
-                })
-            })
-            .and_then(|value| match value {
-                EValue::Closure(_, _) | EValue::NativeFunction(_) => Ok(value),
-                other => Err(format!(
-                    "sequencer tick {id} must compile to a callable, got {}",
-                    eseqlisp::vm::format_lisp_value(&other)
-                )),
-            });
+        let callback = compile_thunk(&mut self.runtime, "tick", id, source);
         self.sequencer_tick_callbacks.insert(
             id,
             CompiledSequencerTick {
@@ -1237,6 +1240,59 @@ impl ScratchControlRuntime {
             },
         );
         callback
+    }
+
+    /// Set (or clear) generator `id`'s `:trigger` source. A source that does
+    /// not compile clears it and reports why.
+    pub fn set_sequencer_trigger(&mut self, id: u64, source: Option<&str>) -> Result<(), String> {
+        self.sequencer_triggers.remove(&id);
+        let Some(source) = source else {
+            return Ok(());
+        };
+        let callback = compile_thunk(&mut self.runtime, "trigger", id, source)?;
+        self.sequencer_triggers
+            .insert(id, CompiledSequencerTick { source: source.to_string(), callback: Ok(callback) });
+        Ok(())
+    }
+
+    /// Each generator's trigger track for this chunk, as (generator id,
+    /// track): its `:trigger` read against the chunk's documents. Generators
+    /// without one, or whose trigger is not a track index, are left out. A
+    /// trigger that errors is parked (skipped until it is set again) and
+    /// returned in `failed` as (id, generator name, error), to report once.
+    pub fn generator_trigger_tracks(&mut self, failed: &mut Vec<(u64, String, String)>) -> Vec<(u64, usize)> {
+        let mut tracks = Vec::new();
+        if self.sequencer_triggers.is_empty() {
+            return tracks;
+        }
+        // Only ids that registered get a trigger (set after registering).
+        let callbacks: Vec<(u64, EValue)> = self
+            .sequencer_triggers
+            .iter()
+            .filter_map(|(id, compiled)| compiled.callback.clone().ok().map(|callback| (*id, callback)))
+            .collect();
+        for (id, callback) in callbacks {
+            match self.runtime.invoke(callback, vec![]) {
+                Ok(Some(EValue::Number(track))) if track >= 0.0 && track.fract() == 0.0 => {
+                    tracks.push((id, track as usize));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    let error = format!("trigger: {error:?}");
+                    if let Some(compiled) = self.sequencer_triggers.get_mut(&id) {
+                        compiled.callback = Err(error.clone());
+                    }
+                    let name = self
+                        .sequencers
+                        .lock()
+                        .ok()
+                        .and_then(|registry| registry.iter().find(|entry| entry.id == id).map(|entry| entry.name.clone()))
+                        .unwrap_or_default();
+                    failed.push((id, name, error));
+                }
+            }
+        }
+        tracks
     }
 
     /// Definitions of all generators registered in this VM, for the scheduler to

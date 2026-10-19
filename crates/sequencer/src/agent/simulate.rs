@@ -298,6 +298,7 @@ mod tests {
                 requires: Vec::new(),
                 graph: None,
                 owner_rack: None,
+                trigger_source: None,
             }),
             document: vec![("cells".to_string(), literal("(list 0)"))],
             state_fields: Vec::new(),

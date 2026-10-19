@@ -347,6 +347,12 @@ impl SchedulerDriver {
                             "failed to register published sequencer {:?} ({}): {error}",
                             seq.name, seq.id
                         );
+                    } else if let Err(error) =
+                        runtime.set_sequencer_trigger(seq.id, seq.trigger_source.as_deref())
+                    {
+                        self.runtime_errors.push(format!("sequencer {:?} ({}): {error}", seq.name, seq.id));
+                        eprintln!("failed to register sequencer trigger {:?} ({}): {error}", seq.name, seq.id);
+                        state.report_generator_tick_error(seq.id, seq.name.clone(), error);
                     }
                 }
             }

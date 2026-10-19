@@ -6305,6 +6305,7 @@ mod tests {
             requires: Vec::new(),
             graph: None,
             owner_rack: None,
+            trigger_source: None,
         });
         state.publish_scene_slot_declaration(
             "a-slot".to_string(),

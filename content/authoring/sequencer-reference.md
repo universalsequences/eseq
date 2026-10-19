@@ -49,11 +49,13 @@ involved: the module is loaded from disk.
 Slots (all optional except that a sequencer needs `:generator` or
 `:sequencer`, never both):
 
-- `:generator (:resolution TB :requires (MODULE …) :tick EXPR)`: the tick
-  body, evaluated once per step of the timebase (`:16`, `:8`, `:16t`, `:32`,
-  …) while the transport plays. `self.FIELD` reads document fields. `:requires`
-  names every module the tick calls into; a function the tick calls must be
-  reachable through them (qualified: `my.pulse-core/tick`).
+- `:generator (:resolution TB :requires (MODULE …) :tick EXPR :trigger EXPR)`:
+  the tick body, evaluated once per step of the timebase (`:16`, `:8`, `:16t`,
+  `:32`, …) while the transport plays. `self.FIELD` reads document fields.
+  `:requires` names every module the tick calls into; a function the tick
+  calls must be reachable through them (qualified: `my.pulse-core/tick`).
+  The optional `:trigger` names a track whose steps drive the instance; see
+  Driven by a track's steps below.
 - `:sequencer (…)`: a graph sequencer body (nodes and edges); see Graph
   sequencers below. Use it for anything that is states and transitions (a
   Markov chain, a neural or energy network, a state machine); use
@@ -135,6 +137,67 @@ marks with `(generator-mark-named g key)`.
   (let ((m (generator-mark-of self key)))
     (if m #'m.value 0)))
 ```
+
+## Driven by a track's steps
+
+When the user wants the app's step sequencer to play, gate, retrigger or
+advance your sequencer ("use track 2's steps as triggers"), give the
+`:generator` a `:trigger` naming that track, and let the panel pick it:
+
+```lisp
+(def-kind glitch
+  :generator (:resolution :16
+              :requires (my.glitch-core)
+              :tick (my.glitch-core/tick self.track self.cells)
+              :trigger self.trig-source)      ; a track index, -1 for none
+  :document ((track 0) (trig-source -1) (cells (list 1 0 1 0)))
+  :view glitch-panel)
+```
+
+Each step that plays on that track opens the instance's gate on the step's
+own boundary, for the step's length, with its note offset and velocity. The
+tick reads it with `(gen-gate)`:
+`(dict :epoch n :open bool :note st :vel v :restart n)`.
+
+- `:epoch` counts the steps delivered so far: a trigger arrived on this
+  boundary when it moved since the tick last looked (keep the last value
+  with `(state-get "epoch" 0)` / `(state-set! "epoch" e)`). Use it to
+  retrigger: restart an internal phrase, start a burst.
+- `:open` is true while a step's length lasts: play only while open to gate.
+- `:note` is the step's transpose (add it to your notes) and `:vel` its
+  velocity (scale yours). They hold the latest step's values.
+- Before any step, and after the transport stops, it reads epoch 0, closed,
+  note 0, vel 1.
+
+```lisp
+;; Play the internal phrase only while track steps hold the gate open,
+;; restarting it from step 0 on each new step.
+(def tick (track cells)
+  (let ((g (gen-gate))
+        (fresh (> (get g :epoch) (state-get "epoch" 0))))
+    (do
+      (state-set! "epoch" (get g :epoch))
+      (if fresh (state-set! "start" (gen-tick)) nil)
+      (if (get g :open)
+        (let ((s (mod (- (gen-tick) (state-get "start" 0)) (len cells))))
+          (if (> (nth cells s) 0)
+            (seq-emit :track track :at :now :note (get g :note) :vel (get g :vel) :dur 0.25)
+            nil))
+        nil))))
+
+;; The panel's trigger picker: "Off" or a track. `tracks` comes from
+;; eseq.kinds and `index-of` (-1 when absent) from eseq.view-kit.
+(let ((opts (cons "Off" (map |t| t.name (tracks)))))
+  (dropdown :key "trig-source" :options opts
+    :value-index (+ self.trig-source 1)
+    :on-change (lambda (name) (set! self.trig-source (- (index-of opts name) 1)))))
+```
+
+Do not build a second kind or a graph to relay a track's steps into a
+generator: the extra hop lands each trigger a step late and loses the
+downbeat. (A graph node routed to a generator is for when a neural graph
+itself decides when the generator plays.) A rack-owned instance's
+`:trigger` names a member of its rack, like its `:track`.
 
 ## Graph sequencers
 

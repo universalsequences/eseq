@@ -1135,6 +1135,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 requires: Vec::new(),
                 graph: Some(manifest),
                 owner_rack: None,
+                trigger_source: None,
             });
             // Mirrors the production natives: the handle is the instance id.
             Ok(Value::Number(id as f64))
@@ -1428,6 +1429,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             requires: Vec::new(),
             graph: Some(manifest),
             owner_rack: None,
+            trigger_source: None,
         });
 
         let mut runtime = Runtime::new();
@@ -1590,6 +1592,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             requires: Vec::new(),
             graph: Some(manifest.clone()),
             owner_rack: None,
+            trigger_source: None,
         });
         let mut runtime = Runtime::new();
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
@@ -1753,6 +1756,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             requires: Vec::new(),
             graph: Some(manifest.clone()),
             owner_rack: None,
+            trigger_source: None,
         });
         // Adds look the class up on the published def, as the app does once
         // the builtin library has loaded.
@@ -1863,6 +1867,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             requires: Vec::new(),
             graph: Some(manifest.clone()),
             owner_rack: None,
+            trigger_source: None,
         });
 
         let mut runtime = Runtime::new();
@@ -2062,6 +2067,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             requires: Vec::new(),
             graph: Some(manifest.clone()),
             owner_rack: None,
+            trigger_source: None,
         });
         state.publish_sequencer(PublishedSequencer {
             id: fixed.id,
@@ -2071,6 +2077,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             requires: Vec::new(),
             graph: Some(fixed),
             owner_rack: None,
+            trigger_source: None,
         });
 
         let mut runtime = Runtime::new();

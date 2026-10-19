@@ -7986,6 +7986,7 @@ mod tests {
                 requires: Vec::new(),
                 graph: None,
                 owner_rack: Some(group_id),
+                trigger_source: None,
             });
             if authored_scene_row {
                 app.arr_replace_rows(
@@ -9608,6 +9609,7 @@ mod tests {
             requires: Vec::new(),
             graph: Some(manifest),
             owner_rack: None,
+            trigger_source: None,
         });
         let intrinsic = |instance: usize, route: usize| ProjectGraphNodeIntrinsicOverride {
             group: "nrn".into(),

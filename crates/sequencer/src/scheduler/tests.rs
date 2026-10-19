@@ -2889,6 +2889,7 @@
                     requires: vec!["alez.jaki.doc".to_string()],
                     graph: None,
                     owner_rack: None,
+                    trigger_source: None,
                 }),
                 document: vec![
                     ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
@@ -3472,6 +3473,151 @@
         assert_eq!(notes, [12.0, 5.0, 5.0, 5.0].repeat(4), "{triggers:?}");
     }
 
+    /// A generator instance whose `:trigger` names track 0 (eseq-hvni):
+    /// every step played there opens its gate on that step's own boundary.
+    /// The tick emits one hit on track 1 per new gate epoch; returns the
+    /// samples of track 0's steps and of track 1's hits over two bars, one
+    /// sixteenth per lookahead call like the live driver, and the generator
+    /// errors reported.
+    fn generator_triggered_by_track(trigger_source: &'static str) -> (Vec<u64>, Vec<u64>, Vec<String>) {
+        run_with_scheduler_stack(move || {
+            let state = Arc::new(SequencerState::new(
+                4,
+                (0..4).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            for step in [0, 4] {
+                state.toggle_step_and_clear_plocks(0, step);
+            }
+            let mut values = Runtime::new();
+            let mut literal = |source: &str| {
+                let value = values.eval_str(source).expect("literal").expect("a value");
+                crate::process::ProcessLiteral::from_value(&value).expect("portable")
+            };
+            let kind = lisp_host::KindDefinition {
+                id: "test:gated".to_string(),
+                name: "gated".to_string(),
+                package: None,
+                module: None,
+                sequencer: None,
+                generator: Some(crate::sequencer::PublishedSequencer {
+                    id: 0,
+                    name: "gated".to_string(),
+                    resolution: crate::sequencer::Timebase::Sixteenth as u8,
+                    tick_source: "(let ((epoch (get (gen-gate) :epoch))) \
+                                  (if (> epoch (state-get \"epoch\" 0)) \
+                                    (do (state-set! \"epoch\" epoch) \
+                                        (seq-emit :track 1 :at :now :note 0 :vel 1 :dur 0.1)) \
+                                    nil))"
+                        .to_string(),
+                    requires: Vec::new(),
+                    graph: None,
+                    owner_rack: None,
+                    trigger_source: Some(trigger_source.to_string()),
+                }),
+                document: vec![("src".to_string(), literal("0"))],
+                state_fields: Vec::new(),
+                has_view: true,
+                keymap: None,
+            };
+            lisp_host::register_kind(kind.clone());
+            state
+                .write_current_scene_slot(lisp_host::instance_document_slot(5, "src"), literal("0"))
+                .expect("src");
+            let published = lisp_host::instance_published_sequencer(&kind, 5, None).expect("generator");
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(); 4],
+                vec![EffectDescriptor::builtin_sampler(); 4],
+                0,
+                0,
+            );
+            scratch
+                .register_published_sequencer(
+                    published.id,
+                    published.name.clone(),
+                    crate::sequencer::Timebase::from_index(published.resolution as u32),
+                    published.tick_source.clone(),
+                    &published.requires,
+                )
+                .expect("register");
+            scratch
+                .set_sequencer_trigger(published.id, published.trigger_source.as_deref())
+                .expect("trigger");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler.generator_runtime.sync_definitions(&scratch.sequencer_defs(), 0.0);
+            let mut scratch_runtime = Some(scratch);
+            let snapshot = state.publish_scheduler_snapshot();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            // 24000 samples per quarter: a sixteenth is 6000, a bar 96000.
+            let chunk = 6_000u64;
+            let (mut now, mut until) = (0u64, 0u64);
+            let mut observed = Vec::new();
+            while now < 2 * 96_000 {
+                let queue = ScheduledEventQueue::<256>::new();
+                let result = schedule_playing_lookahead(
+                    &mut scheduler,
+                    &state,
+                    &snapshot,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    snapshot.transport.pattern_epoch,
+                    now,
+                    now + chunk,
+                    48_000,
+                    6_000,
+                    24_000.0,
+                    until,
+                    false,
+                    false,
+                );
+                until = result.scheduled_until_sample;
+                observed.extend(observed_triggers(&queue));
+                now += chunk;
+            }
+            let errors: Vec<String> =
+                state.drain_generator_tick_errors().into_iter().map(|notice| notice.error).collect();
+            let on = |track| {
+                // The lookahead runs ahead of `now`: keep the two bars.
+                let mut samples: Vec<u64> = observed
+                    .iter()
+                    .filter(|t| t.track == track && t.sample_time < 2 * 96_000)
+                    .map(|t| t.sample_time)
+                    .collect();
+                samples.sort();
+                samples
+            };
+            (on(0), on(1), errors)
+        })
+    }
+
+    #[test]
+    fn a_generators_trigger_track_opens_its_gate_on_each_steps_own_boundary() {
+        let (steps, hits, errors) = generator_triggered_by_track("self.src");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(steps, [0, 24_000, 96_000, 120_000], "track 0 plays steps 0 and 4 each bar");
+        assert_eq!(hits, steps, "each step gates the generator on its own boundary, downbeats included");
+    }
+
+    #[test]
+    fn a_generator_without_a_trigger_track_stays_closed() {
+        let (steps, hits, errors) = generator_triggered_by_track("-1");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(steps.len(), 4);
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    #[test]
+    fn a_trigger_that_errors_is_reported_once_and_parked() {
+        let (steps, hits, errors) = generator_triggered_by_track("(no-such-function self.src)");
+        assert_eq!(steps.len(), 4, "the track still plays");
+        assert!(hits.is_empty(), "{hits:?}");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("trigger:"), "{errors:?}");
+    }
+
     /// Perf probe: a five-row jaki instance (two `. -` figures, modifier-heavy
     /// rows) ticked for 16 bars, one sixteenth per lookahead call like the
     /// live driver. Prints per-call percentiles; ~1.5 ms of each call is the
@@ -3508,6 +3654,7 @@
                     requires: vec!["alez.jaki.doc".to_string()],
                     graph: None,
                     owner_rack: None,
+                    trigger_source: None,
                 }),
                 document: vec![
                     ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
@@ -3678,6 +3825,7 @@
                 requires: vec!["alez.jaki.doc".to_string()],
                 graph: None,
                 owner_rack: None,
+                trigger_source: None,
             }),
             document: vec![
                 ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
