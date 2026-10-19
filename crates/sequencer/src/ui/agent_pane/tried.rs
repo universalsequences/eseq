@@ -18,6 +18,16 @@ const IMPORT: &str = "import";
 thread_local! {
     /// The tried forms, the module's source after its `(module …)` line.
     static TRIED: RefCell<String> = const { RefCell::new(String::new()) };
+    /// The labels of the tried forms open in a tile beside the pane.
+    static VIEWED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+fn viewed() -> Vec<String> {
+    VIEWED.with(|viewed| viewed.borrow().clone())
+}
+
+fn set_viewed(labels: Vec<String>) {
+    VIEWED.with(|viewed| *viewed.borrow_mut() = labels);
 }
 
 fn tried() -> String {
@@ -78,15 +88,118 @@ fn label(form: &TopForm) -> String {
     }
 }
 
-/// One label per form of `source` but its imports.
-fn labels_of(source: &str) -> Vec<String> {
+/// Each form of `source` but its imports, with its label: a repeated one
+/// (two `bind-key`s) numbered from its second on, so each row is its own.
+fn labeled_forms(source: &str) -> Vec<(String, TopForm)> {
+    let mut seen: Vec<String> = Vec::new();
     let forms = forms::top_level_forms(source).unwrap_or_default();
-    forms.iter().filter(|form| form.head != IMPORT).map(label).collect()
+    forms
+        .into_iter()
+        .filter(|form| form.head != IMPORT)
+        .map(|form| {
+            let base = label(&form);
+            let repeats = seen.iter().filter(|label| **label == base).count();
+            seen.push(base.clone());
+            let label = if repeats == 0 { base } else { format!("{base} #{}", repeats + 1) };
+            (label, form)
+        })
+        .collect()
 }
 
-/// What is being tried, for the pane: one label per form, imports left out.
-pub(super) fn shown_labels() -> Vec<String> {
-    labels_of(&tried())
+/// Each form of `source` but its imports, as its label and its text.
+fn forms_of(source: &str) -> Vec<(String, String)> {
+    labeled_forms(source)
+        .into_iter()
+        .map(|(label, form)| (label, source[form.start_byte..form.end_byte].to_string()))
+        .collect()
+}
+
+/// One label per form of `source` but its imports.
+fn labels_of(source: &str) -> Vec<String> {
+    labeled_forms(source).into_iter().map(|(label, _)| label).collect()
+}
+
+/// What is being tried, for the pane: each form's label (imports left out)
+/// and whether its code is open beside the pane.
+pub(super) fn shown_forms() -> Vec<(String, bool)> {
+    let viewed = viewed();
+    labels_of(&tried()).into_iter().map(|label| {
+        let open = viewed.contains(&label);
+        (label, open)
+    }).collect()
+}
+
+/// The buffer a tried form's code shows in.
+fn view_buffer(label: &str) -> String {
+    format!("*try: {label}*")
+}
+
+/// Open the code of the tried form `label` in a tile beside the pane, or
+/// close it when it is open.
+pub(super) fn toggle_view(editor: &mut Editor, label: &str) -> Result<(), String> {
+    let name = view_buffer(label);
+    let mut viewed = viewed();
+    if editor.buffer_named_is_showing(&name) {
+        close_view(editor, &name);
+        viewed.retain(|open| open != label);
+    } else {
+        let forms = forms_of(&tried());
+        let (_, source) = forms
+            .iter()
+            .find(|(form, _)| form == label)
+            .ok_or_else(|| format!("`{label}` is no longer being tried"))?;
+        editor.upsert_read_only_lisp_buffer(&name, source);
+        if !editor.show_buffer_beside(super::PANE_BUFFER, &name) {
+            return Err("Open the agent pane to see the code.".to_string());
+        }
+        if !viewed.iter().any(|open| open == label) {
+            viewed.push(label.to_string());
+        }
+    }
+    set_viewed(viewed);
+    Ok(())
+}
+
+/// Close a view's tile and drop its buffer.
+fn close_view(editor: &mut Editor, name: &str) {
+    editor.close_tile_showing_buffer_named(name);
+    editor.remove_buffer_by_name(name);
+}
+
+/// Forget the views whose tile was closed some other way (a drag, `C-x 0`),
+/// so their rows show closed. Whether any was; cheap enough for every frame.
+pub(super) fn forget_closed_views(editor: &Editor) -> bool {
+    VIEWED.with(|viewed| {
+        let mut viewed = viewed.borrow_mut();
+        let before = viewed.len();
+        viewed.retain(|label| editor.buffer_named_is_showing(&view_buffer(label)));
+        viewed.len() != before
+    })
+}
+
+/// Bring the open views in line with what is tried: refill each with its
+/// form's current code and close those whose form is gone.
+fn sync_views(editor: &mut Editor) {
+    forget_closed_views(editor);
+    let before = viewed();
+    if before.is_empty() {
+        return;
+    }
+    let forms = forms_of(&tried());
+    let mut kept = Vec::new();
+    for label in before {
+        let name = view_buffer(&label);
+        match forms.iter().find(|(form, _)| *form == label) {
+            Some((_, source)) => {
+                if editor.read_buffer_text(&name).as_deref() != Some(source.as_str()) {
+                    editor.upsert_read_only_lisp_buffer(&name, source);
+                }
+                kept.push(label);
+            }
+            None => close_view(editor, &name),
+        }
+    }
+    set_viewed(kept);
 }
 
 /// Run one of the agent's live tool calls.
@@ -109,11 +222,12 @@ pub(super) fn try_forms(editor: &mut Editor, file: &Path, code: &str) -> Result<
         return Err(format!("Nothing changed; the forms failed:\n{}", report.diagnostics.join("\n")));
     }
     set_tried(next);
+    sync_views(editor);
     settle(editor);
     Ok(format!(
         "The app now shows: {}. The user can Keep it (into init.lisp) or Revert it from the pane; \
          tell them what to look at.",
-        shown_labels().join(", ")
+        labels_of(&tried()).join(", ")
     ))
 }
 
@@ -121,6 +235,7 @@ pub(super) fn try_forms(editor: &mut Editor, file: &Path, code: &str) -> Result<
 fn clear(editor: &mut Editor, file: &Path) -> Vec<String> {
     let targets = editor.runtime_mut().remove_module_overrides(MODULE);
     set_tried(String::new());
+    sync_views(editor);
     let _ = write_text_atomically(file, &module_source(""));
     settle(editor);
     targets
@@ -229,11 +344,49 @@ mod tests {
     }
 
     #[test]
+    fn a_tried_form_opens_beside_the_pane_and_follows_later_tries() {
+        let dir = std::env::temp_dir().join(format!("eseq-tried-view-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("try.lisp");
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_scratch_buffer(super::super::PANE_BUFFER, "");
+        try_forms(&mut editor, &file, "(def shade 1)").unwrap();
+        let name = view_buffer("def shade");
+
+        toggle_view(&mut editor, "def shade").unwrap();
+        assert!(editor.buffer_named_is_showing(&name));
+        assert_eq!(shown_forms(), [("def shade".to_string(), true)]);
+        // A later try of the same name refills the open view.
+        try_forms(&mut editor, &file, "(def shade 2)").unwrap();
+        assert_eq!(editor.read_buffer_text(&name).as_deref(), Some("(def shade 2)"));
+
+        // Clicking again closes it; a tile closed another way is forgotten.
+        toggle_view(&mut editor, "def shade").unwrap();
+        assert!(!editor.buffer_named_is_showing(&name));
+        assert_eq!(shown_forms(), [("def shade".to_string(), false)]);
+        toggle_view(&mut editor, "def shade").unwrap();
+        editor.close_tile_showing_buffer_named(&name);
+        assert!(forget_closed_views(&editor));
+        assert_eq!(shown_forms(), [("def shade".to_string(), false)]);
+
+        // Revert closes what is open.
+        toggle_view(&mut editor, "def shade").unwrap();
+        revert(&mut editor, &file).unwrap();
+        assert!(!editor.buffer_named_is_showing(&name));
+        assert!(toggle_view(&mut editor, "def shade").is_err(), "nothing tried to show");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn tried_forms_replace_by_name_and_skip_repeats() {
         let first = merged("", "(import eseq.mixer)\n(override eseq.mixer/a () 1)").unwrap();
         let second = merged(&first, "(import eseq.mixer)\n(override eseq.mixer/a () 2)\n(bind-key \"C-c m\" \"x\")").unwrap();
         assert_eq!(second, "(import eseq.mixer)\n\n(override eseq.mixer/a () 2)\n\n(bind-key \"C-c m\" \"x\")\n");
         assert_eq!(labels_of(&second), ["override eseq.mixer/a", "bind-key"]);
+        let keys = merged("", "(bind-key \"C-c a\" \"x\")\n(bind-key \"C-c b\" \"y\")").unwrap();
+        assert_eq!(labels_of(&keys), ["bind-key", "bind-key #2"], "each repeat is its own row");
+        assert_eq!(forms_of(&keys)[1].1, "(bind-key \"C-c b\" \"y\")");
+        assert_eq!(forms_of(&second)[0].1, "(override eseq.mixer/a () 2)", "a form shows as written");
         assert!(merged("", "(module x)").is_err(), "the module is user.try's");
         assert!(merged("", "(def").is_err());
     }

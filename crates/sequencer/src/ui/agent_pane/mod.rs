@@ -212,8 +212,14 @@ pub(crate) fn register_agent_pane_natives(runtime: &mut Runtime, scratch: impl F
     runtime.register_native_with_docs(
         "agent-pane/tried",
         "(agent-pane/tried)",
-        "What the agent is trying in the app (its `try` tool), one label per form (\"override eseq.mixer/strip-buttons\"), imports left out; empty when nothing is. Keep and Revert are the host commands agent-pane-keep-tried and agent-pane-revert-tried.",
-        |_args, _ctx| Ok(list_value(tried::shown_labels().iter().map(|label| text(label)))),
+        "What the agent is trying in the app (its `try` tool), one dict per form, imports left out: :label (\"override eseq.mixer/strip-buttons\") and :open (its code shows in a tile beside the pane); empty when nothing is. The host command agent-pane-view-tried (dict :label …) opens or closes that tile; Keep and Revert are agent-pane-keep-tried and agent-pane-revert-tried.",
+        |_args, _ctx| {
+            Ok(list_value(
+                tried::shown_forms()
+                    .iter()
+                    .map(|(label, open)| map_value([("label", text(label)), ("open", Value::Bool(*open))])),
+            ))
+        },
     );
     runtime.register_native_with_docs(
         "agent-pane/entries-from",
@@ -317,16 +323,32 @@ fn register_choice_natives(runtime: &mut Runtime) {
     );
 }
 
+/// The agent pane's buffer.
+const PANE_BUFFER: &str = "*agent-pane*";
+
 const KEEP_COMMAND: &str = "agent-pane-keep-tried";
 const REVERT_COMMAND: &str = "agent-pane-revert-tried";
-/// The pane's host commands: Keep and Revert on what the agent is trying.
-pub(crate) const COMMANDS: &[&str] = &[KEEP_COMMAND, REVERT_COMMAND];
+const VIEW_COMMAND: &str = "agent-pane-view-tried";
+/// The pane's host commands on what the agent is trying: Keep, Revert, and
+/// show or hide one form's code.
+pub(crate) const COMMANDS: &[&str] = &[KEEP_COMMAND, REVERT_COMMAND, VIEW_COMMAND];
 
-pub(crate) fn handle_command(name: &str, editor: &mut Editor) {
+pub(crate) fn handle_command(name: &str, payload: &Value, editor: &mut Editor) {
     let Ok(session) = session() else { return };
     let result = match name {
         KEEP_COMMAND => tried::keep_in_init(editor),
         REVERT_COMMAND => tried::revert_tried(editor),
+        VIEW_COMMAND => {
+            let label = match payload {
+                Value::Map(map) => crate::history_commands::map_string(map, "label"),
+                _ => None,
+            };
+            if let Err(why) = label.ok_or_else(|| "which form?".to_string()).and_then(|label| tried::toggle_view(editor, &label)) {
+                editor.show_transient_message(why);
+            }
+            session.touch();
+            return;
+        }
         _ => return,
     };
     match result {
@@ -354,7 +376,7 @@ pub(crate) fn publish(editor: &mut Editor, seen: &mut u64) {
         let result = tried::serve(editor, &request.action);
         request.reply(result);
     }
-    if served {
+    if served || tried::forget_closed_views(editor) {
         session.touch();
     }
     let (generation, shape) = session.with_transcript(|transcript| (transcript.generation, transcript.shape));
@@ -365,7 +387,7 @@ pub(crate) fn publish(editor: &mut Editor, seen: &mut u64) {
     present_agent_pane(generation, shape);
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
-    editor.refresh_visible_layouts_for_buffer_named("*agent-pane*");
+    editor.refresh_visible_layouts_for_buffer_named(PANE_BUFFER);
     editor.mark_needs_redraw();
 }
 

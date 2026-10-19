@@ -988,6 +988,18 @@ fn apply_capture_macro_host_commands(
     state: &SequencerState,
     current_track: usize,
 ) -> Result<bool, String> {
+    apply_capture_host_commands(editor, app, state, current_track).map(|(applied, _)| applied)
+}
+
+/// [`apply_capture_macro_host_commands`], also returning the commands it has
+/// no headless handler for.
+fn apply_capture_host_commands(
+    editor: &mut Editor,
+    app: &mut app::App,
+    state: &SequencerState,
+    current_track: usize,
+) -> Result<(bool, Vec<String>), String> {
+    let mut dropped: Vec<String> = Vec::new();
     let mut applied = false;
     for command in editor.drain_host_commands() {
         let HostCommand::Custom { name, payload } = command else {
@@ -1080,9 +1092,13 @@ fn apply_capture_macro_host_commands(
             applied = true;
             continue;
         }
-        // Mixer edits (track mute, solo, volume; bus mute), so `(set! t.muted
-        // true)` or a click on a mute button lands as in the live loop.
-        let mixer_edit = match name.as_str() {
+        // Mixer edits (track mute, solo, volume; bus mute) and step toggles,
+        // so `(set! t.muted true)`, `(set! s.active true)` or a click on a
+        // mute button or a step lands as in the live loop.
+        let history_edit = match name.as_str() {
+            "toggle-step" => {
+                Some(crate::history_commands::apply_toggle_step_host_command(app, &payload).map(|_| ()))
+            }
             "slice3-history-action" => {
                 Some(crate::history_commands::apply_slice3_history_host_command(app, &payload).map(|_| ()))
             }
@@ -1091,7 +1107,7 @@ fn apply_capture_macro_host_commands(
             }
             _ => None,
         };
-        if let Some(result) = mixer_edit {
+        if let Some(result) = history_edit {
             result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
             applied = true;
             continue;
@@ -1111,10 +1127,14 @@ fn apply_capture_macro_host_commands(
                     "capture setup emitted invalid {name} payload: {payload:?}"
                 ));
             }
-            MacroHostCommandOutcome::NotMacro => {}
+            MacroHostCommandOutcome::NotMacro => {
+                if !dropped.contains(&name) {
+                    dropped.push(name);
+                }
+            }
         }
     }
-    Ok(applied)
+    Ok((applied, dropped))
 }
 
 /// Optional standalone delta-glyph gallery feed. Entries sharing an
@@ -1542,9 +1562,20 @@ impl HeadlessSession {
 
     /// Apply the host commands Lisp queued since the last drain, through the
     /// same subset capture setup supports (instances, racks, song edits, …).
+    /// A command with no headless handler is named on stderr, which the
+    /// agent's tools return with their result.
     pub(crate) fn apply_host_commands(&mut self) -> Result<bool, String> {
         let applied =
-            apply_capture_macro_host_commands(&mut self.editor, &mut self.app, &self.kinds_handles.state, self.track);
+            apply_capture_host_commands(&mut self.editor, &mut self.app, &self.kinds_handles.state, self.track)
+                .map(|(applied, dropped)| {
+                    if !dropped.is_empty() {
+                        eprintln!(
+                            "Not applied in this headless copy (it has no handler for them): {}.",
+                            dropped.join(", ")
+                        );
+                    }
+                    applied
+                });
         // The bus kinds read the shared copy, as the live loop refreshes it.
         if matches!(applied, Ok(true)) {
             *self.kinds_handles.bus_state.lock().unwrap() = self.app.buses.clone();
@@ -1702,6 +1733,38 @@ impl HeadlessSession {
         }
     }
 
+    /// Run `draw` with the session's capture backend, made at `size` the
+    /// first time and kept for the next capture.
+    fn with_capture_backend<T>(
+        &mut self,
+        size: (u32, u32),
+        draw: impl FnOnce(&mut Self, &mut AppBackend) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut backend = match self.capture_backend.take() {
+            Some(backend) => backend,
+            None => create_capture_backend(&mut self.editor, size.0, size.1).map_err(|error| error.to_string())?,
+        };
+        let drawn = draw(self, &mut backend);
+        self.capture_backend = Some(backend);
+        drawn
+    }
+
+    /// Draw the whole window, its tiles as they stand, to a PNG at `path`.
+    pub(crate) fn save_window_png(&mut self, size: (u32, u32), path: &Path) -> Result<(), String> {
+        self.with_capture_backend(size, |session, backend| {
+            session.settle()?;
+            let (columns, rows, _) = session.fit_viewport(backend, size);
+            session.editor.sync_reactive_bindings_for_visible_layouts();
+            session.sync_host_kinds();
+            let target = backend
+                .create_tiled_capture_target(size.0, size.1)
+                .map_err(|_| "failed to create the window capture target".to_string())?;
+            let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(&mut session.editor, columns, rows);
+            backend.render_tiled_capture(&tiled, &target).map_err(|_| "failed to render the window".to_string())?;
+            target.save_png(path).map_err(|error| error.to_string())
+        })
+    }
+
     /// Draw one buffer alone, as `metal_seq capture --buffer B --hide-status`
     /// does, after typing `keys` (`--keys` spelling). Returns the PNG (cropped
     /// to `key`'s subtree when given) and the frame's keyed layout report.
@@ -1714,13 +1777,10 @@ impl HeadlessSession {
         keys: Option<&str>,
     ) -> Result<(Vec<u8>, eseqlisp::ui::capture::LayoutReport), String> {
         let keystrokes = keys.map(parse_capture_keys).transpose()?.unwrap_or_default();
-        let mut backend = match self.capture_backend.take() {
-            Some(backend) => backend,
-            None => create_capture_backend(&mut self.editor, size.0, size.1).map_err(|error| error.to_string())?,
-        };
-        let rendered = self.render_with(&mut backend, &normalize_buffer_name(buffer), key, size, click, &keystrokes);
-        self.capture_backend = Some(backend);
-        rendered
+        let buffer = normalize_buffer_name(buffer);
+        self.with_capture_backend(size, |session, backend| {
+            session.render_with(backend, &buffer, key, size, click, &keystrokes)
+        })
     }
 
     fn render_with(

@@ -991,6 +991,24 @@ mod coverage {
     }
 
     #[test]
+    fn steps_toggled_from_eval_land_and_unknown_commands_are_named() {
+        let mut session = booted();
+        let on = "(import eseq.kinds :refer (track))\n\
+                  (let ((t (track 0)) (s (nth t.steps 3))) (set! s.active true))\n\
+                  (host-command \"toggle-step\" (dict :track 0 :step 5))";
+        let (set, _) = run_lisp(&mut session, on);
+        set.unwrap();
+        let (read, _) = run_lisp(
+            &mut session,
+            "(import eseq.kinds :refer (track))\n\
+             (let ((t (track 0)) (a (nth t.steps 3)) (b (nth t.steps 5))) (list a.active b.active (seq-track-step-active? 0 4)))",
+        );
+        assert_eq!(read.unwrap(), "(true true false)");
+        let (_, log) = run_lisp(&mut session, "(host-command \"no-such-command\" (dict))");
+        assert!(log.contains("Not applied in this headless copy") && log.contains("no-such-command"), "{log}");
+    }
+
+    #[test]
     fn every_name_the_sequencer_guide_teaches_is_documented() {
         let mut session = booted();
         let runtime = session.editor.runtime_mut();

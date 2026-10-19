@@ -118,3 +118,10 @@ the app restarts.
 - Include the `(import …)` lines your forms need in every `try`; repeats are
   skipped.
 - Mute and solo through `eval` change the headless copy only.
+- To see a step drawn on before you `try`, switch it on in the headless copy,
+  then `capture`:
+  `(import eseq.kinds :refer (track))`
+  `(let ((t (track 0)) (s (nth t.steps 3))) (set! s.active true))`
+- A host command the headless copy cannot run comes back named as "Not
+  applied in this headless copy". Another route to the same change will not
+  work either; check the look another way, or say what you could not check.

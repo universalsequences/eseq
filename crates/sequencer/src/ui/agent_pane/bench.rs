@@ -5,7 +5,9 @@
 //! `/capture BUFFER PATH [KEY]` draws a buffer of the stand-in app to a PNG
 //! (clicking the widget keyed KEY first) and
 //! `/eval CODE` evaluates there (to mute a track before capturing);
-//! `/try CODE` tries forms there as the agent's `try` does.
+//! `/try CODE` tries forms there as the agent's `try` does;
+//! `/layout` shows the sequencer with the pane beside it, `/view LABEL`
+//! clicks a tried form's row, and `/window PATH` draws the whole window.
 //! Needs ANTHROPIC_API_KEY; set ESEQ_CONFIG_DIR to keep Keep's init.lisp
 //! and the agent's packages out of ~/.eseq.d.
 
@@ -29,6 +31,7 @@ pub(crate) fn run(messages: Vec<String>) -> Result<(), Box<dyn std::error::Error
     let agent = session()?;
     let started = Instant::now();
     let mut printed = 0;
+    let mut seen = 0;
     for message in messages {
         let words: Vec<&str> = message.split_whitespace().collect();
         match words.as_slice() {
@@ -39,6 +42,20 @@ pub(crate) fn run(messages: Vec<String>) -> Result<(), Box<dyn std::error::Error
                 let (png, _) = app.render_png(buffer, None, (1600, 700), click.first().copied(), None)?;
                 std::fs::write(path, png)?;
                 println!("/capture: {buffer} -> {path}");
+            }
+            ["/layout"] => {
+                let layout = r#"(set-layout (list :rows 1.0 "*sequencer*")) (show-in-side-pane "*agent-pane*")"#;
+                let result = app.editor.runtime_mut().eval_str(layout).map(|_| ());
+                app.editor.refresh_runtime_side_effects();
+                println!("/layout: {result:?}");
+            }
+            ["/view", ..] => {
+                let label = message.trim_start_matches("/view").trim();
+                println!("/view: {:?}", tried::toggle_view(&mut app.editor, label));
+            }
+            ["/window", path] => {
+                app.save_window_png((1600, 900), std::path::Path::new(path))?;
+                println!("/window: {path}");
             }
             ["/try", ..] => {
                 let code = message.trim_start_matches("/try").to_string();
@@ -72,6 +89,9 @@ pub(crate) fn run(messages: Vec<String>) -> Result<(), Box<dyn std::error::Error
                 }
             }
         }
+        // Redraw the pane as the app's frame does, for a later /capture.
+        agent.touch();
+        super::publish(&mut app.editor, &mut seen);
     }
     if let Some(dir) = agent.conversation_dir() {
         println!("conversation: {}", dir.join("conversation.json").display());

@@ -9895,6 +9895,67 @@ fn side_pane_takes_the_layouts_tile_chrome() {
 }
 
 #[test]
+fn buffers_shown_beside_the_side_pane_stack_to_its_right() {
+    use crate::tile::{SplitDir, TileNode};
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*main*", "");
+    editor.open_scratch_buffer("*pane*", "");
+    editor.runtime_mut().eval_str(r#"(set-layout (list :rows 1.0 "*main*"))"#).unwrap();
+    editor.runtime_mut().eval_str(r#"(show-in-side-pane "*pane*")"#).unwrap();
+    editor.refresh_runtime_side_effects();
+    let root_ratio = |editor: &Editor| match &editor.tile_root.content {
+        TileNode::Split(split) => split.ratio,
+        TileNode::Leaf(_) => panic!("the pane is open"),
+    };
+    let narrow = root_ratio(&editor);
+    for name in ["*one*", "*two*", "*three*"] {
+        editor.upsert_read_only_lisp_buffer(name, "(def x 1)");
+        assert!(editor.show_buffer_beside("*pane*", name));
+    }
+    assert!(editor.show_buffer_beside("*pane*", "*two*"), "one already showing stays put");
+    assert_eq!(editor.tile_root.leaf_ids().len(), 5);
+    assert!(root_ratio(&editor) < narrow, "the pane widened");
+
+    // The pane, then to its right a column of the three, one height each.
+    let TileNode::Split(root) = &editor.tile_root.content else { unreachable!() };
+    let TileNode::Split(pane) = root.b.as_ref() else { panic!("the pane split") };
+    assert_eq!(pane.dir, SplitDir::Vertical);
+    let TileNode::Split(column) = pane.b.as_ref() else { panic!("a column") };
+    assert_eq!(column.dir, SplitDir::Horizontal);
+    assert!((column.ratio - 1.0 / 3.0).abs() < 1e-6, "{}", column.ratio);
+    let TileNode::Split(rest) = column.b.as_ref() else { panic!("two more") };
+    assert!((rest.ratio - 0.5).abs() < 1e-6);
+
+    // Closing one evens out the rest; closing the pane takes them along and
+    // the next opening starts narrow again.
+    assert!(editor.close_tile_showing_buffer_named("*one*"));
+    assert!(!editor.buffer_named_is_showing("*one*"));
+    assert!(editor.buffer_named_is_showing("*three*"));
+    assert!(editor.close_tile_showing_buffer_named("*two*"));
+    assert!(editor.close_tile_showing_buffer_named("*three*"));
+    assert!((root_ratio(&editor) - narrow).abs() < 1e-6, "narrow again once none is beside it");
+    editor.show_buffer_beside("*pane*", "*one*");
+    assert!(editor.close_tile_showing_buffer_named("*pane*"));
+    assert_eq!(editor.tile_root.leaf_ids().len(), 1, "the pane's neighbours closed with it");
+
+    // C-x 0 on the last tile beside the pane narrows it too.
+    editor.runtime_mut().eval_str(r#"(show-in-side-pane "*pane*")"#).unwrap();
+    editor.refresh_runtime_side_effects();
+    let narrow = root_ratio(&editor);
+    editor.show_buffer_beside("*pane*", "*two*");
+    assert!(editor.switch_active_tile_to_buffer_named("*two*"));
+    assert!(editor.delete_active_tile());
+    assert!((root_ratio(&editor) - narrow).abs() < 1e-6, "C-x 0 narrows the pane again");
+
+    // A new layout drops them, and the next one starts a fresh column.
+    editor.show_buffer_beside("*pane*", "*three*");
+    editor.runtime_mut().eval_str(r#"(set-layout (list :rows 1.0 "*main*"))"#).unwrap();
+    editor.refresh_runtime_side_effects();
+    assert!(!editor.buffer_named_is_showing("*three*"));
+    assert!(editor.beside_tiles.is_empty() && editor.beside_widened.is_none());
+}
+
+#[test]
 fn side_pane_closes_when_dragged_through_its_minimum_width() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor.open_scratch_buffer("*main*", "");

@@ -180,8 +180,6 @@ impl Transcript {
         self.changed();
     }
 
-    /// Redraw without a change here: something the pane shows beside the
-    /// conversation moved (a package was loaded into the project).
     /// The entries from `printed` on that will not change any more, in
     /// order, for a driver printing the conversation as it settles: the last
     /// one is still streaming while the turn runs, and a tool stays open
@@ -198,6 +196,8 @@ impl Transcript {
             .map(|(_, entry)| entry)
     }
 
+    /// Redraw without a change here: something the pane shows beside the
+    /// conversation moved (a package was loaded into the project).
     pub fn touch(&mut self) {
         self.reshaped();
     }

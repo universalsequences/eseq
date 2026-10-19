@@ -296,6 +296,14 @@
             (small-button "Really reject?" (str key "-reject") :danger (lambda () (press-reject artifact)))
             (small-button "Reject" (str key "-reject") :ghost (lambda () (press-reject artifact)))))))))
 
+;; One tried form: its label, which opens its code (read-only, highlighted)
+;; in a tile beside the pane, and closes it again.
+(def tried-form (form key)
+  (label (str "▸ " (get form :label))
+    :key key :font-size 10 :color (if (get form :open) :accent :fg) :hover-color :accent :mono true :bg :transparent
+    :on-click (lambda (event)
+                (host-command "agent-pane-view-tried" (dict :label (get form :label))))))
+
 ;; What the agent is showing in the app with `try`, not yet saved: Keep
 ;; adds it to init.lisp, Revert takes it off.
 (def tried-card (tried)
@@ -306,9 +314,8 @@
         (label "Trying in the app" :font-size 12 :color :fg :bold true :bg :transparent)
         (box :flex 1)
         (dim-text "not saved" 10 false))
-      (v-stack :width :fill :gap 0.05
-        (each tried |form j|
-          (label form :key (str "agent-pane-tried-" j) :font-size 10 :color :fg :mono true :bg :transparent)))
+      (v-stack :width :fill :gap 0.2
+        (each tried |form j| (tried-form form (str "agent-pane-tried-" j))))
       (wrap :width :fill :gap 0.3 :row-gap 0.3
         (small-button "Keep in init.lisp" "agent-pane-keep" :primary
           (lambda () (host-command "agent-pane-keep-tried" (dict))))
@@ -360,8 +367,11 @@
             (subtree :key (str "agent-pane-tail-" last-start) (tail-view last-start busy))
             (if busy (working-row) (nothing)))))
       ;; Its own subtree: the Add buttons read project.instances, whose
-      ;; changes need not redraw the conversation.
-      (subtree :key "agent-pane-artifacts-tree" (artifacts-view (get state :artifacts) (agent-pane/tried))))))
+      ;; changes need not redraw the conversation. It reads the shape so a
+      ;; touch (a tried form's code opened or closed) redraws it.
+      (subtree :key "agent-pane-artifacts-tree"
+        (let ((shape agent.pane-shape))
+          (artifacts-view (get state :artifacts) (agent-pane/tried)))))))
 
 ;; ── The composer ──
 ;;
