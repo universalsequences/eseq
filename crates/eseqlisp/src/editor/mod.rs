@@ -43,6 +43,10 @@ use natives::register_editor_natives;
 const TILE_GAP_PX_PER_UNIT: f32 = 15.0;
 /// The share of the window the layout keeps when a side pane opens.
 const SIDE_PANE_RATIO: f32 = 0.72;
+/// The side pane's narrowest width in cells; dragging a quarter of it further
+/// closes the pane, as the sequencer's sidebars collapse.
+const SIDE_PANE_MIN_WIDTH: f32 = 34.0;
+const SIDE_PANE_COLLAPSE_THRESHOLD: f32 = 0.25;
 const TEXT_HORIZONTAL_SCROLL_MARGIN: usize = 3;
 
 fn tile_resize_cursor(dir: SplitDir) -> WidgetCursor {
@@ -815,6 +819,14 @@ struct TileResizeDrag {
     split_id: TileId,
     dir: SplitDir,
     area: Rect,
+}
+
+/// What a divider dragged through a pane's collapse threshold does.
+enum TileCollapse {
+    /// The layout's `:on-collapse`.
+    Callback(Value),
+    /// The side pane is in no layout spec: the editor closes it itself.
+    CloseSidePane(TileId),
 }
 
 impl Editor {
@@ -1610,8 +1622,10 @@ impl Editor {
     }
 
     /// Put `leaf` to the right of the whole layout, styled like its tiles.
-    fn wrap_root_with_side_pane(&mut self, leaf: TileLeaf, ratio: f32) {
+    fn wrap_root_with_side_pane(&mut self, mut leaf: TileLeaf, ratio: f32) {
         let (split_id, side) = (self.alloc_tile_id(), leaf.id);
+        leaf.min_width = Some(SIDE_PANE_MIN_WIDTH);
+        leaf.collapse_threshold = Some(SIDE_PANE_COLLAPSE_THRESHOLD);
         let content = std::mem::replace(&mut self.tile_root.content, TileNode::Leaf(TileLeaf::new(side, 0)));
         self.tile_root.content = TileNode::Split(TileSplit {
             id: split_id,
@@ -2227,6 +2241,10 @@ impl Editor {
         else {
             return false;
         };
+        self.close_tile(tile_id)
+    }
+
+    fn close_tile(&mut self, tile_id: TileId) -> bool {
         if self.inspect_source_tile_id == Some(tile_id) {
             self.inspect_source_tile_id = None;
         }
@@ -3568,15 +3586,12 @@ impl Editor {
                     precise_col,
                     precise_row,
                 );
-                if let Some(callback) = collapse_callback {
+                if let Some(collapse) = collapse_callback {
                     self.active_tile_resize_drag = None;
                     self.last_mouse_precise = None;
                     self.widget_cursor = WidgetCursor::Default;
                     self.suppress_mouse_until_left_up = true;
-                    self.apply_widget_output(Some(crate::widget_render::EventOutput {
-                        callback,
-                        args: Vec::new(),
-                    }));
+                    self.collapse_tile(collapse);
                 }
                 true
             }
@@ -3591,15 +3606,26 @@ impl Editor {
                 self.active_tile_resize_drag = None;
                 self.last_mouse_precise = None;
                 self.widget_cursor = WidgetCursor::Default;
-                if let Some(callback) = collapse_callback {
-                    self.apply_widget_output(Some(crate::widget_render::EventOutput {
-                        callback,
-                        args: Vec::new(),
-                    }));
+                if let Some(collapse) = collapse_callback {
+                    self.collapse_tile(collapse);
                 }
                 true
             }
             _ => true,
+        }
+    }
+
+    fn collapse_tile(&mut self, collapse: TileCollapse) {
+        match collapse {
+            TileCollapse::Callback(callback) => {
+                self.apply_widget_output(Some(crate::widget_render::EventOutput {
+                    callback,
+                    args: Vec::new(),
+                }));
+            }
+            TileCollapse::CloseSidePane(tile_id) => {
+                self.close_tile(tile_id);
+            }
         }
     }
 
@@ -3644,7 +3670,8 @@ impl Editor {
         area: Rect,
         precise_col: f32,
         precise_row: f32,
-    ) -> Option<Value> {
+    ) -> Option<TileCollapse> {
+        let side_pane = self.inspect_source_tile_id;
         if let Some(split) = self.tile_root.find_split_mut(split_id) {
             let mut ratio = split_ratio_for_point(area, dir, precise_col, precise_row);
             // Enforce minimum sizes from layout spec
@@ -3662,9 +3689,13 @@ impl Editor {
                         SplitDir::Vertical => leaf.min_width?,
                         SplitDir::Horizontal => leaf.min_height?,
                     };
-                    (attempted_size <= minimum * (1.0 - threshold))
-                        .then(|| leaf.on_collapse.clone())
-                        .flatten()
+                    if attempted_size > minimum * (1.0 - threshold) {
+                        return None;
+                    }
+                    match &leaf.on_collapse {
+                        Some(callback) => Some(TileCollapse::Callback(callback.clone())),
+                        None => (side_pane == Some(leaf.id)).then_some(TileCollapse::CloseSidePane(leaf.id)),
+                    }
                 };
                 collapse_for(&split.a, total * ratio)
                     .or_else(|| collapse_for(&split.b, total * (1.0 - ratio)))

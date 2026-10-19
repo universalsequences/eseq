@@ -9895,6 +9895,52 @@ fn side_pane_takes_the_layouts_tile_chrome() {
 }
 
 #[test]
+fn side_pane_closes_when_dragged_through_its_minimum_width() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*main*", "");
+    editor.open_scratch_buffer("*pane*", "");
+    let show_pane = |editor: &mut Editor| {
+        editor.runtime_mut().eval_str(r#"(show-in-side-pane "*pane*")"#).unwrap();
+        editor.refresh_runtime_side_effects();
+    };
+    editor.runtime_mut().eval_str(r#"(set-layout (list :rows 1.0 "*main*"))"#).unwrap();
+    show_pane(&mut editor);
+    let (split_id, dir) = match &editor.tile_root.content {
+        crate::tile::TileNode::Split(split) => (split.id, split.dir),
+        crate::tile::TileNode::Leaf(_) => panic!("the pane opens on the right"),
+    };
+    let area = crate::layout::Rect { row: 0.0, col: 0.0, width: 200.0, height: 50.0 };
+    let drag_to = |editor: &mut Editor, col: f32| {
+        editor.active_tile_resize_drag = Some(super::TileResizeDrag { split_id, dir, area });
+        editor.handle_tile_resize_drag(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), col as u16, 10),
+            col,
+            10.0,
+        );
+    };
+
+    // Narrower than its minimum, it stops at the minimum and stays open.
+    drag_to(&mut editor, 200.0 - 30.0);
+    match &editor.tile_root.content {
+        crate::tile::TileNode::Split(split) => {
+            let width = area.width * (1.0 - split.ratio);
+            assert!((width - super::SIDE_PANE_MIN_WIDTH).abs() < 1e-3, "pane width {width}");
+        }
+        crate::tile::TileNode::Leaf(_) => panic!("a short drag keeps the pane"),
+    }
+
+    // Through a quarter of its minimum, it closes, and the gesture is spent.
+    drag_to(&mut editor, 200.0 - 20.0);
+    assert_eq!(editor.tile_root.leaf_ids().len(), 1, "the pane closed");
+    assert!(editor.active_tile_resize_drag.is_none());
+    assert!(editor.suppress_mouse_until_left_up);
+
+    // It opens again as usual.
+    show_pane(&mut editor);
+    assert_eq!(editor.tile_root.leaf_ids().len(), 2);
+}
+
+#[test]
 fn remembered_layout_split_restores_its_user_resized_ratio() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor.open_scratch_buffer("*main*", "");
