@@ -13,6 +13,7 @@
 (import eseq.kinds :refer (agent project))
 (import eseq.markdown-view :as markdown-view)
 (import eseq.view-kit :refer (nothing open-menu! menu-of find))
+(import eseq.customize :refer (knob-editor short-name set-knob customize-dirty customize-save))
 
 (export agent-pane-open agent-pane-close agent-pane-send)
 
@@ -329,6 +330,65 @@
       (if (empty? tried) (nothing) (tried-card tried))
       (each artifacts |artifact i| (artifact-card artifact i)))))
 
+;; ── Knobs to tweak ──
+;;
+;; Each `defcustom` the agent wrote, in what it tries or in a package of
+;; this conversation, as the control the Customize dialog shows: the user
+;; tweaks it live. Keep keeps a tried knob at its value; a package's knobs
+;; save, as the dialog's do, into init.lisp.
+
+;; "user.try/grain" in a tried `defcustom grain`, "pond.skin/speed" in a
+;; package `pond` of this conversation.
+(def knob-of-conversation? (row packages tried)
+  (let ((module (get row :module))
+        (name (short-name (get row :name) module)))
+    (if (= module "user.try")
+      (find |form| (= (get form :label) (str "defcustom " name)) tried)
+      (find |package| (string-starts-with? module (str package ".")) packages))))
+
+;; The knob whose doc shows under the knobs ("" for none).
+(defstate knob-doc "")
+
+;; One cell: the name (click for its doc), ↺ once changed, the control.
+(def knob-view (row i)
+  (let ((module (get row :module))
+        (name (short-name (get row :name) module))
+        (key (str "agent-pane-knob-" i))
+        (changed (not (= (get row :value) (get row :default)))))
+    (box :key key :width 19
+     (h-stack :width :fill :gap 0.3 :align :center
+      (label name :font-size 10 :color (if changed :accent :fg) :hover-color :dim :wrap false :bg :transparent
+        :on-click (lambda (event) (set! knob-doc (if (= knob-doc (get row :name)) "" (get row :name)))))
+      (if changed
+        (label "↺" :key (str key "-reset") :font-size 10 :color :dim :hover-color :fg :bg :transparent
+          :on-click (lambda (event) (set-knob (get row :name) (get row :default))))
+        (nothing))
+      (box :flex 1)
+      (knob-editor row (str key "-editor") true)))))
+
+(def knobs-card (knobs saves)
+  (let ((open (find |row| (= (get row :name) knob-doc) knobs)))
+    (box :key "agent-pane-knobs" :width :fill :padding 0.8 :corner-radius 12
+      :background-color :button-ghost-bg :border-width 1 :border-color :dropdown-menu-border
+      (v-stack :width :fill :gap 0.4
+        (h-stack :width :fill :gap 0.5 :align :center
+          (label "Tweak" :font-size 12 :color :fg :bold true :bg :transparent)
+          (box :flex 1)
+          (if (and saves customize-dirty)
+            (small-button "Save tweaks" "agent-pane-knobs-save" :primary customize-save)
+            (dim-text "click a name for what it does" 9 false)))
+        (wrap :width :fill :gap 1.0 :row-gap 0.25
+          (each knobs |row i| (knob-view row i)))
+        (if open (dim-text (get open :doc) 9 true) (nothing))))))
+
+;; Redrawn when a knob moves (custom-declarations reads each value), apart
+;; from the cards above; `packages` and `tried` come from the conversation.
+(def knobs-view (packages tried)
+  (let ((knobs (filter |row| (knob-of-conversation? row packages tried) (custom-declarations))))
+    (if (empty? knobs)
+      (nothing)
+      (knobs-card knobs (find |row| (not (= (get row :module) "user.try")) knobs)))))
+
 (def empty-state ()
   (v-stack :key "agent-pane-empty" :width :fill :flex 1 :gap 0.6 :padding 1.0
     (dim-text "Ask for a sequencer, a panel or an extension, or for a change to how eseq looks. The agent writes new work as a Local package and shows tweaks live in the app, for you to keep or revert."
@@ -371,7 +431,9 @@
       ;; touch (a tried form's code opened or closed) redraws it.
       (subtree :key "agent-pane-artifacts-tree"
         (let ((shape agent.pane-shape))
-          (artifacts-view (get state :artifacts) (agent-pane/tried)))))))
+          (artifacts-view (get state :artifacts) (agent-pane/tried))))
+      (subtree :key "agent-pane-knobs-tree"
+        (knobs-view (map |artifact| (get artifact :package) (get state :artifacts)) (agent-pane/tried))))))
 
 ;; ── The composer ──
 ;;

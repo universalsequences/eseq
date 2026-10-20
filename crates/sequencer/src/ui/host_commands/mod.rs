@@ -2,7 +2,7 @@ mod agent;
 mod arrangement;
 pub(crate) mod content_reload;
 pub(crate) mod audio_settings;
-mod customize;
+pub(crate) mod customize;
 mod devices;
 mod dispatch;
 mod drum_rack_v2;

@@ -82,6 +82,17 @@ pub fn top_level_forms(source: &str) -> Result<Vec<TopForm>, String> {
         .collect())
 }
 
+/// `form` (one top-level list) with its item at `index` replaced by `text`,
+/// or None when it has no such item: `(defcustom gain 0.5 …)` with item 2
+/// replaced by `0.8`.
+pub fn with_item_replaced(form: &str, index: usize, text: &str) -> Option<String> {
+    let exprs = parse(form).ok()?;
+    let [expr] = exprs.as_slice() else { return None };
+    let ExprKind::List(items) = &expr.kind else { return None };
+    let span = &items.get(index)?.origin.primary_span;
+    Some(format!("{}{text}{}", &form[..span.start_byte], &form[span.end_byte..]))
+}
+
 /// What [`define_form`] did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Defined {

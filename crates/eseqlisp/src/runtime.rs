@@ -2685,6 +2685,28 @@ impl Runtime {
         self.vm.take_source_load_errors()
     }
 
+    /// See [`crate::vm::VM::override_modules`].
+    pub fn override_modules(&self) -> std::collections::BTreeMap<String, bool> {
+        self.vm.override_modules()
+    }
+
+    /// Switch `module`'s overrides on or off because something does or
+    /// does not attach its package; see
+    /// [`crate::vm::VM::unattached_override_modules`].
+    pub fn set_module_attached(&mut self, module: &str, attached: bool) -> Result<(), String> {
+        let form = format!("({}-module-overrides {module})", if attached { "enable" } else { "disable" });
+        self.eval_str(&form).map_err(|error| format!("{form}: {error:?}"))?;
+        if !attached {
+            self.vm.unattached_override_modules.insert(module.to_string());
+        }
+        Ok(())
+    }
+
+    /// Whether `module` is off only because nothing attaches its package.
+    pub fn is_module_unattached(&self, module: &str) -> bool {
+        self.vm.unattached_override_modules.contains(module)
+    }
+
     /// See [`crate::vm::VM::remove_module_overrides`].
     pub fn remove_module_overrides(&mut self, module: &str) -> Vec<String> {
         self.vm.remove_module_overrides(module)

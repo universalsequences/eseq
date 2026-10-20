@@ -333,6 +333,14 @@ const REVERT_COMMAND: &str = "agent-pane-revert-tried";
 const VIEW_COMMAND: &str = "agent-pane-view-tried";
 /// The pane's host commands on what the agent is trying: Keep, Revert, and
 /// show or hide one form's code.
+/// The module what the agent tries runs as.
+pub(crate) const TRY_MODULE: &str = tried::MODULE;
+
+/// The source of what the agent is trying in the app, after its module line.
+pub(crate) fn tried_source() -> String {
+    tried::tried()
+}
+
 pub(crate) const COMMANDS: &[&str] = &[KEEP_COMMAND, REVERT_COMMAND, VIEW_COMMAND];
 
 pub(crate) fn handle_command(name: &str, payload: &Value, editor: &mut Editor) {

@@ -218,6 +218,15 @@ darkens or lightens your face. One with its own `:background-color` or
   `apropos` with the area's name lists them. The user's Customize dialog keeps
   its own `setopt`s in a managed block at the end of init.lisp; leave that block
   alone.
+- A `defcustom` of your own, in what you `try` or in a package you write,
+  shows in the pane as a control the user can tweak live. Keep keeps a
+  tried one at the value they left it. Declare the few numbers worth
+  tuning that way, each with a `:doc` and a `:min`/`:max`: a width, a
+  speed, a tint. Then mention them. A shader cannot read a `defcustom`;
+  give its widget a `:state` and pass the knob where the widget is used:
+  `(defwidget ripples :state (speed) :shader …)`, then
+  `(merge node :background "ripples" :speed ripple-speed)`. A widget given
+  to `override-theme-slot` takes no state, so it cannot have a knob.
 - `(bind-key "C-c m" "user.init/focus-mixer")` binds a key to a command: any
   `def` of a declared module, by its qualified name.
 - `(add-hook "hook-name" "my-entry-key" (lambda (…) …))` runs code at a factory

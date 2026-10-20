@@ -30,7 +30,7 @@ fn set_viewed(labels: Vec<String>) {
     VIEWED.with(|viewed| *viewed.borrow_mut() = labels);
 }
 
-fn tried() -> String {
+pub(super) fn tried() -> String {
     TRIED.with(|tried| tried.borrow().clone())
 }
 
@@ -273,6 +273,27 @@ pub(super) fn revert(editor: &mut Editor, file: &Path) -> Result<String, String>
     Ok(message)
 }
 
+/// `source` with each `defcustom` the user tweaked in the pane declared
+/// with the value they left it at, so what is kept is what they saw.
+fn with_tweaked_defaults(editor: &mut Editor, source: &str) -> Result<String, String> {
+    let prefix = format!("{MODULE}/");
+    let tweaked: Vec<(String, String)> = crate::host_commands::customize::changed_knobs(editor, &prefix)?
+        .into_iter()
+        .filter_map(|(name, literal)| Some((name.strip_prefix(&prefix)?.to_string(), literal)))
+        .collect();
+    let mut out = source.to_string();
+    for (name, literal) in tweaked {
+        let held = forms::top_level_forms(&out).unwrap_or_default();
+        let Some(form) = held.iter().find(|form| form.head == "defcustom" && form.name.as_deref() == Some(&name)) else {
+            continue;
+        };
+        if let Some(text) = forms::with_item_replaced(&out[form.start_byte..form.end_byte], 2, &literal) {
+            out = forms::define_form(&out, &text)?.0;
+        }
+    }
+    Ok(out)
+}
+
 /// Add the tried forms to the user init at `init` and reload it, then drop
 /// `user.try`: the init's overrides take over.
 pub(super) fn keep(editor: &mut Editor, file: &Path, init: &Path) -> Result<String, String> {
@@ -280,6 +301,7 @@ pub(super) fn keep(editor: &mut Editor, file: &Path, init: &Path) -> Result<Stri
     if source.trim().is_empty() {
         return nothing_tried();
     }
+    let source = with_tweaked_defaults(editor, &source)?;
     edit_user_init(editor, init, |before| {
         merged(if before.trim().is_empty() { "(module user.init)\n" } else { before }, &source)
     })?;
@@ -343,6 +365,23 @@ mod tests {
         assert!(tried().is_empty());
         let saved = std::fs::read_to_string(&init).unwrap();
         assert_eq!(saved, "(module user.init)\n\n(def x 0)\n\n(override demo.panel/greet () \"kept\")\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tried_knob_is_kept_at_the_value_the_user_left_it() {
+        let dir = std::env::temp_dir().join(format!("eseq-tried-knob-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (file, init) = (dir.join("try.lisp"), dir.join("init.lisp"));
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        try_forms(&mut editor, &file, "(defcustom grain 0.5 :type :number :doc \"Grain.\" :min 0 :max 1)\n(defcustom tint 0.2 :type :number :doc \"Tint.\")").unwrap();
+        editor.runtime_mut().eval_str("(setopt-by-name \"user.try/grain\" 0.8)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+
+        keep(&mut editor, &file, &init).unwrap();
+        let saved = std::fs::read_to_string(&init).unwrap();
+        assert!(saved.contains("(defcustom grain 0.8 :type :number :doc \"Grain.\" :min 0 :max 1)"), "{saved}");
+        assert!(saved.contains("(defcustom tint 0.2 :type"), "an untouched knob keeps its default: {saved}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

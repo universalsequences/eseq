@@ -3000,6 +3000,11 @@ pub struct VM {
     /// disabled across hot reload and across restart (the user init
     /// replays `(disable-module-overrides …)` from its managed block).
     pub disabled_override_modules: HashSet<String>,
+    /// Of those, the ones a host switched off only because nothing attaches
+    /// their package (not the user's choice): it switches them back on when
+    /// something does, and a settings UI leaves them out of what it saves.
+    /// Switching a module on or off by hand takes it out.
+    pub unattached_override_modules: HashSet<String>,
     /// Auto-qualified `defcustom` metadata used to generate settings UIs.
     pub custom_declarations: HashMap<String, CustomDeclaration>,
     /// Defaults of `defcustom`s pruned by a module re-declaration, kept until
@@ -3081,6 +3086,7 @@ pub struct VmStateSnapshot {
     extension_hooks: HashMap<String, Vec<(String, Value)>>,
     overrides: HashMap<String, OverrideSet>,
     disabled_override_modules: HashSet<String>,
+    unattached_override_modules: HashSet<String>,
     custom_declarations: HashMap<String, CustomDeclaration>,
     declared_modules: HashMap<String, Option<std::path::PathBuf>>,
     /// Shared with each segment's compiler, which only reads it: every
@@ -4057,6 +4063,7 @@ pub fn register_core_natives(vm: &mut VM) {
         } else {
             vm.disabled_override_modules.insert(module.clone());
         }
+        vm.unattached_override_modules.remove(module);
         let mut touched = HashSet::new();
         for (name, set) in &mut vm.overrides {
             for entry in set
@@ -5358,6 +5365,7 @@ impl VM {
             extension_hooks: HashMap::new(),
             overrides: HashMap::new(),
             disabled_override_modules: HashSet::new(),
+            unattached_override_modules: HashSet::new(),
             custom_declarations: HashMap::new(),
             retired_custom_defaults: HashMap::new(),
             declared_modules: HashMap::new(),
@@ -6360,6 +6368,7 @@ impl VM {
                 })
                 .collect(),
             disabled_override_modules: self.disabled_override_modules.clone(),
+            unattached_override_modules: self.unattached_override_modules.clone(),
             custom_declarations: self.custom_declarations.iter().map(|(name, declaration)| {
                 let mut declaration = declaration.clone();
                 declaration.default = clone_value_for_snapshot(&declaration.default);
@@ -6416,6 +6425,7 @@ impl VM {
         self.overrides = snapshot.overrides;
         self.sync_theme_slot_overrides();
         self.disabled_override_modules = snapshot.disabled_override_modules;
+        self.unattached_override_modules = snapshot.unattached_override_modules;
         self.custom_declarations = snapshot.custom_declarations;
         self.declared_modules = snapshot.declared_modules;
         self.module_exports = snapshot.module_exports;
@@ -7059,6 +7069,16 @@ impl VM {
                 _ => None,
             }
         }));
+    }
+
+    /// Each module that wrote an override, and whether any of its
+    /// overrides is switched on.
+    pub fn override_modules(&self) -> std::collections::BTreeMap<String, bool> {
+        let mut modules = std::collections::BTreeMap::new();
+        for entry in self.overrides.values().flat_map(|set| &set.entries) {
+            *modules.entry(entry.overriding_module.clone()).or_insert(false) |= entry.enabled;
+        }
+        modules
     }
 
     /// Drop every override written in `module`, leaving other modules' on the

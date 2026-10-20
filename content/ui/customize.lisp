@@ -23,6 +23,8 @@
         customize-generation
         reset-knob
         set-knob
+        knob-editor
+        short-name
         set-override-enabled
         set-module-overrides-enabled
         module-overrides-enabled?)
@@ -94,15 +96,14 @@
 (def knob-decimals (row)
   (if (< (knob-step row) 1) 2 0))
 
-(def knob-editor (row)
+(def knob-editor (row key compact)
   (let ((name (get row :name))
         (value (get row :value))
         (type (get row :type))
-        (choices (get row :choices))
-        (key (str "customize-" name)))
+        (choices (get row :choices)))
     (if (> (len choices) 0)
-      (let ((options (map choices |choice| (str choice))))
-        (dropdown :key key :width 12 :height 1.2 :font-size 10
+      (let ((options (map |choice| (str choice) choices)))
+        (dropdown :key key :width (if compact 8 12) :height (if compact 1.1 1.2) :font-size 10
           :value (str value) :options options
           :on-change (lambda (picked)
             (each (range 0 (len choices)) |index|
@@ -113,11 +114,11 @@
         (toggle :key key :value value
           :on-change (lambda (v) (set-knob name v)))
         (if (= type :number)
-          (number-picker :key key :width 8 :height 1.2 :font-size 10
+          (number-picker :key key :width (if compact 6 8) :height (if compact 1.1 1.2) :font-size 10
             :value value :min (knob-min row) :max (knob-max row)
             :step (knob-step row) :decimals (knob-decimals row)
             :on-change (lambda (v) (set-knob name v)))
-          (text-input :key key :width 14 :height 1.2 :font-size 10
+          (text-input :key key :width (if compact 8 14) :height (if compact 1.1 1.2) :font-size 10
             :value (str value)
             :on-change |v| (set-knob name v)))))))
 
@@ -133,7 +134,7 @@
             (label "(customized)" :font-size 8 :color :dim :bg :transparent)
             nil))
         (label (get row :doc) :font-size 8.5 :color :dim :bg :transparent))
-      (knob-editor row)
+      (knob-editor row (str "customize-" name) false)
       (button "Reset" :key (str "customize-reset-" name) :variant :ghost
         :disabled (not changed)
         :on-click |x y r| (reset-knob row)))))
