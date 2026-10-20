@@ -6,6 +6,10 @@ use std::fmt::Write;
 
 mod geometry;
 
+/// The colour of the theme slot a widget is painting for (see
+/// `ShaderEmitter::emit_slot_material`).
+pub const SLOT_COLOR_SYMBOL: &str = "slot-color";
+
 #[derive(Debug)]
 pub enum CodegenError {
     UnsupportedExpression(String),
@@ -57,12 +61,16 @@ impl SdfLightingQuality {
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 pub struct SdfShaderOptions {
     pub lighting_quality: SdfLightingQuality,
+    /// Leave out the rounded-box clip mask: for a built-in control's face,
+    /// which is never painted as a box's background.
+    pub skip_box_clip: bool,
 }
 
 impl SdfShaderOptions {
     pub const fn flat_lighting() -> Self {
         Self {
             lighting_quality: SdfLightingQuality::Flat,
+            skip_box_clip: false,
         }
     }
 
@@ -74,7 +82,7 @@ impl SdfShaderOptions {
             Err(std::env::VarError::NotPresent) => SdfLightingQuality::Full,
             Err(error) => return Err(format!("cannot read ESEQ_SDF_LIGHTING_QUALITY: {error}")),
         };
-        Ok(Self { lighting_quality })
+        Ok(Self { lighting_quality, skip_box_clip: false })
     }
 }
 
@@ -91,6 +99,9 @@ struct ShaderEmitter {
     theme: theme::Theme,
     current_region_id: Option<usize>,
     next_region_id: usize,
+    /// Theme slots whose widget is being inlined, innermost last: the slot's
+    /// own keyword inside its widget is the plain colour.
+    splicing: Vec<String>,
 }
 
 struct MaterialSpec<'a> {
@@ -168,6 +179,52 @@ impl ShaderEmitter {
             theme,
             current_region_id: None,
             next_region_id: 0,
+            splicing: Vec::new(),
+        }
+    }
+
+    /// A theme slot that holds a widget (`override-theme-slot`) paints with
+    /// that widget's shader wherever the slot's keyword is read, with
+    /// `slot-color` bound to the slot's colour. Only a widget whose shader is
+    /// a colour and takes no state, no hit regions and no time can stand in;
+    /// otherwise, or if it fails to emit here, the keyword stays the colour.
+    fn emit_slot_material(&mut self, slot: &str) -> Option<String> {
+        if self.splicing.iter().any(|s| s == slot) {
+            return None;
+        }
+        let widget = theme::slot_widget_in(&self.theme, slot)?;
+        let def = crate::widget_render::sdf_widget::sdf_widget_def(&widget)?;
+        if !def.state_uniforms.is_empty()
+            || def.region_count > 0
+            || def.animates
+            || !expr_returns_float4(&def.sdf_expr)
+        {
+            return None;
+        }
+        let spliced = Expression::List(vec![
+            Expression::Symbol("let".into()),
+            Expression::List(vec![Expression::List(vec![
+                Expression::Symbol(SLOT_COLOR_SYMBOL.into()),
+                Expression::Keyword(slot.to_string()),
+            ])]),
+            def.sdf_expr.clone(),
+        ]);
+        let (statements, scopes, type_scopes) =
+            (self.statements.len(), self.scopes.len(), self.type_scopes.len());
+        let regions = (self.current_region_id, self.next_region_id);
+        self.splicing.push(slot.to_string());
+        let result = self.emit_expr(&spliced);
+        self.splicing.pop();
+        match result {
+            Ok(out) => Some(out),
+            Err(error) => {
+                eprintln!("theme slot :{slot} widget '{widget}' not inlined: {error}");
+                self.statements.truncate(statements);
+                self.scopes.truncate(scopes);
+                self.type_scopes.truncate(type_scopes);
+                (self.current_region_id, self.next_region_id) = regions;
+                None
+            }
         }
     }
 
@@ -259,6 +316,11 @@ impl ShaderEmitter {
         if let Some(uniform_name) = self.uniform_symbols.get(name) {
             return uniform_name.clone();
         }
+        // Outside a slot it stands in for, a slot material is drawn as its
+        // own widget: its slot colour is the widget's input colour.
+        if name == SLOT_COLOR_SYMBOL {
+            return self.resolve_symbol("input-color");
+        }
         // Remap Lisp names to Metal-safe identifiers
         name.replace('-', "_")
     }
@@ -304,7 +366,9 @@ impl ShaderEmitter {
     fn expr_type(&self, expr: &Expression) -> Option<&'static str> {
         match expr {
             Expression::Keyword(_) => Some("float4"),
-            Expression::Symbol(name) if name == "input-color" => Some("float4"),
+            Expression::Symbol(name) if name == "input-color" || name == SLOT_COLOR_SYMBOL => {
+                Some("float4")
+            }
             Expression::Symbol(name) => self.resolve_symbol_type(name),
             Expression::List(items) if items.is_empty() => None,
             Expression::List(items) => {
@@ -344,6 +408,9 @@ impl ShaderEmitter {
             Expression::Symbol(name) => Ok(self.resolve_symbol(name)),
 
             Expression::Keyword(name) => {
+                if let Some(spliced) = self.emit_slot_material(name) {
+                    return Ok(spliced);
+                }
                 let color = theme::named_color_in(&self.theme, name)
                     .ok_or_else(|| CodegenError::UnknownThemeColor(name.clone()))?;
                 Ok(format!(
@@ -1297,6 +1364,7 @@ fn format_float(n: f64) -> String {
 fn expr_returns_float4(expr: &Expression) -> bool {
     match expr {
         Expression::Keyword(_) => true,
+        Expression::Symbol(name) => name == "input-color" || name == SLOT_COLOR_SYMBOL,
         Expression::List(items) if items.is_empty() => false,
         Expression::List(items) => {
             let Some(Expression::Symbol(head)) = items.first() else {
@@ -1307,7 +1375,8 @@ fn expr_returns_float4(expr: &Expression) -> bool {
                 "let" => items.last().is_some_and(expr_returns_float4),
                 "do" => items.last().is_some_and(expr_returns_float4),
                 "if" => items.get(2).is_some_and(expr_returns_float4),
-                "mix" => items.get(1).is_some_and(expr_returns_float4),
+                // A colour scaled or offset: `(* slot-color (rgba k k k 1))`.
+                "mix" | "+" | "-" | "*" | "/" => items.get(1).is_some_and(expr_returns_float4),
                 _ => false,
             }
         }
@@ -1525,6 +1594,7 @@ pub fn builtin_shader_symbols() -> HashSet<String> {
         "hit/active".to_string(),
         "hit/region".to_string(),
         "input-color".to_string(),
+        SLOT_COLOR_SYMBOL.to_string(),
     ])
 }
 
@@ -1599,17 +1669,20 @@ fn compile_sdf_to_metal_with_state_and_theme(
 /// `box_mask`: 1, or for a widget painting a rounded box's background
 /// (`box_clip` > 0, the box's normalized corner radius) the box's rounded
 /// shape, with the box shader's own geometry and edge so the two line up.
-/// Computed unconditionally: `fwidth` needs uniform control flow.
-fn emit_box_clip_mask(shader: &mut String, language: ShaderLanguage) {
-    let lines: &[&str] = match language {
-        ShaderLanguage::Metal => &[
+/// Computed unconditionally: `fwidth` needs uniform control flow. With
+/// `skip` it is just 1.
+fn emit_box_clip_mask(shader: &mut String, language: ShaderLanguage, skip: bool) {
+    let lines: &[&str] = match (language, skip) {
+        (ShaderLanguage::Metal, true) => &["float box_mask = 1.0;"],
+        (ShaderLanguage::Wgsl, true) => &["let box_mask: f32 = 1.0;"],
+        (ShaderLanguage::Metal, false) => &[
             "float2 box_p = float2((logical_uv.x - 0.5) * 2.0 * aspect, (logical_uv.y - 0.5) * 2.0);",
             "float box_r = min(in.box_clip, min(aspect, 1.0));",
             "float box_d = sdf_rounded_rect(box_p, float2(aspect, 1.0), box_r);",
             "float box_edge = fwidth(box_d) * 1.2;",
             "float box_mask = in.box_clip > 0.0 ? smoothstep(box_edge, -box_edge, box_d) : 1.0;",
         ],
-        ShaderLanguage::Wgsl => &[
+        (ShaderLanguage::Wgsl, false) => &[
             "let box_p: vec2<f32> = vec2<f32>((logical_uv.x - 0.5) * 2.0 * aspect, (logical_uv.y - 0.5) * 2.0);",
             "let box_r: f32 = min(input.box_clip, min(aspect, 1.0));",
             "let box_d: f32 = sdf_rounded_rect(box_p, vec2<f32>(aspect, 1.0), box_r);",
@@ -1674,7 +1747,7 @@ fn compile_sdf_to_metal_with_state_theme_and_options(
     // SDF units per design pixel (`sdf_design_px`), for chrome sized like a
     // box's :corner-radius / :border-width.
     writeln!(shader, "    float design_px = in.corner_radius;").unwrap();
-    emit_box_clip_mask(&mut shader, ShaderLanguage::Metal);
+    emit_box_clip_mask(&mut shader, ShaderLanguage::Metal, options.skip_box_clip);
 
     if region_count > 0 {
         // Hit region uniforms packed into color_b
@@ -1822,7 +1895,7 @@ fn compile_sdf_to_wgsl_with_state_theme_and_options(
     writeln!(shader, "    let value_t: f32 = input.value_t;").unwrap();
     writeln!(shader, "    let itime: f32 = input.itime;").unwrap();
     writeln!(shader, "    let design_px: f32 = input.corner_radius;").unwrap();
-    emit_box_clip_mask(&mut shader, ShaderLanguage::Wgsl);
+    emit_box_clip_mask(&mut shader, ShaderLanguage::Wgsl, options.skip_box_clip);
 
     if region_count > 0 {
         writeln!(shader, "    let hit_region: f32 = input.color_b.x;").unwrap();

@@ -131,6 +131,24 @@ is restyled by its theme slot: `(override-theme-slot :instrument-group-bg
 an override owned by your module, so detaching the package reverts it, which
 `apply-theme` does not.
 
+Knobs paint their parts from theme slots too (`content/ui/widgets.lisp`), so
+one slot restyles that part of every knob, the rest unchanged:
+`:widget-knob-filled` is the filled arc and its dot, `:widget-knob-track`
+the unfilled ring and the pointer. The widget is drawn inside the part's
+shape, so it is only a colour expression, and `slot-color` is the colour
+the slot would have been: scale it to keep the theme's hue.
+
+```lisp
+(defwidget brushed-arc
+  :width 2 :height 2
+  :shader (let ((k (+ 0.8 (* 0.2 (sin (* (length (vec2 x y)) 300.0))))))
+            (* slot-color (rgba k k k 1.0))))
+(override-theme-slot :widget-knob-filled "brushed-arc")
+```
+
+A widget standing in for a slot this way takes no `:state`. A knob given
+its own `:arc-color`, or p-locked, keeps that colour.
+
 ## Knobs, keys and hooks
 
 - A factory module's `defcustom` is a knob: `(setopt eseq.mixer/track-strip-width 14)`.

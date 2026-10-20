@@ -1674,20 +1674,42 @@ pub fn set_slot_widget_overrides(slots: impl IntoIterator<Item = (String, String
     }
 }
 
+/// A package's widget for slot `name`, if one holds it.
+fn slot_widget_override(name: &str) -> Option<String> {
+    // Runs per box: normalize only when a package holds a slot.
+    SLOT_WIDGET_OVERRIDES.with(|cell| {
+        let slots = cell.borrow();
+        if slots.is_empty() {
+            None
+        } else {
+            slots.get(&normalize_name(name)).cloned()
+        }
+    })
+}
+
 /// The widget theme slot `name` (a keyword such as `instrument-group-bg`)
 /// is painted with, if it holds one: a package's, else the theme's.
 pub fn named_widget(name: &str) -> Option<String> {
-    // Runs per box: normalize only when a package holds a slot.
-    SLOT_WIDGET_OVERRIDES
-        .with(|cell| {
-            let slots = cell.borrow();
-            if slots.is_empty() {
-                None
-            } else {
-                slots.get(&normalize_name(name)).cloned()
-            }
-        })
-        .or_else(|| named_widget_in(&current(), name))
+    slot_widget_override(name).or_else(|| named_widget_in(&current(), name))
+}
+
+/// [`named_widget`] with `theme` in place of the current one, for shader
+/// codegen that bakes against an explicit theme.
+pub fn slot_widget_in(theme: &Theme, name: &str) -> Option<String> {
+    slot_widget_override(name).or_else(|| named_widget_in(theme, name))
+}
+
+/// `widget` was just (re)defined. Shaders that inline it for a slot baked
+/// its old source, so a widget in use counts as a theme change.
+pub fn note_widget_redefined(widget: &str) {
+    let in_use = SLOT_WIDGET_OVERRIDES.with(|cell| cell.borrow().values().any(|w| w == widget))
+        || {
+            let widgets = current().widgets;
+            widgets != WidgetSlots::NONE && widgets.map().values().any(|w| w == widget)
+        };
+    if in_use {
+        THEME_GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// [`named_widget`] against an explicit theme.

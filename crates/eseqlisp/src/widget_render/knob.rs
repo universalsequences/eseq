@@ -14,6 +14,9 @@ pub struct KnobWidget;
 
 pub static KNOB_WIDGET: KnobWidget = KnobWidget;
 
+/// The `defwidget` that paints a knob when one is defined.
+pub const KNOB_FACE_WIDGET: &str = "knob-face";
+
 const KNOB_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
@@ -275,6 +278,20 @@ the theme. It is :size cells wide (default 2) and drawn round. Example: \
         node: &LayoutNode,
         viewport: super::WidgetViewport,
     ) -> Vec<GpuPrimitive> {
+        // The factory paints knobs with a Lisp shader (content/ui/widgets.lisp)
+        // whose theme slots a package can restyle; this built-in shader draws
+        // them when it is not loaded.
+        if let Some(face) = super::sdf_widget::face_primitive(
+            KNOB_FACE_WIDGET,
+            &[],
+            &[],
+            node.rect,
+            viewport,
+            normalized_value(&node.props),
+            [0.0; 4],
+        ) {
+            return vec![face];
+        }
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;
         let px_h = node.rect.height * viewport.cell_h;

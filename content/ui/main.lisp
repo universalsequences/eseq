@@ -15,6 +15,7 @@
 (load "@/ui/themes.lisp")
 (seq-theme-mac-osx-dark)
 (import eseq.materials)
+(import eseq.widgets)
 (import eseq.seq-core-state)
 ;; The host kinds (track, step, transport, …): loaded here so the host can
 ;; publish them; views still `(import eseq.kinds :refer (...))` what they use.

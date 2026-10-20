@@ -1908,6 +1908,15 @@ fn knob_number_component_layout(
 pub struct KnobNumberWidget;
 pub static KNOB_NUMBER_WIDGET: KnobNumberWidget = KnobNumberWidget;
 
+/// The `defwidget` that paints the knob ring when one is defined.
+pub const KNOB_NUMBER_FACE_WIDGET: &str = "knob-number-face";
+
+/// The face's `:state`, in the order the ring passes their values.
+const KNOB_NUMBER_FACE_STATES: [&str; 9] = [
+    "plock", "default-t", "origin-t", "arc-slot", "track-slot",
+    "track-r", "track-g", "track-b", "track-a",
+];
+
 impl WidgetDefinition for KnobNumberWidget {
     fn names(&self) -> &'static [&'static str] {
         &[
@@ -2334,13 +2343,16 @@ names are internal draw passes. Example: \
             b: get_f32_prop(&node.props, "plock-color-b", 0.862_745_1),
             a: 1.0,
         };
+        // An :arc-color / :track-color that parses replaces the theme slot.
+        let own_color = |prop: &str| node.props.get(prop).and_then(theme::parse_color_value);
+        let own_arc = own_color("arc-color");
+        let own_track = own_color("track-color");
         let arc_color = if plock_active {
             plock_color
         } else {
-            resolve_named_color(&node.props, "arc-color", theme::WIDGET_KNOB_FILLED())
+            own_arc.unwrap_or_else(theme::WIDGET_KNOB_FILLED)
         };
-        let track_color =
-            resolve_named_color(&node.props, "track-color", theme::WIDGET_KNOB_TRACK());
+        let track_color = own_track.unwrap_or_else(theme::WIDGET_KNOB_TRACK);
         let formatted = format_display(&node.props, value, decimals);
         let (mut display_text, fg) = if state.editing {
             (state.edit_text.clone(), edit_color)
@@ -2404,32 +2416,52 @@ names are internal draw passes. Example: \
         } else {
             0.0
         };
-        let mut prims = vec![GpuPrimitive::WidgetInstance {
-            widget_type: widget_type.to_string(),
-            instance: WidgetInstance {
-                ndc_min,
-                ndc_max,
-                value_t,
-                orientation: 0.0,
-                itime: viewport.time_seconds,
-                uniform_a: [
-                    if is_focused { 1.0 } else { 0.0 },
-                    if plock_active { 1.0 } else { 0.0 },
-                    default_t,
-                    origin_t,
-                ],
-                uniform_b: [0.0; 4],
-                uniform_c: [0.0; 4],
-                uniform_d: [0.0; 4],
-                color_a: [arc_color.r, arc_color.g, arc_color.b, arc_color.a],
-                color_b: [track_color.r, track_color.g, track_color.b, track_color.a],
-                color_c: [edit_color.r, edit_color.g, edit_color.b, edit_color.a],
-                color_d: [plock_color.r, plock_color.g, plock_color.b, plock_color.a],
-                corner_radius: 0.0,
-                pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
-            },
-            is_background: false,
-        }];
+        // The face paints a part with its theme slot (so a package's material)
+        // only where the knob would use the slot's colour.
+        let flag = |on: bool| if on { 1.0 } else { 0.0 };
+        let ring = super::sdf_widget::face_primitive(
+            KNOB_NUMBER_FACE_WIDGET,
+            &KNOB_NUMBER_FACE_STATES,
+            &[
+                flag(plock_active),
+                default_t,
+                origin_t,
+                flag(!plock_active && own_arc.is_none()),
+                flag(own_track.is_none()),
+                track_color.r,
+                track_color.g,
+                track_color.b,
+                track_color.a,
+            ],
+            knob_rect,
+            viewport,
+            value_t,
+            arc_color.to_rgba(),
+        )
+        .unwrap_or_else(|| {
+            GpuPrimitive::WidgetInstance {
+                widget_type: widget_type.to_string(),
+                instance: WidgetInstance {
+                    ndc_min,
+                    ndc_max,
+                    value_t,
+                    orientation: 0.0,
+                    itime: viewport.time_seconds,
+                    uniform_a: [flag(is_focused), flag(plock_active), default_t, origin_t],
+                    uniform_b: [0.0; 4],
+                    uniform_c: [0.0; 4],
+                    uniform_d: [0.0; 4],
+                    color_a: arc_color.to_rgba(),
+                    color_b: track_color.to_rgba(),
+                    color_c: edit_color.to_rgba(),
+                    color_d: plock_color.to_rgba(),
+                    corner_radius: 0.0,
+                    pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                },
+                is_background: false,
+            }
+        });
+        let mut prims = vec![ring];
 
         let base_min = node
             .props

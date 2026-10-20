@@ -1729,6 +1729,10 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
             .hash(&mut hasher);
     }
     theme::generation().hash(&mut hasher);
+    if node.widget_type == "knob" {
+        // Paints with a defwidget (`knob-face`) that may be defined later.
+        sdf_widget::sdf_widget_registry_generation().hash(&mut hasher);
+    }
     viewport.cell_w.to_bits().hash(&mut hasher);
     viewport.cell_h.to_bits().hash(&mut hasher);
     viewport.vp_w.to_bits().hash(&mut hasher);

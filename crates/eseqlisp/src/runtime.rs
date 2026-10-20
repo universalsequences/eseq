@@ -542,9 +542,19 @@ fn fill_sdf_state_props(
 fn compile_expanded_sdf(
     expanded: &crate::parser::Expression,
     state_symbols: &[String],
+    options: crate::lang::sdf_codegen::SdfShaderOptions,
 ) -> Result<crate::lang::sdf_codegen::SdfShaderOutput, String> {
-    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
     compile_sdf_for_platform_backend(expanded, state_symbols, options).map_err(|e| e.to_string())
+}
+
+/// `options` as `defwidget` `widget` compiles with them: a built-in
+/// control's face skips the box clip mask.
+fn widget_shader_options(
+    mut options: crate::lang::sdf_codegen::SdfShaderOptions,
+    widget: &str,
+) -> crate::lang::sdf_codegen::SdfShaderOptions {
+    options.skip_box_clip = crate::widget_render::sdf_widget::is_builtin_face(widget);
+    options
 }
 
 /// Plan a shader's state (kind-bindings spec §7.3) and hold it to the
@@ -569,7 +579,8 @@ fn compile_sdf_value(value: &Value, vm: &mut VM) -> Result<SdfCompileResult, Str
     let expr = crate::lang::sdf_codegen::value_to_expression(value).map_err(|e| e.to_string())?;
     let expanded = expand_sdf_expression(&expr, vm)?;
     let state_symbols = plan_sdf_state("sdf->metal", vm, &[], &expanded)?.uniforms();
-    let output = compile_expanded_sdf(&expanded, &state_symbols)?;
+    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
+    let output = compile_expanded_sdf(&expanded, &state_symbols, options)?;
     Ok(SdfCompileResult {
         output,
         expanded_expr: expanded,
@@ -595,7 +606,10 @@ fn compile_defwidget_shader(
     let expanded = expand_sdf_expression(&expr, vm).map_err(shader_error)?;
     let plan = plan_sdf_state(widget, vm, state_names, &expanded)?;
     let state_symbols = plan.uniforms();
-    let output = compile_expanded_sdf(&expanded, &state_symbols).map_err(shader_error)?;
+    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env().map_err(shader_error)?;
+    let output =
+        compile_expanded_sdf(&expanded, &state_symbols, widget_shader_options(options, widget))
+            .map_err(shader_error)?;
     Ok((
         SdfCompileResult {
             output,
@@ -660,6 +674,7 @@ pub fn recompile_theme_dependent_sdf_shaders() -> bool {
         if !expression_contains_keyword(&def.sdf_expr) {
             continue;
         }
+        let options = widget_shader_options(options, &def.name);
         match compile_sdf_for_platform_backend(&def.sdf_expr, &def.state_uniforms, options) {
             Ok(output) => {
                 if output.shader_source != def.shader_source {
@@ -1945,6 +1960,7 @@ impl Runtime {
                     paint_margin,
                     animates,
                 });
+                crate::theme::note_widget_redefined(&name);
 
                 let widget_type = name.clone();
                 vm.register_ref_aware_native_with_vm(&name, move |args, vm| {
@@ -2254,7 +2270,7 @@ impl Runtime {
             (
                 "override-theme-slot",
                 "(override-theme-slot :slot \"widget\")",
-                "Paint every box whose background is theme slot :slot with defwidget \"widget\", while the calling module's overrides stand (detaching or disabling it reverts).",
+                "Paint every box whose background is theme slot :slot with defwidget \"widget\", and every shader that reads the slot's colour (a knob's :widget-knob-filled / :widget-knob-track) with it inlined, `slot-color` bound to that colour, while the calling module's overrides stand (detaching or disabling it reverts).",
             ),
             (
                 "instance-ref",
@@ -5751,6 +5767,78 @@ mod theme_shader_recompile_tests {
 
         // Guarded by theme generation: a second pass is a no-op.
         assert!(!super::recompile_theme_dependent_sdf_shaders());
+    }
+
+    #[test]
+    fn a_builtin_face_compiles_without_the_box_clip_mask() {
+        let mut runtime = super::Runtime::new();
+        runtime
+            .eval_str(
+                "(defwidget knob-face :width 2 :height 2 :shader :accent)
+                 (defwidget not-a-face :width 2 :height 2 :shader :accent)",
+            )
+            .unwrap();
+        let clips = |name: &str| sdf_widget_def(name).unwrap().shader_source.contains("box_d");
+        assert!(!clips("knob-face"));
+        assert!(clips("not-a-face"));
+
+        // A theme change re-emits it the same way.
+        super::recompile_theme_dependent_sdf_shaders();
+        let mut theme = theme::current();
+        theme.accent = Color::from_hex(0x04, 0x05, 0x06);
+        theme::set_current(theme);
+        assert!(super::recompile_theme_dependent_sdf_shaders());
+        assert!(!clips("knob-face"));
+        assert!(clips("not-a-face"));
+    }
+
+    #[test]
+    fn a_slot_widget_is_inlined_where_shaders_read_the_slot() {
+        let mut runtime = super::Runtime::new();
+        runtime
+            .eval_str(
+                "(defwidget splice-face :width 2 :height 2
+                   :shader (mix (rgba 0 0 0 0) :widget-knob-filled 1.0))
+                 (defwidget splice-brass :width 2 :height 2
+                   :shader (mix (rgba 0.123 0.456 0.789 1.0) slot-color 0.5))
+                 (defwidget splice-seeded :width 2 :height 2 :state (seed)
+                   :shader (rgba seed 0.0 0.0 1.0))
+                 (defwidget splice-self :width 2 :height 2
+                   :shader (mix :widget-knob-filled (rgba 0.321 0.0 0.0 1.0) 0.5))",
+            )
+            .unwrap();
+        let source = || sdf_widget_def("splice-face").unwrap().shader_source.clone();
+        let use_slot = |widget: &str| {
+            theme::set_slot_widget_overrides([("widget-knob-filled".to_string(), widget.to_string())]);
+            super::recompile_theme_dependent_sdf_shaders();
+        };
+        super::recompile_theme_dependent_sdf_shaders();
+        let plain = source();
+
+        use_slot("splice-brass");
+        assert!(source().contains("0.123"), "the slot's widget is inlined");
+
+        // A widget that takes state has nothing to read it from here.
+        use_slot("splice-seeded");
+        assert_eq!(source(), plain);
+
+        // One that reads its own slot gets the colour there, not itself.
+        use_slot("splice-self");
+        assert!(source().contains("0.321"));
+
+        // Redefining the widget in use re-emits the shaders inlining it.
+        runtime
+            .eval_str(
+                "(defwidget splice-self :width 2 :height 2
+                   :shader (rgba 0.654 0.0 0.0 1.0))",
+            )
+            .unwrap();
+        assert!(super::recompile_theme_dependent_sdf_shaders());
+        assert!(source().contains("0.654"));
+
+        theme::set_slot_widget_overrides(std::iter::empty());
+        super::recompile_theme_dependent_sdf_shaders();
+        assert_eq!(source(), plain);
     }
 }
 
