@@ -204,22 +204,58 @@ mod inner {
 
     impl TiledCaptureTarget {
         pub fn rgba(&self) -> Vec<u8> {
-            let width = self.texture.width();
-            let height = self.texture.height();
-            let mut pixels = vec![0u8; width * height * 4];
-            unsafe {
-                self.texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
-                    NonNull::new(pixels.as_mut_ptr().cast()).unwrap(), width * 4,
-                    MTLRegion {
-                        origin: MTLOrigin { x: 0, y: 0, z: 0 },
-                        size: MTLSize { width, height, depth: 1 },
-                    }, 0,
-                );
+            let (width, height) = (self.texture.width() as u32, self.texture.height() as u32);
+            self.rgba_region(crate::ui::capture::PixelRegion { x: 0, y: 0, width, height }).1
+        }
+
+        /// The target's RGBA pixels in `region`, clamped to the target, and
+        /// the clamped region.
+        pub fn rgba_region(
+            &self,
+            region: crate::ui::capture::PixelRegion,
+        ) -> (crate::ui::capture::PixelRegion, Vec<u8>) {
+            let (width, height) = (self.texture.width() as u32, self.texture.height() as u32);
+            let x = region.x.min(width);
+            let y = region.y.min(height);
+            let region = crate::ui::capture::PixelRegion {
+                x, y, width: region.width.min(width - x), height: region.height.min(height - y),
+            };
+            let mut pixels = vec![0u8; region.width as usize * region.height as usize * 4];
+            if !pixels.is_empty() {
+                unsafe {
+                    self.texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                        NonNull::new(pixels.as_mut_ptr().cast()).unwrap(), region.width as usize * 4,
+                        MTLRegion {
+                            origin: MTLOrigin { x: x as usize, y: y as usize, z: 0 },
+                            size: MTLSize { width: region.width as usize, height: region.height as usize, depth: 1 },
+                        }, 0,
+                    );
+                }
             }
             for pixel in pixels.chunks_exact_mut(4) {
                 pixel.swap(0, 2);
             }
-            pixels
+            (region, pixels)
+        }
+
+        /// The target's pixels in `region` as a PNG, each PNG pixel `scale`
+        /// target pixels across.
+        pub fn region_png(&self, region: crate::ui::capture::PixelRegion, scale: u32) -> Result<Vec<u8>, String> {
+            let (region, pixels) = self.rgba_region(region);
+            let image = image::RgbaImage::from_raw(region.width, region.height, pixels)
+                .ok_or("the region's pixels do not fit its size")?;
+            let scale = scale.max(1);
+            let image = if scale > 1 {
+                image::imageops::resize(&image, (image.width() / scale).max(1), (image.height() / scale).max(1),
+                    image::imageops::FilterType::Triangle)
+            } else {
+                image
+            };
+            let mut png = Vec::new();
+            image::DynamicImage::ImageRgba8(image)
+                .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .map_err(|error| error.to_string())?;
+            Ok(png)
         }
 
         pub fn save_png(&self, path: &std::path::Path) -> Result<(), image::ImageError> {
@@ -4354,6 +4390,14 @@ fragment float4 live_spectrogram_frag(
                 .unwrap_or(1.0);
             let measurer = PropTextMeasurer::new(scale)?;
             Some(Box::new(measurer))
+        }
+
+        /// The window's drawable size in pixels, or None without a window.
+        pub fn window_pixel_size(&self) -> Option<(u32, u32)> {
+            self.window.as_ref().map(|window| {
+                let size = window.inner_size();
+                (size.width, size.height)
+            })
         }
 
         pub fn cell_dimensions(&self) -> (f32, f32) {

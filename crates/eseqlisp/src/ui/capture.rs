@@ -204,7 +204,7 @@ pub fn layout_report(frame: &RenderFrame, cell: (f32, f32), size: (u32, u32))
                         problems.push(LayoutProblem::Clipped);
                     }
                 }
-                pixel_region(rect, cell)
+                PixelRegion::from_rect(rect, cell)
             });
             nodes.push(KeyedNode { key: key.to_string(), widget_type: node.widget_type.clone(), region, problems });
         });
@@ -341,12 +341,16 @@ fn source_symbol(node: &LayoutNode) -> Option<&str> {
     }
 }
 
-fn pixel_region(rect: Rect, cell: (f32, f32)) -> PixelRegion {
-    PixelRegion {
-        x: (rect.col * cell.0).max(0.0).floor() as u32,
-        y: (rect.row * cell.1).max(0.0).floor() as u32,
-        width: (rect.width * cell.0).max(0.0).ceil() as u32,
-        height: (rect.height * cell.1).max(0.0).ceil() as u32,
+impl PixelRegion {
+    /// The pixels a layout rectangle (cells) covers at `cell` pixels a cell:
+    /// its origin rounded down, its size up.
+    pub fn from_rect(rect: Rect, cell: (f32, f32)) -> Self {
+        PixelRegion {
+            x: (rect.col * cell.0).max(0.0).floor() as u32,
+            y: (rect.row * cell.1).max(0.0).floor() as u32,
+            width: (rect.width * cell.0).max(0.0).ceil() as u32,
+            height: (rect.height * cell.1).max(0.0).ceil() as u32,
+        }
     }
 }
 
@@ -372,7 +376,7 @@ pub fn hooks_at(frame: &RenderFrame, cell: (f32, f32), size: (u32, u32), (x, y):
             if !overlay && col >= visible.col && col < visible.col + visible.width
                 && row >= visible.row && row < visible.row + visible.height
             {
-                stack.push(WidgetHooks::of(node, pixel_region(rect, cell)));
+                stack.push(WidgetHooks::of(node, PixelRegion::from_rect(rect, cell)));
             }
         });
     stack.reverse();
@@ -415,7 +419,7 @@ pub fn hook_overview(frame: &RenderFrame, cell: (f32, f32), size: (u32, u32))
             if overlay || visible.width <= 0.0 || visible.height <= 0.0 {
                 return;
             }
-            let hooks = WidgetHooks::of(node, pixel_region(rect, cell));
+            let hooks = WidgetHooks::of(node, PixelRegion::from_rect(rect, cell));
             if let Some(part) = &hooks.part {
                 note(&mut overview.parts, part, hooks.region);
             }

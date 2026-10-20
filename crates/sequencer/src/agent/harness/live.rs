@@ -14,10 +14,12 @@ use super::{lock, ToolResult};
 
 pub const TRY_TOOL: &str = "try";
 pub const KEEP_TOOL: &str = "keep_tried";
+pub const LOOK_TOOL: &str = "look";
+pub const WHAT_DRAWS_LIVE_TOOL: &str = "what_draws_live";
 
 /// Whether `name` is one of these tools.
 pub fn is_live_tool(name: &str) -> bool {
-    name == TRY_TOOL || name == KEEP_TOOL
+    [TRY_TOOL, KEEP_TOOL, LOOK_TOOL, WHAT_DRAWS_LIVE_TOOL].contains(&name)
 }
 
 /// What a live call asks the app to do.
@@ -26,6 +28,10 @@ pub enum LiveAction {
     Try(String),
     /// Press the pane's Keep: what is tried goes into init.lisp.
     Keep,
+    /// Show the user's window, or the tile showing `buffer`, with its hooks.
+    Look { buffer: Option<String> },
+    /// The hooks at pixel (x, y) of `look`'s image of `buffer`.
+    WhatDraws { buffer: String, x: f32, y: f32 },
 }
 
 /// How long a live call waits for the app before giving up: the UI thread
@@ -35,7 +41,7 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 /// One live call, waiting for the UI thread.
 pub struct LiveRequest {
     pub action: LiveAction,
-    reply: mpsc::Sender<Result<String, String>>,
+    reply: mpsc::Sender<ToolResult>,
     /// Cleared when the tool call stops waiting (cancelled, timed out).
     waiting: Arc<AtomicBool>,
 }
@@ -58,13 +64,58 @@ impl LiveRequest {
 
     /// Answer the waiting tool call: what the app now shows, or why not.
     pub fn reply(self, result: Result<String, String>) {
+        self.answer(match result {
+            Ok(text) => ToolResult::ok(text),
+            Err(why) => ToolResult::error(why),
+        });
+    }
+
+    /// Answer the waiting tool call with a whole result (an image too).
+    pub fn answer(self, result: ToolResult) {
         let _ = self.reply.send(result);
     }
 }
 
 /// The live tools' Messages API definitions.
 pub fn tools() -> Vec<Value> {
-    vec![try_tool(), keep_tool()]
+    vec![try_tool(), keep_tool(), look_tool(), what_draws_live_tool()]
+}
+
+fn look_tool() -> Value {
+    json!({
+        "name": LOOK_TOOL,
+        "description": "See the user's window as they see it now: their project, selection, open \
+            tiles and installed packages (the headless copy `capture` draws has its own). Without \
+            `buffer`: an image of the whole window and the buffers its tiles show. With `buffer`: \
+            an image of that tile and the hooks that restyle what is in it (parts, theme slots, \
+            building functions). Look first when the user refers to what is on their screen; it \
+            changes nothing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "buffer": {"type": "string", "description": "A buffer one of the user's tiles shows, e.g. `*fx*`"}
+            }
+        }
+    })
+}
+
+fn what_draws_live_tool() -> Value {
+    json!({
+        "name": WHAT_DRAWS_LIVE_TOOL,
+        "description": "What draws pixel (x, y) of `look`'s image of a tile of the user's window: the \
+            widgets there, topmost first, each with the hooks that restyle it, least fragile \
+            first: theme slots (override-theme-slot), its part (restyle), the function that built \
+            it (override :around). Look at the tile first; it changes nothing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "buffer": {"type": "string", "description": "The tile's buffer, as given to `look`"},
+                "x": {"type": "integer", "description": "Pixel column in look's image"},
+                "y": {"type": "integer", "description": "Pixel row in look's image"}
+            },
+            "required": ["buffer", "x", "y"]
+        }
+    })
 }
 
 fn keep_tool() -> Value {
@@ -103,13 +154,19 @@ fn try_tool() -> Value {
 /// Queue live tool `name` for the UI thread and wait for its answer, giving
 /// up when the turn is cancelled or the app does not answer in time.
 pub(super) fn call(queue: &Mutex<Vec<LiveRequest>>, cancel: &AtomicBool, name: &str, input: &Value) -> ToolResult {
-    let action = if name == KEEP_TOOL {
-        LiveAction::Keep
-    } else {
-        match input["code"].as_str().filter(|code| !code.trim().is_empty()) {
-            Some(code) => LiveAction::Try(code.to_string()),
+    let text = |key: &str| input[key].as_str().filter(|value| !value.trim().is_empty()).map(str::to_string);
+    let action = match name {
+        KEEP_TOOL => LiveAction::Keep,
+        LOOK_TOOL => LiveAction::Look { buffer: text("buffer") },
+        WHAT_DRAWS_LIVE_TOOL => match (text("buffer"), input["x"].as_f64(), input["y"].as_f64()) {
+            (Some(buffer), Some(x), Some(y)) => LiveAction::WhatDraws { buffer, x: x as f32, y: y as f32 },
+            _ => return ToolResult::error("`buffer`, `x` and `y` are required"),
+        },
+        TRY_TOOL => match text("code") {
+            Some(code) => LiveAction::Try(code),
             None => return ToolResult::error("`code` is required"),
-        }
+        },
+        _ => return ToolResult::error(format!("`{name}` is not a live tool")),
     };
     let (reply, answer) = mpsc::channel();
     let waiting = Arc::new(AtomicBool::new(true));
@@ -118,8 +175,7 @@ pub(super) fn call(queue: &Mutex<Vec<LiveRequest>>, cancel: &AtomicBool, name: &
     let deadline = Instant::now() + ANSWER_TIMEOUT;
     loop {
         match answer.recv_timeout(Duration::from_millis(100)) {
-            Ok(Ok(text)) => return ToolResult::ok(text),
-            Ok(Err(why)) => return ToolResult::error(why),
+            Ok(result) => return result,
             Err(mpsc::RecvTimeoutError::Disconnected) => return ToolResult::error("The app dropped the request."),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }

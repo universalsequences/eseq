@@ -38,14 +38,19 @@ made there changes nothing they can see. Use them to check a layout before
 
 ## Finding what draws it
 
-- `capture` the buffer, then `what_draws` the spot the user means (pixel x,
-  y in that capture). It lists the widgets there, innermost first, each
-  with its hooks: the theme slots it paints with, its part, its background
-  widget, the face it paints with, and the function that built it. The
-  capture itself lists the buffer's parts, slots and building functions.
+- `look` at the user's window first: it shows their project, selection
+  and packages as they see them, which the headless copy does not have
+  (another instrument on the selected track, other tracks). `look` with a
+  buffer shows that tile and lists its hooks; `what_draws_live` the spot
+  they mean (pixel x, y in that image). Neither changes anything.
+- In the headless copy, `capture` a buffer, then `what_draws` a spot of it,
+  to check your own changes. Both list, for each widget, its hooks: the
+  theme slots it paints with, its part, its background widget, the face it
+  paints with, and the function that built it.
 - Take the least fragile hook that changes what the user asked for:
-  1. a theme slot, `override-theme-slot` (every use of that colour, in
-     every panel; it follows the user's theme switches);
+  1. a theme slot, `override-theme-slot` (every box background and
+     control face painted from that slot, in every panel; text in that
+     colour stays a colour);
   2. a part, `restyle` (that kind of widget wherever it is built);
   3. the building function, `override … :around` merging into what it
      returns (that function's widgets);

@@ -11,7 +11,7 @@
 #[cfg(target_os = "macos")]
 mod stdio;
 #[cfg(target_os = "macos")]
-mod tools;
+pub(crate) mod tools;
 
 use std::path::PathBuf;
 

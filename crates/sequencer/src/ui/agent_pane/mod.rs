@@ -7,6 +7,8 @@
 
 #[cfg(target_os = "macos")]
 pub(crate) mod bench;
+#[cfg(target_os = "macos")]
+mod live_view;
 mod tried;
 
 use std::sync::OnceLock;
@@ -368,11 +370,20 @@ pub(crate) fn refresh() {
 /// Once per frame: when the conversation changed since `seen`, present the
 /// new generation so the pane redraws. Nothing happens until the pane is
 /// first used.
-pub(crate) fn publish(editor: &mut Editor, seen: &mut u64) {
+/// `backend`, when there is a window, answers the agent's looks at it.
+#[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
+pub(crate) fn publish(editor: &mut Editor, mut backend: Option<&mut crate::AppBackend>, seen: &mut u64) {
     let Some(Ok(session)) = SESSION.get() else { return };
     let requests = session.take_live_requests();
     let served = !requests.is_empty();
     for request in requests.into_iter().filter(|request| !request.abandoned()) {
+        #[cfg(target_os = "macos")]
+        if let Some(result) =
+            backend.as_deref_mut().and_then(|backend| live_view::serve(editor, backend, &request.action))
+        {
+            request.answer(result);
+            continue;
+        }
         let result = tried::serve(editor, &request.action);
         request.reply(result);
     }

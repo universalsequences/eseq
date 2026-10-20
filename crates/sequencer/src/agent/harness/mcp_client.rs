@@ -31,6 +31,21 @@ impl ToolResult {
         Self { content: vec![json!({"type": "text", "text": text.into()})], is_error: true, images: Vec::new() }
     }
 
+    /// This result with `png` shown first.
+    pub fn with_png(mut self, png: Vec<u8>) -> Self {
+        use base64::Engine as _;
+        self.content.insert(0, json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": base64::engine::general_purpose::STANDARD.encode(&png),
+            },
+        }));
+        self.images.insert(0, png);
+        self
+    }
+
     /// The result's text, joined.
     pub fn text(&self) -> String {
         content_text(&self.content)

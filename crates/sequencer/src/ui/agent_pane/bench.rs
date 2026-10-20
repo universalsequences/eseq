@@ -91,7 +91,7 @@ pub(crate) fn run(messages: Vec<String>) -> Result<(), Box<dyn std::error::Error
         }
         // Redraw the pane as the app's frame does, for a later /capture.
         agent.touch();
-        super::publish(&mut app.editor, &mut seen);
+        super::publish(&mut app.editor, None, &mut seen);
     }
     if let Some(dir) = agent.conversation_dir() {
         println!("conversation: {}", dir.join("conversation.json").display());

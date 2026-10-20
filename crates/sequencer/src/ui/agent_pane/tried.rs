@@ -207,6 +207,9 @@ pub(super) fn serve(editor: &mut Editor, action: &LiveAction) -> Result<String, 
     match action {
         LiveAction::Try(code) => try_forms(editor, &try_file(), code),
         LiveAction::Keep => keep(editor, &try_file(), &user_init_path()),
+        LiveAction::Look { .. } | LiveAction::WhatDraws { .. } => {
+            Err("There is no window to look at here.".to_string())
+        }
     }
 }
 

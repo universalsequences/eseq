@@ -775,7 +775,7 @@ fn capture_size(args: &Json) -> (u32, u32) {
 }
 
 /// The hooks a capture shows, at most [`HOOK_LINES`] per kind.
-fn hook_lines(hooks: &eseqlisp::ui::capture::HookOverview) -> Vec<String> {
+pub(crate) fn hook_lines(hooks: &eseqlisp::ui::capture::HookOverview) -> Vec<String> {
     let mut lines = Vec::new();
     let mut section = |title: &str, form: &str, uses: &[eseqlisp::ui::capture::HookUse]| {
         if uses.is_empty() {
@@ -812,12 +812,21 @@ fn what_draws(
         Ok(stack) => stack,
         Err(problem) => return ToolOutput::error(with_log(problem, &log)),
     };
+    ToolOutput::text(with_log(hooks_text(buffer, point, &stack), &log))
+}
+
+/// The widgets at `point` of `buffer`, topmost first, each with its hooks.
+pub(crate) fn hooks_text(
+    buffer: &str,
+    point: (f32, f32),
+    stack: &[eseqlisp::ui::capture::WidgetHooks],
+) -> String {
     if stack.is_empty() {
-        return ToolOutput::text(format!("Nothing is drawn at {},{} in {buffer}.", point.0, point.1));
+        return format!("Nothing is drawn at {},{} in {buffer}.", point.0, point.1);
     }
     let mut lines = vec![format!("At {},{} in {buffer}, topmost first:", point.0, point.1)];
     let mut previous_builder = None;
-    for hooks in &stack {
+    for hooks in stack {
         let key = hooks.key.as_deref().map(|key| format!(" {key:?}")).unwrap_or_default();
         lines.push(format!("{}{key} at {}", hooks.widget_type, hooks.region));
         for (slot, read_by) in &hooks.slots {
@@ -838,7 +847,7 @@ fn what_draws(
         }
         previous_builder = hooks.built_by.as_ref();
     }
-    ToolOutput::text(with_log(lines.join("\n"), &log))
+    lines.join("\n")
 }
 
 /// Evaluate `code` and settle, as the live loop does after an evaluation
