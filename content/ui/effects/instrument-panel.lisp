@@ -570,7 +570,7 @@
     (if (< slot-idx 0)
       (box :width 0 :height 0)
       (let ((slot (nth (get inst :slots) slot-idx)))
-        (box :debug-name "rack-slot-fx-drop-panel"
+        (box :debug-name "rack-slot-fx-drop-panel" :part "fx/drop-zone"
              :background-color :buffer-bg
              :corner-radius 10
              :border-color :mixer-strip-border

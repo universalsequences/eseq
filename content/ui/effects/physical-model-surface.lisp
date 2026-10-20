@@ -53,7 +53,7 @@
       (page (nth pages active)))
     (h-stack :height 9.8 :gap 0.25 :align :start :debug-name "pm-surface"
       (v-stack :gap 0.2 (block (nth blocks 0) 0 active) (block (nth blocks 1) 1 active))
-      (box :debug-name "pm-display" :width 36 :height 9.8 :padding 0.35 :corner-radius 2
+      (box :debug-name "pm-display" :part "instrument/screen" :width 36 :height 9.8 :padding 0.35 :corner-radius 2
         :background-color (accent)
         (v-stack :gap 0.2
           (box :width 35.3 :height 0.7 :background-color (ink)

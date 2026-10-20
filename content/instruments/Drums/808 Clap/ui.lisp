@@ -266,7 +266,7 @@
     :background-color (if (= (idclap-section) section) :black (idclap-c))
     :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)))
 (def idclap-display ()
-  (box :debug-name "clap-display" :width 35.8 :height 9.8 :padding 0.3 :background-color (idclap-c)
+  (box :debug-name "clap-display" :part "instrument/screen" :width 35.8 :height 9.8 :padding 0.3 :background-color (idclap-c)
     (v-stack :gap 0.15
       (label (str "808 CLAP / " (nth '("BURSTS" "TAIL" "FILTERS" "OUTPUT" "BANK" "BANK FX") (idclap-section)))
         :width 35.2 :height 0.7 :h-align :center :v-align :center :font-size 8 :color (idclap-c) :bg :black)

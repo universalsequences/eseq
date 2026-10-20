@@ -88,6 +88,9 @@ pub fn register_widget_natives(vm: &mut VM) {
         vm.register_ref_aware_native_with_vm(widget, move |args, vm| {
             let mut widget = build_widget(&widget_type, args);
             vm.qualify_widget_stable_key(&mut widget);
+            // Restyled first, so what follows binds the restyled props
+            // (a restyle's `:background` shader reads the part's subject).
+            let mut widget = vm.restyle_part(widget);
             if widget_type == "box"
                 && let Err(error) = fill_box_background_instance_fields(vm, &mut widget)
             {

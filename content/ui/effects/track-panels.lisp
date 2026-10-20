@@ -437,7 +437,7 @@
       (box :width 0.5)
       (label (eseq.seqv-track-params/seqv-param-name mode) :font-size 10 :color :dim :bg :transparent :v-align :center :flex 1)
       (number-picker
-        :key (str "step-param-" key)
+        :key (str "step-param-" key) :part "step/param-picker"
         :value (step-param-binding es key)
         :min (step-param-min mode)
         :max (step-param-max mode)

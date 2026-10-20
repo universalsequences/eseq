@@ -70,10 +70,46 @@ made there changes nothing they can see. Use them to check a layout before
   `enable-override` switch it; `(disable-module-overrides some.module)` switches
   off everything a package overrides.
 
+### Restyling a part
+
+Widgets the factory marks with `:part` are restyled by name, wherever they
+are built: inside a subtree, inside an instrument's own UI, in every
+instrument at once. The function gets the widget as built and returns what
+to draw, usually `(merge node …)`:
+
+```lisp
+(restyle "instrument/screen"
+  |node| (merge node :background "tv-screen"
+                     :color (get node :background-color)
+                     :background-color (rgba 0 0 0 0)))
+```
+
+Reach for a part before an override that walks a widget tree. Like an
+override, a `restyle` belongs to its module: detaching the package reverts
+it, and one that throws is switched off. `(parts)` lists the parts built
+so far; `search_source` for `:part "` finds where each is built.
+
+| Part | What | Also on the node |
+|---|---|---|
+| `instrument/screen` | an instrument's display screen (PM, drum kits, Digi Syn, …) | its colour in `:background-color` |
+| `fx/drop-zone` | the *fx* panel's effect drop boxes, a rack slot's too | |
+| `step/param-picker` | a *step* parameter's number picker | |
+| `sequencer/step` | a step cell's shell | `:step`, `:track` |
+| `sequencer/track-name` | a track's name plate in the sequencer | `:track` |
+| `sequencer/track-editor` | an expanded track's editor panel | |
+| `mixer/bus-name` | a bus strip's name button | `:bus` |
+| `mixer/output-picker` | a strip's output dropdown | `:track` or `:bus` |
+| `mixer/drop-zone` | the mixer's "drop sounds here" box | |
+
+A part's subject (`:track`, `:bus`, `:step`) is the live instance: read its
+fields (`(get node :track)` then `t.audible`, `t.color`), or let a
+background widget whose shader reads `track.color` bind to it.
+
 ### Changing one prop deep inside
 
-A widget is a dict, so an `:around` can change what `original` returned
-instead of copying a long function. Find the widget by its authored `:key`:
+For a widget with no `:part`, an `:around` can change what `original`
+returned instead of copying a long function. A widget is a dict; find it by
+its authored `:key`:
 
 ```lisp
 (def recolor (w key)

@@ -1975,6 +1975,7 @@ impl Runtime {
                     }
                     let mut widget = crate::widgets::build_widget(&widget_type, args);
                     vm.qualify_widget_stable_key(&mut widget);
+                    let mut widget = vm.restyle_part(widget);
                     if let Value::Map(map) = &mut widget
                         && let Err(error) = fill_sdf_state_props(vm, &widget_type, map)
                     {
@@ -1996,6 +1997,7 @@ impl Runtime {
                 .register_ref_aware_native_with_vm(widget_name, move |args, vm| {
                     let mut widget = crate::widgets::build_widget(&wtype, args);
                     vm.qualify_widget_stable_key(&mut widget);
+                    let mut widget = vm.restyle_part(widget);
                     if let Value::Map(map) = &mut widget {
                         if let Some(material_cell) = map.get("material") {
                             let material_val = material_cell.borrow().clone();
@@ -2271,6 +2273,16 @@ impl Runtime {
                 "override-theme-slot",
                 "(override-theme-slot :slot \"widget\")",
                 "Paint every box whose background is theme slot :slot with defwidget \"widget\", and every shader that reads the slot's colour (a knob's :widget-knob-filled / :widget-knob-track, a button's :button-secondary-bg, a number picker's :dropdown-bg, their :button-border) with it inlined, `slot-color` bound to that colour, while the calling module's overrides stand (detaching or disabling it reverts).",
+            ),
+            (
+                "restyle",
+                "(restyle \"area/part\" (lambda (node) ...))",
+                "Pass every widget built with :part \"area/part\" to the function, built, and draw what it returns (usually (merge node ...)) in its place, wherever the part is built, while the calling module's overrides stand (detaching or disabling it reverts). A part may carry its subject (:track, :bus, :step) to read. (parts) lists the parts built so far.",
+            ),
+            (
+                "parts",
+                "(parts)",
+                "The :part names widgets have been built with so far, sorted: what (restyle ...) can target.",
             ),
             (
                 "instance-ref",
@@ -5878,7 +5890,13 @@ mod observer_tests {
             "dependent buffer must rerender: {:?}",
             report.rerendered_roots
         );
-        let text = runtime
+        let text = pending_tree_text(&mut runtime);
+        assert!(text.contains("override-grid"), "{text}");
+    }
+
+    /// Every widget tree the runtime has published since the last take.
+    fn pending_tree_text(runtime: &mut Runtime) -> String {
+        runtime
             .take_pending_buffer_widget_trees()
             .iter()
             .map(|t| match t {
@@ -5886,8 +5904,64 @@ mod observer_tests {
                 crate::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => format!("{tree:?}"),
             })
             .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("override-grid"), "{text}");
+            .join("\n")
+    }
+
+    #[test]
+    fn a_restyle_redraws_its_part_wherever_it_is_built() {
+        let mut runtime = Runtime::new();
+        let owner = std::env::temp_dir()
+            .join(format!("eseqlisp-restyle-owner-{}.lisp", std::process::id()));
+        // The part is built inside a subtree, which an override of the
+        // function that returns it could not reach.
+        let factory = "(module test.factory)\n\
+             (def strip () (subtree :key \"strip\" (label \"factory-plate\" :part \"test/plate\")))\n\
+             (effect-buffer \"*m*\" (strip))";
+        let report = runtime.eval_source_transactional(Some(owner), factory, Vec::new());
+        assert!(report.success, "{:?}", report.diagnostics);
+        runtime.take_pending_buffer_widget_trees();
+
+        let report = runtime.eval_source_transactional(
+            None,
+            "(module test.pkg)\n(restyle \"test/plate\" (lambda (n) (merge n :text \"restyled-plate\")))",
+            Vec::new(),
+        );
+        assert!(report.success, "{:?}", report.diagnostics);
+        // The buffer that built the part redraws with it restyled.
+        let text = pending_tree_text(&mut runtime);
+        assert!(text.contains("restyled-plate"), "{text}");
+        assert!(!text.contains("factory-plate"), "{text}");
+
+        // Detaching the package draws the part as the factory builds it.
+        runtime.vm.remove_module_overrides("test.pkg");
+        runtime.vm.rerender_dirty_effects().unwrap();
+        runtime.flush_widget_trees();
+        let text = pending_tree_text(&mut runtime);
+        assert!(text.contains("factory-plate"), "{text}");
+    }
+
+    #[test]
+    fn a_failing_restyle_is_quarantined_and_a_self_building_one_terminates() {
+        let mut runtime = Runtime::new();
+        let text_of = |runtime: &mut Runtime, src: &str| match runtime.eval_str(src).unwrap() {
+            Some(Value::Map(map)) => format!("{:?}", map.get("text").map(|cell| cell.borrow().clone())),
+            other => panic!("expected a widget, got {other:?}"),
+        };
+        runtime
+            .eval_str(
+                "(module test.pkg)
+                 (restyle \"test/nested\" (lambda (n) (box (label \"inner\" :part \"test/nested\"))))
+                 (restyle \"test/broken\" (lambda (n) (car 1)))",
+            )
+            .unwrap();
+        // Building its own part inside the restyle gets the part as built.
+        let nested = runtime.eval_str("(label \"outer\" :part \"test/nested\")").unwrap();
+        assert!(format!("{nested:?}").contains("inner"), "{nested:?}");
+        // A restyle that throws leaves the part as built, now and after.
+        assert!(text_of(&mut runtime, "(label \"as-built\" :part \"test/broken\")").contains("as-built"));
+        assert!(text_of(&mut runtime, "(label \"again\" :part \"test/broken\")").contains("again"));
+        let parts = format!("{:?}", runtime.eval_str("(parts)").unwrap());
+        assert!(parts.contains("test/nested") && parts.contains("test/broken"), "{parts}");
     }
 
     #[test]

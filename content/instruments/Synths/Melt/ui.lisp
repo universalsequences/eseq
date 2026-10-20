@@ -213,7 +213,7 @@
         (melt-num "am_rate" "AM rate" 1) (melt-num "am_depth" "AM Depth" 2)))))
 
 (def melt-display ()
-  (box :debug-name "melt-display" :width 35.8 :height 9.8 :padding 0.3 :background-color (melt-accent)
+  (box :debug-name "melt-display" :part "instrument/screen" :width 35.8 :height 9.8 :padding 0.3 :background-color (melt-accent)
     (v-stack :gap 0.25
       (label (str (nth '("OPERATOR 1" "OPERATOR 2" "FILTER" "AMPLITUDE" "FM ROUTING" "COLOR") (melt-section)))
         :width 35.2 :height 0.7 :h-align :center :v-align :center :font-size 8

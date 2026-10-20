@@ -241,6 +241,11 @@ pub(crate) fn log_source_load_error(form: &str, message: &str, queued: &[String]
 /// theme slot `slot` (`override-theme-slot`).
 const THEME_SLOT_TARGET_PREFIX: &str = "theme-slot/";
 
+/// Overrides on `part/<name>` targets restyle every widget built with
+/// `:part "<name>"` (`restyle`).
+const PART_TARGET_PREFIX: &str = "part/";
+
+
 /// Register `callback` as the current module's override of `name`.
 /// Re-evaluation replaces this module's registration and makes it the
 /// active (most recently evaluated) layer rather than stacking copies.
@@ -2955,6 +2960,11 @@ pub struct VM {
     subtree_touch_clock: u64,
     subtree_touched_at: HashMap<u64, u64>,
     pub macros: Rc<HashMap<String, MacroDef>>,
+    /// Every part name a widget has been built with, for `(parts)`.
+    seen_parts: HashSet<String>,
+    /// The `part/` targets whose restyle is running, innermost last: a
+    /// restyle that builds its own part gets it as built.
+    restyling_parts: Vec<String>,
     /// [`VM::definition_generation`].
     definition_generation: u64,
     /// Latest definition header per qualified global
@@ -3952,6 +3962,35 @@ pub fn register_core_natives(vm: &mut VM) {
         let target = format!("{THEME_SLOT_TARGET_PREFIX}{slot}");
         register_override(vm, &target, OverrideKind::Replace, widget.clone());
         Value::Nil
+    });
+
+    // `(restyle "mixer/bus-name" (lambda (node) ...))`: every widget built
+    // with `:part "mixer/bus-name"` is passed, built, to the function, and
+    // the function's result is drawn in its place, for as long as the
+    // calling module's override stands. Wherever the part is built, inside
+    // a subtree or an instrument's UI, it is restyled at construction.
+    vm.register_native_with_vm("restyle", |args, vm| {
+        let (Some(Value::String(part) | Value::Keyword(part)), Some(callback)) =
+            (args.first(), args.get(1))
+        else {
+            log_native_misuse("restyle", "expects (restyle \"area/part\" (lambda (node) ...))");
+            return Value::Nil;
+        };
+        let target = format!("{PART_TARGET_PREFIX}{part}");
+        register_override(vm, &target, OverrideKind::Replace, callback.clone());
+        Value::Nil
+    });
+
+    // `(parts)`: the part names widgets have been built with so far, sorted.
+    vm.register_native_with_vm("parts", |_args, vm| {
+        let mut parts: Vec<&String> = vm.seen_parts.iter().collect();
+        parts.sort();
+        Value::List(
+            parts
+                .into_iter()
+                .map(|part| Rc::new(RefCell::new(Value::String(part.clone()))))
+                .collect(),
+        )
     });
 
     // Enable/disable flip flags in place: no re-evaluation to re-enable, no
@@ -5304,6 +5343,8 @@ impl VM {
             subtree_touch_clock: 0,
             subtree_touched_at: HashMap::new(),
             macros: Rc::default(),
+            seen_parts: HashSet::new(),
+            restyling_parts: Vec::new(),
             definition_generation: 0,
             definition_headers: HashMap::new(),
             comment_doc_sources: HashMap::new(),
@@ -6621,27 +6662,10 @@ impl VM {
         match self.invoke(active.callback, override_args) {
             Ok(value) => Ok(value),
             Err(error) => {
-                if let Some(entry) = self
-                    .overrides
-                    .get_mut(name)
-                    .and_then(|set| {
-                        set.entries.iter_mut().rev().find(|entry| {
-                            entry.overriding_module == active.overriding_module
-                        })
-                    })
-                {
-                    entry.quarantined = true;
-                }
-                let detail = self.last_reactive_error_detail.as_deref().unwrap_or("-");
-                let message = format!(
-                    "override {name} from {} failed ({error:?}, detail={detail}); \
-                     quarantined and using factory definition",
-                    active.overriding_module
-                );
-                self.source_load_errors.push(message.clone());
-                if debug_lisp_callback_errors_enabled() {
-                    eprintln!("[lisp-error][override] {message}");
-                }
+                let failure = self.callback_failure(&error);
+                self.quarantine_active_override(name, "override", |module| {
+                    format!("override {name} from {module} {failure}; quarantined and using factory definition")
+                });
                 self.invoke_raw_global(name, args)
             }
         }
@@ -6948,6 +6972,81 @@ impl VM {
         self.source_manager.record_render_root(node_id);
     }
 
+    /// A widget just built with `:part`: the active `restyle` of that part's
+    /// result in its place, else `widget`. The read is recorded either way,
+    /// so a restyle added or removed later redraws the effect that built it.
+    /// A restyle that fails is quarantined, like a failing override, and the
+    /// part is drawn as built.
+    pub fn restyle_part(&mut self, widget: Value) -> Value {
+        let target = match &widget {
+            Value::Map(map) => match map.get("part").map(|cell| cell.borrow()).as_deref() {
+                Some(Value::String(part) | Value::Keyword(part)) => {
+                    Some(format!("{PART_TARGET_PREFIX}{part}"))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(target) = target else {
+            return widget;
+        };
+        self.record_symbol_read(&target);
+        let part = &target[PART_TARGET_PREFIX.len()..];
+        if !self.seen_parts.contains(part) {
+            self.seen_parts.insert(part.to_string());
+        }
+        if self.restyling_parts.contains(&target) {
+            return widget;
+        }
+        let Some(callback) =
+            self.overrides.get(&target).and_then(OverrideSet::active).map(|entry| entry.callback.clone())
+        else {
+            return widget;
+        };
+        self.restyling_parts.push(target.clone());
+        let result = self.invoke(callback, vec![widget.clone()]);
+        self.restyling_parts.pop();
+        let problem = match result {
+            Ok(Some(restyled @ Value::Map(_))) => return restyled,
+            Ok(other) => format!(
+                "returned {} instead of a widget",
+                other.map_or_else(|| "nothing".to_string(), |value| format_lisp_value(&value))
+            ),
+            Err(error) => self.callback_failure(&error),
+        };
+        self.quarantine_active_override(&target, "restyle", |module| {
+            format!("restyle of part {} from {module} {problem}; quarantined and drawing it as built", &target[PART_TARGET_PREFIX.len()..])
+        });
+        widget
+    }
+
+    /// "failed (<error>, detail=<detail>)" for a callback that returned `error`.
+    fn callback_failure(&self, error: &VMError) -> String {
+        let detail = self.last_reactive_error_detail.as_deref().unwrap_or("-");
+        format!("failed ({error:?}, detail={detail})")
+    }
+
+    /// Switch off the active override of `target` after it failed, and report
+    /// `message(<its module>)` as a load error (logged under `tag`).
+    fn quarantine_active_override(
+        &mut self,
+        target: &str,
+        tag: &str,
+        message: impl FnOnce(&str) -> String,
+    ) {
+        let Some(entry) = self.overrides.get_mut(target).and_then(|set| {
+            set.entries.iter_mut().rev().find(|entry| entry.enabled && !entry.quarantined)
+        }) else {
+            return;
+        };
+        entry.quarantined = true;
+        let message = message(&entry.overriding_module);
+        self.source_load_errors.push(message.clone());
+        if debug_lisp_callback_errors_enabled() {
+            eprintln!("[lisp-error][{tag}] {message}");
+        }
+    }
+
     /// Mirror the active `theme-slot/` overrides into the theme, which paints
     /// those slots with their widgets.
     fn sync_theme_slot_overrides(&self) {
@@ -6992,7 +7091,10 @@ impl VM {
         let mut symbols = HashSet::new();
         for target in targets {
             symbols.insert(target.clone());
-            if let Some((_, base)) = crate::modules::split_qualified(target) {
+            // A theme slot or part target is read only by that spelling.
+            let synthetic = target.starts_with(THEME_SLOT_TARGET_PREFIX)
+                || target.starts_with(PART_TARGET_PREFIX);
+            if !synthetic && let Some((_, base)) = crate::modules::split_qualified(target) {
                 symbols.insert(base.to_string());
             }
         }
@@ -7727,7 +7829,9 @@ impl VM {
     }
 
     fn record_symbol_read(&mut self, name: &str) {
-        if let Some(reads) = self.current_effect_symbol_reads.as_mut() {
+        if let Some(reads) = self.current_effect_symbol_reads.as_mut()
+            && !reads.contains(name)
+        {
             reads.insert(name.to_string());
         }
     }

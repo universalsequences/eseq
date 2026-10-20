@@ -371,7 +371,7 @@
   (let ((section (syn-section))
         (prefix (if (= (syn-section) 1) "env2" "env1")))
     (box :width 34 :height 9.8 :padding 0.35 :corner-radius 2
-      :debug-name "syn-detail-display" :background-color (syn-accent)
+      :debug-name "syn-detail-display" :part "instrument/screen" :background-color (syn-accent)
       (v-stack :gap 0.12
         (h-stack :gap 0.15
           (box :width 17.15 :height 0.75 :background-color :instrument-control-bg

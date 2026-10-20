@@ -1098,7 +1098,7 @@
         (header-toggle "S" (str "solo-" i) #'t.soloed
           :on-click (track-toggle-click t (lambda () (toggle! t.soloed))))
         (box :width 8.6 :height 1
-          :key (str "select-" i)
+          :key (str "select-" i) :part "sequencer/track-name" :track t
           :background-color :transparent
           :on-click (lambda (event) (track-click event t))
           :on-double-click (lambda (evt) (open-piano-roll-for-track t))
@@ -1263,7 +1263,8 @@
       :off-fill (if (= (step-odd s.index) 1)
         :sequencer-step-off-fill-alt
         :sequencer-step-off-fill)
-      :background "seqv-step-shell")))
+      :background "seqv-step-shell"
+      :part "sequencer/step")))
 
 (def playhead-row (t row)
   (box
@@ -3235,7 +3236,7 @@
 ;; and carries its own gap.
 (def expanded-track-editor (t mode lane)
   (box :padding 0.85
-    (box
+    (box :part "sequencer/track-editor"
       :background-color :buffer-bg :corner-radius (eseq.seq-core-state/radius 16)
       (v-stack :width :fill :padding 0.35 :gap 0.1
         (expanded-param-tabs t lane)

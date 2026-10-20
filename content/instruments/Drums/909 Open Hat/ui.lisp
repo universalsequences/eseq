@@ -68,7 +68,7 @@
         :tail (idhat-bind "d_mode") :decay (idhat-bind "decay") :metal (idhat-bind "metal")
         :attack (idhat-bind "atk") :hold (idhat-bind "hold")))))
 (def idhat-display ()
-  (box :debug-name "hat-display" :width 35.6 :height 9.8 :padding 0.3 :background-color (idhat-c)
+  (box :debug-name "hat-display" :part "instrument/screen" :width 35.6 :height 9.8 :padding 0.3 :background-color (idhat-c)
     (v-stack :gap 0.14
       (label "909 OPEN HAT / DECAY" :width 35 :height 0.7 :font-size 8
         :h-align :center :v-align :center :color (idhat-c) :bg :black)

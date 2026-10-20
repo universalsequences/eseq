@@ -300,7 +300,7 @@
 (def tri-detail-column ()
   (let ((section (tri-section)))
     (box :width 36 :height 9.8 :padding 0.35 :corner-radius 2
-      :background-color (tri-accent) :debug-name "tri-detail-display"
+      :background-color (tri-accent) :debug-name "tri-detail-display" :part "instrument/screen"
       (v-stack :gap 0.3
         (box :width 35.2 :height 0.7 :background-color (tri-ink)
           (label (str "POSEIDON / " (nth '("OSCILLATOR 1" "OSCILLATOR 2" "FILTER" "AMPLITUDE" "LFO 1" "LFO 2" "VOICE") section))

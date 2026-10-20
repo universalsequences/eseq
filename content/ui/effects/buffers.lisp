@@ -69,7 +69,7 @@
     (pf/device-output-meter d.meter)))
 
 (def drop-placeholder-panel ()
-  (box :debug-name "fx-drop-placeholder-panel"
+  (box :debug-name "fx-drop-placeholder-panel" :part "fx/drop-zone"
        :background-color :buffer-bg
        :corner-radius 10
        :border-color :mixer-strip-border
@@ -98,7 +98,7 @@
       :bg :transparent)))
 
 (def track-drop-placeholder-panel ()
-  (box :debug-name "fx-track-drop-placeholder-panel"
+  (box :debug-name "fx-track-drop-placeholder-panel" :part "fx/drop-zone"
        :background-color :buffer-bg
        :corner-radius 10
        :border-color :mixer-strip-border

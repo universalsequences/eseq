@@ -999,6 +999,7 @@
 (def track-output-picker (t)
   (box :width :fill :h-align :center (dropdown :value (track-output-label t.output)
     :key (str "track-output-" t.index)
+    :part "mixer/output-picker" :track t
     :options (track-output-options)
     :on-change (lambda (v)
       (clear-delete-target)
@@ -1034,6 +1035,7 @@
       (if (> (len options) 0)
         (box  :h-align :center :width :fill 
           (dropdown :key (str "bus-output-" b.index)
+            :part "mixer/output-picker" :bus b
             :value (if b.output (label-of b.output) "main")
             :options (map label-of options)
             :width 8.5 :height 1.1 :font-size 10
@@ -1551,6 +1553,7 @@
         (box :height (if (compact?) 0 0.8))
         (bus-mod-port-row b))
       (button (substring (bus-label b) 0 (bus-name-chars))
+        :part "mixer/bus-name" :bus b
         :width :fill :height 1.0 :padding 0 :font-size 10
         :background-color :mixer-label-bg
         :border-color :transparent
@@ -1814,7 +1817,7 @@
         (track-strip-of t)))))
 
 (def sample-drop-zone ()
-  (box :key "sample-drop-zone"
+  (box :key "sample-drop-zone" :part "mixer/drop-zone"
     :width 11.8 :height (drop-zone-height)
     :background-color :buffer-bg
     :drop-hover-background-color :mixer-control-bg
