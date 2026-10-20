@@ -204,8 +204,10 @@ const HOST_TOOLS: &[HostTool] = &[
     HostTool {
         name: "capture",
         description: "Render one buffer to an image, as the app draws it, and report its layout: \
-            every keyed widget's pixel rectangle and problems (clipped, offscreen, zero-size) \
-            and overlapping siblings in stacks and grids. `key` crops to one keyed subtree. To \
+            every keyed widget's pixel rectangle and problems (clipped, offscreen, zero-size), \
+            overlapping siblings in stacks and grids, and the hooks that restyle what is on \
+            screen (its parts, the functions that build each region, the theme slots it paints \
+            with). `what_draws` names the hooks at one pixel. `key` crops to one keyed subtree. To \
             operate the panel first, `click` clicks the center of a keyed widget, then `keys` \
             types keystrokes (`UP*3 RET`); check the effect with `eval` or `simulate`. Without \
             `buffer`, lists the buffers.",
@@ -216,6 +218,22 @@ const HOST_TOOLS: &[HostTool] = &[
             ("width", "integer", "Pixels (default 1600)", false),
             ("height", "integer", "Pixels (default 900)", false),
             ("keys", "string", "Keystrokes to send first, bindings spelling", false),
+        ],
+    },
+    HostTool {
+        name: "what_draws",
+        description: "What draws the pixel (x, y) of a buffer, in an uncropped `capture` of the \
+            same width and height, as the buffer stands now (no click or keys): the widgets under \
+            it, topmost first, each with the hooks that restyle it, least fragile first: the theme \
+            slots it repaints through (override-theme-slot), its part (restyle), the function \
+            that built it (override :around). Open menus and modals are not looked into. Use it \
+            on the spot the user means before searching source.",
+        params: &[
+            ("buffer", "string", "Buffer name, as for `capture`", true),
+            ("x", "integer", "Pixel column in the capture", true),
+            ("y", "integer", "Pixel row in the capture", true),
+            ("width", "integer", "The capture's width (default 1600)", false),
+            ("height", "integer", "The capture's height (default 900)", false),
         ],
     },
 ];
@@ -290,20 +308,24 @@ pub(super) fn call(session: &mut HeadlessSession, name: &str, args: &Json) -> To
                 }
             }
             "capture" => {
-                let number = |key: &str, default: u32| {
-                    args.get(key).and_then(Json::as_u64).map(|n| n.clamp(64, 4096) as u32).unwrap_or(default)
-                };
                 match str_arg("buffer") {
                     None => ToolOutput::text(format!("Buffers:\n{}", session.buffer_names().join("\n"))),
                     Some(buffer) => capture(
                         session,
                         &buffer,
                         str_arg("key").as_deref(),
-                        (number("width", DEFAULT_CAPTURE_SIZE.0), number("height", DEFAULT_CAPTURE_SIZE.1)),
+                        capture_size(args),
                         str_arg("click").as_deref(),
                         str_arg("keys").as_deref(),
                     ),
                 }
+            }
+            "what_draws" => {
+                let number = |key: &str| args.get(key).and_then(Json::as_u64);
+                let (Some(x), Some(y)) = (number("x"), number("y")) else {
+                    return Err("`x` and `y` are required".to_string());
+                };
+                what_draws(session, &need("buffer")?, capture_size(args), (x as f32, y as f32))
             }
             _ => call_lisp_tool(session, name, args),
         })
@@ -737,10 +759,86 @@ fn capture(
         lines.push("Overlapping siblings:".to_string());
         lines.extend(report.overlaps.iter().map(|overlap| format!("  ⚠ {overlap}")));
     }
+    lines.extend(hook_lines(&report.hooks));
     ToolOutput {
         content: vec![Content::Png(png), Content::Text(with_log(lines.join("\n"), &log))],
         is_error: false,
     }
+}
+
+/// A capture's `width` and `height` arguments, clamped, or the default size.
+fn capture_size(args: &Json) -> (u32, u32) {
+    let number = |key: &str, default: u32| {
+        args.get(key).and_then(Json::as_u64).map(|n| n.clamp(64, 4096) as u32).unwrap_or(default)
+    };
+    (number("width", DEFAULT_CAPTURE_SIZE.0), number("height", DEFAULT_CAPTURE_SIZE.1))
+}
+
+/// The hooks a capture shows, at most [`HOOK_LINES`] per kind.
+fn hook_lines(hooks: &eseqlisp::ui::capture::HookOverview) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut section = |title: &str, form: &str, uses: &[eseqlisp::ui::capture::HookUse]| {
+        if uses.is_empty() {
+            return;
+        }
+        lines.push(format!("  {title}: {form}"));
+        for used in uses.iter().take(HOOK_LINES) {
+            let times = if used.count > 1 { format!(" ×{}", used.count) } else { String::new() };
+            lines.push(format!("    {}{times}  first at {}", used.name, used.first));
+        }
+        if uses.len() > HOOK_LINES {
+            lines.push(format!("    … {} more", uses.len() - HOOK_LINES));
+        }
+    };
+    section("theme slots", "(override-theme-slot :slot \"widget\") restyles every use", &hooks.slots);
+    section("parts", "(restyle \"part\" |node| ...)", &hooks.parts);
+    section("built by", "(override fn :around ...) on the function", &hooks.functions);
+    if !lines.is_empty() {
+        lines.insert(0, "Hooks to restyle it (what_draws x y names them at one spot):".to_string());
+    }
+    lines
+}
+
+const HOOK_LINES: usize = 12;
+
+fn what_draws(
+    session: &mut HeadlessSession,
+    buffer: &str,
+    size: (u32, u32),
+    point: (f32, f32),
+) -> ToolOutput {
+    let (found, log) = capture_output(|| session.hooks_at(buffer, size, point));
+    let stack = match found {
+        Ok(stack) => stack,
+        Err(problem) => return ToolOutput::error(with_log(problem, &log)),
+    };
+    if stack.is_empty() {
+        return ToolOutput::text(format!("Nothing is drawn at {},{} in {buffer}.", point.0, point.1));
+    }
+    let mut lines = vec![format!("At {},{} in {buffer}, topmost first:", point.0, point.1)];
+    let mut previous_builder = None;
+    for hooks in &stack {
+        let key = hooks.key.as_deref().map(|key| format!(" {key:?}")).unwrap_or_default();
+        lines.push(format!("{}{key} at {}", hooks.widget_type, hooks.region));
+        for (slot, read_by) in &hooks.slots {
+            lines.push(format!("  theme slot :{slot} (read by {read_by}): (override-theme-slot :{slot} \"widget\")"));
+        }
+        if let Some(face) = &hooks.face {
+            lines.push(format!("  painted by face {face} (content/ui/widgets.lisp)"));
+        }
+        if let Some(background) = &hooks.background {
+            lines.push(format!("  background widget {background:?}"));
+        }
+        if let Some(part) = &hooks.part {
+            lines.push(format!("  part: (restyle {part:?} |node| ...)"));
+        }
+        // Each builder once, at the first widget it built.
+        if let Some(built_by) = hooks.built_by.as_ref().filter(|built_by| previous_builder != Some(*built_by)) {
+            lines.push(format!("  built by {built_by}: (override {built_by} :around ...)"));
+        }
+        previous_builder = hooks.built_by.as_ref();
+    }
+    ToolOutput::text(with_log(lines.join("\n"), &log))
 }
 
 /// Evaluate `code` and settle, as the live loop does after an evaluation

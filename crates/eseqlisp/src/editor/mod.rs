@@ -260,9 +260,15 @@ fn inspect_node_source_file_path(node: &crate::layout::LayoutNode) -> Option<Pat
     }
 }
 
+/// The name the node's building function is defined under in its file (the
+/// prop is qualified by its module).
 fn inspect_node_source_symbol(node: &crate::layout::LayoutNode) -> Option<String> {
     match node.props.get(crate::vm::SOURCE_SYMBOL_PROP) {
-        Some(Value::String(symbol)) if !symbol.is_empty() => Some(symbol.clone()),
+        Some(Value::String(symbol)) if !symbol.is_empty() => Some(
+            crate::modules::split_qualified(symbol)
+                .map_or(symbol.as_str(), |(_, base)| base)
+                .to_string(),
+        ),
         _ => None,
     }
 }

@@ -3600,6 +3600,56 @@ pub fn plock_color(props: &HashMap<String, Value>) -> Color {
     }
 }
 
+/// The face (content/ui/widgets.lisp) a built-in control paints with, and
+/// the theme slots it paints from (not those the control has its own
+/// colour for), or None for a widget without a face.
+pub fn builtin_face_of(node: &LayoutNode) -> Option<(&'static str, Vec<&'static str>)> {
+    let props = &node.props;
+    let own = |prop: &str| has_color_prop(props, prop);
+    let knob_slots = || {
+        let mut slots = Vec::new();
+        // A p-locked knob's arc is the p-lock colour.
+        if !plock_active(props) && !own("arc-color") {
+            slots.push("widget-knob-filled");
+        }
+        if !own("track-color") {
+            slots.push("widget-knob-track");
+        }
+        slots
+    };
+    Some(match node.widget_type.as_str() {
+        "knob" | "inline-knob" => {
+            (knob::KNOB_FACE_WIDGET, vec!["widget-knob-filled", "widget-knob-track"])
+        }
+        "knob-number" => (knob_number::KNOB_NUMBER_FACE_WIDGET, knob_slots()),
+        "button" => {
+            let face = if button::button_is_active_tab(props) {
+                button::BEZEL_TAB_FACE_WIDGET
+            } else {
+                button::BEZEL_FACE_WIDGET
+            };
+            let fill = button::button_fill_slot(props);
+            (face, bezel_slots(fill, button::button_border_is_slot(props)))
+        }
+        "number-picker" if !number_picker::number_picker_slider_mode(props) => {
+            let fill = number_picker::number_picker_own_bg(props)
+                .is_none()
+                .then_some(button::BezelFill::Dropdown);
+            (button::BEZEL_FACE_WIDGET, bezel_slots(fill, number_picker::number_picker_border_is_slot(props)))
+        }
+        _ => return None,
+    })
+}
+
+/// The theme slots a bezel paints from: its fill slot, and the border's.
+fn bezel_slots(fill: Option<button::BezelFill>, border_slot: bool) -> Vec<&'static str> {
+    let mut slots: Vec<&'static str> = fill.map(button::BezelFill::slot).into_iter().collect();
+    if border_slot {
+        slots.push("button-border");
+    }
+    slots
+}
+
 /// Whether `props` gives `key` a colour of its own (one that parses).
 pub fn has_color_prop(props: &HashMap<String, Value>, key: &str) -> bool {
     props.get(key).and_then(theme::parse_color_value).is_some()

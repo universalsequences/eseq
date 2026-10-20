@@ -5595,10 +5595,12 @@ impl VM {
             .and_then(|resolver| resolver(callee, inlet))
     }
 
-    pub fn current_source_symbol(&self) -> Option<String> {
+    /// The named function whose body is executing, a lambda or subtree body
+    /// written in it included ([`crate::compiler::Chunk::owner_symbol`]).
+    pub fn current_owner_symbol(&self) -> Option<String> {
         self.chunks
             .get(self.current_chunk)
-            .and_then(|chunk| chunk.source_symbol.clone())
+            .and_then(|chunk| chunk.owner_symbol.clone())
     }
 
     /// The module of the currently executing chunk (spec §5): registration

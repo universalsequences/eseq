@@ -205,6 +205,12 @@ pub struct Chunk {
     pub symbols: Vec<String>,
     pub upvalues: Vec<String>,
     pub source_symbol: Option<String>,
+    /// The named function whose body this chunk's code is written in,
+    /// qualified by its module as `override` names it: its own
+    /// `source_symbol`, or for a lambda or a subtree/effect body the
+    /// enclosing chunk's owner; `None` for a unit's top level and for
+    /// chunks the VM builds itself. Set by [`Compiler::new_chunk`].
+    pub owner_symbol: Option<String>,
     pub source_file: Option<PathBuf>,
     /// The module the chunk's code was compiled under (spec §5): `None`
     /// for the implicit `eseq.vanilla`. Lets runtime registration forms
@@ -1954,6 +1960,7 @@ impl<'a> Compiler<'a> {
             symbols: vec![],
             upvalues: vec![],
             source_symbol: None,
+            owner_symbol: None,
             source_file: self.source_file.clone(),
             source_module: None,
             origins: Vec::new(),
@@ -3215,6 +3222,16 @@ impl<'a> Compiler<'a> {
         // (None = implicit eseq.vanilla). The entry chunk of a unit whose
         // (module …) form appears mid-file is re-stamped by that form.
         chunk.source_module = self.declared_module();
+        chunk.owner_symbol = match (&chunk.source_symbol, &chunk.source_module) {
+            (Some(name), Some(module)) if !crate::modules::is_qualified(name) => {
+                Some(crate::modules::qualify(module, name))
+            }
+            (Some(name), _) => Some(name.clone()),
+            (None, _) => self
+                .chunks
+                .get(self.current_chunk)
+                .and_then(|enclosing| enclosing.owner_symbol.clone()),
+        };
         let symbols = chunk.symbols.clone();
         let prev_chunk_idx = self.current_chunk;
         let new_chunk_idx = self.chunks.len();
@@ -3448,6 +3465,7 @@ impl<'a> Compiler<'a> {
             symbols,
             upvalues: vec![],
             source_symbol: Some(name.to_string()),
+            owner_symbol: None,
             source_file: self.source_file.clone(),
             source_module: self.declared_module(),
             origins: Vec::new(),
@@ -3549,6 +3567,7 @@ impl<'a> Compiler<'a> {
             symbols,
             upvalues: vec![],
             source_symbol: name.clone(),
+            owner_symbol: None,
             source_file: self.source_file.clone(),
             source_module: None,
             origins: Vec::new(),
@@ -4710,11 +4729,15 @@ impl<'a> Compiler<'a> {
             symbols: vec![],
             upvalues: vec![],
             source_symbol: None,
+            owner_symbol: None,
             source_file: self.source_file.clone(),
             source_module: entry_module,
             origins: Vec::new(),
             lambda_list: None,
         });
+        // A unit's top level is no function's body, whatever chunk came
+        // before it.
+        self.chunks[self.current_chunk].owner_symbol = None;
         let expressions = std::mem::take(&mut self.expressions);
         for expression in &expressions {
             self.compile_expression(expression)?;

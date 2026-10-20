@@ -1783,6 +1783,50 @@ impl HeadlessSession {
         })
     }
 
+    /// The widgets under pixel `point` of `buffer` drawn at `size`, as
+    /// [`Self::render_png`] would draw it, innermost first, with their hooks.
+    pub(crate) fn hooks_at(
+        &mut self,
+        buffer: &str,
+        size: (u32, u32),
+        point: (f32, f32),
+    ) -> Result<Vec<eseqlisp::ui::capture::WidgetHooks>, String> {
+        let buffer = normalize_buffer_name(buffer);
+        self.with_capture_backend(size, |session, backend| {
+            let (frame, cell, _) = session.isolated_frame(backend, &buffer, size)?;
+            eseqlisp::ui::capture::hooks_at(&frame, cell, size, point)
+        })
+    }
+
+    /// `buffer` alone, settled and laid out at `size` as a capture draws it:
+    /// its frame, cell size and grid.
+    fn isolated_frame(
+        &mut self,
+        backend: &mut AppBackend,
+        buffer: &str,
+        size: (u32, u32),
+    ) -> Result<(eseqlisp::backend::RenderFrame, (f32, f32), (usize, usize)), String> {
+        self.isolate(buffer, true, false)?;
+        // A buffer that was hidden (a new instance's view) defers its effects
+        // until it shows; run them now, as the live loop's next tick would.
+        self.settle()?;
+        self.settle_sample_browser()?;
+        let (columns, rows, cell) = self.fit_viewport(backend, size);
+        let frame = self.frame(columns, rows);
+        Self::check_drawn(&frame, buffer)?;
+        Ok((frame, cell, (columns, rows)))
+    }
+
+    fn check_drawn(frame: &eseqlisp::backend::RenderFrame, buffer: &str) -> Result<(), String> {
+        if frame.widget_layout.is_none() {
+            return Err(format!(
+                "{buffer} has no widget tree: its view has not drawn. A render error reported with \
+                 this or an earlier call says why; fix the view and capture again"
+            ));
+        }
+        Ok(())
+    }
+
     fn render_with(
         &mut self,
         backend: &mut AppBackend,
@@ -1792,13 +1836,7 @@ impl HeadlessSession {
         click: Option<&str>,
         keystrokes: &[KeyEvent],
     ) -> Result<(Vec<u8>, eseqlisp::ui::capture::LayoutReport), String> {
-        self.isolate(buffer, true, false)?;
-        // A buffer that was hidden (a new instance's view) defers its effects
-        // until it shows; run them now, as the live loop's next tick would.
-        self.settle()?;
-        self.settle_sample_browser()?;
-        let (columns, rows, cell) = self.fit_viewport(backend, size);
-        let mut frame = self.frame(columns, rows);
+        let (mut frame, cell, (columns, rows)) = self.isolated_frame(backend, buffer, size)?;
         if let Some(target) = click {
             let center = eseqlisp::ui::capture::keyed_cell_center(&frame, target, (columns as f32, rows as f32))?;
             click_cell(&mut self.editor, columns, rows, center);
@@ -1810,12 +1848,7 @@ impl HeadlessSession {
             self.settle()?;
             frame = self.frame(columns, rows);
         }
-        if frame.widget_layout.is_none() {
-            return Err(format!(
-                "{buffer} has no widget tree: its view has not drawn. A render error reported with \
-                 this or an earlier call says why; fix the view and capture again"
-            ));
-        }
+        Self::check_drawn(&frame, buffer)?;
         let report = eseqlisp::ui::capture::layout_report(&frame, cell, size)?;
         let region = key
             .map(|key| eseqlisp::ui::capture::keyed_region(&frame, key, cell, size, 8))

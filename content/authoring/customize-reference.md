@@ -38,10 +38,25 @@ made there changes nothing they can see. Use them to check a layout before
 
 ## Finding what draws it
 
-- `search_source` for the words on screen, a widget `:key` from a `capture`
-  layout, or a field name (`muted`), with `filter` set to the area (`mixer`).
-- `form_source` the definition, then the helpers it calls. Override the
-  smallest function that draws the thing, not the whole panel.
+- `capture` the buffer, then `what_draws` the spot the user means (pixel x,
+  y in that capture). It lists the widgets there, innermost first, each
+  with its hooks: the theme slots it paints with, its part, its background
+  widget, the face it paints with, and the function that built it. The
+  capture itself lists the buffer's parts, slots and building functions.
+- Take the least fragile hook that changes what the user asked for:
+  1. a theme slot, `override-theme-slot` (every use of that colour, in
+     every panel; it follows the user's theme switches);
+  2. a part, `restyle` (that kind of widget wherever it is built);
+  3. the building function, `override … :around` merging into what it
+     returns (that function's widgets);
+  4. replacing the function outright, only when the change is to what the
+     widget does, not how it looks.
+  Walking a function's result for a `:key` or a debug name is a last
+  resort: those are not kept stable across updates.
+- `search_source` for the words on screen or a field name (`muted`), with
+  `filter` set to the area (`mixer`), when the spot is not on screen.
+- `form_source` the building function, then the helpers it calls. Override
+  the smallest function that draws the thing, not the whole panel.
 - `outline` a module for its functions. A module's `(export …)` lists its
   public ones; overriding a private one works but warns, since it may change
   on update.

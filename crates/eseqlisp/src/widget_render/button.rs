@@ -42,7 +42,7 @@ pub(super) enum BezelFill {
 }
 
 impl BezelFill {
-    fn slot(self) -> &'static str {
+    pub(super) fn slot(self) -> &'static str {
         match self {
             BezelFill::Primary => "button-primary-bg",
             BezelFill::Secondary => "button-secondary-bg",
@@ -188,7 +188,7 @@ fn button_is_active(props: &HashMap<String, Value>) -> bool {
     }
 }
 
-fn button_is_active_tab(props: &HashMap<String, Value>) -> bool {
+pub(super) fn button_is_active_tab(props: &HashMap<String, Value>) -> bool {
     matches!(
         props.get("shape"),
         Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "tab"
@@ -238,7 +238,7 @@ fn is_filled(props: &HashMap<String, Value>) -> bool {
 
 /// The theme slot a button's fill comes from, unless it has its own (as
 /// [`variant_bg`] decides).
-fn button_fill_slot(props: &HashMap<String, Value>) -> Option<BezelFill> {
+pub(super) fn button_fill_slot(props: &HashMap<String, Value>) -> Option<BezelFill> {
     if (button_is_active(props) && has_color_prop(props, "active-background-color"))
         || has_color_prop(props, "background-color")
     {
@@ -253,7 +253,7 @@ fn button_fill_slot(props: &HashMap<String, Value>) -> Option<BezelFill> {
 }
 
 /// Whether [`button_border`] is the theme's `:button-border`.
-fn button_border_is_slot(props: &HashMap<String, Value>) -> bool {
+pub(super) fn button_border_is_slot(props: &HashMap<String, Value>) -> bool {
     !plock_active(props) && !is_filled(props) && !has_color_prop(props, "border-color")
 }
 

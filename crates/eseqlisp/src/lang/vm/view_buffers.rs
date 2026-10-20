@@ -133,6 +133,7 @@ impl VM {
             symbols: Vec::new(),
             upvalues: Vec::new(),
             source_symbol: Some(format!("view-buffer {target}")),
+            owner_symbol: None,
             source_file: None,
             source_module: None,
             origins: Vec::new(),

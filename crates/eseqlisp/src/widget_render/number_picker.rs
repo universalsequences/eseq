@@ -783,7 +783,7 @@ fn cursor_x_from_cache(text: &str, cursor_pos: usize, font_size: f32, cell_w: f3
 }
 
 /// A number picker's own fill, if it has one; otherwise it is `:dropdown-bg`.
-fn number_picker_own_bg(props: &HashMap<String, Value>) -> Option<Color> {
+pub(super) fn number_picker_own_bg(props: &HashMap<String, Value>) -> Option<Color> {
     props
         .get("background-color")
         .and_then(theme::parse_color_value)
@@ -806,7 +806,13 @@ fn number_picker_shadow(props: &HashMap<String, Value>) -> Color {
     resolve_named_color(props, "shadow-color", theme::BUTTON_SHADOW())
 }
 
-fn number_picker_slider_mode(props: &HashMap<String, Value>) -> bool {
+/// Whether its bezel's border is the theme's `:button-border` (the slider
+/// mode draws no bezel).
+pub(super) fn number_picker_border_is_slot(props: &HashMap<String, Value>) -> bool {
+    !plock_active(props) && !has_color_prop(props, "border-color")
+}
+
+pub(super) fn number_picker_slider_mode(props: &HashMap<String, Value>) -> bool {
     matches!(
         props.get("mode"),
         Some(Value::Keyword(mode) | Value::String(mode)) if mode == "slider"
@@ -1385,7 +1391,7 @@ cells by default. The -tri and -slider names are internal draw passes. Example: 
                         fill_slot: number_picker_own_bg(&node.props)
                             .is_none()
                             .then_some(super::button::BezelFill::Dropdown),
-                        border_slot: !plocked && !has_color_prop(&node.props, "border-color"),
+                        border_slot: number_picker_border_is_slot(&node.props),
                         press: 0.0,
                         fill: bg_color,
                         border: border_color,

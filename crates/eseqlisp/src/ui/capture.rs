@@ -14,6 +14,12 @@ pub struct PixelRegion {
     pub height: u32,
 }
 
+impl std::fmt::Display for PixelRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{},{} {}x{}", self.x, self.y, self.width, self.height)
+    }
+}
+
 fn intersection(a: Rect, b: Rect) -> Rect {
     let col = a.col.max(b.col);
     let row = a.row.max(b.row);
@@ -37,6 +43,13 @@ fn visit<'a>(node: &'a LayoutNode, dx: f32, dy: f32, clip: Rect, overlay: bool,
     for child in &node.children {
         visit(child, dx, dy, clip, overlay, visitor);
     }
+}
+
+/// [`visit`] over a frame's layout, its scroll applied.
+fn visit_frame<'a>(frame: &RenderFrame, root: &'a LayoutNode, viewport: Rect,
+    visitor: &mut impl FnMut(&'a LayoutNode, Rect, Rect, bool)) {
+    visit(root, -frame.widget_layout_scroll_left,
+        -frame.widget_scroll_top - frame.text_scroll_top as f32, viewport, false, visitor);
 }
 
 fn authored_key(node: &LayoutNode) -> Option<&str> {
@@ -68,8 +81,7 @@ pub fn layout_keys(root: &LayoutNode) -> Vec<String> {
 fn keyed_rect(frame: &RenderFrame, key: &str, viewport: Rect) -> Result<Rect, String> {
     let root = frame.widget_layout.as_ref().ok_or("capture buffer has no widget layout")?;
     let mut matches = Vec::new();
-    visit(root, -frame.widget_layout_scroll_left,
-        -frame.widget_scroll_top - frame.text_scroll_top as f32, viewport, false,
+    visit_frame(frame, root, viewport,
         &mut |node, rect, clip, overlay| {
             if node.stable_key.as_deref() == Some(key) || authored_key(node) == Some(key) {
                 matches.push((rect, clip, overlay));
@@ -165,6 +177,8 @@ pub struct LayoutReport {
     pub nodes: Vec<KeyedNode>,
     /// One line per pair of overlapping siblings in a stack or grid.
     pub overlaps: Vec<String>,
+    /// What a package can hook to restyle what is on screen.
+    pub hooks: HookOverview,
 }
 
 /// Every keyed node in the frame, in layout order, with its pixel region and
@@ -172,13 +186,9 @@ pub struct LayoutReport {
 /// flexed `wrap` overlapping its rows is the usual cause).
 pub fn layout_report(frame: &RenderFrame, cell: (f32, f32), size: (u32, u32))
     -> Result<LayoutReport, String> {
-    let (cell_w, cell_h) = cell;
-    let root = frame.widget_layout.as_ref().ok_or("the buffer has no widget layout")?;
-    let viewport = Rect { col: 0.0, row: 0.0,
-        width: size.0 as f32 / cell_w, height: size.1 as f32 / cell_h };
+    let (root, viewport) = frame_root(frame, cell, size)?;
     let mut nodes = Vec::new();
-    visit(root, -frame.widget_layout_scroll_left,
-        -frame.widget_scroll_top - frame.text_scroll_top as f32, viewport, false,
+    visit_frame(frame, root, viewport,
         &mut |node, rect, clip, overlay| {
             let Some(key) = node.stable_key.as_deref().or(authored_key(node)) else { return };
             let mut problems = Vec::new();
@@ -194,18 +204,14 @@ pub fn layout_report(frame: &RenderFrame, cell: (f32, f32), size: (u32, u32))
                         problems.push(LayoutProblem::Clipped);
                     }
                 }
-                PixelRegion {
-                    x: (rect.col * cell_w).max(0.0).floor() as u32,
-                    y: (rect.row * cell_h).max(0.0).floor() as u32,
-                    width: (rect.width * cell_w).max(0.0).ceil() as u32,
-                    height: (rect.height * cell_h).max(0.0).ceil() as u32,
-                }
+                pixel_region(rect, cell)
             });
             nodes.push(KeyedNode { key: key.to_string(), widget_type: node.widget_type.clone(), region, problems });
         });
     let mut overlaps = Vec::new();
     sibling_overlaps(root, None, &mut overlaps);
-    Ok(LayoutReport { nodes, overlaps })
+    let hooks = hook_overview(frame, cell, size)?;
+    Ok(LayoutReport { nodes, overlaps, hooks })
 }
 
 /// Containers that place their children side by side: two children that
@@ -245,6 +251,198 @@ fn sibling_overlaps(node: &LayoutNode, keyed_ancestor: Option<&str>, out: &mut V
     }
 }
 
+/// What a package can hook to restyle one widget, from least to most
+/// fragile (customize-reference "Finding what draws it"): a theme slot it
+/// paints with, its `:part`, the function that built it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WidgetHooks {
+    pub widget_type: String,
+    pub key: Option<String>,
+    pub region: PixelRegion,
+    /// `(restyle "<part>" …)`.
+    pub part: Option<String>,
+    /// The function whose body built it: `(override <fn> :around …)`.
+    pub built_by: Option<String>,
+    /// Its `:background` widget.
+    pub background: Option<String>,
+    /// The built-in face (content/ui/widgets.lisp) it paints with.
+    pub face: Option<String>,
+    /// The theme slots `override-theme-slot` repaints it through, each with
+    /// what reads it: a box's background prop, or its face.
+    pub slots: Vec<(String, String)>,
+}
+
+impl WidgetHooks {
+    fn of(node: &LayoutNode, region: PixelRegion) -> Self {
+        let string = |prop: &str| match node.props.get(prop) {
+            Some(Value::String(text) | Value::Keyword(text)) if !text.is_empty() => Some(text.clone()),
+            _ => None,
+        };
+        // A slot's widget paints only a box's background and the shaders
+        // that read the slot (a control's face), so only those are hooks.
+        let mut reads: Vec<(String, String)> = Vec::new();
+        if node.widget_type == "box" {
+            for prop in BOX_BACKGROUND_PROPS {
+                if let Some(Value::Keyword(name)) = node.props.get(prop)
+                    && let Some(slot) = slot_name(name)
+                {
+                    reads.push((slot, format!(":{prop}")));
+                }
+            }
+        }
+        let face = crate::widget_render::builtin_face_of(node)
+            .filter(|(face, _)| crate::widget_render::sdf_widget::sdf_widget_def(face).is_some());
+        if let Some((face, slots)) = &face {
+            reads.extend(slots.iter().map(|slot| (slot.to_string(), format!("its face {face}"))));
+        }
+        reads.sort();
+        // One line per slot, naming everything that reads it.
+        let mut slots: Vec<(String, String)> = Vec::new();
+        for (slot, read_by) in reads {
+            match slots.last_mut() {
+                Some((last, readers)) if *last == slot => {
+                    readers.push_str(", ");
+                    readers.push_str(&read_by);
+                }
+                _ => slots.push((slot, read_by)),
+            }
+        }
+        Self {
+            widget_type: node.widget_type.clone(),
+            key: node.stable_key.as_deref().or(authored_key(node)).map(str::to_string),
+            region,
+            part: string("part"),
+            built_by: source_symbol(node).map(str::to_string),
+            background: string("background"),
+            face: face.map(|(face, _)| face.to_string()),
+            slots,
+        }
+    }
+}
+
+/// The props a box paints its background from (box_widget `state_color_prop`).
+const BOX_BACKGROUND_PROPS: [&str; 4] = [
+    "background-color", "selected-background-color", "muted-background-color",
+    "drop-hover-background-color",
+];
+
+/// The theme slot `name` names, as its canonical field (`primary` is
+/// `accent`), or None for a colour that is no slot (`none`, `transparent`).
+fn slot_name(name: &str) -> Option<String> {
+    let (_, slots) = crate::theme::record_slot_reads(|| crate::theme::named_color(name));
+    slots.into_iter().next()
+}
+
+/// The function whose body built `node`, module-qualified.
+fn source_symbol(node: &LayoutNode) -> Option<&str> {
+    match node.props.get(crate::vm::SOURCE_SYMBOL_PROP) {
+        Some(Value::String(symbol)) if !symbol.is_empty() => Some(symbol),
+        _ => None,
+    }
+}
+
+fn pixel_region(rect: Rect, cell: (f32, f32)) -> PixelRegion {
+    PixelRegion {
+        x: (rect.col * cell.0).max(0.0).floor() as u32,
+        y: (rect.row * cell.1).max(0.0).floor() as u32,
+        width: (rect.width * cell.0).max(0.0).ceil() as u32,
+        height: (rect.height * cell.1).max(0.0).ceil() as u32,
+    }
+}
+
+fn frame_root<'a>(frame: &'a RenderFrame, cell: (f32, f32), size: (u32, u32))
+    -> Result<(&'a LayoutNode, Rect), String> {
+    let root = frame.widget_layout.as_ref().ok_or("the buffer has no widget layout")?;
+    let viewport = Rect { col: 0.0, row: 0.0,
+        width: size.0 as f32 / cell.0, height: size.1 as f32 / cell.1 };
+    Ok((root, viewport))
+}
+
+/// The widgets under pixel `(x, y)`, the topmost drawn first (the innermost
+/// of a nested chain), with their hooks. Overlays (menus, modals) are not
+/// looked into.
+pub fn hooks_at(frame: &RenderFrame, cell: (f32, f32), size: (u32, u32), (x, y): (f32, f32))
+    -> Result<Vec<WidgetHooks>, String> {
+    let (root, viewport) = frame_root(frame, cell, size)?;
+    let (col, row) = (x / cell.0, y / cell.1);
+    let mut stack = Vec::new();
+    visit_frame(frame, root, viewport,
+        &mut |node, rect, clip, overlay| {
+            let visible = intersection(rect, clip);
+            if !overlay && col >= visible.col && col < visible.col + visible.width
+                && row >= visible.row && row < visible.row + visible.height
+            {
+                stack.push(WidgetHooks::of(node, pixel_region(rect, cell)));
+            }
+        });
+    stack.reverse();
+    Ok(stack)
+}
+
+/// One hook and where it shows: how many widgets, and the first one's place.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookUse {
+    pub name: String,
+    pub count: usize,
+    pub first: PixelRegion,
+}
+
+/// A buffer's hooks: its parts, the functions that build its regions (each
+/// where its output starts, not every widget inside), and the theme slots
+/// it paints with, in layout order.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HookOverview {
+    pub parts: Vec<HookUse>,
+    pub functions: Vec<HookUse>,
+    pub slots: Vec<HookUse>,
+}
+
+pub fn hook_overview(frame: &RenderFrame, cell: (f32, f32), size: (u32, u32))
+    -> Result<HookOverview, String> {
+    let (root, viewport) = frame_root(frame, cell, size)?;
+    let mut roots = std::collections::HashSet::new();
+    function_roots(root, None, &mut roots);
+    let mut overview = HookOverview::default();
+    let note = |uses: &mut Vec<HookUse>, name: &str, region: PixelRegion| {
+        match uses.iter_mut().find(|used| used.name == name) {
+            Some(used) => used.count += 1,
+            None => uses.push(HookUse { name: name.to_string(), count: 1, first: region }),
+        }
+    };
+    visit_frame(frame, root, viewport,
+        &mut |node, rect, clip, overlay| {
+            let visible = intersection(rect, clip);
+            if overlay || visible.width <= 0.0 || visible.height <= 0.0 {
+                return;
+            }
+            let hooks = WidgetHooks::of(node, pixel_region(rect, cell));
+            if let Some(part) = &hooks.part {
+                note(&mut overview.parts, part, hooks.region);
+            }
+            if let Some(built_by) = &hooks.built_by
+                && roots.contains(&(node as *const LayoutNode))
+            {
+                note(&mut overview.functions, built_by, hooks.region);
+            }
+            for (slot, _) in &hooks.slots {
+                note(&mut overview.slots, slot, hooks.region);
+            }
+        });
+    Ok(overview)
+}
+
+/// The nodes where a function's output starts: built by a different
+/// function than their parent.
+fn function_roots(node: &LayoutNode, parent: Option<&str>, out: &mut std::collections::HashSet<*const LayoutNode>) {
+    let built_by = source_symbol(node).or(parent);
+    if built_by.is_some() && built_by != parent {
+        out.insert(node as *const LayoutNode);
+    }
+    for child in &node.children {
+        function_roots(child, built_by, out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,7 +465,7 @@ mod tests {
             (box :key "ok" :width 4 :height 2)
             (box :key "empty" :width 0 :height 0)
             (scroll :width 10 :height 3 (box :key "clipped" :width 10 :height 20))))"#);
-        let LayoutReport { nodes, overlaps } = layout_report(&frame, (10.0, 10.0), (1000, 600)).unwrap();
+        let LayoutReport { nodes, overlaps, .. } = layout_report(&frame, (10.0, 10.0), (1000, 600)).unwrap();
         let problems = |key: &str| nodes.iter().find(|n| n.key == key).map(|n| n.problems.clone()).unwrap();
         assert!(problems("ok").is_empty());
         assert_eq!(problems("empty"), vec![LayoutProblem::ZeroSize]);
@@ -282,6 +480,37 @@ mod tests {
         sibling_overlaps(&node, None, &mut found);
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].contains("box \"ok\" overlaps box \"empty\""), "{found:?}");
+    }
+
+    #[test]
+    fn hooks_name_the_part_slots_and_building_function_of_what_is_drawn() {
+        let frame = frame(r#"(module test.hooks)
+            (def plate (text)
+              (box :key "plate" :part "test/plate" :width 10 :height 4
+                :background-color :accent (label text)))
+            ;; The cell is built in a lambda written in `row`: `row` built it.
+            (def row ()
+              (h-stack (plate "a") (each (list 1) |x| (box :key "cell" :width 3 :height 3))))
+            (effect (v-stack (row)))"#);
+        let stack = hooks_at(&frame, (10.0, 10.0), (1000, 600), (50.0, 20.0)).unwrap();
+        let plate = stack.iter().find(|hooks| hooks.key.as_deref() == Some("test.hooks/plate")).unwrap();
+        assert_eq!(plate.part.as_deref(), Some("test/plate"));
+        assert_eq!(plate.built_by.as_deref(), Some("test.hooks/plate"));
+        assert_eq!(plate.slots, vec![("accent".to_string(), ":background-color".to_string())]);
+        assert!(stack.iter().position(|h| h.widget_type == "label")
+            < stack.iter().position(|h| h.key.as_deref() == Some("test.hooks/plate")),
+            "innermost first: {stack:?}");
+
+        let cell = hooks_at(&frame, (10.0, 10.0), (1000, 600), (115.0, 15.0)).unwrap();
+        assert_eq!(cell[0].built_by.as_deref(), Some("test.hooks/row"), "{cell:?}");
+
+        let overview = hook_overview(&frame, (10.0, 10.0), (1000, 600)).unwrap();
+        let names = |uses: &[HookUse]| uses.iter().map(|used| used.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&overview.parts), vec!["test/plate"]);
+        assert!(names(&overview.slots).contains(&"accent".to_string()));
+        let functions = names(&overview.functions);
+        assert!(functions.contains(&"test.hooks/row".to_string()), "{functions:?}");
+        assert!(functions.contains(&"test.hooks/plate".to_string()), "{functions:?}");
     }
 
     fn frame(source: &str) -> RenderFrame {

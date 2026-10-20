@@ -97,7 +97,7 @@ pub fn register_widget_natives(vm: &mut VM) {
                 vm.fail_native_call(error);
                 return Value::Nil;
             }
-            if let Some(symbol) = vm.current_source_symbol() {
+            if let Some(symbol) = vm.current_owner_symbol() {
                 if let Value::Map(map) = &mut widget {
                     map.insert(
                         SOURCE_SYMBOL_PROP.to_string(),
