@@ -505,7 +505,7 @@
       body)))
 
 (def sampler-panel (inst)
-  (box :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
+  (box :background (pf/panel-surface) :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
     :height st/fx-fixed-panel-height
     :debug-name "sampler-panel"
     :drop-types (sampler-panel-drop-types inst)

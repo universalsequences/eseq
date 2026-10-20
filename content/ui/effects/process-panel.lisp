@@ -328,7 +328,7 @@
 (def process-chain-panel ()
   (box :width 26 :height st/fx-fixed-panel-height :padding 0
     :debug-name "process-chain-panel"
-    :background "fx-panel-bg"
+    :background (pf/panel-surface)
     :color :instrument-panel-bg
     :header :fx-panel-header-bg
     :selected-header :fx-panel-header-selected-bg

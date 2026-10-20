@@ -522,7 +522,7 @@
   (box :debug-name "rack-empty-selected-panel"
        :width 34
        :height st/fx-fixed-panel-height
-       :background "fx-panel-bg"
+       :background (pf/panel-surface)
        :color :instrument-panel-bg
        :header :fx-panel-header-bg
        :selected-header :fx-panel-header-selected-bg
@@ -655,7 +655,7 @@
     :drop-meta (dict :track (get inst :track))
     :drop-hover-border-color :mixer-strip-selected-border
     :on-drop (lambda (event) (rack-panel-drop-on-container event))
-    :background "fx-panel-bg"
+    :background (pf/panel-surface)
     :color :instrument-panel-bg
     :header :fx-panel-header-bg
     :selected-header :fx-panel-header-selected-bg
@@ -742,7 +742,7 @@
             (str "instrument-panel-" (get inst :track))
             (str "rack-instrument-panel-" (get inst :track) "-" (get inst :rack-slot)))
           :debug-name "instrument-panel"
-          :background "fx-panel-bg"
+          :background (pf/panel-surface)
           :color :instrument-panel-bg
           :header :fx-panel-header-bg
           :selected-header :fx-panel-header-selected-bg

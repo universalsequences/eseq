@@ -74,7 +74,7 @@
               :fill-color (rgba 1.0 0.48 0.18 0.16))))))))
 
 (def modulator-panel (inst)
-  (box :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
+  (box :background (pf/panel-surface) :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
     :height st/fx-fixed-panel-height
     :debug-name "modulator-panel"
     (v-stack :gap 0 :height :fill

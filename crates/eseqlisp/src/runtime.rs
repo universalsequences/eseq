@@ -2252,6 +2252,11 @@ impl Runtime {
                 "Switch the overrides written in `module` back on.",
             ),
             (
+                "override-theme-slot",
+                "(override-theme-slot :slot \"widget\")",
+                "Paint every box whose background is theme slot :slot with defwidget \"widget\", while the calling module's overrides stand (detaching or disabling it reverts).",
+            ),
+            (
                 "instance-ref",
                 "(instance-ref id)",
                 "The live instance with this id, as a value (what a kind's :view receives as `self`), or nil. Read and write its fields with a `let`: (let ((e (instance-ref 1))) (set! e.rings (list)) e.rings).",

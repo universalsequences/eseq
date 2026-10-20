@@ -117,6 +117,20 @@ no inset for the border and no second box behind it:
 `design-px` is one design pixel, for detail that keeps its size as the box
 grows. Draw shapes with `sdf/…` only for marks inside the panel.
 
+To texture a whole tile, wrap its buffer body: `eseq.sequencer/sequencer-body`,
+`eseq.mixer/mixer-body`, and in `eseq.effects.buffers` `step-buffer-body`,
+`track-buffer-body` and `fx-buffer-body`. Every effect and instrument card
+paints the widget `eseq.effects.panel-frame/panel-surface` returns; override it
+to restyle them all (the widget takes the card's `selected`, `header-r/g/b`
+and `selected-header-r/g/b`).
+
+A colour used across many files (the boxes inside every instrument UI use
+`:instrument-group-bg`, `:instrument-panel-bg` and `:instrument-control-bg`)
+is restyled by its theme slot: `(override-theme-slot :instrument-group-bg
+"my-texture")` paints every box with that background with your widget. It is
+an override owned by your module, so detaching the package reverts it, which
+`apply-theme` does not.
+
 ## Knobs, keys and hooks
 
 - A factory module's `defcustom` is a knob: `(setopt eseq.mixer/track-strip-width 14)`.

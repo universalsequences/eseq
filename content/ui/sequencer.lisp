@@ -51,7 +51,7 @@
                            remove-process! bind-port! add-fanout! unbind-port! clear-port!
                            remove-fanout! graph-of))
 
-(export lane-patchbay-node lane-patch-register-node lane-patch-node-namespace
+(export sequencer-body lane-patchbay-node lane-patch-register-node lane-patch-node-namespace
         harmony-snap-meter lane-patch-expr-error lane-patch-hidden-in-port-count
         lane-patch-node-selected-id lane-patch-node-select lane-patch-node-host? node-of
         process-of
@@ -4075,7 +4075,9 @@
         (each (range 0 (eseq.drum-rack-v2/pad-map-row-count)) |row|
           (pad-map-row g pads row page))))))
 
-(effect-buffer "*sequencer*"
+;; The whole *sequencer* buffer, named so a package can restyle the tile edge
+;; to edge with an :around (a buffer body runs on every redraw).
+(def sequencer-body ()
   (v-stack :key "sequencer-grid" :width :fill :fill-content-style true :padding 0.00 :gap 0.0
     ;; Sample import modal: opened by Rust after a file drop; renders as a
     ;; centered overlay (modal spec) with zero footprint here while closed.
@@ -4114,6 +4116,8 @@
         :color :transparent
         :bg :transparent))))
 
+(effect-buffer "*sequencer*"
+  (sequencer-body))
 
 (set-buffer-mode-for "*sequencer*" "eseq.seq-grid-mode/seq-grid-mode")
 

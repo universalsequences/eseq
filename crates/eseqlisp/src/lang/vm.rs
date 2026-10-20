@@ -237,6 +237,45 @@ pub(crate) fn log_source_load_error(form: &str, message: &str, queued: &[String]
     }
 }
 
+/// Overrides on `theme-slot/<slot>` targets name the defwidget that paints
+/// theme slot `slot` (`override-theme-slot`).
+const THEME_SLOT_TARGET_PREFIX: &str = "theme-slot/";
+
+/// Register `callback` as the current module's override of `name`.
+/// Re-evaluation replaces this module's registration and makes it the
+/// active (most recently evaluated) layer rather than stacking copies.
+/// A hot reload keeps the entry's enabled state: a package the user
+/// switched off must not switch itself back on by re-evaluating.
+fn register_override(vm: &mut VM, name: &str, kind: OverrideKind, callback: Value) {
+    let overriding_module = vm.current_module_name().to_string();
+    let set = vm
+        .overrides
+        .entry(name.to_string())
+        .or_insert_with(|| OverrideSet {
+            entries: Vec::new(),
+            dispatcher: Rc::new(RefCell::new(Value::OverrideDispatcher(name.to_string()))),
+        });
+    let previously_enabled = set
+        .entries
+        .iter()
+        .find(|entry| entry.overriding_module == overriding_module)
+        .map(|entry| entry.enabled);
+    let enabled = previously_enabled
+        .unwrap_or_else(|| !vm.disabled_override_modules.contains(&overriding_module));
+    set.entries
+        .retain(|entry| entry.overriding_module != overriding_module);
+    set.entries.push(OverrideEntry {
+        overriding_module,
+        kind,
+        callback,
+        quarantined: false,
+        enabled,
+    });
+    // What the factory function draws changed with no reactive edge:
+    // redraw its dependents, cached subtrees included.
+    vm.mark_effects_depending_on_override_targets(&HashSet::from([name.to_string()]));
+}
+
 /// Run every listener registered on an extension hook, in registration order.
 /// A listener error is logged and does not stop the remaining listeners.
 fn run_extension_hook(vm: &mut VM, name: &str, args: Vec<Value>) -> Value {
@@ -3894,37 +3933,24 @@ pub fn register_core_natives(vm: &mut VM) {
                 return Value::Nil;
             }
         };
-        let overriding_module = vm.current_module_name().to_string();
-        let set = vm
-            .overrides
-            .entry(name.clone())
-            .or_insert_with(|| OverrideSet {
-                entries: Vec::new(),
-                dispatcher: Rc::new(RefCell::new(Value::OverrideDispatcher(name.clone()))),
-            });
-        // Re-evaluation replaces this module's registration and makes it the
-        // active (most recently evaluated) layer rather than stacking copies.
-        // A hot reload keeps the entry's enabled state: a package the user
-        // switched off must not switch itself back on by re-evaluating.
-        let previously_enabled = set
-            .entries
-            .iter()
-            .find(|entry| entry.overriding_module == overriding_module)
-            .map(|entry| entry.enabled);
-        let enabled = previously_enabled
-            .unwrap_or_else(|| !vm.disabled_override_modules.contains(&overriding_module));
-        set.entries
-            .retain(|entry| entry.overriding_module != overriding_module);
-        set.entries.push(OverrideEntry {
-            overriding_module,
-            kind,
-            callback: callback.clone(),
-            quarantined: false,
-            enabled,
-        });
-        // What the factory function draws changed with no reactive edge:
-        // redraw its dependents, cached subtrees included.
-        vm.mark_effects_depending_on_override_targets(&HashSet::from([name.clone()]));
+        register_override(vm, name, kind, callback.clone());
+        Value::Nil
+    });
+
+    // `(override-theme-slot :slot "widget")`: boxes whose background is theme
+    // slot `slot` paint defwidget `widget` instead, for as long as the
+    // calling module's override stands. It is an override on the target
+    // `theme-slot/<slot>`, so detaching the package, disabling its overrides
+    // and re-evaluating it work as they do for a function.
+    vm.register_native_with_vm("override-theme-slot", |args, vm| {
+        let (Some(Value::Keyword(slot) | Value::String(slot)), Some(widget @ Value::String(_))) =
+            (args.first(), args.get(1))
+        else {
+            log_native_misuse("override-theme-slot", "expects (override-theme-slot :slot \"widget\")");
+            return Value::Nil;
+        };
+        let target = format!("{THEME_SLOT_TARGET_PREFIX}{slot}");
+        register_override(vm, &target, OverrideKind::Replace, widget.clone());
         Value::Nil
     });
 
@@ -6345,6 +6371,7 @@ impl VM {
         self.preserve_state_on_redefinition = snapshot.preserve_state_on_redefinition;
         self.extension_hooks = snapshot.extension_hooks;
         self.overrides = snapshot.overrides;
+        self.sync_theme_slot_overrides();
         self.disabled_override_modules = snapshot.disabled_override_modules;
         self.custom_declarations = snapshot.custom_declarations;
         self.declared_modules = snapshot.declared_modules;
@@ -6921,6 +6948,18 @@ impl VM {
         self.source_manager.record_render_root(node_id);
     }
 
+    /// Mirror the active `theme-slot/` overrides into the theme, which paints
+    /// those slots with their widgets.
+    fn sync_theme_slot_overrides(&self) {
+        crate::theme::set_slot_widget_overrides(self.overrides.iter().filter_map(|(target, set)| {
+            let slot = target.strip_prefix(THEME_SLOT_TARGET_PREFIX)?;
+            match &set.active()?.callback {
+                Value::String(widget) => Some((slot.to_string(), widget.clone())),
+                _ => None,
+            }
+        }));
+    }
+
     /// Drop every override written in `module`, leaving other modules' on the
     /// same targets, and redraw what depended on them. Returns the targets
     /// it took an override off, sorted.
@@ -6946,6 +6985,9 @@ impl VM {
     pub fn mark_effects_depending_on_override_targets(&mut self, targets: &HashSet<String>) {
         if targets.is_empty() {
             return;
+        }
+        if targets.iter().any(|target| target.starts_with(THEME_SLOT_TARGET_PREFIX)) {
+            self.sync_theme_slot_overrides();
         }
         let mut symbols = HashSet::new();
         for target in targets {
@@ -10378,6 +10420,28 @@ mod tests {
         assert_eq!(vm.eval_str("(test.tfactory/other)").unwrap(), Some(Value::Number(22.0)));
         vm.eval_str("(enable-override test.tfactory/value)").expect("enable one");
         assert_eq!(vm.eval_str("(test.tfactory/value)").unwrap(), Some(Value::Number(10.0)));
+    }
+
+    #[test]
+    fn a_theme_slot_override_paints_while_its_module_is_on() {
+        let mut vm = module_test_vm();
+        let painted = || crate::theme::named_widget("instrument-control-bg");
+        vm.eval_module_source(
+            temp_lisp_path("slot-pkg"),
+            "(module test.slotpkg)\n(override-theme-slot :instrument-control-bg \"steel\")",
+            1,
+        )
+        .expect("package");
+        assert_eq!(painted().as_deref(), Some("steel"));
+
+        vm.eval_str("(disable-module-overrides test.slotpkg)").expect("disable");
+        assert_eq!(painted(), None);
+        vm.eval_str("(enable-module-overrides test.slotpkg)").expect("enable");
+        assert_eq!(painted().as_deref(), Some("steel"));
+
+        // Detaching the package drops it.
+        vm.remove_module_overrides("test.slotpkg");
+        assert_eq!(painted(), None);
     }
 
     #[test]

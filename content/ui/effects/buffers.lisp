@@ -19,9 +19,15 @@
 (import eseq.effects.process-panel :as pp)
 (import eseq.effects.state :as st)
 (import eseq.effects.track-panels :as tp)
+(import eseq.sound-palette)
 
 (export empty-track-fallback
         no-tracks?
+        step-buffer-body
+        track-buffer-body
+        fx-buffer-body
+        drop-placeholder-panel
+        track-drop-placeholder-panel
         delete-selected-plock-row-key)
 
 ;; Flat callers: step-buffer.lisp calls fx-empty-track-fallback and binds
@@ -141,7 +147,7 @@
     (h-stack :gap 1 :align :start
       (box :debug-name "rack-fx-pads-panel"
         :key (str "rack-fx-pads-panel-" g.gid)
-        :background "fx-panel-bg"
+        :background (pf/panel-surface)
         :color :instrument-panel-bg
         :header :fx-panel-header-bg
         :selected-header :fx-panel-header-selected-bg
@@ -233,7 +239,29 @@
         (track-drop-placeholder-panel)
         (box :width 0 :height 0)))))
 
-(effect-buffer "*track*"
+;; Each side buffer's whole content is a named function, so a package can
+;; restyle the tile edge to edge with an :around (a buffer body runs on every
+;; redraw, unlike a subtree's).
+
+;; *step*: registered by step-buffer.lisp.
+(def step-buffer-body ()
+  (if (no-tracks?)
+    (empty-track-fallback)
+    (box :padding 0.5
+      (v-stack :gap 0.1
+        ;; Sound palette overlay (takes spec 17.6), opened from the
+        ;; instrument panel's binding badge. Collapses to nothing while
+        ;; closed.
+        (subtree :key "step-sound-palette"
+          (eseq.sound-palette/panel))
+        ;; Each panel is its own subtree so selection/p-lock updates rerun
+        ;; only the panel that reads them instead of the whole buffer.
+        (subtree :key "step-parameters-panel"
+          (tp/step-parameters-panel))
+        (subtree :key "step-track-plocks-panel"
+          (tp/track-plocks-panel))))))
+
+(def track-buffer-body ()
   (if (no-tracks?)
     (empty-track-fallback)
     (box :padding 1.0
@@ -245,10 +273,13 @@
         ;(fx-track-accumulator-panel)
         ))))
 
+(effect-buffer "*track*"
+  (track-buffer-body))
+
 ;; The knob right-click menu (bead eseq-1gy6) is an overlay, so it has to be
 ;; rendered by the tile that owns the knobs — this buffer. Zero footprint when
 ;; closed; the wrapper boxes only set the shared menu state.
-(effect-buffer "*fx*"
+(def fx-buffer-body ()
   (h-stack :debug-name "fx-buffer-root" :gap 0 :width :fill :height :fill
   (if (pw/has-selected-bus?)
     (let ((g (eseq.drum-rack-v2/selected-bus-rack)))
@@ -270,6 +301,9 @@
       (track-selection-panel)))))
   (subtree :key "fx-param-plock-menu" (pc/param-plock-context-menu "fx"))
   (subtree :key "fx-polyphony-menu" (tp/polyphony-context-menu))))
+
+(effect-buffer "*fx*"
+  (fx-buffer-body))
 
 (def copy-selected-effect ()
   (seq-copy-selected-effect))

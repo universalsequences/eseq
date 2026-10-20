@@ -1646,10 +1646,48 @@ pub fn parse_widget_value(value: &Value) -> Option<String> {
     }
 }
 
+thread_local! {
+    /// Slots a package paints with a widget (`override-theme-slot`), over the
+    /// theme's own: slot field name (underscored) -> defwidget. Per thread,
+    /// like the VM whose overrides they mirror, so the agent's headless copy
+    /// never repaints the app's.
+    static SLOT_WIDGET_OVERRIDES: std::cell::RefCell<WidgetSlotMap> =
+        std::cell::RefCell::default();
+}
+
+/// Replace this thread's package slot widgets with `slots` (slot name ->
+/// defwidget). A change is a theme change: it bumps the generation.
+pub fn set_slot_widget_overrides(slots: impl IntoIterator<Item = (String, String)>) {
+    let slots: WidgetSlotMap = slots
+        .into_iter()
+        .map(|(slot, widget)| (normalize_name(&slot), widget))
+        .collect();
+    let changed = SLOT_WIDGET_OVERRIDES.with(|cell| {
+        if *cell.borrow() == slots {
+            return false;
+        }
+        cell.replace(slots);
+        true
+    });
+    if changed {
+        THEME_GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// The widget theme slot `name` (a keyword such as `instrument-group-bg`)
-/// is painted with, if it holds one.
+/// is painted with, if it holds one: a package's, else the theme's.
 pub fn named_widget(name: &str) -> Option<String> {
-    named_widget_in(&current(), name)
+    // Runs per box: normalize only when a package holds a slot.
+    SLOT_WIDGET_OVERRIDES
+        .with(|cell| {
+            let slots = cell.borrow();
+            if slots.is_empty() {
+                None
+            } else {
+                slots.get(&normalize_name(name)).cloned()
+            }
+        })
+        .or_else(|| named_widget_in(&current(), name))
 }
 
 /// [`named_widget`] against an explicit theme.
