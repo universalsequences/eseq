@@ -673,7 +673,27 @@ pub fn resolve_theme_keywords(def: &SdfWidgetDef) {
 /// Whether `name` is the face a built-in control paints with
 /// (content/ui/widgets.lisp), never a box background.
 pub fn is_builtin_face(name: &str) -> bool {
-    name == super::knob::KNOB_FACE_WIDGET || name == super::knob_number::KNOB_NUMBER_FACE_WIDGET
+    [
+        super::knob::KNOB_FACE_WIDGET,
+        super::knob_number::KNOB_NUMBER_FACE_WIDGET,
+        super::button::BEZEL_FACE_WIDGET,
+        super::button::BEZEL_TAB_FACE_WIDGET,
+    ]
+    .contains(&name)
+}
+
+/// Whether a package or the theme paints theme slot `slot` with a defined
+/// widget, as a box background or a shader reading the slot would.
+pub fn slot_paints_with_widget(slot: &str) -> bool {
+    crate::theme::named_widget(slot).is_some_and(|widget| sdf_widget_def(&widget).is_some())
+}
+
+/// `primitive` drawn as its widget's background (behind its text).
+pub fn as_background(mut primitive: GpuPrimitive) -> GpuPrimitive {
+    if let GpuPrimitive::WidgetInstance { is_background, .. } = &mut primitive {
+        *is_background = true;
+    }
+    primitive
 }
 
 pub fn sdf_widget_def(name: &str) -> Option<Rc<SdfWidgetDef>> {
@@ -731,8 +751,8 @@ thread_local! {
 
 /// Paint a built-in control at `rect` with its face, the `defwidget` `face`
 /// (content/ui/widgets.lisp), or None if that is not defined. The face reads
-/// the control's value as `value_t`, `input_color` as `input-color`, and
-/// `values[i]` as its `:state` `names[i]`; a state it does not declare is
+/// the control's value as `value_t`, `colors` as `input-color` and
+/// `second-color`, and `values[i]` as its `:state` `names[i]`; a state it does not declare is
 /// dropped, one it declares but is not given reads 0. `names` must be the
 /// same for every call with one `face`.
 #[allow(clippy::too_many_arguments)]
@@ -743,7 +763,7 @@ pub fn face_primitive(
     rect: Rect,
     viewport: WidgetViewport,
     value_t: f32,
-    input_color: [f32; 4],
+    colors: [[f32; 4]; 2],
 ) -> Option<GpuPrimitive> {
     let generation = sdf_widget_registry_generation();
     let (def, uniforms) = FACES.with(|faces| {
@@ -800,10 +820,11 @@ pub fn face_primitive(
             uniform_b: quad(4),
             uniform_c: quad(8),
             uniform_d: quad(12),
-            color_a: input_color,
+            color_a: colors[0],
             color_b: [0.0; 4],
             color_c: sdf_widget_logical_uv_bounds(rect, paint_rect),
-            color_d: [0.0; 4],
+            // A negative alpha would read as a hover-scale animation.
+            color_d: colors[1].map(|c| c.max(0.0)),
             corner_radius: sdf_design_px(rect, viewport),
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         },
@@ -1290,7 +1311,7 @@ mod tests {
         // `undeclared` is dropped, `unpassed` reads 0, the rest by name.
         let names = ["a", "undeclared", "b"];
         let face = |values: &[f32]| {
-            face_primitive("test-face", &names, values, rect, viewport, 0.5, [1.0; 4])
+            face_primitive("test-face", &names, values, rect, viewport, 0.5, [[1.0; 4], [0.5; 4]])
         };
         let Some(GpuPrimitive::WidgetInstance { widget_type, instance, .. }) = face(&[1.0, 9.0, 2.0])
         else {
@@ -1298,9 +1319,9 @@ mod tests {
         };
         assert_eq!(widget_type, "test-face");
         assert_eq!(instance.uniform_a, [2.0, 0.0, 1.0, 0.0]);
-        assert_eq!((instance.value_t, instance.color_a), (0.5, [1.0; 4]));
+        assert_eq!((instance.value_t, instance.color_a, instance.color_d), (0.5, [1.0; 4], [0.5; 4]));
 
-        assert!(face_primitive("no-such-face", &[], &[], rect, viewport, 0.0, [0.0; 4]).is_none());
+        assert!(face_primitive("no-such-face", &[], &[], rect, viewport, 0.0, [[0.0; 4]; 2]).is_none());
     }
 
     #[test]

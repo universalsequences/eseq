@@ -2270,7 +2270,7 @@ impl Runtime {
             (
                 "override-theme-slot",
                 "(override-theme-slot :slot \"widget\")",
-                "Paint every box whose background is theme slot :slot with defwidget \"widget\", and every shader that reads the slot's colour (a knob's :widget-knob-filled / :widget-knob-track) with it inlined, `slot-color` bound to that colour, while the calling module's overrides stand (detaching or disabling it reverts).",
+                "Paint every box whose background is theme slot :slot with defwidget \"widget\", and every shader that reads the slot's colour (a knob's :widget-knob-filled / :widget-knob-track, a button's :button-secondary-bg, a number picker's :dropdown-bg, their :button-border) with it inlined, `slot-color` bound to that colour, while the calling module's overrides stand (detaching or disabling it reverts).",
             ),
             (
                 "instance-ref",

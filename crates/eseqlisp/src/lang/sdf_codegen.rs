@@ -10,6 +10,15 @@ mod geometry;
 /// `ShaderEmitter::emit_slot_material`).
 pub const SLOT_COLOR_SYMBOL: &str = "slot-color";
 
+/// A built-in control face's second input colour (the first is
+/// `input-color`), e.g. a button's border.
+pub const SECOND_COLOR_SYMBOL: &str = "second-color";
+
+/// The symbols a shader reads as a colour without declaring it.
+fn is_color_symbol(name: &str) -> bool {
+    name == "input-color" || name == SLOT_COLOR_SYMBOL || name == SECOND_COLOR_SYMBOL
+}
+
 #[derive(Debug)]
 pub enum CodegenError {
     UnsupportedExpression(String),
@@ -280,6 +289,7 @@ impl ShaderEmitter {
             "aspect" => return "aspect".to_string(),
             "design-px" => return "design_px".to_string(),
             "input-color" => return format!("{}.color_a", self.input_name()),
+            SECOND_COLOR_SYMBOL => return format!("{}.color_d", self.input_name()),
             "hit/hover" => {
                 return if let Some(rid) = self.current_region_id {
                     match self.language {
@@ -366,9 +376,7 @@ impl ShaderEmitter {
     fn expr_type(&self, expr: &Expression) -> Option<&'static str> {
         match expr {
             Expression::Keyword(_) => Some("float4"),
-            Expression::Symbol(name) if name == "input-color" || name == SLOT_COLOR_SYMBOL => {
-                Some("float4")
-            }
+            Expression::Symbol(name) if is_color_symbol(name) => Some("float4"),
             Expression::Symbol(name) => self.resolve_symbol_type(name),
             Expression::List(items) if items.is_empty() => None,
             Expression::List(items) => {
@@ -1362,9 +1370,18 @@ fn format_float(n: f64) -> String {
 }
 
 fn expr_returns_float4(expr: &Expression) -> bool {
+    returns_float4_with(expr, &mut Vec::new())
+}
+
+/// [`expr_returns_float4`] with `scope` the `let` names in scope, innermost
+/// last, each with whether it is bound to a colour.
+fn returns_float4_with<'a>(expr: &'a Expression, scope: &mut Vec<(&'a str, bool)>) -> bool {
     match expr {
         Expression::Keyword(_) => true,
-        Expression::Symbol(name) => name == "input-color" || name == SLOT_COLOR_SYMBOL,
+        Expression::Symbol(name) => match scope.iter().rev().find(|(bound, _)| bound == name) {
+            Some(&(_, color)) => color,
+            None => is_color_symbol(name),
+        },
         Expression::List(items) if items.is_empty() => false,
         Expression::List(items) => {
             let Some(Expression::Symbol(head)) = items.first() else {
@@ -1372,11 +1389,33 @@ fn expr_returns_float4(expr: &Expression) -> bool {
             };
             match head.as_str() {
                 "vec4" | "rgba" | "sdf/region" | "sdf/fill" | "sdf/paint" | "sdf/stroke" | "sdf/stroke-px" | "sdf/layer" => true,
-                "let" => items.last().is_some_and(expr_returns_float4),
-                "do" => items.last().is_some_and(expr_returns_float4),
-                "if" => items.get(2).is_some_and(expr_returns_float4),
+                "let" => {
+                    // Bindings are sequential: each sees the colours before it.
+                    let outer = scope.len();
+                    if let Some(Expression::List(bindings)) = items.get(1) {
+                        for binding in bindings {
+                            if let Expression::List(pair) = binding
+                                && let [Expression::Symbol(name), value] = pair.as_slice()
+                            {
+                                let color = returns_float4_with(value, scope);
+                                scope.push((name, color));
+                            }
+                        }
+                    }
+                    let returns = items.len() > 2
+                        && items.last().is_some_and(|body| returns_float4_with(body, scope));
+                    scope.truncate(outer);
+                    returns
+                }
+                "do" => items.last().is_some_and(|body| returns_float4_with(body, scope)),
+                // As `expr_type`: the then branch or the else, the first
+                // operand or (for `mix`) the second.
+                "if" => items.iter().skip(2).take(2).any(|branch| returns_float4_with(branch, scope)),
+                "mix" => items.iter().skip(1).take(2).any(|operand| returns_float4_with(operand, scope)),
                 // A colour scaled or offset: `(* slot-color (rgba k k k 1))`.
-                "mix" | "+" | "-" | "*" | "/" => items.get(1).is_some_and(expr_returns_float4),
+                "+" | "-" | "*" | "/" => {
+                    items.get(1).is_some_and(|first| returns_float4_with(first, scope))
+                }
                 _ => false,
             }
         }
@@ -1595,6 +1634,7 @@ pub fn builtin_shader_symbols() -> HashSet<String> {
         "hit/region".to_string(),
         "input-color".to_string(),
         SLOT_COLOR_SYMBOL.to_string(),
+        SECOND_COLOR_SYMBOL.to_string(),
     ])
 }
 

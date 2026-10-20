@@ -149,6 +149,13 @@ the slot would have been: scale it to keep the theme's hue.
 A widget standing in for a slot this way takes no `:state`. A knob given
 its own `:arc-color`, or p-locked, keeps that colour.
 
+Buttons and number pickers work the same way: their face is
+`:button-secondary-bg` (and `:button-primary-bg`, `:button-ghost-bg`,
+`:button-danger-bg` by variant) or a number picker's `:dropdown-bg`, their
+rim `:button-border`. The bezel's lighting and rim stay; a held button still
+darkens or lightens your face. One with its own `:background-color` or
+`:border-color` keeps it.
+
 ## Knobs, keys and hooks
 
 - A factory module's `defcustom` is a knob: `(setopt eseq.mixer/track-strip-width 14)`.

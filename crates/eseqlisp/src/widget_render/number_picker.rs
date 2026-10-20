@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent,
-    get_bool_prop, get_f32_prop, plock_active, plock_color, resolve_named_color,
+    get_bool_prop, get_f32_prop, has_color_prop, plock_active, plock_color, resolve_named_color,
     should_trigger_integer_haptic, styled_cell, trigger_level_change_haptic,
 };
 use crate::layout::{
@@ -782,12 +782,16 @@ fn cursor_x_from_cache(text: &str, cursor_pos: usize, font_size: f32, cell_w: f3
     })
 }
 
-fn number_picker_bg(props: &HashMap<String, Value>) -> Color {
+/// A number picker's own fill, if it has one; otherwise it is `:dropdown-bg`.
+fn number_picker_own_bg(props: &HashMap<String, Value>) -> Option<Color> {
     props
         .get("background-color")
         .and_then(theme::parse_color_value)
         .or_else(|| props.get("bg-color").and_then(theme::parse_color_value))
-        .unwrap_or_else(theme::DROPDOWN_BG)
+}
+
+fn number_picker_bg(props: &HashMap<String, Value>) -> Color {
+    number_picker_own_bg(props).unwrap_or_else(theme::DROPDOWN_BG)
 }
 
 fn number_picker_border(props: &HashMap<String, Value>) -> Color {
@@ -1374,30 +1378,24 @@ cells by default. The -tri and -slider names are internal draw passes. Example: 
             // Slider mode uses one flat surface primitive below. The standard
             // mode keeps the softly lit button surface.
             if !slider_mode {
-                let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
-                let px_w = node.rect.width * viewport.cell_w;
-                let px_h = node.rect.height * viewport.cell_h;
-                prims.push(GpuPrimitive::WidgetInstance {
-                    widget_type: "number-picker".to_string(),
-                    instance: WidgetInstance {
-                        ndc_min,
-                        ndc_max,
-                        value_t: 0.0,
-                        orientation: 0.0,
-                        itime: viewport.time_seconds,
-                        uniform_a: [0.0; 4],
-                        uniform_b: [0.0; 4],
-                        uniform_c: [0.0; 4],
-                        uniform_d: [0.0; 4],
-                        color_a: bg_color.to_rgba(),
-                        color_b: border_color.to_rgba(),
-                        color_c: highlight_color.to_rgba(),
-                        color_d: shadow_color.to_rgba(),
-                        corner_radius: normalized_corner_radius(node.rect, viewport, corner_radius),
-                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                prims.push(super::button::bezel_primitive(
+                    &super::button::BezelPaint {
+                        radius: normalized_corner_radius(node.rect, viewport, corner_radius),
+                        tab: false,
+                        fill_slot: number_picker_own_bg(&node.props)
+                            .is_none()
+                            .then_some(super::button::BezelFill::Dropdown),
+                        border_slot: !plocked && !has_color_prop(&node.props, "border-color"),
+                        press: 0.0,
+                        fill: bg_color,
+                        border: border_color,
+                        highlight: highlight_color,
+                        shadow: shadow_color,
                     },
-                    is_background: true,
-                });
+                    node.rect,
+                    viewport,
+                    "number-picker",
+                ));
             }
 
             if slider_mode {

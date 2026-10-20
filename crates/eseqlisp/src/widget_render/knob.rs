@@ -288,7 +288,7 @@ the theme. It is :size cells wide (default 2) and drawn round. Example: \
             node.rect,
             viewport,
             normalized_value(&node.props),
-            [0.0; 4],
+            [[0.0; 4]; 2],
         ) {
             return vec![face];
         }

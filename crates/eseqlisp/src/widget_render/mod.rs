@@ -3600,6 +3600,11 @@ pub fn plock_color(props: &HashMap<String, Value>) -> Color {
     }
 }
 
+/// Whether `props` gives `key` a colour of its own (one that parses).
+pub fn has_color_prop(props: &HashMap<String, Value>, key: &str) -> bool {
+    props.get(key).and_then(theme::parse_color_value).is_some()
+}
+
 pub fn resolve_named_color(props: &HashMap<String, Value>, key: &str, default: Color) -> Color {
     match props.get(key) {
         Some(value) => theme::parse_color_value(value).unwrap_or(default),

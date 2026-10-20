@@ -2436,7 +2436,7 @@ names are internal draw passes. Example: \
             knob_rect,
             viewport,
             value_t,
-            arc_color.to_rgba(),
+            [arc_color.to_rgba(), [0.0; 4]],
         )
         .unwrap_or_else(|| {
             GpuPrimitive::WidgetInstance {
