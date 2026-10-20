@@ -14442,6 +14442,8 @@ use panel_kinds_seed::*;
             .id;
         editor.set_active_buffer(mixer_id);
         editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::UiOnly;
+        // The fixture measures the clip grid, which the factory hides by default.
+        editor.runtime_mut().eval_str("(setopt eseq.seq-core-state/mixer-show-clip-grid true)").unwrap();
         editor.set_layout_viewport(160, 34);
         editor.refresh_runtime_side_effects();
         let layout = editor
@@ -26985,6 +26987,8 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_rack_clip_run_renders_launches_and_swaps_the_rack_menu() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        // The clip run stands in for the clip grid (off by default).
+        editor.runtime_mut().eval_str("(setopt eseq.seq-core-state/mixer-show-clip-grid true)").unwrap();
         let mut kind_rack = rack_group_fixture(true);
         kind_rack.id = 8;
         kind_rack.name = "Break".to_string();
@@ -30344,6 +30348,8 @@ use panel_kinds_seed::*;
 
         let track_count = 10;
         let mut editor = full_grid_editor_for_scroll_tests();
+        // The retained layouts include the clip grid (off by default).
+        editor.runtime_mut().eval_str("(setopt eseq.seq-core-state/mixer-show-clip-grid true)").unwrap();
         set_full_grid_track_count(&mut editor, track_count, 16);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -43188,6 +43194,8 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(&src)
             .expect("load mixer lisp");
+        // The clicks reach pattern cells: show the clip grid (off by default).
+        editor.runtime_mut().eval_str("(setopt eseq.seq-core-state/mixer-show-clip-grid true)").unwrap();
         editor.refresh_runtime_side_effects();
         let mixer_id = editor
             .buffers

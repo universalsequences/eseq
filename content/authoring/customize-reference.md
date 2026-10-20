@@ -97,6 +97,26 @@ follows the user's theme. `(apply-theme (dict :accent '(0.95 0.25 0.65)))` chang
 slots everywhere; unmentioned slots keep their values. Revert does not undo a
 theme change; restarting the app does.
 
+## Textured backgrounds
+
+To give a panel texture (brushed metal, grain, a gradient), keep its box and
+swap the flat fill for a shader: `(merge w :background "my-texture")`, leaving
+its `:corner-radius`, `:border-width` and `:border-color` as they are. A
+rounded box clips its `:background` widget to its own shape, so the shader is
+only a colour expression in `x`/`y` (`(rgba …)`), with no `sdf/rounded-rect`,
+no inset for the border and no second box behind it:
+
+```lisp
+(defwidget brushed-steel
+  :width 4 :height 4
+  :shader (let ((grain (* 0.05 (sin (* y 90.0)))))
+            (rgba (+ 0.62 grain) (+ 0.64 grain) (+ 0.7 grain) 1.0)))
+```
+
+`x` runs across the box and `y` down it, each about -1..1 on the shorter side;
+`design-px` is one design pixel, for detail that keeps its size as the box
+grows. Draw shapes with `sdf/…` only for marks inside the panel.
+
 ## Knobs, keys and hooks
 
 - A factory module's `defcustom` is a knob: `(setopt eseq.mixer/track-strip-width 14)`.
@@ -113,6 +133,12 @@ the app restarts.
 
 ## Gotchas
 
+- An `:around` that changes what a function returns only sticks if that
+  function is called on every redraw. One that returns a `(subtree :key …)`
+  is called once: the subtree redraws by running its own body, and your
+  change is gone the first time it does (a picker reverts after its value
+  changes). Override the function the subtree's body calls instead (the
+  mixer's `track-output-picker`, not `track-output-dropdown`).
 - `(track 1).muted` does not parse. Bind it first:
   `(let ((t (track 1))) t.muted)`.
 - Include the `(import …)` lines your forms need in every `try`; repeats are

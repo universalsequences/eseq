@@ -456,9 +456,23 @@ whose body is an SDF expression:
 
 `x y width height aspect` and the state names are free variables in the
 shader. `design-px` is one design pixel in shader units (the unit of a box's
-`:corner-radius` and `:border-width`); a box does not clip its `:background`
-widget, which paints over the border, so the widget sizes its own rounded rect
-with it. `hit/hover` and `hit/active` report pointer state. The shapes live in
+`:corner-radius` and `:border-width`).
+
+A box with `:corner-radius` owns its shape: its `:background` widget paints
+the area inside the border, clipped to the same rounded rect a
+`:background-color` fills, so a texture is just a colour expression:
+
+```lisp
+(defwidget brushed
+  :width 4 :height 4
+  :shader (let ((v (+ 0.6 (* 0.05 (sin (* y 90.0))))))
+            (rgba v v (+ v 0.06) 1.0)))
+
+(box :corner-radius 24 :border-width 2 :border-color :dim :background "brushed" …)
+```
+
+A square box does not clip its widget, which may paint past it
+(`:paint-margin`). `hit/hover` and `hit/active` report pointer state. The shapes live in
 `content/core/sdf-stdlib.lisp` as `sdf/circle`, `sdf/rect`, `sdf/translate`,
 `sdf/union`, and so on. `(sdf/region :name shape material)` makes a region
 that pointer handlers can identify.

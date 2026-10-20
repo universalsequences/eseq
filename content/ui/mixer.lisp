@@ -70,6 +70,8 @@
         track-meter-control
         bus-meter-control
         bus-output-dropdown
+        bus-output-picker
+        track-output-picker
         select-bus
         activate-track-control
         clear-delete-target
@@ -989,15 +991,21 @@
 
 (def track-output-dropdown (t)
   (subtree :key (str "mixer-v2-track-output-sub-" t.index)
-    (box :width :fill :h-align :center (dropdown :value (track-output-label t.output)
-      :key (str "track-output-" t.index)
-      :options (track-output-options)
-      :on-change (lambda (v)
-        (clear-delete-target)
-        (let ((b (track-output-of v)))
-          (when (or b (= v "sends only")) (set! t.output b))))
-      :width (* track-strip-width 0.85) :height 1.1 :font-size 10
-      :corner-radius (eseq.seq-core-state/radius 20)))))
+    (track-output-picker t)))
+
+;; The picker itself, outside its subtree: the subtree redraws by calling
+;; this, so a package restyles the picker by overriding it (an :around on
+;; track-output-dropdown would only see the first draw).
+(def track-output-picker (t)
+  (box :width :fill :h-align :center (dropdown :value (track-output-label t.output)
+    :key (str "track-output-" t.index)
+    :options (track-output-options)
+    :on-change (lambda (v)
+      (clear-delete-target)
+      (let ((b (track-output-of v)))
+        (when (or b (= v "sends only")) (set! t.output b))))
+    :width (* track-strip-width 0.85) :height 1.1 :font-size 10
+    :corner-radius (eseq.seq-core-state/radius 20))))
 
 ;; The bus names more than one bus has (read once per dropdown).
 (def shared-bus-names ()
@@ -1015,7 +1023,12 @@
 
 (def bus-output-dropdown (b)
   (subtree :key (str "mixer-bus-output-" (if b b.index -1))
-    (let ((options (if b b.output-options (list)))
+    (bus-output-picker b)))
+
+;; The picker itself, outside its subtree (see track-output-picker); a
+;; spacer when the bus has nowhere to route.
+(def bus-output-picker (b)
+  (let ((options (if b b.output-options (list)))
         (shared (if (> (len options) 0) (shared-bus-names) (list)))
         (label-of (lambda (x) (bus-output-label x shared))))
       (if (> (len options) 0)
@@ -1029,7 +1042,7 @@
               (let ((dest (first (filter (lambda (o) (= (label-of o) label)) options))))
                 (when dest (set! b.output dest)))))
           )
-        (box :height 1.2 :width :fill)))))
+        (box :height 1.2 :width :fill))))
 
 ;; A track's strip frame, `width` by `height`: lit while the track is in
 ;; the selection, in the silenced look while it is not heard. `props` are

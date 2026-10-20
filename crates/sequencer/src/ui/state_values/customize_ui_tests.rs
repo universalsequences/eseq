@@ -108,6 +108,8 @@ fn customize_lists_the_mixer_clip_knob_under_its_module_and_edits_resize_the_mix
     assert_eq!(pickers[0].widget_type, "number-picker");
     assert_eq!(pickers[0].props.get("value"), Some(&Value::Number(4.0)));
 
+    // The clip area only takes room while the clip grid shows (off by default).
+    eval(&mut editor, "(setopt eseq.seq-core-state/mixer-show-clip-grid true)");
     assert_eq!(
         eval(&mut editor, "(eseq.seq-core-state/mixer-panel-height)"),
         Value::Number(14.5)
@@ -295,6 +297,8 @@ fn customize_lists_an_attached_package_knob_under_its_module_and_setopt_reaches_
 #[test]
 fn compact_mixer_knob_drops_the_clip_grid_and_shrinks_the_mixer_panel() {
     let mut editor = full_grid_editor_for_scroll_tests();
+    // Compact is the default; start from the clip grid shown.
+    eval(&mut editor, "(setopt eseq.seq-core-state/mixer-show-clip-grid true)");
     assert_eq!(
         eval(&mut editor, "(eseq.seq-core-state/mixer-panel-height)"),
         Value::Number(14.5)

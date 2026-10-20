@@ -1036,11 +1036,11 @@
 ;; badge in the header derive their heights from this one number, so it sets
 ;; how tall (or how dense) the whole sequencer reads. No shader change is
 ;; needed: the step widgets scale their artwork with the box.
-(defcustom step-cell-width 3.05
+(defcustom step-cell-width 3
   :type :number :min 1.5 :max 6 :step 0.05
   :doc "Width (cells) of each step in the sequencer grid; the playhead bar under each row spans the same width.")
 
-(defcustom step-cell-height 1.55
+(defcustom step-cell-height 1
   :type :number :min 1 :max 4 :step 0.05
   :doc "Height (cells) of each step in the sequencer grid; track rows and the colour badge scale with it.")
 
@@ -3324,30 +3324,29 @@
 ;; over the active theme's buffer surface in Lisp; selection then changes only
 ;; the border without changing the fill.
 (def group-container-part (c i)
-  (+ (* (rgb-part c i) 0.01) (* (nth THEME.buffer_bg i) 0.99)))
+  (+ (* (rgb-part c i) 0.1) (* (nth THEME.buffer_bg i) 0.9)))
 
 ;; A group's enclosure: its flat fill (fill-*) given texture — a soft mottle
 ;; and inner rim in the group's color (tint-*), a faint top sheen, and fine
 ;; grain. Noise runs in design pixels, so the texture keeps its scale however
-;; tall the group grows. A box's :background paints over its border, so the
-;; fill is the box's inner rounded rect: inset by `surface-border` with radius
-;; `surface-radius` − `surface-border`, in the box's own design px.
+;; tall the group grows. The rounded box paints this inside its border,
+;; clipped to its shape; the fill's radius, `surface-radius` −
+;; `surface-border`, gives the rim its edge.
 (defwidget seqv-group-surface
   :width 4 :height 4
   :state (fill-r fill-g fill-b tint-r tint-g tint-b surface-radius surface-border)
   :shader
-  (let ((inset (* surface-border design-px))
-      (px (/ (+  x) design-px))
+  (let ((px (/ (+  x) design-px))
       (py (/ (- x y) design-px))
       (mottle (+ (* 9.2 (eseq.materials/surface-noise (/ px 110.0) (/ py 110.0)))
           (* 3.8 (eseq.materials/surface-noise (/ px 7.0) (/ py 37.0)))))
       (grain (- (eseq.materials/surface-hash (floor px) (floor py)) 0.5))
       (sheen (* 0.5 (- 1.0 (/ y height))))
       (base (vec3 fill-r fill-g fill-b))
-      (tint (vec3 (* 0.3 tint-r) (* 0.3 tint-g) (* 0.3 tint-b))))
+      (tint (vec3 (* 0.5 tint-r) (* 0.5 tint-g) (* 0.5 tint-b))))
     (sdf/layer
       (sdf/fill
-        (sdf/rounded-rect (- width inset) (- height inset)
+        (sdf/rounded-rect width height
           (* (max 0.0 (- surface-radius surface-border)) design-px))
         (material 
           :lighting (lighting :edge-min -0.004 :edge-max 0.1 :light (vec3 1 3 4))
@@ -3365,7 +3364,7 @@
                     (vec3 lift lift lift))
                   1.0)              
                 )
-              0.1
+              0.3
               )))))))
 
 ;; Volume/meter for a group's backing bus b; a spacer while it has none.

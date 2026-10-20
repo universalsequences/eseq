@@ -61,6 +61,7 @@
                            delete-scene! launch-quantize-options record-quantize-options))
 (import eseq.menus :as menus)
 (import eseq.application-menus)
+(import eseq.materials)
 
 (export transport-stop
         seq-set-scene-launch-quantize

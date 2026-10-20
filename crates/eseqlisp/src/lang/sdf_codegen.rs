@@ -1596,6 +1596,32 @@ fn compile_sdf_to_metal_with_state_and_theme(
     )
 }
 
+/// `box_mask`: 1, or for a widget painting a rounded box's background
+/// (`box_clip` > 0, the box's normalized corner radius) the box's rounded
+/// shape, with the box shader's own geometry and edge so the two line up.
+/// Computed unconditionally: `fwidth` needs uniform control flow.
+fn emit_box_clip_mask(shader: &mut String, language: ShaderLanguage) {
+    let lines: &[&str] = match language {
+        ShaderLanguage::Metal => &[
+            "float2 box_p = float2((logical_uv.x - 0.5) * 2.0 * aspect, (logical_uv.y - 0.5) * 2.0);",
+            "float box_r = min(in.box_clip, min(aspect, 1.0));",
+            "float box_d = sdf_rounded_rect(box_p, float2(aspect, 1.0), box_r);",
+            "float box_edge = fwidth(box_d) * 1.2;",
+            "float box_mask = in.box_clip > 0.0 ? smoothstep(box_edge, -box_edge, box_d) : 1.0;",
+        ],
+        ShaderLanguage::Wgsl => &[
+            "let box_p: vec2<f32> = vec2<f32>((logical_uv.x - 0.5) * 2.0 * aspect, (logical_uv.y - 0.5) * 2.0);",
+            "let box_r: f32 = min(input.box_clip, min(aspect, 1.0));",
+            "let box_d: f32 = sdf_rounded_rect(box_p, vec2<f32>(aspect, 1.0), box_r);",
+            "let box_edge: f32 = fwidth(box_d) * 1.2;",
+            "let box_mask: f32 = select(1.0, smoothstep(box_edge, -box_edge, box_d), input.box_clip > 0.0);",
+        ],
+    };
+    for line in lines {
+        writeln!(shader, "    {line}").unwrap();
+    }
+}
+
 fn compile_sdf_to_metal_with_state_theme_and_options(
     expr: &Expression,
     state_symbols: &[String],
@@ -1648,6 +1674,7 @@ fn compile_sdf_to_metal_with_state_theme_and_options(
     // SDF units per design pixel (`sdf_design_px`), for chrome sized like a
     // box's :corner-radius / :border-width.
     writeln!(shader, "    float design_px = in.corner_radius;").unwrap();
+    emit_box_clip_mask(&mut shader, ShaderLanguage::Metal);
 
     if region_count > 0 {
         // Hit region uniforms packed into color_b
@@ -1668,12 +1695,13 @@ fn compile_sdf_to_metal_with_state_theme_and_options(
         )
         .unwrap();
         writeln!(shader, "    result.rgb *= style_brightness;").unwrap();
+        writeln!(shader, "    result.a *= box_mask;").unwrap();
         writeln!(shader, "    if (result.a < 0.001) discard_fragment();").unwrap();
         writeln!(shader, "    return result;").unwrap();
     } else {
         writeln!(shader, "    float d = {};", result_expr).unwrap();
         writeln!(shader, "    float aa = max(fwidth(d), 0.001);").unwrap();
-        writeln!(shader, "    float mask = smoothstep(aa, -aa, d);").unwrap();
+        writeln!(shader, "    float mask = smoothstep(aa, -aa, d) * box_mask;").unwrap();
         writeln!(shader, "    if (mask < 0.001) discard_fragment();").unwrap();
         writeln!(shader, "    float4 fill_color = in.color_a;").unwrap();
         writeln!(
@@ -1794,6 +1822,7 @@ fn compile_sdf_to_wgsl_with_state_theme_and_options(
     writeln!(shader, "    let value_t: f32 = input.value_t;").unwrap();
     writeln!(shader, "    let itime: f32 = input.itime;").unwrap();
     writeln!(shader, "    let design_px: f32 = input.corner_radius;").unwrap();
+    emit_box_clip_mask(&mut shader, ShaderLanguage::Wgsl);
 
     if region_count > 0 {
         writeln!(shader, "    let hit_region: f32 = input.color_b.x;").unwrap();
@@ -1818,7 +1847,7 @@ fn compile_sdf_to_wgsl_with_state_theme_and_options(
         .unwrap();
         writeln!(
             shader,
-            "    result = vec4<f32>(result.rgb * style_brightness, result.a);"
+            "    result = vec4<f32>(result.rgb * style_brightness, result.a * box_mask);"
         )
         .unwrap();
         writeln!(shader, "    if (result.a < 0.001) {{ discard; }}").unwrap();
@@ -1826,7 +1855,7 @@ fn compile_sdf_to_wgsl_with_state_theme_and_options(
     } else {
         writeln!(shader, "    let d: f32 = {};", result_expr).unwrap();
         writeln!(shader, "    let aa: f32 = max(fwidth(d), 0.001);").unwrap();
-        writeln!(shader, "    let mask: f32 = smoothstep(aa, -aa, d);").unwrap();
+        writeln!(shader, "    let mask: f32 = smoothstep(aa, -aa, d) * box_mask;").unwrap();
         writeln!(shader, "    if (mask < 0.001) {{ discard; }}").unwrap();
         writeln!(shader, "    let fill_color: vec4<f32> = input.color_a;").unwrap();
         writeln!(
@@ -2479,8 +2508,10 @@ mod tests {
             assert_valid_wgsl(&wgsl.shader_source);
             assert_eq!(metal.region_count, 0);
             assert_eq!(wgsl.region_count, 0);
-            assert!(!metal.shader_source.contains("smoothstep"));
-            assert!(!wgsl.shader_source.contains("smoothstep"));
+            // The stroke itself is pixel-exact; only the box clip smooths.
+            for shader in [&metal.shader_source, &wgsl.shader_source] {
+                assert!(shader.lines().filter(|line| !line.contains("box_mask")).all(|line| !line.contains("smoothstep")));
+            }
         }
     }
 

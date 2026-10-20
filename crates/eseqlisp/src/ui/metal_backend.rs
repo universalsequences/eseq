@@ -934,6 +934,9 @@ struct WidgetVaryings {
     float4 color_d       [[flat]];
     float  aspect        [[flat]];
     float  corner_radius [[flat]];
+    // An SDF widget painting a rounded box's background: the box's
+    // normalized corner radius, its output clipped to that shape; 0 = none.
+    float  box_clip      [[flat]];
 };
 
 float sdf_rounded_rect(float2 p, float2 half_size, float radius) {
@@ -1007,6 +1010,7 @@ vertex WidgetVaryings widget_vert(
     out.color_d = inst.color_d.w < 0.0 ? float4(0.0) : inst.color_d;
     out.aspect = inst.pixel_aspect;
     out.corner_radius = inst.corner_radius;
+    out.box_clip = inst.orientation;
     return out;
 }
 "#;

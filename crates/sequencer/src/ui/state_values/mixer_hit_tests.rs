@@ -81,6 +81,8 @@ fn rack_clip_scroll_owns_vertical_gestures_across_the_visible_list() {
     use eseqlisp::widget_render::scroll::{get_scroll_state, scroll_state_key, set_scroll_state};
 
     let mut editor = full_grid_editor_for_scroll_tests();
+    // The clip run stands in for the clip grid (off by default).
+    editor.runtime_mut().eval_str("(setopt eseq.seq-core-state/mixer-show-clip-grid true)").unwrap();
     set_full_grid_track_count(&mut editor, 12, 16);
     let mut group = rack_group_fixture(true);
     group.members = vec![9, 10];
