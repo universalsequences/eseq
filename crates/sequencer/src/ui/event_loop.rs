@@ -701,38 +701,42 @@ pub(crate) fn run_event_loop(
             match event {
                 BackendEvent::Quit => editor.request_quit(),
                 BackendEvent::FileDrop(paths, drop_position) => {
-                    match editor.handle_patcher_file_drop(&paths, drop_position, 0) {
-                        Ok(Some(imported)) => {
-                            editor.show_transient_message(format!(
-                                "Imported {imported} tensor asset into the patch draft"
-                            ));
-                        }
-                        Err(error) => {
-                            editor.show_transient_message(format!("Asset import failed: {error}"));
-                        }
-                        Ok(None) => {
-                            match SampleImportDraft::from_drop(
-                                paths,
-                                &sequencer::app_paths::app_paths().sample_db_path(),
-                            ) {
-                                Ok(draft) => {
-                                    if draft.is_empty() {
-                                        editor.show_transient_message(
-                                            "No supported audio files found in dropped items",
-                                        );
-                                    } else {
-                                        let count = draft.len();
-                                        install_draft(draft);
-                                        open_sample_import_modal(&mut editor);
+                    if let Some(message) = agent_pane::attach_dropped(&mut editor, &paths) {
+                        editor.show_transient_message(message);
+                    } else {
+                        match editor.handle_patcher_file_drop(&paths, drop_position, 0) {
+                            Ok(Some(imported)) => {
+                                editor.show_transient_message(format!(
+                                    "Imported {imported} tensor asset into the patch draft"
+                                ));
+                            }
+                            Err(error) => {
+                                editor.show_transient_message(format!("Asset import failed: {error}"));
+                            }
+                            Ok(None) => {
+                                match SampleImportDraft::from_drop(
+                                    paths,
+                                    &sequencer::app_paths::app_paths().sample_db_path(),
+                                ) {
+                                    Ok(draft) => {
+                                        if draft.is_empty() {
+                                            editor.show_transient_message(
+                                                "No supported audio files found in dropped items",
+                                            );
+                                        } else {
+                                            let count = draft.len();
+                                            install_draft(draft);
+                                            open_sample_import_modal(&mut editor);
+                                            editor.show_transient_message(format!(
+                                                "Staged {count} sample(s) for import"
+                                            ));
+                                        }
+                                    }
+                                    Err(error) => {
                                         editor.show_transient_message(format!(
-                                            "Staged {count} sample(s) for import"
+                                            "Sample import failed: {error}"
                                         ));
                                     }
-                                }
-                                Err(error) => {
-                                    editor.show_transient_message(format!(
-                                        "Sample import failed: {error}"
-                                    ));
                                 }
                             }
                         }

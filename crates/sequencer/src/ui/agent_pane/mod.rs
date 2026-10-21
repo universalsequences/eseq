@@ -17,10 +17,10 @@ use eseqlisp::vm::Value;
 use eseqlisp::{Editor, Runtime};
 use eseqlisp::package::PackageCatalog;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use sequencer::agent::harness::{clip, AgentSession, Artifact, Entry, SessionConfig, Transcript, EFFORTS, MODELS};
+use sequencer::agent::harness::{attachments, clip, AgentSession, Artifact, Entry, SessionConfig, Transcript, EFFORTS, MODELS};
 
 use super::presented::present_agent_pane;
 use super::values::{list_value, map_value};
@@ -51,9 +51,15 @@ fn clipped(body: &str, limit: usize) -> Value {
     Value::String(clip(body, limit))
 }
 
+fn paths_value(paths: &[PathBuf]) -> Value {
+    list_value(paths.iter().map(|path| text(&path.display().to_string())))
+}
+
 fn entry_value(entry: &Entry) -> Value {
     match entry {
-        Entry::User(body) => map_value([("kind", text("user")), ("text", text(body))]),
+        Entry::User { text: body, images } => {
+            map_value([("kind", text("user")), ("text", text(body)), ("images", paths_value(images))])
+        }
         Entry::Assistant(body) => map_value([("kind", text("assistant")), ("text", text(body))]),
         Entry::Thinking(body) => map_value([("kind", text("thinking")), ("text", clipped(body, THINKING_CHARS))]),
         Entry::Notice(body) => map_value([("kind", text("notice")), ("text", text(body))]),
@@ -63,7 +69,7 @@ fn entry_value(entry: &Entry) -> Value {
             ("input", clipped(input, INPUT_CHARS)),
             ("status", text(status.as_str())),
             ("output", clipped(output, OUTPUT_CHARS)),
-            ("images", list_value(images.iter().map(|path| text(&path.display().to_string())))),
+            ("images", paths_value(images)),
         ]),
     }
 }
@@ -164,6 +170,30 @@ pub(crate) fn register_agent_pane_natives(runtime: &mut Runtime, scratch: impl F
         },
     );
     runtime.register_native_with_docs(
+        "agent-pane/attach",
+        "(agent-pane/attach path)",
+        "Attach the image file at path (PNG or JPEG) to the next message, as dropping it on the window does. It shows in agent-pane/attachments once copied in; one that cannot be attached becomes a notice in the conversation.",
+        |args, _ctx| {
+            session()?.attach(vec![PathBuf::from(string_arg(&args, 0, "an image path")?)]);
+            Ok(Value::Nil)
+        },
+    );
+    runtime.register_native_with_docs(
+        "agent-pane/attachments",
+        "(agent-pane/attachments)",
+        "The images attached to the next message, as file paths (staged copies), in order. Read it under agent.pane-shape.",
+        |_args, _ctx| Ok(session()?.with_transcript(|transcript| paths_value(&transcript.attachments))),
+    );
+    runtime.register_native_with_docs(
+        "agent-pane/detach",
+        "(agent-pane/detach index)",
+        "Take the image at index (as agent-pane/attachments lists them) off the next message.",
+        |args, _ctx| match args.first() {
+            Some(Value::Number(index)) if *index >= 0.0 => Ok(Value::Bool(session()?.detach(*index as usize))),
+            _ => Err("expected an attachment index".to_string()),
+        },
+    );
+    runtime.register_native_with_docs(
         "agent-pane/cancel",
         "(agent-pane/cancel)",
         "Stop the agent's running turn.",
@@ -190,7 +220,7 @@ pub(crate) fn register_agent_pane_natives(runtime: &mut Runtime, scratch: impl F
     runtime.register_native_with_docs(
         "agent-pane/state",
         "(agent-pane/state)",
-        "The conversation: (dict :busy :entries :usage :artifacts). Each entry has :kind \"user\", \"assistant\", \"thinking\", \"notice\" (and :text) or \"tool\" (:name :input :status :output :images); long text is clipped. :usage is (dict :input :output :cache-read) tokens. Each artifact is a package the agent wrote: :package :created :loaded :lines :added :removed :entries :kinds (dicts :module :kind :id, the id packages-new-instance takes) and :files (dicts :name :path :change :lines :added :removed). Read it under agent.pane-shape to redraw as rows change (agent.pane-generation also moves as text streams; read the last rows with agent-pane/entries-from under it).",
+        "The conversation: (dict :busy :entries :usage :artifacts). Each entry has :kind \"user\" (:text, and :images, the paths of the images sent with it), \"assistant\", \"thinking\", \"notice\" (and :text) or \"tool\" (:name :input :status :output :images); long text is clipped. :usage is (dict :input :output :cache-read) tokens. Each artifact is a package the agent wrote: :package :created :loaded :lines :added :removed :entries :kinds (dicts :module :kind :id, the id packages-new-instance takes) and :files (dicts :name :path :change :lines :added :removed). Read it under agent.pane-shape to redraw as rows change (agent.pane-generation also moves as text streams; read the last rows with agent-pane/entries-from under it).",
         move |_args, _ctx| {
             let session = session()?;
             // Only cards show what is loaded; most turns have none.
@@ -368,6 +398,30 @@ pub(crate) fn handle_command(name: &str, payload: &Value, editor: &mut Editor) {
     session.touch();
 }
 
+/// A drop of image files on the window goes to the agent pane, opening it:
+/// they are attached to the next message. `None` when the drop holds
+/// anything but images, for the other importers.
+pub(crate) fn attach_dropped(editor: &mut Editor, paths: &[PathBuf]) -> Option<String> {
+    if paths.is_empty() || !paths.iter().all(|path| attachments::is_image_path(path)) {
+        return None;
+    }
+    let session = match session() {
+        Ok(session) => session,
+        Err(why) => return Some(format!("The agent pane is unavailable: {why}")),
+    };
+    session.attach(paths.to_vec());
+    if !editor.buffer_named_is_showing(PANE_BUFFER) {
+        if let Err(error) = editor.runtime_mut().eval_str("(eseq.agent-pane/agent-pane-open)") {
+            return Some(format!("The agent pane did not open: {error:?}"));
+        }
+        editor.refresh_runtime_side_effects();
+    }
+    Some(match paths.len() {
+        1 => "Attaching the image to the next message.".to_string(),
+        n => format!("Attaching {n} images to the next message."),
+    })
+}
+
 /// Redraw the pane (when it is in use): the project's loaded packages changed.
 pub(crate) fn refresh() {
     if let Some(Ok(session)) = SESSION.get() {
@@ -418,7 +472,7 @@ mod tests {
     fn transcript_entries_become_lisp_dicts_the_pane_reads() {
         let transcript = Transcript {
             entries: vec![
-                Entry::User("hi".into()),
+                Entry::User { text: "hi".into(), images: vec!["/tmp/knob.png".into()] },
                 Entry::Tool {
                     id: "t1".into(),
                     name: "capture".into(),
@@ -443,6 +497,7 @@ mod tests {
         for part in [
             ":busy true",
             ":kind \"user\"",
+            ":images (\"/tmp/knob.png\")",
             ":kind \"tool\"",
             ":name \"capture\"",
             ":status \"done\"",

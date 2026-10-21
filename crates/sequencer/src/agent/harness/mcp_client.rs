@@ -13,6 +13,19 @@ use super::lock;
 
 use serde_json::{json, Value};
 
+/// A Messages API image block holding `bytes`.
+pub fn image_block(media_type: &str, bytes: &[u8]) -> Value {
+    use base64::Engine as _;
+    json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+        },
+    })
+}
+
 /// A tool call's result as Messages API `tool_result` content.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolResult {
@@ -33,15 +46,7 @@ impl ToolResult {
 
     /// This result with `png` shown first.
     pub fn with_png(mut self, png: Vec<u8>) -> Self {
-        use base64::Engine as _;
-        self.content.insert(0, json!({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/png",
-                "data": base64::engine::general_purpose::STANDARD.encode(&png),
-            },
-        }));
+        self.content.insert(0, image_block("image/png", &png));
         self.images.insert(0, png);
         self
     }

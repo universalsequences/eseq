@@ -7,6 +7,7 @@
 //! picks up. Only `try` ([`live`]) reaches the live session, through the UI
 //! thread.
 
+pub mod attachments;
 pub mod live;
 pub mod mcp_client;
 pub mod message;
@@ -26,7 +27,7 @@ pub use live::{LiveAction, LiveRequest};
 pub use mcp_client::{McpClient, ServerHandle, ToolBackend, ToolResult};
 pub use transcript::{clip, render_entry, Entry, ToolStatus, Transcript};
 use transcript::with_notes;
-use turn::{push_user_text, record, run_turn, AnthropicTransport, TurnConfig};
+use turn::{push_user_content, record, run_turn, AnthropicTransport, TurnConfig};
 pub use workspace::{Artifact, Change, FileChange, KindDecl};
 use workspace::{Workspace, WRITE_TOOLS};
 
@@ -116,6 +117,12 @@ impl SessionConfig {
             local_root: crate::app_paths::app_paths().local_modules_dir(),
         })
     }
+
+    /// Where images dropped on the pane are staged; emptied when a session
+    /// starts, since only that session's messages show them.
+    fn attachments_dir(&self) -> PathBuf {
+        self.conversations_dir.with_file_name("attachments")
+    }
 }
 
 /// What a turn needs, made on the first turn and kept: the API client (so
@@ -164,6 +171,7 @@ pub struct AgentSession {
 impl AgentSession {
     pub fn new(config: SessionConfig) -> Self {
         let workspace = Workspace::new(config.local_root.clone());
+        let _ = std::fs::remove_dir_all(config.attachments_dir());
         let choice = (config.model.clone(), config.effort.clone());
         Self {
             shared: Arc::new(Shared {
@@ -221,7 +229,9 @@ impl AgentSession {
         lock(&self.shared.notes).clear();
         *lock(&self.shared.conversation) = None;
         let (generation, shape) = (transcript.generation + 1, transcript.shape + 1);
-        *transcript = Transcript { generation, shape, ..next };
+        // The composer's images wait for the next message, as its text does.
+        let attachments = std::mem::take(&mut transcript.attachments);
+        *transcript = Transcript { generation, shape, attachments, ..next };
         Ok(())
     }
 
@@ -313,27 +323,62 @@ impl AgentSession {
         Ok(message)
     }
 
-    /// Send the user's message and run the turn in the background.
+    /// Copy dropped images in, in the background (shrinking one can take a
+    /// moment), to go with the next message: the composer shows each once
+    /// staged, and the conversation a notice for any that could not be.
+    pub fn attach(&self, paths: Vec<PathBuf>) {
+        let shared = Arc::clone(&self.shared);
+        let spawned = std::thread::Builder::new().name("eseq-agent-attach".to_string()).spawn(move || {
+            let dir = shared.config.attachments_dir();
+            let mut staged = Vec::new();
+            for path in &paths {
+                match attachments::stage(path, &dir) {
+                    Ok(image) => staged.push(image),
+                    Err(why) => lock(&shared.transcript).push(Entry::Notice(format!("Not attached: {why}"))),
+                }
+            }
+            if !staged.is_empty() {
+                lock(&shared.transcript).attach(staged);
+            }
+        });
+        if let Err(error) = spawned {
+            lock(&self.shared.transcript).push(Entry::Notice(format!("Could not attach the images: {error}")));
+        }
+    }
+
+    /// Take the composer's image at `index` off, deleting its staged copy.
+    pub fn detach(&self, index: usize) -> bool {
+        let removed = lock(&self.shared.transcript).detach(index);
+        if let Some(path) = &removed {
+            let _ = std::fs::remove_file(path);
+        }
+        removed.is_some()
+    }
+
+    /// Send the user's message, with the composer's images, and run the
+    /// turn in the background.
     pub fn send(&self, text: &str) -> Result<(), String> {
         let text = text.trim().to_string();
-        if text.is_empty() {
-            return Err("Nothing to send.".to_string());
-        }
-        {
+        let images = {
             let mut transcript = lock(&self.shared.transcript);
             if transcript.busy {
                 return Err("The agent is still working; stop it or wait.".to_string());
             }
-            transcript.push(Entry::User(text.clone()));
+            if text.is_empty() && transcript.attachments.is_empty() {
+                return Err("Nothing to send.".to_string());
+            }
+            let images = std::mem::take(&mut transcript.attachments);
+            transcript.push(Entry::User { text: text.clone(), images: images.clone() });
             transcript.set_busy(true);
-        }
+            images
+        };
         self.shared.cancel.store(false, Ordering::Relaxed);
         let shared = Arc::clone(&self.shared);
         std::thread::Builder::new()
             .name("eseq-agent-turn".to_string())
             .spawn(move || {
                 let _idle = IdleOnExit(&shared);
-                if let Err(error) = take_turn(&shared, &text) {
+                if let Err(error) = take_turn(&shared, &text, &images) {
                     lock(&shared.transcript).push(Entry::Notice(error));
                 }
             })
@@ -372,7 +417,7 @@ fn start(shared: &Shared) -> Result<Running, String> {
     Ok(Running { transport, client, turn })
 }
 
-fn take_turn(shared: &Shared, text: &str) -> Result<(), String> {
+fn take_turn(shared: &Shared, text: &str, images: &[PathBuf]) -> Result<(), String> {
     let mut running = lock(&shared.running);
     if running.as_ref().is_some_and(|running| !running.client.alive()) {
         *running = None;
@@ -392,8 +437,18 @@ fn take_turn(shared: &Shared, text: &str) -> Result<(), String> {
         .clone();
     let notes = std::mem::take(&mut *lock(&shared.notes));
     let text = with_notes(&notes, text);
+    let mut blocks = Vec::new();
+    for image in images {
+        match attachments::image_block(image) {
+            Ok(block) => blocks.push(block),
+            Err(why) => lock(&shared.transcript).push(Entry::Notice(format!("Not sent: {why}"))),
+        }
+    }
+    if blocks.is_empty() && text.is_empty() {
+        return Err("Nothing was sent: the images could not be read.".to_string());
+    }
     let mut history = lock(&shared.history);
-    push_user_text(&mut history, &text);
+    push_user_content(&mut history, blocks, &text);
     let mut tools = Tracking { tools: client, shared };
     let result = run_turn(transport, &mut tools, turn, &mut history, &shared.transcript, &shared.cancel);
     record(turn, &history);

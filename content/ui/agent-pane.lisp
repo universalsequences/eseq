@@ -33,9 +33,9 @@
 (def agent-pane-close ()
   (close-window-for buffer-name))
 
-;; Send the composer's text to the agent.
+;; Send the composer's text, and the images attached to it, to the agent.
 (def agent-pane-send ()
-  (if (= draft "")
+  (if (and (= draft "") (empty? (agent-pane/attachments)))
     nil
     (if (agent-pane/busy?)
       (status "The agent is still working; stop it or wait.")
@@ -71,11 +71,25 @@
   (box :key key :width :fill
     (markdown-view/render-markdown (get entry :text) (dict :size 12 :on-link open-link))))
 
-;; What you asked, in a box like the composer's.
+;; An attached image, square and rounded.
+(def thumbnail (key path width)
+  (image :key key :src path :width width :aspect 1 :radius 10))
+
+;; What you asked, in a box like the composer's, under the images you sent
+;; with it.
 (def user-view (entry key)
-  (box :key key :width :fill :padding 1.0 :corner-radius 12
-    :background-color :button-ghost-bg :border-width 1 :border-color :dropdown-menu-border
-    (label (get entry :text) :font-size 12 :color :fg :wrap true :bg :transparent)))
+  (let ((images (get entry :images)))
+    (v-stack :key key :width :fill :gap 0.4
+      (if (empty? images)
+        (nothing)
+        (wrap :width :fill :gap 0.5 :row-gap 0.5
+          (each images |path j|
+            (thumbnail (str key "-image-" j) path 9))))
+      (if (= (get entry :text) "")
+        (nothing)
+        (box :width :fill :padding 1.0 :corner-radius 12
+          :background-color :button-ghost-bg :border-width 1 :border-color :dropdown-menu-border
+          (label (get entry :text) :font-size 12 :color :fg :wrap true :bg :transparent))))))
 
 ;; ── Collapsed rows ──
 ;;
@@ -397,7 +411,7 @@
 
 (def empty-state ()
   (v-stack :key "agent-pane-empty" :width :fill :flex 1 :gap 0.6 :padding 1.0
-    (dim-text "Ask for a sequencer, a panel or an extension, or for a change to how eseq looks. The agent writes new work as a Local package and shows tweaks live in the app, for you to keep or revert."
+    (dim-text "Ask for a sequencer, a panel or an extension, or for a change to how eseq looks. The agent writes new work as a Local package and shows tweaks live in the app, for you to keep or revert. Drop images on the window to show it what you mean."
       11 true)))
 
 ;; The last row: the only one that changes as text streams, so the only
@@ -443,7 +457,8 @@
 
 ;; ── The composer ──
 ;;
-;; The text box with, below it, the model and effort the next turn uses
+;; Images dropped on the window wait above the text box (× takes one off);
+;; the text box with, below it, the model and effort the next turn uses
 ;; (a menu) and one round button: send (shown once there is text) or, while
 ;; a turn runs, stop.
 
@@ -491,10 +506,10 @@
   (button text :key key :width 3.2 :height 1.6 :corner-radius 32 :font-size 13
     :background-color :fg :color :buffer-bg :on-click |x y r| (action)))
 
-(def send-or-stop (busy)
+(def send-or-stop (busy attached)
   (cond
     (busy (round-button "■" "agent-pane-stop" agent-pane/cancel))
-    ((= draft "") (box :width 3.2 :height 1.6))
+    ((and (= draft "") (empty? attached)) (box :width 3.2 :height 1.6))
     (else (round-button "↑" "agent-pane-send" agent-pane-send))))
 
 ;; Tokens so far and, between turns, New.
@@ -509,13 +524,30 @@
             :on-click |x y r| (do (set! row-epoch (+ row-epoch 1)) (agent-pane/reset))))
         (dim-text (str (get usage :input) " in · " (get usage :output) " out") 9 false)))))
 
+;; One attached image: a thumbnail, × beside it to take it off.
+(def attachment-view (path i)
+  (let ((key (str "agent-pane-attachment-" i)))
+    (h-stack :key key :gap 0.2 :align :start
+      (thumbnail (str key "-image") path 7)
+      (label "×" :key (str key "-remove") :font-size 12 :color :dim :hover-color :fg :bg :transparent
+        :on-click (lambda (event) (agent-pane/detach i))))))
+
+(def attachments-row (attached)
+  (if (empty? attached)
+    (nothing)
+    (wrap :key "agent-pane-attachments" :width :fill :gap 0.6 :row-gap 0.4 :padding 0.3
+      (each attached |path i| (attachment-view path i)))))
+
 (def composer ()
-  ;; The shape ties the button, the placeholder and the counts to the turn.
+  ;; The shape ties the button, the placeholder, the counts and the
+  ;; attached images to the turn.
   (let ((shape agent.pane-shape)
-        (choice (agent-pane/choice)))
+        (choice (agent-pane/choice))
+        (attached (agent-pane/attachments)))
     (box :key "agent-pane-composer" :width :fill :padding 0.5 :corner-radius 12
       :background-color :button-ghost-bg :border-width 1 :border-color :dropdown-menu-border
       (v-stack :width :fill :gap 0.3
+        (attachments-row attached)
         (textbox :key "agent-pane-input" :value draft
           :placeholder (if (get choice :started) "Refine the request" "Ask the agent…")
           :width :fill :min-lines 2 :max-lines 8 :font-size 12 :bg :transparent
@@ -524,7 +556,7 @@
           (usage-row choice)
           (box :flex 1)
           (model-chip choice)
-          (send-or-stop (get choice :busy)))))))
+          (send-or-stop (get choice :busy) attached))))))
 
 (def model-menu ()
   (let ((shape agent.pane-shape))

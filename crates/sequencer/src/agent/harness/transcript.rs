@@ -47,7 +47,8 @@ impl ToolStatus {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Entry {
-    User(String),
+    /// What the user typed and the images they sent with it (staged copies).
+    User { text: String, images: Vec<PathBuf> },
     Assistant(String),
     /// The model's reasoning, as summarized by the API.
     Thinking(String),
@@ -72,7 +73,8 @@ pub enum Entry {
 /// conversation: a tool shows its input, output and images.
 pub fn render_entry(entry: &Entry) -> String {
     match entry {
-        Entry::User(text) => format!("USER {text}"),
+        Entry::User { text, images } if images.is_empty() => format!("USER {text}"),
+        Entry::User { text, images } => format!("USER {text}\n    images: {images:?}"),
         Entry::Assistant(text) => format!("CLAUDE {text}"),
         Entry::Thinking(text) => format!("THINKING {}", clip(text, 300)),
         Entry::Notice(text) => format!("NOTICE {text}"),
@@ -107,6 +109,8 @@ pub struct Transcript {
     pub cache_read_tokens: u64,
     /// The packages this conversation wrote, as they stand.
     pub artifacts: Vec<Artifact>,
+    /// Images waiting in the composer for the next message (staged copies).
+    pub attachments: Vec<PathBuf>,
 }
 
 impl Transcript {
@@ -130,7 +134,7 @@ impl Transcript {
                         let sent = text("text");
                         let (notes, typed) = split_notes(&sent);
                         transcript.entries.extend(notes.map(|notes| Entry::Notice(notes.to_string())));
-                        transcript.entries.push(Entry::User(typed.to_string()));
+                        transcript.entries.push(Entry::User { text: typed.to_string(), images: Vec::new() });
                     }
                     Some("thinking") => transcript.entries.push(Entry::Thinking(text("thinking"))),
                     Some("tool_use") => transcript.entries.push(Entry::Tool {
@@ -209,6 +213,21 @@ impl Transcript {
         }
     }
 
+    pub fn attach(&mut self, images: impl IntoIterator<Item = PathBuf>) {
+        self.attachments.extend(images);
+        self.reshaped();
+    }
+
+    /// Take the composer's image at `index` off and return it.
+    pub fn detach(&mut self, index: usize) -> Option<PathBuf> {
+        if index >= self.attachments.len() {
+            return None;
+        }
+        let removed = self.attachments.remove(index);
+        self.reshaped();
+        Some(removed)
+    }
+
     pub fn push(&mut self, entry: Entry) {
         self.entries.push(entry);
         self.reshaped();
@@ -276,17 +295,21 @@ impl Transcript {
 mod tests {
     use super::*;
 
+    fn user(text: &str) -> Entry {
+        Entry::User { text: text.into(), images: Vec::new() }
+    }
+
     #[test]
     fn text_streams_into_the_last_entry_of_its_kind_and_every_change_bumps_the_generation() {
         let mut transcript = Transcript::default();
-        transcript.push(Entry::User("hi".into()));
+        transcript.push(user("hi"));
         transcript.append_thinking("Thinking ");
         transcript.append_thinking("more.");
         transcript.append_assistant("Hel");
         transcript.append_assistant("lo");
         assert_eq!(
             transcript.entries,
-            vec![Entry::User("hi".into()), Entry::Thinking("Thinking more.".into()), Entry::Assistant("Hello".into())]
+            vec![user("hi"), Entry::Thinking("Thinking more.".into()), Entry::Assistant("Hello".into())]
         );
         assert_eq!(transcript.generation, 5);
         // New entries reshape it; text streaming into one does not.
@@ -323,14 +346,14 @@ mod tests {
         assert_eq!(
             Transcript::from_messages(&messages).entries,
             vec![
-                Entry::User("add 1 and 2".into()),
+                user("add 1 and 2"),
                 Entry::Thinking("Use eval.".into()),
                 tool("t1", r#"{"code":"(+ 1 2)"}"#, ToolStatus::Done, "=> 3"),
                 tool("t2", r#"{"code":"("}"#, ToolStatus::Failed, "unbalanced"),
                 Entry::Assistant("It is 3.".into()),
                 tool("t3", "{}", ToolStatus::Failed, "No result was saved."),
                 Entry::Notice("You loaded markov.".into()),
-                Entry::User("thanks".into()),
+                user("thanks"),
             ]
         );
     }

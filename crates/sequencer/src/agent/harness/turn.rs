@@ -141,17 +141,25 @@ pub fn request_body(config: &TurnConfig, messages: &[Value]) -> Vec<u8> {
 /// Add the user's words: to the last message when it is already the user's
 /// (tool results, or a turn that was stopped before the model said anything).
 pub fn push_user_text(history: &mut Vec<Value>, text: &str) {
-    let block = json!({ "type": "text", "text": text });
+    push_user_content(history, Vec::new(), text);
+}
+
+/// Add the user's images (image blocks) and words, the images first; an
+/// empty text adds no text block (the API rejects one).
+pub fn push_user_content(history: &mut Vec<Value>, mut blocks: Vec<Value>, text: &str) {
+    if !text.is_empty() {
+        blocks.push(json!({ "type": "text", "text": text }));
+    }
     match history.last_mut() {
         Some(last) if last["role"] == "user" => {
             if let Some(content) = last["content"].as_array_mut() {
-                content.push(block);
+                content.extend(blocks);
                 return;
             }
         }
         _ => {}
     }
-    history.push(json!({ "role": "user", "content": [block] }));
+    history.push(json!({ "role": "user", "content": blocks }));
 }
 
 /// Run the model until it ends its turn (or `config.max_rounds` tool rounds,
@@ -473,6 +481,17 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0]["content"][1], json!({"type": "text", "text": "go on"}));
         push_user_text(&mut Vec::new(), "x");
+    }
+
+    #[test]
+    fn images_go_before_the_words_and_an_image_alone_sends_no_empty_text() {
+        let image = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}});
+        let mut history = Vec::new();
+        push_user_content(&mut history, vec![image.clone()], "this knob");
+        assert_eq!(history[0]["content"], json!([image, {"type": "text", "text": "this knob"}]));
+        let mut history = Vec::new();
+        push_user_content(&mut history, vec![image.clone()], "");
+        assert_eq!(history[0]["content"], json!([image]));
     }
 
     #[test]
