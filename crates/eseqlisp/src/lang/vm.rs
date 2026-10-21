@@ -3859,10 +3859,14 @@ pub fn register_core_natives(vm: &mut VM) {
                     let queued = vm.source_load_errors.get(queued..).unwrap_or_default();
                     log_source_load_error("import", &message, queued);
                     vm.source_load_errors.push(message.clone());
+                    // Not loaded: the next import tries again (once the file
+                    // is fixed), rather than finding it done for this pass.
+                    vm.imported_at_epoch.remove(name);
                     Value::String(message)
                 }
             };
         }
+        vm.imported_at_epoch.remove(name);
         let message = format!(
             "import {name}: no module file found ({})",
             errors.join("; ")
@@ -10992,6 +10996,27 @@ mod tests {
             .expect("second import eval");
         assert_eq!(again, Some(Value::Number(5.0)));
         let _ = std::fs::remove_file(conventional);
+    }
+
+    #[test]
+    fn an_import_that_failed_is_tried_again_once_the_file_is_fixed() {
+        let mut vm = module_test_vm();
+        let root = import_test_dir("import-retry");
+        vm.source_manager.set_scoped_module_load_roots(vec![crate::hot_reload::ModuleLoadRoot {
+            path: root.clone(),
+            module_prefix: Some("test.retry".into()),
+        }]);
+        let file = root.join("pkg.lisp");
+        std::fs::write(&file, "(module test.retry.pkg)\n(def value () 1)\n(car 1)").unwrap();
+        let _ = vm.eval_str("(import test.retry.pkg)");
+        assert!(vm.take_source_load_errors().iter().any(|error| error.contains("test.retry.pkg")));
+
+        std::fs::write(&file, "(module test.retry.pkg)\n(def value () 2)").unwrap();
+        assert_eq!(
+            vm.eval_str("(import test.retry.pkg)\n(test.retry.pkg/value)"),
+            Ok(Some(Value::Number(2.0))),
+            "the fixed file is evaluated, not skipped as already imported"
+        );
     }
 
     #[test]

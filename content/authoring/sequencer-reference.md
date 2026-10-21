@@ -342,6 +342,8 @@ to grow last in the row.
   (`my.pulse/dot`), and exported, even in the module that defines them.
 - Pointer callbacks: `:on-mouse-down` / `:on-drag` / `:on-mouse-up`
   `(lambda (sx sy region) …)`. `sx`, `sy` are [-1, 1] per axis with no
+  `and or not` (over comparisons; a number counts when nonzero, so
+  `(and step.active (> x 0))` works),
   aspect correction; `region` is the `sdf/region` keyword under the press.
 - Each pixel should only evaluate what is near it (for example the nearest
   step), not loop over everything.

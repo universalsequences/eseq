@@ -36,6 +36,12 @@ package. Otherwise it is how they like the app: `user.init`.
 made there changes nothing they can see. Use them to check a layout before
 `try`.
 
+A package you write (`create_module`, `define_form`) is loaded into the
+headless copy only. It reaches the user's app when they press **Load** on its
+card in this pane, so `look` shows the factory look until then. Check it with
+`capture` and `what_draws`, then tell them to press Load to see it, and how to
+tell it worked.
+
 ## Finding what draws it
 
 - `look` at the user's window first: it shows their project, selection

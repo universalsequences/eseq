@@ -367,10 +367,30 @@ impl ShaderEmitter {
             Expression::List(items) => matches!(
                 items.first(),
                 Some(Expression::Symbol(head))
-                    if matches!(head.as_str(), "=" | "<" | ">" | "<=" | ">=")
+                    if matches!(head.as_str(), "=" | "<" | ">" | "<=" | ">=" | "and" | "or" | "not")
             ),
             _ => false,
         }
+    }
+
+    /// `expr` as a bool: a comparison or bool as it is, a number as true
+    /// when nonzero (WGSL converts neither implicitly).
+    fn emit_condition(&mut self, expr: &Expression) -> Result<String, CodegenError> {
+        let value = self.emit_expr(expr)?;
+        Ok(if self.expr_is_bool(expr) { value } else { format!("({value} != 0.0)") })
+    }
+
+    /// `(and a b …)` / `(or a b …)`: every argument as a condition, joined
+    /// by `op`; both shader languages short-circuit.
+    fn emit_logical(&mut self, op: &str, args: &[Expression]) -> Result<String, CodegenError> {
+        if args.is_empty() {
+            return Ok(if op == "&&" { "true" } else { "false" }.to_string());
+        }
+        let conditions = args
+            .iter()
+            .map(|arg| self.emit_condition(arg))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(format!("({})", conditions.join(&format!(" {op} "))))
     }
 
     fn expr_type(&self, expr: &Expression) -> Option<&'static str> {
@@ -452,6 +472,14 @@ impl ShaderEmitter {
                     // Comparison operators
                     "=" => self.emit_binary_op("==", args),
                     "<" | ">" | "<=" | ">=" => self.emit_binary_op(head, args),
+
+                    // Logic, over conditions (a number is true when nonzero)
+                    "and" => self.emit_logical("&&", args),
+                    "or" => self.emit_logical("||", args),
+                    "not" => match args {
+                        [arg] => Ok(format!("(!{})", self.emit_condition(arg)?)),
+                        _ => Err(CodegenError::UnsupportedExpression("not takes 1 arg".into())),
+                    },
 
                     // min/max are variadic in Lisp, binary in Metal
                     "min" | "max" => self.emit_variadic_func(head, args),
@@ -1240,19 +1268,15 @@ impl ShaderEmitter {
                 "if needs 3 args".into(),
             ));
         }
-        let cond = self.emit_expr(&args[0])?;
+        let cond = match self.language {
+            ShaderLanguage::Metal => self.emit_expr(&args[0])?,
+            ShaderLanguage::Wgsl => self.emit_condition(&args[0])?,
+        };
         let then = self.emit_expr(&args[1])?;
         let else_ = self.emit_expr(&args[2])?;
         match self.language {
             ShaderLanguage::Metal => Ok(format!("(({}) ? ({}) : ({}))", cond, then, else_)),
-            ShaderLanguage::Wgsl => {
-                let condition = if self.expr_is_bool(&args[0]) {
-                    cond
-                } else {
-                    format!("({cond} != 0.0)")
-                };
-                Ok(format!("select(({}), ({}), ({}))", else_, then, condition))
-            }
+            ShaderLanguage::Wgsl => Ok(format!("select(({}), ({}), ({}))", else_, then, cond)),
         }
     }
 
@@ -2470,6 +2494,23 @@ mod tests {
             shader_count >= 60,
             "expected the full content shader corpus"
         );
+    }
+
+    #[test]
+    fn and_or_not_join_conditions_a_number_counting_when_nonzero() {
+        let (_, result) = codegen_expr("(and (> x 0) value_t)");
+        assert_eq!(result, "((x > 0.0) && (value_t != 0.0))");
+        let (_, result) = codegen_expr("(or (< x 0) (> y 0) (not itime))");
+        assert_eq!(result, "((x < 0.0) || (y > 0.0) || (!(itime != 0.0)))");
+
+        // Valid WGSL in a condition, a let and a select, as numbers and bools.
+        let output = compile_sdf_to_wgsl(&parse_one_expr(
+            "(let ((on (and (> x 0) value_t))
+                   (edge (or on (not (< y 0.5)))))
+               (if (and edge (or on itime)) (rgba 1 1 1 1) (rgba 0 0 0 0)))",
+        ))
+        .unwrap();
+        assert_valid_wgsl(&output.shader_source);
     }
 
     #[test]
