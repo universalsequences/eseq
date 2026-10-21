@@ -370,7 +370,11 @@ pub(super) fn reconcile_graph_runtimes(
             } else {
                 let mut replacement = crate::graph::GraphRuntime::new_from_config(config);
                 replacement.inherit_delta_state_from(&runtime);
-                replacement.realign(total_beats);
+                if runtime.rewound_at(total_beats) {
+                    replacement.rewind(total_beats);
+                } else {
+                    replacement.realign(total_beats);
+                }
                 replacement
             }
         } else {

@@ -19,6 +19,10 @@ pub(super) struct SchedulerLookaheadState {
     pub(super) resolved_read_pattern_epoch: Option<u64>,
     pub(super) graph_manifests: Vec<crate::graph::GraphManifest>,
     pub(super) graph_runtimes: Vec<crate::graph::GraphRuntime>,
+    /// The graph overrides `graph_runtimes` were last reconciled against:
+    /// the live snapshot's (worker) or an arranged row's / launched scene's
+    /// (adopted here at the boundary, ahead of the control-side mirror).
+    pub(super) graph_overrides_applied: Option<Vec<crate::graph::ProjectGraphOverrides>>,
     pub(super) debug_graph_drive_chunks: u32,
     pub(super) debug_accum_invocations: u64,
     pub(super) quantized_launches: crate::quantized_launch::PendingQuantizedLaunches,
@@ -146,6 +150,7 @@ impl SchedulerLookaheadState {
             resolved_read_pattern_epoch: None,
             graph_manifests: Vec::new(),
             graph_runtimes: Vec::new(),
+            graph_overrides_applied: None,
             debug_graph_drive_chunks: 0,
             debug_accum_invocations: 0,
             quantized_launches: crate::quantized_launch::PendingQuantizedLaunches::default(),
@@ -158,6 +163,33 @@ impl SchedulerLookaheadState {
             live_rack_config_chunk: None,
         }
     }
+}
+
+/// Point every graph at the overrides of the snapshot a chunk boundary
+/// switches to (an arranged row or a launched scene) from that boundary on.
+/// The live snapshot only catches up once the control thread mirrors the
+/// audible switch, which leaves the graph running the previous scene's
+/// config for the first steps of the new one.
+fn adopt_graph_overrides(
+    manifests: &mut Vec<crate::graph::GraphManifest>,
+    runtimes: &mut Vec<crate::graph::GraphRuntime>,
+    applied: &mut Option<Vec<crate::graph::ProjectGraphOverrides>>,
+    overrides: &[crate::graph::ProjectGraphOverrides],
+    rack_memberships: &[crate::graph::RackMembership],
+    total_beats: f64,
+) {
+    if applied.as_deref() == Some(overrides) {
+        return;
+    }
+    reconcile_graph_runtimes(
+        std::mem::take(manifests),
+        overrides,
+        rack_memberships,
+        runtimes,
+        manifests,
+        total_beats,
+    );
+    *applied = Some(overrides.to_vec());
 }
 
 /// Flag accumulator resets for exactly the tracks whose resolved SOURCE
@@ -388,6 +420,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let published_process_channel_epoch = &mut scheduler.published_process_channel_epoch;
     let graph_manifests = &mut scheduler.graph_manifests;
     let graph_runtimes = &mut scheduler.graph_runtimes;
+    let graph_overrides_applied = &mut scheduler.graph_overrides_applied;
     let session_launches = &mut scheduler.quantized_launches;
     let mut debug_graph_drive_chunks = scheduler.debug_graph_drive_chunks;
     let mut debug_accum_invocations = scheduler.debug_accum_invocations;
@@ -564,6 +597,21 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         } else {
             None
         };
+        if song_playback.is_none() {
+            // Graphs follow whatever this chunk schedules from: a launch
+            // awaiting its mirror, else the live scene. Re-checked every
+            // chunk, so a launch adopted ahead of the audio that never becomes
+            // the scene (Stop first, cancelled) hands the graph straight back.
+            let target = session_launch_snapshot.as_deref().unwrap_or(base_snapshot);
+            adopt_graph_overrides(
+                graph_manifests,
+                graph_runtimes,
+                graph_overrides_applied,
+                &target.graph_overrides,
+                &base_snapshot.rack_memberships,
+                clock.total_beats,
+            );
+        }
         if let Some(song) = song_playback.as_mut() {
             let prev_row = song.current_row();
             match song.next_chunk(
@@ -581,6 +629,27 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 } => {
                     chunk_frames = frames;
                     song_row_snapshot = Some(song.row_snapshot(row));
+                    // Graphs follow the governing row, unless a scene latch
+                    // (a manual scene launch, or Play's auto-latch on an
+                    // empty arrangement) handed scene-level authority to the
+                    // session. Re-checked every chunk, so a latch taken or
+                    // released mid-song moves the graph with it.
+                    let target = if state.song_scene_latch() {
+                        &base_snapshot.graph_overrides
+                    } else {
+                        &song_row_snapshot
+                            .as_deref()
+                            .expect("row snapshot set above")
+                            .graph_overrides
+                    };
+                    adopt_graph_overrides(
+                        graph_manifests,
+                        graph_runtimes,
+                        graph_overrides_applied,
+                        target,
+                        &base_snapshot.rack_memberships,
+                        clock.total_beats,
+                    );
                     if row_changed {
                         for graph in graph_runtimes.iter_mut() {
                             graph.clear_deltas();

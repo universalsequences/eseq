@@ -1252,6 +1252,10 @@ pub struct GraphRuntime {
     /// since the node last fired. Read into `NodeEmitContext::after_reset`
     /// and cleared by the fire, so a patch sees it exactly once.
     after_reset: Vec<bool>,
+    /// Beat of a transport rewind no block has run past yet. A config
+    /// applied on that beat (the first song row's) re-runs the rewind, so
+    /// the beat's reset seeds come from the config that plays it.
+    rewound_at: Option<f64>,
     /// `graph-reset!` requests collected while committing a boundary's (or a
     /// reset seed's) fires, applied once those commits are done: the
     /// requesting node and the group (`None` = whole graph).
@@ -1416,6 +1420,7 @@ impl GraphRuntime {
             node_sounding: vec![Vec::new(); num_nodes],
             block_samples_per_quarter: 0.0,
             after_reset: vec![false; num_nodes],
+            rewound_at: None,
             requested_resets: Vec::new(),
             last_boundary_beats: 0.0,
             group_gain: dense_group_matrix(config.group_gain, GROUP_GAIN_DEFAULT),
@@ -1593,6 +1598,9 @@ impl GraphRuntime {
         if (previous_reset_interval_beats - self.reset_interval_beats).abs() > 1e-9 {
             self.next_reset_beat = next_reset_beat_after(total_beats, self.reset_interval_beats);
         }
+        if self.rewound_at(total_beats) {
+            self.rewind(total_beats);
+        }
         true
     }
 
@@ -1694,7 +1702,23 @@ impl GraphRuntime {
     /// Periodic graph resets intentionally call `reset` directly and retain it.
     pub fn reset_transport(&mut self, total_beats: f64) {
         self.clear_deltas();
-        self.reset(total_beats);
+        self.rewind(total_beats);
+    }
+
+    /// Transport rewind (Stop, Play, song loop wrap): every queued
+    /// propagation, external seeds included, belongs to the run being
+    /// abandoned. Keeping a seed the lookahead queued before Stop would replay
+    /// it on top of the next run's own seeds once the clock passes its old
+    /// beat. Reset-seeded nodes still emit at `total_beats`.
+    pub fn rewind(&mut self, total_beats: f64) {
+        self.reset_internal(total_beats, false, true);
+        self.rewound_at = Some(total_beats);
+    }
+
+    /// Whether a transport rewind at `total_beats` is still unplayed.
+    pub fn rewound_at(&self, total_beats: f64) -> bool {
+        self.rewound_at
+            .is_some_and(|beat| (beat - total_beats).abs() <= 1e-9)
     }
 
     pub fn inherit_delta_state_from(&mut self, previous: &GraphRuntime) {
@@ -1714,18 +1738,18 @@ impl GraphRuntime {
         self.pending.get(node_index).map(Vec::len)
     }
 
-    /// Reset runtime state for transport/periodic resets: clocks realigned to
+    /// Reset runtime state for periodic resets: clocks realigned to
     /// `total_beats`, energy zeroed then seeded from `seed_on_reset`, edge dampening
     /// restored, decay/reset indices recomputed. Future external seed propagations are
     /// preserved so a clock trigger at the reset boundary can still drive the graph.
     pub fn reset(&mut self, total_beats: f64) {
-        self.reset_internal(total_beats, true);
+        self.reset_internal(total_beats, true, true);
     }
 
     /// Reset caused by an accepted graph firing. This clears pending propagations too:
     /// a node-authored reset means "clear the graph's state", not "resync transport".
     fn reset_clearing_pending(&mut self, total_beats: f64) {
-        self.reset_internal(total_beats, false);
+        self.reset_internal(total_beats, false, false);
     }
 
     /// Reset only the nodes of one neural group: their energy, input,
@@ -1832,7 +1856,12 @@ impl GraphRuntime {
         self.after_reset[idx] = true;
     }
 
-    fn reset_internal(&mut self, total_beats: f64, preserve_external_seeds: bool) {
+    fn reset_internal(
+        &mut self,
+        total_beats: f64,
+        preserve_external_seeds: bool,
+        emit_reset_seeds: bool,
+    ) {
         if !self.event_history.is_empty() {
             self.event_history.clear();
             self.history_stamp = next_events_stamp();
@@ -1865,7 +1894,7 @@ impl GraphRuntime {
         self.last_decay_index = self.finest_decay_index(total_beats);
         self.next_reset_beat = next_reset_beat_after(total_beats, self.reset_interval_beats);
         self.pending_reset_seed_emit_beat =
-            (preserve_external_seeds && self.has_reset_seed_triggers()).then_some(total_beats);
+            (emit_reset_seeds && self.has_reset_seed_triggers()).then_some(total_beats);
     }
 
     /// Realign every node's clock to the current transport position without firing
@@ -1947,6 +1976,13 @@ impl GraphRuntime {
         }
         self.block_samples_per_quarter = samples_per_quarter;
         let appended_from = out.len();
+        // A periodic reset on the previous block's end beat runs here instead,
+        // after any config the caller applied at this block start (a song row
+        // or scene launch), so it reseeds from the config that governs it.
+        if self.next_reset_beat > 0.0 && self.next_reset_beat <= start_beats + 1e-9 {
+            self.run_periodic_reset();
+        }
+        self.rewound_at = None;
         self.emit_pending_reset_seeded_nodes(
             start_beats,
             end_beats,
@@ -1959,9 +1995,12 @@ impl GraphRuntime {
         while let Some(boundary_beats) = self.next_eval_boundary(start_beats, end_beats) {
             // Periodic reset lands on a boundary: decay up to it, then reset.
             if self.next_reset_beat > 0.0 && self.next_reset_beat <= boundary_beats + 1e-9 {
-                let reset_beat = self.next_reset_beat;
-                self.apply_energy_decay(reset_beat);
-                self.reset(reset_beat);
+                if self.next_reset_beat >= end_beats - 1e-9 {
+                    // On the block end: the next block runs it (see above);
+                    // the reset realigns past this boundary either way.
+                    break;
+                }
+                self.run_periodic_reset();
                 self.emit_pending_reset_seeded_nodes(
                     start_beats,
                     end_beats,
@@ -2166,11 +2205,10 @@ impl GraphRuntime {
             self.apply_energy_decay(boundary_beats);
         }
 
-        // Resets and decay between the last boundary and the block end.
-        while self.next_reset_beat > 0.0 && self.next_reset_beat <= end_beats + 1e-9 {
-            let reset_beat = self.next_reset_beat;
-            self.apply_energy_decay(reset_beat);
-            self.reset(reset_beat);
+        // Resets and decay between the last boundary and the block end; one
+        // on the end beat itself waits for the next block.
+        while self.next_reset_beat > 0.0 && self.next_reset_beat < end_beats - 1e-9 {
+            self.run_periodic_reset();
             self.emit_pending_reset_seeded_nodes(
                 start_beats,
                 end_beats,
@@ -2260,6 +2298,13 @@ impl GraphRuntime {
             .filter(|beats| *beats > 0.0)
             .fold(DEFAULT_DECAY_STEP_BEATS, f64::min);
         (total_beats / finest.max(1e-9)).floor() as u64
+    }
+
+    /// Decay up to the due periodic reset, then run it.
+    fn run_periodic_reset(&mut self) {
+        let reset_beat = self.next_reset_beat;
+        self.apply_energy_decay(reset_beat);
+        self.reset(reset_beat);
     }
 
     fn apply_energy_decay(&mut self, end_beats: f64) {
@@ -5298,6 +5343,71 @@ mod tests {
     }
 
     #[test]
+    fn config_applied_at_a_block_start_governs_a_reset_on_that_beat() {
+        // A song row or scene launch reconciles the graph at its chunk start.
+        // A periodic reset landing on that same beat must reseed from the new
+        // config, as starting the transport on it would, not the old one.
+        let config = |hot: bool| {
+            let mut n0 = node(Timebase::Quarter);
+            n0.route = Some(2);
+            n0.seed_on_reset = if hot { 1.0 } else { 0.0 };
+            n0.trigger_on_reset = hot;
+            GraphRuntimeConfig::new(
+                1,
+                "g".into(),
+                vec![n0],
+                Vec::new(),
+                1.0,
+                4.0,
+                0,
+                NeuralMaxPolySelection::Deterministic,
+                GraphDurationSpec::default(),
+                GraphSwingSpec::default(),
+                Vec::new(),
+            )
+        };
+        let mut runtime = GraphRuntime::new_from_config(config(false));
+        let mut update = threshold_update(vec![1.0]);
+        let mut out = Vec::new();
+        runtime.process_block(0.0, 4.0, 0, 48_000.0, 0, &mut update, &mut out);
+        assert!(out.is_empty());
+
+        assert!(runtime.apply_config_preserving_state(config(true), 4.0));
+        runtime.process_block(4.0, 5.0, 192_000, 48_000.0, 0, &mut update, &mut out);
+        let observed = out
+            .iter()
+            .map(|emission| (emission.sample_time, emission.node_index))
+            .collect::<Vec<_>>();
+        assert_eq!(observed, vec![(192_000, 0)]);
+    }
+
+    #[test]
+    fn transport_stop_drops_seeds_still_in_flight() {
+        // A seed the lookahead queued just before Stop (delay still counting
+        // down) belongs to the abandoned run: the next Play must not replay it
+        // on top of its own seeds when it passes the old beat.
+        let mut n0 = node(Timebase::Quarter);
+        n0.seed_track_mask = seed_track_mask(&[0]);
+        n0.delay_steps = 2;
+        let mut n1 = node(Timebase::Quarter);
+        n1.route = Some(1);
+        let nodes = vec![n0, n1];
+        let edges = vec![GraphEdge::new(0, 1, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
+
+        runtime.seed(0, 3.0, GraphPayload::default());
+        assert!(run(&mut runtime, 3.0, 0, vec![1.0, 1.0]).is_empty());
+
+        // The scheduler's stopped branch: one transport reset on the
+        // playing->stopped edge, then a plain rewind on every parked poll.
+        runtime.reset_transport(0.0);
+        runtime.rewind(0.0);
+
+        let replay = run(&mut runtime, 8.0, 0, vec![1.0, 1.0]);
+        assert!(replay.is_empty(), "stale seed replayed after stop: {replay:?}");
+    }
+
+    #[test]
     fn manifest_materializes_all_to_all_and_spikes() {
         // A 1-node line, self all-to-all weight 1: materialized graph self-loops and
         // spikes every quarter once seeded — proving manifest -> runtime -> emit.
@@ -6298,7 +6408,8 @@ mod tests {
         let mut runtime = reset_seeded_self_loop();
         let mut driver = ResetLogDriver::new(Some(0), 4.0, None);
         let mut out = Vec::new();
-        runtime.process_block_with_driver(0.0, 4.0, 0, 48_000.0, 0, &mut driver, &mut out);
+        // Past beat 4: a reset on a block's end beat runs in the next block.
+        runtime.process_block_with_driver(0.0, 4.5, 0, 48_000.0, 0, &mut driver, &mut out);
         assert!(driver.log.iter().any(|(b, _, _)| (b - 4.0).abs() < 1e-9), "{:?}", driver.log);
         assert!(driver.pending.is_empty(), "the request was taken");
         assert!(runtime.requested_resets.is_empty(), "and applied");

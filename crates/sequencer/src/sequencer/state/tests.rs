@@ -4859,6 +4859,45 @@
             .is_none());
     }
 
+    /// A rack-owned graph's overrides live in the scene's rack clip, not the
+    /// scene: the launch snapshot must compose them like the live one, or a
+    /// boundary launch drives the graph with its unoverridden defaults.
+    #[test]
+    fn preflight_pattern_launch_snapshot_composes_rack_clip_graph_overrides() {
+        const RACK: u64 = 7;
+        const MEMBERS: [usize; 2] = [1, 2];
+        let state = make_state_with_tracks(4);
+        state.replace_pattern_repository(
+            vec![PatternSnapshot::new_default(4, &[]), PatternSnapshot::new_default(4, &[])],
+            0,
+        );
+        state.restore_current_pattern_from_repository().unwrap();
+        let expected = {
+            let mut scenes = state.pattern.scenes.lock().unwrap();
+            for track in MEMBERS {
+                let data = scenes.track_pools[track].get(PatternId(1)).expect("pool pattern");
+                let id = scenes.track_pools[track].insert(data);
+                scenes.scenes[1].cells[track] = Some(id);
+            }
+            let mut overrides = crate::graph::ProjectGraphOverrides::default();
+            overrides.sequencer_id = 11;
+            overrides.owner_rack = Some(RACK);
+            overrides.reset_every_beats = Some(8.0);
+            scenes.scenes[1].graph_overrides = vec![overrides];
+            scenes.convert_rack_to_clips(RACK, &MEMBERS).expect("rack converts");
+            assert!(scenes.scenes[1].graph_overrides.is_empty(), "moved into the clip");
+            scenes.composed_graph_overrides(1)
+        };
+        assert_eq!(expected.len(), 1);
+
+        let snapshot = state
+            .preflight_pattern_launch_snapshot(
+                &crate::quantized_launch::PatternLaunchTarget::Scene { scene: 1 },
+            )
+            .expect("target scene resolves");
+        assert_eq!(snapshot.graph_overrides, expected);
+    }
+
     #[test]
     fn masked_scene_launch_validates_first_and_updates_only_selected_tracks() {
         let state = make_state_with_tracks(2);

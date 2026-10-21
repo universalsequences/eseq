@@ -13148,6 +13148,239 @@
         }));
     }
 
+    /// Song-mode graph harness: `line 2` graph seeded from track 0 with a
+    /// 2-step delay, node 1 routed to track 1, resetting every 4 beats.
+    /// Scene 0 leaves the 0->1 edge at weight 0 (silent); scene 1 opens it
+    /// and starts node 1 hot on every reset, so node 1 fires alone one step
+    /// after each reset, before the first seed arrives. The live session
+    /// stays on scene 0 throughout, as it does in the app until the control
+    /// thread mirrors the audible row.
+    fn song_graph_scene_fixture() -> Arc<SequencerState> {
+        let (state, _) = song_mode_fixture();
+        publish_test_graph_sequencer(
+            Arc::clone(&state),
+            r#"
+            (def-sequencer "song-row-graph"
+              :shape (line 2)
+              :energy-decay 1
+              :reset-every 4
+              :seed-on-reset 0
+              :max-poly 8
+              :max-poly-selection :deterministic
+              :duration (steps 1)
+              (def-node nrn
+                :resolution :16
+                :delay 2
+                :quantize :16
+                :route 1
+                :seed-from 0
+                :reduce :sum
+                :params ((threshold :float 0 4 :default 0.5))
+                :state ((energy :leak (per-step :energy-decay)))
+                :update (if (>= (energy) (param :threshold))
+                          (emit :note (in-note) :vel (in-vel))
+                          false))
+              (edges
+                :from nrn
+                :to nrn
+                :topology (all-to-all)
+                :gather (edge :weight)
+                :params ((weight :float -1 1 :default 0))))
+            "#,
+        );
+        let published = state
+            .published_sequencers()
+            .into_iter()
+            .find(|seq| seq.name == "song-row-graph")
+            .expect("published graph");
+        let manifest = published.graph.as_ref().expect("graph manifest");
+        let edge_group = crate::graph::edge_set_group_id(&manifest.edge_sets[0]);
+        let overrides = |weight: f64, hot: f64| ProjectGraphOverrides {
+            sequencer_id: published.id,
+            sequencer_name: published.name.clone(),
+            owner_rack: None,
+            node_intrinsics: vec![ProjectGraphNodeIntrinsicOverride {
+                group: "nrn".to_string(),
+                instance: 1,
+                resolution: None,
+                delay_steps: None,
+                quantize: None,
+                route: None,
+                seed_from: Some(ProjectGraphSeedFrom::Tracks(Vec::new())),
+                seed_on_reset: Some(hot),
+                duration: None,
+                swing: None,
+                neural_group: None,
+                process_chain: None,
+            }],
+            node_params: Vec::new(),
+            edge_params: vec![ProjectGraphEdgeParamOverride {
+                group: edge_group.clone(),
+                from: 0,
+                to: 1,
+                param: "weight".to_string(),
+                value: weight,
+            }],
+            reset_every_beats: None,
+            max_poly: None,
+            max_poly_selection: None,
+            node_count: None,
+            group_gain: None,
+            group_coupling: None,
+            group_trace_decay: None,
+            group_coupling_scale: None,
+            group_excite_floor: None,
+        };
+        state.with_scenes_mut(|scenes| {
+            scenes.scenes[0].graph_overrides = vec![overrides(0.0, 0.0)];
+            scenes.scenes[1].graph_overrides = vec![overrides(1.0, 2.0)];
+        });
+        state
+    }
+
+    /// Drive a committed song through the production lookahead in small
+    /// blocks, with graph runtimes reconciled from the LIVE snapshot and
+    /// rewound first (as the worker does on Play), and return track-1 graph triggers as
+    /// `(sample, transpose)`.
+    fn drive_song_graph(
+        state: &Arc<SequencerState>,
+        rows: Vec<crate::sequencer::ProjectSongRow>,
+        end_beat: f64,
+    ) -> Vec<(u64, f32)> {
+        song_mode_commit(state, rows, end_beat, false);
+        let song = state.preflight_runtime_song().expect("preflight song");
+        state.transport.playing.store(true, Ordering::Relaxed);
+        let base = state.publish_scheduler_snapshot();
+        let samples_per_quarter = 48_000.0 * 60.0 / base.transport.bpm as f64;
+        let queue = Box::new(ScheduledEventQueue::<256>::new());
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        let manifests = state
+            .published_sequencers()
+            .into_iter()
+            .filter_map(|seq| seq.graph)
+            .collect::<Vec<_>>();
+        reconcile_graph_runtimes(
+            manifests,
+            &base.graph_overrides,
+            &[],
+            &mut scheduler.graph_runtimes,
+            &mut scheduler.graph_manifests,
+            0.0,
+        );
+        // Play rewinds every graph before the song's first chunk.
+        for graph in &mut scheduler.graph_runtimes {
+            graph.reset_transport(0.0);
+        }
+        scheduler.song = Some(
+            crate::sequencer::SongPlaybackRuntime::new(song, 0.0, samples_per_quarter)
+                .expect("song playback runtime"),
+        );
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let mut scratch_runtime =
+            Some(lisp_host::scratch_runtime_with_fallbacks(Arc::clone(state), 0, 0));
+        let block = 1_000_usize;
+        let end_sample = (end_beat * samples_per_quarter) as u64;
+        let mut scheduled_until = 0_u64;
+        let mut rendered = 0_u64;
+        let mut fires = Vec::new();
+        while rendered < end_sample {
+            let result = schedule_playing_lookahead(
+                &mut scheduler,
+                state,
+                &base,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                base.transport.pattern_epoch,
+                rendered,
+                4_000,
+                48_000,
+                block,
+                samples_per_quarter,
+                scheduled_until,
+                false,
+                false,
+            );
+            scheduled_until = result.scheduled_until_sample;
+            fires.extend(
+                observed_triggers(&queue)
+                    .into_iter()
+                    .filter(|event| event.kind == ScheduledTriggerKind::Network && event.track == 1)
+                    .map(|event| (event.sample_time, event.transpose)),
+            );
+            rendered += block as u64;
+        }
+        fires.sort_by_key(|(sample, _)| *sample);
+        fires
+    }
+
+    /// An arranged switch onto a scene must drive the graph exactly as
+    /// starting the transport on that scene does: the row's own graph
+    /// overrides govern from its first beat (here the reset boundary), not
+    /// the live session's until the control thread mirrors the row.
+    #[test]
+    fn song_row_switch_drives_graph_like_a_fresh_start_on_that_scene() {
+        run_with_scheduler_stack(|| {
+            let beat = 24_000_u64;
+            let fresh = drive_song_graph(
+                &song_graph_scene_fixture(),
+                vec![song_mode_row(1, 0.0, 1, Vec::new())],
+                4.0,
+            );
+            assert!(!fresh.is_empty(), "scene 1 opens the graph edge");
+
+            let switched = drive_song_graph(
+                &song_graph_scene_fixture(),
+                vec![
+                    song_mode_row(1, 0.0, 0, Vec::new()),
+                    song_mode_row(2, 4.0, 1, Vec::new()),
+                ],
+                8.0,
+            );
+            let second_row = switched
+                .iter()
+                .filter(|(sample, _)| *sample >= 4 * beat)
+                .map(|(sample, transpose)| (sample - 4 * beat, *transpose))
+                .collect::<Vec<_>>();
+            assert_eq!(second_row, fresh);
+        });
+    }
+
+    /// Play on an empty arrangement auto-latches the selected scene (takes
+    /// spec 10): the scene latch hands scene-level authority to the session,
+    /// so the graph must run the live scene's overrides, not the unscened
+    /// row's empty set.
+    #[test]
+    fn scene_latched_song_drives_graph_from_the_live_scene() {
+        run_with_scheduler_stack(|| {
+            let fresh = drive_song_graph(
+                &song_graph_scene_fixture(),
+                vec![song_mode_row(1, 0.0, 1, Vec::new())],
+                4.0,
+            );
+            assert!(!fresh.is_empty(), "scene 1 opens the graph edge");
+
+            let state = song_graph_scene_fixture();
+            // The auto-latch launches the selected scene into the session.
+            state
+                .launch_scene(
+                    1,
+                    2,
+                    &[-1, -1],
+                    &[48_000, 48_000],
+                    &[String::from("a"), String::from("b")],
+                    &[crate::sequencer::InstrumentType::Sampler, crate::sequencer::InstrumentType::Sampler],
+                )
+                .expect("launch scene 1");
+            state.latch_song_manual_override_all(2);
+            let mut empty = song_mode_row(1, 0.0, 0, Vec::new());
+            empty.scene = None;
+            let latched = drive_song_graph(&state, vec![empty], 4.0);
+            assert_eq!(latched, fresh);
+        });
+    }
+
     /// Run the production lookahead pass in song mode from sample 0 and
     /// return the observed triggers plus the scheduler-authoritative song
     /// notices. `samples_per_quarter` is 24_000 (48 kHz at the default

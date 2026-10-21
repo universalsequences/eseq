@@ -406,6 +406,7 @@ impl SchedulerDriver {
                 );
             }
             self.loaded_graph_overrides = Some(snapshot.graph_overrides.clone());
+            self.lookahead_state.graph_overrides_applied = Some(snapshot.graph_overrides.clone());
         }
 
         if self.loaded_graph_overrides.as_ref() != Some(&snapshot.graph_overrides) {
@@ -423,6 +424,7 @@ impl SchedulerDriver {
                 self.lookahead_state.clock.total_beats,
             );
             self.loaded_graph_overrides = Some(snapshot.graph_overrides.clone());
+            self.lookahead_state.graph_overrides_applied = Some(snapshot.graph_overrides.clone());
         }
 
         let graph_control_commands = state.drain_graph_control_commands();
@@ -591,7 +593,7 @@ impl SchedulerDriver {
                 if clear_graph_deltas {
                     graph.reset_transport(0.0);
                 } else {
-                    graph.reset(0.0);
+                    graph.rewind(0.0);
                 }
             }
             publish_graph_visualizations(state, &self.lookahead_state.graph_runtimes, 0.0);
