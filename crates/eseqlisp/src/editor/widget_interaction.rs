@@ -1075,7 +1075,10 @@ impl Editor {
             hit::to_local(precise_col, precise_row, content_col, content_row)
         else {
             if matches!(mouse.kind, MouseEventKind::Moved) {
-                for output in widget_render::sexp_slot::pointer_moved_to(None) {
+                for output in widget_render::sexp_slot::pointer_moved_to(None)
+                    .into_iter()
+                    .chain(widget_render::pointer_moved_over(None))
+                {
                     let _ = self.apply_widget_output(Some(output));
                 }
                 if widget_render::set_pointer_hover_widget(None) {
@@ -1085,9 +1088,13 @@ impl Editor {
             return false;
         };
         if matches!(mouse.kind, MouseEventKind::Moved) {
-            // A sexp-slot's :on-hover hears the pointer leave it.
-            let hovered = self.widget_node_at_local(local_col, local_row).map(|node| node.widget_id);
-            for output in widget_render::sexp_slot::pointer_moved_to(hovered) {
+            // A sexp-slot's :on-hover hears the pointer leave it; any other
+            // widget's hears it enter and leave.
+            let hovered = self.widget_node_at_local(local_col, local_row);
+            for output in widget_render::sexp_slot::pointer_moved_to(hovered.as_ref().map(|node| node.widget_id))
+                .into_iter()
+                .chain(widget_render::pointer_moved_over(hovered.as_ref()))
+            {
                 let _ = self.apply_widget_output(Some(output));
             }
         }

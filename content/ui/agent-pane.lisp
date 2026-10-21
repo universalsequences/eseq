@@ -346,10 +346,11 @@
       (find |form| (= (get form :label) (str "defcustom " name)) tried)
       (find |package| (string-starts-with? module (str package ".")) packages))))
 
-;; The knob whose doc shows under the knobs ("" for none).
+;; The knob whose name the pointer is over, its doc shown under the knobs
+;; ("" for none).
 (defstate knob-doc "")
 
-;; One cell: the name (click for its doc), ↺ once changed, the control.
+;; One cell: the name (hover for its doc), ↺ once changed, the control.
 (def knob-view (row i)
   (let ((module (get row :module))
         (name (short-name (get row :name) module))
@@ -357,8 +358,11 @@
         (changed (not (= (get row :value) (get row :default)))))
     (box :key key :width 19
      (h-stack :width :fill :gap 0.3 :align :center
-      (label name :font-size 10 :color (if changed :accent :fg) :hover-color :dim :wrap false :bg :transparent
-        :on-click (lambda (event) (set! knob-doc (if (= knob-doc (get row :name)) "" (get row :name)))))
+      (label name :key (str key "-name") :font-size 10 :color (if changed :accent :fg) :wrap false :bg :transparent
+        :on-hover (lambda (over)
+                    (cond (over (set! knob-doc (get row :name)))
+                          ((= knob-doc (get row :name)) (set! knob-doc ""))
+                          (else nil))))
       (if changed
         (label "↺" :key (str key "-reset") :font-size 10 :color :dim :hover-color :fg :bg :transparent
           :on-click (lambda (event) (set-knob (get row :name) (get row :default))))
@@ -376,10 +380,12 @@
           (box :flex 1)
           (if (and saves customize-dirty)
             (small-button "Save tweaks" "agent-pane-knobs-save" :primary customize-save)
-            (dim-text "click a name for what it does" 9 false)))
+            (nothing)))
         (wrap :width :fill :gap 1.0 :row-gap 0.25
           (each knobs |row i| (knob-view row i)))
-        (if open (dim-text (get open :doc) 9 true) (nothing))))))
+        ;; Two lines held open, so a doc showing moves nothing.
+        (box :width :fill :height 1.0
+          (if open (dim-text (get open :doc) 9 true) (nothing)))))))
 
 ;; Redrawn when a knob moves (custom-declarations reads each value), apart
 ;; from the cards above; `packages` and `tried` come from the conversation.

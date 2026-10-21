@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -673,13 +674,7 @@ pub fn resolve_theme_keywords(def: &SdfWidgetDef) {
 /// Whether `name` is the face a built-in control paints with
 /// (content/ui/widgets.lisp), never a box background.
 pub fn is_builtin_face(name: &str) -> bool {
-    [
-        super::knob::KNOB_FACE_WIDGET,
-        super::knob_number::KNOB_NUMBER_FACE_WIDGET,
-        super::button::BEZEL_FACE_WIDGET,
-        super::button::BEZEL_TAB_FACE_WIDGET,
-    ]
-    .contains(&name)
+    BUILTIN_FACES.contains(&name)
 }
 
 /// Whether a package or the theme paints theme slot `slot` with a defined
@@ -733,10 +728,89 @@ pub fn sdf_widget_tui_render(
     // Future: Milestone 6 TUI fallback rendering
 }
 
-/// A built-in face, cached for one registry generation: its definition and,
-/// for the caller's state names, the uniform slot each name fills.
+/// A control's own face (`:face "widget"`).
+pub const FACE_PROP: &str = "face";
+/// A container's faces for the controls under it (`:faces (dict :knob-face "widget")`).
+pub const FACES_PROP: &str = "faces";
+/// The faces a control's containers give it, filled in at layout: the id of
+/// a face map ([`faces_with`]), so it copies and compares as a number.
+pub const INHERITED_FACES_PROP: &str = "__inherited-faces";
+
+/// The built-in faces a package can replace (content/ui/widgets.lisp).
+pub const BUILTIN_FACES: [&str; 4] = [
+    super::knob::KNOB_FACE_WIDGET,
+    super::knob_number::KNOB_NUMBER_FACE_WIDGET,
+    super::button::BEZEL_FACE_WIDGET,
+    super::button::BEZEL_TAB_FACE_WIDGET,
+];
+
+thread_local! {
+    /// Every face map `:faces` has built (face -> widget), each once: a
+    /// handful per session.
+    static FACE_MAPS: RefCell<Vec<std::collections::BTreeMap<String, String>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// The face map `inherited` (an id from this function) with the `:faces`
+/// `own` over it, as an id; None when `own` is not a map.
+pub fn faces_with(inherited: Option<&Value>, own: &Value) -> Option<Value> {
+    let Value::Map(own) = own else {
+        return None;
+    };
+    FACE_MAPS.with(|maps| {
+        let mut maps = maps.borrow_mut();
+        let mut faces = face_map_id(inherited)
+            .and_then(|id| maps.get(id).cloned())
+            .unwrap_or_default();
+        faces.extend(own.iter().filter_map(|(face, widget)| {
+            Some((face.clone(), super::live_audio::keyword_or_string(&widget.borrow())?))
+        }));
+        let id = maps.iter().position(|map| *map == faces).unwrap_or_else(|| {
+            maps.push(faces);
+            maps.len() - 1
+        });
+        Some(Value::Number(id as f64))
+    })
+}
+
+fn face_map_id(faces: Option<&Value>) -> Option<usize> {
+    match faces {
+        Some(Value::Number(id)) => Some(*id as usize),
+        _ => None,
+    }
+}
+
+/// The widget a control with built-in face `face` paints with: its own
+/// `:face`, else what its containers' `:faces` give `face`, else a
+/// package's `restyle-face`, else `face` itself.
+pub fn chosen_face(face: &'static str, props: &HashMap<String, Value>) -> Cow<'static, str> {
+    super::live_audio::prop_keyword(props, FACE_PROP)
+        .or_else(|| {
+            let id = face_map_id(props.get(INHERITED_FACES_PROP))?;
+            FACE_MAPS.with(|maps| maps.borrow().get(id)?.get(face).cloned())
+        })
+        .or_else(|| crate::theme::face_override(face))
+        .map_or(Cow::Borrowed(face), Cow::Owned)
+}
+
+/// The widget that paints a control with built-in face `face`: the
+/// [`chosen_face`] when it is defined, else `face` when that is, else None.
+pub fn painted_face(face: &'static str, props: &HashMap<String, Value>) -> Option<Cow<'static, str>> {
+    let chosen = chosen_face(face, props);
+    if sdf_widget_def(&chosen).is_some() {
+        Some(chosen)
+    } else {
+        sdf_widget_def(face).map(|_| Cow::Borrowed(face))
+    }
+}
+
+/// A face, cached for one registry generation: its definition and, for the
+/// caller's state names, the uniform slot each name fills.
 struct FaceEntry {
+    /// The built-in face the caller paints, whose state names it passes.
     face: &'static str,
+    /// The widget that paints it ([`chosen_face`]).
+    widget: String,
     generation: u64,
     def: Option<Rc<SdfWidgetDef>>,
     /// Index into the caller's `names` for each of the face's uniform slots.
@@ -749,30 +823,23 @@ thread_local! {
     static FACES: RefCell<Vec<FaceEntry>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Paint a built-in control at `rect` with its face, the `defwidget` `face`
-/// (content/ui/widgets.lisp), or None if that is not defined. The face reads
-/// the control's value as `value_t`, `colors` as `input-color` and
-/// `second-color`, and `values[i]` as its `:state` `names[i]`; a state it does not declare is
-/// dropped, one it declares but is not given reads 0. `names` must be the
-/// same for every call with one `face`.
-#[allow(clippy::too_many_arguments)]
-pub fn face_primitive(
+/// The definition of `widget` painting built-in face `face`, and the
+/// uniforms `values` fill for it, or None if `widget` is not defined.
+fn face_uniforms(
     face: &'static str,
+    widget: &str,
     names: &[&str],
     values: &[f32],
-    rect: Rect,
-    viewport: WidgetViewport,
-    value_t: f32,
-    colors: [[f32; 4]; 2],
-) -> Option<GpuPrimitive> {
+) -> Option<(Rc<SdfWidgetDef>, [f32; MAX_SDF_STATE_UNIFORMS])> {
     let generation = sdf_widget_registry_generation();
-    let (def, uniforms) = FACES.with(|faces| {
+    FACES.with(|faces| {
         let mut faces = faces.borrow_mut();
-        let index = match faces.iter().position(|entry| entry.face == face) {
+        let index = match faces.iter().position(|entry| entry.face == face && entry.widget == widget) {
             Some(index) => index,
             None => {
                 faces.push(FaceEntry {
                     face,
+                    widget: widget.to_string(),
                     generation: 0,
                     def: None,
                     slots: Vec::new(),
@@ -785,7 +852,7 @@ pub fn face_primitive(
         debug_assert_eq!(entry.names_len, names.len(), "{face} called with other state names");
         if entry.generation != generation {
             entry.generation = generation;
-            entry.def = sdf_widget_def(face);
+            entry.def = sdf_widget_def(widget);
             entry.slots = entry.def.as_ref().map_or_else(Vec::new, |def| {
                 def.state_uniforms
                     .iter()
@@ -802,14 +869,36 @@ pub fn face_primitive(
             }
         }
         Some((def, uniforms))
-    })?;
+    })
+}
+
+/// Paint a built-in control at `rect` with its face: the `defwidget` `face`
+/// (content/ui/widgets.lisp), or the one [`painted_face`] picks for it from
+/// `props`, or None if neither is defined. The face reads the control's
+/// value as `value_t`, `colors` as `input-color` and `second-color`, and
+/// `values[i]` as its `:state` `names[i]`; a state it does not declare is
+/// dropped, one it declares but is not given reads 0. `names` must be the
+/// same for every call with one `face`.
+#[allow(clippy::too_many_arguments)]
+pub fn face_primitive(
+    face: &'static str,
+    props: &HashMap<String, Value>,
+    names: &[&str],
+    values: &[f32],
+    rect: Rect,
+    viewport: WidgetViewport,
+    value_t: f32,
+    colors: [[f32; 4]; 2],
+) -> Option<GpuPrimitive> {
+    let widget = painted_face(face, props)?;
+    let (def, uniforms) = face_uniforms(face, &widget, names, values)?;
     let quad = |i: usize| [uniforms[i], uniforms[i + 1], uniforms[i + 2], uniforms[i + 3]];
     let paint_rect = sdf_widget_paint_rect(rect, def.paint_margin);
     let (ndc_min, ndc_max) = super::ndc_bounds(paint_rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
     Some(GpuPrimitive::WidgetInstance {
-        widget_type: face.to_string(),
+        widget_type: widget.into_owned(),
         instance: super::WidgetInstance {
             ndc_min,
             ndc_max,
@@ -1311,7 +1400,7 @@ mod tests {
         // `undeclared` is dropped, `unpassed` reads 0, the rest by name.
         let names = ["a", "undeclared", "b"];
         let face = |values: &[f32]| {
-            face_primitive("test-face", &names, values, rect, viewport, 0.5, [[1.0; 4], [0.5; 4]])
+            face_primitive("test-face", &HashMap::new(), &names, values, rect, viewport, 0.5, [[1.0; 4], [0.5; 4]])
         };
         let Some(GpuPrimitive::WidgetInstance { widget_type, instance, .. }) = face(&[1.0, 9.0, 2.0])
         else {
@@ -1321,7 +1410,34 @@ mod tests {
         assert_eq!(instance.uniform_a, [2.0, 0.0, 1.0, 0.0]);
         assert_eq!((instance.value_t, instance.color_a, instance.color_d), (0.5, [1.0; 4], [0.5; 4]));
 
-        assert!(face_primitive("no-such-face", &[], &[], rect, viewport, 0.0, [[0.0; 4]; 2]).is_none());
+        assert!(face_primitive("no-such-face", &HashMap::new(), &[], &[], rect, viewport, 0.0, [[0.0; 4]; 2]).is_none());
+
+        // A face standing in for it gets the same states by name; a control's
+        // own :face wins over its containers', and one not defined leaves the
+        // control's own face.
+        register_sdf_widget(SdfWidgetDef {
+            name: "test-other-face".to_string(),
+            state_uniforms: ["a"].map(String::from).to_vec(),
+            ..sdf_widget_def("test-face").unwrap().as_ref().clone()
+        });
+        let painted = |props: &HashMap<String, Value>| {
+            match face_primitive("test-face", props, &names, &[1.0, 9.0, 2.0], rect, viewport, 0.5, [[1.0; 4]; 2]) {
+                Some(GpuPrimitive::WidgetInstance { widget_type, instance, .. }) => (widget_type, instance.uniform_a[0]),
+                _ => panic!("painted"),
+            }
+        };
+        let inherited = faces_with(
+            None,
+            &Value::Map(HashMap::from([(
+                "test-face".to_string(),
+                Rc::new(RefCell::new(Value::Keyword("no-such-face".into()))),
+            )])),
+        )
+        .unwrap();
+        let mut props = HashMap::from([(INHERITED_FACES_PROP.to_string(), inherited)]);
+        assert_eq!(painted(&props), ("test-face".to_string(), 2.0));
+        props.insert("face".to_string(), Value::String("test-other-face".into()));
+        assert_eq!(painted(&props), ("test-other-face".to_string(), 1.0));
     }
 
     #[test]

@@ -48,6 +48,7 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
+use super::hover_callback;
 use super::menu_style::{self, PANEL_PADDING_V, ROW_HEIGHT as MENU_ROW_HEIGHT};
 use super::{
     CellBuffer, EventOutput, GpuPrimitive, GpuProportionalTextPrimitive, MouseEventOutcome,
@@ -148,10 +149,6 @@ pub fn pointer_moved_to(widget_id: Option<u64>) -> Vec<EventOutput> {
             .map(|(callback, _)| EventOutput { callback, args: vec![Value::Nil] })
             .collect()
     })
-}
-
-fn hover_callback(node: &LayoutNode) -> Option<Value> {
-    node.props.get("on-hover").filter(|v| !matches!(v, Value::Nil | Value::Bool(false))).cloned()
 }
 
 /// Record the hovered top-level item; the event to dispatch when it changed.

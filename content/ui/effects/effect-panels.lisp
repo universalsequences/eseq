@@ -98,6 +98,7 @@
         (if (get fx :midi-fx)
           (pb/midi-fx-panel-body fx)
           (pb/audio-fx-panel-body fx params))))
+    :part "fx/panel" :device title
     :background (pf/panel-surface)
     :color :fx-panel-bg
     :header :fx-panel-header-bg
@@ -123,6 +124,7 @@
       (pf/fx-panel-body "midi-fx-panel-content"
         (subtree :key (str "midi-fx-panel-body-" (get fx :slot-idx) "-" (get fx :name))
           (pb/midi-fx-panel-body fx))))
+    :part "fx/panel" :device title
     :background (pf/panel-surface)
     :color :fx-panel-bg
     :header :fx-panel-header-bg

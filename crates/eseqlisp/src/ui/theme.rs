@@ -1655,23 +1655,45 @@ thread_local! {
         std::cell::RefCell::default();
 }
 
-/// Replace this thread's package slot widgets with `slots` (slot name ->
-/// defwidget). A change is a theme change: it bumps the generation.
-pub fn set_slot_widget_overrides(slots: impl IntoIterator<Item = (String, String)>) {
-    let slots: WidgetSlotMap = slots
-        .into_iter()
-        .map(|(slot, widget)| (normalize_name(&slot), widget))
-        .collect();
-    let changed = SLOT_WIDGET_OVERRIDES.with(|cell| {
-        if *cell.borrow() == slots {
+thread_local! {
+    /// Built-in faces a package paints with another widget (`restyle-face`):
+    /// face name -> defwidget. Per thread, like [`SLOT_WIDGET_OVERRIDES`].
+    static FACE_OVERRIDES: std::cell::RefCell<WidgetSlotMap> = std::cell::RefCell::default();
+}
+
+/// Replace `cell`'s map with `map`. A change is a theme change: it bumps
+/// the generation.
+fn replace_widget_map(
+    cell: &'static std::thread::LocalKey<std::cell::RefCell<WidgetSlotMap>>,
+    map: WidgetSlotMap,
+) {
+    let changed = cell.with(|cell| {
+        if *cell.borrow() == map {
             return false;
         }
-        cell.replace(slots);
+        cell.replace(map);
         true
     });
     if changed {
         THEME_GENERATION.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// Replace this thread's package slot widgets with `slots` (slot name ->
+/// defwidget).
+pub fn set_slot_widget_overrides(slots: impl IntoIterator<Item = (String, String)>) {
+    let slots = slots.into_iter().map(|(slot, widget)| (normalize_name(&slot), widget)).collect();
+    replace_widget_map(&SLOT_WIDGET_OVERRIDES, slots);
+}
+
+/// Replace this thread's package faces with `faces` (face -> defwidget).
+pub fn set_face_overrides(faces: impl IntoIterator<Item = (String, String)>) {
+    replace_widget_map(&FACE_OVERRIDES, faces.into_iter().collect());
+}
+
+/// The widget a package paints built-in face `face` with, if one does.
+pub fn face_override(face: &str) -> Option<String> {
+    FACE_OVERRIDES.with(|cell| cell.borrow().get(face).cloned())
 }
 
 /// A package's widget for slot `name`, if one holds it.

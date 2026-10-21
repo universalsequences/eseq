@@ -244,6 +244,45 @@ fn focused_text_input_survives_on_change_rerender() {
 }
 
 #[test]
+fn a_widget_on_hover_hears_the_pointer_enter_and_leave() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def hovered (state ""))
+            (effect
+              (v-stack :width 24 :height 6
+                (label "one" :key "one" :width 10 :on-hover |over| (set! hovered (if over "one" "")))
+                (label "two" :key "two" :width 10 :on-hover |over| (if over (set! hovered "two") nil))))
+            "#,
+        )
+        .expect("build labels");
+    editor.refresh_runtime_side_effects();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(30, 8);
+    let hover = |editor: &mut Editor, key: Option<&str>| {
+        let layout = editor.widget_layout().expect("layout");
+        let (col, row) = match key {
+            Some(key) => {
+                let node = super::find_layout_node_by_stable_key(layout.as_ref(), key).expect("label");
+                (node.rect.col + 1.0, node.rect.row + 0.5)
+            }
+            None => (28.0, 7.5),
+        };
+        editor.handle_mouse_precise(mouse_event(MouseEventKind::Moved, col as u16, row as u16), 0, 0, 30, 8, col, row);
+        editor.runtime_mut().eval_str("hovered").unwrap()
+    };
+    assert_eq!(hover(&mut editor, Some("one")), Some(Value::String("one".into())));
+    assert_eq!(hover(&mut editor, Some("one")), Some(Value::String("one".into())), "moving within it is no new enter");
+    // Leaving one (it clears) comes before entering two (it sets).
+    assert_eq!(hover(&mut editor, Some("two")), Some(Value::String("two".into())));
+    assert_eq!(hover(&mut editor, None), Some(Value::String("two".into())), "two ignores its leave");
+    assert_eq!(hover(&mut editor, Some("one")), Some(Value::String("one".into())));
+    assert_eq!(hover(&mut editor, None), Some(Value::String("".into())));
+}
+
+#[test]
 fn remapped_focus_after_relayout_does_not_reselect_all() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor

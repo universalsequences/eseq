@@ -508,6 +508,7 @@
   (box :background (pf/panel-surface) :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
     :height st/fx-fixed-panel-height
     :debug-name "sampler-panel"
+    :part "instrument/panel" :device (get inst :display-name)
     :drop-types (sampler-panel-drop-types inst)
     :drop-meta (sampler-panel-drop-meta inst)
     :drop-hover-border-color :mixer-strip-selected-border

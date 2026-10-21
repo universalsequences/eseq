@@ -77,6 +77,7 @@ pub(super) struct BezelPaint {
 /// with `fill`, which already has any press in it.
 pub(super) fn bezel_primitive(
     paint: &BezelPaint,
+    props: &HashMap<String, Value>,
     rect: Rect,
     viewport: super::WidgetViewport,
     native: &str,
@@ -89,6 +90,7 @@ pub(super) fn bezel_primitive(
     let (hl, sh) = (paint.highlight, paint.shadow);
     let face = super::sdf_widget::face_primitive(
         if paint.tab { BEZEL_TAB_FACE_WIDGET } else { BEZEL_FACE_WIDGET },
+        props,
         &BEZEL_FACE_STATES,
         &[
             paint.radius, fill_slot, flag(paint.border_slot), paint.press,
@@ -1229,6 +1231,7 @@ active tab. :icon names a glyph drawn left of the text (:plus, :folder, :piano, 
                     highlight: button_highlight(&node.props),
                     shadow: button_shadow(&node.props),
                 },
+                &node.props,
                 surface_rect,
                 viewport,
                 "button",
@@ -1355,7 +1358,7 @@ mod tests {
             shadow: Color::rgba(0.0, 0.0, 0.0, 0.3),
         };
         let rect = Rect { row: 0.0, col: 0.0, width: 8.0, height: 2.0 };
-        let fill_slot = || match bezel_primitive(&paint, rect, test_viewport(), "button") {
+        let fill_slot = || match bezel_primitive(&paint, &HashMap::new(), rect, test_viewport(), "button") {
             GpuPrimitive::WidgetInstance { widget_type, instance, is_background } => {
                 assert_eq!(widget_type, BEZEL_FACE_WIDGET);
                 assert!(is_background, "a bezel draws behind its text");

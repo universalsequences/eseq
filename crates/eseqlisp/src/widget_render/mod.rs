@@ -169,6 +169,9 @@ static WIDGET_STATE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static POINTER_HOVER_WIDGET_ID: RefCell<Option<u64>> = const { RefCell::new(None) };
+    /// The widget with an `:on-hover` the pointer is over, and its callback
+    /// (to report the leave once the widget is gone).
+    static ON_HOVER_WIDGET: RefCell<Option<(u64, Value)>> = const { RefCell::new(None) };
     static WIDGET_STATE_REVISIONS: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
     /// Text measurer available to render-pass code. Widget metrics that are
     /// normally cached as a side effect of measure() (e.g. text-input
@@ -254,6 +257,36 @@ pub fn set_pointer_hover_widget(widget_id: Option<u64>) -> bool {
         *hovered = widget_id;
         if let Some(id) = widget_id { bump_widget_state_revision(id); }
         true
+    })
+}
+
+/// A widget's `:on-hover`, unless it is switched off.
+pub(crate) fn hover_callback(node: &LayoutNode) -> Option<Value> {
+    node.props.get("on-hover").filter(|v| !matches!(v, Value::Nil | Value::Bool(false))).cloned()
+}
+
+/// The pointer is now over `node`, the topmost widget under it (or none):
+/// a widget with an `:on-hover` it left hears `false`, one it entered hears
+/// `true`, in that order. Only that widget hears it, not its containers. A
+/// sexp-slot's `:on-hover` reports its item instead (sexp_slot.rs).
+pub fn pointer_moved_over(node: Option<&LayoutNode>) -> Vec<EventOutput> {
+    let entered = node
+        .filter(|node| node.widget_type != "sexp-slot")
+        .and_then(|node| Some((node.widget_id, hover_callback(node)?)));
+    ON_HOVER_WIDGET.with(|current| {
+        let mut current = current.borrow_mut();
+        if current.as_ref().map(|(id, _)| *id) == entered.as_ref().map(|(id, _)| *id) {
+            return Vec::new();
+        }
+        let mut outputs = Vec::new();
+        if let Some((_, callback)) = current.take() {
+            outputs.push(EventOutput { callback, args: vec![Value::Bool(false)] });
+        }
+        if let Some((_, callback)) = &entered {
+            outputs.push(EventOutput { callback: callback.clone(), args: vec![Value::Bool(true)] });
+        }
+        *current = entered;
+        outputs
     })
 }
 

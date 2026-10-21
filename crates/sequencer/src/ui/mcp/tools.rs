@@ -833,7 +833,10 @@ pub(crate) fn hooks_text(
             lines.push(format!("  theme slot :{slot} (read by {read_by}): (override-theme-slot :{slot} \"widget\")"));
         }
         if let Some(face) = &hooks.face {
-            lines.push(format!("  painted by face {face} (content/ui/widgets.lisp)"));
+            lines.push(format!(
+                "  painted by face {}: (restyle-face {:?} \"widget\"), or :faces on a container",
+                face.painted_by, face.factory
+            ));
         }
         if let Some(background) = &hooks.background {
             lines.push(format!("  background widget {background:?}"));

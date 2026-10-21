@@ -120,6 +120,8 @@ so far; `search_source` for `:part "` finds where each is built.
 | `mixer/bus-name` | a bus strip's name button | `:bus` |
 | `mixer/output-picker` | a strip's output dropdown | `:track` or `:bus` |
 | `mixer/drop-zone` | the mixer's "drop sounds here" box | |
+| `fx/panel` | an effect's card | `:device`, the effect's name |
+| `instrument/panel` | an instrument's card | `:device`, the instrument's name |
 
 A part's subject (`:track`, `:bus`, `:step`) is the live instance: read its
 fields (`(get node :track)` then `t.audible`, `t.color`), or let a
@@ -211,6 +213,46 @@ Buttons and number pickers work the same way: their face is
 rim `:button-border`. The bezel's lighting and rim stay; a held button still
 darkens or lightens your face. One with its own `:background-color` or
 `:border-color` keeps it.
+
+### Replacing a control's whole face
+
+A slot only recolours the parts a control already has. To change its
+shape (a ridged hardware knob, a pill button), replace its face, the
+`defwidget` in `content/ui/widgets.lisp` that draws it. The control keeps
+its drag, value and text; your widget draws inside its square, gets
+`value_t` (0..1), `x`/`y`, `design-px`, `input-color` (the arc's colour,
+the p-lock colour while locked), and any of the factory face's states it
+declares by name. For `knob-number-face` they are `plock`, `default-t`
+(the unlocked value while locked) and `origin-t`; show `plock` so a
+locked knob still reads as locked.
+
+| Face | Draws |
+|---|---|
+| `knob-number-face` | the device panels' and mixer's labelled knobs |
+| `knob-face` | plain `knob`s |
+| `bezel-face` | buttons and number pickers |
+| `bezel-tab-face` | the active tab button |
+
+Three scopes, the narrowest winning:
+
+```lisp
+;; Everywhere.
+(restyle-face "knob-number-face" "ik-knob")
+
+;; Every knob inside one panel: :faces on a container reaches the
+;; controls under it, however they are built.
+(restyle "fx/panel"
+  |node| (if (= (get node :device) "Compressor")
+           (merge node :faces (dict :knob-number-face "ik-knob"))
+           node))
+
+;; One control you build yourself.
+(knob-number :value v :face "ik-knob")
+```
+
+`fx/panel` is an effect's card and `instrument/panel` an instrument's; both
+carry the device's name in `:device`. `what_draws` names the face a
+control paints with.
 
 ## Knobs, keys and hooks
 

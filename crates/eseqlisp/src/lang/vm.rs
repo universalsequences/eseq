@@ -245,6 +245,16 @@ const THEME_SLOT_TARGET_PREFIX: &str = "theme-slot/";
 /// `:part "<name>"` (`restyle`).
 const PART_TARGET_PREFIX: &str = "part/";
 
+/// Overrides on `face/<face>` targets name the defwidget that paints every
+/// built-in control whose face is `face` (`restyle-face`).
+const FACE_TARGET_PREFIX: &str = "face/";
+
+/// Whether overrides on `target` are mirrored into the theme
+/// ([`VM::sync_theme_overrides`]).
+fn is_theme_target(target: &str) -> bool {
+    target.starts_with(THEME_SLOT_TARGET_PREFIX) || target.starts_with(FACE_TARGET_PREFIX)
+}
+
 
 /// Register `callback` as the current module's override of `name`.
 /// Re-evaluation replaces this module's registration and makes it the
@@ -3970,6 +3980,32 @@ pub fn register_core_natives(vm: &mut VM) {
         Value::Nil
     });
 
+    // `(restyle-face "knob-number-face" "widget")`: every built-in control
+    // whose face is `knob-number-face` paints with defwidget `widget`
+    // instead, for as long as the calling module's override stands. A
+    // control's own `:face`, or a `:faces` its container sets, wins.
+    vm.register_native_with_vm("restyle-face", |args, vm| {
+        let (Some(Value::String(face) | Value::Keyword(face)), Some(widget @ Value::String(_))) =
+            (args.first(), args.get(1))
+        else {
+            log_native_misuse("restyle-face", "expects (restyle-face \"knob-number-face\" \"widget\")");
+            return Value::Nil;
+        };
+        if !crate::widget_render::sdf_widget::BUILTIN_FACES.contains(&face.as_str()) {
+            log_native_misuse(
+                "restyle-face",
+                &format!(
+                    "{face} is not a built-in face; one of {}",
+                    crate::widget_render::sdf_widget::BUILTIN_FACES.join(", ")
+                ),
+            );
+            return Value::Nil;
+        }
+        let target = format!("{FACE_TARGET_PREFIX}{face}");
+        register_override(vm, &target, OverrideKind::Replace, widget.clone());
+        Value::Nil
+    });
+
     // `(restyle "mixer/bus-name" (lambda (node) ...))`: every widget built
     // with `:part "mixer/bus-name"` is passed, built, to the function, and
     // the function's result is drawn in its place, for as long as the
@@ -6423,7 +6459,7 @@ impl VM {
         self.preserve_state_on_redefinition = snapshot.preserve_state_on_redefinition;
         self.extension_hooks = snapshot.extension_hooks;
         self.overrides = snapshot.overrides;
-        self.sync_theme_slot_overrides();
+        self.sync_theme_overrides();
         self.disabled_override_modules = snapshot.disabled_override_modules;
         self.unattached_override_modules = snapshot.unattached_override_modules;
         self.custom_declarations = snapshot.custom_declarations;
@@ -7059,16 +7095,20 @@ impl VM {
         }
     }
 
-    /// Mirror the active `theme-slot/` overrides into the theme, which paints
-    /// those slots with their widgets.
-    fn sync_theme_slot_overrides(&self) {
-        crate::theme::set_slot_widget_overrides(self.overrides.iter().filter_map(|(target, set)| {
-            let slot = target.strip_prefix(THEME_SLOT_TARGET_PREFIX)?;
-            match &set.active()?.callback {
-                Value::String(widget) => Some((slot.to_string(), widget.clone())),
-                _ => None,
-            }
-        }));
+    /// Mirror the active `theme-slot/` and `face/` overrides into the
+    /// theme, which paints those slots and faces with their widgets.
+    fn sync_theme_overrides(&self) {
+        let widgets = |prefix: &'static str| {
+            self.overrides.iter().filter_map(move |(target, set)| {
+                let name = target.strip_prefix(prefix)?;
+                match &set.active()?.callback {
+                    Value::String(widget) => Some((name.to_string(), widget.clone())),
+                    _ => None,
+                }
+            })
+        };
+        crate::theme::set_slot_widget_overrides(widgets(THEME_SLOT_TARGET_PREFIX));
+        crate::theme::set_face_overrides(widgets(FACE_TARGET_PREFIX));
     }
 
     /// Each module that wrote an override, and whether any of its
@@ -7107,15 +7147,14 @@ impl VM {
         if targets.is_empty() {
             return;
         }
-        if targets.iter().any(|target| target.starts_with(THEME_SLOT_TARGET_PREFIX)) {
-            self.sync_theme_slot_overrides();
+        if targets.iter().any(|target| is_theme_target(target)) {
+            self.sync_theme_overrides();
         }
         let mut symbols = HashSet::new();
         for target in targets {
             symbols.insert(target.clone());
             // A theme slot or part target is read only by that spelling.
-            let synthetic = target.starts_with(THEME_SLOT_TARGET_PREFIX)
-                || target.starts_with(PART_TARGET_PREFIX);
+            let synthetic = is_theme_target(target) || target.starts_with(PART_TARGET_PREFIX);
             if !synthetic && let Some((_, base)) = crate::modules::split_qualified(target) {
                 symbols.insert(base.to_string());
             }
@@ -10567,6 +10606,28 @@ mod tests {
 
         // Detaching the package drops it.
         vm.remove_module_overrides("test.slotpkg");
+        assert_eq!(painted(), None);
+    }
+
+    #[test]
+    fn a_face_override_paints_while_its_module_is_on() {
+        let mut vm = module_test_vm();
+        let painted = || crate::theme::face_override("knob-number-face");
+        vm.eval_module_source(
+            temp_lisp_path("face-pkg"),
+            "(module test.facepkg)\n(restyle-face \"knob-number-face\" \"ik-knob\")",
+            1,
+        )
+        .expect("package");
+        assert_eq!(painted().as_deref(), Some("ik-knob"));
+
+        vm.eval_str("(disable-module-overrides test.facepkg)").expect("disable");
+        assert_eq!(painted(), None);
+        vm.eval_str("(enable-module-overrides test.facepkg)").expect("enable");
+        assert_eq!(painted().as_deref(), Some("ik-knob"));
+
+        // Detaching the package drops it.
+        vm.remove_module_overrides("test.facepkg");
         assert_eq!(painted(), None);
     }
 

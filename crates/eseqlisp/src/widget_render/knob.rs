@@ -283,6 +283,7 @@ the theme. It is :size cells wide (default 2) and drawn round. Example: \
         // them when it is not loaded.
         if let Some(face) = super::sdf_widget::face_primitive(
             KNOB_FACE_WIDGET,
+            &node.props,
             &[],
             &[],
             node.rect,

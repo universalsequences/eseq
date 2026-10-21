@@ -2421,6 +2421,7 @@ names are internal draw passes. Example: \
         let flag = |on: bool| if on { 1.0 } else { 0.0 };
         let ring = super::sdf_widget::face_primitive(
             KNOB_NUMBER_FACE_WIDGET,
+            &node.props,
             &KNOB_NUMBER_FACE_STATES,
             &[
                 flag(plock_active),

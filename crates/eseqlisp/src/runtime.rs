@@ -2275,6 +2275,11 @@ impl Runtime {
                 "Paint every box whose background is theme slot :slot with defwidget \"widget\", and every shader that reads the slot's colour (a knob's :widget-knob-filled / :widget-knob-track, a button's :button-secondary-bg, a number picker's :dropdown-bg, their :button-border) with it inlined, `slot-color` bound to that colour, while the calling module's overrides stand (detaching or disabling it reverts).",
             ),
             (
+                "restyle-face",
+                "(restyle-face \"knob-number-face\" \"widget\")",
+                "Paint every built-in control whose face is the first name (knob-face, knob-number-face, bezel-face for buttons and number pickers, bezel-tab-face) with defwidget \"widget\" instead: the whole control, not one colour. The widget gets value_t, x/y and the states the factory face declares, by name (a knob-number's plock, default-t, origin-t). While the calling module's overrides stand (detaching or disabling it reverts). A control's own :face, or :faces (dict :knob-number-face \"widget\") on a container it is in, wins.",
+            ),
+            (
                 "restyle",
                 "(restyle \"area/part\" (lambda (node) ...))",
                 "Pass every widget built with :part \"area/part\" to the function, built, and draw what it returns (usually (merge node ...)) in its place, wherever the part is built, while the calling module's overrides stand (detaching or disabling it reverts). A part may carry its subject (:track, :bus, :step) to read. (parts) lists the parts built so far.",

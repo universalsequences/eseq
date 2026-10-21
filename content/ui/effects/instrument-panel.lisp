@@ -742,6 +742,7 @@
             (str "instrument-panel-" (get inst :track))
             (str "rack-instrument-panel-" (get inst :track) "-" (get inst :rack-slot)))
           :debug-name "instrument-panel"
+          :part "instrument/panel" :device (get inst :display-name)
           :background (pf/panel-surface)
           :color :instrument-panel-bg
           :header :fx-panel-header-bg

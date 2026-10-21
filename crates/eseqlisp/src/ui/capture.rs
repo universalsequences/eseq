@@ -265,11 +265,21 @@ pub struct WidgetHooks {
     pub built_by: Option<String>,
     /// Its `:background` widget.
     pub background: Option<String>,
-    /// The built-in face (content/ui/widgets.lisp) it paints with.
-    pub face: Option<String>,
+    /// The face it paints with.
+    pub face: Option<FaceHook>,
     /// The theme slots `override-theme-slot` repaints it through, each with
     /// what reads it: a box's background prop, or its face.
     pub slots: Vec<(String, String)>,
+}
+
+/// The face a built-in control paints with.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FaceHook {
+    /// The built-in face it has (content/ui/widgets.lisp), which
+    /// `restyle-face` replaces.
+    pub factory: &'static str,
+    /// What paints it: `factory`, or a package's widget in its place.
+    pub painted_by: String,
 }
 
 impl WidgetHooks {
@@ -290,11 +300,13 @@ impl WidgetHooks {
                 }
             }
         }
-        let face = crate::widget_render::builtin_face_of(node)
-            .filter(|(face, _)| crate::widget_render::sdf_widget::sdf_widget_def(face).is_some());
-        if let Some((face, slots)) = &face {
-            reads.extend(slots.iter().map(|slot| (slot.to_string(), format!("its face {face}"))));
-        }
+        // A package's face in place of the factory's reads none of its slots.
+        let face = crate::widget_render::builtin_face_of(node).and_then(|(factory, slots)| {
+            let painted_by = crate::widget_render::sdf_widget::painted_face(factory, &node.props)?;
+            let slots = if painted_by == factory { slots } else { Vec::new() };
+            reads.extend(slots.iter().map(|slot| (slot.to_string(), format!("its face {painted_by}"))));
+            Some(FaceHook { factory, painted_by: painted_by.into_owned() })
+        });
         reads.sort();
         // One line per slot, naming everything that reads it.
         let mut slots: Vec<(String, String)> = Vec::new();
@@ -314,7 +326,7 @@ impl WidgetHooks {
             part: string("part"),
             built_by: source_symbol(node).map(str::to_string),
             background: string("background"),
-            face: face.map(|(face, _)| face.to_string()),
+            face,
             slots,
         }
     }

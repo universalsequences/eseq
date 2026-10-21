@@ -1221,6 +1221,7 @@ pub(crate) fn apply_replayed_scratch_imports(
     state: &SequencerState,
     imports: &[app::history::ScratchImportState],
 ) {
+    let package_of = package_lookup();
     for import in imports {
         let module = import.module.as_str();
         let Some(buffer) = editor
@@ -1241,7 +1242,7 @@ pub(crate) fn apply_replayed_scratch_imports(
             if removed {
                 buffer.set_text(&updated);
             }
-            if sequencer::lisp_host::package_name_for_module(module).is_none()
+            if package_of(module).is_none()
                 && !module_still_attached_elsewhere(state, module, AttachmentDestination::Scratch)
             {
                 set_module_overrides_enabled(editor, module, false);
@@ -1431,7 +1432,7 @@ fn module_still_attached_elsewhere(state: &SequencerState, module: &str, removed
     }
 }
 
-/// Switch every installed package's overrides on or off to match whether
+/// Switch every package's overrides (installed or Local) on or off to match whether
 /// the project's scratch, init.lisp or what the agent is trying imports a
 /// module of it. A module the user switched off by hand stays off. `import` is
 /// load-once and nothing unloads, so this is how a package stops showing:
@@ -1445,11 +1446,30 @@ pub(crate) fn sync_package_overrides(editor: &mut Editor, state: &SequencerState
         .iter()
         .flat_map(|source| import_modules(source))
         .collect();
+    sync_overrides_to_imports(editor, &imports, package_lookup());
+}
+
+/// The package a module is in: an installed package by its manifest, or
+/// a Local package (a folder with no manifest) by the folder its file is in:
+/// `pond.controls` is in `pond`, as ~/.eseq.d/packages/local/pond/controls.lisp.
+fn package_lookup() -> impl Fn(&str) -> Option<String> {
+    let paths = sequencer::app_paths::app_paths();
     // Read once: the catalog checks the package folders on every call.
-    let catalog = sequencer::app_paths::app_paths().package_catalog();
-    sync_overrides_to_imports(editor, &imports, |module| {
-        catalog.package_for_module(module).map(|package| package.manifest.name.clone())
-    });
+    let catalog = paths.package_catalog();
+    let local = paths.local_modules_dir();
+    move |module| {
+        catalog
+            .package_for_module(module)
+            .map(|package| package.manifest.name.clone())
+            .or_else(|| local_package_of(&local, module))
+    }
+}
+
+/// The Local package folder under `local` that holds `module`, as
+/// `local:<folder>`.
+fn local_package_of(local: &Path, module: &str) -> Option<String> {
+    let (folder, _) = module.split_once('.')?;
+    local.join(folder).is_dir().then(|| format!("local:{folder}"))
 }
 
 /// [`sync_package_overrides`] for these imports, `package_of` naming the
@@ -1485,9 +1505,9 @@ fn switch_on_attached(editor: &mut Editor, state: &SequencerState, module: &str)
 
 /// After `module`'s import left `removed_from`: its package's overrides go
 /// off unless something still attaches the package; a module of no
-/// installed package goes off on its own.
+/// package goes off on its own.
 fn switch_off_detached(editor: &mut Editor, state: &SequencerState, module: &str, removed_from: AttachmentDestination) {
-    if sequencer::lisp_host::package_name_for_module(module).is_some() {
+    if package_lookup()(module).is_some() {
         sync_package_overrides(editor, state);
     } else if !module_still_attached_elsewhere(state, module, removed_from) {
         set_module_overrides_enabled(editor, module, false);
@@ -3054,6 +3074,17 @@ mod tests {
         set_module_overrides_enabled(&mut editor, "t.pkg", true);
         assert_eq!(seam(&mut editor), Some(Value::String("package".into())));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_local_package_is_the_folder_its_modules_are_in() {
+        let local = temp_root("local-package");
+        std::fs::create_dir_all(local.join("pond")).unwrap();
+        assert_eq!(local_package_of(&local, "pond.controls").as_deref(), Some("local:pond"));
+        assert_eq!(local_package_of(&local, "pond.skin"), local_package_of(&local, "pond.mixer"));
+        assert_eq!(local_package_of(&local, "user.init"), None, "no folder: no package");
+        assert_eq!(local_package_of(&local, "pond"), None);
+        std::fs::remove_dir_all(local).unwrap();
     }
 
     #[test]

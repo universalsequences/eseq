@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::vm::{Value, format_lisp_value};
 use crate::widget_render;
+use crate::widget_render::sdf_widget::{FACES_PROP, INHERITED_FACES_PROP, faces_with};
 
 /// Default font size (in points) used when no explicit font-size is specified.
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
@@ -468,8 +469,10 @@ impl<'a> LayoutEngine<'a> {
             true,
         )?;
         let root_rect = self.root_rect(tree, size, root_max_width, 0.0, 0.0);
-        let mut layout =
-            self.build_layout_node(tree, root_rect, DEFAULT_FONT_SIZE, LayoutCtx::default(), true);
+        let mut layout = {
+            let _root = FaceScope::enter(None);
+            self.build_layout_node(tree, root_rect, DEFAULT_FONT_SIZE, LayoutCtx::default(), true)
+        };
         set_natural_content_width_prop(&mut layout, natural_width);
         let mut next_widget_id = widget_id_offset.wrapping_add(1);
         assign_widget_ids(&mut layout, &mut next_widget_id);
@@ -667,8 +670,9 @@ impl<'a> LayoutEngine<'a> {
     ) -> Result<LayoutNode, String> {
         validate_replacement_root_identity(existing, tree)?;
         collect_layout_widget_ids(existing, dirty_widget_ids);
-        let mut layout =
-            self.build_layout_node(tree, rect, inherited_font_size, layout_ctx, in_tree);
+        let mut layout = with_faces_of(existing, || {
+            self.build_layout_node(tree, rect, inherited_font_size, layout_ctx, in_tree)
+        });
         preserve_layout_internal_props(&existing.props, &mut layout.props);
         let mut reusable_widget_ids = HashMap::new();
         collect_stable_widget_ids(existing, &mut reusable_widget_ids);
@@ -734,6 +738,10 @@ impl<'a> LayoutEngine<'a> {
             dirty_widget_ids.push(existing.widget_id);
         }
 
+        // The scope on entry is the root's, not necessarily this node's.
+        let inherited = existing.props.get(INHERITED_FACES_PROP).cloned();
+        let _child_scope = own_face_scope(inherited.as_ref(), tree)
+            .unwrap_or_else(|| FaceScope::enter(inherited));
         with_children(tree, |children_values| {
             let Some(definition) = widget_render::widget_definition(&widget_type) else {
                 return Err(format!("non-container:{widget_type}"));
@@ -1014,6 +1022,8 @@ impl<'a> LayoutEngine<'a> {
             .map(f64_to_f32)
             .unwrap_or(inherited_font_size);
 
+        let inherited_faces = inherited_faces();
+        let child_scope = own_face_scope(inherited_faces.as_ref(), node);
         let (children, has_child_values) = with_children(node, |children_values| {
             (
                 self.layout_children_with_font(
@@ -1028,7 +1038,11 @@ impl<'a> LayoutEngine<'a> {
                 !children_values.is_empty(),
             )
         });
+        drop(child_scope);
         let mut props = collect_props(node);
+        if let Some(faces) = inherited_faces {
+            props.insert(INHERITED_FACES_PROP.to_string(), faces);
+        }
         if widget_type == "menu-item" && has_child_values {
             props.insert("__has-submenu".to_string(), Value::Bool(true));
         }
@@ -1711,9 +1725,9 @@ fn rebuild_layout_node_at_rect(
             rect.width, rect.height, measured.width, measured.height
         ));
     }
-    let mut built = ctx
-        .engine
-        .build_layout_node(tree, rect, inherited_font_size, layout_ctx, true);
+    let mut built = with_faces_of(existing, || {
+        ctx.engine.build_layout_node(tree, rect, inherited_font_size, layout_ctx, true)
+    });
     if std::env::var_os("ESEQLISP_TRACE_UI").is_some() {
         let mut ids = Vec::new();
         collect_layout_widget_ids(&built, &mut ids);
@@ -2344,6 +2358,11 @@ fn size_affecting_props_equal(
     old_props: &HashMap<String, Value>,
     new_props: &HashMap<String, Value>,
 ) -> bool {
+    // Not a size, but a container's `:faces` reaches every control under it
+    // at layout (`__inherited-faces`), so a change must lay it out again.
+    if !value_option_eq(old_props.get(FACES_PROP), new_props.get(FACES_PROP)) {
+        return false;
+    }
     if widget_type == "label" {
         let width_equal = value_option_eq(old_props.get("width"), new_props.get("width"));
         let height_equal = value_option_eq(old_props.get("height"), new_props.get("height"));
@@ -2526,6 +2545,47 @@ pub(crate) fn shrink_constraints_xy(
         max_height: (constraints.max_height - pad_y * 2.0).max(0.0),
         aspect: constraints.aspect,
     }
+}
+
+thread_local! {
+    /// The faces the node being built inherits from its containers, as
+    /// [`INHERITED_FACES_PROP`] holds them.
+    static FACE_SCOPE: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While it lives, nodes built inherit `faces`; the previous ones come back
+/// when it drops.
+struct FaceScope(Option<Value>);
+
+impl FaceScope {
+    fn enter(faces: Option<Value>) -> Self {
+        Self(FACE_SCOPE.with(|scope| scope.replace(faces)))
+    }
+}
+
+impl Drop for FaceScope {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        FACE_SCOPE.with(|scope| *scope.borrow_mut() = previous);
+    }
+}
+
+fn inherited_faces() -> Option<Value> {
+    FACE_SCOPE.with(|scope| scope.borrow().clone())
+}
+
+/// A scope for `node`'s children when it sets `:faces` of its own over
+/// `inherited`; without, its children inherit what it does.
+fn own_face_scope(inherited: Option<&Value>, node: &Value) -> Option<FaceScope> {
+    with_prop(node, FACES_PROP, |own| faces_with(inherited, own))
+        .flatten()
+        .map(|faces| FaceScope::enter(Some(faces)))
+}
+
+/// Lay out a replacement for `existing` with what it inherited in scope.
+fn with_faces_of<R>(existing: &LayoutNode, build: impl FnOnce() -> R) -> R {
+    let _scope = FaceScope::enter(existing.props.get(INHERITED_FACES_PROP).cloned());
+    build()
 }
 
 fn collect_props(v: &Value) -> HashMap<String, Value> {
@@ -2783,6 +2843,66 @@ mod tests {
             (actual - expected).abs() < 0.000_01,
             "expected {expected}, got {actual}"
         );
+    }
+
+    #[test]
+    fn a_containers_faces_reach_the_controls_under_it_and_leave_with_it() {
+        use crate::widget_render::sdf_widget::chosen_face;
+        let faces = |widget: &str| {
+            Value::Map(HashMap::from([(
+                "knob-number-face".to_string(),
+                Rc::new(RefCell::new(s(widget))),
+            )]))
+        };
+        let panel = |faces: Option<Value>, value: f64| {
+            let mut props = vec![kw("width"), num(20.0)];
+            if let Some(faces) = faces {
+                props.extend([kw("faces"), faces]);
+            }
+            props.push(build_widget(
+                "v-stack",
+                vec![build_widget("knob-number", vec![kw("value"), num(value)])],
+            ));
+            build_widget("box", props)
+        };
+        let face_of = |layout: &LayoutNode| {
+            chosen_face("knob-number-face", &layout.children[0].children[0].props).into_owned()
+        };
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&panel(Some(faces("ik-knob")), 0.5)).unwrap();
+        assert_eq!(face_of(&layout), "ik-knob");
+        assert!(
+            !layout.props.contains_key(INHERITED_FACES_PROP),
+            "the container's own :faces are for what is under it"
+        );
+
+        // A reuse (the knob turned) keeps it.
+        let mut dirty = Vec::new();
+        let turned = reuse_layout_node(&layout, &panel(Some(faces("ik-knob")), 0.7), &mut dirty)
+            .expect("a turned knob reuses the layout");
+        assert_eq!(face_of(&turned), "ik-knob");
+
+        // So does relaying out part of the panel, which builds it afresh.
+        let relaid = relayout_subtree_path_result(
+            &layout,
+            &panel(Some(faces("ik-knob")), 0.9),
+            &[0],
+            &mut dirty,
+            &engine,
+        )
+        .expect("relayout under the panel");
+        assert_eq!(face_of(&relaid), "ik-knob");
+
+        // Changing or dropping the container's faces is never reused stale.
+        assert!(reuse_layout_node(&layout, &panel(Some(faces("other")), 0.5), &mut dirty).is_none());
+        assert!(reuse_layout_node(&layout, &panel(None, 0.5), &mut dirty).is_none());
+        let (dropped, _) = reconcile_layout_node(&layout, &panel(None, 0.5), &engine, &mut dirty)
+            .expect("reconcile rebuilds the panel");
+        assert_eq!(face_of(&dropped), "knob-number-face");
+        let (changed, _) =
+            reconcile_layout_node(&layout, &panel(Some(faces("other")), 0.5), &engine, &mut dirty)
+                .expect("reconcile rebuilds the panel");
+        assert_eq!(face_of(&changed), "other");
     }
 
     fn layout_node(

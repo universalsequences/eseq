@@ -545,7 +545,8 @@ label starts at the top). :h-align :start (default), :center or :end, or a numbe
 available width. Styling: :color, :font-size, :bold true, :mono true, :underline \
 true, :hover-color, and :active-color (used while :active is true). :on-click, \
 :on-right-click and :on-double-click make it a link; each receives one pointer \
-event map (e.phase, e.x, e.y, e.u, e.v, e.shift, e.cmd, ...). Example: \
+event map (e.phase, e.x, e.y, e.u, e.v, e.shift, e.cmd, ...). :on-hover is called \
+with true as the pointer enters it and false as it leaves. Example: \
 (label \"Cutoff\" :color :dim :font-size 11 :h-align :center :width 10)"
     }
 
@@ -553,7 +554,7 @@ event map (e.phase, e.x, e.y, e.u, e.v, e.shift, e.cmd, ...). Example: \
         &[
             "text", "color", "active", "active-color", "hover-color", "bg", "font-size",
             "width", "height", "wrap", "h-align", "v-align", "underline", "on-click", "mono",
-            "bold", "on-right-click", "on-double-click",
+            "bold", "on-right-click", "on-double-click", "on-hover",
         ]
     }
 

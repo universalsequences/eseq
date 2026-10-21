@@ -1398,6 +1398,7 @@ cells by default. The -tri and -slider names are internal draw passes. Example: 
                         highlight: highlight_color,
                         shadow: shadow_color,
                     },
+                    &node.props,
                     node.rect,
                     viewport,
                     "number-picker",
