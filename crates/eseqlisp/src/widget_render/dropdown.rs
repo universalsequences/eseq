@@ -5,8 +5,9 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent,
-    get_f32_prop, plock_active, plock_color, resolve_named_color, styled_cell,
+    get_f32_prop, has_color_prop, plock_active, plock_color, resolve_named_color, styled_cell,
 };
+use super::sdf_widget::{flag, slot_paints_with_widget};
 use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, TextMeasurer, f64_to_f32, get_map,
     get_prop_num,
@@ -32,6 +33,23 @@ const BADGE_INSET: f32 = 0.12;
 const BADGE_ASPECT: f32 = 1.12;
 /// Badge corner radius, normalized to half its height (see `DROPDOWN_SURFACE_SHADER`).
 const BADGE_CORNER_RADIUS: f32 = 0.5;
+
+/// The `defwidget`s (content/ui/widgets.lisp) that paint the trigger's
+/// surface, its badge and the chevron when defined; the native shaders
+/// below draw them otherwise.
+pub const DROPDOWN_FACE_WIDGET: &str = "dropdown-face";
+pub const DROPDOWN_BADGE_FACE_WIDGET: &str = "dropdown-badge-face";
+pub const DROPDOWN_CHEVRON_FACE_WIDGET: &str = "dropdown-chevron-face";
+
+/// The theme slots the dropdown paints from (content/ui/widgets.lisp).
+const BG_SLOT: &str = "dropdown-bg";
+const BORDER_SLOT: &str = "dropdown-border";
+const BADGE_BG_SLOT: &str = "dropdown-badge-bg";
+const BADGE_BORDER_SLOT: &str = "dropdown-badge-border";
+const CHEVRON_SLOT: &str = "dropdown-chevron";
+
+/// A surface face's `:state`, in the order [`surface_face`] passes them.
+const SURFACE_FACE_STATES: [&str; 5] = ["radius", "light", "grad", "fill-slot", "border-slot"];
 const TRIGGER_LIGHT: SurfaceLight = SurfaceLight { strength: 0.5, gradient: 0.04 };
 const BADGE_LIGHT: SurfaceLight = SurfaceLight { strength: 0.5, gradient: 0.08 };
 const SURFACE_WIDGET: &str = "dropdown-surface";
@@ -552,7 +570,22 @@ fn get_selected(props: &HashMap<String, Value>) -> String {
     }
 }
 
-fn is_action_menu(props: &HashMap<String, Value>) -> bool {
+/// Whether a p-lock or the dropdown's own `:border-color` rings its trigger,
+/// in place of the lit hairline.
+fn has_custom_border(props: &HashMap<String, Value>) -> bool {
+    plock_active(props) || props.contains_key("border-color")
+}
+
+/// The theme slots the trigger's surface paints from: its fill's unless it
+/// has its own `:bg-color`, its hairline's unless it has a custom border.
+pub(super) fn trigger_slots(props: &HashMap<String, Value>) -> [Option<&'static str>; 2] {
+    [
+        (!has_color_prop(props, "bg-color")).then_some(BG_SLOT),
+        (!has_custom_border(props)).then_some(BORDER_SLOT),
+    ]
+}
+
+pub(super) fn is_action_menu(props: &HashMap<String, Value>) -> bool {
     matches!(props.get("action-menu"), Some(Value::Bool(true)))
 }
 
@@ -1192,7 +1225,7 @@ draw passes. Example: \
         }
 
         // ── Border (only when border-color is set; default is no border) ──
-        let custom_border = plocked || node.props.contains_key("border-color");
+        let custom_border = has_custom_border(&node.props);
         if custom_border {
             let border_color = if plocked {
                 plock_color
@@ -1221,12 +1254,14 @@ draw passes. Example: \
             // A custom or p-lock border already rings the trigger; skip the
             // lit hairline under it.
             let hairline = if custom_border { transparent } else { theme::DROPDOWN_BORDER() };
-            prims.push(surface_primitive(
-                SURFACE_WIDGET,
+            let [fill_slot, border_slot] = trigger_slots(&node.props).map(painted_slot);
+            prims.push(surface_face(
+                DROPDOWN_FACE_WIDGET,
+                &node.props,
                 node.rect,
                 viewport,
                 radius_for(node.rect),
-                SurfaceStyle { fill: bg_color, border: hairline, light: TRIGGER_LIGHT },
+                SurfaceStyle { fill: bg_color, border: hairline, light: TRIGGER_LIGHT, fill_slot, border_slot },
                 true,
             ));
         }
@@ -1319,8 +1354,9 @@ draw passes. Example: \
             // ── Chevron badge + arrows ──
             let badge_color =
                 resolve_named_color(&node.props, "badge-color", theme::DROPDOWN_BADGE_BG());
-            prims.push(surface_primitive(
-                SURFACE_WIDGET,
+            prims.push(surface_face(
+                DROPDOWN_BADGE_FACE_WIDGET,
+                &node.props,
                 badge_rect,
                 viewport,
                 BADGE_CORNER_RADIUS,
@@ -1328,17 +1364,35 @@ draw passes. Example: \
                     fill: badge_color,
                     border: theme::DROPDOWN_BADGE_BORDER(),
                     light: BADGE_LIGHT,
+                    fill_slot: painted_slot((!has_color_prop(&node.props, "badge-color")).then_some(BADGE_BG_SLOT)),
+                    border_slot: painted_slot(Some(BADGE_BORDER_SLOT)),
                 },
                 false,
             ));
-            prims.push(surface_primitive(
-                "dropdown-chevron",
-                ch_rect,
-                viewport,
-                0.0,
-                SurfaceStyle::flat(chevron_color),
-                false,
-            ));
+            let chevron_slot =
+                painted_slot((!has_color_prop(&node.props, "chevron-color")).then_some(CHEVRON_SLOT));
+            prims.push(
+                super::sdf_widget::face_primitive(
+                    DROPDOWN_CHEVRON_FACE_WIDGET,
+                    &node.props,
+                    &["chevron-slot"],
+                    &[flag(chevron_slot)],
+                    ch_rect,
+                    viewport,
+                    0.0,
+                    [chevron_color.to_rgba(), [0.0; 4]],
+                )
+                .unwrap_or_else(|| {
+                    surface_primitive(
+                        "dropdown-chevron",
+                        ch_rect,
+                        viewport,
+                        0.0,
+                        SurfaceStyle::flat(chevron_color),
+                        false,
+                    )
+                }),
+            );
         }
 
         // ── Menu overlay (when open) ──
@@ -1651,13 +1705,30 @@ struct SurfaceStyle {
     /// Hairline drawn inside the rect; alpha 0 draws none.
     border: Color,
     light: SurfaceLight,
+    /// Whether a face paints the fill and border from their theme slots
+    /// ([`painted_slot`]); the native shader always paints `fill`/`border`.
+    fill_slot: bool,
+    border_slot: bool,
 }
 
 impl SurfaceStyle {
     fn flat(fill: Color) -> Self {
         let none = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
-        Self { fill, border: none, light: SurfaceLight { strength: 0.0, gradient: 0.0 } }
+        Self {
+            fill,
+            border: none,
+            light: SurfaceLight { strength: 0.0, gradient: 0.0 },
+            fill_slot: false,
+            border_slot: false,
+        }
     }
+}
+
+/// Whether a face reads theme slot `slot` rather than the colour it is
+/// given: only while a package paints the slot with a widget, since the
+/// colour is the slot's otherwise.
+fn painted_slot(slot: Option<&str>) -> bool {
+    slot.is_some_and(slot_paints_with_widget)
 }
 
 fn emit_flat_surface(
@@ -1678,6 +1749,40 @@ fn emit_flat_surface(
     ));
 }
 
+/// A lit surface painted with its face `face` (content/ui/widgets.lisp),
+/// or the native surface shader when that is not defined.
+fn surface_face(
+    face: &'static str,
+    props: &HashMap<String, Value>,
+    rect: Rect,
+    viewport: WidgetViewport,
+    corner_radius: f32,
+    style: SurfaceStyle,
+    is_background: bool,
+) -> GpuPrimitive {
+    let painted = super::sdf_widget::face_primitive(
+        face,
+        props,
+        &SURFACE_FACE_STATES,
+        &[
+            corner_radius,
+            style.light.strength,
+            style.light.gradient,
+            flag(style.fill_slot),
+            flag(style.border_slot),
+        ],
+        rect,
+        viewport,
+        0.0,
+        [style.fill.to_rgba(), style.border.to_rgba()],
+    );
+    match painted {
+        Some(painted) if is_background => super::sdf_widget::as_background(painted),
+        Some(painted) => painted,
+        None => surface_primitive(SURFACE_WIDGET, rect, viewport, corner_radius, style, is_background),
+    }
+}
+
 fn surface_primitive(
     widget_type: &str,
     rect: Rect,
@@ -1689,7 +1794,7 @@ fn surface_primitive(
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
-    let SurfaceStyle { fill, border, light } = style;
+    let SurfaceStyle { fill, border, light, .. } = style;
     GpuPrimitive::WidgetInstance {
         widget_type: widget_type.to_string(),
         instance: WidgetInstance {
@@ -1885,6 +1990,133 @@ mod tests {
                 .map(|value| Rc::new(RefCell::new(Value::String((*value).to_string()))))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn a_dropdown_paints_with_its_faces_and_reads_slots_only_while_a_package_paints_them() {
+        use super::super::sdf_widget::{SdfWidgetDef, register_sdf_widget};
+        let define = |name: &str, states: &[&str]| {
+            register_sdf_widget(SdfWidgetDef {
+                name: name.to_string(),
+                shader_source: String::new(),
+                sdf_expr: crate::parser::Expression::Symbol("shape".to_string()),
+                state_uniforms: states.iter().map(|state| state.to_string()).collect(),
+                state: Default::default(),
+                region_count: 0,
+                width: 4.0,
+                height: 1.0,
+                paint_margin: 0.0,
+                animates: false,
+            })
+        };
+        define(DROPDOWN_FACE_WIDGET, &SURFACE_FACE_STATES);
+        define(DROPDOWN_BADGE_FACE_WIDGET, &SURFACE_FACE_STATES);
+        define(DROPDOWN_CHEVRON_FACE_WIDGET, &["chevron-slot"]);
+        define("test-steel", &[]);
+        struct ClearSlots;
+        impl Drop for ClearSlots {
+            fn drop(&mut self) {
+                theme::set_slot_widget_overrides(std::iter::empty());
+            }
+        }
+        let _clear = ClearSlots;
+        let node = |props: &[(&str, Value)]| LayoutNode {
+            widget_id: 91_001,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "dropdown".to_string(),
+            rect: Rect { row: 1.0, col: 2.0, width: 10.0, height: 1.4 },
+            props: props
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.clone()))
+                .chain([
+                    ("options".to_string(), string_list(&["main", "bus"])),
+                    ("value".to_string(), Value::String("main".to_string())),
+                ])
+                .collect(),
+            children: Vec::new(),
+            focusable: true,
+            animation: Default::default(),
+        };
+        let viewport = WidgetViewport {
+            vp_w: 800.0,
+            vp_h: 400.0,
+            cell_w: 8.0,
+            cell_h: 16.0,
+            scroll_top: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 25.0,
+            inherited_hover: false,
+            time_seconds: 0.0,
+            scroll_left: 0.0,
+        };
+        // Each face, with its fill and border slot flags (the chevron's one).
+        let faces = |node: &LayoutNode| -> Vec<(String, f32, f32)> {
+            DROPDOWN_WIDGET
+                .build_primitives("dropdown", node, viewport)
+                .into_iter()
+                .filter_map(|primitive| match primitive {
+                    GpuPrimitive::WidgetInstance { widget_type, instance, .. } if widget_type.ends_with("-face") => {
+                        let slots = if widget_type == DROPDOWN_CHEVRON_FACE_WIDGET {
+                            (instance.uniform_a[0], 0.0)
+                        } else {
+                            (instance.uniform_a[3], instance.uniform_b[0])
+                        };
+                        Some((widget_type, slots.0, slots.1))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let plain = node(&[]);
+        assert_eq!(
+            faces(&plain),
+            vec![
+                (DROPDOWN_FACE_WIDGET.to_string(), 0.0, 0.0),
+                (DROPDOWN_BADGE_FACE_WIDGET.to_string(), 0.0, 0.0),
+                (DROPDOWN_CHEVRON_FACE_WIDGET.to_string(), 0.0, 0.0),
+            ],
+            "the theme's colours, as the native shaders paint them"
+        );
+
+        theme::set_slot_widget_overrides(
+            ["dropdown-bg", "dropdown-border", "dropdown-badge-bg", "dropdown-badge-border", "dropdown-chevron"]
+                .map(|slot| (slot.to_string(), "test-steel".to_string())),
+        );
+        assert_eq!(
+            faces(&plain),
+            vec![
+                (DROPDOWN_FACE_WIDGET.to_string(), 1.0, 1.0),
+                (DROPDOWN_BADGE_FACE_WIDGET.to_string(), 1.0, 1.0),
+                (DROPDOWN_CHEVRON_FACE_WIDGET.to_string(), 1.0, 0.0),
+            ],
+            "a package's material, slot by slot"
+        );
+        // Its own colours, and a p-lock's ring in place of the hairline, win.
+        let own = node(&[
+            ("bg-color", Value::Keyword("red".into())),
+            ("badge-color", Value::Keyword("green".into())),
+            ("chevron-color", Value::Keyword("black".into())),
+            ("plock-active", Value::Number(1.0)),
+        ]);
+        assert_eq!(
+            faces(&own),
+            vec![
+                (DROPDOWN_FACE_WIDGET.to_string(), 0.0, 0.0),
+                (DROPDOWN_BADGE_FACE_WIDGET.to_string(), 0.0, 1.0),
+                (DROPDOWN_CHEVRON_FACE_WIDGET.to_string(), 0.0, 0.0),
+            ]
+        );
+        // Its own :face replaces the trigger's surface, not the badge or chevron.
+        define("test-well-face", &[]);
+        let names = |node: &LayoutNode| faces(node).into_iter().map(|(face, ..)| face).collect::<Vec<_>>();
+        assert_eq!(
+            names(&node(&[("face", Value::String("test-well-face".into()))])),
+            ["test-well-face", DROPDOWN_BADGE_FACE_WIDGET, DROPDOWN_CHEVRON_FACE_WIDGET]
+        );
     }
 
     #[test]

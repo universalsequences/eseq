@@ -2277,7 +2277,7 @@ impl Runtime {
             (
                 "restyle-face",
                 "(restyle-face \"knob-number-face\" \"widget\")",
-                "Paint every built-in control whose face is the first name (knob-face, knob-number-face, bezel-face for buttons and number pickers, bezel-tab-face) with defwidget \"widget\" instead: the whole control, not one colour. The widget gets value_t, x/y and the states the factory face declares, by name (a knob-number's plock, default-t, origin-t). While the calling module's overrides stand (detaching or disabling it reverts). A control's own :face, or :faces (dict :knob-number-face \"widget\") on a container it is in, wins.",
+                "Paint every built-in control whose face is the first name (knob-face, knob-number-face, bezel-face for buttons and number pickers, bezel-tab-face, dropdown-face, dropdown-badge-face, dropdown-chevron-face) with defwidget \"widget\" instead: the whole control, not one colour. The widget gets value_t, x/y and the states the factory face declares, by name (a knob-number's plock, default-t, origin-t). While the calling module's overrides stand (detaching or disabling it reverts). A control's own :face, or :faces (dict :knob-number-face \"widget\") on a container it is in, wins.",
             ),
             (
                 "restyle",

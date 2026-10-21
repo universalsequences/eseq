@@ -215,3 +215,121 @@
 
 (def-bezel bezel-face eseq.widgets/bezel-rrect)
 (def-bezel bezel-tab-face eseq.widgets/bezel-tab)
+
+;; ── Dropdown: the trigger's lit surface, its badge and the chevron ──
+
+;; The dropdown faces place points as the native dropdown shaders did, to
+;; draw the same pixels: from the uv (`logical-uv`, 0..1 across the face,
+;; y down) as ((u - 0.5) * 2 * aspect, (v - 0.5) * 2).
+(defmacro dropdown-u () `(dot logical-uv (vec2 1.0 0.0)))
+(defmacro dropdown-v () `(dot logical-uv (vec2 0.0 1.0)))
+
+;; Distance at (px, py) to a rounded rect of half-size (sx, sy) and corner
+;; radius r, in the order the native dropdown shader computes it.
+(defmacro dropdown-rrect (px py sx sy r)
+  `(let ((__dr-dx (+ (- (abs ,px) ,sx) ,r))
+         (__dr-dy (+ (- (abs ,py) ,sy) ,r)))
+     (- (+ (length (vec2 (max __dr-dx 0.0) (max __dr-dy 0.0)))
+           (min (max __dr-dx __dr-dy) 0.0))
+        ,r)))
+
+;; A dropdown's lit surface, after AppKit's pop-up buttons: a rounded fill
+;; with a soft top-to-bottom gradient, a 1px hairline that catches light
+;; along the top edge and falls into shade along the bottom, and a faint
+;; sheen just under the top. `dropdown-face` is the trigger and
+;; `dropdown-badge-face` the badge behind the chevron.
+;;   fill    `fill-slot` (the trigger's :dropdown-bg, the badge's
+;;           :dropdown-badge-bg), 0 when the control has its own colour
+;;   border  `border-slot` (:dropdown-border, :dropdown-badge-border), 0
+;;           when it has its own (or none, under a p-lock or :border-color)
+;; `input-color` and `second-color` are the fill and border it paints with
+;; when not using a slot. `radius` is the corner radius over the
+;; half-height (0 for the pill), `light` the edge light and sheen, `grad`
+;; the fill's gradient.
+(defmacro def-dropdown-surface (name fill-slot-color border-slot-color)
+  `(defwidget ,name
+     :width 4 :height 1
+     :state (radius light grad fill-slot border-slot)
+     :shader
+     (let ((asp (max aspect 0.001))
+           (px (* (- (eseq.widgets/dropdown-u) 0.5) 2.0 asp))
+           (py (* (- (eseq.widgets/dropdown-v) 0.5) 2.0))
+           (r (min (if (> radius 0.0) radius 0.75) (min asp 1.0)))
+           (border-px 1.0)
+           ;; The 1px hairline and the fill's coverage.
+           (outer-d (eseq.widgets/dropdown-rrect px py asp 1.0 r))
+           (pixel (max (max (fwidth px) (fwidth py)) 0.001))
+           (inner-d (+ outer-d (* border-px pixel)))
+           (outer (smoothstep pixel (* -1.0 pixel) outer-d))
+           (inner (smoothstep pixel (* -1.0 pixel) inner-d))
+           (border-mask (* outer (- 1.0 inner)))
+           ;; Which way the nearest edge faces: 1 on the top, -1 on the bottom.
+           (qx (- (abs px) (- asp r)))
+           (qy (- (abs py) (- 1.0 r)))
+           (qcx (max qx 0.0))
+           (qcy (max qy 0.0))
+           (ql (length (vec2 qcx qcy)))
+           (ny (if (> ql 0.00001) (/ qcy ql) (if (> qx qy) 0.0 1.0)))
+           (facing (* -1.0 (if (> py 0.0) ny (* -1.0 ny))))
+           (top (clamp facing 0.0 1.0))
+           (bottom (clamp (* -1.0 facing) 0.0 1.0))
+           (up (- 1.0 (clamp (eseq.widgets/dropdown-v) 0.0 1.0)))
+           (inside-px (max (- (/ (* -1.0 outer-d) pixel) border-px) 0.0))
+           (fill (if (> fill-slot 0.5) ,fill-slot-color input-color))
+           (border (if (> border-slot 0.5) ,border-slot-color second-color))
+           (fill-a-in (dot fill (rgba 0.0 0.0 0.0 1.0)))
+           (border-a-in (dot border (rgba 0.0 0.0 0.0 1.0)))
+           (fill-lit (mix (* fill (+ 1.0 (* grad (- up 0.5))))
+                          (rgba 1.0 1.0 1.0 1.0)
+                          (* (exp (/ (* -1.0 inside-px) 1.6)) top light 0.14)))
+           (border-lit (mix border (rgba 1.0 1.0 1.0 1.0) (* top light 0.6)))
+           (border-a (* (clamp (+ (* border-a-in (- 1.0 (* bottom light 0.45))) (* top light 0.24)) 0.0 1.0)
+                        border-mask
+                        (if (>= border-a-in 0.001) 1.0 0.0)))
+           ;; The hairline over the fill.
+           (fill-a (* fill-a-in outer))
+           (out-a (+ border-a (* fill-a (- 1.0 border-a))))
+           (out-rgb (/ (+ (* border-lit border-a) (* (* fill-lit fill-a) (- 1.0 border-a))) out-a)))
+       (if (< outer 0.002)
+         (rgba 0.0 0.0 0.0 0.0)
+         (if (<= out-a 0.002)
+           (rgba 0.0 0.0 0.0 0.0)
+           (+ (* out-rgb (rgba 1.0 1.0 1.0 0.0)) (rgba 0.0 0.0 0.0 out-a)))))))
+
+(def-dropdown-surface dropdown-face :dropdown-bg :dropdown-border)
+(def-dropdown-surface dropdown-badge-face :dropdown-badge-bg :dropdown-badge-border)
+
+;; Distance at p to the segment from a to b.
+(defmacro dropdown-segment (p a b)
+  `(let ((__ds-pa (- ,p ,a))
+         (__ds-ba (- ,b ,a))
+         (__ds-h (clamp (/ (dot __ds-pa __ds-ba) (dot __ds-ba __ds-ba)) 0.0 1.0)))
+     (length (- __ds-pa (* __ds-ba __ds-h)))))
+
+;; The dropdown's chevron: a compact up "^" over a down "v", stroked in
+;; `input-color`, or :dropdown-chevron when `chevron-slot` is 1 (0 when the
+;; dropdown has its own :chevron-color).
+(defwidget dropdown-chevron-face
+  :width 1 :height 1
+  :state (chevron-slot)
+  :shader
+  (let ((p (vec2 (* (- (eseq.widgets/dropdown-u) 0.5) 2.0 aspect)
+                 (* (- (eseq.widgets/dropdown-v) 0.5) 2.0)))
+        (hw (* 0.35 aspect))
+        (up-pt (vec2 0.0 -0.70))
+        (up-a (vec2 (* -1.0 hw) -0.22))
+        (up-b (vec2 hw -0.22))
+        (dn-pt (vec2 0.0 0.70))
+        (dn-a (vec2 (* -1.0 hw) 0.22))
+        (dn-b (vec2 hw 0.22))
+        (d (min (min (eseq.widgets/dropdown-segment p up-a up-pt)
+                     (eseq.widgets/dropdown-segment p up-pt up-b))
+                (min (eseq.widgets/dropdown-segment p dn-a dn-pt)
+                     (eseq.widgets/dropdown-segment p dn-pt dn-b))))
+        (stroke 0.10)
+        (edge (* (fwidth d) 1.2))
+        (mask (smoothstep (+ stroke edge) (- stroke edge) d))
+        (col (if (> chevron-slot 0.5) :dropdown-chevron input-color)))
+    (if (< mask 0.002)
+      (rgba 0.0 0.0 0.0 0.0)
+      (+ (* col (rgba 1.0 1.0 1.0 0.0)) (rgba 0.0 0.0 0.0 (* (dot col (rgba 0.0 0.0 0.0 1.0)) mask))))))

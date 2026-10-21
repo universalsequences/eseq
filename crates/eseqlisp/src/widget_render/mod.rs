@@ -3664,6 +3664,11 @@ pub fn builtin_face_of(node: &LayoutNode) -> Option<(&'static str, Vec<&'static 
             let fill = button::button_fill_slot(props);
             (face, bezel_slots(fill, button::button_border_is_slot(props)))
         }
+        // The trigger's surface; its badge and chevron have faces of their
+        // own (dropdown-badge-face, dropdown-chevron-face), not reported here.
+        "dropdown" if !dropdown::is_action_menu(props) => {
+            (dropdown::DROPDOWN_FACE_WIDGET, dropdown::trigger_slots(props).into_iter().flatten().collect())
+        }
         "number-picker" if !number_picker::number_picker_slider_mode(props) => {
             let fill = number_picker::number_picker_own_bg(props)
                 .is_none()

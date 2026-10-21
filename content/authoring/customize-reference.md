@@ -210,7 +210,9 @@ its own `:arc-color`, or p-locked, keeps that colour.
 Buttons and number pickers work the same way: their face is
 `:button-secondary-bg` (and `:button-primary-bg`, `:button-ghost-bg`,
 `:button-danger-bg` by variant) or a number picker's `:dropdown-bg`, their
-rim `:button-border`. The bezel's lighting and rim stay; a held button still
+rim `:button-border`. A dropdown paints its surface from `:dropdown-bg` and
+`:dropdown-border`, its badge from `:dropdown-badge-bg` and
+`:dropdown-badge-border`, its chevron from `:dropdown-chevron`. The bezel's lighting and rim stay; a held button still
 darkens or lightens your face. One with its own `:background-color` or
 `:border-color` keeps it.
 
@@ -232,6 +234,12 @@ locked knob still reads as locked.
 | `knob-face` | plain `knob`s |
 | `bezel-face` | buttons and number pickers |
 | `bezel-tab-face` | the active tab button |
+| `dropdown-face` | a dropdown's lit surface; states `radius`, `light`, `grad`, `fill-slot`, `border-slot` |
+| `dropdown-badge-face` | the badge behind its chevron; the same states |
+| `dropdown-chevron-face` | the chevron; state `chevron-slot` |
+
+A dropdown's own `:face` replaces its surface only; its badge and chevron
+change through `:faces` or `restyle-face`.
 
 Three scopes, the narrowest winning:
 

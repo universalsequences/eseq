@@ -737,11 +737,14 @@ pub const FACES_PROP: &str = "faces";
 pub const INHERITED_FACES_PROP: &str = "__inherited-faces";
 
 /// The built-in faces a package can replace (content/ui/widgets.lisp).
-pub const BUILTIN_FACES: [&str; 4] = [
+pub const BUILTIN_FACES: [&str; 7] = [
     super::knob::KNOB_FACE_WIDGET,
     super::knob_number::KNOB_NUMBER_FACE_WIDGET,
     super::button::BEZEL_FACE_WIDGET,
     super::button::BEZEL_TAB_FACE_WIDGET,
+    super::dropdown::DROPDOWN_FACE_WIDGET,
+    super::dropdown::DROPDOWN_BADGE_FACE_WIDGET,
+    super::dropdown::DROPDOWN_CHEVRON_FACE_WIDGET,
 ];
 
 thread_local! {
@@ -780,11 +783,25 @@ fn face_map_id(faces: Option<&Value>) -> Option<usize> {
     }
 }
 
+/// Faces that paint one part of a control whose own `:face` replaces
+/// another (a dropdown's trigger), so that `:face` does not reach them.
+const PART_FACES: [&str; 2] = [
+    super::dropdown::DROPDOWN_BADGE_FACE_WIDGET,
+    super::dropdown::DROPDOWN_CHEVRON_FACE_WIDGET,
+];
+
+/// A uniform's 1 for `on`, 0 otherwise.
+pub fn flag(on: bool) -> f32 {
+    if on { 1.0 } else { 0.0 }
+}
+
 /// The widget a control with built-in face `face` paints with: its own
-/// `:face`, else what its containers' `:faces` give `face`, else a
-/// package's `restyle-face`, else `face` itself.
+/// `:face` (for its main face), else what its containers' `:faces` give
+/// `face`, else a package's `restyle-face`, else `face` itself.
 pub fn chosen_face(face: &'static str, props: &HashMap<String, Value>) -> Cow<'static, str> {
-    super::live_audio::prop_keyword(props, FACE_PROP)
+    (!PART_FACES.contains(&face))
+        .then(|| super::live_audio::prop_keyword(props, FACE_PROP))
+        .flatten()
         .or_else(|| {
             let id = face_map_id(props.get(INHERITED_FACES_PROP))?;
             FACE_MAPS.with(|maps| maps.borrow().get(id)?.get(face).cloned())
