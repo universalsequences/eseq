@@ -11,6 +11,12 @@ fn adsr_sdSegment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
     return length(pa - ba * h);
 }
 
+// `col` with `color` over it by `t`, its alpha raised as well, so the
+// curve paints over a transparent background.
+fn adsr_over(col: vec4<f32>, color: vec3<f32>, t: f32) -> vec4<f32> {
+    return vec4<f32>(mix(col.rgb, color, t), mix(col.a, 1.0, t));
+}
+
 fn adsr_logWeight(ms: f32) -> f32 {
     return max(0.0, log(1.0 + (ms / 20.0)));
 }
@@ -81,8 +87,8 @@ fn adsr_ahdDisplay(input: WidgetVaryings) -> vec4<f32> {
         previous = current;
     }
     let baseline = adsr_sdSegment(p, adsr_toPlot(vec2<f32>(0.0, 0.0)) / perPixel, adsr_toPlot(vec2<f32>(1.0, 0.0)) / perPixel);
-    col = vec4<f32>(mix(col.rgb, input.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * input.color_c.a * 0.25), col.a);
-    col = vec4<f32>(mix(col.rgb, input.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * input.color_a.a), col.a);
+    col = adsr_over(col, input.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * input.color_c.a * 0.25);
+    col = adsr_over(col, input.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * input.color_a.a);
     let scale = max(input.uniform_b.z, 0.001);
     for (var index = 1; index <= 3; index += 1) {
         if (index == 2 && input.uniform_c.x < 0.5) { continue; }
@@ -93,7 +99,7 @@ fn adsr_ahdDisplay(input: WidgetVaryings) -> vec4<f32> {
         let d = max(abs(p.x - h.x), abs(p.y - h.y));
         let outer = 1.0 - smoothstep(halfSize, halfSize + 0.75, d);
         let inner = 1.0 - smoothstep(halfSize - 1.5 * scale, halfSize - 1.5 * scale + 0.75, d);
-        col = vec4<f32>(mix(col.rgb, input.color_d.rgb, select(max(outer - inner, 0.0), outer, highlighted) * input.color_d.a), col.a);
+        col = adsr_over(col, input.color_d.rgb, select(max(outer - inner, 0.0), outer, highlighted) * input.color_d.a);
     }
     return col;
 }
@@ -107,7 +113,7 @@ fn adsr_decayDisplay(input: WidgetVaryings) -> vec4<f32> {
     var end: f32 = mix(0.03, 1.0, input.uniform_d.z);
     var col: vec4<f32> = input.color_b;
     var baseline: f32 = abs(p.y - adsr_toPlot(vec2<f32>(0.0, zero)).y / perPixel.y);
-    col = vec4<f32>(mix(col.rgb, input.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * input.color_c.a * 0.4), col.a);
+    col = adsr_over(col, input.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * input.color_c.a * 0.4);
     var distance: f32 = 10000.0;
     var previous: vec2<f32> = adsr_toPlot(vec2<f32>(0.03, initial)) / perPixel;
     for (var i: i32 = 1; i <= 64; i = i + 1) {
@@ -123,7 +129,7 @@ fn adsr_decayDisplay(input: WidgetVaryings) -> vec4<f32> {
         distance = min(distance, adsr_sdSegment(p, previous, current));
         previous = current;
     }
-    col = vec4<f32>(mix(col.rgb, input.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * input.color_a.a), col.a);
+    col = adsr_over(col, input.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * input.color_a.a);
     var scale: f32 = max(input.uniform_b.z, 0.001);
     for (var i: i32 = 1; i <= 2; i = i + 1) {
         if (i == 1 && input.uniform_a.y < 0.5) { continue; }
@@ -133,7 +139,7 @@ fn adsr_decayDisplay(input: WidgetVaryings) -> vec4<f32> {
         var d: f32 = max(abs(p.x - h.x), abs(p.y - h.y));
         var outer: f32 = 1.0 - smoothstep(halfSize, halfSize + 0.75, d);
         var inner: f32 = 1.0 - smoothstep(halfSize - 1.5 * scale, halfSize - 1.5 * scale + 0.75, d);
-        col = vec4<f32>(mix(col.rgb, input.color_d.rgb, select(max(outer - inner, 0.0), outer, highlighted) * input.color_d.a), col.a);
+        col = adsr_over(col, input.color_d.rgb, select(max(outer - inner, 0.0), outer, highlighted) * input.color_d.a);
     }
     return col;
 }
@@ -155,10 +161,10 @@ fn adsr_adeDisplay(input: WidgetVaryings) -> vec4<f32> {
     let heldPeak = gated && input.uniform_c.y > 0.5;
     var col = input.color_b;
     let baseline = adsr_sdSegment(p, adsr_toPlot(vec2<f32>(0.0, 0.0)) / perPixel, adsr_toPlot(vec2<f32>(1.0, 0.0)) / perPixel);
-    col = vec4<f32>(mix(col.rgb, input.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * input.color_c.a * 0.25), col.a);
+    col = adsr_over(col, input.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * input.color_c.a * 0.25);
     let noteOff = adsr_sdSegment(p, adsr_toPlot(vec2<f32>(0.68, 0.0)) / perPixel, adsr_toPlot(vec2<f32>(0.68, 1.0)) / perPixel);
     let dash = step(0.5, fract(p.y / 8.0));
-    col = vec4<f32>(mix(col.rgb, input.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, noteOff)) * dash * input.color_c.a * 0.35), col.a);
+    col = adsr_over(col, input.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, noteOff)) * dash * input.color_c.a * 0.35);
     var distance = 10000.0;
     var ghost = 10000.0;
     for (var segment = 0; segment < 5; segment += 1) {
@@ -168,8 +174,8 @@ fn adsr_adeDisplay(input: WidgetVaryings) -> vec4<f32> {
         else { distance = min(distance, adsr_sdSegment(p, a, b)); }
     }
     if (heldPeak) { distance = min(distance, adsr_sdSegment(p, adsr_toPlot(vec2<f32>(0.68, 1.0)) / perPixel, adsr_toPlot(vec2<f32>(1.0, 1.0)) / perPixel)); }
-    col = vec4<f32>(mix(col.rgb, input.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, ghost)) * input.color_a.a * 0.25), col.a);
-    col = vec4<f32>(mix(col.rgb, input.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * input.color_a.a), col.a);
+    col = adsr_over(col, input.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, ghost)) * input.color_a.a * 0.25);
+    col = adsr_over(col, input.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * input.color_a.a);
     let scale = max(input.uniform_b.z, 0.001);
     for (var handleIndex = 1; handleIndex <= 4; handleIndex += 1) {
         let pointIndex = select(handleIndex + 1, handleIndex, handleIndex <= 2);
@@ -179,7 +185,7 @@ fn adsr_adeDisplay(input: WidgetVaryings) -> vec4<f32> {
         let d = max(abs(p.x - h.x), abs(p.y - h.y));
         let outer = 1.0 - smoothstep(halfSize, halfSize + 0.75, d);
         let inner = 1.0 - smoothstep(halfSize - 1.5 * scale, halfSize - 1.5 * scale + 0.75, d);
-        col = vec4<f32>(mix(col.rgb, input.color_d.rgb, select(max(outer - inner, 0.0), outer, highlighted) * input.color_d.a), col.a);
+        col = adsr_over(col, input.color_d.rgb, select(max(outer - inner, 0.0), outer, highlighted) * input.color_d.a);
     }
     return col;
 }
@@ -219,7 +225,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var gridZero: f32 = adsr_toPlot(vec2<f32>(0.0, 0.0)).y;
     var baselineWidth: f32 = max(fwidth(uv.y), 0.001);
     var baseline: f32 = 1.0 - smoothstep(0.0, baselineWidth, abs(uv.y - gridZero));
-    col = vec4<f32>((mix(col.rgb, input.color_c.rgb, baseline * input.color_c.a * 0.25 * insidePlot)), col.a);
+    col = adsr_over(col, input.color_c.rgb, baseline * input.color_c.a * 0.25 * insidePlot);
 
     var uvPerPixel: vec2<f32> = max(vec2<f32>(fwidth(uv.x), fwidth(uv.y)), vec2<f32>(1e-6));
     var pxScale: f32 = select(1.0, input.uniform_b.z, input.uniform_b.z > 0.0);
@@ -238,7 +244,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     bracketDist = min(bracketDist, adsr_bracketDistance(pPx, vec2<f32>(plotMinPx.x, plotMaxPx.y), vec2<f32>(1.0, -1.0), vec2<f32>(leftBracketWidthPx, bottomBracketHeightPx)));
     bracketDist = min(bracketDist, adsr_bracketDistance(pPx, plotMaxPx, vec2<f32>(-1.0, -1.0), vec2<f32>(16.0 * pxScale, bottomBracketHeightPx)));
     var brackets: f32 = 1.0 - smoothstep(0.5, 1.25, bracketDist);
-    col = vec4<f32>((mix(col.rgb, input.color_a.rgb, brackets * input.color_a.a)), col.a);
+    col = adsr_over(col, input.color_a.rgb, brackets * input.color_a.a);
 
     var dataX: f32 = clamp((uv.x - pad.x) / (1.0 - pad.x * 2.0), 0.0, 1.0);
     var curveDataY: f32 = adsr_curveY(dataX, x1, x2, x3, x4, sustain);
@@ -246,7 +252,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var fillRegion: f32 = step(attackOrigin, dataX) * step(dataX, x4)
         * step(curvePlotY, uv.y) * step(uv.y, gridZero) * insidePlot;
     var fillGradient: f32 = clamp((gridZero - uv.y) / max(gridZero - curvePlotY, 1e-5), 0.0, 1.0);
-    col = vec4<f32>((mix(col.rgb, input.color_a.rgb, fillRegion * fillGradient * input.color_a.a * 0.10)), col.a);
+    col = adsr_over(col, input.color_a.rgb, fillRegion * fillGradient * input.color_a.a * 0.10);
 
     var minDistPx: f32 = 1000.0;
     var previous: vec2<f32> = adsr_toPlot(vec2<f32>(attackOrigin, 0.0)) / uvPerPixel;
@@ -270,7 +276,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var activeHandle: f32 = round(input.uniform_b.y);
     var curve: f32 = 1.0 - smoothstep(0.65, 1.55, minDistPx);
     var curveBrightness: f32 = select(1.0, 1.12, activeHandle > 0.5);
-    col = vec4<f32>((mix(col.rgb, min(input.color_a.rgb * curveBrightness, vec3<f32>(1.0)), curve * input.color_a.a)), col.a);
+    col = adsr_over(col, min(input.color_a.rgb * curveBrightness, vec3<f32>(1.0)), curve * input.color_a.a);
 
     var pixelY: f32 = max(fwidth(uv.y), 0.001);
     for (var i: i32 = 1; i < 5; i = i + 1) {
@@ -288,7 +294,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
         var outer: f32 = 1.0 - smoothstep(0.0, 0.75, outerDist);
         var inner: f32 = 1.0 - smoothstep(0.0, 0.75, innerDist);
         var square: f32 = select(max(outer - inner, 0.0), outer, highlighted);
-        col = vec4<f32>((mix(col.rgb, input.color_d.rgb, square * input.color_d.a)), col.a);
+        col = adsr_over(col, input.color_d.rgb, square * input.color_d.a);
     }
 
     return col;

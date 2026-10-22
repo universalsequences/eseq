@@ -97,7 +97,7 @@
 ;; (or the division at its value), so a p-locked division shows.
 (def div-button (fx p current label-text)
   (button label-text
-    :width 2.72 :height 1.12 :padding 0 :font-size 8.0
+    :width 3.22 :height 1.12 :padding 0 :font-size 8.0
     :background-color (if (= current label-text) :effect-mode-on-bg :mixer-control-bg)
     :border-color :transparent
     :color (if (= current label-text) :control-on-fg :dim)
@@ -131,7 +131,7 @@
           (box :width 2.72 :height 0.82))))))
 
 (def side (fx title sync-p div-p offset-p time-p)
-  (box :width 6.15 :height 9.45 :padding 0.18
+  (box :width 8.5 :height 9.45 :padding 0.18
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.14 :align :center
       (sync-button fx sync-p)
@@ -164,7 +164,7 @@
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-        :width 4.35 :height 2.45 :knob-size 1.55
+        :width 4.35 :height 2.45 :knob-size 1.85
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
 (def percent-knob (fx label-text p)
@@ -196,50 +196,51 @@
 (def builtin-fx-str8-delay-ui (fx)
   (let ((params (get fx :params)))
     (let ((wet-p (eseq.effects.builtin.filter-core/builtin-fx-param params "wet"))
-          (feedback-p (eseq.effects.builtin.filter-core/builtin-fx-param params "feedback"))
-          (left-sync-p (eseq.effects.builtin.filter-core/builtin-fx-param params "left sync"))
-          (left-div-p (eseq.effects.builtin.filter-core/builtin-fx-param params "left div"))
-          (left-offset-p (eseq.effects.builtin.filter-core/builtin-fx-param params "left offset"))
-          (left-time-p (eseq.effects.builtin.filter-core/builtin-fx-param params "left time"))
-          (right-sync-p (eseq.effects.builtin.filter-core/builtin-fx-param params "right sync"))
-          (right-div-p (eseq.effects.builtin.filter-core/builtin-fx-param params "right div"))
-          (right-offset-p (eseq.effects.builtin.filter-core/builtin-fx-param params "right offset"))
-          (right-time-p (eseq.effects.builtin.filter-core/builtin-fx-param params "right time"))
-          (filter-freq-p (eseq.effects.builtin.filter-core/builtin-fx-param params "filter freq"))
-          (filter-q-p (eseq.effects.builtin.filter-core/builtin-fx-param params "filter width"))
-          (mod-rate-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mod rate"))
-          (mod-amount-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mod amount"))
-          (mod-phase-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mod phase")))
-      (h-stack :gap 0.35 :align :start
+        (feedback-p (eseq.effects.builtin.filter-core/builtin-fx-param params "feedback"))
+        (left-sync-p (eseq.effects.builtin.filter-core/builtin-fx-param params "left sync"))
+        (left-div-p (eseq.effects.builtin.filter-core/builtin-fx-param params "left div"))
+        (left-offset-p (eseq.effects.builtin.filter-core/builtin-fx-param params "left offset"))
+        (left-time-p (eseq.effects.builtin.filter-core/builtin-fx-param params "left time"))
+        (right-sync-p (eseq.effects.builtin.filter-core/builtin-fx-param params "right sync"))
+        (right-div-p (eseq.effects.builtin.filter-core/builtin-fx-param params "right div"))
+        (right-offset-p (eseq.effects.builtin.filter-core/builtin-fx-param params "right offset"))
+        (right-time-p (eseq.effects.builtin.filter-core/builtin-fx-param params "right time"))
+        (filter-freq-p (eseq.effects.builtin.filter-core/builtin-fx-param params "filter freq"))
+        (filter-q-p (eseq.effects.builtin.filter-core/builtin-fx-param params "filter width"))
+        (mod-rate-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mod rate"))
+        (mod-amount-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mod amount"))
+        (mod-phase-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mod phase")))
+      (h-stack :gap 0.85 :align :start
+        :padding 0.5
         (side fx "Left" left-sync-p left-div-p left-offset-p left-time-p)
         (side fx "Right" right-sync-p right-div-p right-offset-p right-time-p)
         (v-stack :gap 0.18
           (box :width 20.4 :height 7.5
             ;; See filter-panel.lisp: keep the curve in its own subtree.
             (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx filter-freq-p "curve")
-            (response-curve-editor
-              :mode :filter
-              :bands (list (band fx filter-freq-p filter-q-p))
-              :freq-min (get filter-freq-p :min)
-              :freq-max (get filter-freq-p :max)
-              :gain-min -12
-              :gain-max 12
-              :q-min (get filter-q-p :min)
-              :q-max (get filter-q-p :max)
-              :background-color (rgba 0.055 0.058 0.06 1.0)
-              :corner-radius 16
-              :grid-color (rgba 0.34 0.34 0.36 0.55)
-              :stroke-color :blue
-              :point-color :accent
-              :on-action |event| (handle-curve-action fx filter-freq-p filter-q-p event))))
+              (response-curve-editor
+                :mode :filter
+                :bands (list (band fx filter-freq-p filter-q-p))
+                :freq-min (get filter-freq-p :min)
+                :freq-max (get filter-freq-p :max)
+                :gain-min -12
+                :gain-max 12
+                :q-min (get filter-q-p :min)
+                :q-max (get filter-q-p :max)
+                :background-color :black
+                :corner-radius 16
+                :grid-color :instrument-panel-bg
+                :stroke-color :blue
+                :point-color :yellow
+                :on-action |event| (handle-curve-action fx filter-freq-p filter-q-p event))))
           (box :width 20.4 :height 1.92 :padding 0.36
-               :background-color :fx-inner-panel-bg :corner-radius 7
-            (h-stack :gap 0.38 :align :baseline
-              (label "Filter" :font-size 9.0 :width 3.8 :color :dim :bg :transparent)
+            :v-align :center
+            :background-color :fx-inner-panel-bg :corner-radius 7
+            (h-stack :gap 1.38 :align :center
               (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-cutoff fx filter-freq-p)
-              (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "wid" filter-q-p))))
+              (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "width" filter-q-p))))
         (box :width 9.6 :height 7.45 :padding 0.36
-             :background-color :fx-inner-panel-bg :corner-radius 7
+          :background-color :fx-inner-panel-bg :corner-radius 7
           (v-stack :gap 0.16
             (h-stack :gap 0.18 :align :center
               (percent-knob fx "wet" wet-p)

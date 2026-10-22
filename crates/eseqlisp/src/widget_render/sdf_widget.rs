@@ -683,6 +683,15 @@ pub fn slot_paints_with_widget(slot: &str) -> bool {
     crate::theme::named_widget(slot).is_some_and(|widget| sdf_widget_def(&widget).is_some())
 }
 
+/// The defined widget that paints theme slot `slot` for a node with
+/// `props`: what its containers' `:faces` give the slot, else a package's
+/// or the theme's widget for it.
+pub fn slot_widget(props: &HashMap<String, Value>, slot: &str) -> Option<String> {
+    inherited_face(props, slot)
+        .or_else(|| crate::theme::named_widget(slot))
+        .filter(|widget| sdf_widget_def(widget).is_some())
+}
+
 /// `primitive` drawn as its widget's background (behind its text).
 pub fn as_background(mut primitive: GpuPrimitive) -> GpuPrimitive {
     if let GpuPrimitive::WidgetInstance { is_background, .. } = &mut primitive {
@@ -783,6 +792,14 @@ fn face_map_id(faces: Option<&Value>) -> Option<usize> {
     }
 }
 
+/// What the `:faces` of a node's containers give `name`: a built-in face
+/// or a theme slot (`mixer-control-bg`), so a container can repaint a slot
+/// only inside itself.
+pub fn inherited_face(props: &HashMap<String, Value>, name: &str) -> Option<String> {
+    let id = face_map_id(props.get(INHERITED_FACES_PROP))?;
+    FACE_MAPS.with(|maps| maps.borrow().get(id)?.get(name).cloned())
+}
+
 /// Faces that paint one part of a control whose own `:face` replaces
 /// another (a dropdown's trigger), so that `:face` does not reach them.
 const PART_FACES: [&str; 2] = [
@@ -802,10 +819,7 @@ pub fn chosen_face(face: &'static str, props: &HashMap<String, Value>) -> Cow<'s
     (!PART_FACES.contains(&face))
         .then(|| super::live_audio::prop_keyword(props, FACE_PROP))
         .flatten()
-        .or_else(|| {
-            let id = face_map_id(props.get(INHERITED_FACES_PROP))?;
-            FACE_MAPS.with(|maps| maps.borrow().get(id)?.get(face).cloned())
-        })
+        .or_else(|| inherited_face(props, face))
         .or_else(|| crate::theme::face_override(face))
         .map_or(Cow::Borrowed(face), Cow::Owned)
 }

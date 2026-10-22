@@ -721,7 +721,6 @@
               :text-color accent
               :chevron-color accent
               :badge-color :transparent
-              :border-color :black
               :border-width 0.05
               :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -1184,7 +1183,7 @@
 (def ui-lego-panel-x-s (section width height surface border-color stripe-color body)
   (box :width width :height height
        :background-color surface
-       :corner-radius 12
+       :corner-radius 0
        :border-width 1
        :border-color :transparent ;border-color
        :padding 0.18
@@ -1209,7 +1208,8 @@
 
 ;; Accent text header with underline — alternative to ui-lego-badge-s.
 (def ui-lego-header-s (section title width accent)
-  (box :width width :height 0.6 :v-align :end :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
+  (box 
+    :width width :height 0.6 :v-align :end :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
     (v-stack :width width :gap 0.14 :align :start
       (label title :font-size 9.2 :width width :color accent :bg :transparent)
       )

@@ -790,7 +790,11 @@ pub(crate) fn hook_lines(hooks: &eseqlisp::ui::capture::HookOverview) -> Vec<Str
             lines.push(format!("    … {} more", uses.len() - HOOK_LINES));
         }
     };
-    section("theme slots", "(override-theme-slot :slot \"widget\") restyles every use", &hooks.slots);
+    section(
+        "theme slots",
+        "(override-theme-slot :slot \"widget\") restyles every use; :faces (dict :slot \"widget\") on a container, only the uses under it",
+        &hooks.slots,
+    );
     section("parts", "(restyle \"part\" |node| ...)", &hooks.parts);
     section("built by", "(override fn :around ...) on the function", &hooks.functions);
     if !lines.is_empty() {
@@ -830,7 +834,9 @@ pub(crate) fn hooks_text(
         let key = hooks.key.as_deref().map(|key| format!(" {key:?}")).unwrap_or_default();
         lines.push(format!("{}{key} at {}", hooks.widget_type, hooks.region));
         for (slot, read_by) in &hooks.slots {
-            lines.push(format!("  theme slot :{slot} (read by {read_by}): (override-theme-slot :{slot} \"widget\")"));
+            lines.push(format!(
+                "  theme slot :{slot} (read by {read_by}): (override-theme-slot :{slot} \"widget\"), or :faces (dict :{slot} \"widget\") on a container"
+            ));
         }
         if let Some(face) = &hooks.face {
             lines.push(format!(

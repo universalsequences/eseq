@@ -111,8 +111,9 @@ fn box_state_active(props: &std::collections::HashMap<String, Value>, key: &str)
 }
 
 /// The defwidget a background color prop paints with instead of a flat
-/// color: set when the prop names a theme slot holding `(:widget "name")`
-/// (see `theme::named_widget`) and that widget is defined.
+/// color: set when the prop names a theme slot that a container's `:faces`
+/// maps to a widget, or that holds `(:widget "name")` (see
+/// `theme::named_widget`), and that widget is defined.
 fn theme_background_widget(
     props: &std::collections::HashMap<String, Value>,
     prop: &str,
@@ -121,8 +122,7 @@ fn theme_background_widget(
         Value::Keyword(text) | Value::String(text) => text,
         _ => return None,
     };
-    let widget = crate::theme::named_widget(name)?;
-    super::sdf_widget::sdf_widget_def(&widget).map(|_| widget)
+    super::sdf_widget::slot_widget(props, name)
 }
 
 fn state_color_prop<'a>(
@@ -421,11 +421,20 @@ name) (label detail :color :dim)))"
                     );
                 }
 
+                // An aligned (non-stretch) child keeps its natural height and
+                // overflows a shorter box, as a tile-filling backdrop around a
+                // body taller than the tile needs; only a `:height :fill`
+                // child takes the box's height.
+                let max_height = if v_align == Align::Stretch || prop_is_keyword(child, "height", "fill") {
+                    inner_height
+                } else {
+                    f32::INFINITY
+                };
                 let inner_constraints = Constraints {
                     min_width: 0.0,
                     max_width: inner_width,
                     min_height: 0.0,
-                    max_height: inner_height,
+                    max_height,
                     aspect: 1.0,
                 };
                 let size = measure_child(child, inner_constraints).unwrap_or(Size {

@@ -347,7 +347,7 @@
       (box :debug-name (str "fx-param-adsr-number-" title)
            :width 5.2 :height 1.55 :padding 0
         (v-stack :width 5.2 :height :fill :gap 0.0 :align :center
-          (label title :font-size 9.0 :color :dim :bg :transparent)
+          (label title :font-size 9.0 :color :dim :transparent)
           (number-picker :value (pc/fx-param-value-for fx p)
             :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
             :decimals decimals :unit unit
@@ -364,14 +364,14 @@
 
 (def adsr-param-editor (params fx env-name key-prefix)
   (let ((attack-p (env-role-param params env-name "attack"))
-        (decay-p (env-role-param params env-name "decay"))
-        (sustain-p (env-role-param params env-name "sustain"))
-        (release-p (env-role-param params env-name "release")))
+      (decay-p (env-role-param params env-name "decay"))
+      (sustain-p (env-role-param params env-name "sustain"))
+      (release-p (env-role-param params env-name "release")))
     (subtree :key key-prefix
       (box :width 23.2 :height :fill
-           :background-color :instrument-control-bg
-           :border-width 1 :corner-radius 16 :padding 0.16
-           :debug-name (str "fx-param-env-" env-name)
+        :background-color :instrument-control-bg
+        :border-width 1 :corner-radius 16 :padding 0.16
+        :debug-name (str "fx-param-env-" env-name)
         (v-stack :width :fill :height :fill :gap 0.12
           (box :width :fill :height 2.95 :padding 0.08
             (adsr-editor
@@ -386,11 +386,11 @@
                   (host-command
                     (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
                     (dict :slot-idx (get fx :slot-idx)
-                          :target-node-id (dv/fx-node-id fx)
-                          :updates (pc/effect-param-updates fx
-                            (list (list attack-p (get env :attack)) (list decay-p (get env :decay))
-                                  (list sustain-p (get env :sustain)) (list release-p (get env :release))))
-                          :commit (not (get env :active))))
+                      :target-node-id (dv/fx-node-id fx)
+                      :updates (pc/effect-param-updates fx
+                        (list (list attack-p (get env :attack)) (list decay-p (get env :decay))
+                          (list sustain-p (get env :sustain)) (list release-p (get env :release))))
+                      :commit (not (get env :active))))
                   (do
                     (pc/param-set-control-value fx attack-p (get env :attack))
                     (pc/param-set-control-value fx decay-p (get env :decay))
@@ -403,8 +403,8 @@
               (adsr-number sustain-p fx (str key-prefix "-sustain") "sus" 2 false)
               (adsr-number release-p fx (str key-prefix "-release") "rel" 2 false)))
           (box :width :fill :height 0.52 :h-align :center :v-align :center
-            (label env-name :font-size 9.4 :color :dim :bg :transparent
-                   :debug-name (str "fx-param-env-label-" env-name)))
+            (label env-name :font-size 9.4 :color :dim  :bg :transparent
+              :debug-name (str "fx-param-env-label-" env-name)))
           (box :width :fill :flex 1))))))
 
 (def group-has-controls? (all-params group-params)
@@ -512,7 +512,7 @@
       (h-stack :width :fill :height :fill :gap (group-label-gap) :align :center
         (box :width (group-label-width) :height :fill
              :h-align :start :v-align :center :padding (group-label-padding)
-          (label group-label :font-size 11.4 :width 4.8
+          (label group-label :bold true :font-size 11.4 :width 4.8
                  :color :dim :bg :transparent))
         (v-stack :width (group-controls-column-width controls)
                  :height :fill :gap (group-row-gap) :align :start

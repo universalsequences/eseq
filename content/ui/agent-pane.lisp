@@ -75,8 +75,7 @@
 (def thumbnail (key path width)
   (image :key key :src path :width width :aspect 1 :radius 10))
 
-;; What you asked, in a box like the composer's, under the images you sent
-;; with it.
+;; What you asked, in a bubble, under the images you sent with it.
 (def user-view (entry key)
   (let ((images (get entry :images)))
     (v-stack :key key :width :fill :gap 0.4
@@ -87,9 +86,9 @@
             (thumbnail (str key "-image-" j) path 9))))
       (if (= (get entry :text) "")
         (nothing)
-        (box :width :fill :padding 1.0 :corner-radius 12
-          :background-color :button-ghost-bg :border-width 1 :border-color :dropdown-menu-border
-          (label (get entry :text) :font-size 12 :color :fg :wrap true :bg :transparent))))))
+        (box :width :fill :padding 1.2 :corner-radius 20
+          :background-color :blue :border-width 1 :border-color :transparent
+          (label (get entry :text) :font-size 12 :color :white :wrap true :bg :transparent))))))
 
 ;; ── Collapsed rows ──
 ;;
@@ -288,7 +287,7 @@
 (def artifact-card (artifact i)
   (let ((key (str "agent-artifact-" i)) (package (get artifact :package)))
     (box :key key :width :fill :padding 1.0 :corner-radius 12
-      :background-color :button-ghost-bg :border-width 1 :border-color :dropdown-menu-border
+      :background-color :button-ghost-bg :border-width 1 :border-color :mixer-strip-border
       (v-stack :width :fill :gap 0.3
         (h-stack :width :fill :gap 0.5 :align :center
           (package-name artifact key)
@@ -499,17 +498,17 @@
   (box :key "agent-pane-model" :padding 0.2 :corner-radius 6
     :on-click (lambda (event) (open-menu! agent-model-menu event))
     (label (str (get choice :label) " · " (effort-label (get choice :effort)) " ▾")
-      :font-size 11 :color :dim :hover-color :fg :bg :transparent)))
+      :font-size 11 :color :fg :hover-color :fg :bg :transparent)))
 
 ;; The round button: stop while a turn runs, send once there is text.
 (def round-button (text key action)
-  (button text :key key :width 3.2 :height 1.6 :corner-radius 32 :font-size 13
-    :background-color :fg :color :buffer-bg :on-click |x y r| (action)))
+  (button text :key key :width 3.2 :height 1.4 :corner-radius 32 :font-size 15
+    :background-color :blue :color :fg :on-click |x y r| (action)))
 
 (def send-or-stop (busy attached)
   (cond
     (busy (round-button "■" "agent-pane-stop" agent-pane/cancel))
-    ((and (= draft "") (empty? attached)) (box :width 3.2 :height 1.6))
+    ((and (= draft "") (empty? attached)) (box :width 3.2 :height 1.4))
     (else (round-button "↑" "agent-pane-send" agent-pane-send))))
 
 ;; Tokens so far and, between turns, New.
@@ -544,12 +543,12 @@
   (let ((shape agent.pane-shape)
         (choice (agent-pane/choice))
         (attached (agent-pane/attachments)))
-    (box :key "agent-pane-composer" :width :fill :padding 0.5 :corner-radius 12
-      :background-color :button-ghost-bg :border-width 1 :border-color :dropdown-menu-border
+    (box :key "agent-pane-composer" :width :fill :padding 0.5 :corner-radius 24
+      :background-color :mixer-strip-selected-bg :border-width 1 :border-color :gray
       (v-stack :width :fill :gap 0.3
         (attachments-row attached)
         (textbox :key "agent-pane-input" :value draft
-          :placeholder (if (get choice :started) "Refine the request" "Ask the agent…")
+          :placeholder (if (get choice :started) "Refine the request" "Create something")
           :width :fill :min-lines 2 :max-lines 8 :font-size 12 :bg :transparent
           :on-change (lambda (v) (set! draft v)))
         (h-stack :width :fill :gap 0.6 :align :center
@@ -564,7 +563,7 @@
 
 (effect-buffer "*agent-pane*"
   (box :width :fill :height :fill :background-color :buffer-bg
-    (v-stack :width :fill :height :fill :gap 0.5 :padding 0.6
+    (v-stack :width :fill :height :fill :gap 0.5 :padding 1.2
       (subtree :key "agent-pane-conversation" (conversation))
       (subtree :key "agent-pane-composer-tree" (composer))
       (subtree :key "agent-pane-model-menu" (model-menu)))))

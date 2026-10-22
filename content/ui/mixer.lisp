@@ -1086,33 +1086,34 @@
   (track-frame t track-strip-width (if t.group (grouped-strip-height) (strip-height)) 2 12
     (track-strip-props t)
     (v-stack :gap 0.18 :width :fill
+      (box :height 0.001)
       ;; Grouped tracks drop the output dropdown (their output is the group
       ;; bus); the container provides the color above. A small spacer keeps
       ;; the pattern grid aligned with loose strips.
       (if t.group nil (track-output-dropdown t))
       (if (compact?) nil (track-pattern-grid t))
-
+      
       (box :width :fill
-      (h-stack :gap 0 :align :center :width :fill
-        (v-stack
-          (h-stack :gap 0.05
-            ;; Stable identities keep only Bus A / Bus B here even when
-            ;; other buses are created or the bus list is reordered.
-            (each (filter (lambda (s) (or (= s.bus.bid 1) (= s.bus.bid 2))) t.sends) |s|
-              (send-knob t s)))
-          (knob-number :label "pan"
-            :key (str "track-pan-" t.index)
-            :value #'t.pan
-            :min -1 :max 1 :origin 0 :decimals 2
-            :font-size 9 :label-font-size 8
-            :text-color :dim :label-color :dim
-            :width 4.5 :height 2.35 :knob-size 2.58
-            :on-change (lambda (v)
-              (clear-delete-target)
-              (set! t.pan v))))
-        (box :flex 1 :height 1)
-        (track-meter-control t)))
-
+        (h-stack :gap 0 :align :center :width :fill
+          (v-stack
+            (h-stack :gap 0.05
+              ;; Stable identities keep only Bus A / Bus B here even when
+              ;; other buses are created or the bus list is reordered.
+              (each (filter (lambda (s) (or (= s.bus.bid 1) (= s.bus.bid 2))) t.sends) |s|
+                (send-knob t s)))
+            (knob-number :label "pan"
+              :key (str "track-pan-" t.index)
+              :value #'t.pan
+              :min -1 :max 1 :origin 0 :decimals 2
+              :font-size 9 :label-font-size 8
+              :text-color :dim :label-color :dim
+              :width 4.5 :height 2.35 :knob-size 2.58
+              :on-change (lambda (v)
+                (clear-delete-target)
+                (set! t.pan v))))
+          (box :flex 1 :height 1)
+          (track-meter-control t)))
+      
       (box :width :fill :height 0.05)
       (subtree :key (str "mixer-v2-strip-buttons-" t.index)
         (strip-buttons t))
@@ -1686,7 +1687,7 @@
       :drop-meta (dict :kind "bus" :bus bus-idx)
       :on-drop (lambda (event) (drop-on-group-header event g))
       (v-stack :gap 0.175 :align :center
-        (box :height 0 :width 0)
+        (box :height 0.01 :width 0)
         (bus-output-dropdown b)
         ;; Where a plain track strip shows its pattern grid, a clip-bearing
         ;; rack shows its clip run vertically (§6.2). Everything else keeps the
@@ -1704,7 +1705,7 @@
             (bus-buttons b g))
           (nothing))
         (if b (bus-mod-port-row b) nil)
-        (box :width 0 :height 0.4)
+        (box :width 0 :height 0.2)
         (box :corner-radius (eseq.seq-core-state/radius 34) :background-color g.color :width 9.5 :padding 0.1
           :key (str "group-badge-" g.gid)
           :selected #'g.delete-target

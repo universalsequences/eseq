@@ -109,11 +109,11 @@
 ;; modulation), so the morph point and preview follow modulation too.
 (def vs-map ()
   (let ((pa (eseq.effects.custom-ui-runtime/custom-ui-current-param "snare_a"))
-        (pb (eseq.effects.custom-ui-runtime/custom-ui-current-param "snare_b"))
-        (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
+      (pb (eseq.effects.custom-ui-runtime/custom-ui-current-param "snare_b"))
+      (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (if (and pa pb)
       (box :width (vs-map-w) :height (vs-total-h) :corner-radius 12 :padding 0.18
-           :background-color (vs-surf)
+        :background-color (vs-surf)
         (family-map
           :file (vs-family-file)
           :a (vs-effective "snare_a" 0) :b (vs-effective "snare_b" 0)
@@ -123,6 +123,7 @@
           :body (vs-effective "body" 1) :ring (vs-effective "ring" 1) :tune (vs-effective "tune" 1)
           :armed (if (= (vs-armed) "b") 1 0)
           :accent (vs-accent)
+          :dot-color :dim
           :background-color :instrument-control-bg
           :x-label "sustain" :y-label "tension"
           :width (- (vs-map-w) 0.4) :height (- (vs-total-h) 0.4)

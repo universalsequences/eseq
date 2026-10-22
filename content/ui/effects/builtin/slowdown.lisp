@@ -40,7 +40,7 @@
   (subtree :key (fc/builtin-fx-param-subtree-key fx p "slowdown-clock")
     (dropdown :value (if (pc/fx-param-on-for? fx p) "Beat sync" "Free time")
       :options '("Beat sync" "Free time")
-      :debug-name "slowdown-clock" :width 8.0 :height 1.15 :font-size 10
+      :debug-name "slowdown-clock" :width 10.0 :height 1.15 :font-size 10
       :plock-active (pc/param-plock-active-prop fx p)
       :plock-color-r (pc/param-plock-color-r) :plock-color-g (pc/param-plock-color-g) :plock-color-b (pc/param-plock-color-b)
       :on-change |value| (pc/fx-set-effect-value fx p (if (= value "Beat sync") 1 0)))))
@@ -89,14 +89,16 @@
           (clock-switch fx (fc/builtin-fx-param params "sync"))
           (division-picker fx (fc/builtin-fx-param params "beats"))
           (mode-picker fx (fc/builtin-fx-param params "mode")))
-        (h-stack :gap 0.35
-          (knob fx (fc/builtin-fx-param params "speed") 2)
-          (knob fx (fc/builtin-fx-param params "beats") 3)
-          (knob fx (fc/builtin-fx-param params "time") 0)
-          (knob fx (fc/builtin-fx-param params "slice") 0)
-          (knob fx (fc/builtin-fx-param params "xfade") 1))
-        (h-stack :gap 0.35
-          (knob fx (fc/builtin-fx-param params "smooth") 1)
-          (knob fx (fc/builtin-fx-param params "tone") 0)
-          (knob fx (fc/builtin-fx-param params "mix") 2)
-          (knob fx (fc/builtin-fx-param params "pitch") 0))))))
+        (box :padding 0.5 :background-color :fx-inner-panel-bg
+          (v-stack
+          (h-stack :gap 0.35
+            (knob fx (fc/builtin-fx-param params "speed") 2)
+            (knob fx (fc/builtin-fx-param params "beats") 3)
+            (knob fx (fc/builtin-fx-param params "time") 0)
+            (knob fx (fc/builtin-fx-param params "slice") 0)
+            (knob fx (fc/builtin-fx-param params "xfade") 1))
+          (h-stack :gap 0.35
+            (knob fx (fc/builtin-fx-param params "smooth") 1)
+            (knob fx (fc/builtin-fx-param params "tone") 0)
+            (knob fx (fc/builtin-fx-param params "mix") 2)
+            (knob fx (fc/builtin-fx-param params "pitch") 0))))))))

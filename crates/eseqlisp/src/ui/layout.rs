@@ -3240,6 +3240,32 @@ mod tests {
         );
     }
 
+    /// A tile-filling backdrop box aligned to the start keeps a taller body at
+    /// its natural height instead of squeezing it into the viewport, and a
+    /// row that grows by a targeted relayout matches a fresh layout.
+    #[test]
+    fn start_aligned_fill_box_lets_a_taller_body_overflow() {
+        let engine = LayoutEngine::new(80, 6, 0.5);
+        let tree = |h: f64| {
+            let row = |child: Value| build_widget("box", vec![kw("width"), kw("fill"), kw("padding"), num(0.3), child]);
+            let body = build_widget("v-stack", vec![kw("width"), kw("fill"),
+                row(keyed_box(4.0, h, "target")), row(keyed_box(4.0, 2.0, "tail"))]);
+            build_widget("box", vec![kw("width"), kw("fill"), kw("height"), kw("fill"),
+                kw("h-align"), kw("start"), kw("v-align"), kw("start"),
+                build_widget("box", vec![body])])
+        };
+        let initial = engine.layout(&tree(2.0)).expect("initial layout");
+        let grown = tree(9.0);
+        let expected = engine.layout(&grown).expect("fresh layout");
+        let target = &expected.children[0].children[0].children[0].children[0];
+        assert_f32_approx(target.rect.height, 9.0);
+        assert_f32_approx(expected.rect.height, 6.0);
+        let mut dirty = Vec::new();
+        let updated = relayout_subtree_path_result(&initial, &grown, &[0, 0, 0], &mut dirty, &engine)
+            .expect("targeted relayout");
+        assert!(same_layout_geometry(&updated, &expected), "updated={updated:#?} expected={expected:#?}");
+    }
+
     #[test]
     fn relayout_subtree_path_preserves_layout_aspect_when_remeasuring_changed_child() {
         fn padded_keyed_box(key: &str, child_height: f64) -> Value {

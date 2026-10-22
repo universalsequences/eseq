@@ -991,6 +991,35 @@ mod tests {
     }
 
     #[test]
+    fn a_containers_faces_repaint_a_theme_slot_only_inside_it() {
+        sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
+            name: "retained-scoped-well".into(), shader_source: String::new(),
+            sdf_expr: crate::parser::Expression::Number(0.0), state_uniforms: vec![],
+            state: Default::default(), region_count: 0, width: 1.0, height: 1.0,
+            paint_margin: 0.0, animates: false,
+        });
+        let well = |id, x| {
+            let mut well = node(id, "box", rect(x, 0.0, 10.0, 4.0), vec![]);
+            well.props.insert("background-color".into(), Value::Keyword("mixer-control-bg".into()));
+            well
+        };
+        let faces = sdf_widget::faces_with(None, &Value::Map(HashMap::from([(
+            "mixer-control-bg".to_string(),
+            Rc::new(std::cell::RefCell::new(Value::String("retained-scoped-well".into()))),
+        )])));
+        let mut inside = well(81202, 0.0);
+        inside.props.insert(sdf_widget::INHERITED_FACES_PROP.into(), faces.unwrap());
+        let root = node(81201, "hstack", rect(0.0, 0.0, 20.0, 4.0), vec![inside, well(81203, 10.0)]);
+
+        let frame = RetainedScene::default().prepare(&root, 1, 1, &[], viewport(), rect(0.0, 0.0, 40.0, 20.0));
+        let painted = |id| frame.runs.iter().find(|run| run.widget_id == id).unwrap().primitives.iter()
+            .any(|primitive| matches!(primitive,
+                GpuPrimitive::WidgetInstance { widget_type, .. } if widget_type == "retained-scoped-well"));
+        assert!(painted(81202), "the slot paints with the widget under the container's :faces");
+        assert!(!painted(81203), "the same slot elsewhere keeps its theme colour");
+    }
+
+    #[test]
     fn dirty_control_refreshes_only_its_ancestor_bounds() {
         let mut root = node(82000, "hstack", rect(0.0, 0.0, 3000.0, 10.0),
             (0..100).map(|i| panel(82010 + i * 10, i as f32 * 30.0)).collect());

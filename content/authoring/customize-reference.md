@@ -195,6 +195,19 @@ is restyled by its theme slot: `(override-theme-slot :instrument-group-bg
 an override owned by your module, so detaching the package reverts it, which
 `apply-theme` does not.
 
+Effect UIs draw their sections with `:fx-inner-panel-bg` and their wells
+with `:mixer-control-bg`, which the mixer, browser and arrangement use too.
+To repaint a slot inside one container only, put it in that container's
+`:faces` (below): a box under it whose background is that slot paints with
+your widget, and the slot is unchanged everywhere else.
+
+```lisp
+(def device-faces ()
+  (dict :fx-inner-panel-bg "my-section" :mixer-control-bg "my-well"))
+(restyle "fx/panel" |card| (merge card :faces (device-faces)))
+(restyle "instrument/panel" |card| (merge card :faces (device-faces)))
+```
+
 Knobs paint their parts from theme slots too (`content/ui/widgets.lisp`), so
 one slot restyles that part of every knob, the rest unchanged:
 `:widget-knob-filled` is the filled arc and its dot, `:widget-knob-track`

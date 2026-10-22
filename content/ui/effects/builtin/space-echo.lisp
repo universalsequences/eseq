@@ -65,7 +65,7 @@
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-        :width 4.35 :height 2.45 :knob-size 1.85
+        :width 6.5 :height 3.0 :knob-size 2.85
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
 (def percent-knob (fx label-text p)
@@ -91,14 +91,14 @@
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-        :width 4.35 :height 2.45 :knob-size 1.85
+        :width 6.5 :height 3.0 :knob-size 2.85
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
 ;; ── Repeat rate (sync grid / free knob) ──
 
 (def sync-button (fx p)
   (button "Sync"
-    :width 4.95 :height 0.88 :padding 0 :font-size 8.5
+    :width 5.55 :height 1.0 :padding 0 :font-size 9
     :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :effect-mode-on-bg :mixer-control-bg)
     :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :control-on-fg :dim)
     :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
@@ -109,7 +109,7 @@
 
 (def div-button (fx p current label-text)
   (button label-text
-    :width 2.72 :height 0.92 :padding 0 :font-size 8.0
+    :width 3.72 :height 1.0 :padding 0 :font-size 9.0
     :background-color (if (= current label-text) :effect-mode-on-bg :mixer-control-bg)
     :color (if (= current label-text) :control-on-fg :dim)
     :border-color :transparent
@@ -122,7 +122,7 @@
 (def div-grid (fx p)
   (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p "space-echo-div")
     (let ((current (eseq.effects.param-controls/fx-param-text-value-for fx p)))
-      (v-stack :gap 0.11
+      (v-stack :gap 0.21
         (h-stack :gap 0.12
           (div-button fx p current "1/32")
           (div-button fx p current "1/16"))
@@ -143,12 +143,12 @@
           (box :width 2.72 :height 0.82))))))
 
 (def rate-box (fx sync-p div-p offset-p rate-p)
-  (box :width 8.25 :height 9.75 :padding 0.18
+  (box :width 8.25 :height 9.75 :padding 0.08
     :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.14 :align :center
-      (label "REPEAT RATE" :font-size 8.0 :width 5.4 :color :dim :bg :transparent)
-      (box :height 0.5)
+      (box :height 0.1)
       (sync-button fx sync-p)
+      (box :height 0.1)
       (if (eseq.effects.param-controls/fx-param-on-for? fx sync-p)
         (v-stack :gap 0.12 :align :center
           (div-grid fx div-p)
@@ -164,7 +164,7 @@
         (reverb-mode (> index 5)))
     (button short-label
       :width 3.0 :height 1.30 :padding 0 :font-size 8.5
-      :background-color (if selected (if reverb-mode :delay-reverb-mode-on-bg :effect-mode-on-bg) :mixer-control-bg)
+      :background-color (if selected (if reverb-mode :effect-mode-on-bg :effect-mode-on-bg) :mixer-control-bg)
       :color (if selected :control-on-fg :dim)
       :border-color :transparent
       :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
@@ -192,31 +192,32 @@
       (mode-button fx p 10 "2+3R")
       (mode-button fx p 11 "rev"))))
 
-(def mode-box (fx mode-p)
-  (box :width 10.5 :height 8.85 :padding 0.30
+(def mode-box (fx mode-p wf-p age-p drive-p dry-p)
+  (box :width 10.5 :height :fill :padding 0.00
     :background-color :fx-inner-panel-bg :corner-radius 7
-    (v-stack :gap 0.22 :align :center
-      (label "MODE SELECTOR" :font-size 8.0 :width 8.2 :color :dim :bg :transparent)
+    (v-stack :gap 0.02 :align :center
       (box :height 0.25)
       (mode-grid fx mode-p)
-      (label (eseq.effects.param-controls/fx-param-text-value-for fx mode-p)
-        :font-size 8.5 :width 8.2 :color :delay-mode-readout-fg :bg :transparent))))
+      (box :height 0.25)
+      (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "wow" wf-p)
+      (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "age" age-p)
+      (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "drive" drive-p)
+      (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "dry" dry-p)
+      )))
 
 ;; ── Echo section ──
 
 (def echo-box (fx intensity-p echo-p bass-p treble-p width-p)
   (box :width 10.4 :height 9.75 :padding 0.36
     :background-color :fx-inner-panel-bg :corner-radius 7
-    (v-stack :gap 0.18 :align :center
-      (label "ECHO" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
-      (h-stack :gap 0.22 :align :center
+    (v-stack :gap 0.1 :align :center
+      (v-stack :gap 0.1 :align :center
         (percent-knob fx "intensity" intensity-p)
-        (parameter-knob fx "echo vol" echo-p 2 "linear"))
-      (box :height 0.85)
-      (label "TONE" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
-      (v-stack :gap 0.30 :align :baseline
+        (parameter-knob fx "echo" echo-p 2 "linear"))
+      (box :height 0.25)
+      (v-stack :gap 0.10 :align :baseline
         (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "bass" bass-p)
-        (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "treb" treble-p)
+        (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "treble" treble-p)
         (if width-p
           (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "wide" width-p)
           (box :height 0.1))))))
@@ -228,7 +229,7 @@
   (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value-for fx p)) index)))
     (button short-label
       :width 4.35 :height 0.92 :padding 0 :font-size 8.0
-      :background-color (if selected :delay-reverb-mode-on-bg :mixer-control-bg)
+      :background-color (if selected :effect-mode-on-bg :mixer-control-bg)
       :border-color :transparent
       :color (if selected :control-on-fg :dim)
       :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
@@ -244,26 +245,25 @@
       (spring-button fx p 1 "Tubby")))
   )
 
-(def tape-box (fx reverb-p tension-p spring-p wf-p age-p drive-p dry-p)
+(def tape-box (fx reverb-p tension-p spring-p )
   (box :width 10.4 :height 9.75 :padding 0.36
-       :background-color :fx-inner-panel-bg :corner-radius 7
+    :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.16 :align :center
-      (label "REVERB" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
-      (h-stack :gap 0.22 :align :center
+      (v-stack :gap 0.22 :align :center
         ;; Cube taper: subtle spring lives around 0.001..0.05, which gets
         ;; the bottom third of the arc instead of a sliver of it.
-        (parameter-knob fx "reverb vol" reverb-p 3 "cube")
+        (parameter-knob fx "reverb" reverb-p 3 "cube")
         (if tension-p
           (percent-knob fx "tension" tension-p)
           (box :width 4.35 :height 2.45)))
+      (box :flex 1)
       (if spring-p
         (spring-row fx spring-p)
         (box :height 0.1))
-      (label "TAPE" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
-      (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "w/f" wf-p)
-      (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "age" age-p)
-      (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "drv" drive-p)
-      (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "dry" dry-p))))
+      
+      )
+    )
+  )
 
 (def panel-ui (fx)
   (let ((params (get fx :params)))
@@ -287,7 +287,7 @@
       (if (and mode-p rate-p sync-p intensity-p echo-p reverb-p)
         (h-stack :gap 0.35 :align :start
           (rate-box fx sync-p div-p offset-p rate-p)
-          (mode-box fx mode-p)
+          (mode-box fx mode-p  wf-p age-p drive-p dry-p)
           (echo-box fx intensity-p echo-p bass-p treble-p width-p)
-          (tape-box fx reverb-p tension-p spring-p wf-p age-p drive-p dry-p))
+          (tape-box fx reverb-p tension-p spring-p))
         (eseq.effects.param-grid/fx-param-grid params fx)))))

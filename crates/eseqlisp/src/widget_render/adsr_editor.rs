@@ -794,11 +794,31 @@ env.attack env.decay env.sustain env.release)))"
             "curve-color",
             crate::theme::ADSR_CURVE(),
         );
-        let bg_color = resolve_named_color(
+        let mut bg_color = resolve_named_color(
             &node.props,
             "background-color",
             crate::theme::ADSR_BG(),
         );
+        // A slot painted with a widget paints that widget behind the curve,
+        // grid and handles, as a box's background would.
+        let background_widget = match node.props.get("background-color") {
+            Some(Value::Keyword(slot) | Value::String(slot)) => {
+                super::sdf_widget::slot_widget(&node.props, slot)
+            }
+            _ => None,
+        };
+        let mut prims = background_widget
+            .map(|widget| {
+                bg_color.a = 0.0;
+                super::sdf_widget::sdf_widget_background_primitives(
+                    &widget,
+                    node.widget_id,
+                    node.rect,
+                    viewport,
+                    &node.props,
+                )
+            })
+            .unwrap_or_default();
         let grid_color = resolve_named_color(
             &node.props,
             "grid-color",
@@ -818,7 +838,7 @@ env.attack env.decay env.sustain env.release)))"
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;
         let px_h = node.rect.height * viewport.cell_h;
-        vec![GpuPrimitive::WidgetInstance {
+        prims.push(GpuPrimitive::WidgetInstance {
             widget_type: widget_type.to_string(),
             instance: WidgetInstance {
                 ndc_min,
@@ -838,7 +858,8 @@ env.attack env.decay env.sustain env.release)))"
                 pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
             },
             is_background: false,
-        }]
+        });
+        prims
     }
 }
 
@@ -848,6 +869,12 @@ float adsr_sdSegment(float2 p, float2 a, float2 b) {
     float2 ba = b - a;
     float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
     return length(pa - ba * h);
+}
+
+// `col` with `color` over it by `t`, its alpha raised as well, so the
+// curve paints over a transparent background.
+float4 adsr_over(float4 col, float3 color, float t) {
+    return float4(mix(col.rgb, color, t), mix(col.a, 1.0, t));
 }
 
 float adsr_logWeight(float ms) {
@@ -920,8 +947,8 @@ float4 adsr_ahdDisplay(WidgetVaryings in) {
         previous = current;
     }
     float baseline = adsr_sdSegment(p, adsr_toPlot(float2(0.0, 0.0)) / perPixel, adsr_toPlot(float2(1.0, 0.0)) / perPixel);
-    col.rgb = mix(col.rgb, in.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * in.color_c.a * 0.25);
-    col.rgb = mix(col.rgb, in.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * in.color_a.a);
+    col = adsr_over(col, in.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * in.color_c.a * 0.25);
+    col = adsr_over(col, in.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * in.color_a.a);
     float scale = max(in.uniform_b.z, 0.001);
     for (int index = 1; index <= 3; ++index) {
         if (index == 2 && in.uniform_c.x < 0.5) continue;
@@ -932,7 +959,7 @@ float4 adsr_ahdDisplay(WidgetVaryings in) {
         float d = max(abs(p.x - h.x), abs(p.y - h.y));
         float outer = 1.0 - smoothstep(halfSize, halfSize + 0.75, d);
         float inner = 1.0 - smoothstep(halfSize - 1.5 * scale, halfSize - 1.5 * scale + 0.75, d);
-        col.rgb = mix(col.rgb, in.color_d.rgb, (highlighted ? outer : max(outer - inner, 0.0)) * in.color_d.a);
+        col = adsr_over(col, in.color_d.rgb, (highlighted ? outer : max(outer - inner, 0.0)) * in.color_d.a);
     }
     return col;
 }
@@ -946,7 +973,7 @@ float4 adsr_decayDisplay(WidgetVaryings in) {
     float end = mix(0.03, 1.0, in.uniform_d.z);
     float4 col = in.color_b;
     float baseline = abs(p.y - adsr_toPlot(float2(0.0, zero)).y / perPixel.y);
-    col.rgb = mix(col.rgb, in.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * in.color_c.a * 0.4);
+    col = adsr_over(col, in.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * in.color_c.a * 0.4);
     float distance = 10000.0;
     float2 previous = adsr_toPlot(float2(0.03, initial)) / perPixel;
     for (int i = 1; i <= 64; ++i) {
@@ -962,7 +989,7 @@ float4 adsr_decayDisplay(WidgetVaryings in) {
         distance = min(distance, adsr_sdSegment(p, previous, current));
         previous = current;
     }
-    col.rgb = mix(col.rgb, in.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * in.color_a.a);
+    col = adsr_over(col, in.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * in.color_a.a);
     float scale = max(in.uniform_b.z, 0.001);
     for (int i = 1; i <= 2; ++i) {
         if (i == 1 && in.uniform_a.y < 0.5) continue;
@@ -972,7 +999,7 @@ float4 adsr_decayDisplay(WidgetVaryings in) {
         float d = max(abs(p.x - h.x), abs(p.y - h.y));
         float outer = 1.0 - smoothstep(halfSize, halfSize + 0.75, d);
         float inner = 1.0 - smoothstep(halfSize - 1.5 * scale, halfSize - 1.5 * scale + 0.75, d);
-        col.rgb = mix(col.rgb, in.color_d.rgb, (active ? outer : max(outer - inner, 0.0)) * in.color_d.a);
+        col = adsr_over(col, in.color_d.rgb, (active ? outer : max(outer - inner, 0.0)) * in.color_d.a);
     }
     return col;
 }
@@ -994,10 +1021,10 @@ float4 adsr_adeDisplay(WidgetVaryings in) {
     bool heldPeak = gated && in.uniform_c.y > 0.5;
     float4 col = in.color_b;
     float baseline = adsr_sdSegment(p, adsr_toPlot(float2(0.0, 0.0)) / perPixel, adsr_toPlot(float2(1.0, 0.0)) / perPixel);
-    col.rgb = mix(col.rgb, in.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * in.color_c.a * 0.25);
+    col = adsr_over(col, in.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * in.color_c.a * 0.25);
     float noteOff = adsr_sdSegment(p, adsr_toPlot(float2(0.68, 0.0)) / perPixel, adsr_toPlot(float2(0.68, 1.0)) / perPixel);
     float dash = step(0.5, fract(p.y / 8.0));
-    col.rgb = mix(col.rgb, in.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, noteOff)) * dash * in.color_c.a * 0.35);
+    col = adsr_over(col, in.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, noteOff)) * dash * in.color_c.a * 0.35);
     float distance = 10000.0;
     float ghost = 10000.0;
     for (int segment = 0; segment < 5; ++segment) {
@@ -1007,8 +1034,8 @@ float4 adsr_adeDisplay(WidgetVaryings in) {
         else distance = min(distance, adsr_sdSegment(p, a, b));
     }
     if (heldPeak) distance = min(distance, adsr_sdSegment(p, adsr_toPlot(float2(0.68, 1.0)) / perPixel, adsr_toPlot(float2(1.0, 1.0)) / perPixel));
-    col.rgb = mix(col.rgb, in.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, ghost)) * in.color_a.a * 0.25);
-    col.rgb = mix(col.rgb, in.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * in.color_a.a);
+    col = adsr_over(col, in.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, ghost)) * in.color_a.a * 0.25);
+    col = adsr_over(col, in.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * in.color_a.a);
     float scale = max(in.uniform_b.z, 0.001);
     for (int handleIndex = 1; handleIndex <= 4; ++handleIndex) {
         int pointIndex = handleIndex <= 2 ? handleIndex : handleIndex + 1;
@@ -1018,7 +1045,7 @@ float4 adsr_adeDisplay(WidgetVaryings in) {
         float d = max(abs(p.x - h.x), abs(p.y - h.y));
         float outer = 1.0 - smoothstep(halfSize, halfSize + 0.75, d);
         float inner = 1.0 - smoothstep(halfSize - 1.5 * scale, halfSize - 1.5 * scale + 0.75, d);
-        col.rgb = mix(col.rgb, in.color_d.rgb, (highlighted ? outer : max(outer - inner, 0.0)) * in.color_d.a);
+        col = adsr_over(col, in.color_d.rgb, (highlighted ? outer : max(outer - inner, 0.0)) * in.color_d.a);
     }
     return col;
 }
@@ -1057,7 +1084,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float gridZero = adsr_toPlot(float2(0.0, 0.0)).y;
     float baselineWidth = max(fwidth(uv.y), 0.001);
     float baseline = 1.0 - smoothstep(0.0, baselineWidth, abs(uv.y - gridZero));
-    col.rgb = mix(col.rgb, in.color_c.rgb, baseline * in.color_c.a * 0.25 * insidePlot);
+    col = adsr_over(col, in.color_c.rgb, baseline * in.color_c.a * 0.25 * insidePlot);
 
     float2 uvPerPixel = max(float2(fwidth(uv.x), fwidth(uv.y)), float2(1e-6));
     float pxScale = (in.uniform_b.z > 0.0) ? in.uniform_b.z : 1.0;
@@ -1076,7 +1103,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     bracketDist = min(bracketDist, adsr_bracketDistance(pPx, float2(plotMinPx.x, plotMaxPx.y), float2(1.0, -1.0), float2(leftBracketWidthPx, bottomBracketHeightPx)));
     bracketDist = min(bracketDist, adsr_bracketDistance(pPx, plotMaxPx, float2(-1.0, -1.0), float2(16.0 * pxScale, bottomBracketHeightPx)));
     float brackets = 1.0 - smoothstep(0.5, 1.25, bracketDist);
-    col.rgb = mix(col.rgb, in.color_a.rgb, brackets * in.color_a.a);
+    col = adsr_over(col, in.color_a.rgb, brackets * in.color_a.a);
 
     float dataX = clamp((uv.x - pad.x) / (1.0 - pad.x * 2.0), 0.0, 1.0);
     float curveDataY = adsr_curveY(dataX, x1, x2, x3, x4, sustain);
@@ -1084,7 +1111,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float fillRegion = step(attackOrigin, dataX) * step(dataX, x4)
         * step(curvePlotY, uv.y) * step(uv.y, gridZero) * insidePlot;
     float fillGradient = clamp((gridZero - uv.y) / max(gridZero - curvePlotY, 1e-5), 0.0, 1.0);
-    col.rgb = mix(col.rgb, in.color_a.rgb, fillRegion * fillGradient * in.color_a.a * 0.10);
+    col = adsr_over(col, in.color_a.rgb, fillRegion * fillGradient * in.color_a.a * 0.10);
 
     float minDistPx = 1000.0;
     float2 previous = adsr_toPlot(float2(attackOrigin, 0.0)) / uvPerPixel;
@@ -1107,7 +1134,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float activeHandle = round(in.uniform_b.y);
     float curve = 1.0 - smoothstep(0.65, 1.55, minDistPx);
     float curveBrightness = activeHandle > 0.5 ? 1.12 : 1.0;
-    col.rgb = mix(col.rgb, min(in.color_a.rgb * curveBrightness, float3(1.0)), curve * in.color_a.a);
+    col = adsr_over(col, min(in.color_a.rgb * curveBrightness, float3(1.0)), curve * in.color_a.a);
 
     float pixelY = max(fwidth(uv.y), 0.001);
     for (int i = 1; i < 5; ++i) {
@@ -1125,7 +1152,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         float outer = 1.0 - smoothstep(0.0, 0.75, outerDist);
         float inner = 1.0 - smoothstep(0.0, 0.75, innerDist);
         float square = highlighted ? outer : max(outer - inner, 0.0);
-        col.rgb = mix(col.rgb, in.color_d.rgb, square * in.color_d.a);
+        col = adsr_over(col, in.color_d.rgb, square * in.color_d.a);
     }
 
     return col;

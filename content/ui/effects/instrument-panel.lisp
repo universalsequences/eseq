@@ -444,7 +444,7 @@
       :on-drop (lambda (event) (rack-slot-drop-fx slot event))
       :on-click |x y r| (rack-slot-select slot)
       (h-stack :width :fill :height :fill :gap 0.15 :align :center
-        (box :width 1)
+        (box :width 0.5)
         ;; The slot number doubles as the live-set enable toggle (eseq-bw9v):
         ;; a disabled slot gets no triggers and runs no DSP, so a set can park
         ;; one instrument per bank without paying for the parked ones.
@@ -454,9 +454,9 @@
           :background-color (if (get slot :enabled) :transparent :mixer-control-bg)
           :color (if (get slot :enabled) (if selected :fg :gray) :dim)
           :on-click |x y r| (rack-slot-set-enabled slot (not (get slot :enabled))))
-        (box :width 1)
+        (box :width 0.5)
         (box :key (str "rack-slot-label-" (get slot :idx))
-          :width 8.0 :height :fill  :padding 0
+          :width 10.0 :height :fill  :padding 0
           :selected delete-target
           :background-color :transparent
           :selected-background-color :fx-panel-header-selected-bg
@@ -474,30 +474,33 @@
         
         
         (rack-slot-param-wrapper inst slot sd "gain"
-          (v-stack :width 5.55 :height 1.9 :gap 0.05 :align :center
+          (v-stack :width 5.05 :height 1.9 :gap 0.05 :align :center
             (label "Volume" :font-size 8.2 :color :dim :bg :transparent)
             (number-picker :value #'sd.gain-display
               :min (get slot :gain-min) :max (get slot :gain-max) :decimals 2
               :mode :slider :font-size 9.4
               :text-align :center :text-color :dim :edit-color :yellow
-              :width 5.55 :height 0.84
+              :corner-radius 0
+              :width 5.05 :height 0.84
               :on-change (lambda (v) (rack-slot-set-gain slot v)))))
         (rack-slot-param-wrapper inst slot sd "base-note"
-          (v-stack :width 5.55 :height 1.9 :gap 0.05 :align :center
+          (v-stack :width 5.05 :height 1.9 :gap 0.05 :align :center
             (label "Note" :font-size 8.2 :color :dim :bg :transparent)
             (number-picker :value #'sd.base-note-display
               :min (get slot :base-note-min) :max (get slot :base-note-max) :decimals 0
               :mode :slider :font-size 9.4
               :text-align :center :text-color :dim :edit-color :yellow
-              :width 5.55 :height 0.84
+              :corner-radius 0
+              :width 5.05 :height 0.84
               :on-change (lambda (v) (rack-slot-set-base-note slot v)))))        (rack-slot-param-wrapper inst slot sd "pan"
-          (v-stack :width 5.55 :height 1.9 :gap 0.05 :align :center
+          (v-stack :width 5.05 :height 1.9 :gap 0.05 :align :center
             (label "Pan" :font-size 8.2 :color :dim :bg :transparent)
             (number-picker :value #'sd.pan-display
               :min (get slot :pan-min) :max (get slot :pan-max) :decimals 2
               :mode :slider :font-size 9.4
+              :corner-radius 0
               :text-align :center :text-color :dim :edit-color :yellow
-              :width 5.55 :height 0.84
+              :width 5.05 :height 0.84
               :on-change (lambda (v) (rack-slot-set-pan slot v)))))
         (box :flex 1 :height 1)
         (rack-slot-param-wrapper inst slot sd "mute"
@@ -711,12 +714,13 @@
         (mp/modulator-panel inst)
         (box
           (v-stack :debug-name "instrument-panel-vstack" :gap 0 :height :fill
-            (box :debug-name "instrument-header-box" :height 1 :padding 0 :v-align :center :h-align :start :width :fill
+            (box :debug-name "instrument-header-box" :height 1.0 :padding 0 :v-align :center :h-align :start :width :fill
               (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center :width :fill
                 (pf/fx-panel-header-leading-spacer)
                 (ep/enabled-toggle (ep/enabled-param (get inst :synth)) false "instrument-enabled")
-                (h-stack :v-align :center :height st/fx-panel-header-height :gap 1 :padding 0.1
+                (h-stack :v-align :center  :gap 1 :padding 0.1
                   (label (substring (get inst :display-name) 0 12)
+                    :v-align :baseline
                     :font-size 11  :color :fg :bg :transparent)
                   (ep/instrument-synth-button)
                   (ep/instrument-mods-toggle-button)

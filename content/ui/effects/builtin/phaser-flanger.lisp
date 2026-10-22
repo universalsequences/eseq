@@ -160,7 +160,7 @@
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "phaser-flanger-param-" (get p :idx) "-mod-wrapper")
     (subtree :key "phaser-flanger-notches-control"
       (h-stack :gap 0.18 :align :baseline
-        (label "ntch" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
+        (label "notches" :font-size 8.5 :width 3.55 :color :dim :bg :transparent)
         (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
           :min 1 :max 12 :step 1 :decimals 0
           :noui true :font-size 9.5 :text-color :dim
@@ -174,7 +174,7 @@
 (def circuit-control (fx p)
   (subtree :key "phaser-flanger-circuit-control"
     (h-stack :gap 0.18 :align :center
-      (label "circ" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
+      (label "mode" :font-size 8.5 :width 3.0 :color :dim :bg :transparent)
       (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
         :value-index (eseq.effects.param-controls/param-option-index fx p)
         :options (get p :options)
@@ -183,7 +183,7 @@
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-        :width 6.4 :height 1.05 :font-size 9.0))))
+        :width 7.4 :height 1.05 :font-size 9.0))))
 
 (def mode-controls (fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p)
   (let ((m (round (eseq.effects.param-controls/fx-param-numeric-value mode-p))))
@@ -202,8 +202,8 @@
         (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "time" dbt-p)))))
 
 (def mode-box (fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
-  (box :width 16.0 :height 9.55 :padding 0.36
-       :background-color :mixer-control-bg :corner-radius 16
+  (box :width 17.0 :height 9.55 :padding 0.36
+       :background-color :fx-inner-panel-bg :corner-radius 16
     (v-stack :gap 0.16 :align :center
       (display fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
       (mode-row fx mode-p)
@@ -281,7 +281,7 @@
 
 (def lfo-box (fx sync-p rate-p div-p shape-p)
   (box :width 10.6 :height 9.55 :padding 0.30
-       :background-color :mixer-control-bg :corner-radius 16
+       :background-color :fx-inner-panel-bg :corner-radius 16
     (v-stack :gap 0.16 :align :center
       (label "LFO" :font-size 8.0 :width 8.6 :color :dim :bg :transparent)
       (sync-button fx sync-p)
@@ -308,7 +308,7 @@
 
 (def sweep-box (fx amount-p feedback-p invert-p stereo-p)
   (box :width 10.0 :height 9.55 :padding 0.36
-       :background-color :mixer-control-bg :corner-radius 7
+       :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
       (label "SWEEP" :font-size 8.0 :width 9.0 :color :dim :bg :transparent)
       (h-stack :gap 0.22 :align :center
@@ -323,7 +323,7 @@
 
 (def out-box (fx warmth-p mix-p output-p)
   (box :width 5.3 :height 9.55 :padding 0.30
-       :background-color :mixer-control-bg :corner-radius 7
+       :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.10 :align :center
       (label "OUT" :font-size 8.0 :width 4.4 :color :dim :bg :transparent)
       (parameter-knob fx "output" output-p 1)

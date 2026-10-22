@@ -303,7 +303,7 @@
     :active active
     :active-color :yellow
     :border-color :transparent
-    :color :dim
+    :color :dimmer
     :plock-active (pc/param-plock-active-prop false mode)
     :plock-color-r (pc/param-plock-color-r)
     :plock-color-g (pc/param-plock-color-g)
@@ -455,9 +455,9 @@
           :header-height 0.3
           :ruler-font-size 8
           :ruler-color :dim
-          :ruler-bg :black
-          :grid-major-color :black
-          :grid-minor-color :black
+          :ruler-bg :instrument-control-bg
+          :grid-major-color :dim
+          :grid-minor-color :dimmer
           :bg :instrument-control-bg
           :focusable true
           ;; Slice mode turns the body into a slice picker: no
