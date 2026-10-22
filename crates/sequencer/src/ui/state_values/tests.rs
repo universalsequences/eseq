@@ -26057,8 +26057,8 @@ use panel_kinds_seed::*;
         );
         assert_eq!(
             expand.props.get("background"),
-            Some(&Value::String("seqv-ellipsis-button".to_string())),
-            "sequencer row expand control should use the SDF ellipsis widget instead of text"
+            Some(&Value::String("seqv-gear-button".to_string())),
+            "sequencer row expand control should use the SDF gear widget instead of text"
         );
     }
 

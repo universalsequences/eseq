@@ -687,33 +687,27 @@
             :light (vec3 -0.35 -1.0 2.8) :shininess 54.0)
           :color :sequencer-volume-handle)))))
 
-(defwidget seqv-ellipsis-button
+(defwidget seqv-gear-button
   :width 2.2 :height 1.2
   :state (expanded)
   :shader
   (sdf/layer
-    (sdf/fill (sdf/rounded-rect width (* 0.99 height) 0.98)
-      :mixer-strip-selected-bg)
-    
-    (sdf/fill (sdf/rounded-rect (* 0.96 width) (* 0.93 height) 0.98)
+    (sdf/fill (sdf/circle 0.98) :mixer-strip-selected-bg)
+    (sdf/fill (sdf/circle 0.92)
       (material
         :lighting (lighting :edge-min -0.25 :edge-max 0.4
           :light (vec3 0.1 -1.2 0.4) :shininess 24.0)
-        :color 
-        (if expanded 
-          (rgba 0.18 0.18 0.20 1.0) 
-          :mixer-strip-bg) 
-        ))
+        :color (if expanded (rgba 0.18 0.18 0.20 1.0) :mixer-strip-bg)))
+    ;; Hub plus eight teeth (a plus and its 45° copy), axle hole cut out.
     (sdf/fill
-      (sdf/translate -0.48 0
-        (sdf/circle 0.12))
-      (material :color :fg))
-    (sdf/fill (sdf/circle 0.12)
-      (material :color :fg))
-    (sdf/fill
-      (sdf/translate 0.48 0
-        (sdf/circle 0.12))
-      (material :color :fg))))
+      (sdf/subtract
+        (sdf/union (sdf/circle 0.38)
+          (sdf/union
+            (sdf/union (sdf/rect 0.1 0.56) (sdf/rect 0.56 0.1))
+            (sdf/rotate 0.7853982
+              (sdf/union (sdf/rect 0.1 0.56) (sdf/rect 0.56 0.1)))))
+        (sdf/circle 0.17))
+      (material :color (if expanded (rgba 1.0 1.0 1.0 1.0) :dim)))))
 
 ;; Module spec §10 hazard (h): the two `:material` props that call this expand
 ;; much later, at shader-compile time, in a throwaway *implicit-module*
@@ -1154,7 +1148,7 @@
     (box
       :key (str "expand-" t.index)
       :width 3.5 :height 1.0
-      :background "seqv-ellipsis-button"
+      :background "seqv-gear-button"
       :expanded (if t.expanded 1 0)
       :on-click (lambda (event)
         (track-control-click event t (lambda () (track-menu-click t)))))
