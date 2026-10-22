@@ -716,6 +716,9 @@ pub struct Editor {
     toast_pointer_pressed: bool,
 
     pending_key: Option<KeyEvent>,
+    /// `describe-key` waits for a key: the chord typed so far (empty until
+    /// the first key).
+    describing_key: Option<Vec<String>>,
     builtins: HashMap<KeyEvent, String>,
     default_lisp_bindings: LispBindings,
     lisp_bindings: LispBindings,
@@ -921,6 +924,7 @@ impl Editor {
             toast_placement: None,
             toast_pointer_pressed: false,
             pending_key: None,
+            describing_key: None,
             builtins: HashMap::new(),
             default_lisp_bindings: HashMap::new(),
             lisp_bindings: HashMap::new(),
@@ -6902,6 +6906,11 @@ impl Editor {
             self.toast = None;
         }
 
+        if self.describing_key.is_some() {
+            self.describe_key_press(key);
+            return;
+        }
+
         // Inspect mode outranks the modal keyboard boundary, same as it
         // outranks the overlay intercept for hit-testing: the toggle chord and
         // the Esc that exits inspect must work while inspecting a modal.
@@ -8504,7 +8513,7 @@ impl Editor {
             return true;
         }
         // Editor commands that open their own minibuffer prompt.
-        if matches!(fn_name, "find-file" | "describe-function" | palette::COMMAND_PALETTE) {
+        if matches!(fn_name, "find-file" | "describe-function" | "describe-key" | palette::COMMAND_PALETTE) {
             self.run_command(fn_name);
             return true;
         }

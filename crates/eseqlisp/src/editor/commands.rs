@@ -141,6 +141,7 @@ impl Editor {
             ("C-x o", "other-window"),
             ("C-x C-f", "find-file"),
             ("C-h f", "describe-function"),
+            ("C-h k", "describe-key"),
             // Meta, never an "ESC" prefix: Escape must stay a plain key so
             // Vim's Esc-then-command never turns into a chord.
             ("M-.", "goto-definition"),
@@ -367,6 +368,7 @@ impl Editor {
                 });
             }
             "describe-function" => self.start_describe_function(),
+            "describe-key" => self.start_describe_key(),
             "find-file" => {
                 self.completion = None;
                 self.minibuffer = None;

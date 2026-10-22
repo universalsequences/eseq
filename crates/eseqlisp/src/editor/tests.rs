@@ -18897,3 +18897,57 @@ fn button_click_inside_scrolled_container_reports_its_own_top_left() {
     click_at(&mut editor, 2.5, 8.5);
     assert_eq!(eval_number(editor.runtime_mut(), "click-y"), 0.0);
 }
+
+/// `describe-key` names the next key and what it runs instead of running
+/// it, following a chord to its end.
+#[test]
+fn describe_key_names_the_next_key_and_its_binding_without_running_it() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*described*", "");
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+(def bank-next () (host-command "bank-next-ran" true))
+(def commit () (host-command "commit-ran" true))
+(define-mode "described-mode")
+(mode-bind-key "described-mode" "C-S-RIGHT" "bank-next")
+(mode-bind-key "described-mode" "C-c C-c" "commit")
+(set-buffer-mode-for "*described*" "described-mode")
+"#,
+        )
+        .expect("install bindings");
+    editor.refresh_runtime_side_effects();
+    let describe = |editor: &mut Editor, keys: &[KeyEvent]| {
+        editor.run_command("describe-key");
+        for key in keys {
+            editor.handle_key(*key);
+        }
+        editor.minibuffer.clone().unwrap_or_default()
+    };
+
+    let ctrl_shift_right = KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    assert_eq!(
+        describe(&mut editor, &[ctrl_shift_right]),
+        "C-S-RIGHT runs bank-next (described-mode keymap)"
+    );
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(
+        describe(&mut editor, &[ctrl_c, ctrl_c]),
+        "C-c C-c runs commit (described-mode keymap)"
+    );
+    assert_eq!(
+        describe(&mut editor, &[KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE)]),
+        "F(9) is undefined here"
+    );
+    assert!(
+        editor.drain_host_commands().iter().all(|c| !matches!(c, HostCommand::Custom { .. })),
+        "a described key does not run"
+    );
+    // Afterwards keys run again.
+    editor.handle_key(ctrl_shift_right);
+    assert!(editor
+        .drain_host_commands()
+        .iter()
+        .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "bank-next-ran")));
+}

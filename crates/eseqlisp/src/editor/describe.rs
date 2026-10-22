@@ -2,7 +2,8 @@
 //! from a Lisp definition header (docs/command-palette-spec.md §3.3) or a
 //! documented native.
 
-use super::{Editor, MinibufferMode};
+use super::{Editor, MinibufferMode, key_str};
+use crossterm::event::KeyEvent;
 use crate::mode::BufferMode;
 
 pub(super) const HELP_BUFFER: &str = "*Help*";
@@ -14,6 +15,66 @@ impl Editor {
         let candidates = self.collect_mx_candidates();
         self.minibuffer_input =
             Some(MinibufferMode::DescribeFunction { input: String::new(), candidates, selected: 0 });
+    }
+
+    /// `describe-key`: the next key (a whole chord, if it starts one) is
+    /// named, with what it runs here, instead of running.
+    pub(super) fn start_describe_key(&mut self) {
+        self.completion = None;
+        self.minibuffer_input = None;
+        self.describing_key = Some(Vec::new());
+        self.show_sticky_message("Describe key: ");
+    }
+
+    pub(super) fn describe_key_press(&mut self, key: KeyEvent) {
+        let mut chord = self.describing_key.take().unwrap_or_default();
+        chord.push(key_str(key));
+        let spelled = chord.join(" ");
+        if self.binding_has_prefix(&spelled) && self.key_binding_of(&spelled).is_none() {
+            self.show_sticky_message(format!("Describe key: {spelled} -"));
+            self.describing_key = Some(chord);
+            return;
+        }
+        let message = self.describe_key_text(&spelled, (chord.len() == 1).then_some(key));
+        self.show_sticky_message(message);
+    }
+
+    /// What `spelled` (a `key_str` spelling, or a chord of them) runs in the
+    /// active buffer: the mode keymap (nearest mode first), else the global
+    /// map, else a builtin. Earlier layers that see it first are named too:
+    /// a focused widget, the mode's `:on-key` handler.
+    pub fn describe_key_text(&self, spelled: &str, key: Option<KeyEvent>) -> String {
+        let runs = self
+            .key_binding_of(spelled)
+            .or_else(|| key.and_then(|key| self.builtins.get(&key).map(|cmd| (cmd.clone(), "built-in".to_string()))));
+        let mut text = match runs {
+            Some((handler, source)) => format!("{spelled} runs {handler} ({source})"),
+            None => format!("{spelled} is undefined here"),
+        };
+        if let Some(on_key) = self.active_mode_on_key() {
+            text.push_str(&format!("; the mode's :on-key {on_key} sees it first"));
+        }
+        if self.active_leaf().focused_widget_id.is_some() {
+            text.push_str("; a focused widget sees it before that");
+        }
+        text
+    }
+
+    /// The handler `spelled` is bound to in the mode chain or the global
+    /// map, and where.
+    fn key_binding_of(&self, spelled: &str) -> Option<(String, String)> {
+        self.active_mode_chain()
+            .into_iter()
+            .find_map(|mode| {
+                mode.keybindings
+                    .get(spelled)
+                    .map(|handler| (handler.clone(), format!("{} keymap", mode.name)))
+            })
+            .or_else(|| {
+                self.lisp_bindings
+                    .get(spelled)
+                    .map(|handler| (handler.clone(), "global keymap".to_string()))
+            })
     }
 
     /// Shows `name`'s help in the `*Help*` buffer, replacing what it held.
