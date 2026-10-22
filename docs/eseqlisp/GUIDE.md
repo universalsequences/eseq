@@ -331,7 +331,10 @@ Sizes are in cell units, or `:fill`. Layout containers are `v-stack`,
 and `box`. `box`, `scroll` and `modal` lay out only their first child: wrap
 several in a stack. `:flex N` on a child takes a share of leftover space
 (in an `h-stack` only when the row is `:width :fill`); a `scroll` needs a
-`:height` or `:flex`. `h-stack`
+`:height` or `:flex`. Use `scroll` only when something must stay fixed while
+the rest scrolls (a header over a long list, a view that follows the
+playhead): a buffer's viewport already scrolls, so a panel never needs one
+around itself. `h-stack`
 defaults to gap 1, `v-stack` to gap 0.
 
 `:bind cell` is shorthand for `:value cell :on-change (lambda (v) (set! cell v))`.
@@ -668,6 +671,13 @@ period, `:target (step-param :transpose)` where writes land. In `:run`,
 typed fields between processes. A `set!` of state must sit at the top level
 of `:run`, not inside a nested `let`.
 
+By default a track's process runs only on the step sequencer's trigs.
+`:triggers :all` runs it on every trigger that lands on the track: neural
+and graph sequencer fires, generator `seq-emit`s and other processes'
+emissions too, never what its own track's chain made (its ratchets and
+emits). `(trigger-origin)` says which: `:step`, `:neural`, `:graph`,
+`:generator` or `:process`.
+
 Every `def-process` is also a constructor:
 
 ```lisp
@@ -848,9 +858,9 @@ image tree`. `describe` each for its props. Instrument panel roots:
 
 (def-process name :doc "…" :in ((n :type [lo hi] :default d [:lane true])…)
   [:out ((n :type)…)] [:state ((n init)…)] [:every dur] [:seed :locked]
-  [:target t] [:listen (…)] [:init body] :run body)
+  [:triggers :steps|:all] [:target t] [:listen (…)] [:init body] :run body)
   in out send transpose! veto! roll! ratchet! rand clip wrap now-beats
-  step-note current-note read track hear suggest
+  step-note current-note trigger-origin read track hear suggest
 (def-accumulator name :target t :amount (n :float lo hi :default d :lane true) …)
 (defchan name [init])  (send name v)  (chan-get "name" [default])
 (start h) (stop h) (lane! h :in v…) (connect! h :out (inlet other :in)) (ps)

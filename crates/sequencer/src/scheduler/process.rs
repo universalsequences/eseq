@@ -1665,6 +1665,163 @@ pub(super) fn process_step_event_value(
     eseqlisp::vm::Value::Map(map)
 }
 
+/// Where a trigger the step sequencer did not make came from. A process reads
+/// it as `(trigger-origin)`; the step sequencer's own trigs read `:step`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ForeignTriggerOrigin {
+    Neural,
+    Graph,
+    Generator,
+    Process { runtime_id: u64 },
+}
+
+impl ForeignTriggerOrigin {
+    fn keyword(self) -> &'static str {
+        match self {
+            Self::Neural => "neural",
+            Self::Graph => "graph",
+            Self::Generator => "generator",
+            Self::Process { .. } => "process",
+        }
+    }
+}
+
+/// Run the `:triggers :all` slots of `event.track`'s chain on a trigger the
+/// step sequencer did not make, the way the step loop runs the chain on a
+/// trig: target writes land on the event, `veto!` drops it, `ratchet!`
+/// schedules copies (as process step events, which no chain sees again). A
+/// process emission from this track's own chain is skipped, so a chain never
+/// runs on what it made. Returns `None` when a slot vetoed the event, else
+/// the MIDI-FX overrides the chain wrote.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_track_chain_on_foreign_trigger(
+    scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
+    process_runtime: &mut crate::process::ProcessRuntime,
+    snapshot: &SequencerSnapshot,
+    event: &mut StepEvent,
+    beat: f64,
+    sample_time: u64,
+    samples_per_quarter: f32,
+    origin: ForeignTriggerOrigin,
+    debug_accum: bool,
+) -> Option<Vec<ProcessMidiFxParamOverride>> {
+    let track = event.track;
+    let Some(track_snapshot) = snapshot.tracks.get(track) else {
+        return Some(Vec::new());
+    };
+    let chain = &track_snapshot.process_chain;
+    let slots: Vec<&crate::process::TrackProcessSlot> = chain
+        .slots
+        .iter()
+        .filter(|slot| process_runtime.slot_runs_on_all_triggers(slot))
+        .collect();
+    if slots.is_empty() {
+        return Some(Vec::new());
+    }
+    if let ForeignTriggerOrigin::Process { runtime_id } = origin {
+        if chain
+            .slots
+            .iter()
+            .any(|slot| crate::process::track_process_slot_runtime_id(slot, track).0 == runtime_id)
+        {
+            return Some(Vec::new());
+        }
+    }
+    let step = match event.source {
+        EventSource::Network { seed: Some((seed_track, step)), .. } if seed_track == track => step,
+        _ => 0,
+    };
+    // The track's own step, not the hit's: an emission carries no step
+    // length of its own, and `(step-length)` must mean the grid it lands on.
+    let num_steps = track_snapshot.params.num_steps.max(1);
+    let step_beats = track_snapshot.params.timebase.step_beats(num_steps) as f32;
+    let cycle_beats = num_steps as f64 * step_beats as f64;
+    let cycle = if cycle_beats > 0.0 { (beat / cycle_beats).floor().max(0.0) as u64 } else { 0 };
+    let samples_per_step = step_beats * samples_per_quarter;
+    let mut resolved = event.resolved;
+    let mut overlay = ProcessTargetOverlay::default();
+    let mut alive = true;
+    // Built on first target write only: building clones every midi-fx's params.
+    let midi_fx_descriptors = std::cell::OnceCell::new();
+    for slot in slots {
+        let mut value =
+            process_step_event_value(track, step, cycle, beat, sample_time, resolved, step_beats);
+        if let eseqlisp::vm::Value::Map(map) = &mut value {
+            map.insert(
+                "origin".to_string(),
+                Rc::new(RefCell::new(eseqlisp::vm::Value::Keyword(origin.keyword().to_string()))),
+            );
+        }
+        let Some(invocation) = process_runtime.step_process_invocation_with_inlet_writes(
+            slot,
+            crate::process::ProcessStepRunContext {
+                track,
+                step,
+                cycle,
+                beat,
+                sample_time,
+                step_beats,
+                resolved,
+                note: resolved.transpose,
+                event: value,
+                fire_seed: None,
+                after_reset: false,
+                delay_offset_steps: 0.0,
+            },
+            None,
+        ) else {
+            continue;
+        };
+        invoke_process_cascade(
+            scratch_runtime,
+            process_runtime,
+            invocation,
+            debug_accum,
+            |scratch, process_runtime, runtime_id, commands| {
+                let writes = commands
+                    .iter()
+                    .any(|command| matches!(command, crate::process::ProcessRunCommand::TargetWrite(_)));
+                let descriptors: &[EffectDescriptor] = if writes {
+                    midi_fx_descriptors
+                        .get_or_init(|| scratch.midi_fx_descriptor_source().descriptors())
+                } else {
+                    &[]
+                };
+                apply_step_process_commands(
+                    scratch,
+                    process_runtime,
+                    runtime_id,
+                    snapshot,
+                    descriptors,
+                    track,
+                    step,
+                    beat,
+                    samples_per_step,
+                    Some(slot),
+                    &mut resolved,
+                    &mut overlay,
+                    &mut alive,
+                    commands,
+                    None,
+                    debug_accum,
+                );
+            },
+        );
+        if !alive {
+            return None;
+        }
+    }
+    event.resolved = resolved;
+    upsert_effect_params(&mut event.effect_params, overlay.effect_params);
+    upsert_instrument_params(&mut event.instrument_params, overlay.instrument_params);
+    for (value, written) in event.rack_macro_values.iter_mut().zip(overlay.rack_macro_values) {
+        if written.is_some() {
+            *value = written;
+        }
+    }
+    Some(overlay.midi_fx_params)
+}
+
 /// A cross-track network fire lands on its destination's step grid: instead of
 /// the base stamp [`normalize_network_event_destination`] would give it, it
 /// takes the landing step's params (see [`StepLanding`]). The seed becomes

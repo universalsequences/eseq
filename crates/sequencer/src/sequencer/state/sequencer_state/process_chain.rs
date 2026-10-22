@@ -243,7 +243,13 @@ impl SequencerState {
         &self,
         snapshot: crate::process::PublishedProcessAuthoringSnapshot,
     ) {
-        *self.published_process_authoring.lock().unwrap() = snapshot;
+        {
+            let mut published = self.published_process_authoring.lock().unwrap();
+            if *published == snapshot {
+                return;
+            }
+            *published = snapshot;
+        }
         self.published_process_authoring_version
             .fetch_add(1, Ordering::AcqRel);
     }

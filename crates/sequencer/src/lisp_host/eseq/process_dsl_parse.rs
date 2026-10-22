@@ -437,6 +437,7 @@ pub(in crate::lisp_host) fn parse_process_def(name: &str, args: &[EValue]) -> Re
     let mut state = Vec::new();
     let mut every = None;
     let mut seed_policy = crate::process::ProcessSeedPolicy::default();
+    let mut triggers = crate::process::ProcessTriggerScope::default();
     let mut ports: Option<Vec<crate::process::ProcessPortDef>> = None;
     let mut doc = None;
     let mut run_value = None;
@@ -455,6 +456,7 @@ pub(in crate::lisp_host) fn parse_process_def(name: &str, args: &[EValue]) -> Re
             "state" => state = parse_process_state(value)?,
             "every" => every = Some(parse_process_time_expr(value)?),
             "seed" => seed_policy = parse_process_seed_policy(value)?,
+            "triggers" => triggers = parse_process_trigger_scope(value)?,
             "target" => {
                 if ports.is_some() {
                     return Err("def-process cannot specify both :target and :targets".to_string());
@@ -509,6 +511,7 @@ pub(in crate::lisp_host) fn parse_process_def(name: &str, args: &[EValue]) -> Re
         state,
         every,
         seed_policy,
+        triggers,
         ports: ports.unwrap_or_default(),
         accumulator: None,
         run_source,
@@ -640,6 +643,15 @@ pub(in crate::lisp_host) fn parse_process_seed_policy(value: &EValue) -> Result<
         "locked" => Ok(crate::process::ProcessSeedPolicy::Locked),
         "per-cycle" | "per_cycle" => Ok(crate::process::ProcessSeedPolicy::PerCycle),
         other => Err(format!("unknown process seed policy :{other}")),
+    }
+}
+
+pub(in crate::lisp_host) fn parse_process_trigger_scope(value: &EValue) -> Result<crate::process::ProcessTriggerScope, String> {
+    let name = process_symbol_name(value)?.to_ascii_lowercase();
+    match name.as_str() {
+        "steps" => Ok(crate::process::ProcessTriggerScope::Steps),
+        "all" => Ok(crate::process::ProcessTriggerScope::All),
+        other => Err(format!("unknown process :triggers :{other} (expected :steps or :all)")),
     }
 }
 
@@ -1306,6 +1318,7 @@ pub(in crate::lisp_host) fn construct_anonymous_listener_process(
         state: Vec::new(),
         every: None,
         seed_policy: crate::process::ProcessSeedPolicy::default(),
+        triggers: Default::default(),
         ports: Vec::new(),
         accumulator: None,
         run_source: None,

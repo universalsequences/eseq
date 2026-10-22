@@ -478,17 +478,18 @@ pub(super) fn enqueue_neural_output_with_midi_fx(
     queue: &impl ScheduledEventSink,
     snapshot: &SequencerSnapshot,
     track_output_events: &mut Vec<TrackOutputEvent>,
-    runtime: Option<&mut lisp_host::ScratchControlRuntime>,
+    scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
+    process_runtime: &mut crate::process::ProcessRuntime,
     mut quantizer_state: Option<&mut MidiFxQuantizerState>,
     pattern_epoch: u64,
     sample_time: u64,
     samples_per_quarter: f32,
-    global_transpose: f32,
     arp_phase_beats: f32,
     output: NeuralOutput,
     debug_accum: bool,
 ) -> bool {
     let mut event = output.event;
+    let global_transpose = process_runtime.global_transpose();
     let (seed, neuron) = match event.source.clone() {
         EventSource::Network { seed, neuron, .. } => (seed, neuron),
         EventSource::Step { .. } => {
@@ -497,7 +498,7 @@ pub(super) fn enqueue_neural_output_with_midi_fx(
                     queue,
                     snapshot,
                     track_output_events,
-                    runtime,
+                    scratch_runtime.as_mut(),
                     quantizer_state.as_deref_mut(),
                     pattern_epoch,
                     sample_time,
@@ -523,11 +524,25 @@ pub(super) fn enqueue_neural_output_with_midi_fx(
     if !output.emit_trigger {
         return true;
     }
+    // A track's `:triggers :all` processes run on this hit like on a trig.
+    let Some(midi_fx_params) = run_track_chain_on_foreign_trigger(
+        scratch_runtime,
+        process_runtime,
+        snapshot,
+        &mut event,
+        arp_phase_beats as f64,
+        sample_time,
+        samples_per_quarter,
+        ForeignTriggerOrigin::Neural,
+        debug_accum,
+    ) else {
+        return true;
+    };
     enqueue_step_event_with_midi_fx(
         queue,
         snapshot,
         track_output_events,
-        runtime,
+        scratch_runtime.as_mut(),
         quantizer_state,
         pattern_epoch,
         sample_time,
@@ -536,7 +551,7 @@ pub(super) fn enqueue_neural_output_with_midi_fx(
         global_transpose,
         arp_phase_beats,
         event,
-        Vec::new(),
+        midi_fx_params,
         debug_accum,
     )
 }
@@ -582,6 +597,14 @@ impl EmittedNetworkEventSource {
         }
     }
 
+    pub(super) fn trigger_origin(self) -> ForeignTriggerOrigin {
+        match self {
+            Self::Generator { .. } => ForeignTriggerOrigin::Generator,
+            Self::Process { runtime_id } => ForeignTriggerOrigin::Process { runtime_id },
+            Self::Graph { .. } => ForeignTriggerOrigin::Graph,
+        }
+    }
+
     pub(super) fn resolve_track(self, emitted_track: Option<usize>) -> Option<usize> {
         match self {
             Self::Generator { .. } | Self::Process { .. } => emitted_track.or(Some(0)),
@@ -594,13 +617,13 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
     queue: &impl ScheduledEventSink,
     snapshot: &SequencerSnapshot,
     track_output_events: &mut Vec<TrackOutputEvent>,
-    runtime: Option<&mut lisp_host::ScratchControlRuntime>,
+    scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
+    process_runtime: &mut crate::process::ProcessRuntime,
     quantizer_state: Option<&mut MidiFxQuantizerState>,
     pattern_epoch: u64,
     sample_time: u64,
     samples_per_quarter: f32,
     arp_phase_beats: f32,
-    global_transpose: f32,
     source: EmittedNetworkEventSource,
     emitted: lisp_host::EmittedAccumulatorEvent,
     landing: Option<StepLanding>,
@@ -695,7 +718,7 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
     // landing stamp so it is the most specific source for this hit.
     let mut midi_fx_params = Vec::new();
     if !emitted.named_params.is_empty() {
-        let midi_fx = runtime
+        let midi_fx = scratch_runtime
             .as_ref()
             .map(|runtime| runtime.midi_fx_descriptor_source());
         apply_named_params(
@@ -706,18 +729,33 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
             &mut midi_fx_params,
         );
     }
+    // A track's `:triggers :all` processes run on this hit like on a trig.
+    let Some(chain_midi_fx_params) = run_track_chain_on_foreign_trigger(
+        scratch_runtime,
+        process_runtime,
+        snapshot,
+        &mut event,
+        arp_phase_beats as f64,
+        sample_time,
+        samples_per_quarter,
+        source.trigger_origin(),
+        debug_accum,
+    ) else {
+        return true;
+    };
+    midi_fx_params.extend(chain_midi_fx_params);
 
     enqueue_step_event_with_midi_fx(
         queue,
         snapshot,
         track_output_events,
-        runtime,
+        scratch_runtime.as_mut(),
         quantizer_state,
         pattern_epoch,
         sample_time,
         arp_phase_beats as f64,
         samples_per_quarter,
-        global_transpose,
+        process_runtime.global_transpose(),
         arp_phase_beats,
         event,
         midi_fx_params,
@@ -745,7 +783,16 @@ pub(super) fn enqueue_due_process_emissions(
     landing: Option<&dyn Fn(usize, f64) -> Option<StepLanding>>,
     debug_accum: bool,
 ) -> bool {
-    for item in process_runtime.take_due_events(up_to_beat) {
+    // A `:triggers :all` chain running on an emission below can schedule
+    // ratchets that are already due, so refill until nothing is.
+    let mut due = std::collections::VecDeque::new();
+    loop {
+        if due.is_empty() {
+            due.extend(process_runtime.take_due_events(up_to_beat));
+        }
+        let Some(item) = due.pop_front() else {
+            break;
+        };
         let straight_sample_time = chunk_start_sample.saturating_add(
             ((item.beat - chunk_start_beats).max(0.0) * samples_per_quarter).round() as u64,
         );
@@ -825,13 +872,13 @@ pub(super) fn enqueue_due_process_emissions(
                     queue,
                     snapshot,
                     track_output_events,
-                    scratch_runtime.as_mut(),
+                    scratch_runtime,
+                    process_runtime,
                     Some(&mut *quantizer_state),
                     pattern_epoch,
                     sample_time,
                     samples_per_quarter as f32,
                     item.beat as f32,
-                    process_runtime.global_transpose(),
                     source,
                     event,
                     landing,

@@ -83,6 +83,9 @@ pub(crate) struct SchedulerDriver {
     published_sequencers_version: u64,
     published_process_authoring_version: u64,
     scratch_runtime: Option<lisp_host::ScratchControlRuntime>,
+    /// How many times `advance` rebuilt the scheduler VM.
+    #[cfg(test)]
+    pub(super) scratch_runtime_builds: u32,
     debug_accum: bool,
     debug_graph: bool,
     runtime_errors: Vec<String>,
@@ -136,6 +139,8 @@ impl SchedulerDriver {
             published_sequencers_version: u64::MAX,
             published_process_authoring_version: u64::MAX,
             scratch_runtime: None,
+            #[cfg(test)]
+            scratch_runtime_builds: 0,
             runtime_errors: Vec::new(),
             debug_accum: std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some(),
             debug_graph: std::env::var_os("TINYSEQ_DEBUG_GRAPH").is_some(),
@@ -272,11 +277,23 @@ impl SchedulerDriver {
         let latest_published_sequencers_version = state.published_sequencers_version();
         let latest_published_process_authoring_version =
             state.published_process_authoring_version();
-        if latest_scratch_source_version != self.scratch_source_version
+        let process_authoring_changed = latest_published_process_authoring_version
+            != self.published_process_authoring_version;
+        // Only the scratch source and the published generators live in the
+        // scheduler VM. Process bodies ship as source in the authoring
+        // snapshot and compile lazily into the VM's run cache, so a
+        // process-only republish (a panel re-declaring a track's chain on
+        // every slider tick) keeps the VM and its cache: rebuilding it
+        // re-evaluates the builtin libraries on this thread, which outlasts
+        // the lookahead and plays the next hits late.
+        let rebuild_runtime = latest_scratch_source_version != self.scratch_source_version
             || latest_published_sequencers_version != self.published_sequencers_version
-            || latest_published_process_authoring_version
-                != self.published_process_authoring_version
-        {
+            || (process_authoring_changed && self.scratch_runtime.is_none());
+        if rebuild_runtime {
+            #[cfg(test)]
+            {
+                self.scratch_runtime_builds += 1;
+            }
             let user_source = state.scratch_source();
             if debug_accum {
                 eprintln!(
@@ -358,8 +375,6 @@ impl SchedulerDriver {
             }
             self.scratch_source_version = latest_scratch_source_version;
             self.published_sequencers_version = latest_published_sequencers_version;
-            self.published_process_authoring_version =
-                latest_published_process_authoring_version;
             let generator_defs = self.scratch_runtime
                 .as_ref()
                 .map(|runtime| runtime.sequencer_defs())
@@ -369,17 +384,6 @@ impl SchedulerDriver {
             // (eseq-85a.5): the parked-on-error set is scoped to one
             // runtime build.
             self.lookahead_state.parked_generators.clear();
-            let process_authoring = self.scratch_runtime
-                .as_ref()
-                .map(|runtime| runtime.process_authoring_snapshot())
-                .unwrap_or_default();
-            let process_authoring = crate::process::merge_authoring_snapshots(
-                process_authoring,
-                published_process_authoring.to_runtime(),
-            );
-            self.lookahead_state
-                .process_runtime
-                .sync_authoring(process_authoring, self.lookahead_state.clock.total_beats);
 
             let new_manifests: Vec<crate::graph::GraphManifest> =
                 published.iter().filter_map(|s| s.graph.clone()).collect();
@@ -407,6 +411,21 @@ impl SchedulerDriver {
             }
             self.loaded_graph_overrides = Some(snapshot.graph_overrides.clone());
             self.lookahead_state.graph_overrides_applied = Some(snapshot.graph_overrides.clone());
+        }
+        if rebuild_runtime || process_authoring_changed {
+            self.published_process_authoring_version =
+                latest_published_process_authoring_version;
+            let process_authoring = self.scratch_runtime
+                .as_ref()
+                .map(|runtime| runtime.process_authoring_snapshot())
+                .unwrap_or_default();
+            let process_authoring = crate::process::merge_authoring_snapshots(
+                process_authoring,
+                state.published_process_authoring().to_runtime(),
+            );
+            self.lookahead_state
+                .process_runtime
+                .sync_authoring(process_authoring, self.lookahead_state.clock.total_beats);
         }
 
         if self.loaded_graph_overrides.as_ref() != Some(&snapshot.graph_overrides) {

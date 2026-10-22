@@ -1701,12 +1701,12 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            Some(&mut runtime),
+            &mut Some(runtime),
+            &mut crate::process::ProcessRuntime::default(),
             None,
             0,
             1_000,
             48_000.0,
-            0.0,
             0.0,
             EmittedNetworkEventSource::Generator { index: 0 },
             lisp_host::EmittedAccumulatorEvent {
@@ -1750,6 +1750,135 @@
         assert_eq!(track_output_events[0].transpose, 12.0);
     }
 
+    /// Enqueue one emitted hit on track 0 through `scratch`'s process
+    /// authoring and return the transposes it put in the queue.
+    fn emitted_hit_transposes(
+        state: &Arc<SequencerState>,
+        scratch: lisp_host::ScratchControlRuntime,
+        source: EmittedNetworkEventSource,
+    ) -> (lisp_host::ScratchControlRuntime, Vec<f32>) {
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut process_runtime = crate::process::ProcessRuntime::default();
+        process_runtime.sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+        let queue = ScheduledEventQueue::<16>::new();
+        let mut track_output_events = Vec::new();
+        let mut scratch = Some(scratch);
+        assert!(super::enqueue_emitted_network_event_with_midi_fx(
+            &queue,
+            &snapshot,
+            &mut track_output_events,
+            &mut scratch,
+            &mut process_runtime,
+            None,
+            0,
+            1_000,
+            48_000.0,
+            0.0,
+            source,
+            lisp_host::EmittedAccumulatorEvent {
+                origin_note: None,
+                offset_beats: 0.0,
+                track: Some(0),
+                resolved: test_resolved_step(),
+                chord: Vec::new(),
+                chord_durations: Vec::new(),
+                chord_step_transpose: 0.0,
+                effect_params: Vec::new(),
+                instrument_params: Vec::new(),
+                named_params: Vec::new(),
+            },
+            None,
+            false,
+        ));
+        let mut transposes = Vec::new();
+        while let Some(event) = queue.pop_owned() {
+            if let ScheduledEventKind::NetworkTrigger { resolved, .. } = event.kind {
+                transposes.push(resolved.transpose);
+            }
+        }
+        (scratch.expect("scratch runtime"), transposes)
+    }
+
+    #[test]
+    fn triggers_all_processes_run_on_emitted_hits_and_skip_their_own() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            vec![Vec::new()],
+            vec![EffectDescriptor::builtin_sampler()],
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process bump-steps
+                  :target (step-param :transpose)
+                  :run (target-add! 5))
+                (def-process bump-all
+                  :triggers :all
+                  :target (step-param :transpose)
+                  :run (target-add! 7))
+                (def-process drop-generated
+                  :triggers :all
+                  :run (if (= (trigger-origin) :generator) (veto!) nil))
+                (processes :track 0 (bump-steps) (bump-all))
+                "#,
+            )
+            .expect("define processes");
+        let generator = EmittedNetworkEventSource::Generator { index: 0 };
+
+        // Only the :triggers :all slot runs on a generator hit.
+        let (scratch, transposes) = emitted_hit_transposes(&state, scratch, generator);
+        assert_eq!(transposes, vec![7.0]);
+
+        // A hit this track's own chain emitted is not run through it again.
+        let own = state.track_process_chain(0).expect("chain").slots[1].clone();
+        let own_id = crate::process::track_process_slot_runtime_id(&own, 0).0;
+        let (mut scratch, transposes) = emitted_hit_transposes(
+            &state,
+            scratch,
+            EmittedNetworkEventSource::Process { runtime_id: own_id },
+        );
+        assert_eq!(transposes, vec![0.0]);
+        let (_, transposes) = emitted_hit_transposes(
+            &state,
+            {
+                scratch.eval("(processes :track 0 (drop-generated))").expect("swap chain");
+                scratch
+            },
+            EmittedNetworkEventSource::Process { runtime_id: own_id + 1 },
+        );
+        assert_eq!(transposes, vec![0.0], "another process's emission plays");
+
+        // (trigger-origin) tells the process where the hit came from.
+        let mut scratch = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            vec![Vec::new()],
+            vec![EffectDescriptor::builtin_sampler()],
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process drop-generated
+                  :triggers :all
+                  :run (if (= (trigger-origin) :generator) (veto!) nil))
+                (processes :track 0 (drop-generated))
+                "#,
+            )
+            .expect("define veto process");
+        let (scratch, transposes) = emitted_hit_transposes(&state, scratch, generator);
+        assert!(transposes.is_empty(), "generator hit vetoed: {transposes:?}");
+        let (_, transposes) = emitted_hit_transposes(
+            &state,
+            scratch,
+            EmittedNetworkEventSource::Graph { graph_index: 0, node_index: 0 },
+        );
+        assert_eq!(transposes, vec![0.0], "graph hit plays");
+    }
+
     #[test]
     fn emitted_network_event_trigger_to_track_copies_to_selected_target_track() {
         let state = Arc::new(SequencerState::new(
@@ -1791,12 +1920,12 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            Some(&mut runtime),
+            &mut Some(runtime),
+            &mut crate::process::ProcessRuntime::default(),
             None,
             0,
             1_000,
             48_000.0,
-            0.0,
             0.0,
             EmittedNetworkEventSource::Generator { index: 0 },
             lisp_host::EmittedAccumulatorEvent {
@@ -2402,13 +2531,13 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            Some(&mut runtime),
+            &mut Some(runtime),
+            &mut crate::process::ProcessRuntime::default(),
             None,
             0,
             graph_emissions[0].sample_time,
             48_000.0,
             1.0,
-            0.0,
             EmittedNetworkEventSource::Graph {
                 graph_index: 0,
                 node_index: graph_emissions[0].node_index,
@@ -2456,12 +2585,12 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            None,
+            &mut None,
+            &mut crate::process::ProcessRuntime::default(),
             None,
             0,
             1_000,
             48_000.0,
-            0.0,
             0.0,
             EmittedNetworkEventSource::Graph {
                 graph_index: 0,
@@ -2525,12 +2654,12 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            Some(&mut runtime),
+            &mut Some(runtime),
+            &mut crate::process::ProcessRuntime::default(),
             None,
             0,
             1_000,
             48_000.0,
-            0.0,
             0.0,
             EmittedNetworkEventSource::Graph {
                 graph_index: 0,
@@ -10722,12 +10851,12 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            None,
+            &mut None,
+            &mut crate::process::ProcessRuntime::default(),
             None,
             0,
             1_000,
             48_000.0,
-            0.0,
             0.0,
             NeuralOutput {
                 sample_time: 1_000,
@@ -12206,12 +12335,12 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            None,
+            &mut None,
+            &mut crate::process::ProcessRuntime::default(),
             None,
             7,
             1234,
             48_000.0,
-            0.0,
             0.0,
             NeuralOutput {
                 sample_time: 1234,
@@ -12334,12 +12463,12 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            None,
+            &mut None,
+            &mut crate::process::ProcessRuntime::default(),
             None,
             7,
             1234,
             48_000.0,
-            0.0,
             0.0,
             NeuralOutput {
                 sample_time: 1234,
@@ -16955,6 +17084,109 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
     }
 
     #[test]
+    fn scheduler_driver_process_only_republish_keeps_the_runtime() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(4);
+            for step in 0..4 {
+                state.pattern.patterns[0].set_step_active(step, true);
+            }
+            // A panel re-declaring a track's chain on every slider tick: the
+            // UI VM republishes process authoring, nothing else.
+            let mut ui = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+            ui.eval(
+                r#"
+                (def-process shift-test
+                  :target (step-param :transpose)
+                  :in ((by :float -24 24 :default 0))
+                  :run (target-add! (in :by)))
+                "#,
+            )
+            .expect("define process");
+            let declare = |ui: &mut lisp_host::ScratchControlRuntime, by: i32| {
+                ui.eval(&format!("(processes :track 0 (shift-test :by {by}))"))
+                    .expect("declare chain");
+                state.publish_process_authoring(
+                    ui.process_authoring_snapshot().to_published().expect("publishable"),
+                );
+                state.publish_scheduler_snapshot();
+            };
+            state.transport.playing.store(true, Ordering::Relaxed);
+            declare(&mut ui, 3);
+
+            let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+            let mut driver =
+                super::worker::SchedulerDriver::new(state.clone(), 48_000, 512, queue.clone());
+            let input = super::worker::SchedulerInput::Offline;
+            driver.advance(0, 24_000, input);
+            let first = observed_triggers(&queue);
+            assert!(!first.is_empty());
+            assert!(first.iter().all(|event| event.transpose == 3.0), "{first:?}");
+            assert_eq!(driver.scratch_runtime_builds, 1);
+
+            for (pass, by) in [5, -2, 7].into_iter().enumerate() {
+                declare(&mut ui, by);
+                let start = 24_000 * (pass as u64 + 1);
+                driver.advance(start, start + 24_000, input);
+                let events = observed_triggers(&queue);
+                assert!(!events.is_empty());
+                assert!(
+                    events.iter().all(|event| event.transpose == by as f32),
+                    "by={by}: {events:?}"
+                );
+            }
+            assert_eq!(
+                driver.scratch_runtime_builds, 1,
+                "a process-only republish must not rebuild the scheduler VM"
+            );
+
+            // An identical republish is not a change at all.
+            let version = state.published_process_authoring_version();
+            state.publish_process_authoring(
+                ui.process_authoring_snapshot().to_published().expect("publishable"),
+            );
+            assert_eq!(state.published_process_authoring_version(), version);
+        });
+    }
+
+    #[test]
+    fn track_step_process_state_survives_between_steps() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(4);
+            for step in 0..4 {
+                state.pattern.patterns[0].set_step_active(step, true);
+            }
+            // `(processes :track …)` gives the slot the authored instance's
+            // runtime id; the run's `:state` must still reach the next step.
+            let mut ui = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+            ui.eval(
+                r#"
+                (def-process count-up
+                  :target (step-param :transpose)
+                  :state ((n 0))
+                  :run (do (set! n (+ n 1)) (target-set! n)))
+                (processes :track 0 (count-up))
+                "#,
+            )
+            .expect("declare counting process");
+            state.publish_process_authoring(
+                ui.process_authoring_snapshot().to_published().expect("publishable"),
+            );
+            state.transport.playing.store(true, Ordering::Relaxed);
+            state.publish_scheduler_snapshot();
+            let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+            let mut driver =
+                super::worker::SchedulerDriver::new(state.clone(), 48_000, 512, queue.clone());
+            // Four 16ths at 120 bpm: one cycle in 24_000 samples.
+            driver.advance(0, 24_000, super::worker::SchedulerInput::Offline);
+            let transposes: Vec<f32> =
+                observed_triggers(&queue).iter().map(|event| event.transpose).collect();
+            assert_eq!(transposes, vec![1.0, 2.0, 3.0, 4.0]);
+        });
+    }
+
+    #[test]
     fn scheduler_driver_preserves_live_roll_start_hold_with_an_injected_clock() {
         run_with_scheduler_stack(|| {
             let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
@@ -19509,4 +19741,6 @@ fn prebuilt_chunks_take_their_scenes_live_groove_table() {
         super::lookahead::with_live_rack_config(&mut cache, Arc::new(verse_chunk), &base);
     assert!(Arc::ptr_eq(&patched.track_grooves, &verse));
 }
+
+
 

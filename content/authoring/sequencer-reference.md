@@ -290,6 +290,14 @@ package with a weight matrix panel) and
   that group's `tracks` are its pads, in pad order.
 - Offer "Off" in track pickers (store -1, skip the emit), so a voice can be
   silenced without losing its settings.
+- Projects can have dozens of tracks. A picker of several tracks shows only
+  the chosen ones (click to remove) plus a `dropdown` of the rest, inside a
+  `wrap` with a fixed `:width`; never a button per project track in an
+  `h-stack`, which runs off the panel.
+- Do not wrap the panel, or a section of it, in `scroll`: the buffer
+  viewport already scrolls. Use `scroll` only when something must stay fixed
+  while the rest moves (a header over a long list, a view that follows the
+  playhead), and give it a `:height` or `:flex`.
 
 ### sexp-slot: editable lists
 
@@ -334,6 +342,8 @@ to grow last in the row.
   points DOWN. `aspect` is width/height in pixels.
 - Available: `+ - * / min max abs clamp mix smoothstep floor ceil fract
   round mod pow exp sqrt sin cos atan2 length vec2 rgba`, `let`, `if`,
+  `and or not` (over comparisons; a number counts when nonzero, so
+  `(and step.active (> x 0))` works),
   `sdf/circle sdf/rect sdf/rounded-rect sdf/line sdf/translate sdf/rotate`,
   `sdf/layer` (later children on top), `sdf/paint dist color` (straight
   alpha), `sdf/fill dist (material :color …)`, `sdf/region :key visible
@@ -342,8 +352,6 @@ to grow last in the row.
   (`my.pulse/dot`), and exported, even in the module that defines them.
 - Pointer callbacks: `:on-mouse-down` / `:on-drag` / `:on-mouse-up`
   `(lambda (sx sy region) …)`. `sx`, `sy` are [-1, 1] per axis with no
-  `and or not` (over comparisons; a number counts when nonzero, so
-  `(and step.active (> x 0))` works),
   aspect correction; `region` is the `sdf/region` keyword under the press.
 - Each pixel should only evaluate what is near it (for example the nearest
   step), not loop over everything.
