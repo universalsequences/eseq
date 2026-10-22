@@ -265,7 +265,8 @@ fn rack_clip_request(app: &app::App, map: &Payload) -> Result<Option<RackEdit>, 
     let (field, value) = SetValue::field(map)?;
     match field.as_str() {
         "name" => {
-            let name = value.name()?;
+            // Blank is allowed: it clears the name back to "Clip N".
+            let name = value.label()?.trim();
             let changed = name != current;
             let name = name.to_string();
             Ok(changed.then_some(RackEdit::ClipName { group, clip, name }))

@@ -22736,6 +22736,11 @@ use panel_kinds_seed::*;
                 "drop position snaps down to the bar grid"
             );
             assert_eq!(action_field(&recorded[8], "scene"), Value::Number(1.0));
+            assert_eq!(
+                action_field(&recorded[8], "place-patterns"),
+                Value::Bool(true),
+                "a pill drop stamps the scene's track/rack clips"
+            );
         }
 
         // Start-edge drag on a track clip: NOT a move and not an end resize —
@@ -24435,7 +24440,8 @@ use panel_kinds_seed::*;
         assert!(commands.iter().any(|command| matches!(command,
             eseqlisp::host::HostCommand::Custom { name, payload }
                 if name == "arrangement-scene-insert" && *payload == map_value([
-                    ("beat", Value::Number(0.0)), ("scene", Value::Number(1.0))]))));
+                    ("beat", Value::Number(0.0)), ("scene", Value::Number(1.0)),
+                    ("place-patterns", Value::Bool(true))]))));
 
         let right_click = |editor: &mut eseqlisp::Editor| {
             eseqlisp::widget_render::clear_overlay();
@@ -24467,7 +24473,8 @@ use panel_kinds_seed::*;
         assert!(commands.iter().any(|command| matches!(command,
             eseqlisp::host::HostCommand::Custom { name, payload }
                 if name == "arrangement-scene-insert" && *payload == map_value([
-                    ("beat", Value::Number(8.0)), ("scene", Value::Number(1.0))]))));
+                    ("beat", Value::Number(8.0)), ("scene", Value::Number(1.0)),
+                    ("place-patterns", Value::Bool(true))]))));
 
         seed_kind_spans(&mut editor, &[(0.0, 16.0, 0)]);
         editor.refresh_runtime_side_effects();
@@ -24486,6 +24493,35 @@ use panel_kinds_seed::*;
             eseqlisp::host::HostCommand::Custom { name, payload }
                 if name == "arrangement-scene-patterns-place" && *payload == map_value([
                     ("beat", Value::Number(0.0))]))));
+
+        // Two banks: the scene choices split into one submenu per bank, and
+        // picking a scene in bank B replaces the span's clips with its own.
+        seed_kind_scene_banks(&mut editor, &[(1, Some("A"), 1), (2, Some("B"), 1)], 0, None);
+        seed_kind_spans(&mut editor, &[]);
+        editor.refresh_runtime_side_effects();
+        right_click(&mut editor);
+        let key = |editor: &mut eseqlisp::Editor, code| {
+            editor.handle_key(crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE));
+        };
+        key(&mut editor, crossterm::event::KeyCode::Right);
+        let layout = editor.widget_layout().unwrap();
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/arr-set-scene-bank-1").is_some());
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/arr-set-scene-1").is_none(),
+            "scenes sit inside their bank's submenu");
+        key(&mut editor, crossterm::event::KeyCode::Down);
+        key(&mut editor, crossterm::event::KeyCode::Right);
+        let layout = editor.widget_layout().unwrap();
+        let choice = find_layout_node_by_stable_key_suffix(&layout, "/arr-set-scene-1")
+            .expect("bank B's scene");
+        let callback = choice.props.get("on-select").unwrap().clone();
+        editor.drain_host_commands();
+        editor.runtime_mut().invoke(callback, vec![Value::Nil]).unwrap();
+        let commands = editor.drain_host_commands();
+        assert!(commands.iter().any(|command| matches!(command,
+            eseqlisp::host::HostCommand::Custom { name, payload }
+                if name == "arrangement-scene-insert" && *payload == map_value([
+                    ("beat", Value::Number(8.0)), ("scene", Value::Number(1.0)),
+                    ("place-patterns", Value::Bool(true))]))));
     }
 
     #[test]

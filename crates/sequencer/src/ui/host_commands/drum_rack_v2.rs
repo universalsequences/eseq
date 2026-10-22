@@ -18,6 +18,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "launch-rack-clip",
     "save-rack-clip-as",
     "delete-rack-clip",
+    "rename-rack-clips-in-order",
 ];
 
 /// How long a pad-grid hit sounds before its note-off. The pad grid is a
@@ -359,6 +360,22 @@ pub(super) fn handle(
             };
             match app.delete_rack_clip_recorded(group_id, clip_id) {
                 Ok(()) => sync_rack_pad_map(app, editor, &track_groups, &ui_epoch),
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+            }
+        }
+        // Bulk rename (Finder-style): "<prefix> 1..N" in bank order; a blank
+        // prefix clears every name back to the clip's position.
+        "rename-rack-clips-in-order" => {
+            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
+            let prefix = extract_string_from_payload(&payload, "prefix").unwrap_or_default();
+            let Some(group_id) = group_id else {
+                editor.handle_host_event(HostEvent::Status(
+                    "rename-rack-clips-in-order needs a group id".to_string(),
+                ));
+                return;
+            };
+            match app.rename_rack_clips_in_order_recorded(group_id, &prefix) {
+                Ok(()) => editor.handle_host_event(HostEvent::Status("Renamed rack clips".to_string())),
                 Err(error) => editor.handle_host_event(HostEvent::Status(error)),
             }
         }

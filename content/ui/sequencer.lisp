@@ -60,6 +60,10 @@
         seq-view
         clip-menu
         clip-rename
+        begin-clip-rename
+        begin-clip-bulk-rename
+        finish-clip-rename
+        clip-bulk-rename-preview
         lane-edit
         patch-view
         card-menu
@@ -178,8 +182,9 @@
           (modes '())
           (cursors '())))
 
-;; The rack clip menu (where it opened, the clip it targets) and the inline
-;; clip rename in progress (the clip, nil when none is, and the draft).
+;; The rack clip menu (where it opened, the clip it targets) and the rename
+;; modal in progress (the clip, nil when none is, and the draft). `bulk`
+;; renames the clip's whole bank in order, the draft being the prefix.
 (def-kind clip-menu
   :key ()
   :state ((open false)
@@ -189,7 +194,8 @@
 (def-kind clip-rename
   :key ()
   :state ((clip rack-clip :default nil)
-          (draft "")))
+          (draft "")
+          (bulk false)))
 
 ;; The lane strip's edit scope (`all`: project lanes edit the shared slot
 ;; every track inherits, else this track's fork) and the UI-only slider step
@@ -3486,8 +3492,9 @@
 ;; A collapsed rack is no longer a dead row: it shows the rack's clip bank as a
 ;; Max-style preset box grid. The cell the CURRENT scene plays is lit;
 ;; clicking one launches it (quantized exactly like a scene launch),
-;; right-clicking opens a menu (rename in place, launch, save what the rack
-;; is playing now as a new clip, delete), and the trailing number picker
+;; right-clicking opens a menu (rename, rename the whole bank in order, launch,
+;; save what the rack is playing now as a new clip, delete), and the trailing
+;; number picker
 ;; shows the lit clip's number and launches whatever number is typed in.
 ;; Drag reorder is not wired yet; the bank order is the create order.
 
@@ -3498,7 +3505,6 @@
 ;; more rows rather than stretching the row past the window.
 (def rack-clip-cell-width 4.34)
 (def rack-clip-cell-height 2.17)
-(def rack-clip-rename-width 4.6)
 
 ;; Whether the held clip rc is still in its rack's bank (a delete, an undo or
 ;; a project load drops it).
@@ -3507,15 +3513,76 @@
 
 (def begin-clip-rename (rc)
   (set! clip-menu.open false)
+  (set! clip-rename.bulk false)
   (set! clip-rename.draft rc.name)
   (set! clip-rename.clip rc))
 
+;; Finder-style bulk rename of rc's whole bank: "<prefix> 1..N".
+(def begin-clip-bulk-rename (rc)
+  (set! clip-menu.open false)
+  (set! clip-rename.bulk true)
+  (set! clip-rename.draft "")
+  (set! clip-rename.clip rc))
+
+;; A blank name (or prefix) clears names back to "Clip N".
 (def finish-clip-rename (commit)
   (let ((rc clip-rename.clip))
     (when (and commit (clip-listed? rc))
-      (set! rc.name clip-rename.draft))
+      (if clip-rename.bulk
+        (host-command "rename-rack-clips-in-order"
+          (dict :group-id rc.group.gid :prefix clip-rename.draft))
+        (set! rc.name clip-rename.draft)))
     (set! clip-rename.clip nil)
     (set! clip-rename.draft "")))
+
+;; The names a bulk rename with the current prefix gives the bank.
+(def clip-bulk-rename-preview (rc)
+  (let ((n (len rc.group.clips))
+        (prefix (string-trim clip-rename.draft))
+        (stem (if (= prefix "") "Clip" prefix)))
+    (if (< n 3)
+      (if (= n 2) (str stem " 1, " stem " 2") (str stem " 1"))
+      (str stem " 1, " stem " 2, … " stem " " n))))
+
+(def clip-rename-body (rc)
+  (let ((bulk clip-rename.bulk))
+    (v-stack :width :fill :height :fill :gap 0.6
+      (label (if bulk
+               (str "Renames all " (len rc.group.clips) " clips of "
+                    rc.group.name " in order.")
+               (str "Clip " (+ rc.index 1) " of " rc.group.name))
+        :key "rack-clip-rename-info" :bg :transparent :font-size 11 :color :dim)
+      (v-stack :width :fill :gap 0.3
+        (label (if bulk "Prefix" "Name") :bg :transparent :font-size 11)
+        (text-input :key "rack-clip-rename-input" :width :fill :height 1.35 :font-size 11
+          :value clip-rename.draft
+          :placeholder (if bulk "Clip" (str "Clip " (+ rc.index 1)))
+          :auto-focus true
+          :select-all-on-focus true
+          :on-change (lambda (v) (set! clip-rename.draft v))
+          :on-submit (lambda () (finish-clip-rename true))
+          :on-cancel (lambda () (finish-clip-rename false))))
+      (label (if bulk
+               (clip-bulk-rename-preview rc)
+               "Leave blank to show the clip's number.")
+        :key "rack-clip-rename-hint" :bg :transparent :font-size 10.5 :color :dim :flex 1)
+      (h-stack :width :fill :gap 0.8 :align :center
+        (box :height 0 :flex 1)
+        (button "Cancel" :key "rack-clip-rename-cancel" :variant :ghost
+          :on-click |event| (finish-clip-rename false))
+        (button (if bulk "Rename All" "Rename") :key "rack-clip-rename-commit"
+          :on-click |event| (finish-clip-rename true))))))
+
+;; Mounted once at the buffer root, like the clip menu.
+(def rack-clip-rename-modal ()
+  (let ((rc clip-rename.clip)
+        (open (clip-listed? rc)))
+    (modal :key "rack-clip-rename-modal" :is-open open
+      :on-close (lambda () (finish-clip-rename false))
+      :title (if clip-rename.bulk "Rename All Clips" "Rename Clip")
+      :width-px 460 :height-px 230
+      ;; Closed, the buffer's rebuilds must not evaluate the body.
+      (if open (clip-rename-body rc) (nothing)))))
 
 (def open-clip-menu (event rc)
   (set! clip-menu.clip rc)
@@ -3534,6 +3601,8 @@
   (menu-of clip-menu
     (menu-item "Rename…" :key "rack-clip-menu-rename"
       :on-select (clip-menu-action begin-clip-rename))
+    (menu-item "Rename All Clips in Order…" :key "rack-clip-menu-rename-all"
+      :on-select (clip-menu-action begin-clip-bulk-rename))
     (menu-item "Launch" :key "rack-clip-menu-launch"
       :on-select (clip-menu-action launch-rack-clip!))
     (menu-separator)
@@ -3545,9 +3614,8 @@
 ;; The rack color c, scaled by `k`.
 (def tint (c k) (map (lambda (i) (* k (rgb-part c i))) (range 0 3)))
 
-;; Clip rc's launch cell, tinted `tinted` (its rack's color, dimmed). A
-;; subtree of its own: a rename's start, its keystrokes and its end re-run
-;; this cell alone.
+;; Clip rc's launch cell, tinted `tinted` (its rack's color, dimmed), labelled
+;; with its bank position (the number the picker and unnamed clips use).
 (def rack-clip-cell (g rc tinted)
   (subtree :key (str "rack-clip-cell-" g.gid "-" rc.cid)
     ;; An unkeyed root: the subtree's key would replace the cell's, which
@@ -3555,40 +3623,28 @@
     (h-stack (rack-clip-cell-body g rc tinted))))
 
 (def rack-clip-cell-body (g rc tinted)
-  (let ((renaming (= clip-rename.clip rc)))
-    (box :key (str "rack-clip-" g.gid "-" rc.cid)
-      :debug-name "rack-clip-cell"
-      :width (if renaming rack-clip-rename-width rack-clip-cell-width)
-      :height rack-clip-cell-height
-      :padding (if renaming 0.1 0.3)
-      :bg :transparent
-      :background "track-pattern-cell-bg"
-      :active #'rc.active
-      :assigned 1
-      :override 0
-      :selected 0
-      :track-r (nth tinted 0)
-      :track-g (nth tinted 1)
-      :track-b (nth tinted 2)
-      :on-click (lambda (event)
-        (if event.shift
-          (begin-clip-rename rc)
-          (launch-rack-clip! rc)))
-      :on-right-click (lambda (event) (open-clip-menu event rc))
-      (if renaming
-        (text-input
-          :key (str "rack-clip-rename-" g.gid "-" rc.cid)
-          :width 4.3 :height 0.7 :font-size 10
-          :value clip-rename.draft
-          :auto-focus true
-          :select-all-on-focus true
-          :on-change (lambda (name) (set! clip-rename.draft name))
-          :on-submit (lambda () (finish-clip-rename true))
-          :on-cancel (lambda () (finish-clip-rename false))
-          :on-blur (lambda () (finish-clip-rename true)))
-        (label rc.cid
-          :color :dim :active #'rc.active :active-color :white
-          :font-size 8  :bg :transparent :v-align :center :h-align :center)))))
+  (box :key (str "rack-clip-" g.gid "-" rc.cid)
+    :debug-name "rack-clip-cell"
+    :width rack-clip-cell-width
+    :height rack-clip-cell-height
+    :padding 0.3
+    :bg :transparent
+    :background "track-pattern-cell-bg"
+    :active #'rc.active
+    :assigned 1
+    :override 0
+    :selected 0
+    :track-r (nth tinted 0)
+    :track-g (nth tinted 1)
+    :track-b (nth tinted 2)
+    :on-click (lambda (event)
+      (if event.shift
+        (begin-clip-rename rc)
+        (launch-rack-clip! rc)))
+    :on-right-click (lambda (event) (open-clip-menu event rc))
+    (label (+ rc.index 1)
+      :color :dim :active #'rc.active :active-color :white
+      :font-size 8  :bg :transparent :v-align :center :h-align :center)))
 
 ;; The last cell is a number picker showing the lit clip's number (0 while
 ;; the rack is silent): read it at a glance, or type/drag a number to launch
@@ -4096,6 +4152,8 @@
       (eseq.factory-promote/panel))
     (subtree :key "seq-rack-clip-menu"
       (rack-clip-context-menu))
+    (subtree :key "seq-rack-clip-rename"
+      (rack-clip-rename-modal))
     (v-stack :key "sequencer-tracks" :width :fill :gap 0
       (each (grid-items) |item|
         (grid-render-item item)))

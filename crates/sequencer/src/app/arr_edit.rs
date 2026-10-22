@@ -14,8 +14,9 @@
 //! placement gesture instead requires an empty span, preserving existing clips.
 
 use crate::sequencer::{
-    insert_clip_sorted, insert_rack_clip_sorted, lower_rows_to_arrangement, occlude_rack_span,
-    occlude_span, pattern_play_step, restamped_clip, stamp_scene_clips, ArrClip, ClipId, LaneSpan,
+    arrangement_scene_spans, insert_clip_sorted, insert_rack_clip_sorted, lower_rows_to_arrangement,
+    occlude_rack_span, occlude_span, pattern_play_step, restamp_changed_scene_spans,
+    restamped_clip, stamp_scene_clips, ArrClip, ClipId, LaneSpan,
     LaneSource, ProjectArrangement, ProjectScenes, ProjectSongRow, RackArrClip, RackClipId,
     SongCompileContext, SongRowId,
 };
@@ -1092,34 +1093,58 @@ impl App {
     pub fn arr_scene_event_insert(&mut self, beat: f64, scene: usize) -> Result<(), String> {
         let beat = finite_beat("Scene event beat", beat)?;
         self.edit_arrangement("Insert scene event", move |arrangement, _scenes| {
-            if beat >= arrangement.end_beat {
-                arrangement.end_beat = next_bar_end(beat);
-            }
-            match arrangement
-                .scene_lane
-                .iter()
-                .position(|event| event.start_beat == beat)
-            {
-                Some(existing) => {
-                    arrangement.scene_lane[existing].scene = scene;
-                }
-                None => {
-                    let position = arrangement
-                        .scene_lane
-                        .iter()
-                        .position(|event| event.start_beat > beat)
-                        .unwrap_or(arrangement.scene_lane.len());
-                    arrangement.scene_lane.insert(
-                        position,
-                        crate::sequencer::SceneEvent {
-                            start_beat: beat,
-                            scene,
-                        },
-                    );
-                }
-            }
+            Self::insert_scene_marker(arrangement, beat, scene);
             Ok(())
         })
+    }
+
+    /// Insert a scene marker AND stamp that scene's linked track patterns
+    /// and rack clips under its span, as one undo entry: what dropping a
+    /// transport scene pill on the timeline means — the same lanes a
+    /// recorded launch of that scene would have written.
+    pub fn arr_scene_event_insert_placing(
+        &mut self,
+        beat: f64,
+        scene: usize,
+    ) -> Result<(), String> {
+        let beat = finite_beat("Scene event beat", beat)?;
+        self.edit_arrangement("Insert scene", move |arrangement, scenes| {
+            let index = Self::insert_scene_marker(arrangement, beat, scene);
+            let (start, end) = Self::scene_event_span(arrangement, index);
+            stamp_scene_clips(arrangement, scenes, start, end)
+        })
+    }
+
+    /// Returns the marker's index in the scene lane.
+    fn insert_scene_marker(arrangement: &mut ProjectArrangement, beat: f64, scene: usize) -> usize {
+        if beat >= arrangement.end_beat {
+            arrangement.end_beat = next_bar_end(beat);
+        }
+        match arrangement
+            .scene_lane
+            .iter()
+            .position(|event| event.start_beat == beat)
+        {
+            Some(existing) => {
+                arrangement.scene_lane[existing].scene = scene;
+                existing
+            }
+            None => {
+                let position = arrangement
+                    .scene_lane
+                    .iter()
+                    .position(|event| event.start_beat > beat)
+                    .unwrap_or(arrangement.scene_lane.len());
+                arrangement.scene_lane.insert(
+                    position,
+                    crate::sequencer::SceneEvent {
+                        start_beat: beat,
+                        scene,
+                    },
+                );
+                position
+            }
+        }
     }
 
     /// Move a scene-state marker without editing clips. Landing on another
@@ -1128,41 +1153,65 @@ impl App {
         let from_beat = finite_beat("Scene event beat", from_beat)?;
         let to_beat = finite_beat("Scene event beat", to_beat)?;
         self.edit_arrangement("Move scene event", move |arrangement, _scenes| {
-            let index = Self::scene_event_index(arrangement, from_beat)?;
-            if from_beat == to_beat {
-                return Ok(());
-            }
-            if to_beat >= arrangement.end_beat {
-                arrangement.end_beat = next_bar_end(to_beat);
-            }
-            let scene = arrangement.scene_lane[index].scene;
-            match arrangement
-                .scene_lane
-                .iter()
-                .position(|event| event.start_beat == to_beat)
-            {
-                Some(_) => {
-                    // Landing on an occupied beat: the moved marker replaces
-                    // the target event and its own slot vacates.
-                    arrangement.scene_lane.remove(index);
-                    let target = arrangement
-                        .scene_lane
-                        .iter()
-                        .position(|event| event.start_beat == to_beat)
-                        .expect("the target event survives removing the moved one");
-                    arrangement.scene_lane[target].scene = scene;
-                }
-                None => {
-                    arrangement.scene_lane[index].start_beat = to_beat;
-                    arrangement.scene_lane.sort_by(|a, b| {
-                        a.start_beat
-                            .partial_cmp(&b.start_beat)
-                            .expect("scene event beats are finite")
-                    });
-                }
-            }
-            Ok(())
+            Self::move_scene_marker(arrangement, from_beat, to_beat)
         })
+    }
+
+    /// Move a scene boundary and re-print the patterns wherever the move
+    /// changed which scene plays: what a scene-lane edge drag means.
+    pub fn arr_scene_event_move_placing(
+        &mut self,
+        from_beat: f64,
+        to_beat: f64,
+    ) -> Result<(), String> {
+        let from_beat = finite_beat("Scene event beat", from_beat)?;
+        let to_beat = finite_beat("Scene event beat", to_beat)?;
+        self.edit_arrangement("Resize scene", move |arrangement, scenes| {
+            let before = arrangement_scene_spans(arrangement);
+            Self::move_scene_marker(arrangement, from_beat, to_beat)?;
+            restamp_changed_scene_spans(arrangement, scenes, &before)
+        })
+    }
+
+    fn move_scene_marker(
+        arrangement: &mut ProjectArrangement,
+        from_beat: f64,
+        to_beat: f64,
+    ) -> Result<(), String> {
+        let index = Self::scene_event_index(arrangement, from_beat)?;
+        if from_beat == to_beat {
+            return Ok(());
+        }
+        if to_beat >= arrangement.end_beat {
+            arrangement.end_beat = next_bar_end(to_beat);
+        }
+        let scene = arrangement.scene_lane[index].scene;
+        match arrangement
+            .scene_lane
+            .iter()
+            .position(|event| event.start_beat == to_beat)
+        {
+            Some(_) => {
+                // Landing on an occupied beat: the moved marker replaces
+                // the target event and its own slot vacates.
+                arrangement.scene_lane.remove(index);
+                let target = arrangement
+                    .scene_lane
+                    .iter()
+                    .position(|event| event.start_beat == to_beat)
+                    .expect("the target event survives removing the moved one");
+                arrangement.scene_lane[target].scene = scene;
+            }
+            None => {
+                arrangement.scene_lane[index].start_beat = to_beat;
+                arrangement.scene_lane.sort_by(|a, b| {
+                    a.start_beat
+                        .partial_cmp(&b.start_beat)
+                        .expect("scene event beats are finite")
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Change the recalled scene state without modifying any clip.
@@ -1214,6 +1263,28 @@ impl App {
         let end_beat = finite_beat("Arrangement end beat", end_beat)?;
         self.edit_arrangement("Set song end", move |arrangement, _scenes| {
             Self::set_end_in(arrangement, end_beat)
+        })
+    }
+
+    /// Resize the last scene span's end edge: growing prints its scene's
+    /// patterns into the new stretch; shrinking trims every lane at the new
+    /// end (those clips belonged to the span being cut) instead of refusing.
+    pub fn arr_set_end_placing(&mut self, end_beat: f64) -> Result<(), String> {
+        let end_beat = finite_beat("Arrangement end beat", end_beat)?;
+        self.edit_arrangement("Resize scene", move |arrangement, scenes| {
+            let before = arrangement_scene_spans(arrangement);
+            let old_end = arrangement.end_beat;
+            if end_beat > 0.0 && end_beat < old_end {
+                for track in 0..arrangement.track_lanes.len() {
+                    occlude_span(arrangement, scenes, track, end_beat, old_end)?;
+                }
+                let racks: Vec<u64> = arrangement.rack_lanes.keys().copied().collect();
+                for group_id in racks {
+                    occlude_rack_span(arrangement, group_id, end_beat, old_end)?;
+                }
+            }
+            Self::set_end_in(arrangement, end_beat)?;
+            restamp_changed_scene_spans(arrangement, scenes, &before)
         })
     }
 
@@ -2520,6 +2591,75 @@ mod tests {
         assert_eq!(
             lane(&app, 0),
             vec![(0.0, 4.0, Some(1), 0.0), (8.0, 24.0, Some(3), 0.0)]
+        );
+    }
+
+    /// A transport-pill drop: the marker and its scene's patterns land as
+    /// ONE undo entry, stamped only up to the next marker.
+    #[test]
+    fn scene_insert_placing_stamps_the_new_span_in_one_undo_entry() {
+        let mut app = app_with_clips();
+        app.arr_scene_event_insert(24.0, 0).expect("next marker");
+        assert_one_entry_and_undoable(&mut app, |app| {
+            app.arr_scene_event_insert_placing(8.0, 2).expect("drop scene");
+        });
+        assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 2), (24.0, 0)]);
+        assert_eq!(
+            lane(&app, 0),
+            vec![(0.0, 4.0, Some(1), 0.0), (8.0, 24.0, Some(3), 0.0)]
+        );
+    }
+
+    /// Scene-edge drags re-print patterns only where the boundary swept:
+    /// the hand-made clips and the gap in scene 0's untouched stretch
+    /// survive every step.
+    #[test]
+    fn scene_edge_drags_reprint_only_the_swept_stretch() {
+        let mut app = app_with_clips();
+        app.arr_scene_event_insert_placing(16.0, 2).expect("drop scene");
+        assert_eq!(
+            lane(&app, 0),
+            vec![(0.0, 4.0, Some(1), 0.0), (8.0, 16.0, Some(2), 0.0), (16.0, 32.0, Some(3), 0.0)]
+        );
+        // Grow scene 2 leftwards: [12, 16) now plays scene 2.
+        assert_one_entry_and_undoable(&mut app, |app| {
+            app.arr_scene_event_move_placing(16.0, 12.0).expect("move boundary");
+        });
+        assert_eq!(
+            lane(&app, 0),
+            vec![
+                (0.0, 4.0, Some(1), 0.0),
+                (8.0, 12.0, Some(2), 0.0),
+                (12.0, 16.0, Some(3), 0.0),
+                (16.0, 32.0, Some(3), 0.0),
+            ]
+        );
+        // Grow scene 0 rightwards past it: [12, 20) now plays scene 0.
+        app.arr_scene_event_move_placing(12.0, 20.0).expect("move boundary back");
+        assert_eq!(
+            lane(&app, 0),
+            vec![
+                (0.0, 4.0, Some(1), 0.0),
+                (8.0, 12.0, Some(2), 0.0),
+                (12.0, 20.0, Some(1), 0.0),
+                (20.0, 32.0, Some(3), 0.0),
+            ]
+        );
+        // The last span's end edge: growing prints, shrinking trims.
+        assert_one_entry_and_undoable(&mut app, |app| {
+            app.arr_set_end_placing(40.0).expect("grow the last span");
+        });
+        assert_eq!(lane(&app, 0).last(), Some(&(32.0, 40.0, Some(3), 0.0)));
+        app.arr_set_end_placing(24.0).expect("shrink the last span");
+        assert_eq!(app.state.committed_arrangement().unwrap().end_beat, 24.0);
+        assert_eq!(
+            lane(&app, 0),
+            vec![
+                (0.0, 4.0, Some(1), 0.0),
+                (8.0, 12.0, Some(2), 0.0),
+                (12.0, 20.0, Some(1), 0.0),
+                (20.0, 24.0, Some(3), 0.0),
+            ]
         );
     }
 

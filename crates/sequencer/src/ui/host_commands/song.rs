@@ -362,7 +362,11 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let map = payload_map(payload)?;
             let beat = require_number(map, "beat")?;
             let scene = require_scene(map)?;
-            app.arr_scene_event_insert(beat, scene)?;
+            if map_bool(map, "place-patterns") {
+                app.arr_scene_event_insert_placing(beat, scene)?;
+            } else {
+                app.arr_scene_event_insert(beat, scene)?;
+            }
             Ok(format!(
                 "Inserted scene {} at beat {beat}",
                 scene + 1
@@ -372,7 +376,11 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let map = payload_map(payload)?;
             let from_beat = require_number(map, "from-beat")?;
             let to_beat = require_number(map, "to-beat")?;
-            app.arr_scene_event_move(from_beat, to_beat)?;
+            if map_bool(map, "place-patterns") {
+                app.arr_scene_event_move_placing(from_beat, to_beat)?;
+            } else {
+                app.arr_scene_event_move(from_beat, to_beat)?;
+            }
             Ok(format!("Moved the scene change to beat {to_beat}"))
         }
         "arrangement-scene-set" => {
@@ -602,7 +610,11 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
         "song-set-end" => {
             let map = payload_map(payload)?;
             let end_beat = require_number(map, "end-beat")?;
-            app.arr_set_end(end_beat)?;
+            if map_bool(map, "place-patterns") {
+                app.arr_set_end_placing(end_beat)?;
+            } else {
+                app.arr_set_end(end_beat)?;
+            }
             Ok(format!("Set song end to beat {end_beat}"))
         }
         "song-set-loop" => {

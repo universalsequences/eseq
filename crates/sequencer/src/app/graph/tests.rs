@@ -2107,7 +2107,7 @@
     }
 
     #[test]
-    fn saving_a_clip_without_a_name_numbers_it_past_the_scene_named_clips() {
+    fn unnamed_rack_clips_show_their_position_and_bulk_rename_numbers_them() {
         let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
         let lg = engine.lg_ptr;
         let mut app = App::new(engine.state, lg, engine.sample_rate,
@@ -2134,19 +2134,21 @@
         app.save_rack_clip_as_recorded(group_id, "").expect("first unnamed clip");
         app.save_rack_clip_as_recorded(group_id, "  ").expect("second unnamed clip");
         app.save_rack_clip_as_recorded(group_id, "Fill").expect("named clip");
-        let names: Vec<String> = app.state.with_scenes(|scenes| {
-            scenes
-                .rack_bank(group_id)
-                .expect("bank")
-                .clips
-                .iter()
-                .map(|clip| clip.name.clone())
-                .collect()
-        });
-        // Convert names clips after their scenes; the unnamed saves continue
-        // the numbering instead of stacking identical "Clip" entries, and an
-        // explicit name is kept verbatim.
-        assert_eq!(names, vec!["Scene 1", "Scene 2", "Clip 3", "Clip 4", "Fill"]);
+        let labels = |app: &App| -> Vec<String> {
+            app.state.with_scenes(|scenes| {
+                let bank = scenes.rack_bank(group_id).expect("bank");
+                bank.clips.iter().map(|clip| bank.clip_label(clip.id).unwrap()).collect()
+            })
+        };
+        // Converted and unnamed clips stay blank and show their bank
+        // position, never a copied scene name; an explicit name is kept.
+        assert_eq!(labels(&app), vec!["Clip 1", "Clip 2", "Clip 3", "Clip 4", "Fill"]);
+
+        // Bulk rename numbers the whole bank in one undo entry.
+        app.rename_rack_clips_in_order_recorded(group_id, "Break").expect("bulk rename");
+        assert_eq!(labels(&app), vec!["Break 1", "Break 2", "Break 3", "Break 4", "Break 5"]);
+        assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(labels(&app), vec!["Clip 1", "Clip 2", "Clip 3", "Clip 4", "Fill"]);
     }
 
     #[test]

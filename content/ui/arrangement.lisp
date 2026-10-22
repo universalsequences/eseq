@@ -34,8 +34,8 @@
 (import eseq.export-song)
 (import eseq.file-dialogs)
 (import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of rgb-part))
-(import eseq.kinds :refer (track tracks groups scenes song transport selection select-region!
-                           clear-region!))
+(import eseq.kinds :refer (track tracks groups scenes banks song transport selection
+                           select-region! clear-region!))
 
 (export arr-view
         arr-select
@@ -1577,6 +1577,10 @@
 (def drop-time (event)
   (max 0 (* snap (floor (/ (pointer-time event) snap)))))
 
+;; Dropping a transport scene pill writes the scene AND its linked track
+;; patterns / rack clips under the new span, as a recorded launch would.
+;; The pill launches its scene on press, which latches every lane over the
+;; arrangement; the drop hands them back (a no-op when nothing latched).
 (def drop-scene (event)
   (let ((scene (get (get event :payload) :scene)))
     (unless (= scene nil)
@@ -1587,14 +1591,19 @@
             ;; Dropping at/past the song end extends it by four bars from
             ;; the drop point (the translator only uses :end in that case).
             :end (+ start (* beats-per-bar 4))
-            :scene scene))))))
+            :scene scene
+            :place-patterns true))
+        (set! song.manual-latch false)))))
 
 (def scene-choice-label (s)
   (str (+ s.index 1) " · " s.name))
 
+;; Setting a span's scene replaces the track patterns and rack clips under
+;; it with that scene's, up to the next scene change.
 (def set-scene-at (beat s)
   (set! arr-scene-menu.open false)
-  (host-command "arrangement-scene-insert" (dict :beat beat :scene s.index)))
+  (host-command "arrangement-scene-insert"
+    (dict :beat beat :scene s.index :place-patterns true)))
 
 (def starting-scene-control ()
   (let ((span (first song.spans))
@@ -1628,11 +1637,22 @@
     (when (and (listed? span song.spans) (= span.start arr-scene-menu.span-start))
       span)))
 
-(def scene-menu-choices (beat current prefix)
-  (each (scenes) |s|
+(def scene-menu-scene-items (scene-list beat current prefix)
+  (each scene-list |s|
     (menu-item (scene-choice-label s) :key (str prefix s.index)
       :checked (= s current)
       :on-select |event| (set-scene-at beat s))))
+
+;; One submenu per scene bank; a single bank lists its scenes directly.
+(def scene-menu-choices (beat current prefix)
+  (let ((all (banks)))
+    (if (< (len all) 2)
+      (scene-menu-scene-items (scenes) beat current prefix)
+      (each all |b|
+        (menu-item (str "Bank " b.label) :key (str prefix "bank-" b.bid)
+          :disabled (empty? b.scenes)
+          :checked (and current (= current.bank b))
+          (scene-menu-scene-items b.scenes beat current prefix))))))
 
 (def close-scene-menu-with (command payload)
   (set! arr-scene-menu.open false)
@@ -2364,7 +2384,7 @@
         (list
           (menu-item "Insert Clip Here" :key "arr-rack-insert" :disabled (empty? bank)
             (each bank |rc|
-              (menu-item rc.name :key (str "arr-rack-insert-" rc.cid)
+              (menu-item rc.label :key (str "arr-rack-insert-" rc.cid)
                 :on-select |event|
                   (rack-menu-do (dict :type :rack-clip-place :group g.gid
                                   :rack-clip rc.cid :start arr-rack-menu.snapped))))))
@@ -2372,7 +2392,7 @@
           (list
             (menu-item "Change Clip" :key "arr-rack-change"
               (each bank |rc|
-                (menu-item rc.name :key (str "arr-rack-change-" rc.cid)
+                (menu-item rc.label :key (str "arr-rack-change-" rc.cid)
                   :checked (= rc.cid (get c :rack-clip))
                   :on-select |event|
                     (rack-menu-do (dict :type :rack-clip-set :clip-id cid :rack-clip rc.cid)))))

@@ -1655,7 +1655,7 @@
                 (h-stack :gap 0.3 :align :center
                   (box :width 0.2 )
                   (rack-clip-play :playing #'rc.active)
-                  (apply label (substring rc.name 0 (name-chars 9))
+                  (apply label (substring rc.label 0 (name-chars 9))
                     :key (str "mixer-rack-clip-label-" g.gid "-" rc.cid)
                     :font-size 9 :h-align :left :v-align :center
                     :active #'rc.active

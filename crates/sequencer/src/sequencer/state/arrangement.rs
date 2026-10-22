@@ -998,6 +998,58 @@ pub fn stamp_scene_clips(
     Ok(())
 }
 
+/// Re-print the scene clips wherever a scene-lane edit changed which scene
+/// governs a beat: `before` is `arrangement_scene_spans` taken before the
+/// edit. Stretches whose scene did not change keep their clips untouched
+/// (hand edits survive), and a stretch that became unscened keeps its clips,
+/// as removing a marker does. Used by scene-edge drags so the patterns
+/// follow the boundary.
+pub fn restamp_changed_scene_spans(
+    arr: &mut ProjectArrangement,
+    ctx: &dyn SongCompileContext,
+    before: &[SceneSpan],
+) -> Result<(), String> {
+    let after = arrangement_scene_spans(arr);
+    let mut beats: Vec<f64> = before
+        .iter()
+        .chain(&after)
+        .flat_map(|span| [span.start_beat, span.end_beat])
+        .collect();
+    beats.sort_by(|a, b| a.partial_cmp(b).expect("scene span beats are finite"));
+    beats.dedup();
+    let scene_at = |spans: &[SceneSpan], beat: f64| {
+        spans
+            .iter()
+            .find(|span| span.start_beat <= beat && beat < span.end_beat)
+            .map(|span| span.scene)
+    };
+    // Adjacent changed windows under one scene stamp as a single run: the
+    // clips free-run, so one clip across them plays the same as the pieces.
+    let mut run: Option<(f64, f64, usize)> = None;
+    for pair in beats.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        let now = scene_at(&after, start);
+        let changed = now.filter(|_| now != scene_at(before, start));
+        match (run, changed) {
+            (Some((run_start, run_end, scene)), Some(now))
+                if scene == now && run_end == start =>
+            {
+                run = Some((run_start, end, scene));
+            }
+            (_, changed) => {
+                if let Some((run_start, run_end, _)) = run.take() {
+                    stamp_scene_clips(arr, ctx, run_start, run_end)?;
+                }
+                run = changed.map(|now| (start, end, now));
+            }
+        }
+    }
+    if let Some((run_start, run_end, _)) = run {
+        stamp_scene_clips(arr, ctx, run_start, run_end)?;
+    }
+    Ok(())
+}
+
 /// Append the arrangement lane for a newly appended project track and stamp
 /// every scene cell that already exists for that track.
 ///

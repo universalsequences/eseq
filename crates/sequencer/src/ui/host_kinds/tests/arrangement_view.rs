@@ -542,10 +542,11 @@ fn a_clip_bearing_rack_draws_a_rack_row_of_ring_summaries() {
     let Value::Map(item) = &lane_items[0] else { panic!("item map") };
     let field = |name: &str| item.get(name).map(|value| value.borrow().clone());
     assert_eq!(field("end"), Some(Value::Number(8.0)));
-    let name = h.app.state.with_scenes(|scenes| {
-        scenes.rack_bank(group).and_then(|bank| bank.clip(verse)).map(|clip| clip.name.clone())
+    // The timeline shows the clip's display label ("Clip N" while unnamed).
+    let label = h.app.state.with_scenes(|scenes| {
+        scenes.rack_bank(group).and_then(|bank| bank.clip_label(verse))
     });
-    assert_eq!(field("label"), Some(s(&name.expect("clip name"))));
+    assert_eq!(field("label"), Some(s(&label.expect("clip label"))));
     let Some(Value::Map(content)) = field("content") else { panic!("ring content") };
     let rings = items(&content.get("rings").expect("rings").borrow());
     assert_eq!(rings.len(), 2, "one ring per member");
