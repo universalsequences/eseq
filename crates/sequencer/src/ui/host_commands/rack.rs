@@ -354,11 +354,15 @@ pub(super) fn handle(
                         );
                     }
                     let path = Path::new(&path_str);
-                    match app.apply_recorded_rack_slot_add(
-                        track,
-                        "Add rack sample",
-                        |app| app.graph_controller().add_sampler_slot_to_rack(track, path),
-                    ) {
+                    let only_here = extract_bool_from_payload(&payload, "only-here");
+                    match app.apply_recorded_rack_slot_add(track, "Add rack sample", |app| {
+                        let slot_idx =
+                            app.graph_controller().add_sampler_slot_to_rack(track, path)?;
+                        if only_here {
+                            app.state.park_rack_slot_outside_current_pattern(track, slot_idx);
+                        }
+                        Ok(slot_idx)
+                    }) {
                         Ok(slot_idx) => {
                             sync_after_instrument_track_apply(
                                 &mut app,
@@ -1045,7 +1049,9 @@ pub(super) fn handle(
                 .filter(|preset| !preset.is_empty());
             match (track, name) {
                 (Some(track), Some(name)) => {
-                    match app.add_saved_instrument_slot_to_rack_sync(track, &name) {
+                    let only_here = extract_bool_from_payload(&payload, "only-here");
+                    match app.add_saved_instrument_slot_to_rack_scoped_sync(track, &name, only_here)
+                    {
                         Ok(slot_idx) => {
                             let preset_error = preset.as_deref().and_then(|preset| {
                                 load_instrument_preset_into_rack_slot(

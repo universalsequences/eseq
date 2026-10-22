@@ -2095,6 +2095,40 @@
     }
 
     #[test]
+    fn parked_rack_slot_plays_only_in_the_current_pattern() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        state.restore_current_pattern_from_repository().unwrap();
+        state.set_rack_track_for_all_pattern_snapshots(0, sample_rack_track_snapshot());
+
+        state.append_rack_slot_for_all_pattern_snapshots(
+            0,
+            sample_sampler_rack_slot(123, "swap-in", 48_000, 88),
+        );
+        assert!(state.park_rack_slot_outside_current_pattern(0, 1));
+
+        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert!(live.slots[1].enabled);
+
+        let repository = state.export_pattern_repository();
+        let current = repository[0].rack_tracks[0].as_ref().unwrap();
+        let other = repository[1].rack_tracks[0].as_ref().unwrap();
+        assert_eq!(other.slots.len(), 2, "slot lists stay aligned");
+        assert!(current.slots[1].enabled);
+        assert!(!other.slots[1].enabled);
+        assert!(other.slots[0].enabled, "only the new slot is parked");
+    }
+
+    #[test]
     fn replace_rack_slot_source_preserves_pad_controls_and_slot_plocks() {
         let state = SequencerState::new(1, Vec::new());
         let mut initial = sample_rack_track_snapshot();
