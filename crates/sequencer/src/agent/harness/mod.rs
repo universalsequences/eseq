@@ -417,6 +417,28 @@ fn start(shared: &Shared) -> Result<Running, String> {
     Ok(Running { transport, client, turn })
 }
 
+/// A fresh folder for a conversation started at `started` (Unix seconds):
+/// `<started>`, or `<started>-1`, `<started>-2`, ... when an earlier
+/// conversation in the same second already holds that name, so the later one
+/// never overwrites the earlier one's `conversation.json` or images. The folder
+/// is created here to claim the name; if it cannot be created (an unwritable
+/// state dir) the plain name is returned and `record` reports nothing, as before.
+fn claim_conversation_dir(conversations_dir: &Path, started: u64) -> PathBuf {
+    if std::fs::create_dir_all(conversations_dir).is_err() {
+        return conversations_dir.join(started.to_string());
+    }
+    for suffix in 0u32.. {
+        let name = if suffix == 0 { started.to_string() } else { format!("{started}-{suffix}") };
+        let dir = conversations_dir.join(name);
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return dir,
+            Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return dir,
+        }
+    }
+    unreachable!("u32 suffixes run out before a folder name is free")
+}
+
 fn take_turn(shared: &Shared, text: &str, images: &[PathBuf]) -> Result<(), String> {
     let mut running = lock(&shared.running);
     if running.as_ref().is_some_and(|running| !running.client.alive()) {
@@ -432,7 +454,7 @@ fn take_turn(shared: &Shared, text: &str, images: &[PathBuf]) -> Result<(), Stri
     turn.dir = lock(&shared.conversation)
         .get_or_insert_with(|| {
             let started = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
-            shared.config.conversations_dir.join(started.to_string())
+            claim_conversation_dir(&shared.config.conversations_dir, started)
         })
         .clone();
     let notes = std::mem::take(&mut *lock(&shared.notes));
@@ -483,5 +505,26 @@ impl ToolBackend for Tracking<'_> {
             self.shared.publish_artifacts();
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claim_conversation_dir;
+
+    #[test]
+    fn conversations_started_in_the_same_second_get_their_own_folders() {
+        let root = std::env::temp_dir()
+            .join(format!("eseq-agent-conversations-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let conversations = root.join("conversations");
+        let first = claim_conversation_dir(&conversations, 1_700_000_000);
+        let second = claim_conversation_dir(&conversations, 1_700_000_000);
+        let third = claim_conversation_dir(&conversations, 1_700_000_000);
+        assert_eq!(first, conversations.join("1700000000"));
+        assert_eq!(second, conversations.join("1700000000-1"));
+        assert_eq!(third, conversations.join("1700000000-2"));
+        assert!(first.is_dir() && second.is_dir() && third.is_dir());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

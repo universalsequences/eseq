@@ -241,6 +241,7 @@ const HOST_TOOLS: &[HostTool] = &[
 /// Import the Lisp registry (and so every tool module it loads). A failure is
 /// logged; the host tools still work.
 pub(super) fn load_lisp_tools(session: &mut HeadlessSession) {
+    recover_interrupted_writes(session);
     let (result, log) = run_lisp(session, &format!("(import {REGISTRY_MODULE})"));
     if let Err(problem) = result {
         eprintln!("eseq mcp: the Lisp tool registry did not load: {problem} {log}");
@@ -342,6 +343,12 @@ pub(super) fn call(session: &mut HeadlessSession, name: &str, args: &Json) -> To
             ToolOutput::error(format!("the tool panicked inside eseq: {message}"))
         }
     };
+    // The first call after a restart says what an interrupted call left
+    // behind and how it was put back.
+    let recovered = RECOVERED.with(|notes| std::mem::take(&mut *notes.borrow_mut()));
+    if !recovered.is_empty() {
+        output.content.push(Content::Text(recovered.join("\n")));
+    }
     // A view that throws leaves its last good tree (or none) and says
     // nothing; this is where the agent learns why a buffer did not draw.
     let errors = session.take_reactive_errors();
@@ -558,6 +565,9 @@ fn create_module(session: &mut HeadlessSession, module: &str, source: Option<&st
         text.push('\n');
     }
     std::fs::create_dir_all(path.parent().unwrap_or(&local)).map_err(|error| error.to_string())?;
+    // A kill (Stop) before the import finishes skips the removal below; the
+    // journal lets the next server remove the file instead.
+    let _journal = WriteJournal::begin(&journal_dir(), &path, None)?;
     std::fs::write(&path, &text).map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     let (loaded, log) = run_lisp(session, &format!("(import {module})"));
     if let Err(problem) = loaded {
@@ -589,6 +599,160 @@ impl Drop for RestoreFile<'_> {
             let _ = std::fs::write(self.path, self.before);
         }
     }
+}
+
+thread_local! {
+    /// What startup recovery put back, for the first call's result.
+    static RECOVERED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Where write tools journal a file's previous text for the length of a
+/// call.
+fn journal_dir() -> PathBuf {
+    sequencer::app_paths::app_paths().user_data_root().join("mcp-restore")
+}
+
+/// A record, on disk for the length of a write call, of what a module file
+/// held before it (`before: None` when the call creates it). Dropping it
+/// removes the record; a server killed mid-call (Stop sends SIGKILL, so no
+/// Drop runs) leaves it for [`recover_journals`] in the next server.
+struct WriteJournal {
+    record: PathBuf,
+}
+
+impl WriteJournal {
+    fn begin(dir: &Path, path: &Path, before: Option<&str>) -> Result<Self, String> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let cannot = |error: std::io::Error| format!("cannot journal the write to {}: {error}", path.display());
+        std::fs::create_dir_all(dir).map_err(cannot)?;
+        let pid = std::process::id();
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let record = dir.join(format!("{pid}-{n}.json"));
+        let partial = dir.join(format!("{pid}-{n}.partial"));
+        let body = json!({ "pid": pid, "path": path, "before": before });
+        // Written whole and renamed into place, so a kill never leaves half
+        // a record; synced before the module file is touched.
+        let write = || -> std::io::Result<()> {
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(&partial)?;
+            file.write_all(body.to_string().as_bytes())?;
+            file.sync_all()?;
+            std::fs::rename(&partial, &record)
+        };
+        write().map_err(|error| {
+            let _ = std::fs::remove_file(&partial);
+            cannot(error)
+        })?;
+        Ok(Self { record })
+    }
+}
+
+impl Drop for WriteJournal {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.record);
+    }
+}
+
+/// Whether the server that wrote a journal may still be mid-call. Another
+/// live server's record is its own business.
+fn process_alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
+        // SAFETY: signal 0 only checks that the process exists.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// Puts back every file a killed server's write call left changed, and
+/// returns each restored path (`true` when it was rewritten, `false` when
+/// a file the call created was removed) with a line saying so.
+fn recover_journals(dir: &Path) -> Vec<(PathBuf, bool, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut records: Vec<PathBuf> = entries.filter_map(|entry| entry.ok().map(|entry| entry.path())).collect();
+    records.sort();
+    let mut recovered = Vec::new();
+    for record in records {
+        let extension = record.extension().and_then(|extension| extension.to_str());
+        if extension == Some("partial") {
+            let stem_pid = record.file_stem().and_then(|stem| stem.to_str()).and_then(|stem| stem.split('-').next());
+            if stem_pid.and_then(|pid| pid.parse().ok()).is_some_and(|pid| !process_alive(pid)) {
+                let _ = std::fs::remove_file(&record);
+            }
+            continue;
+        }
+        if extension != Some("json") {
+            continue;
+        }
+        let Some(body) = std::fs::read_to_string(&record).ok().and_then(|text| serde_json::from_str::<Json>(&text).ok())
+        else {
+            eprintln!("eseq mcp: unreadable write journal {}", record.display());
+            continue;
+        };
+        let pid = body.get("pid").and_then(Json::as_u64).and_then(|pid| u32::try_from(pid).ok());
+        if pid.is_some_and(process_alive) {
+            continue;
+        }
+        let Some(path) = body.get("path").and_then(Json::as_str).map(PathBuf::from) else {
+            let _ = std::fs::remove_file(&record);
+            continue;
+        };
+        let outcome = match body.get("before").and_then(Json::as_str) {
+            Some(before) => std::fs::write(&path, before).map(|()| {
+                (true, format!("An interrupted call had left {} changed; its previous text was restored.", path.display()))
+            }),
+            None => match std::fs::remove_file(&path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                _ => Ok((
+                    false,
+                    format!("An interrupted call had created {} without loading it; the file was removed.", path.display()),
+                )),
+            },
+        };
+        match outcome {
+            Ok((rewritten, note)) => {
+                let _ = std::fs::remove_file(&record);
+                recovered.push((path, rewritten, note));
+            }
+            // Kept for the next server to retry.
+            Err(error) => eprintln!("eseq mcp: could not restore {}: {error}", path.display()),
+        }
+    }
+    recovered
+}
+
+/// Startup: undo what a call killed mid-write left on disk, reload the
+/// restored files (boot may have loaded the unvalidated text) and keep the
+/// notes for the first call's result.
+fn recover_interrupted_writes(session: &mut HeadlessSession) {
+    let recovered = recover_journals(&journal_dir());
+    if recovered.is_empty() {
+        return;
+    }
+    let rewritten: Vec<PathBuf> =
+        recovered.iter().filter(|(_, rewritten, _)| *rewritten).map(|(path, _, _)| path.clone()).collect();
+    let mut notes: Vec<String> = recovered.into_iter().map(|(_, _, note)| note).collect();
+    if !rewritten.is_empty() {
+        let (report, _log) =
+            capture_output(|| session.editor.runtime_mut().reload_paths_transactional(rewritten, Vec::new()));
+        if !report.success {
+            notes.push(format!("Reloading the restored text failed:\n{}", report.diagnostics.join("\n")));
+        }
+    }
+    for note in &notes {
+        eprintln!("eseq mcp: {note}");
+    }
+    RECOVERED.with(|pending| pending.borrow_mut().extend(notes));
 }
 
 /// A user-tier module's file and text, or why the agent may not write it:
@@ -641,6 +805,10 @@ fn rewrite_and_reload(
     after: &str,
     what: &str,
 ) -> Result<ToolOutput, String> {
+    // Declared first so it is dropped last, after the guard has restored.
+    // Drop does not run when Stop kills the server mid-call; the journal
+    // lets the next server put `before` back.
+    let _journal = WriteJournal::begin(&journal_dir(), path, Some(before))?;
     let mut guard = RestoreFile { path, before, armed: true };
     std::fs::write(path, after).map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     // A failed transactional reload restores the runtime's state itself.
@@ -1015,6 +1183,75 @@ fn squash(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stop SIGKILLs the server mid-call, so no Drop runs: `mem::forget`
+    /// stands in for that.
+    fn killed_mid_call(journal: WriteJournal) {
+        std::mem::forget(journal);
+    }
+
+    /// Rewrites the pid in every record, as if another server wrote them.
+    fn written_by(dir: &Path, pid: u64) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let record = entry.unwrap().path();
+            let mut body: Json = serde_json::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
+            body["pid"] = json!(pid);
+            std::fs::write(&record, body.to_string()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_write_killed_mid_call_is_restored_by_the_next_server() {
+        let root = tempfile::tempdir().unwrap();
+        let journals = root.path().join("journals");
+        let module = root.path().join("euclid.lisp");
+        std::fs::write(&module, "(module euclid)\n(def ok () 1)\n").unwrap();
+
+        let journal = WriteJournal::begin(&journals, &module, Some("(module euclid)\n(def ok () 1)\n")).unwrap();
+        std::fs::write(&module, "(module euclid)\n(def broken () (nope))\n").unwrap();
+        killed_mid_call(journal);
+
+        let recovered = recover_journals(&journals);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!((recovered[0].0.as_path(), recovered[0].1), (module.as_path(), true));
+        assert_eq!(std::fs::read_to_string(&module).unwrap(), "(module euclid)\n(def ok () 1)\n");
+        assert_eq!(std::fs::read_dir(&journals).unwrap().count(), 0, "the record is consumed");
+        assert!(recover_journals(&journals).is_empty());
+    }
+
+    #[test]
+    fn a_create_killed_before_its_import_finishes_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let journals = root.path().join("journals");
+        let module = root.path().join("fresh.lisp");
+        let journal = WriteJournal::begin(&journals, &module, None).unwrap();
+        std::fs::write(&module, "(module fresh)\n").unwrap();
+        killed_mid_call(journal);
+
+        let recovered = recover_journals(&journals);
+        assert_eq!(recovered.len(), 1);
+        assert!(!recovered[0].1);
+        assert!(!module.exists());
+    }
+
+    #[test]
+    fn a_finished_call_leaves_no_record_and_a_live_servers_record_is_left_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let journals = root.path().join("journals");
+        let module = root.path().join("m.lisp");
+        std::fs::write(&module, "old").unwrap();
+        drop(WriteJournal::begin(&journals, &module, Some("old")).unwrap());
+        assert_eq!(std::fs::read_dir(&journals).unwrap().count(), 0);
+
+        // The parent (the test runner) is alive and mid-call, as far as
+        // the record says.
+        let journal = WriteJournal::begin(&journals, &module, Some("old")).unwrap();
+        std::fs::write(&module, "new").unwrap();
+        killed_mid_call(journal);
+        written_by(&journals, u64::from(std::os::unix::process::parent_id()));
+        assert!(recover_journals(&journals).is_empty());
+        assert_eq!(std::fs::read_to_string(&module).unwrap(), "new");
+    }
 
     fn eval(runtime: &mut eseqlisp::Runtime, code: &str) -> Value {
         runtime.eval_str(code).unwrap().unwrap_or(Value::Nil)

@@ -3,7 +3,7 @@
 //! documented native.
 
 use super::{Editor, MinibufferMode, key_str};
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, KeyModifiers};
 use crate::mode::BufferMode;
 
 pub(super) const HELP_BUFFER: &str = "*Help*";
@@ -30,7 +30,17 @@ impl Editor {
         let mut chord = self.describing_key.take().unwrap_or_default();
         chord.push(key_str(key));
         let spelled = chord.join(" ");
-        if self.binding_has_prefix(&spelled) && self.key_binding_of(&spelled).is_none() {
+        // Dispatch opens a chord for a modified global prefix before the
+        // mode keymap is consulted, so such a key waits for the rest of the
+        // chord whatever the mode binds; other prefixes wait only when no
+        // binding claims the key itself.
+        let opens_chord = if chord.len() == 1 {
+            self.opens_chord_before_mode(key)
+                || (self.binding_has_prefix(&spelled) && self.key_binding_of(&spelled).is_none())
+        } else {
+            false
+        };
+        if opens_chord {
             self.show_sticky_message(format!("Describe key: {spelled} -"));
             self.describing_key = Some(chord);
             return;
@@ -39,10 +49,21 @@ impl Editor {
         self.show_sticky_message(message);
     }
 
+    /// Whether `key` opens a chord before the mode's `:on-key` or keymap
+    /// sees it, as `handle_key` does: a modified key that is a prefix of
+    /// some binding but not itself a direct global binding.
+    fn opens_chord_before_mode(&self, key: KeyEvent) -> bool {
+        let spelled = super::key_str(key);
+        key.modifiers != KeyModifiers::NONE
+            && !self.lisp_bindings.contains_key(&spelled)
+            && self.binding_has_prefix(&spelled)
+    }
+
     /// What `spelled` (a `key_str` spelling, or a chord of them) runs in the
     /// active buffer: the mode keymap (nearest mode first), else the global
-    /// map, else a builtin. Earlier layers that see it first are named too:
-    /// a focused widget, the mode's `:on-key` handler.
+    /// map, else a builtin. Earlier layers that see a single key first are
+    /// named too: a focused widget, the mode's `:on-key` handler. The rest
+    /// of a chord never reaches `:on-key`.
     pub fn describe_key_text(&self, spelled: &str, key: Option<KeyEvent>) -> String {
         let runs = self
             .key_binding_of(spelled)
@@ -51,7 +72,8 @@ impl Editor {
             Some((handler, source)) => format!("{spelled} runs {handler} ({source})"),
             None => format!("{spelled} is undefined here"),
         };
-        if let Some(on_key) = self.active_mode_on_key() {
+        let reaches_on_key = key.is_some_and(|key| !self.opens_chord_before_mode(key));
+        if let Some(on_key) = self.active_mode_on_key().filter(|_| reaches_on_key) {
             text.push_str(&format!("; the mode's :on-key {on_key} sees it first"));
         }
         if self.active_leaf().focused_widget_id.is_some() {
@@ -120,5 +142,46 @@ impl Editor {
             }
             None => format!("{name}\n\nNot documented.\n"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Editor, EditorConfig};
+    use crate::runtime::Runtime;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    /// A mode binding for a modified global chord prefix never runs, since
+    /// dispatch opens the chord first; describe-key follows the chord too.
+    #[test]
+    fn describe_key_follows_a_global_chord_prefix_the_mode_also_binds() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_scratch_buffer("*prefixed*", "");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+(def mode-cx () (host-command "mode-cx-ran" true))
+(def other-window-cmd () (host-command "other-ran" true))
+(def watch-keys (k txt) false)
+(bind-key "C-x o" "other-window-cmd")
+(define-mode "prefixed-mode" :on-key "watch-keys")
+(mode-bind-key "prefixed-mode" "C-x" "mode-cx")
+(set-buffer-mode-for "*prefixed*" "prefixed-mode")
+"#,
+            )
+            .expect("install bindings");
+        editor.refresh_runtime_side_effects();
+        let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        let o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE);
+
+        editor.run_command("describe-key");
+        editor.handle_key(ctrl_x);
+        assert_eq!(editor.minibuffer.clone().unwrap_or_default(), "Describe key: C-x -");
+        editor.handle_key(o);
+        assert_eq!(
+            editor.minibuffer.clone().unwrap_or_default(),
+            "C-x o runs other-window-cmd (global keymap)"
+        );
     }
 }

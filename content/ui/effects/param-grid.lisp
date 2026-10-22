@@ -347,7 +347,7 @@
       (box :debug-name (str "fx-param-adsr-number-" title)
            :width 5.2 :height 1.55 :padding 0
         (v-stack :width 5.2 :height :fill :gap 0.0 :align :center
-          (label title :font-size 9.0 :color :dim :transparent)
+          (label title :font-size 9.0 :color :dim :bg :transparent)
           (number-picker :value (pc/fx-param-value-for fx p)
             :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
             :decimals decimals :unit unit
@@ -403,7 +403,7 @@
               (adsr-number sustain-p fx (str key-prefix "-sustain") "sus" 2 false)
               (adsr-number release-p fx (str key-prefix "-release") "rel" 2 false)))
           (box :width :fill :height 0.52 :h-align :center :v-align :center
-            (label env-name :font-size 9.4 :color :dim  :bg :transparent
+            (label env-name :font-size 9.4 :color :dim :bg :transparent
               :debug-name (str "fx-param-env-label-" env-name)))
           (box :width :fill :flex 1))))))
 

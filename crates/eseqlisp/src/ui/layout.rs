@@ -2374,6 +2374,7 @@ fn size_affecting_props_equal(
             && height_equal
             && font_size_equal
             && wrap_equal
+            && label_face_equal(old_props, new_props)
             && (width_locked || value_option_eq(old_props.get("text"), new_props.get("text")));
     }
 
@@ -2393,6 +2394,25 @@ fn size_affecting_props_equal(
 
     keys.iter()
         .all(|key| value_option_eq(old_props.get(*key), new_props.get(*key)))
+}
+
+/// `:mono` / `:bold` pick the face a label is measured with, so a change
+/// must measure it again. A bound face prop reads the same slot on both sides
+/// and cannot show that the slot flipped since the rect was measured, so it
+/// always counts as a size change.
+fn label_face_equal(
+    old_props: &HashMap<String, Value>,
+    new_props: &HashMap<String, Value>,
+) -> bool {
+    let bound = |props: &HashMap<String, Value>| {
+        ["mono", "bold"]
+            .iter()
+            .any(|key| matches!(props.get(*key), Some(Value::ReactiveRef { .. })))
+    };
+    if bound(old_props) || bound(new_props) {
+        return false;
+    }
+    widget_render::label::text_face(old_props) == widget_render::label::text_face(new_props)
 }
 
 fn value_option_eq(left: Option<&Value>, right: Option<&Value>) -> bool {
@@ -4435,6 +4455,25 @@ mod tests {
             natural > 40.0,
             "content should exceed narrow viewport → scroll needed"
         );
+    }
+
+    #[test]
+    fn label_bold_or_mono_toggle_is_a_size_change() {
+        let props = |pairs: &[(&str, Value)]| -> HashMap<String, Value> {
+            pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.clone()))
+                .collect()
+        };
+        let plain = props(&[("text", s("name"))]);
+        let bold = props(&[("text", s("name")), ("bold", Value::Bool(true))]);
+        let bold_off = props(&[("text", s("name")), ("bold", Value::Bool(false))]);
+        let mono = props(&[("text", s("name")), ("mono", Value::Bool(true))]);
+        assert!(!size_affecting_props_equal("label", &plain, &bold));
+        assert!(!size_affecting_props_equal("label", &bold, &bold_off));
+        assert!(!size_affecting_props_equal("label", &plain, &mono));
+        assert!(size_affecting_props_equal("label", &plain, &bold_off));
+        assert!(size_affecting_props_equal("label", &bold, &bold));
     }
 
     #[test]

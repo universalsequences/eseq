@@ -255,8 +255,12 @@
           :lighting (lighting :edge-min -0.115 :edge-max 1.2413
             :light (vec3 -0.51 -1.851 1.5) :shininess 91.0)
           :color
+          ;; The inner face of an active pill keeps the active tint: every
+          ;; theme's `:scene-active-base` is opaque, while `:scene-hover-base`
+          ;; is translucent grey in most themes and would bury the cue for
+          ;; which scene is playing.
           (if (> active 0)
-            (eseq.materials/color-cell :scene-hover-base :scene-hover-base)
+            (eseq.materials/color-cell :scene-active-base :scene-active-base)
             (if hit/hover
               (let ((base :scene-hover-base)
                   (lit (+ 0.06 (* 0.03 diffuse)))

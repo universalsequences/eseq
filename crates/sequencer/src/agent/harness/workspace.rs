@@ -7,6 +7,11 @@
 //! is `<root>/tidal/view.lisp`, in package `tidal`. Only its module files
 //! (`.lisp`, not hidden, not links) are tracked: they are all the write
 //! tools write.
+//!
+//! The edit tools also reach a module the loader finds outside its folder
+//! (`<root>/tidal.lisp`, the flat `<root>/tidal.view.lisp`, a `ui/` file):
+//! such a file is tracked on its own, beside its package, and rejecting
+//! puts it back too.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -87,6 +92,9 @@ struct Tracked {
     /// The package's files before the first write, by path inside it;
     /// empty for a package the agent made.
     baseline: BTreeMap<PathBuf, Vec<u8>>,
+    /// Files of the package's modules outside its folder, by full path,
+    /// as they were before the first write to each.
+    loose: BTreeMap<PathBuf, Vec<u8>>,
     created: bool,
 }
 
@@ -111,19 +119,33 @@ impl Workspace {
     /// (an installed package's is not tracked).
     pub fn before_write(&mut self, tool: &str, module: &str) {
         let Some(package) = module.split('.').next() else { return };
-        if !eseqlisp::modules::is_valid_module_name(module) || self.find(package).is_some() {
+        if !eseqlisp::modules::is_valid_module_name(module) {
             return;
         }
-        let file = self.root.join(format!("{}.lisp", module.replace('.', "/")));
-        if tool != "create_module" && !file.is_file() {
-            return;
-        }
-        // A folder that exists is the user's, whatever is in it: rejecting
-        // restores its modules, never deletes it.
+        // The file the write tools resolve, in the loader's order.
+        let local = eseqlisp::ModuleLoadRoot { path: self.root.clone(), module_prefix: None };
+        let file = match forms::resolve_module_file(&[local], module) {
+            Some(file) => file,
+            None if tool == "create_module" => self.root.join(format!("{}.lisp", module.replace('.', "/"))),
+            None => return,
+        };
         let dir = self.root.join(package);
-        let created = !dir.exists();
-        let baseline = read_files(&dir);
-        self.tracked.push(Tracked { package: package.to_string(), baseline, created });
+        let index = match self.find(package) {
+            Some(index) => index,
+            None => {
+                // A folder or file that exists is the user's, whatever is in
+                // it: rejecting restores its modules, never deletes it.
+                let created = !dir.exists() && !file.exists();
+                let baseline = read_files(&dir);
+                self.tracked.push(Tracked { package: package.to_string(), baseline, loose: BTreeMap::new(), created });
+                self.tracked.len() - 1
+            }
+        };
+        if !file.starts_with(&dir) {
+            if let Ok(bytes) = std::fs::read(&file) {
+                self.tracked[index].loose.entry(file).or_insert(bytes);
+            }
+        }
     }
 
     /// Every tracked package that changed, as it stands on disk now.
@@ -151,21 +173,27 @@ impl Workspace {
         }
         for (path, before) in &tracked.baseline {
             if !current.contains_key(path) {
-                let removed = String::from_utf8_lossy(before).lines().count();
-                files.push(FileChange {
-                    path: dir.join(path),
-                    name: path.display().to_string(),
-                    change: Change::Deleted,
-                    lines: 0,
-                    added: 0,
-                    removed,
-                });
+                files.push(deleted(dir.join(path), path.display().to_string(), before));
             }
+        }
+        let mut modules = current;
+        for (path, before) in &tracked.loose {
+            let name = path.strip_prefix(&self.root).unwrap_or(path).display().to_string();
+            let Ok(now) = std::fs::read(path) else {
+                files.push(deleted(path.clone(), name, before));
+                continue;
+            };
+            if &now != before {
+                let lines = String::from_utf8_lossy(&now).lines().count();
+                let (added, removed) = line_changes(&String::from_utf8_lossy(before), &String::from_utf8_lossy(&now));
+                files.push(FileChange { path: path.clone(), name, change: Change::Modified, lines, added, removed });
+            }
+            modules.insert(path.clone(), now);
         }
         if files.is_empty() {
             return None;
         }
-        let (entries, kinds) = package_modules(&current);
+        let (entries, kinds) = package_modules(&modules);
         Some(Artifact { package: tracked.package.clone(), created: tracked.created, files, entries, kinds })
     }
 
@@ -175,6 +203,14 @@ impl Workspace {
         let index = self.find(package).ok_or_else(|| format!("No changes to `{package}` to reject."))?;
         let tracked = &self.tracked[index];
         let dir = self.root.join(package);
+        let mut problems = Vec::new();
+        for (file, before) in &tracked.loose {
+            if std::fs::read(file).ok().as_ref() != Some(before) {
+                if let Err(error) = std::fs::write(file, before) {
+                    problems.push(format!("cannot restore {}: {error}", file.display()));
+                }
+            }
+        }
         if tracked.created {
             match std::fs::remove_dir_all(&dir) {
                 Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
@@ -184,7 +220,6 @@ impl Workspace {
             }
         } else {
             let current = read_files(&dir);
-            let mut problems = Vec::new();
             for path in current.keys().filter(|path| !tracked.baseline.contains_key(*path)) {
                 if let Err(error) = std::fs::remove_file(dir.join(path)) {
                     problems.push(format!("cannot delete {}: {error}", path.display()));
@@ -203,9 +238,9 @@ impl Workspace {
                     problems.push(format!("cannot restore {}: {error}", path.display()));
                 }
             }
-            if !problems.is_empty() {
-                return Err(format!("`{package}` was only partly restored: {}", problems.join("; ")));
-            }
+        }
+        if !problems.is_empty() {
+            return Err(format!("`{package}` was only partly restored: {}", problems.join("; ")));
         }
         let created = tracked.created;
         self.tracked.remove(index);
@@ -223,6 +258,9 @@ impl Workspace {
         let index = self.find(package).ok_or_else(|| format!("`{package}` is not a package the agent made."))?;
         if !self.tracked[index].created {
             return Err(format!("`{package}` existed before; only a package the agent made can be renamed here."));
+        }
+        if !self.tracked[index].loose.is_empty() {
+            return Err(format!("`{package}` has modules outside its folder; rename it by hand."));
         }
         if !valid_name(new_name) {
             return Err("A package name is lowercase letters, digits and dashes, starting with a letter.".to_string());
@@ -286,6 +324,11 @@ fn read_files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut files = BTreeMap::new();
     walk(dir, dir, &mut files);
     files
+}
+
+fn deleted(path: PathBuf, name: String, before: &[u8]) -> FileChange {
+    let removed = String::from_utf8_lossy(before).lines().count();
+    FileChange { path, name, change: Change::Deleted, lines: 0, added: 0, removed }
 }
 
 fn line_changes(before: &str, after: &str) -> (usize, usize) {
@@ -397,6 +440,61 @@ mod tests {
         assert!(!root.path().join("tidal/extra.lisp").exists());
         assert!(root.path().join("tidal/notes.txt").exists());
         assert!(root.path().join("tidal/.DS_Store").exists());
+    }
+
+    #[test]
+    fn modules_outside_the_package_folder_are_tracked_and_restored() {
+        let root = tempfile::tempdir().unwrap();
+        let single = root.path().join("tidal.lisp");
+        let flat = root.path().join("tidal.view.lisp");
+        let index = root.path().join("tidal/core/index.lisp");
+        write(&single, "(module tidal)\n");
+        write(&flat, "(module tidal.view)\n");
+        write(&index, "(module tidal.core)\n");
+        let mut workspace = Workspace::new(root.path().to_path_buf());
+        workspace.before_write("define_form", "tidal");
+        workspace.before_write("write_module", "tidal.view");
+        workspace.before_write("define_form", "tidal.core");
+        write(&single, "(module tidal)\n(def a 1)\n");
+        write(&flat, "(module tidal.view)\n(def b 2)\n");
+        write(&index, "(module tidal.core)\n(def c 3)\n");
+        workspace.before_write("create_module", "tidal.extra");
+        write(&root.path().join("tidal/extra.lisp"), "(module tidal.extra)\n");
+        let artifact = &workspace.artifacts()[0];
+        assert!(!artifact.created, "the files existed before");
+        let mut names = artifact.files.iter().map(|f| (f.name.clone(), f.change)).collect::<Vec<_>>();
+        names.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            names,
+            vec![
+                ("core/index.lisp".to_string(), Change::Modified),
+                ("extra.lisp".to_string(), Change::Added),
+                ("tidal.lisp".to_string(), Change::Modified),
+                ("tidal.view.lisp".to_string(), Change::Modified),
+            ]
+        );
+        assert!(workspace.rename("tidal", "cycles").is_err());
+        workspace.reject("tidal").unwrap();
+        assert_eq!(std::fs::read_to_string(&single).unwrap(), "(module tidal)\n");
+        assert_eq!(std::fs::read_to_string(&flat).unwrap(), "(module tidal.view)\n");
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), "(module tidal.core)\n");
+        assert!(!root.path().join("tidal/extra.lisp").exists());
+    }
+
+    #[test]
+    fn a_new_package_folder_beside_an_edited_single_file_module_restores_the_file() {
+        let root = tempfile::tempdir().unwrap();
+        let single = root.path().join("tidal.lisp");
+        write(&single, "(module tidal)\n");
+        let mut workspace = Workspace::new(root.path().to_path_buf());
+        workspace.before_write("create_module", "tidal.view");
+        write(&root.path().join("tidal/view.lisp"), "(module tidal.view)\n");
+        workspace.before_write("define_form", "tidal");
+        write(&single, "(module tidal)\n(def a 1)\n");
+        assert_eq!(workspace.artifacts()[0].files.len(), 2);
+        workspace.reject("tidal").unwrap();
+        assert!(!root.path().join("tidal").exists());
+        assert_eq!(std::fs::read_to_string(&single).unwrap(), "(module tidal)\n");
     }
 
     #[test]

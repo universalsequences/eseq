@@ -3036,6 +3036,11 @@ pub struct VM {
     /// re-eval skip every child and silently drop the edit. Bumping the
     /// epoch (`begin_import_pass`) is what re-arms them.
     pub imported_at_epoch: HashMap<String, u64>,
+    /// Module name → its last failed import. A failure is not "imported"
+    /// (so a fixed file loads), but within the pass that saw it, a later
+    /// `import` of the same unchanged source returns the recorded error
+    /// instead of re-running every top-level form before the failure.
+    pub failed_imports: HashMap<String, FailedImport>,
     /// Current import pass. Starts at 1 so entries from a plain
     /// `eval_module_source` (no transaction) still dedupe within that pass.
     pub import_pass_epoch: u64,
@@ -3056,6 +3061,16 @@ pub struct VM {
     instances: instances::InstanceStore,
     /// Host-bound view buffers (instance-kinds spec §7).
     view_buffers: view_buffers::ViewBufferStore,
+}
+
+/// A module import that failed in pass `epoch`. `source` is the file it
+/// resolved to and a hash of its text (None when no file was found), so an
+/// import of a changed or newly created file in the same pass runs it.
+#[derive(Debug, Clone)]
+pub struct FailedImport {
+    pub epoch: u64,
+    pub source: Option<(std::path::PathBuf, u64)>,
+    pub message: String,
 }
 
 pub struct VmStateSnapshot {
@@ -3104,6 +3119,7 @@ pub struct VmStateSnapshot {
     /// boot tens of milliseconds. Writers go through `Rc::make_mut`.
     module_exports: Rc<crate::modules::ModuleExportRegistry>,
     imported_at_epoch: HashMap<String, u64>,
+    failed_imports: HashMap<String, FailedImport>,
     import_pass_epoch: u64,
     instances: instances::InstanceStore,
     view_buffers: view_buffers::ViewBufferStore,
@@ -3817,7 +3833,6 @@ pub fn register_core_natives(vm: &mut VM) {
         if vm.imported_at_epoch.get(name) == Some(&epoch) {
             return Value::Nil;
         }
-        vm.imported_at_epoch.insert(name.clone(), epoch);
         let relative_candidates = crate::modules::module_relative_file_candidates(name);
         let (loaded, errors) = match vm
             .source_manager
@@ -3840,6 +3855,18 @@ pub fn register_core_natives(vm: &mut VM) {
                 (loaded, errors)
             }
         };
+        // Failed earlier in this pass on this same source: report that
+        // failure again without re-evaluating (see `failed_imports`).
+        let source_key = loaded
+            .as_ref()
+            .map(|loaded| (loaded.path.clone(), crate::hot_reload::hash_source(&loaded.text)));
+        if let Some(failed) = vm.failed_imports.get(name) {
+            if failed.epoch == epoch && failed.source == source_key {
+                return Value::String(failed.message.clone());
+            }
+        }
+        vm.failed_imports.remove(name);
+        vm.imported_at_epoch.insert(name.clone(), epoch);
         if let Some(loaded) = loaded {
             let path_display = loaded.path.display().to_string();
             let queued = vm.source_load_errors.len();
@@ -3859,9 +3886,13 @@ pub fn register_core_natives(vm: &mut VM) {
                     let queued = vm.source_load_errors.get(queued..).unwrap_or_default();
                     log_source_load_error("import", &message, queued);
                     vm.source_load_errors.push(message.clone());
-                    // Not loaded: the next import tries again (once the file
-                    // is fixed), rather than finding it done for this pass.
+                    // Not loaded: a fixed file, or the next pass, tries again
+                    // rather than finding it done for this pass.
                     vm.imported_at_epoch.remove(name);
+                    vm.failed_imports.insert(
+                        name.clone(),
+                        FailedImport { epoch, source: source_key, message: message.clone() },
+                    );
                     Value::String(message)
                 }
             };
@@ -3873,6 +3904,10 @@ pub fn register_core_natives(vm: &mut VM) {
         );
         log_source_load_error("import", &message, &[]);
         vm.source_load_errors.push(message.clone());
+        vm.failed_imports.insert(
+            name.clone(),
+            FailedImport { epoch, source: None, message: message.clone() },
+        );
         Value::String(message)
     });
 
@@ -5411,6 +5446,7 @@ impl VM {
             declared_modules: HashMap::new(),
             module_exports: Rc::default(),
             imported_at_epoch: HashMap::new(),
+            failed_imports: HashMap::new(),
             import_pass_epoch: 1,
             active_expander: None,
             active_expansion_site: None,
@@ -6417,6 +6453,7 @@ impl VM {
             declared_modules: self.declared_modules.clone(),
             module_exports: self.module_exports.clone(),
             imported_at_epoch: self.imported_at_epoch.clone(),
+            failed_imports: self.failed_imports.clone(),
             import_pass_epoch: self.import_pass_epoch,
             instances: self.instances.snapshot(),
             view_buffers: self.view_buffers.snapshot(),
@@ -6470,6 +6507,7 @@ impl VM {
         self.declared_modules = snapshot.declared_modules;
         self.module_exports = snapshot.module_exports;
         self.imported_at_epoch = snapshot.imported_at_epoch;
+        self.failed_imports = snapshot.failed_imports;
         self.import_pass_epoch = snapshot.import_pass_epoch;
         self.instances.restore_from(snapshot.instances);
         self.kind_schema_generation += 1;
@@ -11016,6 +11054,43 @@ mod tests {
             vm.eval_str("(import test.retry.pkg)\n(test.retry.pkg/value)"),
             Ok(Some(Value::Number(2.0))),
             "the fixed file is evaluated, not skipped as already imported"
+        );
+    }
+
+    #[test]
+    fn a_failed_import_is_evaluated_once_per_pass_and_retried_on_the_next() {
+        let mut vm = module_test_vm();
+        let root = import_test_dir("import-fail-once");
+        vm.source_manager.set_scoped_module_load_roots(vec![crate::hot_reload::ModuleLoadRoot {
+            path: root.clone(),
+            module_prefix: Some("test.failonce".into()),
+        }]);
+        std::fs::write(root.join("pkg.lisp"), "(module test.failonce.pkg)\n(car 1)").unwrap();
+        let failures = |vm: &mut VM, module: &str| {
+            let prefix = format!("import {module}:");
+            vm.take_source_load_errors()
+                .iter()
+                .filter(|error| error.starts_with(&prefix))
+                .count()
+        };
+
+        let _ = vm.eval_str("(import test.failonce.pkg)\n(import test.failonce.pkg)");
+        let _ = vm.eval_str("(import test.failonce.pkg)");
+        assert_eq!(
+            failures(&mut vm, "test.failonce.pkg"),
+            1,
+            "the unchanged broken file is evaluated once in a pass"
+        );
+
+        vm.begin_import_pass();
+        let _ = vm.eval_str("(import test.failonce.pkg)\n(import test.failonce.pkg)");
+        assert_eq!(failures(&mut vm, "test.failonce.pkg"), 1, "a new pass tries it again, once");
+
+        let _ = vm.eval_str("(import test.failonce.missing)\n(import test.failonce.missing)");
+        assert_eq!(
+            failures(&mut vm, "test.failonce.missing"),
+            1,
+            "a missing module is reported once per pass"
         );
     }
 

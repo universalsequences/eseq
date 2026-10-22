@@ -784,11 +784,33 @@ pub(super) fn enqueue_due_process_emissions(
     debug_accum: bool,
 ) -> bool {
     // A `:triggers :all` chain running on an emission below can schedule
-    // ratchets that are already due, so refill until nothing is.
+    // ratchets that are already due, so refill until nothing is. Refills are
+    // bounded: mirrored `:triggers :all` chains on two tracks that emit to each
+    // other at offset 0 keep scheduling at the beat just taken, and nothing
+    // else (the per-invocation cascade limit resets on every refill) would
+    // stop that cycle from spinning the scheduler thread forever.
     let mut due = std::collections::VecDeque::new();
+    let mut refills = 0usize;
     loop {
         if due.is_empty() {
-            due.extend(process_runtime.take_due_events(up_to_beat));
+            let next = process_runtime.take_due_events(up_to_beat);
+            if next.is_empty() {
+                break;
+            }
+            refills += 1;
+            if refills > PROCESS_EVENT_CASCADE_LIMIT + 1 {
+                // Drop what the runaway cycle produced so it does not resume
+                // on the next chunk at the same beat.
+                if debug_accum || debug_routing_enabled() {
+                    eprintln!(
+                        "[process] emission refill limit exceeded limit={} dropped={}",
+                        PROCESS_EVENT_CASCADE_LIMIT,
+                        next.len()
+                    );
+                }
+                break;
+            }
+            due.extend(next);
         }
         let Some(item) = due.pop_front() else {
             break;
@@ -933,3 +955,132 @@ pub(super) fn enqueue_due_process_emissions(
     true
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sequencer::default_empty_effect_chain;
+    use std::cell::Cell;
+
+    /// Accepts every event and counts it, so a runaway emission cycle is not
+    /// cut short by a full queue.
+    #[derive(Default)]
+    struct CountingSink(Cell<usize>);
+
+    impl ScheduledEventSink for CountingSink {
+        fn push(&self, _event: ScheduledEvent) -> Result<(), ScheduledEvent> {
+            self.0.set(self.0.get() + 1);
+            Ok(())
+        }
+    }
+
+    fn hit(track: usize) -> lisp_host::EmittedAccumulatorEvent {
+        lisp_host::EmittedAccumulatorEvent {
+            origin_note: None,
+            offset_beats: 0.0,
+            track: Some(track),
+            resolved: ResolvedStep {
+                duration: 1.0,
+                velocity: 1.0,
+                speed: 1.0,
+                aux_a: 0.0,
+                aux_b: 0.0,
+                transpose: 0.0,
+                pan: 0.0,
+                chop: 1.0,
+                retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+            },
+            chord: Vec::new(),
+            chord_durations: Vec::new(),
+            chord_step_transpose: 0.0,
+            effect_params: Vec::new(),
+            instrument_params: Vec::new(),
+            named_params: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mirrored_triggers_all_emitters_on_two_tracks_do_not_refill_forever() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        let mut scratch = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            vec![Vec::new(), Vec::new()],
+            vec![
+                EffectDescriptor::builtin_sampler(),
+                EffectDescriptor::builtin_sampler(),
+            ],
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process echo-to-1 :triggers :all :run (emit :track 1))
+                (def-process echo-to-0 :triggers :all :run (emit :track 0))
+                (processes :track 0 (echo-to-1))
+                (processes :track 1 (echo-to-0))
+                "#,
+            )
+            .expect("define mirrored processes");
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut process_runtime = crate::process::ProcessRuntime::default();
+        process_runtime.sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+        let mut scratch = Some(scratch);
+        let mut track_output_events = Vec::new();
+        let mut quantizer = MidiFxQuantizerState::default();
+        let sink = CountingSink::default();
+
+        // A generator hit on track 0 runs echo-to-1, which schedules the
+        // first emission of the cycle at beat 0.
+        assert!(enqueue_emitted_network_event_with_midi_fx(
+            &sink,
+            &snapshot,
+            &mut track_output_events,
+            &mut scratch,
+            &mut process_runtime,
+            Some(&mut quantizer),
+            0,
+            0,
+            24_000.0,
+            0.0,
+            EmittedNetworkEventSource::Generator { index: 0 },
+            hit(0),
+            None,
+            false,
+        ));
+
+        let mut drain = |sink: &CountingSink| {
+            enqueue_due_process_emissions(
+                sink,
+                &snapshot,
+                &mut track_output_events,
+                &mut scratch,
+                &mut quantizer,
+                &mut process_runtime,
+                0,
+                0.0,
+                0,
+                1.0,
+                24_000.0,
+                crate::groove::GrooveFloor::at(0),
+                None,
+                false,
+            )
+        };
+        let first = CountingSink::default();
+        assert!(drain(&first), "the refill loop returns instead of spinning");
+        assert!(first.0.get() > PROCESS_EVENT_CASCADE_LIMIT, "the cycle did play before the bound: {}", first.0.get());
+        assert!(
+            first.0.get() <= 4 * (PROCESS_EVENT_CASCADE_LIMIT + 2),
+            "bounded emissions: {}",
+            first.0.get()
+        );
+        let next = CountingSink::default();
+        assert!(drain(&next));
+        assert_eq!(next.0.get(), 0, "the runaway cycle does not resume next chunk");
+    }
+}

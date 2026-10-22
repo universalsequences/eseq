@@ -1762,10 +1762,11 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
             .hash(&mut hasher);
     }
     theme::generation().hash(&mut hasher);
-    if node.widget_type == "knob" {
-        // Paints with a defwidget (`knob-face`) that may be defined later.
-        sdf_widget::sdf_widget_registry_generation().hash(&mut hasher);
-    }
+    // Any cacheable widget can paint with a defwidget defined or redefined
+    // after its first paint: `knob-face`, `bezel-face`, a `:face` prop, an
+    // inherited `:faces` map, `restyle-face`, or a box background slot. Key
+    // on the registry generation for all of them, as the retained scene does.
+    sdf_widget::sdf_widget_registry_generation().hash(&mut hasher);
     viewport.cell_w.to_bits().hash(&mut hasher);
     viewport.cell_h.to_bits().hash(&mut hasher);
     viewport.vp_w.to_bits().hash(&mut hasher);
@@ -4281,6 +4282,60 @@ mod tests {
             widget_state_generation(),
             stamp_before,
             "the global change stamp must advance so a repaint is scheduled"
+        );
+    }
+
+    /// A button's `:face` (or a box's `:faces` slot) may name a defwidget
+    /// that is defined only after the first paint; registering it must
+    /// invalidate the cached primitives, not just knobs'.
+    #[test]
+    fn defwidget_registration_invalidates_cached_button_and_box_keys() {
+        let rect = Rect {
+            row: 1.0,
+            col: 1.0,
+            width: 6.0,
+            height: 2.0,
+        };
+        let button = test_node(
+            9201,
+            "button",
+            rect,
+            HashMap::from([
+                ("text".to_string(), Value::String("Go".to_string())),
+                (
+                    "face".to_string(),
+                    Value::String("test-late-bezel".to_string()),
+                ),
+            ]),
+            Vec::new(),
+        );
+        let boxed = test_node(9202, "box", rect, HashMap::new(), Vec::new());
+        let viewport = test_viewport();
+        let button_before = widget_primitive_cache_key(&button, viewport).expect("cacheable");
+        let box_before = widget_primitive_cache_key(&boxed, viewport).expect("cacheable");
+
+        sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
+            name: "test-late-bezel".to_string(),
+            shader_source: String::new(),
+            sdf_expr: crate::parser::Expression::Number(0.0),
+            state_uniforms: Vec::new(),
+            state: Default::default(),
+            region_count: 0,
+            width: 1.0,
+            height: 1.0,
+            paint_margin: 0.0,
+            animates: false,
+        });
+
+        assert_ne!(
+            widget_primitive_cache_key(&button, viewport).expect("cacheable"),
+            button_before,
+            "a late defwidget must invalidate a cached button face"
+        );
+        assert_ne!(
+            widget_primitive_cache_key(&boxed, viewport).expect("cacheable"),
+            box_before,
+            "a late defwidget must invalidate a cached box background"
         );
     }
 

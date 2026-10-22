@@ -119,8 +119,8 @@
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
 ;; Placeholder the size of a knob, so mode-conditional rows keep their shape.
-(def knob-gap ()
-  (box :width 4.25 :height 2.48))
+(def knob-gap (height)
+  (box :width 5.25 :height height))
 
 ;; Value field in the digidrift lego style: dim title over a left-aligned
 ;; number picker (same metrics as `ui-lego-num`, bound to a builtin fx param).
@@ -267,7 +267,7 @@
         (percent-knob fx "diffuse" diffusion-p 5.5))
       (percent-knob fx "size" size-p 5.5)
       (parameter-knob fx "pre ms" predelay-p 1 5.5)
-      (if galaxy? (knob-gap) (percent-knob fx "mod depth" depth-p)))))
+      (if galaxy? (knob-gap 5.5) (percent-knob fx "mod depth" depth-p 5.5)))))
 
 ;; Right-hand column, spanning both rows: the knobs you reach for most.
 (def output-box (fx gain-p width-p mix-p)

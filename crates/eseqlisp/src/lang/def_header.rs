@@ -390,9 +390,29 @@ pub fn comment_block_above(source: &str, start_byte: usize) -> Option<String> {
     (!doc.is_empty()).then_some(doc)
 }
 
+/// A `;;;` line, one framed by rules (`;; ── Rack clips (spec §2) ──────`,
+/// `; --- Envelopes ---`), or one that is mostly a rule (`;; ====`). Prose
+/// that merely contains `---` or a `### Heading` is still documentation.
 fn is_banner(comment: &str) -> bool {
-    comment.starts_with(";;;")
-        || ['─', '-', '=', '*', '#'].iter().any(|rule| comment.contains(&rule.to_string().repeat(3)))
+    if comment.starts_with(";;;") {
+        return true;
+    }
+    let body = comment.trim_start_matches(';').trim();
+    let rule_run = |run: &mut dyn Iterator<Item = char>| {
+        let mut run = run.peekable();
+        match run.peek().copied() {
+            Some(c @ '─') => run.take_while(|&next| next == c).count() >= 2,
+            Some(c @ ('-' | '=')) => run.take_while(|&next| next == c).count() >= 3,
+            _ => false,
+        }
+    };
+    if rule_run(&mut body.chars()) && rule_run(&mut body.chars().rev()) {
+        return true;
+    }
+    let (rule, other) = body.chars().filter(|c| !c.is_whitespace()).fold((0, 0), |(rule, other), c| {
+        if matches!(c, '─' | '-' | '=' | '*' | '#') { (rule + 1, other) } else { (rule, other + 1) }
+    });
+    rule >= 3 && rule > other
 }
 
 fn symbol_of(expr: &super::parser::Expr) -> Option<&str> {
@@ -565,5 +585,27 @@ mod comment_doc_tests {
     fn a_section_banner_is_not_documentation() {
         let source = ";; ── Sizes ──────\n(def name-width 9.0)\n;;; Section\n;; The gap.\n(def gap 1)\n";
         assert_eq!(found(source), vec![("gap".into(), false, "gap".into(), "The gap.".into())]);
+    }
+
+    #[test]
+    fn a_banner_with_a_long_title_is_not_documentation() {
+        let source = ";; ── Rack clips (docs/rack-clips-and-break-kits-spec.md §2-§4, §6) ────────\n;; Whether scene s plays clip c.\n(def plays? (s c) s)\n; --- Envelopes ---\n(def env () 1)\n";
+        let docs: Vec<String> = found(source).into_iter().map(|(_, _, _, doc)| doc).collect();
+        // `env` has only a banner above it, so it has no documentation at all.
+        assert_eq!(docs, vec!["Whether scene s plays clip c.".to_string()]);
+    }
+
+    #[test]
+    fn prose_containing_a_rule_run_is_still_documentation() {
+        let source = ";; ======\n;; Maps a step to its lane.\n;; ### Notes\n;; Example: (lane-of 3) --- returns :pitch\n(def lane-of (s) s)\n";
+        assert_eq!(
+            found(source),
+            vec![(
+                "lane-of".into(),
+                false,
+                "(lane-of s)".into(),
+                "Maps a step to its lane.\n### Notes\nExample: (lane-of 3) --- returns :pitch".into()
+            )]
+        );
     }
 }

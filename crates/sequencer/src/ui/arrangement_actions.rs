@@ -139,6 +139,8 @@ pub(crate) fn arrangement_action_song_commands(
                     ("from-beat", Value::Number(from_beat)),
                     ("to-beat", Value::Number(start_beat)),
                     ("place-patterns", Value::Bool(true)),
+                    // A body drag, not an edge resize: undo reads "Move".
+                    ("span-move", Value::Bool(true)),
                 ]),
             )])
         }
@@ -466,6 +468,7 @@ mod tests {
         assert_eq!(payload_number(&commands[0], "from-beat"), 16.0);
         assert_eq!(payload_number(&commands[0], "to-beat"), 12.5);
         assert!(payload_bool(&commands[0], "place-patterns"), "scene drags re-print patterns");
+        assert!(payload_bool(&commands[0], "span-move"), "a body drag records a move");
     }
 
     /// A scene span ends where the NEXT scene change starts, so its end-edge

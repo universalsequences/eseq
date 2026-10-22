@@ -218,19 +218,23 @@ impl ShaderEmitter {
             ])]),
             def.sdf_expr.clone(),
         ]);
-        let (statements, scopes, type_scopes) =
-            (self.statements.len(), self.scopes.len(), self.type_scopes.len());
+        let statements = self.statements.len();
         let regions = (self.current_region_id, self.next_region_id);
+        // The widget's free names (x, y, uv, ...) are its own coordinates,
+        // not whatever the face around the slot keyword rebound them to:
+        // hide the outer `let` scopes while the splice is emitted.
+        let scopes = std::mem::take(&mut self.scopes);
+        let type_scopes = std::mem::take(&mut self.type_scopes);
         self.splicing.push(slot.to_string());
         let result = self.emit_expr(&spliced);
         self.splicing.pop();
+        self.scopes = scopes;
+        self.type_scopes = type_scopes;
         match result {
             Ok(out) => Some(out),
             Err(error) => {
                 eprintln!("theme slot :{slot} widget '{widget}' not inlined: {error}");
                 self.statements.truncate(statements);
-                self.scopes.truncate(scopes);
-                self.type_scopes.truncate(type_scopes);
                 (self.current_region_id, self.next_region_id) = regions;
                 None
             }
@@ -2740,6 +2744,40 @@ mod tests {
         assert!(stmts.iter().any(|s| s.contains("smoothstep")));
         assert!(stmts.iter().any(|s| s.contains("float4")));
         assert!(result.starts_with("_v"));
+    }
+
+    #[test]
+    fn a_slot_widget_reads_its_own_coordinates_inside_an_outer_let() {
+        let mut runtime = crate::runtime::Runtime::new();
+        runtime
+            .eval_str(
+                "(defwidget splice-stripes :width 2 :height 2
+                   :shader (rgba (* y 0.777) 0.0 0.0 1.0))",
+            )
+            .unwrap();
+        theme::set_slot_widget_overrides([(
+            "widget-knob-filled".to_string(),
+            "splice-stripes".to_string(),
+        )]);
+        let result = compile_sdf_expr_with_theme(
+            &parse_one_expr(
+                "(let ((y (- y 0.5)))
+                   (mix (rgba 0 0 0 0) :widget-knob-filled 1.0))",
+            ),
+            theme::current(),
+        );
+        theme::set_slot_widget_overrides(std::iter::empty());
+        let (stmts, out) = result.unwrap();
+        let all = format!("{}\n{out}", stmts.join("\n"));
+        let line = all
+            .lines()
+            .find(|line| line.contains("0.777"))
+            .unwrap_or_else(|| panic!("slot widget not inlined:\n{all}"));
+        assert!(
+            line.contains("(y * 0.777)"),
+            "the splice reads the widget's y, not the outer rebinding: {line}"
+        );
+        assert!(!line.contains("_v0"), "the outer `let` leaked into the splice: {line}");
     }
 
     #[test]

@@ -182,6 +182,7 @@ pub fn run_turn(
         record(config, history);
         let mut message = MessageAccumulator::default();
         let mut failure = None;
+        let mut started = Vec::new();
         let streamed = transport.stream(request_body(config, history), &mut |event| {
             if cancel.load(Ordering::Relaxed) {
                 return false;
@@ -192,14 +193,17 @@ pub fn run_turn(
                     match update {
                         StreamUpdate::Text(text) => transcript.append_assistant(&text),
                         StreamUpdate::Thinking(text) => transcript.append_thinking(&text),
-                        StreamUpdate::ToolStarted { id, name } => transcript.push(Entry::Tool {
-                            id,
-                            name,
-                            input: String::new(),
-                            status: ToolStatus::Running,
-                            output: String::new(),
-                            images: Vec::new(),
-                        }),
+                        StreamUpdate::ToolStarted { id, name } => {
+                            started.push(id.clone());
+                            transcript.push(Entry::Tool {
+                                id,
+                                name,
+                                input: String::new(),
+                                status: ToolStatus::Running,
+                                output: String::new(),
+                                images: Vec::new(),
+                            });
+                        }
                         StreamUpdate::Nothing => {}
                     }
                     true
@@ -231,6 +235,11 @@ pub fn run_turn(
             return Ok(());
         }
         let tool_uses = message.tool_uses();
+        // A call the fallback model replaced never runs: retire its row.
+        for id in started.iter().filter(|id| !tool_uses.iter().any(|tool| &tool.id == *id)) {
+            let declined = "Declined; the fallback model answered instead.".to_string();
+            lock(transcript).finish_tool(id, String::new(), ToolStatus::Failed, declined, Vec::new());
+        }
         history.push(json!({ "role": "assistant", "content": message.content() }));
         record(config, history);
         let unrunnable = match stop_reason {
@@ -472,6 +481,26 @@ mod tests {
         assert_eq!(ended, Err("The response ended before the message finished.".to_string()));
         assert_eq!(history.len(), 1, "nothing of the cut-off message went back");
         assert!(matches!(&transcript.into_inner().unwrap().entries[0], Entry::Tool { status: ToolStatus::Failed, .. }));
+    }
+
+    #[test]
+    fn a_call_declined_before_a_fallback_is_retired_when_the_turn_ends_normally() {
+        let mut reply = tool_reply("old", "{}", "end_turn");
+        reply.splice(
+            3..3,
+            [
+                json!({"type": "content_block_start", "index": 1, "content_block": {"type": "fallback", "from": {}, "to": {}}}),
+                json!({"type": "content_block_start", "index": 2, "content_block": {"type": "text", "text": "Done."}}),
+                json!({"type": "content_block_stop", "index": 2}),
+            ],
+        );
+        let (_, transcript, calls) = run(vec![reply]);
+        assert!(calls.is_empty(), "the declined call never runs");
+        assert!(matches!(
+            &transcript.entries[0],
+            Entry::Tool { id, status: ToolStatus::Failed, output, .. } if id == "old" && output.starts_with("Declined")
+        ));
+        assert!(!transcript.entries.iter().any(|e| matches!(e, Entry::Tool { status: ToolStatus::Running, .. })));
     }
 
     #[test]

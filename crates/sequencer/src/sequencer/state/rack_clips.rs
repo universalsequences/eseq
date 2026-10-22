@@ -701,18 +701,31 @@ impl ProjectScenes {
 
     /// Rename every clip of `group_id` in bank order: "`prefix` 1..N", or
     /// back to unnamed (shown as Clip 1..N) when `prefix` is blank. `false`
-    /// when the rack has no bank.
+    /// when the rack has no bank, the bank has no clips, or every clip
+    /// already carries its computed name, so callers never record a no-op
+    /// undo entry.
     pub fn rename_rack_clips_in_order(&mut self, group_id: u64, prefix: &str) -> bool {
         let prefix = prefix.trim();
         let Some(bank) = self.rack_bank_mut(group_id) else {
             return false;
         };
-        for (position, clip) in bank.clips.iter_mut().enumerate() {
-            clip.name = if prefix.is_empty() {
+        let name_at = |position: usize| {
+            if prefix.is_empty() {
                 String::new()
             } else {
                 format!("{prefix} {}", position + 1)
-            };
+            }
+        };
+        let changes = bank
+            .clips
+            .iter()
+            .enumerate()
+            .any(|(position, clip)| clip.name != name_at(position));
+        if !changes {
+            return false;
+        }
+        for (position, clip) in bank.clips.iter_mut().enumerate() {
+            clip.name = name_at(position);
         }
         true
     }
@@ -1252,6 +1265,21 @@ mod tests {
         let labels: Vec<_> = [a, b, c].iter().map(|id| bank.clip_label(*id).unwrap()).collect();
         assert_eq!(labels, ["Clip 1", "Clip 2", "Clip 3"]);
         assert!(!scenes.rename_rack_clips_in_order(999, "x"), "no bank, no rename");
+    }
+
+    #[test]
+    fn rename_in_order_reports_no_change_for_an_empty_bank_or_matching_names() {
+        let mut scenes = scenes();
+        let a = scenes.create_rack_clip_with_members(RACK, &MEMBERS, "");
+        let b = scenes.create_rack_clip(RACK, "").expect("clip b");
+        assert!(!scenes.rename_rack_clips_in_order(RACK, ""), "already unnamed");
+        assert!(scenes.rename_rack_clips_in_order(RACK, "Break"));
+        assert!(!scenes.rename_rack_clips_in_order(RACK, " Break "), "same prefix twice");
+
+        assert!(scenes.delete_rack_clip(RACK, a));
+        assert!(scenes.delete_rack_clip(RACK, b));
+        assert!(scenes.rack_bank(RACK).is_some(), "deleting clips keeps the bank");
+        assert!(!scenes.rename_rack_clips_in_order(RACK, "Fill"), "empty bank");
     }
 
     #[test]

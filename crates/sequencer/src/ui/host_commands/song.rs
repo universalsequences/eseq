@@ -376,7 +376,9 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let map = payload_map(payload)?;
             let from_beat = require_number(map, "from-beat")?;
             let to_beat = require_number(map, "to-beat")?;
-            if map_bool(map, "place-patterns") {
+            if map_bool(map, "place-patterns") && map_bool(map, "span-move") {
+                app.arr_scene_span_move_placing(from_beat, to_beat)?;
+            } else if map_bool(map, "place-patterns") {
                 app.arr_scene_event_move_placing(from_beat, to_beat)?;
             } else {
                 app.arr_scene_event_move(from_beat, to_beat)?;

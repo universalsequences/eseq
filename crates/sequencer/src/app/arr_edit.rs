@@ -1109,6 +1109,15 @@ impl App {
     ) -> Result<(), String> {
         let beat = finite_beat("Scene event beat", beat)?;
         self.edit_arrangement("Insert scene", move |arrangement, scenes| {
+            // Checked before the marker lands: stamping a missing scene
+            // would clear every track lane under the span and print nothing.
+            if scene >= scenes.scenes.len() {
+                return Err(format!(
+                    "Scene {} does not exist ({} scenes)",
+                    scene + 1,
+                    scenes.scenes.len()
+                ));
+            }
             let index = Self::insert_scene_marker(arrangement, beat, scene);
             let (start, end) = Self::scene_event_span(arrangement, index);
             stamp_scene_clips(arrangement, scenes, start, end)
@@ -1164,9 +1173,28 @@ impl App {
         from_beat: f64,
         to_beat: f64,
     ) -> Result<(), String> {
+        self.scene_marker_move_placing("Resize scene", from_beat, to_beat)
+    }
+
+    /// `arr_scene_event_move_placing` for a whole-span body drag: the same
+    /// edit, recorded in history as a move rather than a resize.
+    pub fn arr_scene_span_move_placing(
+        &mut self,
+        from_beat: f64,
+        to_beat: f64,
+    ) -> Result<(), String> {
+        self.scene_marker_move_placing("Move scene event", from_beat, to_beat)
+    }
+
+    fn scene_marker_move_placing(
+        &mut self,
+        label: &'static str,
+        from_beat: f64,
+        to_beat: f64,
+    ) -> Result<(), String> {
         let from_beat = finite_beat("Scene event beat", from_beat)?;
         let to_beat = finite_beat("Scene event beat", to_beat)?;
-        self.edit_arrangement("Resize scene", move |arrangement, scenes| {
+        self.edit_arrangement(label, move |arrangement, scenes| {
             let before = arrangement_scene_spans(arrangement);
             Self::move_scene_marker(arrangement, from_beat, to_beat)?;
             restamp_changed_scene_spans(arrangement, scenes, &before)
@@ -2608,6 +2636,39 @@ mod tests {
             lane(&app, 0),
             vec![(0.0, 4.0, Some(1), 0.0), (8.0, 24.0, Some(3), 0.0)]
         );
+    }
+
+    /// A span body drag and an edge drag make the same edit but read
+    /// differently in history: a move is not a resize.
+    #[test]
+    fn scene_span_move_placing_is_recorded_as_a_move() {
+        let mut app = app_with_clips();
+        app.arr_scene_event_insert_placing(16.0, 2).expect("drop scene");
+        app.arr_scene_span_move_placing(16.0, 20.0).expect("move span");
+        match undo(&mut app) {
+            HistoryReplay::Applied(step) => assert_eq!(step.label, "Move scene event"),
+            _ => panic!("the span move is undoable"),
+        }
+        app.arr_scene_event_move_placing(16.0, 20.0).expect("resize span");
+        match undo(&mut app) {
+            HistoryReplay::Applied(step) => assert_eq!(step.label, "Resize scene"),
+            _ => panic!("the edge drag is undoable"),
+        }
+    }
+
+    /// Dropping a scene that does not exist is refused before the marker
+    /// lands, so the clips under the would-be span survive untouched.
+    #[test]
+    fn scene_insert_placing_refuses_a_missing_scene() {
+        let mut app = app_with_clips();
+        let before = lane(&app, 0);
+        let markers = scene_lane(&app);
+        let err = app
+            .arr_scene_event_insert_placing(8.0, 99)
+            .expect_err("missing scene is refused");
+        assert!(err.contains("does not exist"), "{err}");
+        assert_eq!(lane(&app, 0), before);
+        assert_eq!(scene_lane(&app), markers);
     }
 
     /// Scene-edge drags re-print patterns only where the boundary swept:
