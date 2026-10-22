@@ -279,6 +279,7 @@ pub(crate) fn evaluate_project_scratch_on_ui_runtime(
 ) -> Result<(), String> {
     let scratch_text = app.state.scratch_source();
     if scratch_text.trim().is_empty() {
+        crate::host_commands::packages::sync_package_overrides(editor, &app.state);
         return replay_rack_sequencer_sources(editor, app);
     }
 
@@ -299,6 +300,8 @@ pub(crate) fn evaluate_project_scratch_on_ui_runtime(
         Err(failure)
     };
     editor.process_lisp_reload_report(report);
+    // The project's packages show and the previous project's stop showing.
+    crate::host_commands::packages::sync_package_overrides(editor, &app.state);
     if let Some(status) = editor.runtime_mut().take_status_message() {
         editor.show_transient_message(status);
     }

@@ -178,7 +178,7 @@
           (h-on (p "high on")) (m-on (p "mid on")) (l-on (p "low on"))
           (low-split (p "low split")) (high-split (p "high split")))
       (box :width 34.4 :height 9.4 :padding 0.36
-           :background-color :black :corner-radius 7
+           :background-color :mixer-control-bg :corner-radius 7
         (h-stack :gap 0.4 :align :start
           (v-stack :gap 0.18 :align :start
             (label "Below" :font-size 8.5 :width 4.8 :color :dim :bg :transparent)

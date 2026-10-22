@@ -72,7 +72,7 @@
       (active (get page :id)))
     (h-stack :height 9.8 :gap 0.3 :align :start
       (v-stack :gap 0.2 (block (nth blocks 0) 0 active visible) (block (nth blocks 1) 1 active visible))
-      (box :debug-name "drum-display" :width 35.8 :height 9.8 :padding 0.3 :background-color :cyan
+      (box :debug-name "drum-display" :part "instrument/screen" :width 35.8 :height 9.8 :padding 0.3 :background-color :cyan
         (v-stack :gap 0.15
           (label (str title " / " (get page :title)) :width 35.2 :height 0.7
             :h-align :center :v-align :center :font-size 9 :color :cyan :bg :black)

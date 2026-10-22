@@ -581,7 +581,9 @@ impl SequencerState {
                 silenced,
                 scene.mod_connections.clone(),
                 scene.neural_networks.clone(),
-                scene.graph_overrides.clone(),
+                // Composed like the live scene's: a rack-owned graph's
+                // overrides live in the scene's rack clip.
+                scenes.composed_graph_overrides(scene_idx),
                 scene.scene_slots.clone(),
                 scene.project_process_chain.clone(),
             )

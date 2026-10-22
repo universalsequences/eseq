@@ -3678,6 +3678,26 @@ mod live_keyboard_tests {
     }
 
     #[test]
+    fn cmd_option_arrows_step_the_viewed_bank() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        install_sequencer_keys_mode(&mut editor);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate bank-steps 0)
+                (def eseq.sequencer-keys/bank-step (delta) (do (set! bank-steps (+ bank-steps delta)) true))
+                "#,
+            )
+            .expect("stub bank-step");
+        let modifiers = KeyModifiers::SUPER | KeyModifiers::ALT;
+        editor.handle_key(KeyEvent::new(KeyCode::Right, modifiers));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, modifiers));
+        editor.handle_key(KeyEvent::new(KeyCode::Left, modifiers));
+        assert_eq!(count(&mut editor, "bank-steps"), 1.0);
+    }
+
+    #[test]
     fn a_mode_that_does_not_inherit_the_sequencer_keymap_keeps_its_arrows() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         install_sequencer_keys_mode(&mut editor);

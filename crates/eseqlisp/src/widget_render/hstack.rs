@@ -14,6 +14,23 @@ impl WidgetDefinition for HStackWidget {
         &["h-stack"]
     }
 
+    fn doc(&self) -> &'static str {
+        "Lays children out left to right: the basic row. :gap defaults to 1 cell (v-stack's \
+is 0); :padding insets every side. :align places children vertically: :start \
+(default), :center, :end, :stretch (each child takes the full row height) or \
+:baseline (text baselines line up, e.g. a label beside a number-picker). :justify \
+spreads leftover width when no child has :flex: :start (default), :center, :end, \
+:space-between, :space-around, :space-evenly. A child's :flex N takes a share of the \
+leftover width, but only in a row with :width :fill; otherwise the row is exactly as \
+wide as its children and nothing is left over. In a fill row, flex children are \
+re-measured at their final width, so a wrapping label or a wrap inside one sets the \
+row height correctly. Without :width :fill children are not width-constrained at \
+all, so long text runs past the edge instead of wrapping. Natural size is the summed \
+child widths plus gaps by the tallest child (a :height :fill child does not count \
+toward that height). Example: (h-stack :width :fill :gap 0.5 :align :center (label \
+\"Cutoff\") (slider :bind cutoff :flex 1) (number-picker :bind cutoff :decimals 0))"
+    }
+
     fn is_container(&self) -> bool {
         true
     }

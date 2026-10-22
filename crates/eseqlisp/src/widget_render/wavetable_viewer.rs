@@ -249,6 +249,29 @@ impl WidgetDefinition for WavetableViewerWidget {
         &["wavetable-viewer"]
     }
 
+    fn doc(&self) -> &'static str {
+        "Draws a wavetable as a stack of single-cycle waves with the current position \
+highlighted, for wavetable synths (Digi Wave, Beads) and the Filter Table effect. \
+Display only, no callbacks. Data comes from :file, a wavetable JSON asset path \
+({\"shape\": [frame-length, ...], \"data\": [...], optional \"waves_per_set\"}), or \
+from :data-key, a bank the host published from Rust. The bank is split into sets of \
+:waves-per-set waves (the file's value, else 16); :set picks the set and :wave the \
+position inside it in waves (fractional morphs between neighbours), or 0..1 when \
+:wave-normalized true. :warp and :fold (0..1) preview phase bend and wavefold. \
+:domain :magnitude draws each wave's magnitude spectrum instead of the waveform. \
+Colours: :wave-color (selected wave), :inactive-color, :background-color. Bind \
+:set/:wave to the synth's params so the view tracks knobs and modulation. \
+Example: (wavetable-viewer :file bank-path :waves-per-set 16 :set bank :wave pos :wave-normalized true :width 16 :height 5)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "file", "data-key", "waves-per-set", "set", "wave", "wave-normalized", "warp",
+            "fold", "domain", "wave-color", "inactive-color", "background-color", "label-color",
+            "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

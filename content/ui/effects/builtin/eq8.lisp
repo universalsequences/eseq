@@ -148,7 +148,7 @@
         :width 5 :padding 0.2 :background-color :mixer-control-bg
         (h-stack :gap 0.18
           (button (str (+ band 1))
-            :width 1.05 :height 0.55 :padding 0 :font-size 6.8
+            :width 1.05 :height 1.0 :padding 0 :font-size 6.8
             :background-color (if selected :eq8-band-selected :mixer-control-bg)
             :border-color :transparent
             :corner-radius 0
@@ -157,7 +157,7 @@
           (button (if (get band-map :enabled) "on" "off")
             :border-color :transparent
             :corner-radius 6
-            :width 2.15 :height 0.85 :padding 0 :font-size 8.0
+            :width 2.15 :height 1.5 :padding 0 :font-size 8.0
             :background-color :transparent
             :active-color :eq8-active-text
             :color :dim
@@ -185,7 +185,6 @@
         :mod-range-2-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 2)
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
-        :track-color :mixer-strip-bg
         :font-size 8.8 :label-font-size 8.6
         :text-color :dim :label-color :dim
         :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
@@ -193,12 +192,12 @@
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-        :width 4.45 :height 3.48 :knob-size 2.65
+        :width 6.45 :height 3.08 :knob-size 3.65
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
 (def selected-knobs (fx params band)
-  (box :width 4.9 :height 7.05 :padding 0.22
-    :background-color :mixer-control-bg :corner-radius 12
+  (box :width 5.5 :height 7.05 :padding 0.22
+    :background-color :fx-inner-panel-bg :corner-radius 2
     (v-stack :gap 0.22 :align :center
       (selected-knob fx "freq" (param params band "freq") 0)
       (selected-knob fx "q" (param params band "q") 2))))
@@ -227,46 +226,47 @@
 
 (def eq8-ui (fx)
   (let ((params (get fx :params))
-        (selected-band (selected-band-for fx)))
+      (selected-band (selected-band-for fx)))
     (if (= (len params) 41)
       (v-stack :gap 0.020
         :padding 0.1
         (h-stack :gap 0.25 :align :start
           (selected-knobs fx params selected-band)
-          (box :width 38.05 :height 6.85
-            (eq8-editor
-              :width 38.05 :height 6.85
-              :bands (bands fx params selected-band)
-              :selected-band selected-band
-              :source (eq8-source fx)
-              :tap-point :post-fx
-              :mode :eq
-              :fft-size 8192
-              :time-slices 128
-              :min-db -96
-              :max-db 0
-              :smoothing 0.65
-              :background-color :mixer-control-bg
-              :curve-color :eq8-curve
-              :selected-color :eq8-selected
-              :spectrum-color :eq8-spectrum
-              :spectrum-peak-color :eq8-spectrum-peak
-              :on-action |event| (handle-action fx params event))))
-        (box :background-color :mixer-control-bg
-          :corner-radius 12
-          :padding 0.2
-          (v-stack
-            (box :width 43.2 :height 1.02 :padding 0.22
-              :corner-radius 7
-              (h-stack  :align :center :gap 0.4
-                (band-button fx params 0 selected-band)
-                (band-button fx params 1 selected-band)
-                (band-button fx params 2 selected-band)
-                (band-button fx params 3 selected-band)
-                (band-button fx params 4 selected-band)
-                (band-button fx params 5 selected-band)
-                (band-button fx params 6 selected-band)
-                (band-button fx params 7 selected-band)))
-            (selected-controls fx params selected-band))))
-      (eseq.effects.param-grid/fx-param-grid params fx))
-    ))
+          (box :width 38.05 :height 7 :padding 0.1
+          (eq8-editor
+            :width 38.05 :height 6.85
+            :bands (bands fx params selected-band)
+            :selected-band selected-band
+            :source (eq8-source fx)
+            :tap-point :post-fx
+            :mode :eq
+            :fft-size 8192
+            :time-slices 128
+            :min-db -96
+            :max-db 0
+            :smoothing 0.65
+            :background-color :mixer-control-bg
+            :curve-color :eq8-curve
+            :selected-color :eq8-selected
+            :spectrum-color :eq8-spectrum
+            :spectrum-peak-color :eq8-spectrum-peak
+            :on-action |event| (handle-action fx params event)))
+        )
+      (box :background-color :fx-inner-panel-bg
+        :corner-radius 2
+        :padding 0.2
+        (v-stack
+          (box :width 43.2 :height 1.2 :padding 0.22
+            :corner-radius 7
+            (h-stack  :align :center :gap 0.4
+              (band-button fx params 0 selected-band)
+              (band-button fx params 1 selected-band)
+              (band-button fx params 2 selected-band)
+              (band-button fx params 3 selected-band)
+              (band-button fx params 4 selected-band)
+              (band-button fx params 5 selected-band)
+              (band-button fx params 6 selected-band)
+              (band-button fx params 7 selected-band)))
+          (selected-controls fx params selected-band))))
+    (eseq.effects.param-grid/fx-param-grid params fx))
+  ))

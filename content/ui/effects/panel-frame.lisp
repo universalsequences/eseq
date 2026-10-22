@@ -11,7 +11,8 @@
 (import eseq.effects.state :as st)
 (import eseq.effects.devices :as dv)
 
-(export fx-panel-body
+(export panel-surface
+        fx-panel-body
         fx-panel-header-leading-spacer
         fx-effect-chain-kind
         fx-copy-values-to-all-scenes
@@ -35,6 +36,12 @@
 ;; (src/ui/state_values/tests.rs). Deleted as the caller files convert.
 ;; Converted callers (effect-panels, process-panel, param-controls,
 ;; effect-modulation, filter-core, str8-delay) import this module instead.
+
+;; The widget every effect, instrument, sampler, modulator and process card
+;; paints as its background (eseq.effects.panel-widgets/fx-panel-bg). One
+;; function, so a package restyles every card with a single override; the
+;; widget gets each card's :color, :header, :selected-header and :selected.
+(def panel-surface () "fx-panel-bg")
 
 (def fx-panel-body (debug-name children)
   (box

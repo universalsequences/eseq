@@ -248,6 +248,20 @@ impl WidgetDefinition for ColorPickerWidget {
         &["h", "s", "v", "a"]
     }
 
+    fn doc(&self) -> &'static str {
+        "An HSV colour picker: a saturation/value square above a hue strip and an \
+alpha strip. It shows :h :s :v :a, each 0..1 (defaults h 0, s 0, v 1, a 1, all \
+bindable), and does not change them itself. Every press and drag calls :on-change \
+with four numbers, (h s v a), each 0..1; only the part being dragged differs from \
+the props. Which part a drag edits is fixed by where it started, so overshooting \
+the square does not jump into the hue strip. Keep the colour as HSV in your state \
+(so dragging through grey keeps its hue) and convert with hsv->rgb / rgb->hsv. It \
+is :width cells wide (default 24, or :width :fill for the available width) and \
+tall enough for a square SV area unless :height is given. Example: \
+(color-picker :h h :s s :v v :a a :width 20 \
+:on-change (lambda (h s v a) (set-color! h s v a)))"
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &["h", "s", "v", "a", "width", "height", "on-change"]
     }
@@ -304,13 +318,15 @@ impl WidgetDefinition for ColorPickerWidget {
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let region = region_at(node.rect, local_row);
                 MouseEventOutcome::Dispatch(pick_event(region, node, local_col, local_row))
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                let start_row = drag_start.map_or(local_row, |(_, row)| row);
+                let start_row = drag_start
+                    .map_or(local_row, |(_, row)| super::scroll::event_content_row(row));
                 let region = region_at(node.rect, start_row);
                 MouseEventOutcome::Dispatch(pick_event(region, node, local_col, local_row))
             }

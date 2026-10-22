@@ -138,6 +138,25 @@ impl WidgetDefinition for ScopeWidget {
         &["scope"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A live oscilloscope: the recent audio of one point in the mix drawn as a mono \
+waveform trace over a faint grid. Display only, no callbacks. :source picks what to \
+watch: :master (default) or a selector dict such as (dict :kind :track :index 0); also :track-effect (:index :slot), :bus, \
+:bus-effect, :rack-slot, :rack-effect. :tap-point :pre-fx or :post-fx (default) picks \
+before or after the track's effects. :frames is the window length in samples \
+(1024, 64..16384). The host only captures audio for visible scopes. \
+Colours: :waveform-color, :background-color, :grid-color. Defaults to full width, 6 \
+cells tall. For a stereo phase/Lissajous view use xy-scope. \
+Example: (scope :source (dict :kind :track :index 0) :tap-point :post-fx :height 5)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "source", "tap-point", "frames", "data-key", "waveform-color", "background-color",
+            "grid-color", "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }
@@ -272,6 +291,26 @@ fn stereo_pairs(data_key: &str, max_points: usize) -> Vec<(f32, f32)> {
 impl WidgetDefinition for XyScopeWidget {
     fn names(&self) -> &'static [&'static str] {
         &["xy-scope"]
+    }
+
+    fn doc(&self) -> &'static str {
+        "A live stereo XY (Lissajous / goniometer) scope: plots left against right of \
+the recent audio as a trace in a square plot, so mono shows as a line and wide \
+stereo as a cloud. Display only, no callbacks. :source picks what to watch: :master \
+(default) or a selector dict such as (dict :kind :track :index 0); also :track-effect (:index :slot), :bus, \
+:bus-effect, :rack-slot, :rack-effect. :tap-point :pre-fx or :post-fx (default) picks \
+before or after the track's effects. :frames is the window length in samples \
+(1024, 64..16384). The host only captures audio for visible scopes. \
+Colours: :waveform-color, :background-color, :grid-color. Defaults to full width, 8 \
+cells tall. For a time-domain waveform use scope. \
+Example: (xy-scope :source :master :width 8 :height 8)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "source", "tap-point", "frames", "data-key", "waveform-color", "background-color",
+            "grid-color", "width", "height",
+        ]
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {

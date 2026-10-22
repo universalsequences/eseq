@@ -118,10 +118,11 @@ fn map_string(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<St
     }
 }
 
-/// The lines the managed block should hold right now, sorted for stable
-/// diffs: knobs first, then module switches, then single entries.
-fn managed_block_lines(editor: &mut Editor) -> Result<Vec<String>, String> {
-    let mut lines = Vec::new();
+/// Each `defcustom` knob whose name starts with `prefix` and whose live
+/// value differs from its declared default, as its qualified name and its
+/// value written as Lisp source.
+pub(crate) fn changed_knobs(editor: &mut Editor, prefix: &str) -> Result<Vec<(String, String)>, String> {
+    let mut knobs = Vec::new();
     for row in eval_list(editor, "(custom-declarations)")? {
         let Value::Map(map) = &*row.borrow() else {
             continue;
@@ -133,11 +134,11 @@ fn managed_block_lines(editor: &mut Editor) -> Result<Vec<String>, String> {
         ) else {
             continue;
         };
-        if value == default {
+        if value == default || !name.starts_with(prefix) {
             continue;
         }
         match lisp_literal(&value) {
-            Some(literal) => lines.push(format!("(setopt {name} {literal})")),
+            Some(literal) => knobs.push((name, literal)),
             None => {
                 return Err(format!(
                     "{name} holds a value that cannot be written as Lisp source: {value:?}"
@@ -145,10 +146,28 @@ fn managed_block_lines(editor: &mut Editor) -> Result<Vec<String>, String> {
             }
         }
     }
+    Ok(knobs)
+}
+
+/// The lines the managed block should hold right now, sorted for stable
+/// diffs: knobs first, then module switches, then single entries.
+fn managed_block_lines(editor: &mut Editor) -> Result<Vec<String>, String> {
+    // A tried knob is saved by Keep, into its own declaration: nothing
+    // declares it after a restart.
+    let tried = format!("{}/", crate::agent_pane::TRY_MODULE);
+    let mut lines: Vec<String> = changed_knobs(editor, "")?
+        .into_iter()
+        .filter(|(name, _)| !name.starts_with(&tried))
+        .map(|(name, literal)| format!("(setopt {name} {literal})"))
+        .collect();
+    // A package off only because nothing attaches it is not the user's
+    // choice: saved, it would stay off in the project that attaches it.
     let mut disabled_modules = Vec::new();
     for module in eval_list(editor, "(disabled-override-modules)")? {
         if let Value::String(module) = &*module.borrow() {
-            disabled_modules.push(module.clone());
+            if !editor.runtime().is_module_unattached(module) {
+                disabled_modules.push(module.clone());
+            }
         }
     }
     for module in &disabled_modules {

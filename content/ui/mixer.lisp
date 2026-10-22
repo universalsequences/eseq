@@ -18,6 +18,7 @@
 ;; Compile-time edge (spec §4): the shared defstate keyspace + compat
 ;; aliases must exist before this unit's readers compile.
 (import eseq.seq-core-state)
+(import eseq.materials)
 
 ;; Names other code calls by spelling: `seq-ctrl-g` is the global Ctrl+G /
 ;; Cmd+G dispatcher src/ui/input.rs evals by name.
@@ -69,6 +70,8 @@
         track-meter-control
         bus-meter-control
         bus-output-dropdown
+        bus-output-picker
+        track-output-picker
         select-bus
         activate-track-control
         clear-delete-target
@@ -197,16 +200,28 @@
     (dict :id :convert-drum-rack :label "Convert to Drum Rack" :icon :sampler)
     (dict :id :ungroup :label "Ungroup" :icon :ungroup)))
 
-;; A rack's menu also offers the graph sequencers it could own. A sequencer
-;; that merely routes to tracks inside the rack is still project-owned;
-;; "Attach … to rack" hands it to the rack (routes become rack members, and
-;; the pair travels together into kits), and "Detach …" gives it back
-;; (docs/rack-clips-and-break-kits-spec.md §5.1).
-;; An instance's sequencer shows the instance's label; a legacy script its
-;; published name.
-(def graph-sequencer-label (gr)
-  (let ((instance (instance-ref gr.gid)))
-    (if instance instance.label gr.name)))
+;; A rack's menu also offers the sequencers it could own: every kind
+;; instance, whatever its kind (graph, generator, ...), plus LEGACY plain
+;; graph scripts, which are not instances. One that merely routes to tracks
+;; inside the rack is still project-owned; "Attach … to rack" hands it to the
+;; rack (routes become rack members, and the pair travels together into
+;; kits), and "Detach …" gives it back (docs/rack-clips-and-break-kits-spec.md
+;; §5.1, docs/instance-kinds-spec.md §5). An instance shows its label; a
+;; legacy script its published name.
+(def sequencer-owner-action (id name label owned)
+  (if owned
+    (dict :id :detach-sequencer
+          :key (str "detach-" id)
+          :sequencer-id id
+          :sequencer-name name
+          :label (str "Detach " label)
+          :icon :unlink)
+    (dict :id :move-sequencer-into-rack
+          :key (str "attach-" id)
+          :sequencer-id id
+          :sequencer-name name
+          :label (str "Attach " label " to rack")
+          :icon :link)))
 
 (def rack-group-menu-actions (g)
   (append
@@ -232,22 +247,23 @@
                 :label (str "New " (get kind :name) " in rack")
                 :icon :plus))
         (seq-instance-kinds))
-      (map
-        (lambda (gr)
-          (if (= gr.owner g)
-            (dict :id :detach-sequencer
-                  :key (str "detach-" gr.gid)
-                  :sequencer-id gr.gid
-                  :sequencer-name gr.name
-                  :label (str "Detach " (graph-sequencer-label gr))
-                  :icon :unlink)
-            (dict :id :move-sequencer-into-rack
-                  :key (str "attach-" gr.gid)
-                  :sequencer-id gr.gid
-                  :sequencer-name gr.name
-                  :label (str "Attach " (graph-sequencer-label gr) " to rack")
-                  :icon :link)))
-        (filter (lambda (gr) (or (= gr.owner nil) (= gr.owner g))) (graphs))))
+      (append
+        (map
+          (lambda (inst)
+            (let ((id (get inst :id))
+                  (rack (get inst :owner-rack)))
+              (sequencer-owner-action id (get inst :label) (get inst :label) (= rack g.gid))))
+          (filter
+            (lambda (inst)
+              (let ((rack (get inst :owner-rack)))
+                (or (= rack nil) (= rack g.gid))))
+            project.instances))
+        (map
+          (lambda (gr) (sequencer-owner-action gr.gid gr.name gr.name (= gr.owner g)))
+          (filter
+            (lambda (gr)
+              (and (not (instance-ref gr.gid)) (or (= gr.owner nil) (= gr.owner g))))
+            (graphs)))))
     (list
       ;; Break kits (docs/rack-clips-and-break-kits-spec.md 7.2): the kit save
       ;; panel, which carries a scene checklist for the clip bank.
@@ -563,7 +579,7 @@
 (defwidget track-pattern-cell-bg
   :width 0.88 :height 0.38
   :paint-margin 0.04
-  :state (active assigned override selected track-r track-g track-b)
+  :state (active assigned override selected skip-outer track-r track-g track-b)
   :shader
   (let ((track-col (rgba track-r track-g track-b 1.0))
       (track-r (if (= active 1) (* 1.10 track-r) track-r))
@@ -571,14 +587,17 @@
       (track-b (if (= active 1) (* 1.1 track-b) track-b))
       (outer (if (= selected 1)
           (rgba 0.94 0.96 1.0 1.0)
-          (if (= active 0) (rgba 0 0 0 0.3)   (rgba track-r track-g track-b 1.0))))
+          (if (= active 0)  
+            (rgba (* track-r 0.2) (* track-g 0.2) (* track-b 0.2) 1)
+            (rgba track-r track-g track-b 1.0)
+            )))
       (middle (if (= active 0) 
           (rgba track-r track-g track-b 1.0)
           (rgba track-r track-g track-b 1.0)
           ))
       (inner (if (= active 0)
-          (rgba (* track-r 0.2) (* track-g 0.2) (* track-b 0.2) 1)
-          track-col 
+          (rgba (* track-r 0.1) (* track-g 0.1) (* track-b 0.1) 1)
+          (rgba (* track-r 0.8) (* track-g 0.8) (* track-b 0.8) 1)
           )))
     ;; The play triangle moved into the sound-glyph shader (it must sit ON TOP
     ;; of the glyph; this background always draws underneath it). Liveness
@@ -587,12 +606,33 @@
     ;; every active cell renders the glyph-drawn triangle — no bg fallback.
     (sdf/layer
       (sdf/fill (sdf/rounded-rect width height 0.3)
-        (material :color outer))
-      (sdf/fill (sdf/rounded-rect (* width 0.94) (* height 0.94) 0.2)
-        (material :color middle))
+        (material :color (if (= skip-outer 1) :transparent outer))
+        )
+      (sdf/fill (sdf/rounded-rect (* width 0.93) (* height 0.93) 0.2)
+        (material 
+          :lighting (lighting 
+            :light (vec3 3.0 -0.1 3.5) :shininess 83
+            :edge-max 3.8 :edge-min -0.1)
+          :color 
+          (eseq.materials/color-cell
+            middle
+            (* 2 outer)
+            )
+          )        )
       (sdf/fill (sdf/rounded-rect (* width (if (= active 1) 0.92 0.92))
           (* (if (= active 1) 0.92 0.92) height) (if (= active 1) 0.2 0.22))
-        (material :color inner)))))
+        (material 
+          :lighting (lighting 
+            :light (vec3 2.0 1.1 1.5) :shininess 83
+            :edge-max 4.8 :edge-min -0.1)
+          :color 
+          (eseq.materials/color-cell
+            inner 
+            outer
+            )
+          )
+        ))
+    ))
 
 ;; `track-pattern-cell-bg` for a cell whose quantized launch is pending:
 ;; identical geometry (the sound glyph on top is untouched), but the ring
@@ -951,15 +991,22 @@
 
 (def track-output-dropdown (t)
   (subtree :key (str "mixer-v2-track-output-sub-" t.index)
-    (box :width :fill :h-align :center (dropdown :value (track-output-label t.output)
-      :key (str "track-output-" t.index)
-      :options (track-output-options)
-      :on-change (lambda (v)
-        (clear-delete-target)
-        (let ((b (track-output-of v)))
-          (when (or b (= v "sends only")) (set! t.output b))))
-      :width (* track-strip-width 0.85) :height 1.1 :font-size 10
-      :corner-radius (eseq.seq-core-state/radius 20)))))
+    (track-output-picker t)))
+
+;; The picker itself, outside its subtree: the subtree redraws by calling
+;; this, so a package restyles the picker by overriding it (an :around on
+;; track-output-dropdown would only see the first draw).
+(def track-output-picker (t)
+  (box :width :fill :h-align :center (dropdown :value (track-output-label t.output)
+    :key (str "track-output-" t.index)
+    :part "mixer/output-picker" :track t
+    :options (track-output-options)
+    :on-change (lambda (v)
+      (clear-delete-target)
+      (let ((b (track-output-of v)))
+        (when (or b (= v "sends only")) (set! t.output b))))
+    :width (* track-strip-width 0.85) :height 1.1 :font-size 10
+    :corner-radius (eseq.seq-core-state/radius 20))))
 
 ;; The bus names more than one bus has (read once per dropdown).
 (def shared-bus-names ()
@@ -977,12 +1024,18 @@
 
 (def bus-output-dropdown (b)
   (subtree :key (str "mixer-bus-output-" (if b b.index -1))
-    (let ((options (if b b.output-options (list)))
+    (bus-output-picker b)))
+
+;; The picker itself, outside its subtree (see track-output-picker); a
+;; spacer when the bus has nowhere to route.
+(def bus-output-picker (b)
+  (let ((options (if b b.output-options (list)))
         (shared (if (> (len options) 0) (shared-bus-names) (list)))
         (label-of (lambda (x) (bus-output-label x shared))))
       (if (> (len options) 0)
         (box  :h-align :center :width :fill 
           (dropdown :key (str "bus-output-" b.index)
+            :part "mixer/output-picker" :bus b
             :value (if b.output (label-of b.output) "main")
             :options (map label-of options)
             :width 8.5 :height 1.1 :font-size 10
@@ -991,7 +1044,7 @@
               (let ((dest (first (filter (lambda (o) (= (label-of o) label)) options))))
                 (when dest (set! b.output dest)))))
           )
-        (box :height 1.2 :width :fill)))))
+        (box :height 1.2 :width :fill))))
 
 ;; A track's strip frame, `width` by `height`: lit while the track is in
 ;; the selection, in the silenced look while it is not heard. `props` are
@@ -1033,33 +1086,34 @@
   (track-frame t track-strip-width (if t.group (grouped-strip-height) (strip-height)) 2 12
     (track-strip-props t)
     (v-stack :gap 0.18 :width :fill
+      (box :height 0.001)
       ;; Grouped tracks drop the output dropdown (their output is the group
       ;; bus); the container provides the color above. A small spacer keeps
       ;; the pattern grid aligned with loose strips.
       (if t.group nil (track-output-dropdown t))
       (if (compact?) nil (track-pattern-grid t))
-
+      
       (box :width :fill
-      (h-stack :gap 0 :align :center :width :fill
-        (v-stack
-          (h-stack :gap 0.05
-            ;; Stable identities keep only Bus A / Bus B here even when
-            ;; other buses are created or the bus list is reordered.
-            (each (filter (lambda (s) (or (= s.bus.bid 1) (= s.bus.bid 2))) t.sends) |s|
-              (send-knob t s)))
-          (knob-number :label "pan"
-            :key (str "track-pan-" t.index)
-            :value #'t.pan
-            :min -1 :max 1 :origin 0 :decimals 2
-            :font-size 9 :label-font-size 8
-            :text-color :dim :label-color :dim
-            :width 4.5 :height 2.35 :knob-size 2.58
-            :on-change (lambda (v)
-              (clear-delete-target)
-              (set! t.pan v))))
-        (box :flex 1 :height 1)
-        (track-meter-control t)))
-
+        (h-stack :gap 0 :align :center :width :fill
+          (v-stack
+            (h-stack :gap 0.05
+              ;; Stable identities keep only Bus A / Bus B here even when
+              ;; other buses are created or the bus list is reordered.
+              (each (filter (lambda (s) (or (= s.bus.bid 1) (= s.bus.bid 2))) t.sends) |s|
+                (send-knob t s)))
+            (knob-number :label "pan"
+              :key (str "track-pan-" t.index)
+              :value #'t.pan
+              :min -1 :max 1 :origin 0 :decimals 2
+              :font-size 9 :label-font-size 8
+              :text-color :dim :label-color :dim
+              :width 4.5 :height 2.35 :knob-size 2.58
+              :on-change (lambda (v)
+                (clear-delete-target)
+                (set! t.pan v))))
+          (box :flex 1 :height 1)
+          (track-meter-control t)))
+      
       (box :width :fill :height 0.05)
       (subtree :key (str "mixer-v2-strip-buttons-" t.index)
         (strip-buttons t))
@@ -1186,7 +1240,7 @@
     (v-stack :gap 0.18 :width :fill :height :fill
       ;; Holds the output dropdown's place: the clip grid stays level with
       ;; the other strips'.
-       (if t.group nil (box :width :fill :height 0.2 :bg :transparent))
+       (if t.group nil (box :width :fill :height 1.0 :bg :transparent))
       (if (compact?) nil (track-pattern-grid t))
       (box :width :fill :flex 1)
       (module-jacks t)
@@ -1500,6 +1554,7 @@
         (box :height (if (compact?) 0 0.8))
         (bus-mod-port-row b))
       (button (substring (bus-label b) 0 (bus-name-chars))
+        :part "mixer/bus-name" :bus b
         :width :fill :height 1.0 :padding 0 :font-size 10
         :background-color :mixer-label-bg
         :border-color :transparent
@@ -1560,11 +1615,11 @@
   :shader
   (sdf/layer
     (sdf/fill (sdf/rounded-rect width width 0.06)
-      (material :color (if playing (rgba 0 0 0 1) (rgba 0 0 0 0.35))))
+      (material :color (if playing (rgba 0 0 0 1) (rgba 1 1 1 0.35))))
     (sdf/fill (sdf/scale 1.02 (sdf/disclosure-right))
       (material :color (if (= playing 1)
           (rgba 0.30 0.95 0.55 1.0)
-          (rgba 0.05 0.05 0.06 0.5))))))
+          (rgba 0.55 0.55 0.56 0.5))))))
 
 (def rack-clip-row-height 0.9)
 
@@ -1577,7 +1632,7 @@
 (def rack-clip-column (g)
   (subtree :key (str "rack-clip-column-sub-" g.gid)
     (let ((playing g.rack-clip)
-          (row-bg (color-rgba g.color 1.0)))
+        (row-bg (color-rgba g.color 1.0)))
       (box :key (str "rack-clip-column-" g.gid)
         :width :fill :height (- (clip-area-height) 0.1) :align :top
         :bg :black :background-color :buffer-bg
@@ -1590,14 +1645,23 @@
                 :debug-name "mixer-rack-clip-cell"
                 :width :fill :height rack-clip-row-height :padding 0.01
                 :corner-radius 0
-                :background-color row-bg
+                :active #'rc.active
+                :track-r (* 0.95 (rgb-part g.color 0))
+                :track-g (* 0.95 (rgb-part g.color 1))
+                :track-b (* 0.95 (rgb-part g.color 2))
+                :skip-outer 1
+                :background 
+                "track-pattern-cell-bg"
                 :on-click (lambda (event) (launch-rack-clip! rc))
                 (h-stack :gap 0.3 :align :center
+                  (box :width 0.2 )
                   (rack-clip-play :playing #'rc.active)
-                  (apply label (substring rc.name 0 (name-chars 9))
+                  (apply label (substring rc.label 0 (name-chars 9))
                     :key (str "mixer-rack-clip-label-" g.gid "-" rc.cid)
                     :font-size 9 :h-align :left :v-align :center
-                    :color :black
+                    :active #'rc.active
+                    :active-color :black
+                    :color :white
                     bare-text))))))))))
 
 ;; The group's own channel slot (collapse toggle + name) shown at the left of
@@ -1623,7 +1687,7 @@
       :drop-meta (dict :kind "bus" :bus bus-idx)
       :on-drop (lambda (event) (drop-on-group-header event g))
       (v-stack :gap 0.175 :align :center
-        (box :height 0 :width 0)
+        (box :height 0.01 :width 0)
         (bus-output-dropdown b)
         ;; Where a plain track strip shows its pattern grid, a clip-bearing
         ;; rack shows its clip run vertically (§6.2). Everything else keeps the
@@ -1641,7 +1705,7 @@
             (bus-buttons b g))
           (nothing))
         (if b (bus-mod-port-row b) nil)
-        (box :width 0 :height 0.4)
+        (box :width 0 :height 0.2)
         (box :corner-radius (eseq.seq-core-state/radius 34) :background-color g.color :width 9.5 :padding 0.1
           :key (str "group-badge-" g.gid)
           :selected #'g.delete-target
@@ -1754,7 +1818,7 @@
         (track-strip-of t)))))
 
 (def sample-drop-zone ()
-  (box :key "sample-drop-zone"
+  (box :key "sample-drop-zone" :part "mixer/drop-zone"
     :width 11.8 :height (drop-zone-height)
     :background-color :buffer-bg
     :drop-hover-background-color :mixer-control-bg

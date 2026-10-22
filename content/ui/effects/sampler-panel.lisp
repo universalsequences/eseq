@@ -303,7 +303,7 @@
     :active active
     :active-color :yellow
     :border-color :transparent
-    :color :dim
+    :color :dimmer
     :plock-active (pc/param-plock-active-prop false mode)
     :plock-color-r (pc/param-plock-color-r)
     :plock-color-g (pc/param-plock-color-g)
@@ -455,9 +455,9 @@
           :header-height 0.3
           :ruler-font-size 8
           :ruler-color :dim
-          :ruler-bg :black
-          :grid-major-color :black
-          :grid-minor-color :black
+          :ruler-bg :instrument-control-bg
+          :grid-major-color :dim
+          :grid-minor-color :dimmer
           :bg :instrument-control-bg
           :focusable true
           ;; Slice mode turns the body into a slice picker: no
@@ -505,9 +505,10 @@
       body)))
 
 (def sampler-panel (inst)
-  (box :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
+  (box :background (pf/panel-surface) :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
     :height st/fx-fixed-panel-height
     :debug-name "sampler-panel"
+    :part "instrument/panel" :device (get inst :display-name)
     :drop-types (sampler-panel-drop-types inst)
     :drop-meta (sampler-panel-drop-meta inst)
     :drop-hover-border-color :mixer-strip-selected-border

@@ -39,16 +39,18 @@
       (fall-p (modulator-param inst "fall"))
       (d (dv/inst-device inst)))
     (box
-
+      
       :padding 0.15
+      :height :fill
+      :flex 1
       :debug-name "modulator-panel-body"
       (box
-
-        :background-color :mixer-strip-bg
+        
+        :background-color :instrument-control-bg
         :corner-radius 16
         :padding 1
         :width :fill
-        :height 9.5
+        :height :fill
         (h-stack :width :fill :height :fill :gap 1.05 :align :center
           (if rise-p
             (modulator-knob rise-p "rise ms" "modulator-rise-knob")
@@ -74,7 +76,7 @@
               :fill-color (rgba 1.0 0.48 0.18 0.16))))))))
 
 (def modulator-panel (inst)
-  (box :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
+  (box :background (pf/panel-surface) :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
     :height st/fx-fixed-panel-height
     :debug-name "modulator-panel"
     (v-stack :gap 0 :height :fill
@@ -85,6 +87,5 @@
           (label "Modulator" :font-size 11 :color :white :bg :transparent)
           (box :flex 1 :height 0.15)
           (pf/instrument-header-actions-menu inst)))
-      (box :height 0.2)
       (pf/fx-panel-body "modulator-panel-content"
         (modulator-panel-body inst)))))

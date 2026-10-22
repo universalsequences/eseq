@@ -2095,6 +2095,40 @@
     }
 
     #[test]
+    fn parked_rack_slot_plays_only_in_the_current_pattern() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        state.restore_current_pattern_from_repository().unwrap();
+        state.set_rack_track_for_all_pattern_snapshots(0, sample_rack_track_snapshot());
+
+        state.append_rack_slot_for_all_pattern_snapshots(
+            0,
+            sample_sampler_rack_slot(123, "swap-in", 48_000, 88),
+        );
+        assert!(state.park_rack_slot_outside_current_pattern(0, 1));
+
+        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert!(live.slots[1].enabled);
+
+        let repository = state.export_pattern_repository();
+        let current = repository[0].rack_tracks[0].as_ref().unwrap();
+        let other = repository[1].rack_tracks[0].as_ref().unwrap();
+        assert_eq!(other.slots.len(), 2, "slot lists stay aligned");
+        assert!(current.slots[1].enabled);
+        assert!(!other.slots[1].enabled);
+        assert!(other.slots[0].enabled, "only the new slot is parked");
+    }
+
+    #[test]
     fn replace_rack_slot_source_preserves_pad_controls_and_slot_plocks() {
         let state = SequencerState::new(1, Vec::new());
         let mut initial = sample_rack_track_snapshot();
@@ -4857,6 +4891,45 @@
                 &crate::quantized_launch::PatternLaunchTarget::Scene { scene: 5 },
             )
             .is_none());
+    }
+
+    /// A rack-owned graph's overrides live in the scene's rack clip, not the
+    /// scene: the launch snapshot must compose them like the live one, or a
+    /// boundary launch drives the graph with its unoverridden defaults.
+    #[test]
+    fn preflight_pattern_launch_snapshot_composes_rack_clip_graph_overrides() {
+        const RACK: u64 = 7;
+        const MEMBERS: [usize; 2] = [1, 2];
+        let state = make_state_with_tracks(4);
+        state.replace_pattern_repository(
+            vec![PatternSnapshot::new_default(4, &[]), PatternSnapshot::new_default(4, &[])],
+            0,
+        );
+        state.restore_current_pattern_from_repository().unwrap();
+        let expected = {
+            let mut scenes = state.pattern.scenes.lock().unwrap();
+            for track in MEMBERS {
+                let data = scenes.track_pools[track].get(PatternId(1)).expect("pool pattern");
+                let id = scenes.track_pools[track].insert(data);
+                scenes.scenes[1].cells[track] = Some(id);
+            }
+            let mut overrides = crate::graph::ProjectGraphOverrides::default();
+            overrides.sequencer_id = 11;
+            overrides.owner_rack = Some(RACK);
+            overrides.reset_every_beats = Some(8.0);
+            scenes.scenes[1].graph_overrides = vec![overrides];
+            scenes.convert_rack_to_clips(RACK, &MEMBERS).expect("rack converts");
+            assert!(scenes.scenes[1].graph_overrides.is_empty(), "moved into the clip");
+            scenes.composed_graph_overrides(1)
+        };
+        assert_eq!(expected.len(), 1);
+
+        let snapshot = state
+            .preflight_pattern_launch_snapshot(
+                &crate::quantized_launch::PatternLaunchTarget::Scene { scene: 1 },
+            )
+            .expect("target scene resolves");
+        assert_eq!(snapshot.graph_overrides, expected);
     }
 
     #[test]

@@ -41,6 +41,12 @@ pub(crate) use commands::key_str;
 use natives::register_editor_natives;
 
 const TILE_GAP_PX_PER_UNIT: f32 = 15.0;
+/// The share of the window the layout keeps when a side pane opens.
+const SIDE_PANE_RATIO: f32 = 0.72;
+/// The side pane's narrowest width in cells; dragging a quarter of it further
+/// closes the pane, as the sequencer's sidebars collapse.
+const SIDE_PANE_MIN_WIDTH: f32 = 34.0;
+const SIDE_PANE_COLLAPSE_THRESHOLD: f32 = 0.25;
 const TEXT_HORIZONTAL_SCROLL_MARGIN: usize = 3;
 
 fn tile_resize_cursor(dir: SplitDir) -> WidgetCursor {
@@ -254,9 +260,15 @@ fn inspect_node_source_file_path(node: &crate::layout::LayoutNode) -> Option<Pat
     }
 }
 
+/// The name the node's building function is defined under in its file (the
+/// prop is qualified by its module).
 fn inspect_node_source_symbol(node: &crate::layout::LayoutNode) -> Option<String> {
     match node.props.get(crate::vm::SOURCE_SYMBOL_PROP) {
-        Some(Value::String(symbol)) if !symbol.is_empty() => Some(symbol.clone()),
+        Some(Value::String(symbol)) if !symbol.is_empty() => Some(
+            crate::modules::split_qualified(symbol)
+                .map_or(symbol.as_str(), |(_, base)| base)
+                .to_string(),
+        ),
         _ => None,
     }
 }
@@ -704,6 +716,9 @@ pub struct Editor {
     toast_pointer_pressed: bool,
 
     pending_key: Option<KeyEvent>,
+    /// `describe-key` waits for a key: the chord typed so far (empty until
+    /// the first key).
+    describing_key: Option<Vec<String>>,
     builtins: HashMap<KeyEvent, String>,
     default_lisp_bindings: LispBindings,
     lisp_bindings: LispBindings,
@@ -790,6 +805,15 @@ pub struct Editor {
     inspect_hover_status: Option<String>,
     inspect_hover_rect: Option<crate::layout::Rect>,
     inspect_source_tile_id: Option<TileId>,
+    /// Tiles opened beside another (`show_buffer_beside`), as (anchor,
+    /// tile) in the order they stack.
+    beside_tiles: Vec<(TileId, TileId)>,
+    /// The side pane widened for tiles beside it: (the pane, its split, the
+    /// ratio before), restored when the last of them closes.
+    beside_widened: Option<(TileId, TileId, f32)>,
+    /// The last tile other than the side pane that had focus: where
+    /// `set-window-buffer` lands when it runs from the side pane.
+    last_main_tile_id: Option<TileId>,
     /// Set while inspect mode runs as a theme pick (`theme-pick-start`): a
     /// click reports the slots under the pointer to this callback instead of
     /// opening source.
@@ -810,6 +834,14 @@ struct TileResizeDrag {
     split_id: TileId,
     dir: SplitDir,
     area: Rect,
+}
+
+/// What a divider dragged through a pane's collapse threshold does.
+enum TileCollapse {
+    /// The layout's `:on-collapse`.
+    Callback(Value),
+    /// The side pane is in no layout spec: the editor closes it itself.
+    CloseSidePane(TileId),
 }
 
 impl Editor {
@@ -892,6 +924,7 @@ impl Editor {
             toast_placement: None,
             toast_pointer_pressed: false,
             pending_key: None,
+            describing_key: None,
             builtins: HashMap::new(),
             default_lisp_bindings: HashMap::new(),
             lisp_bindings: HashMap::new(),
@@ -961,6 +994,9 @@ impl Editor {
             inspect_hover_status: None,
             inspect_hover_rect: None,
             inspect_source_tile_id: None,
+            beside_tiles: Vec::new(),
+            beside_widened: None,
+            last_main_tile_id: None,
             inspect_theme_pick: None,
             #[cfg(test)]
             test_clipboard: None,
@@ -1554,6 +1590,9 @@ impl Editor {
         let layout_revision = target_leaf.layout_revision;
         let buffer_idx = target_leaf.buffer_idx;
         self.save_current_widget_tree();
+        if self.inspect_source_tile_id != Some(self.active_tile) {
+            self.last_main_tile_id = Some(self.active_tile);
+        }
         self.active_tile = new_tile;
         self.record_buffer_access_by_idx(buffer_idx);
         self.sync_runtime_context();
@@ -1573,7 +1612,12 @@ impl Editor {
 
     /// Split the active tile. Returns the new tile's ID, or None if no split was possible.
     pub fn split_active_tile(&mut self, dir: SplitDir, new_buffer_idx: usize) -> Option<TileId> {
-        let target = self.active_tile;
+        self.split_tile(self.active_tile, dir, new_buffer_idx).map(|(_, new_tile_id)| new_tile_id)
+    }
+
+    /// Split tile `target`, showing `new_buffer_idx` in the new half. Returns
+    /// (the split's ID, the new tile's ID), or None if no split was possible.
+    fn split_tile(&mut self, target: TileId, dir: SplitDir, new_buffer_idx: usize) -> Option<(TileId, TileId)> {
         let split_id = self.alloc_tile_id();
         let new_tile_id = self.alloc_tile_id();
         if self
@@ -1584,7 +1628,7 @@ impl Editor {
             self.sync_visible_effect_buffers();
             self.resume_deferred_effects_for_presentation();
             self.mark_needs_redraw();
-            Some(new_tile_id)
+            Some((split_id, new_tile_id))
         } else {
             // Roll back IDs
             self.next_tile_id -= 2;
@@ -1594,23 +1638,181 @@ impl Editor {
 
     fn split_root_right_with_buffer(&mut self, new_buffer_idx: usize) -> TileId {
         self.save_current_widget_tree();
-        let split_id = self.alloc_tile_id();
         let new_tile_id = self.alloc_tile_id();
-        let existing_root = std::mem::replace(
-            &mut self.tile_root.content,
-            TileNode::Leaf(TileLeaf::new(new_tile_id, new_buffer_idx)),
-        );
+        self.wrap_root_with_side_pane(TileLeaf::new(new_tile_id, new_buffer_idx), SIDE_PANE_RATIO);
+        self.switch_active_tile(new_tile_id);
+        new_tile_id
+    }
+
+    /// Put `leaf` to the right of the whole layout, styled like its tiles.
+    fn wrap_root_with_side_pane(&mut self, mut leaf: TileLeaf, ratio: f32) {
+        let (split_id, side) = (self.alloc_tile_id(), leaf.id);
+        leaf.min_width = Some(SIDE_PANE_MIN_WIDTH);
+        leaf.collapse_threshold = Some(SIDE_PANE_COLLAPSE_THRESHOLD);
+        let content = std::mem::replace(&mut self.tile_root.content, TileNode::Leaf(TileLeaf::new(side, 0)));
         self.tile_root.content = TileNode::Split(TileSplit {
             id: split_id,
             dir: SplitDir::Vertical,
-            ratio: 0.72,
-            gap: 0.0,
+            ratio,
+            gap: self.tile_outer_gap,
             remember_key: None,
-            a: Box::new(existing_root),
-            b: Box::new(TileNode::Leaf(TileLeaf::new(new_tile_id, new_buffer_idx))),
+            a: Box::new(content),
+            b: Box::new(TileNode::Leaf(leaf)),
         });
-        self.switch_active_tile(new_tile_id);
-        new_tile_id
+        self.style_side_pane_like_its_neighbours(side);
+    }
+
+    /// Show `buffer_name` beside the tile showing `anchor_name`: the first
+    /// such tile to its right, later ones stacked under the last, all one
+    /// height. A buffer already showing stays where it is. Beside the side
+    /// pane, the pane widens to make room until the last of them closes.
+    /// False when either buffer is missing or the anchor is not showing.
+    pub fn show_buffer_beside(&mut self, anchor_name: &str, buffer_name: &str) -> bool {
+        let Some(buffer_idx) = self.buffer_idx_named(buffer_name) else { return false };
+        if self.tile_root.find_leaf_by_buffer_idx(buffer_idx).is_some() {
+            return true;
+        }
+        let Some(anchor) = self.tile_showing_buffer_named(anchor_name) else { return false };
+        self.settle_beside_tiles();
+        let (target, dir) = match self.beside_column(anchor).last() {
+            Some(last) => (*last, SplitDir::Horizontal),
+            None => (anchor, SplitDir::Vertical),
+        };
+        let Some((split_id, tile)) = self.split_tile(target, dir, buffer_idx) else { return false };
+        if let Some(split) = self.tile_root.find_split_mut(split_id) {
+            split.gap = self.tile_outer_gap;
+        }
+        if dir == SplitDir::Vertical {
+            self.widen_side_pane_beside(anchor);
+        }
+        self.beside_tiles.push((anchor, tile));
+        self.settle_beside_tiles();
+        self.style_side_pane_like_its_neighbours(tile);
+        true
+    }
+
+    fn buffer_idx_named(&self, name: &str) -> Option<usize> {
+        self.buffers.iter().position(|buffer| buffer.name == name)
+    }
+
+    fn tile_showing_buffer_named(&self, name: &str) -> Option<TileId> {
+        let idx = self.buffer_idx_named(name)?;
+        self.tile_root.find_leaf_by_buffer_idx(idx).map(|leaf| leaf.id)
+    }
+
+    /// The tiles beside `anchor`, top to bottom.
+    fn beside_column(&self, anchor: TileId) -> Vec<TileId> {
+        self.beside_tiles.iter().filter(|(of, _)| *of == anchor).map(|(_, tile)| *tile).collect()
+    }
+
+    /// Double the side pane's width (to at most 60% of the window) when it
+    /// is `anchor`, remembering the width it had.
+    fn widen_side_pane_beside(&mut self, anchor: TileId) {
+        if self.inspect_source_tile_id != Some(anchor) || self.beside_widened.is_some() {
+            return;
+        }
+        let TileNode::Split(root) = &mut self.tile_root.content else { return };
+        self.beside_widened = Some((anchor, root.id, root.ratio));
+        root.ratio = (1.0 - 2.0 * (1.0 - root.ratio)).max(0.4);
+    }
+
+    /// Forget tiles beside others that closed, give each column's tiles one
+    /// height, and narrow the side pane again once nothing is beside it.
+    fn settle_beside_tiles(&mut self) {
+        if self.beside_tiles.is_empty() && self.beside_widened.is_none() {
+            return;
+        }
+        let ids = self.tile_root.content_leaf_ids();
+        self.beside_tiles.retain(|(anchor, tile)| ids.contains(anchor) && ids.contains(tile));
+        let mut anchors: Vec<TileId> = self.beside_tiles.iter().map(|(anchor, _)| *anchor).collect();
+        anchors.sort_unstable();
+        anchors.dedup();
+        for anchor in anchors {
+            // Each tile but the last is child `a` of the split that holds
+            // the ones under it.
+            let column = self.beside_column(anchor);
+            for (i, tile) in column.iter().enumerate().take(column.len().saturating_sub(1)) {
+                if let Some(split) = self.tile_root.find_parent_split(*tile) {
+                    split.ratio = 1.0 / (column.len() - i) as f32;
+                }
+            }
+        }
+        if let Some((pane, split_id, ratio)) = self.beside_widened {
+            if self.beside_column(pane).is_empty() {
+                self.beside_widened = None;
+                if let Some(split) = self.tile_root.find_split_mut(split_id) {
+                    split.ratio = ratio;
+                }
+            }
+        }
+    }
+
+    /// The side pane (inspect source, `show-in-side-pane`) is in no layout
+    /// spec: carry it from `old_root` onto the new layout at the width it had,
+    /// unless the new layout shows its buffer itself.
+    fn keep_side_pane(&mut self, old_root: TileNode) {
+        let Some(id) = self.inspect_source_tile_id else {
+            return;
+        };
+        let ratio = match &old_root {
+            TileNode::Split(split) if matches!(&*split.b, TileNode::Leaf(leaf) if leaf.id == id) => {
+                split.ratio
+            }
+            _ => SIDE_PANE_RATIO,
+        };
+        let Some(leaf) = old_root.into_leaf(id) else {
+            self.inspect_source_tile_id = None;
+            return;
+        };
+        if self.tile_root.content.find_leaf_by_buffer_idx(leaf.buffer_idx).is_some() {
+            self.inspect_source_tile_id = None;
+            return;
+        }
+        self.wrap_root_with_side_pane(leaf, ratio);
+    }
+
+    /// Give the side pane the chrome of the layout's bordered tiles (radius,
+    /// border, background, hidden status line), preferring the tile it was
+    /// opened beside. A layout with no bordered tile leaves it as it is.
+    fn style_side_pane_like_its_neighbours(&mut self, side: TileId) {
+        let ids = self.tile_root.content_leaf_ids();
+        let model = [self.last_main_tile_id, Some(self.active_tile)]
+            .into_iter()
+            .flatten()
+            .chain(ids)
+            .filter(|id| *id != side)
+            .filter_map(|id| self.tile_root.find_leaf(id))
+            .find(|leaf| leaf.show_border)
+            .map(|leaf| {
+                (
+                    leaf.show_status,
+                    leaf.border_width_px,
+                    leaf.border_radius_px,
+                    leaf.background_color,
+                    leaf.background_color_name.clone(),
+                )
+            });
+        let (Some((show_status, width, radius, color, color_name)), Some(leaf)) =
+            (model, self.tile_root.find_leaf_mut(side))
+        else {
+            return;
+        };
+        leaf.show_status = show_status;
+        leaf.show_border = true;
+        leaf.border_width_px = width;
+        leaf.border_radius_px = radius;
+        leaf.background_color = color;
+        leaf.background_color_name = color_name;
+    }
+
+    /// A content tile other than the side pane, for commands that change
+    /// "the current tile" while the side pane has focus.
+    fn main_tile_beside_side_pane(&self) -> Option<TileId> {
+        let side = self.inspect_source_tile_id.filter(|id| *id == self.active_tile)?;
+        let ids = self.tile_root.content_leaf_ids();
+        self.last_main_tile_id
+            .filter(|id| *id != side && ids.contains(id))
+            .or_else(|| ids.into_iter().find(|id| *id != side))
     }
 
     fn replace_tile_buffer_and_activate(&mut self, tile_id: TileId, buffer_idx: usize) -> bool {
@@ -1649,7 +1851,12 @@ impl Editor {
         if self.tile_root.leaf_count() <= 1 {
             return false;
         }
+        // Tiles shown beside this one go with it.
+        for beside in self.beside_column(self.active_tile) {
+            self.tile_root.remove_leaf(beside);
+        }
         let removed = self.tile_root.remove_leaf(self.active_tile);
+        self.settle_beside_tiles();
         if removed.is_some() {
             // Switch to the first remaining leaf
             let ids = self.tile_root.content_leaf_ids();
@@ -1674,6 +1881,7 @@ impl Editor {
         let new_id = self.alloc_tile_id();
         self.tile_root.collapse_to_single(new_id, buffer_idx);
         self.active_tile = new_id;
+        self.settle_beside_tiles();
         self.sync_visible_effect_buffers();
         self.mark_needs_redraw();
     }
@@ -1968,9 +2176,13 @@ impl Editor {
                 return;
             }
         };
-        self.tile_root.content = new_root;
-        self.prune_retained_tile_layouts();
+        let old_root = std::mem::replace(&mut self.tile_root.content, new_root);
         self.tile_outer_gap = outer_gap;
+        // After the gap: the carried pane sits at the new layout's gap.
+        self.keep_side_pane(old_root);
+        // Tiles shown beside the pane are not carried onto the new layout.
+        self.settle_beside_tiles();
+        self.prune_retained_tile_layouts();
         // Enforce min-size constraints on initial ratios
         self.enforce_min_sizes_recursive();
         // Preserve the active buffer when the rebuilt layout still contains it.
@@ -2136,26 +2348,34 @@ impl Editor {
 
     /// Close the tile showing `buffer_name`. Refuses to close the last tile.
     pub fn close_tile_showing_buffer_named(&mut self, buffer_name: &str) -> bool {
-        let Some(tile_id) = self
-            .buffers
-            .iter()
-            .position(|buffer| buffer.name == buffer_name)
-            .and_then(|idx| self.tile_root.find_leaf_by_buffer_idx(idx))
-            .map(|leaf| leaf.id)
-        else {
-            return false;
-        };
+        self.tile_showing_buffer_named(buffer_name).is_some_and(|tile_id| self.close_tile(tile_id))
+    }
+
+    fn close_tile(&mut self, tile_id: TileId) -> bool {
+        // Tiles shown beside this one go with it.
+        if !self.beside_tiles.is_empty() {
+            for beside in self.beside_column(tile_id) {
+                self.close_tile(beside);
+            }
+        }
         if self.inspect_source_tile_id == Some(tile_id) {
             self.inspect_source_tile_id = None;
         }
-        if tile_id == self.active_tile {
-            return self.delete_active_tile();
+        let closed = if tile_id == self.active_tile {
+            self.delete_active_tile()
+        } else {
+            self.tile_root.leaf_count() > 1 && self.tile_root.remove_leaf(tile_id).is_some()
+        };
+        if closed {
+            self.settle_beside_tiles();
+            self.mark_needs_redraw();
         }
-        if self.tile_root.leaf_count() <= 1 || self.tile_root.remove_leaf(tile_id).is_none() {
-            return false;
-        }
-        self.mark_needs_redraw();
-        true
+        closed
+    }
+
+    /// Whether a tile shows `buffer_name`.
+    pub fn buffer_named_is_showing(&self, buffer_name: &str) -> bool {
+        self.tile_showing_buffer_named(buffer_name).is_some()
     }
 
     pub fn switch_active_tile_to_buffer_named(&mut self, buffer_name: &str) -> bool {
@@ -3486,15 +3706,12 @@ impl Editor {
                     precise_col,
                     precise_row,
                 );
-                if let Some(callback) = collapse_callback {
+                if let Some(collapse) = collapse_callback {
                     self.active_tile_resize_drag = None;
                     self.last_mouse_precise = None;
                     self.widget_cursor = WidgetCursor::Default;
                     self.suppress_mouse_until_left_up = true;
-                    self.apply_widget_output(Some(crate::widget_render::EventOutput {
-                        callback,
-                        args: Vec::new(),
-                    }));
+                    self.collapse_tile(collapse);
                 }
                 true
             }
@@ -3509,15 +3726,26 @@ impl Editor {
                 self.active_tile_resize_drag = None;
                 self.last_mouse_precise = None;
                 self.widget_cursor = WidgetCursor::Default;
-                if let Some(callback) = collapse_callback {
-                    self.apply_widget_output(Some(crate::widget_render::EventOutput {
-                        callback,
-                        args: Vec::new(),
-                    }));
+                if let Some(collapse) = collapse_callback {
+                    self.collapse_tile(collapse);
                 }
                 true
             }
             _ => true,
+        }
+    }
+
+    fn collapse_tile(&mut self, collapse: TileCollapse) {
+        match collapse {
+            TileCollapse::Callback(callback) => {
+                self.apply_widget_output(Some(crate::widget_render::EventOutput {
+                    callback,
+                    args: Vec::new(),
+                }));
+            }
+            TileCollapse::CloseSidePane(tile_id) => {
+                self.close_tile(tile_id);
+            }
         }
     }
 
@@ -3562,7 +3790,8 @@ impl Editor {
         area: Rect,
         precise_col: f32,
         precise_row: f32,
-    ) -> Option<Value> {
+    ) -> Option<TileCollapse> {
+        let side_pane = self.inspect_source_tile_id;
         if let Some(split) = self.tile_root.find_split_mut(split_id) {
             let mut ratio = split_ratio_for_point(area, dir, precise_col, precise_row);
             // Enforce minimum sizes from layout spec
@@ -3580,9 +3809,13 @@ impl Editor {
                         SplitDir::Vertical => leaf.min_width?,
                         SplitDir::Horizontal => leaf.min_height?,
                     };
-                    (attempted_size <= minimum * (1.0 - threshold))
-                        .then(|| leaf.on_collapse.clone())
-                        .flatten()
+                    if attempted_size > minimum * (1.0 - threshold) {
+                        return None;
+                    }
+                    match &leaf.on_collapse {
+                        Some(callback) => Some(TileCollapse::Callback(callback.clone())),
+                        None => (side_pane == Some(leaf.id)).then_some(TileCollapse::CloseSidePane(leaf.id)),
+                    }
                 };
                 collapse_for(&split.a, total * ratio)
                     .or_else(|| collapse_for(&split.b, total * (1.0 - ratio)))
@@ -5391,6 +5624,15 @@ impl Editor {
         }
     }
 
+    /// A read-only eseqlisp buffer holding `text`, shown as text: made, or
+    /// refilled keeping its cursor and scroll.
+    pub fn upsert_read_only_lisp_buffer(&mut self, name: &str, text: &str) -> BufferId {
+        let id = self.upsert_read_only_scratch_buffer_with_mode(name, text, BufferMode::ESeqLisp);
+        self.set_buffer_view_mode_by_name(name, ViewMode::TextOnly);
+        self.mark_needs_redraw();
+        id
+    }
+
     pub fn create_scratch_buffer(&mut self, name: &str, text: &str, mode: BufferMode) -> BufferId {
         let id = self.alloc_buffer_id();
         let mut buffer = Buffer::new(id, name);
@@ -6662,6 +6904,11 @@ impl Editor {
         // Errors linger until acknowledged; any keypress counts.
         if self.toast.as_ref().is_some_and(|toast| toast.kind == ToastKind::Error) {
             self.toast = None;
+        }
+
+        if self.describing_key.is_some() {
+            self.describe_key_press(key);
+            return;
         }
 
         // Inspect mode outranks the modal keyboard boundary, same as it
@@ -8266,7 +8513,7 @@ impl Editor {
             return true;
         }
         // Editor commands that open their own minibuffer prompt.
-        if matches!(fn_name, "find-file" | "describe-function" | palette::COMMAND_PALETTE) {
+        if matches!(fn_name, "find-file" | "describe-function" | "describe-key" | palette::COMMAND_PALETTE) {
             self.run_command(fn_name);
             return true;
         }
@@ -10142,6 +10389,11 @@ impl Editor {
                 crate::runtime::TileOp::SetTitlebar(None) => self.unmount_titlebar(),
                 crate::runtime::TileOp::SetWindowBuffer(name) => {
                     if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+                        // A click in the side pane (an agent pane button) that
+                        // shows a buffer means the project's tile, not the pane.
+                        if let Some(main) = self.main_tile_beside_side_pane() {
+                            self.switch_active_tile(main);
+                        }
                         if self.active_buffer_idx() == idx {
                             self.record_buffer_access_by_idx(idx);
                             continue;
@@ -10691,6 +10943,7 @@ impl Editor {
         if self.tile_root.remove_leaf(remove_tile_id).is_none() {
             return;
         }
+        self.settle_beside_tiles();
         let remaining_ids = self.tile_root.content_leaf_ids();
         let next_tile = activate_tile_id
             .filter(|tile_id| self.tile_root.find_leaf(*tile_id).is_some())

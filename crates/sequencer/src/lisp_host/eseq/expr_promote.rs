@@ -315,6 +315,7 @@ mod tests {
                 state: Vec::new(),
                 every: None,
                 seed_policy: Default::default(),
+                triggers: Default::default(),
                 ports: Vec::new(),
                 accumulator: None,
                 run_source: None,

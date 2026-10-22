@@ -634,9 +634,13 @@ impl ReloadReport {
         format!("Lisp reload ok ({changed}; {roots})")
     }
 
+    /// Why the reload failed: the first error, not a warning that happened
+    /// to be reported before it.
     pub fn failure_message(&self) -> String {
         self.diagnostics
-            .first()
+            .iter()
+            .find(|diagnostic| !diagnostic.starts_with("warning:"))
+            .or_else(|| self.diagnostics.first())
             .cloned()
             .unwrap_or_else(|| "Lisp reload failed".to_string())
     }
@@ -742,6 +746,20 @@ fn normalize_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_reload_reports_its_error_not_an_earlier_warning() {
+        let report = ReloadReport {
+            diagnostics: vec![
+                "warning: eseq.mixer/x is not exported by eseq.mixer".to_string(),
+                "Lisp reload failed: UnknownVariable(\"user.init/tracks\")".to_string(),
+            ],
+            ..Default::default()
+        };
+        assert!(report.failure_message().contains("UnknownVariable"));
+        let only_warning = ReloadReport { diagnostics: vec!["warning: w".to_string()], ..Default::default() };
+        assert_eq!(only_warning.failure_message(), "warning: w");
+    }
 
     #[test]
     fn defcustom_is_a_defined_symbol_for_exports_and_hot_reload() {

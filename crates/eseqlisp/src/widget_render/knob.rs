@@ -14,6 +14,9 @@ pub struct KnobWidget;
 
 pub static KNOB_WIDGET: KnobWidget = KnobWidget;
 
+/// The `defwidget` that paints a knob when one is defined.
+pub const KNOB_FACE_WIDGET: &str = "knob-face";
+
 const KNOB_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
@@ -126,6 +129,22 @@ impl WidgetDefinition for KnobWidget {
         &["size"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A small rotary knob for one continuous value. :value is a number in \
+:min..:max (default 0..1); the arc shows how far along it is. For `knob`, pressing \
+or dragging sets the value from the pointer's height inside the knob (top = :max, \
+bottom = :min). `inline-knob` is the knob that `~knob` places in source code: it \
+is relative instead, dragging up (or right, more slowly) from the starting value, \
+8 cells of travel per full range. Either way :on-change receives one number, \
+clamped to :min..:max and not rounded; feed it back into :value. Colours come from \
+the theme. It is :size cells wide (default 2) and drawn round. Example: \
+(knob :value drive :min 0 :max 10 :size 3 :on-change (lambda (v) (set! drive v)))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &["value", "min", "max", "size", "on-change"]
+    }
+
     fn measure(
         &self,
         node: &Value,
@@ -161,6 +180,7 @@ impl WidgetDefinition for KnobWidget {
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         match (node.widget_type.as_str(), mouse_kind) {
             ("inline-knob", MouseEventKind::Down(MouseButton::Left)) => MouseEventOutcome::Consume,
             ("inline-knob", MouseEventKind::Drag(MouseButton::Left)) => {
@@ -203,6 +223,7 @@ impl WidgetDefinition for KnobWidget {
         local_row: f32,
         _modifiers: KeyModifiers,
     ) -> Option<Value> {
+        let local_row = super::scroll::event_content_row(local_row);
         Some(Value::List(vec![
             std::rc::Rc::new(std::cell::RefCell::new(Value::Number(get_f32_prop(
                 &node.props,
@@ -257,6 +278,21 @@ impl WidgetDefinition for KnobWidget {
         node: &LayoutNode,
         viewport: super::WidgetViewport,
     ) -> Vec<GpuPrimitive> {
+        // The factory paints knobs with a Lisp shader (content/ui/widgets.lisp)
+        // whose theme slots a package can restyle; this built-in shader draws
+        // them when it is not loaded.
+        if let Some(face) = super::sdf_widget::face_primitive(
+            KNOB_FACE_WIDGET,
+            &node.props,
+            &[],
+            &[],
+            node.rect,
+            viewport,
+            normalized_value(&node.props),
+            [[0.0; 4]; 2],
+        ) {
+            return vec![face];
+        }
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;
         let px_h = node.rect.height * viewport.cell_h;

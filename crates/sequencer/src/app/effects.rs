@@ -637,18 +637,35 @@ impl App {
         track: usize,
         name: &str,
     ) -> Result<usize, String> {
+        self.add_saved_instrument_slot_to_rack_scoped_sync(track, name, false)
+    }
+
+    /// `only_here`: the new slot is switched off in every pattern but the
+    /// current one, inside the same undo entry (docs/rig-spec.md §4).
+    pub fn add_saved_instrument_slot_to_rack_scoped_sync(
+        &mut self,
+        track: usize,
+        name: &str,
+        only_here: bool,
+    ) -> Result<usize, String> {
         let prepared = self.prepare_saved_instrument_for_rack_slot_sync(name)?;
         let lib_ptr: *const lisp_host::LoadedDGenLib =
             &self.editor.instrument_libs[prepared.lib_index];
-        self.apply_recorded_rack_slot_add(track, "Add rack instrument", |app| unsafe {
-            app.graph_controller().add_custom_slot_to_rack(
-                track,
-                &prepared.name,
-                prepared.engine_id,
-                &prepared.manifest,
-                &*lib_ptr,
-                prepared.run_mode,
-            )
+        self.apply_recorded_rack_slot_add(track, "Add rack instrument", |app| {
+            let slot_idx = unsafe {
+                app.graph_controller().add_custom_slot_to_rack(
+                    track,
+                    &prepared.name,
+                    prepared.engine_id,
+                    &prepared.manifest,
+                    &*lib_ptr,
+                    prepared.run_mode,
+                )
+            }?;
+            if only_here {
+                app.state.park_rack_slot_outside_current_pattern(track, slot_idx);
+            }
+            Ok(slot_idx)
         })
     }
 
@@ -7986,6 +8003,7 @@ mod tests {
                 requires: Vec::new(),
                 graph: None,
                 owner_rack: Some(group_id),
+                trigger_source: None,
             });
             if authored_scene_row {
                 app.arr_replace_rows(
@@ -9608,6 +9626,7 @@ mod tests {
             requires: Vec::new(),
             graph: Some(manifest),
             owner_rack: None,
+            trigger_source: None,
         });
         let intrinsic = |instance: usize, route: usize| ProjectGraphNodeIntrinsicOverride {
             group: "nrn".into(),

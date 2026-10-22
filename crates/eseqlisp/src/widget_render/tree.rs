@@ -818,8 +818,7 @@ pub(crate) fn tree_drop_info(
     let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
 
     let rh = row_height_from_props(&node.props);
-    let scroll_offset = find_parent_scroll_offset(node);
-    let row_relative = local_row - node.rect.row + scroll_offset;
+    let row_relative = super::scroll::event_content_row(local_row) - node.rect.row;
     let target = if row_relative >= 0.0 {
         rows.get((row_relative / rh).floor() as usize)
             .filter(|row| row.drop_target)
@@ -890,8 +889,7 @@ pub(crate) fn tree_context_menu_info(
     let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
 
     let rh = row_height_from_props(&node.props);
-    let scroll_offset = find_parent_scroll_offset(node);
-    let row_relative = local_row - node.rect.row + scroll_offset;
+    let row_relative = super::scroll::event_content_row(local_row) - node.rect.row;
     let hit = if row_relative >= 0.0 {
         let row_idx = (row_relative / rh).floor() as usize;
         rows.get(row_idx)
@@ -920,6 +918,69 @@ pub(crate) fn tree_context_menu_info(
 impl WidgetDefinition for TreeWidget {
     fn names(&self) -> &'static [&'static str] {
         &["tree"]
+    }
+
+    fn doc(&self) -> &'static str {
+        "A collapsible, keyboard-navigable list built from data, not children: a browser, a \
+file list, a preset library. :items is a list of items, each a map or plist with \
+:label and optionally :children (a list of items, which makes it a folder), :detail \
+(secondary text after the label), :icon, :status-icon, :badge (a count), :swatch (a \
+colour chip) or :kind \"header\" (a section label that cannot be clicked); a bare \
+string is a label. Rows are :row-height tall (default 1.25, at least 1). The tree \
+keeps folder open state itself, keyed by each item's :path, :folder, :name or label; \
+:expand-all true opens everything (for a search filter). Every row callback receives \
+the item as a map: :on-select on clicking a leaf, :on-toggle on clicking a folder \
+(which also toggles it), :on-activate on double-click or Enter on a leaf (folders \
+too with :activate-parents true), :on-modified-activate on Cmd, Shift or Ctrl+Enter, \
+:on-cursor-change when the arrow keys move the cursor. :on-right-click (ctrl+click \
+too) receives the pointer event map with the row's item as :item (nil below the last \
+row). :selected-path or :selected-label (strings) highlight and reveal the row whose \
+:path or label matches; :selection-follows-external true stops clicks from moving \
+that highlight. :current-value (matched against the field named by :current-key, \
+default name) marks the item in use, :loading-value (with :loading-key) shows a \
+spinner on one. Drag and drop: :drag-type \"t\" makes leaves draggable with the item \
+as payload (an item's own :drag-type wins, :draggable false opts one out); :on-drop \
+with :drop-types accepts drops and receives a map with :drag-type, :payload and \
+:target (the item under the pointer, or nil). Its natural height is every visible \
+row, so put it in a scroll, which keeps the selected row in view. Example: (scroll \
+:width :fill :flex 1 (tree :items files :selected-path current :on-activate (lambda \
+(item) (open-file (get item :path)))))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "items",
+            "width",
+            "height",
+            "font-size",
+            "row-height",
+            "expand-all",
+            "selected-path",
+            "selected-label",
+            "selection-follows-external",
+            "activate-parents",
+            "detail-yields",
+            "current-value",
+            "current-key",
+            "loading-value",
+            "loading-key",
+            "drag-type",
+            "drop-types",
+            "on-select",
+            "on-toggle",
+            "on-activate",
+            "on-modified-activate",
+            "on-cursor-change",
+            "on-right-click",
+            "on-drop",
+            "row-bg-alt",
+            "selected-bg",
+            "current-bg",
+            "folder-color",
+            "file-color",
+            "chevron-color",
+            "detail-color",
+        ]
     }
 
     fn fragment_shader(
@@ -1122,8 +1183,7 @@ impl WidgetDefinition for TreeWidget {
 
         let rh = row_height_from_props(&node.props);
 
-        let scroll_offset = find_parent_scroll_offset(node);
-        let row_relative = local_row - node.rect.row + scroll_offset;
+        let row_relative = super::scroll::event_content_row(local_row) - node.rect.row;
         let row_idx = (row_relative / rh).floor() as usize;
         if row_idx >= rows.len() {
             return MouseEventOutcome::Consume;
@@ -1170,8 +1230,7 @@ impl WidgetDefinition for TreeWidget {
         let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
 
         let rh = row_height_from_props(&node.props);
-        let scroll_offset = find_parent_scroll_offset(node);
-        let row_relative = local_row - node.rect.row + scroll_offset;
+        let row_relative = super::scroll::event_content_row(local_row) - node.rect.row;
         let row_idx = (row_relative / rh).floor() as usize;
         let row = rows.get(row_idx)?;
         if row.has_children || !row.draggable {
@@ -1325,8 +1384,7 @@ impl WidgetDefinition for TreeWidget {
         let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
 
         let rh = row_height_from_props(&node.props);
-        let scroll_offset = find_parent_scroll_offset(node);
-        let row_relative = local_row - node.rect.row + scroll_offset;
+        let row_relative = super::scroll::event_content_row(local_row) - node.rect.row;
         let row_idx = (row_relative / rh).floor() as usize;
         let row = rows.get(row_idx)?;
         if !row_is_interactive(row) {
@@ -1705,7 +1763,7 @@ impl WidgetDefinition for TreeWidget {
                     scale: 1.0,
                     fg: theme::FG(),
                     bg: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 }));
             }
             let status_width = if row.status_icon.is_some() || is_loading {
@@ -1826,7 +1884,7 @@ impl WidgetDefinition for TreeWidget {
                     scale: 1.0,
                     fg,
                     bg: transparent,
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
 
@@ -1843,7 +1901,7 @@ impl WidgetDefinition for TreeWidget {
                             scale: 1.0,
                             fg: theme::list_row_fg(is_selected, detail_fg),
                             bg: transparent,
-                            mono: false,
+                            face: crate::ui::glyph_atlas::TextFace::Regular,
                         },
                     ));
                 }
@@ -1889,6 +1947,12 @@ fn update_last_known_expanded(widget_key: u64, expanded: &HashSet<NodeIdPath>) {
 impl WidgetDefinition for TreeRowBgWidget {
     fn names(&self) -> &'static [&'static str] {
         &["tree-row"]
+    }
+
+    fn doc(&self) -> &'static str {
+        "Internal: the rounded row-highlight shader the tree widget draws its rows with. It \
+is not meant to be written in Lisp and lays out nothing; use tree with :items \
+instead."
     }
 
     fn measure(
@@ -1968,11 +2032,6 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 "#,
     super::wgsl::TREE_CHEVRON_SHADER,
 );
-
-/// Find the scroll offset from the nearest parent scroll container.
-fn find_parent_scroll_offset(_node: &LayoutNode) -> f32 {
-    super::scroll::current_event_scroll_offset()
-}
 
 fn row_height_from_value(node: &Value) -> f32 {
     get_prop_num(node, "row-height")

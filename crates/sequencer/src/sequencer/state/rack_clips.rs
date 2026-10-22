@@ -43,6 +43,16 @@ pub struct RackClip {
     pub scene_slots: super::SceneSlotStore,
 }
 
+/// A rack clip's on-screen name: `name`, or "Clip N" for the clip at
+/// `position` (0-based) while it is blank.
+pub fn rack_clip_label(name: &str, position: usize) -> String {
+    if name.trim().is_empty() {
+        format!("Clip {}", position + 1)
+    } else {
+        name.to_string()
+    }
+}
+
 /// One rack's clip bank. `members` mirrors `group.members` so composition needs
 /// nothing but `ProjectScenes`; it is refreshed from the same group-topology
 /// funnel that publishes `rack_memberships`.
@@ -57,6 +67,14 @@ pub struct RackClipBank {
 impl RackClipBank {
     pub fn clip(&self, id: RackClipId) -> Option<&RackClip> {
         self.clips.iter().find(|clip| clip.id == id)
+    }
+
+    /// What clip `id` is called on screen: its name, or "Clip N" (its
+    /// 1-based position in the bank) while it has none. New clips start
+    /// unnamed, so a bank reads Clip 1..N until the user names one.
+    pub fn clip_label(&self, id: RackClipId) -> Option<String> {
+        let position = self.clips.iter().position(|clip| clip.id == id)?;
+        Some(rack_clip_label(&self.clips[position].name, position))
     }
 
     pub fn clip_mut(&mut self, id: RackClipId) -> Option<&mut RackClip> {
@@ -586,12 +604,9 @@ impl ProjectScenes {
                 return Some(id);
             }
         }
-        let name = self
-            .scenes
-            .get(scene_idx)
-            .map(|scene| scene.name.clone())
-            .unwrap_or_else(|| "Clip".to_string());
-        let id = self.create_rack_clip(group_id, &name)?;
+        // Unnamed: the clip shows its bank position, never a copy of the
+        // scene's name.
+        let id = self.create_rack_clip(group_id, "")?;
         self.set_scene_rack_clip(scene_idx, group_id, Some(id));
         if scene_idx == self.current_scene {
             self.adopt_live_rack_clips();
@@ -600,12 +615,12 @@ impl ProjectScenes {
     }
 
     /// Scene create (`new_scene_in_bank`): every rack the new scene inherits
-    /// a clip pointer for gets a fork of that clip under the new scene's
-    /// name, and the pointer moves to the fork.
+    /// a clip pointer for gets an unnamed fork of that clip (it shows its
+    /// bank position), and the pointer moves to the fork.
     pub(super) fn fork_rack_clips_for_new_scene(&mut self, scene_idx: usize) {
-        let Some(scene_name) = self.scenes.get(scene_idx).map(|scene| scene.name.clone()) else {
+        if scene_idx >= self.scenes.len() {
             return;
-        };
+        }
         let inherited: Vec<(u64, RackClipId)> = self
             .scenes
             .get(scene_idx)
@@ -638,7 +653,7 @@ impl ProjectScenes {
             let id = bank.mint_id();
             bank.clips.push(RackClip {
                 id,
-                name: scene_name.clone(),
+                name: String::new(),
                 color: None,
                 cells: forked,
                 graph_overrides: overrides,
@@ -682,6 +697,37 @@ impl ProjectScenes {
             .and_then(|bank| bank.clip_mut(clip))
             .map(|clip| clip.name = name.to_string())
             .is_some()
+    }
+
+    /// Rename every clip of `group_id` in bank order: "`prefix` 1..N", or
+    /// back to unnamed (shown as Clip 1..N) when `prefix` is blank. `false`
+    /// when the rack has no bank, the bank has no clips, or every clip
+    /// already carries its computed name, so callers never record a no-op
+    /// undo entry.
+    pub fn rename_rack_clips_in_order(&mut self, group_id: u64, prefix: &str) -> bool {
+        let prefix = prefix.trim();
+        let Some(bank) = self.rack_bank_mut(group_id) else {
+            return false;
+        };
+        let name_at = |position: usize| {
+            if prefix.is_empty() {
+                String::new()
+            } else {
+                format!("{prefix} {}", position + 1)
+            }
+        };
+        let changes = bank
+            .clips
+            .iter()
+            .enumerate()
+            .any(|(position, clip)| clip.name != name_at(position));
+        if !changes {
+            return false;
+        }
+        for (position, clip) in bank.clips.iter_mut().enumerate() {
+            clip.name = name_at(position);
+        }
+        true
     }
 
     /// Delete a clip and clear every scene pointer to it (those scenes fall
@@ -760,8 +806,7 @@ impl ProjectScenes {
                 // producing an empty clip.
                 continue;
             }
-            let name = scene.name.clone();
-            let id = self.create_rack_clip(group_id, &name)?;
+            let id = self.create_rack_clip(group_id, "")?;
             if let Some(clip) = self
                 .rack_bank_mut(group_id)
                 .and_then(|bank| bank.clip_mut(id))
@@ -1167,7 +1212,7 @@ mod tests {
     }
 
     #[test]
-    fn converting_a_legacy_rack_moves_every_scenes_slice_into_a_named_clip() {
+    fn converting_a_legacy_rack_moves_every_scenes_slice_into_a_clip() {
         let mut scenes = scenes();
         // Scene 0 and 2 have member content; scene 1 is empty for the rack.
         for scene in [0usize, 2] {
@@ -1185,7 +1230,9 @@ mod tests {
             .convert_rack_to_clips(RACK, &MEMBERS)
             .expect("legacy rack converts");
         assert_eq!(created, 2, "only the scenes with content become clips");
-        assert_eq!(scenes.rack_bank(RACK).unwrap().clips[0].name, "Scene 1");
+        let bank = scenes.rack_bank(RACK).unwrap();
+        assert_eq!(bank.clips[0].name, "", "converted clips start unnamed");
+        assert_eq!(bank.clip_label(bank.clips[1].id).as_deref(), Some("Clip 2"));
         assert!(scenes.current_rack_clip(RACK).is_some());
         assert_eq!(scenes.scene_rack_clip(1, RACK), None, "empty scene stays silent");
         // The clip carries the scene's member cells and its rack-owned override.
@@ -1198,6 +1245,41 @@ mod tests {
         assert_eq!(snapshot.graph_overrides.len(), 1);
         // Converting twice is refused.
         assert!(scenes.convert_rack_to_clips(RACK, &MEMBERS).is_none());
+    }
+
+    #[test]
+    fn rename_in_order_numbers_the_bank_or_clears_it_back_to_positions() {
+        let mut scenes = scenes();
+        let a = scenes.create_rack_clip_with_members(RACK, &MEMBERS, "Scene 12");
+        let b = scenes.create_rack_clip(RACK, "Scene 12").expect("clip b");
+        let c = scenes.create_rack_clip(RACK, "yo").expect("clip c");
+
+        assert!(scenes.rename_rack_clips_in_order(RACK, "  Break "));
+        let bank = scenes.rack_bank(RACK).unwrap();
+        let labels: Vec<_> = [a, b, c].iter().map(|id| bank.clip_label(*id).unwrap()).collect();
+        assert_eq!(labels, ["Break 1", "Break 2", "Break 3"]);
+
+        assert!(scenes.rename_rack_clips_in_order(RACK, ""));
+        let bank = scenes.rack_bank(RACK).unwrap();
+        assert!(bank.clips.iter().all(|clip| clip.name.is_empty()));
+        let labels: Vec<_> = [a, b, c].iter().map(|id| bank.clip_label(*id).unwrap()).collect();
+        assert_eq!(labels, ["Clip 1", "Clip 2", "Clip 3"]);
+        assert!(!scenes.rename_rack_clips_in_order(999, "x"), "no bank, no rename");
+    }
+
+    #[test]
+    fn rename_in_order_reports_no_change_for_an_empty_bank_or_matching_names() {
+        let mut scenes = scenes();
+        let a = scenes.create_rack_clip_with_members(RACK, &MEMBERS, "");
+        let b = scenes.create_rack_clip(RACK, "").expect("clip b");
+        assert!(!scenes.rename_rack_clips_in_order(RACK, ""), "already unnamed");
+        assert!(scenes.rename_rack_clips_in_order(RACK, "Break"));
+        assert!(!scenes.rename_rack_clips_in_order(RACK, " Break "), "same prefix twice");
+
+        assert!(scenes.delete_rack_clip(RACK, a));
+        assert!(scenes.delete_rack_clip(RACK, b));
+        assert!(scenes.rack_bank(RACK).is_some(), "deleting clips keeps the bank");
+        assert!(!scenes.rename_rack_clips_in_order(RACK, "Fill"), "empty bank");
     }
 
     #[test]
@@ -1219,7 +1301,9 @@ mod tests {
         assert_ne!(forked, source, "the new scene has its own clip");
         let bank = scenes.rack_bank(RACK).unwrap();
         let clip = bank.clip(forked).unwrap();
-        assert_eq!(clip.name, scenes.scenes[new_idx].name);
+        assert_eq!(clip.name, "", "a fork never copies a name");
+        let last = format!("Clip {}", bank.clips.len());
+        assert_eq!(bank.clip_label(forked), Some(last), "the fork is the bank's newest clip");
         assert_eq!(clip.graph_overrides.len(), 1, "rack-owned overrides ride along");
         for (position, track) in MEMBERS.iter().enumerate() {
             let fresh = clip.cells[position].expect("every member has a cell");

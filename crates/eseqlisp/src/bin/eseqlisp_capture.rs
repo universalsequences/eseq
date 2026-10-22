@@ -49,6 +49,9 @@ fn run() -> Result<(), String> {
         .runtime_mut()
         .eval_str(&source)
         .map_err(|error| format!("lisp evaluation failed: {error:?}"))?;
+    // As the app's frame loop does: a theme or slot change made by the
+    // source re-emits the shaders that bake theme colours.
+    eseqlisp::runtime::recompile_theme_dependent_sdf_shaders();
     if editor.widget_layout().is_some() {
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
     }

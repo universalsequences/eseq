@@ -372,9 +372,16 @@ fn rack_clip_summary(
     group_id: u64,
     rack_clip: Option<u64>,
 ) -> RackClipSummary {
-    let clip = rack_clip.and_then(|rack_clip| scenes.rack_bank(group_id)?.clip(rack_clip));
+    let bank = scenes.rack_bank(group_id);
+    let position = rack_clip.and_then(|rack_clip| {
+        bank?.clips.iter().position(|clip| clip.id == rack_clip)
+    });
+    let clip = position.and_then(|position| bank?.clips.get(position));
+    let label = clip.zip(position).map_or(String::new(), |(clip, position)| {
+        sequencer::sequencer::rack_clip_label(&clip.name, position)
+    });
     let mut summary = RackClipSummary {
-        name: text(clip.map_or("", |clip| clip.name.as_str())),
+        name: text(&label),
         color: clip
             .and_then(|clip| clip.color)
             .map_or(Value::Nil, |[r, g, b]| list_value([number(r), number(g), number(b)])),
@@ -382,7 +389,7 @@ fn rack_clip_summary(
         length: 0.0,
         members: Vec::new(),
     };
-    let (Some(clip), Some(bank)) = (clip, scenes.rack_bank(group_id)) else {
+    let (Some(clip), Some(bank)) = (clip, bank) else {
         return summary;
     };
     let mut rings = Vec::new();

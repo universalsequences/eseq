@@ -99,6 +99,10 @@ pub enum VMError {
 
 pub type NativeFn = Rc<dyn Fn(Vec<Value>, &mut VM) -> Value>;
 
+/// How many effect failures the VM keeps for a host to read: enough to
+/// explain one evaluation, bounded for hosts that never read them.
+const MAX_REACTIVE_FAILURES: usize = 16;
+
 #[derive(Clone)]
 pub struct NativeFunction {
     name: String,
@@ -231,6 +235,60 @@ pub(crate) fn log_source_load_error(form: &str, message: &str, queued: &[String]
             eprintln!("[lisp-error][{form}] {message}: {}", queued.join("; "));
         }
     }
+}
+
+/// Overrides on `theme-slot/<slot>` targets name the defwidget that paints
+/// theme slot `slot` (`override-theme-slot`).
+const THEME_SLOT_TARGET_PREFIX: &str = "theme-slot/";
+
+/// Overrides on `part/<name>` targets restyle every widget built with
+/// `:part "<name>"` (`restyle`).
+const PART_TARGET_PREFIX: &str = "part/";
+
+/// Overrides on `face/<face>` targets name the defwidget that paints every
+/// built-in control whose face is `face` (`restyle-face`).
+const FACE_TARGET_PREFIX: &str = "face/";
+
+/// Whether overrides on `target` are mirrored into the theme
+/// ([`VM::sync_theme_overrides`]).
+fn is_theme_target(target: &str) -> bool {
+    target.starts_with(THEME_SLOT_TARGET_PREFIX) || target.starts_with(FACE_TARGET_PREFIX)
+}
+
+
+/// Register `callback` as the current module's override of `name`.
+/// Re-evaluation replaces this module's registration and makes it the
+/// active (most recently evaluated) layer rather than stacking copies.
+/// A hot reload keeps the entry's enabled state: a package the user
+/// switched off must not switch itself back on by re-evaluating.
+fn register_override(vm: &mut VM, name: &str, kind: OverrideKind, callback: Value) {
+    let overriding_module = vm.current_module_name().to_string();
+    let set = vm
+        .overrides
+        .entry(name.to_string())
+        .or_insert_with(|| OverrideSet {
+            entries: Vec::new(),
+            dispatcher: Rc::new(RefCell::new(Value::OverrideDispatcher(name.to_string()))),
+        });
+    let previously_enabled = set
+        .entries
+        .iter()
+        .find(|entry| entry.overriding_module == overriding_module)
+        .map(|entry| entry.enabled);
+    let enabled = previously_enabled
+        .unwrap_or_else(|| !vm.disabled_override_modules.contains(&overriding_module));
+    set.entries
+        .retain(|entry| entry.overriding_module != overriding_module);
+    set.entries.push(OverrideEntry {
+        overriding_module,
+        kind,
+        callback,
+        quarantined: false,
+        enabled,
+    });
+    // What the factory function draws changed with no reactive edge:
+    // redraw its dependents, cached subtrees included.
+    vm.mark_effects_depending_on_override_targets(&HashSet::from([name.to_string()]));
 }
 
 /// Run every listener registered on an extension hook, in registration order.
@@ -2882,6 +2940,9 @@ pub struct VM {
     reactive_function_profiles: Vec<ReactiveFunctionProfile>,
     last_reactive_error_context: Option<String>,
     last_reactive_error_detail: Option<String>,
+    /// Effects and views that threw, newest last, at most
+    /// [`MAX_REACTIVE_FAILURES`]; see [`VM::take_reactive_failures`].
+    reactive_failures: Vec<String>,
     /// Opcodes left before the running code fails with
     /// [`VMError::StepBudgetExceeded`]; `None` (the default) is unlimited.
     step_budget: Option<u64>,
@@ -2909,11 +2970,23 @@ pub struct VM {
     subtree_touch_clock: u64,
     subtree_touched_at: HashMap<u64, u64>,
     pub macros: Rc<HashMap<String, MacroDef>>,
+    /// Every part name a widget has been built with, for `(parts)`.
+    seen_parts: HashSet<String>,
+    /// The `part/` targets whose restyle is running, innermost last: a
+    /// restyle that builds its own part gets it as built.
+    restyling_parts: Vec<String>,
     /// [`VM::definition_generation`].
     definition_generation: u64,
     /// Latest definition header per qualified global
     /// (docs/command-palette-spec.md §3).
     pub definition_headers: HashMap<String, crate::lang::def_header::DefinitionHeader>,
+    /// Successfully evaluated module sources whose definition docs
+    /// `describe` can show (see [`VM::comment_docs`]): path → (declared
+    /// module, revision, load order). The text stays in the source manager.
+    comment_doc_sources: HashMap<std::path::PathBuf, (Option<String>, u64, u64)>,
+    comment_doc_order: u64,
+    /// [`VM::comment_docs`]'s scans, per path at the revision scanned.
+    scanned_comment_docs: HashMap<std::path::PathBuf, (u64, Vec<(String, String, String)>)>,
     pub source_manager: SourceManager,
     pub(crate) source_load_errors: Vec<String>,
     /// Deprecations already reported (`:bindable`, `reactive-value`): each
@@ -2937,6 +3010,11 @@ pub struct VM {
     /// disabled across hot reload and across restart (the user init
     /// replays `(disable-module-overrides …)` from its managed block).
     pub disabled_override_modules: HashSet<String>,
+    /// Of those, the ones a host switched off only because nothing attaches
+    /// their package (not the user's choice): it switches them back on when
+    /// something does, and a settings UI leaves them out of what it saves.
+    /// Switching a module on or off by hand takes it out.
+    pub unattached_override_modules: HashSet<String>,
     /// Auto-qualified `defcustom` metadata used to generate settings UIs.
     pub custom_declarations: HashMap<String, CustomDeclaration>,
     /// Defaults of `defcustom`s pruned by a module re-declaration, kept until
@@ -2958,6 +3036,11 @@ pub struct VM {
     /// re-eval skip every child and silently drop the edit. Bumping the
     /// epoch (`begin_import_pass`) is what re-arms them.
     pub imported_at_epoch: HashMap<String, u64>,
+    /// Module name → its last failed import. A failure is not "imported"
+    /// (so a fixed file loads), but within the pass that saw it, a later
+    /// `import` of the same unchanged source returns the recorded error
+    /// instead of re-running every top-level form before the failure.
+    pub failed_imports: HashMap<String, FailedImport>,
     /// Current import pass. Starts at 1 so entries from a plain
     /// `eval_module_source` (no transaction) still dedupe within that pass.
     pub import_pass_epoch: u64,
@@ -2978,6 +3061,16 @@ pub struct VM {
     instances: instances::InstanceStore,
     /// Host-bound view buffers (instance-kinds spec §7).
     view_buffers: view_buffers::ViewBufferStore,
+}
+
+/// A module import that failed in pass `epoch`. `source` is the file it
+/// resolved to and a hash of its text (None when no file was found), so an
+/// import of a changed or newly created file in the same pass runs it.
+#[derive(Debug, Clone)]
+pub struct FailedImport {
+    pub epoch: u64,
+    pub source: Option<(std::path::PathBuf, u64)>,
+    pub message: String,
 }
 
 pub struct VmStateSnapshot {
@@ -3002,6 +3095,7 @@ pub struct VmStateSnapshot {
     reactive_exec_timings: Vec<ReactiveExecTiming>,
     last_reactive_error_context: Option<String>,
     last_reactive_error_detail: Option<String>,
+    comment_doc_sources: HashMap<std::path::PathBuf, (Option<String>, u64, u64)>,
     current_effect_source_buffer_id: Option<BufferId>,
     current_effect_target: EffectTarget,
     current_effect_reactive_reads: Option<HashSet<ReactiveFieldKey>>,
@@ -3017,6 +3111,7 @@ pub struct VmStateSnapshot {
     extension_hooks: HashMap<String, Vec<(String, Value)>>,
     overrides: HashMap<String, OverrideSet>,
     disabled_override_modules: HashSet<String>,
+    unattached_override_modules: HashSet<String>,
     custom_declarations: HashMap<String, CustomDeclaration>,
     declared_modules: HashMap<String, Option<std::path::PathBuf>>,
     /// Shared with each segment's compiler, which only reads it: every
@@ -3024,6 +3119,7 @@ pub struct VmStateSnapshot {
     /// boot tens of milliseconds. Writers go through `Rc::make_mut`.
     module_exports: Rc<crate::modules::ModuleExportRegistry>,
     imported_at_epoch: HashMap<String, u64>,
+    failed_imports: HashMap<String, FailedImport>,
     import_pass_epoch: u64,
     instances: instances::InstanceStore,
     view_buffers: view_buffers::ViewBufferStore,
@@ -3737,7 +3833,6 @@ pub fn register_core_natives(vm: &mut VM) {
         if vm.imported_at_epoch.get(name) == Some(&epoch) {
             return Value::Nil;
         }
-        vm.imported_at_epoch.insert(name.clone(), epoch);
         let relative_candidates = crate::modules::module_relative_file_candidates(name);
         let (loaded, errors) = match vm
             .source_manager
@@ -3760,6 +3855,18 @@ pub fn register_core_natives(vm: &mut VM) {
                 (loaded, errors)
             }
         };
+        // Failed earlier in this pass on this same source: report that
+        // failure again without re-evaluating (see `failed_imports`).
+        let source_key = loaded
+            .as_ref()
+            .map(|loaded| (loaded.path.clone(), crate::hot_reload::hash_source(&loaded.text)));
+        if let Some(failed) = vm.failed_imports.get(name) {
+            if failed.epoch == epoch && failed.source == source_key {
+                return Value::String(failed.message.clone());
+            }
+        }
+        vm.failed_imports.remove(name);
+        vm.imported_at_epoch.insert(name.clone(), epoch);
         if let Some(loaded) = loaded {
             let path_display = loaded.path.display().to_string();
             let queued = vm.source_load_errors.len();
@@ -3779,16 +3886,28 @@ pub fn register_core_natives(vm: &mut VM) {
                     let queued = vm.source_load_errors.get(queued..).unwrap_or_default();
                     log_source_load_error("import", &message, queued);
                     vm.source_load_errors.push(message.clone());
+                    // Not loaded: a fixed file, or the next pass, tries again
+                    // rather than finding it done for this pass.
+                    vm.imported_at_epoch.remove(name);
+                    vm.failed_imports.insert(
+                        name.clone(),
+                        FailedImport { epoch, source: source_key, message: message.clone() },
+                    );
                     Value::String(message)
                 }
             };
         }
+        vm.imported_at_epoch.remove(name);
         let message = format!(
             "import {name}: no module file found ({})",
             errors.join("; ")
         );
         log_source_load_error("import", &message, &[]);
         vm.source_load_errors.push(message.clone());
+        vm.failed_imports.insert(
+            name.clone(),
+            FailedImport { epoch, source: None, message: message.clone() },
+        );
         Value::String(message)
     });
 
@@ -3879,35 +3998,80 @@ pub fn register_core_natives(vm: &mut VM) {
                 return Value::Nil;
             }
         };
-        let overriding_module = vm.current_module_name().to_string();
-        let set = vm
-            .overrides
-            .entry(name.clone())
-            .or_insert_with(|| OverrideSet {
-                entries: Vec::new(),
-                dispatcher: Rc::new(RefCell::new(Value::OverrideDispatcher(name.clone()))),
-            });
-        // Re-evaluation replaces this module's registration and makes it the
-        // active (most recently evaluated) layer rather than stacking copies.
-        // A hot reload keeps the entry's enabled state: a package the user
-        // switched off must not switch itself back on by re-evaluating.
-        let previously_enabled = set
-            .entries
-            .iter()
-            .find(|entry| entry.overriding_module == overriding_module)
-            .map(|entry| entry.enabled);
-        let enabled = previously_enabled
-            .unwrap_or_else(|| !vm.disabled_override_modules.contains(&overriding_module));
-        set.entries
-            .retain(|entry| entry.overriding_module != overriding_module);
-        set.entries.push(OverrideEntry {
-            overriding_module,
-            kind,
-            callback: callback.clone(),
-            quarantined: false,
-            enabled,
-        });
+        register_override(vm, name, kind, callback.clone());
         Value::Nil
+    });
+
+    // `(override-theme-slot :slot "widget")`: boxes whose background is theme
+    // slot `slot` paint defwidget `widget` instead, for as long as the
+    // calling module's override stands. It is an override on the target
+    // `theme-slot/<slot>`, so detaching the package, disabling its overrides
+    // and re-evaluating it work as they do for a function.
+    vm.register_native_with_vm("override-theme-slot", |args, vm| {
+        let (Some(Value::Keyword(slot) | Value::String(slot)), Some(widget @ Value::String(_))) =
+            (args.first(), args.get(1))
+        else {
+            log_native_misuse("override-theme-slot", "expects (override-theme-slot :slot \"widget\")");
+            return Value::Nil;
+        };
+        let target = format!("{THEME_SLOT_TARGET_PREFIX}{slot}");
+        register_override(vm, &target, OverrideKind::Replace, widget.clone());
+        Value::Nil
+    });
+
+    // `(restyle-face "knob-number-face" "widget")`: every built-in control
+    // whose face is `knob-number-face` paints with defwidget `widget`
+    // instead, for as long as the calling module's override stands. A
+    // control's own `:face`, or a `:faces` its container sets, wins.
+    vm.register_native_with_vm("restyle-face", |args, vm| {
+        let (Some(Value::String(face) | Value::Keyword(face)), Some(widget @ Value::String(_))) =
+            (args.first(), args.get(1))
+        else {
+            log_native_misuse("restyle-face", "expects (restyle-face \"knob-number-face\" \"widget\")");
+            return Value::Nil;
+        };
+        if !crate::widget_render::sdf_widget::BUILTIN_FACES.contains(&face.as_str()) {
+            log_native_misuse(
+                "restyle-face",
+                &format!(
+                    "{face} is not a built-in face; one of {}",
+                    crate::widget_render::sdf_widget::BUILTIN_FACES.join(", ")
+                ),
+            );
+            return Value::Nil;
+        }
+        let target = format!("{FACE_TARGET_PREFIX}{face}");
+        register_override(vm, &target, OverrideKind::Replace, widget.clone());
+        Value::Nil
+    });
+
+    // `(restyle "mixer/bus-name" (lambda (node) ...))`: every widget built
+    // with `:part "mixer/bus-name"` is passed, built, to the function, and
+    // the function's result is drawn in its place, for as long as the
+    // calling module's override stands. Wherever the part is built, inside
+    // a subtree or an instrument's UI, it is restyled at construction.
+    vm.register_native_with_vm("restyle", |args, vm| {
+        let (Some(Value::String(part) | Value::Keyword(part)), Some(callback)) =
+            (args.first(), args.get(1))
+        else {
+            log_native_misuse("restyle", "expects (restyle \"area/part\" (lambda (node) ...))");
+            return Value::Nil;
+        };
+        let target = format!("{PART_TARGET_PREFIX}{part}");
+        register_override(vm, &target, OverrideKind::Replace, callback.clone());
+        Value::Nil
+    });
+
+    // `(parts)`: the part names widgets have been built with so far, sorted.
+    vm.register_native_with_vm("parts", |_args, vm| {
+        let mut parts: Vec<&String> = vm.seen_parts.iter().collect();
+        parts.sort();
+        Value::List(
+            parts
+                .into_iter()
+                .map(|part| Rc::new(RefCell::new(Value::String(part.clone()))))
+                .collect(),
+        )
     });
 
     // Enable/disable flip flags in place: no re-evaluation to re-enable, no
@@ -3974,6 +4138,7 @@ pub fn register_core_natives(vm: &mut VM) {
         } else {
             vm.disabled_override_modules.insert(module.clone());
         }
+        vm.unattached_override_modules.remove(module);
         let mut touched = HashSet::new();
         for (name, set) in &mut vm.overrides {
             for entry in set
@@ -4146,7 +4311,9 @@ pub fn register_core_natives(vm: &mut VM) {
         };
         // The public contract is an immediate return to factory behavior, not
         // exposure of an older hidden advice layer.
-        vm.overrides.remove(name);
+        if vm.overrides.remove(name).is_some() {
+            vm.mark_effects_depending_on_override_targets(&HashSet::from([name.clone()]));
+        }
         Value::Nil
     });
 
@@ -5245,6 +5412,7 @@ impl VM {
             reactive_function_profiles: Vec::new(),
             last_reactive_error_context: None,
             last_reactive_error_detail: None,
+            reactive_failures: Vec::new(),
             step_budget: None,
             current_effect_source_buffer_id: None,
             current_effect_target: EffectTarget::BufferId(None),
@@ -5257,8 +5425,13 @@ impl VM {
             subtree_touch_clock: 0,
             subtree_touched_at: HashMap::new(),
             macros: Rc::default(),
+            seen_parts: HashSet::new(),
+            restyling_parts: Vec::new(),
             definition_generation: 0,
             definition_headers: HashMap::new(),
+            comment_doc_sources: HashMap::new(),
+            comment_doc_order: 0,
+            scanned_comment_docs: HashMap::new(),
             source_manager: SourceManager::new(),
             source_load_errors: Vec::new(),
             deprecations_warned: HashSet::new(),
@@ -5267,11 +5440,13 @@ impl VM {
             extension_hooks: HashMap::new(),
             overrides: HashMap::new(),
             disabled_override_modules: HashSet::new(),
+            unattached_override_modules: HashSet::new(),
             custom_declarations: HashMap::new(),
             retired_custom_defaults: HashMap::new(),
             declared_modules: HashMap::new(),
             module_exports: Rc::default(),
             imported_at_epoch: HashMap::new(),
+            failed_imports: HashMap::new(),
             import_pass_epoch: 1,
             active_expander: None,
             active_expansion_site: None,
@@ -5504,10 +5679,12 @@ impl VM {
             .and_then(|resolver| resolver(callee, inlet))
     }
 
-    pub fn current_source_symbol(&self) -> Option<String> {
+    /// The named function whose body is executing, a lambda or subtree body
+    /// written in it included ([`crate::compiler::Chunk::owner_symbol`]).
+    pub fn current_owner_symbol(&self) -> Option<String> {
         self.chunks
             .get(self.current_chunk)
-            .and_then(|chunk| chunk.source_symbol.clone())
+            .and_then(|chunk| chunk.owner_symbol.clone())
     }
 
     /// The module of the currently executing chunk (spec §5): registration
@@ -6088,6 +6265,10 @@ impl VM {
             }
         }
         if result.is_ok() {
+            // Its definition docs are scanned lazily, on the first describe.
+            self.comment_doc_order += 1;
+            self.comment_doc_sources
+                .insert(path.clone(), (declared_module.clone(), revision, self.comment_doc_order));
             self.source_manager.record_module_success(
                 path.clone(),
                 source,
@@ -6113,6 +6294,52 @@ impl VM {
 
     pub fn take_source_load_errors(&mut self) -> Vec<String> {
         std::mem::take(&mut self.source_load_errors)
+    }
+
+    /// (global, signature, doc) for every documented top-level definition
+    /// of the module sources evaluated so far (see
+    /// [`crate::lang::def_header::comment_docs`]), in load order so a later
+    /// flat definition of a name comes after an earlier one. Each source is
+    /// scanned once per revision, on demand.
+    pub fn comment_docs(&mut self) -> Vec<(String, String, String)> {
+        let mut sources: Vec<(std::path::PathBuf, Option<String>, u64, u64)> = self
+            .comment_doc_sources
+            .iter()
+            .map(|(path, (module, revision, order))| (path.clone(), module.clone(), *revision, *order))
+            .collect();
+        sources.sort_by_key(|source| source.3);
+        let mut docs = Vec::new();
+        for (path, module, revision, _) in sources {
+            if self.scanned_comment_docs.get(&path).is_none_or(|(scanned, _)| *scanned != revision) {
+                let module = module.as_deref().unwrap_or(crate::modules::IMPLICIT_MODULE);
+                let entries = self
+                    .source_manager
+                    .evaluated_source(&path, revision)
+                    .map(crate::lang::def_header::comment_docs)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|entry| {
+                        let global = if entry.flat || crate::modules::is_qualified(&entry.name) {
+                            entry.name
+                        } else {
+                            crate::modules::qualify(module, &entry.name)
+                        };
+                        (global, entry.signature, entry.doc)
+                    })
+                    .collect();
+                self.scanned_comment_docs.insert(path.clone(), (revision, entries));
+            }
+            if let Some((_, entries)) = self.scanned_comment_docs.get(&path) {
+                docs.extend(entries.iter().cloned());
+            }
+        }
+        docs
+    }
+
+    /// Forget a source's definition docs: its load failed after the VM had
+    /// accepted it.
+    pub fn forget_comment_docs(&mut self, path: &std::path::Path) {
+        self.comment_doc_sources.remove(path);
     }
 
     /// Report deprecation `key` once per session (per VM): to stderr and
@@ -6163,6 +6390,7 @@ impl VM {
             reactive_exec_timings: self.reactive_exec_timings.clone(),
             last_reactive_error_context: self.last_reactive_error_context.clone(),
             last_reactive_error_detail: self.last_reactive_error_detail.clone(),
+            comment_doc_sources: self.comment_doc_sources.clone(),
             current_effect_source_buffer_id: self.current_effect_source_buffer_id,
             current_effect_target: self.current_effect_target.clone(),
             current_effect_reactive_reads: self.current_effect_reactive_reads.clone(),
@@ -6216,6 +6444,7 @@ impl VM {
                 })
                 .collect(),
             disabled_override_modules: self.disabled_override_modules.clone(),
+            unattached_override_modules: self.unattached_override_modules.clone(),
             custom_declarations: self.custom_declarations.iter().map(|(name, declaration)| {
                 let mut declaration = declaration.clone();
                 declaration.default = clone_value_for_snapshot(&declaration.default);
@@ -6224,6 +6453,7 @@ impl VM {
             declared_modules: self.declared_modules.clone(),
             module_exports: self.module_exports.clone(),
             imported_at_epoch: self.imported_at_epoch.clone(),
+            failed_imports: self.failed_imports.clone(),
             import_pass_epoch: self.import_pass_epoch,
             instances: self.instances.snapshot(),
             view_buffers: self.view_buffers.snapshot(),
@@ -6255,6 +6485,7 @@ impl VM {
         self.reactive_exec_timings = snapshot.reactive_exec_timings;
         self.last_reactive_error_context = snapshot.last_reactive_error_context;
         self.last_reactive_error_detail = snapshot.last_reactive_error_detail;
+        self.comment_doc_sources = snapshot.comment_doc_sources;
         self.current_effect_source_buffer_id = snapshot.current_effect_source_buffer_id;
         self.current_effect_target = snapshot.current_effect_target;
         self.current_effect_reactive_reads = snapshot.current_effect_reactive_reads;
@@ -6269,11 +6500,14 @@ impl VM {
         self.preserve_state_on_redefinition = snapshot.preserve_state_on_redefinition;
         self.extension_hooks = snapshot.extension_hooks;
         self.overrides = snapshot.overrides;
+        self.sync_theme_overrides();
         self.disabled_override_modules = snapshot.disabled_override_modules;
+        self.unattached_override_modules = snapshot.unattached_override_modules;
         self.custom_declarations = snapshot.custom_declarations;
         self.declared_modules = snapshot.declared_modules;
         self.module_exports = snapshot.module_exports;
         self.imported_at_epoch = snapshot.imported_at_epoch;
+        self.failed_imports = snapshot.failed_imports;
         self.import_pass_epoch = snapshot.import_pass_epoch;
         self.instances.restore_from(snapshot.instances);
         self.kind_schema_generation += 1;
@@ -6518,27 +6752,10 @@ impl VM {
         match self.invoke(active.callback, override_args) {
             Ok(value) => Ok(value),
             Err(error) => {
-                if let Some(entry) = self
-                    .overrides
-                    .get_mut(name)
-                    .and_then(|set| {
-                        set.entries.iter_mut().rev().find(|entry| {
-                            entry.overriding_module == active.overriding_module
-                        })
-                    })
-                {
-                    entry.quarantined = true;
-                }
-                let detail = self.last_reactive_error_detail.as_deref().unwrap_or("-");
-                let message = format!(
-                    "override {name} from {} failed ({error:?}, detail={detail}); \
-                     quarantined and using factory definition",
-                    active.overriding_module
-                );
-                self.source_load_errors.push(message.clone());
-                if debug_lisp_callback_errors_enabled() {
-                    eprintln!("[lisp-error][override] {message}");
-                }
+                let failure = self.callback_failure(&error);
+                self.quarantine_active_override(name, "override", |module| {
+                    format!("override {name} from {module} {failure}; quarantined and using factory definition")
+                });
                 self.invoke_raw_global(name, args)
             }
         }
@@ -6845,6 +7062,126 @@ impl VM {
         self.source_manager.record_render_root(node_id);
     }
 
+    /// A widget just built with `:part`: the active `restyle` of that part's
+    /// result in its place, else `widget`. The read is recorded either way,
+    /// so a restyle added or removed later redraws the effect that built it.
+    /// A restyle that fails is quarantined, like a failing override, and the
+    /// part is drawn as built.
+    pub fn restyle_part(&mut self, widget: Value) -> Value {
+        let target = match &widget {
+            Value::Map(map) => match map.get("part").map(|cell| cell.borrow()).as_deref() {
+                Some(Value::String(part) | Value::Keyword(part)) => {
+                    Some(format!("{PART_TARGET_PREFIX}{part}"))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(target) = target else {
+            return widget;
+        };
+        self.record_symbol_read(&target);
+        let part = &target[PART_TARGET_PREFIX.len()..];
+        if !self.seen_parts.contains(part) {
+            self.seen_parts.insert(part.to_string());
+        }
+        if self.restyling_parts.contains(&target) {
+            return widget;
+        }
+        let Some(callback) =
+            self.overrides.get(&target).and_then(OverrideSet::active).map(|entry| entry.callback.clone())
+        else {
+            return widget;
+        };
+        self.restyling_parts.push(target.clone());
+        let result = self.invoke(callback, vec![widget.clone()]);
+        self.restyling_parts.pop();
+        let problem = match result {
+            Ok(Some(restyled @ Value::Map(_))) => return restyled,
+            Ok(other) => format!(
+                "returned {} instead of a widget",
+                other.map_or_else(|| "nothing".to_string(), |value| format_lisp_value(&value))
+            ),
+            Err(error) => self.callback_failure(&error),
+        };
+        self.quarantine_active_override(&target, "restyle", |module| {
+            format!("restyle of part {} from {module} {problem}; quarantined and drawing it as built", &target[PART_TARGET_PREFIX.len()..])
+        });
+        widget
+    }
+
+    /// "failed (<error>, detail=<detail>)" for a callback that returned `error`.
+    fn callback_failure(&self, error: &VMError) -> String {
+        let detail = self.last_reactive_error_detail.as_deref().unwrap_or("-");
+        format!("failed ({error:?}, detail={detail})")
+    }
+
+    /// Switch off the active override of `target` after it failed, and report
+    /// `message(<its module>)` as a load error (logged under `tag`).
+    fn quarantine_active_override(
+        &mut self,
+        target: &str,
+        tag: &str,
+        message: impl FnOnce(&str) -> String,
+    ) {
+        let Some(entry) = self.overrides.get_mut(target).and_then(|set| {
+            set.entries.iter_mut().rev().find(|entry| entry.enabled && !entry.quarantined)
+        }) else {
+            return;
+        };
+        entry.quarantined = true;
+        let message = message(&entry.overriding_module);
+        self.source_load_errors.push(message.clone());
+        if debug_lisp_callback_errors_enabled() {
+            eprintln!("[lisp-error][{tag}] {message}");
+        }
+    }
+
+    /// Mirror the active `theme-slot/` and `face/` overrides into the
+    /// theme, which paints those slots and faces with their widgets.
+    fn sync_theme_overrides(&self) {
+        let widgets = |prefix: &'static str| {
+            self.overrides.iter().filter_map(move |(target, set)| {
+                let name = target.strip_prefix(prefix)?;
+                match &set.active()?.callback {
+                    Value::String(widget) => Some((name.to_string(), widget.clone())),
+                    _ => None,
+                }
+            })
+        };
+        crate::theme::set_slot_widget_overrides(widgets(THEME_SLOT_TARGET_PREFIX));
+        crate::theme::set_face_overrides(widgets(FACE_TARGET_PREFIX));
+    }
+
+    /// Each module that wrote an override, and whether any of its
+    /// overrides is switched on.
+    pub fn override_modules(&self) -> std::collections::BTreeMap<String, bool> {
+        let mut modules = std::collections::BTreeMap::new();
+        for entry in self.overrides.values().flat_map(|set| &set.entries) {
+            *modules.entry(entry.overriding_module.clone()).or_insert(false) |= entry.enabled;
+        }
+        modules
+    }
+
+    /// Drop every override written in `module`, leaving other modules' on the
+    /// same targets, and redraw what depended on them. Returns the targets
+    /// it took an override off, sorted.
+    pub fn remove_module_overrides(&mut self, module: &str) -> Vec<String> {
+        let mut touched = HashSet::new();
+        self.overrides.retain(|target, set| {
+            let before = set.entries.len();
+            set.entries.retain(|entry| entry.overriding_module != module);
+            if set.entries.len() != before {
+                touched.insert(target.clone());
+            }
+            !set.entries.is_empty()
+        });
+        self.mark_effects_depending_on_override_targets(&touched);
+        let mut targets: Vec<String> = touched.into_iter().collect();
+        targets.sort();
+        targets
+    }
+
     /// Overrides never touch the factory cell, so flipping one changes what a
     /// dependent effect renders without any reactive edge firing. Mark the
     /// dependents of each target in every spelling they may have recorded.
@@ -6852,10 +7189,15 @@ impl VM {
         if targets.is_empty() {
             return;
         }
+        if targets.iter().any(|target| is_theme_target(target)) {
+            self.sync_theme_overrides();
+        }
         let mut symbols = HashSet::new();
         for target in targets {
             symbols.insert(target.clone());
-            if let Some((_, base)) = crate::modules::split_qualified(target) {
+            // A theme slot or part target is read only by that spelling.
+            let synthetic = is_theme_target(target) || target.starts_with(PART_TARGET_PREFIX);
+            if !synthetic && let Some((_, base)) = crate::modules::split_qualified(target) {
                 symbols.insert(base.to_string());
             }
         }
@@ -7240,6 +7582,38 @@ impl VM {
         self.last_reactive_error_context.take()
     }
 
+    /// Record a failed effect or view run. Whoever ran the reactive pass may
+    /// drop its `Err` (a host's eval after which dirty effects ran), so the
+    /// failure is kept here for [`Self::take_reactive_failures`].
+    fn note_reactive_failure(&mut self, node_id: NodeId, label: Option<String>, error: &VMError) {
+        let context = label.unwrap_or_else(|| format!("node:{node_id}"));
+        // A macro-expanded failure reads as its own error, then where it came from.
+        let (error, origin) = match error {
+            VMError::ExpandedFrom { error, diagnostic } => (error.as_ref(), Some(diagnostic)),
+            error => (error, None),
+        };
+        let mut failure = format!("{context}: {error:?}");
+        if let Some(detail) = &self.last_reactive_error_detail {
+            failure.push_str(&format!(" ({detail})"));
+        }
+        if let Some(origin) = origin {
+            failure.push_str(&format!("\n  {origin}"));
+        }
+        self.last_reactive_error_context = Some(context);
+        if self.reactive_failures.len() == MAX_REACTIVE_FAILURES {
+            self.reactive_failures.remove(0);
+        }
+        self.reactive_failures.push(failure);
+    }
+
+    /// The effect and view failures since the last call, oldest first, each
+    /// led by its node's label (a view buffer's name, `buf#N`, `observer`,
+    /// `node:N`): `*pulse · pulse 1*: UnknownVariable("…")`. A failed run
+    /// leaves the last good tree in place and says nothing else.
+    pub fn take_reactive_failures(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.reactive_failures)
+    }
+
     /// Arm (or with `None` disarm) an evaluation step budget: every opcode
     /// the VM executes, in this call and in any nested call a native makes
     /// back into the VM, spends one step, and running out fails the call with
@@ -7558,7 +7932,9 @@ impl VM {
     }
 
     fn record_symbol_read(&mut self, name: &str) {
-        if let Some(reads) = self.current_effect_symbol_reads.as_mut() {
+        if let Some(reads) = self.current_effect_symbol_reads.as_mut()
+            && !reads.contains(name)
+        {
             reads.insert(name.to_string());
         }
     }
@@ -8567,6 +8943,8 @@ impl VM {
                             self.current_effect_reactive_reads = Some(HashSet::new());
                             self.current_effect_symbol_reads = Some(HashSet::new());
                             let label = self.reactive_node_label(node_id);
+                            // A detail belongs to the failure that set it, not to the next node.
+                            self.last_reactive_error_detail = None;
                             let started = Instant::now();
                             let profile_started = self.begin_function_profile();
                             self.tracking_stack.push(node_id);
@@ -8577,8 +8955,7 @@ impl VM {
                                 // As below: a failed render waits for an input
                                 // change rather than forcing every cycle.
                                 self.dag.clear_dirty(node_id);
-                                self.last_reactive_error_context =
-                                    label.clone().or_else(|| Some(format!("node:{node_id}")));
+                                self.note_reactive_failure(node_id, label.clone(), &error);
                                 error
                             })?;
                             let render_elapsed = started.elapsed();
@@ -8689,6 +9066,8 @@ impl VM {
                         self.detach_subtree_effects_for_current_context();
                     }
                     let label = self.reactive_node_label(node_id);
+                    // A detail belongs to the failure that set it, not to the next node.
+                    self.last_reactive_error_detail = None;
                     let started = Instant::now();
                     let profile_started = self.begin_function_profile();
                     let execute_result = self.execute_from(chunk_idx);
@@ -8707,8 +9086,7 @@ impl VM {
                         // dirty bit here so the node re-runs only once an input
                         // changes again instead of forcing every later cycle.
                         self.dag.clear_dirty(node_id);
-                        self.last_reactive_error_context =
-                            label.clone().or_else(|| Some(format!("node:{node_id}")));
+                        self.note_reactive_failure(node_id, label.clone(), &error);
                         error
                     })?;
                     let captured_reactive_reads = if capturing_effect_reads {
@@ -10252,6 +10630,50 @@ mod tests {
     }
 
     #[test]
+    fn a_theme_slot_override_paints_while_its_module_is_on() {
+        let mut vm = module_test_vm();
+        let painted = || crate::theme::named_widget("instrument-control-bg");
+        vm.eval_module_source(
+            temp_lisp_path("slot-pkg"),
+            "(module test.slotpkg)\n(override-theme-slot :instrument-control-bg \"steel\")",
+            1,
+        )
+        .expect("package");
+        assert_eq!(painted().as_deref(), Some("steel"));
+
+        vm.eval_str("(disable-module-overrides test.slotpkg)").expect("disable");
+        assert_eq!(painted(), None);
+        vm.eval_str("(enable-module-overrides test.slotpkg)").expect("enable");
+        assert_eq!(painted().as_deref(), Some("steel"));
+
+        // Detaching the package drops it.
+        vm.remove_module_overrides("test.slotpkg");
+        assert_eq!(painted(), None);
+    }
+
+    #[test]
+    fn a_face_override_paints_while_its_module_is_on() {
+        let mut vm = module_test_vm();
+        let painted = || crate::theme::face_override("knob-number-face");
+        vm.eval_module_source(
+            temp_lisp_path("face-pkg"),
+            "(module test.facepkg)\n(restyle-face \"knob-number-face\" \"ik-knob\")",
+            1,
+        )
+        .expect("package");
+        assert_eq!(painted().as_deref(), Some("ik-knob"));
+
+        vm.eval_str("(disable-module-overrides test.facepkg)").expect("disable");
+        assert_eq!(painted(), None);
+        vm.eval_str("(enable-module-overrides test.facepkg)").expect("enable");
+        assert_eq!(painted().as_deref(), Some("ik-knob"));
+
+        // Detaching the package drops it.
+        vm.remove_module_overrides("test.facepkg");
+        assert_eq!(painted(), None);
+    }
+
+    #[test]
     fn disabled_module_stays_disabled_across_its_own_reload_and_late_registration() {
         let mut vm = module_test_vm();
         vm.eval_module_source(
@@ -10612,6 +11034,64 @@ mod tests {
             .expect("second import eval");
         assert_eq!(again, Some(Value::Number(5.0)));
         let _ = std::fs::remove_file(conventional);
+    }
+
+    #[test]
+    fn an_import_that_failed_is_tried_again_once_the_file_is_fixed() {
+        let mut vm = module_test_vm();
+        let root = import_test_dir("import-retry");
+        vm.source_manager.set_scoped_module_load_roots(vec![crate::hot_reload::ModuleLoadRoot {
+            path: root.clone(),
+            module_prefix: Some("test.retry".into()),
+        }]);
+        let file = root.join("pkg.lisp");
+        std::fs::write(&file, "(module test.retry.pkg)\n(def value () 1)\n(car 1)").unwrap();
+        let _ = vm.eval_str("(import test.retry.pkg)");
+        assert!(vm.take_source_load_errors().iter().any(|error| error.contains("test.retry.pkg")));
+
+        std::fs::write(&file, "(module test.retry.pkg)\n(def value () 2)").unwrap();
+        assert_eq!(
+            vm.eval_str("(import test.retry.pkg)\n(test.retry.pkg/value)"),
+            Ok(Some(Value::Number(2.0))),
+            "the fixed file is evaluated, not skipped as already imported"
+        );
+    }
+
+    #[test]
+    fn a_failed_import_is_evaluated_once_per_pass_and_retried_on_the_next() {
+        let mut vm = module_test_vm();
+        let root = import_test_dir("import-fail-once");
+        vm.source_manager.set_scoped_module_load_roots(vec![crate::hot_reload::ModuleLoadRoot {
+            path: root.clone(),
+            module_prefix: Some("test.failonce".into()),
+        }]);
+        std::fs::write(root.join("pkg.lisp"), "(module test.failonce.pkg)\n(car 1)").unwrap();
+        let failures = |vm: &mut VM, module: &str| {
+            let prefix = format!("import {module}:");
+            vm.take_source_load_errors()
+                .iter()
+                .filter(|error| error.starts_with(&prefix))
+                .count()
+        };
+
+        let _ = vm.eval_str("(import test.failonce.pkg)\n(import test.failonce.pkg)");
+        let _ = vm.eval_str("(import test.failonce.pkg)");
+        assert_eq!(
+            failures(&mut vm, "test.failonce.pkg"),
+            1,
+            "the unchanged broken file is evaluated once in a pass"
+        );
+
+        vm.begin_import_pass();
+        let _ = vm.eval_str("(import test.failonce.pkg)\n(import test.failonce.pkg)");
+        assert_eq!(failures(&mut vm, "test.failonce.pkg"), 1, "a new pass tries it again, once");
+
+        let _ = vm.eval_str("(import test.failonce.missing)\n(import test.failonce.missing)");
+        assert_eq!(
+            failures(&mut vm, "test.failonce.missing"),
+            1,
+            "a missing module is reported once per pass"
+        );
     }
 
     #[test]

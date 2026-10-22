@@ -292,6 +292,161 @@ fn render_arg(arg: &Expression, out: &mut String) {
     }
 }
 
+
+/// Definitions `describe` can document: their second element names a
+/// global (or, for `defmacro`, a macro).
+pub const DOCUMENTED_DEF_HEADS: &[&str] = &[
+    "def", "defmacro", "defstate", "defcustom", "defscene", "defwidget", "def-process", "def-accumulator",
+];
+
+/// Of [`DOCUMENTED_DEF_HEADS`], those that register their name flat rather
+/// than module-qualified.
+const FLAT_DEF_HEADS: &[&str] = &["defwidget", "def-process", "def-accumulator"];
+
+/// A top-level definition and its documentation: a `:doc` slot, a
+/// docstring, or else the comment block directly above it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommentDoc {
+    pub name: String,
+    /// Registered under its bare name (`defwidget`, `def-process`), not
+    /// module-qualified.
+    pub flat: bool,
+    /// `(name a b &optional c)` for a function, `(name :prop v …)` for a
+    /// widget or process, the bare name otherwise.
+    pub signature: String,
+    pub doc: String,
+}
+
+/// Every documented top-level definition in `source` (see [`CommentDoc`]).
+/// A source that does not parse has none.
+pub fn comment_docs(source: &str) -> Vec<CommentDoc> {
+    use super::parser::{ExprKind, Parser, SpannedASTParser};
+    let Ok(tokens) = Parser::new(source.to_string()).parse_spanned() else { return Vec::new() };
+    let Ok(forms) = SpannedASTParser::new(tokens).parse() else { return Vec::new() };
+    forms
+        .iter()
+        .filter_map(|form| {
+            let ExprKind::List(items) = &form.kind else { return None };
+            let head = symbol_of(items.first()?)?;
+            if !DOCUMENTED_DEF_HEADS.contains(&head) {
+                return None;
+            }
+            let name = symbol_of(items.get(1)?)?.to_string();
+            let doc = form_doc_text(items)
+                .or_else(|| comment_block_above(source, form.origin.primary_span.start_byte))?;
+            let signature = match head {
+                "defwidget" => keyword_call(&name, slot(items, "state")),
+                "def-process" | "def-accumulator" => keyword_call(&name, slot(items, "in")),
+                "def" | "defmacro" => match items.get(2).map(|args| &args.kind) {
+                    Some(ExprKind::List(args)) if items.len() > 3 => {
+                        let args: Vec<Expression> = args.iter().map(|arg| arg.to_legacy()).collect();
+                        render_signature(&name, &args)
+                    }
+                    _ => name.clone(),
+                },
+                _ => name.clone(),
+            };
+            Some(CommentDoc { flat: FLAT_DEF_HEADS.contains(&head), name, signature, doc })
+        })
+        .collect()
+}
+
+/// A definition form's own documentation: a `:doc "…"` slot, or a
+/// docstring as the first body form of `(def name (args) "doc" body…)`.
+pub fn form_doc_text(items: &[super::parser::Expr]) -> Option<String> {
+    use super::parser::ExprKind;
+    let doc = match slot(items, "doc").map(|value| &value.kind) {
+        Some(ExprKind::String(doc)) => Some(doc.clone()),
+        _ => match items {
+            [head, _, args, doc, _, ..] if symbol_of(head) == Some("def") => match (&args.kind, &doc.kind) {
+                (ExprKind::List(_), ExprKind::String(doc)) => Some(doc.clone()),
+                _ => None,
+            },
+            _ => None,
+        },
+    };
+    doc.map(|doc| doc.trim().to_string()).filter(|doc| !doc.is_empty())
+}
+
+/// The `;` comment lines that end on the line above `start_byte` (the form
+/// starting its own line), joined, or None. A section banner (`;;; …`, or a
+/// rule of `─`, `-`, `=`, `*` or `#`) ends the block and is not part of it.
+pub fn comment_block_above(source: &str, start_byte: usize) -> Option<String> {
+    let before = &source[..start_byte];
+    if !before.rsplit('\n').next().unwrap_or_default().trim().is_empty() {
+        return None;
+    }
+    let mut block: Vec<&str> = Vec::new();
+    for line in before.lines().rev().skip(usize::from(!before.ends_with('\n'))) {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with(';') || is_banner(trimmed) {
+            break;
+        }
+        let text = trimmed.trim_start_matches(';');
+        block.push(text.strip_prefix(' ').unwrap_or(text).trim_end());
+    }
+    block.reverse();
+    let doc = block.join("\n").trim().to_string();
+    (!doc.is_empty()).then_some(doc)
+}
+
+/// A `;;;` line, one framed by rules (`;; ── Rack clips (spec §2) ──────`,
+/// `; --- Envelopes ---`), or one that is mostly a rule (`;; ====`). Prose
+/// that merely contains `---` or a `### Heading` is still documentation.
+fn is_banner(comment: &str) -> bool {
+    if comment.starts_with(";;;") {
+        return true;
+    }
+    let body = comment.trim_start_matches(';').trim();
+    let rule_run = |run: &mut dyn Iterator<Item = char>| {
+        let mut run = run.peekable();
+        match run.peek().copied() {
+            Some(c @ '─') => run.take_while(|&next| next == c).count() >= 2,
+            Some(c @ ('-' | '=')) => run.take_while(|&next| next == c).count() >= 3,
+            _ => false,
+        }
+    };
+    if rule_run(&mut body.chars()) && rule_run(&mut body.chars().rev()) {
+        return true;
+    }
+    let (rule, other) = body.chars().filter(|c| !c.is_whitespace()).fold((0, 0), |(rule, other), c| {
+        if matches!(c, '─' | '-' | '=' | '*' | '#') { (rule + 1, other) } else { (rule, other + 1) }
+    });
+    rule >= 3 && rule > other
+}
+
+fn symbol_of(expr: &super::parser::Expr) -> Option<&str> {
+    match &expr.kind {
+        super::parser::ExprKind::Symbol(name) => Some(name),
+        _ => None,
+    }
+}
+
+fn slot<'a>(items: &'a [super::parser::Expr], key: &str) -> Option<&'a super::parser::Expr> {
+    items.windows(2).find_map(|pair| match &pair[0].kind {
+        super::parser::ExprKind::Keyword(slot) if slot.trim_start_matches(':') == key => Some(&pair[1]),
+        _ => None,
+    })
+}
+
+/// `(name :a v :b v)` from a list of names, or of `(name …)` lists.
+fn keyword_call(name: &str, list: Option<&super::parser::Expr>) -> String {
+    use super::parser::ExprKind;
+    let props: String = match list.map(|list| &list.kind) {
+        Some(ExprKind::List(entries)) => entries
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                ExprKind::Symbol(prop) => Some(prop.as_str()),
+                ExprKind::List(parts) => parts.first().and_then(symbol_of),
+                _ => None,
+            })
+            .map(|prop| format!(" :{prop} v"))
+            .collect(),
+        _ => String::new(),
+    };
+    format!("({name}{props})")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +545,67 @@ mod tests {
         assert_eq!(header.step_prompt(0).as_deref(), Some("Look"));
         assert_eq!(header.icon.as_deref(), Some("swatch"));
         assert_eq!(header.shortcut.as_deref(), Some("s-t"));
+    }
+}
+
+#[cfg(test)]
+mod comment_doc_tests {
+    use super::*;
+
+    fn found(source: &str) -> Vec<(String, bool, String, String)> {
+        comment_docs(source).into_iter().map(|d| (d.name, d.flat, d.signature, d.doc)).collect()
+    }
+
+    #[test]
+    fn a_comment_directly_above_a_definition_documents_it() {
+        let source = "(module m)\n\n;; m's context menu opens at the pointer.\n;; Second line.\n(def open-menu! (m event)\n  m)\n\n;; Separated by a blank line.\n\n(def far () 1)\n(def bare 2)\n; one semicolon\n(defstate open? false)\n(foo) ;; trailing\n(def after-code () 1)\n;; a kind is not a global\n(def-kind thing :view v)\n";
+        assert_eq!(
+            found(source),
+            vec![
+                ("open-menu!".into(), false, "(open-menu! m event)".into(), "m's context menu opens at the pointer.\nSecond line.".into()),
+                ("open?".into(), false, "open?".into(), "one semicolon".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn signatures_keep_defaults_and_docstrings_and_slots_win_over_comments() {
+        let source = ";; ignored\n(def menu-tree (rows pick &key (path \"a b\")) \"Menu items for rows.\" rows)\n;; ignored: the slot wins\n(def-process prob-mask\n  :doc \"Veto by chance.\"\n  :in ((prob :float 0 1) (seed :int 0 9))\n  :run nil)\n;; A step's shell.\n(defwidget step-shell\n  :width 1 :height 1\n  :state (step selected)\n  :shader 0)\n";
+        assert_eq!(
+            found(source),
+            vec![
+                ("menu-tree".into(), false, "(menu-tree rows pick &key (path \"a b\"))".into(), "Menu items for rows.".into()),
+                ("prob-mask".into(), true, "(prob-mask :prob v :seed v)".into(), "Veto by chance.".into()),
+                ("step-shell".into(), true, "(step-shell :step v :selected v)".into(), "A step's shell.".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_section_banner_is_not_documentation() {
+        let source = ";; ── Sizes ──────\n(def name-width 9.0)\n;;; Section\n;; The gap.\n(def gap 1)\n";
+        assert_eq!(found(source), vec![("gap".into(), false, "gap".into(), "The gap.".into())]);
+    }
+
+    #[test]
+    fn a_banner_with_a_long_title_is_not_documentation() {
+        let source = ";; ── Rack clips (docs/rack-clips-and-break-kits-spec.md §2-§4, §6) ────────\n;; Whether scene s plays clip c.\n(def plays? (s c) s)\n; --- Envelopes ---\n(def env () 1)\n";
+        let docs: Vec<String> = found(source).into_iter().map(|(_, _, _, doc)| doc).collect();
+        // `env` has only a banner above it, so it has no documentation at all.
+        assert_eq!(docs, vec!["Whether scene s plays clip c.".to_string()]);
+    }
+
+    #[test]
+    fn prose_containing_a_rule_run_is_still_documentation() {
+        let source = ";; ======\n;; Maps a step to its lane.\n;; ### Notes\n;; Example: (lane-of 3) --- returns :pitch\n(def lane-of (s) s)\n";
+        assert_eq!(
+            found(source),
+            vec![(
+                "lane-of".into(),
+                false,
+                "(lane-of s)".into(),
+                "Maps a step to its lane.\n### Notes\nExample: (lane-of 3) --- returns :pitch".into()
+            )]
+        );
     }
 }

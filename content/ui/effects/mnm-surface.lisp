@@ -155,7 +155,7 @@
       :on-change (lambda (v)
         (mnm-write scope name (eseq.effects.param-controls/custom-ui-option-index options v))))))
 (def mnm-display (title titles pages)
-  (box :debug-name "mnm-display" :width 35.8 :height 9.8 :padding 0.3 :background-color (mnm-accent)
+  (box :debug-name "mnm-display" :part "instrument/screen" :width 35.8 :height 9.8 :padding 0.3 :background-color (mnm-accent)
     (v-stack :gap 0.25
       (label (str title " / " (nth titles (mnm-section))) :width 35.2 :height 0.7
         :h-align :center :v-align :center :font-size 8 :color (mnm-accent) :bg :black)

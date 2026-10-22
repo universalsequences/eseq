@@ -5,6 +5,60 @@ Graph runtime reconciliation plus neural, generator, and graph emission merging.
 #[allow(unused_imports)]
 use super::*;
 
+/// A step's length in beats (0 when the tempo is unusable).
+fn step_duration_beats(event: &StepEvent, samples_per_quarter: f64) -> f64 {
+    if !(samples_per_quarter.is_finite() && samples_per_quarter > 0.0) {
+        return 0.0;
+    }
+    let value = event.resolved.duration as f64 * event.samples_per_step as f64 / samples_per_quarter;
+    if value.is_finite() { value.max(0.0) } else { 0.0 }
+}
+
+/// Everything a played step drives besides its own note: graph nodes it
+/// seeds (`seed_beats`, its sounding beat) and generators whose `:trigger`
+/// is its track (`boundary_beats`, its straight beat). The caller has
+/// checked the step is new since the last resync.
+pub(super) fn seed_step_listeners(
+    graphs: &mut [crate::graph::GraphRuntime],
+    generators: &mut crate::generator::GeneratorRuntime,
+    trigger_tracks: &[(u64, usize)],
+    event: &StepEvent,
+    seed_beats: f64,
+    boundary_beats: f64,
+    samples_per_quarter: f64,
+) {
+    seed_graph_runtimes(graphs, event, seed_beats, samples_per_quarter);
+    seed_generator_gates(generators, trigger_tracks, event, boundary_beats, samples_per_quarter);
+}
+
+/// Open the gate of each generator whose `:trigger` track the step played on
+/// (`trigger_tracks`, generator id → track): a gate trigger at the step's
+/// straight beat, for its length, carrying its note offset and velocity. The
+/// step loop runs before the generators tick, so the gate is open on the
+/// generator boundary that coincides with the step.
+fn seed_generator_gates(
+    generators: &mut crate::generator::GeneratorRuntime,
+    trigger_tracks: &[(u64, usize)],
+    event: &StepEvent,
+    beat: f64,
+    samples_per_quarter: f64,
+) {
+    for &(id, track) in trigger_tracks {
+        if track == event.track {
+            generators.push_gate_trigger(
+                id,
+                crate::generator::GateTrigger {
+                    kind: crate::generator::GateTriggerKind::Play,
+                    beat,
+                    duration_beats: step_duration_beats(event, samples_per_quarter),
+                    note: event.resolved.transpose as f32,
+                    velocity: event.resolved.velocity as f32,
+                },
+            );
+        }
+    }
+}
+
 /// Seed every graph-mode runtime from a step-sequencer trigger (spec §4): each node
 /// whose resolved `seed-from` includes the event's track receives a fire carrying the
 /// step's note/velocity, after that node's delay. Mirrors the `neural` seed sites.
@@ -17,17 +71,7 @@ pub(super) fn seed_graph_runtimes(
     if graphs.is_empty() {
         return;
     }
-    let duration_beats = if samples_per_quarter.is_finite() && samples_per_quarter > 0.0 {
-        let value =
-            event.resolved.duration as f64 * event.samples_per_step as f64 / samples_per_quarter;
-        if value.is_finite() {
-            value.max(0.0) as f32
-        } else {
-            0.0
-        }
-    } else {
-        0.0
-    };
+    let duration_beats = step_duration_beats(event, samples_per_quarter) as f32;
     let payload = crate::graph::GraphPayload {
         note: event.resolved.transpose,
         velocity: event.resolved.velocity,
@@ -167,7 +211,7 @@ pub(super) fn generator_emissions_are_same_accent(
     )
 }
 
-pub(super) fn merge_generator_emission_accents(
+pub(crate) fn merge_generator_emission_accents(
     generator_emissions: Vec<crate::generator::GeneratorEmission>,
 ) -> Vec<crate::generator::GeneratorEmission> {
     let mut merged: Vec<crate::generator::GeneratorEmission> =

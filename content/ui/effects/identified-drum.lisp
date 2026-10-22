@@ -381,7 +381,7 @@
     :background-color (if (= (drum-section) section) :black (drum-c))
     :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)))
 (def drum-display (config)
-  (box :debug-name "kick-display" :width 35.8 :height 9.8 :padding 0.3 :background-color (drum-c)
+  (box :debug-name "kick-display" :part "instrument/screen" :width 35.8 :height 9.8 :padding 0.3 :background-color (drum-c)
     (v-stack :gap 0.15
       (label (str (get config :title) " / " (nth '("BODY SCHEMATIC" "AMP" "CLICK" "NOISE SHAPE" "BANK SWEEP" "TONE") (drum-section)))
         :width 35.2 :height 0.7 :h-align :center :v-align :center :font-size 8 :color (drum-c) :bg :black)

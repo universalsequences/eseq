@@ -22,7 +22,7 @@ use crate::ui::gpu_geometry::{
     SOLID_CABLE_RADIUS_DESIGN_PX, SOLID_CABLE_TENSION, ScissorRect, SolidCablePath, Vertex,
     push_solid_quad_vertices, push_solid_rect_vertices, solid_cable_instance,
 };
-use crate::ui::glyph_atlas::{self, GlyphAtlas, ProportionalGlyphAtlas};
+use crate::ui::glyph_atlas::{self, GlyphAtlas, ProportionalGlyphAtlas, TextFace};
 use crate::vm::Value;
 use crate::widget_render::{self, WidgetInstance};
 
@@ -406,7 +406,7 @@ pub(crate) fn build_circle_quads(
 struct ProportionalTextLayoutKey {
     text: String,
     size_tenths: u16,
-    mono: bool,
+    face: TextFace,
 }
 
 struct CachedGlyphPlacement {
@@ -466,13 +466,13 @@ impl PropTextLayoutCache {
         let key = ProportionalTextLayoutKey {
             text: run.text.clone(),
             size_tenths: (run.font_size * 10.0).round() as u16,
-            mono: run.mono,
+            face: run.face,
         };
         if !self.layouts.contains_key(&key) {
             let mut pen_x = 0.0_f32;
             let mut glyphs = Vec::new();
             for ch in key.text.chars() {
-                let Some(entry) = prop_atlas.get_or_rasterize_face(ch, key.size_tenths, key.mono)
+                let Some(entry) = prop_atlas.get_or_rasterize_face(ch, key.size_tenths, key.face)
                 else {
                     continue;
                 };
@@ -488,9 +488,9 @@ impl PropTextLayoutCache {
             }
             let layout = CachedProportionalTextLayout {
                 text_width_px: pen_x,
-                line_height_px: prop_atlas.line_height_face(key.size_tenths, key.mono),
-                descent_px: prop_atlas.descent_face(key.size_tenths, key.mono),
-                cap_height_px: prop_atlas.cap_height_face(key.size_tenths, key.mono),
+                line_height_px: prop_atlas.line_height_face(key.size_tenths, key.face),
+                descent_px: prop_atlas.descent_face(key.size_tenths, key.face),
+                cap_height_px: prop_atlas.cap_height_face(key.size_tenths, key.face),
                 glyphs,
                 last_used_frame: self.frame_index,
             };
@@ -2398,7 +2398,7 @@ mod tests {
             scale: 1.0,
             fg: Color::rgb(0.1, 0.1, 0.1),
             bg: Color::rgb(0.9, 0.9, 0.9),
-            mono: false,
+            face: crate::ui::glyph_atlas::TextFace::Regular,
         };
         let verts = build_proportional_text_quads(
             &[widget_render::GpuPrimitive::ProportionalText(run)],

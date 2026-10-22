@@ -255,6 +255,24 @@ impl WidgetDefinition for AutomationLaneWidget {
         &["automation-lane"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A parameter-lock (automation) strip for a piano roll: one dot per step, plus a \
+bar across each played note's length, at the parameter's value (like a velocity \
+lane). It sits under a timeline and shares its :view-start/:view-duration axis \
+(in steps; default 0 and 16), so bind both to the same reactive fields. :points \
+is a list of maps {:step n :value v} with optional :start/:end (step positions \
+of the note bar), :locked (default true; false draws in :base-color, meaning \
+the unlocked base value) and :active (default true; false draws no bar). \
+:min/:max (default 0..1) map values onto the height; :increment snaps them; \
+:default draws a faint reference line. :on-change receives (kind step value): \
+kind is :set on press and every drag frame, :finish on release, :clear on \
+double-click or alt-click. A drag keeps editing the step it started on. Colours: \
+:color (locked points), :base-color, :background; :dot-size in px (5.5). \
+Example: (automation-lane :width :fill :height 3 :points pts :min 0 :max 127 \
+:increment 1 :view-start #'view.start :view-duration #'view.duration \
+:on-change (lambda (kind step v) (on-lock kind step v)))"
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }
@@ -279,6 +297,7 @@ impl WidgetDefinition for AutomationLaneWidget {
             "color",
             "base-color",
             "background",
+            "dot-size",
             "on-change",
         ]
     }
@@ -335,6 +354,7 @@ impl WidgetDefinition for AutomationLaneWidget {
         cell_w: f32,
         cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         // The anchor is the point hit where the press LANDED, so a drag
         // that wanders sideways keeps editing the same step.
         let anchor_col = drag_start.map(|(col, _)| col).unwrap_or(local_col);

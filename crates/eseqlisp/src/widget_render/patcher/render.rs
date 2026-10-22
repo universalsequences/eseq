@@ -297,7 +297,7 @@ pub(super) fn build_primitives_for_patcher(
                         scale: 1.0,
                         fg: theme::PATCHER_TEXT_MUTED(),
                         bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                        mono: false,
+                        face: crate::ui::glyph_atlas::TextFace::Regular,
                     },
                 ));
             }
@@ -316,7 +316,7 @@ pub(super) fn build_primitives_for_patcher(
                         scale: 1.0,
                         fg: theme::PATCHER_ERROR(),
                         bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                        mono: false,
+                        face: crate::ui::glyph_atlas::TextFace::Regular,
                     },
                 ));
             }
@@ -334,7 +334,7 @@ pub(super) fn build_primitives_for_patcher(
                     scale: 1.0,
                     fg: theme::PATCHER_ERROR(),
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }
@@ -722,7 +722,7 @@ fn draw_agentic_bubbles(
                 scale: zoom,
                 fg: theme::PATCHER_AGENTIC_HEADER_TEXT(),
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             },
         ));
         // The model chip sits immediately after the status, on the left: the
@@ -779,7 +779,7 @@ fn draw_agentic_bubbles(
                         scale: zoom,
                         fg: theme::PATCHER_AGENTIC_HEADER_TEXT(),
                         bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                        mono: false,
+                        face: crate::ui::glyph_atlas::TextFace::Regular,
                     },
                 ));
             }
@@ -816,7 +816,7 @@ fn draw_agentic_bubbles(
                     scale: zoom,
                     fg: body_fg,
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }
@@ -939,7 +939,7 @@ fn push_agentic_follow_up(
                 scale: zoom,
                 fg,
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             },
         ));
     }
@@ -1090,7 +1090,7 @@ fn push_agentic_send_chevron(
             scale: zoom,
             fg: theme::PATCHER_AGENTIC_SEND_GLYPH(),
             bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-            mono: false,
+            face: crate::ui::glyph_atlas::TextFace::Regular,
         },
     ));
     disc
@@ -1143,7 +1143,7 @@ fn push_agentic_model_chip(
             scale: zoom,
             fg: theme::PATCHER_AGENTIC_CHIP_TEXT(),
             bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-            mono: false,
+            face: crate::ui::glyph_atlas::TextFace::Regular,
         },
     ));
     Some(chip)
@@ -1755,7 +1755,7 @@ fn push_hovered_port_tooltip(
             scale: zoom,
             fg: theme::PATCHER_TOOLTIP_TEXT(),
             bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-            mono: false,
+            face: crate::ui::glyph_atlas::TextFace::Regular,
         },
     ));
 }
@@ -1964,7 +1964,7 @@ fn push_autocomplete_panel(
                     theme::COMP_FG()
                 },
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             },
         ));
         let Some(category) = suggestion
@@ -1993,7 +1993,7 @@ fn push_autocomplete_panel(
                 scale: zoom,
                 fg: theme::COMP_CATEGORY_FG(),
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             },
         ));
     }
@@ -2118,7 +2118,7 @@ fn push_autocomplete_documentation_panel(
                     scale: zoom,
                     fg: theme::COMP_DOC_FG(),
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
             visual_index += 1;
@@ -2424,7 +2424,7 @@ fn draw_jev_ghosts(
                 scale: zoom,
                 fg: crate::backend::Color::rgba(base.r, base.g, base.b, JEV_GHOST_MAX_ALPHA),
                 bg: theme::PATCHER_BG(),
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             }));
             continue;
         }
@@ -2476,7 +2476,7 @@ fn draw_jev_ghosts(
                 scale: zoom,
                 fg: theme::PATCHER_AGENTIC_CHIP_TEXT(),
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             }));
             hits.buttons
                 .push((index, kind, (chip.col, chip.row, chip.width, chip.height)));
@@ -2964,7 +2964,7 @@ fn push_comment_node(
                 // never reads as a node name.
                 fg: theme::PATCHER_NODE_TAIL_TEXT(),
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             },
         ));
     }
@@ -3052,7 +3052,7 @@ fn push_node_diagnostic_chip(
         scale: zoom,
         fg: theme::PATCHER_ERROR(),
         bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-        mono: false,
+        face: crate::ui::glyph_atlas::TextFace::Regular,
     }));
 }
 
@@ -3287,7 +3287,7 @@ fn push_node_label(
                 scale: zoom,
                 fg: head_color,
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             },
         ));
         if let Some(ghost) = autocomplete_ghost
@@ -3309,7 +3309,7 @@ fn push_node_label(
                     scale: zoom,
                     fg: theme::PATCHER_TEXT_MUTED(),
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }
@@ -3330,7 +3330,7 @@ fn push_node_label(
             scale: zoom,
             fg: head_color,
             bg,
-            mono: false,
+            face: crate::ui::glyph_atlas::TextFace::Regular,
         },
     ));
     if tail.is_empty() {
@@ -3383,7 +3383,7 @@ fn push_node_label(
                 scale: zoom,
                 fg: color,
                 bg,
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             },
         ));
     }
@@ -3416,7 +3416,7 @@ fn push_probe_value(
                 theme::PATCHER_NODE_TEXT()
             },
             bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-            mono: false,
+            face: crate::ui::glyph_atlas::TextFace::Regular,
         },
     ));
 }
@@ -3478,7 +3478,7 @@ fn push_probe_scope(
             scale: zoom,
             fg: muted,
             bg: transparent,
-            mono: false,
+            face: crate::ui::glyph_atlas::TextFace::Regular,
         })
     };
     let pairs = frame.and_then(|frame| frame.scope.as_deref());
@@ -3495,7 +3495,7 @@ fn push_probe_scope(
                 scale: zoom,
                 fg: muted,
                 bg: transparent,
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             },
         ));
         return;
@@ -3585,7 +3585,7 @@ fn push_probe_spectrogram(
             scale: zoom,
             fg: theme::PATCHER_TEXT_MUTED(),
             bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-            mono: false,
+            face: crate::ui::glyph_atlas::TextFace::Regular,
         }));
         return;
     };

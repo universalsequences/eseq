@@ -478,7 +478,7 @@
 (def heat-detail ()
   (let ((section eseq.vanilla/custom-ui-selected-section))
     (box :width 34 :height 9.8 :padding 0.35 :corner-radius 2
-      :background-color (heat-accent) :debug-name "heat-detail-display"
+      :background-color (heat-accent) :debug-name "heat-detail-display" :part "instrument/screen"
       (v-stack :gap 0.35
         (h-stack :width 33.3 :height 0.7 :gap 0.2
           (button (str "HEAT / " (nth '("OVERVIEW" "OSC 1" "FILTER 1" "AMP 1" "LFO" "OSC 2" "FILTER 2" "AMP 2") section))

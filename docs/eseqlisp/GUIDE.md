@@ -50,7 +50,7 @@ Three things carry the whole language:
 
 ```lisp
 42  1.5  -.5  1e3         ; numbers are all f64
-"a string"                ; NO escape sequences; a \" ends the string
+"a string"  "say \"hi\"\n"  ; escapes: \n \t \r \" \\ (others keep their \)
 :keyword                  ; :foo
 'sym  '(1 2 3)            ; quote
 true false nil
@@ -60,8 +60,7 @@ true false nil
 Comments run from `;` to end of line. There is no `[…]` or `{…}` syntax;
 brackets are ordinary symbol characters.
 
-Strings cannot contain a literal quote. Build such strings with `str` or
-`fmt`:
+Strings may span lines. Build strings from values with `str` or `fmt`:
 
 ```lisp
 (str "say " (source "hi"))
@@ -271,7 +270,7 @@ A meter or a knob that follows audio should not rerun a view sixty times a
 second. Bind the prop to the field instead of reading it:
 
 ```lisp
-(meter :level #'master.peak-l)
+(mixer-meter :level-l #'master.peak-l :level-r #'master.peak-r)
 (let ((t (track i))) (slider :value #'t.volume))
 ```
 
@@ -311,6 +310,10 @@ subtree key.
 A widget call is `(name [text] :prop value … children…)`. Children may be
 maps, lists of maps, or `nil`; lists are flattened.
 
+A `label` paints no background of its own (give `:bg COLOR` for one) and
+centers a single line in its `:height` (`:v-align :start` or `:end` to move
+it); a `:wrap true` label starts at the top.
+
 ```lisp
 (v-stack :gap 0.4 :padding 0.6
   (label "Filter" :font-size 11 :color :dim)
@@ -325,28 +328,47 @@ maps, lists of maps, or `nil`; lists are flattened.
 
 Sizes are in cell units, or `:fill`. Layout containers are `v-stack`,
 `h-stack`, `wrap`, `grid`, `responsive-grid`, `scroll`, `virtual-v-stack`,
-and `box`. `:flex N` on a child takes a share of leftover space. `h-stack`
+and `box`. `box`, `scroll` and `modal` lay out only their first child: wrap
+several in a stack. `:flex N` on a child takes a share of leftover space
+(in an `h-stack` only when the row is `:width :fill`); a `scroll` needs a
+`:height` or `:flex`. Use `scroll` only when something must stay fixed while
+the rest scrolls (a header over a long list, a view that follows the
+playhead): a buffer's viewport already scrolls, so a panel never needs one
+around itself. `h-stack`
 defaults to gap 1, `v-stack` to gap 0.
 
 `:bind cell` is shorthand for `:value cell :on-change (lambda (v) (set! cell v))`.
 
-The full list of widget names is `BUILTIN_WIDGET_NAMES` in
-`crates/eseqlisp/src/widgets.rs`. The props each accepts are the
-`completion_props` list in the matching `crates/eseqlisp/src/widget_render/*`
-file. Do not name a `def` or a parameter after a widget: a local called
+`(describe 'matrix)` (or the `describe` tool) shows any widget's purpose,
+props and what its handlers receive; the names are listed under Reactive and
+UI below. Use a stock widget before building one from boxes: an editable
+grid of numbers is a `matrix`. Do not name a `def` or a parameter after a widget: a local called
 `label` shadows the widget and every `(label …)` below it fails.
 
 ### Handler arguments
 
 | widget | handler | receives |
 |---|---|---|
-| `box` `label` `:on-click :on-drag :on-mouse-down :on-mouse-up :on-right-click :on-double-click` | one pointer event map | see below |
+| `box` `:on-click :on-drag :on-mouse-down :on-mouse-up :on-right-click :on-double-click` | one pointer event map | see below |
+| `label` `:on-click :on-right-click :on-double-click` | one pointer event map | |
 | `button :on-click :on-press :on-release` | one pointer event map | see below |
-| `slider knob number-picker tabs :on-change` | one number | |
+| `slider knob knob-number number-picker tabs :on-change` | one number | |
+| `number-picker :on-release` | nothing | |
 | `toggle :on-change` | one bool | |
-| `dropdown :on-change` | the option string | use `:value-index` for enums |
-| `text-input :on-change :on-submit` | string, none | |
+| `dropdown :on-change` | the option string, even with `:value-index` | map it back to an index yourself |
+| `text-input :on-change :on-submit :on-cancel :on-blur` | string, then none | |
+| `color-picker :on-change` | `h s v a` | |
+| `sexp-slot :on-change` | the whole new value | |
+| `matrix :on-cell-press :on-cell-release` | `row col` | |
+| `adsr-editor :on-change` | one map of the mode's values | `:active` is the dragged handle, false on release |
+| `automation-lane scale-editor :on-change` | `kind index value` | kind `:set` `:finish` `:clear` (scale-editor also `:toggle` `:select`) |
+| `piano-keyboard :on-click` | a pointer event map with `:note` | |
+| `timeline :on-action` | one action map with a `:type` | `describe 'timeline` lists them |
+| any widget `:on-right-click` | one pointer event map | |
+| `menu-item :on-select` | one map: `:phase "select"`, `:text`, `:value` | the menu then closes |
+| `modal context-menu :on-close` | nothing | set `:is-open` false yourself |
 | `xy-pad :on-change` | `x y` | |
+| `matrix :on-cell-change` | `row col value` | `:on-change` gets the whole matrix |
 | shader widgets `:on-drag` | `sx sy region` | normalized -1..1 |
 
 ### Pointer events
@@ -436,7 +458,24 @@ whose body is an SDF expression:
 ```
 
 `x y width height aspect` and the state names are free variables in the
-shader; `hit/hover` and `hit/active` report pointer state. The shapes live in
+shader. `design-px` is one design pixel in shader units (the unit of a box's
+`:corner-radius` and `:border-width`).
+
+A box with `:corner-radius` owns its shape: its `:background` widget paints
+the area inside the border, clipped to the same rounded rect a
+`:background-color` fills, so a texture is just a colour expression:
+
+```lisp
+(defwidget brushed
+  :width 4 :height 4
+  :shader (let ((v (+ 0.6 (* 0.05 (sin (* y 90.0))))))
+            (rgba v v (+ v 0.06) 1.0)))
+
+(box :corner-radius 24 :border-width 2 :border-color :dim :background "brushed" …)
+```
+
+A square box does not clip its widget, which may paint past it
+(`:paint-margin`). `hit/hover` and `hit/active` report pointer state. The shapes live in
 `content/core/sdf-stdlib.lisp` as `sdf/circle`, `sdf/rect`, `sdf/translate`,
 `sdf/union`, and so on. `(sdf/region :name shape material)` makes a region
 that pointer handlers can identify.
@@ -632,6 +671,13 @@ period, `:target (step-param :transpose)` where writes land. In `:run`,
 typed fields between processes. A `set!` of state must sit at the top level
 of `:run`, not inside a nested `let`.
 
+By default a track's process runs only on the step sequencer's trigs.
+`:triggers :all` runs it on every trigger that lands on the track: neural
+and graph sequencer fires, generator `seq-emit`s and other processes'
+emissions too, never what its own track's chain made (its ratchets and
+emits). `(trigger-origin)` says which: `:step`, `:neural`, `:graph`,
+`:generator` or `:process`.
+
 Every `def-process` is also a constructor:
 
 ```lisp
@@ -661,7 +707,9 @@ between processes, sequencers, and the UI.
 `gen-phase`, `gen-rand`, `state-get`, `state-set!`, and `chan-get` are the
 vocabulary; `seq-emit` takes `:track :at :note :vel :dur :chord :quantize`.
 A `defmacro` at the top level can stamp out sequencers with parameters, as
-`content/scripts/sequencers/test-seq.lisp` does.
+`content/scripts/sequencers/test-seq.lisp` does. For states and transitions
+(Markov chains, neural networks) use a graph sequencer instead: the
+`sequencer` guide's Graph sequencers section.
 
 Attach any of these to a project by adding an `(import your.module)` line to
 the project's scratch buffer.
@@ -672,7 +720,6 @@ the project's scratch buffer.
 - **A plain argument list is fixed-arity.** Use `&optional`, `&key`, or
   `&rest` for anything else; `|x|` lambdas stay fixed.
 - **`merge` takes keyword pairs**, not a second map.
-- **No `\"` in strings.** Build the string with `str` or `fmt`.
 - **`each` for widget children, never `map`.** And give `each` a named list.
 - **`map`, `filter`, `reduce` take the function first.** `each` takes the
   list first.
@@ -794,10 +841,11 @@ t.volume  (set! t.volume 0.5)   ; read (subscribes) and write a field
 
 Layout: `v-stack h-stack wrap grid responsive-grid scroll virtual-v-stack box
 modal context-menu tabs`. Controls: `label button badge toggle slider hslider
-vslider knob knob-number number-picker number-label dropdown select
-menu-button text-input textbox xy-pad`. Displays: `meter mixer-meter scope
-xy-scope spectrogram waveform linegraph matrix adsr-editor lfo-curve
-automation-lane timeline piano-keyboard image tree`. Instrument panel roots:
+vslider knob knob-number number-picker number-label number-list dropdown
+menu-button text-input textbox xy-pad matrix piano-keyboard
+adsr-editor lfo-curve automation-lane sexp-slot color-picker`. Displays:
+`mixer-meter device-meter scope xy-scope spectrogram waveform linegraph timeline
+image tree`. `describe` each for its props. Instrument panel roots:
 `defsynth-ui defeffect-ui def-midi-fx-ui`.
 
 ### Scheduler
@@ -810,9 +858,9 @@ automation-lane timeline piano-keyboard image tree`. Instrument panel roots:
 
 (def-process name :doc "…" :in ((n :type [lo hi] :default d [:lane true])…)
   [:out ((n :type)…)] [:state ((n init)…)] [:every dur] [:seed :locked]
-  [:target t] [:listen (…)] [:init body] :run body)
+  [:triggers :steps|:all] [:target t] [:listen (…)] [:init body] :run body)
   in out send transpose! veto! roll! ratchet! rand clip wrap now-beats
-  step-note current-note read track hear suggest
+  step-note current-note trigger-origin read track hear suggest
 (def-accumulator name :target t :amount (n :float lo hi :default d :lane true) …)
 (defchan name [init])  (send name v)  (chan-get "name" [default])
 (start h) (stop h) (lane! h :in v…) (connect! h :out (inlet other :in)) (ps)

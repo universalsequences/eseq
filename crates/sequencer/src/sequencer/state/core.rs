@@ -396,6 +396,11 @@ pub struct PublishedSequencer {
     /// member index, mapped through the rack's members by the scheduler.
     /// Graph mode carries its owner on the manifest instead.
     pub owner_rack: Option<u64>,
+    /// Tick mode only: `:trigger` source, evaluating to the track whose
+    /// played steps open this generator's gate (`gen-gate`; a member of
+    /// `owner_rack` for a rack-owned generator), or a negative number for
+    /// none. Re-read each chunk, like the tick.
+    pub trigger_source: Option<String>,
 }
 
 /// First tick failure of a registered generator, reported once by the

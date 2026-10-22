@@ -197,9 +197,9 @@
 ;; A variant chip (v, one of the track's variants), or the def chip (nil).
 (def plock-chip (v)
   (let ((chip-label (if v v.label "def"))
-        (color (if v v.color (plock-base-color)))
-        (current (= selection.plock-variant chip-label))
-        (c (color-rgba color 1.0)))
+      (color (if v v.color (plock-base-color)))
+      (current (= selection.plock-variant chip-label))
+      (c (color-rgba color 1.0)))
     (box :debug-name (str "track-plock-chip-" (if v "variant" "def") "-" chip-label)
       :height 1.0
       :width 4.00
@@ -221,6 +221,7 @@
           :border-color c)
         (box :width 0.2)
         (label (substring (if v v.name "base") 0 6)
+          :v-align :baseline
           :align :center :flex 1
           :font-size 10.0 :color (if current :black :dim) :bg :transparent)
         (box :width 0.2 )
@@ -436,7 +437,7 @@
       (box :width 0.5)
       (label (eseq.seqv-track-params/seqv-param-name mode) :font-size 10 :color :dim :bg :transparent :v-align :center :flex 1)
       (number-picker
-        :key (str "step-param-" key)
+        :key (str "step-param-" key) :part "step/param-picker"
         :value (step-param-binding es key)
         :min (step-param-min mode)
         :max (step-param-max mode)

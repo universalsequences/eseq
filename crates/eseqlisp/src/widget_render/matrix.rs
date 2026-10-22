@@ -266,6 +266,7 @@ fn display_value(props: &HashMap<String, Value>, value: f32) -> f32 {
 fn cell_index(node: &LayoutNode, local_col: f32, local_row: f32) -> usize {
     let rows = matrix_rows_from_props(&node.props);
     let cols = matrix_cols_from_props(&node.props);
+    let local_row = super::scroll::event_content_row(local_row);
     let col_t = ((local_col - node.rect.col) / node.rect.width.max(0.001)).clamp(0.0, 0.999_999);
     let row_t = ((local_row - node.rect.row) / node.rect.height.max(0.001)).clamp(0.0, 0.999_999);
     let col = (col_t * cols as f32).floor() as usize;
@@ -862,6 +863,35 @@ impl WidgetDefinition for MatrixWidget {
 
     fn bindable_props(&self) -> &'static [&'static str] {
         &["value"]
+    }
+
+    fn doc(&self) -> &'static str {
+        "An editable grid of numbers: weights, probabilities, a step grid, a mod matrix. \
+:value is a list of rows (each a list of numbers) or, for one column, a flat list; \
+:rows and :cols give its shape, :min and :max its range (default 0..1). Drag a cell \
+up or down to change it; :round true snaps to whole numbers; :toggle true makes a \
+click flip a cell between :min and :max (a step grid). :on-cell-change receives \
+(row col value) for the one cell that changed; :on-change instead receives the whole \
+new matrix. Any editable matrix gets a right-click menu with Clear (back to :default, \
+a number or a matrix) unless it has its own :on-right-click. :on-cell-press and \
+:on-cell-release receive (row col). :control picks the cell drawing: :circle \
+(default), :grid (filled squares), :pie (a wedge sweeping from :zero) or :line. \
+:diverging true colours values below :zero with :negative-fill-color. Colours: \
+:fill-color, :empty-fill-color, :background-color, :stroke-color. Without \
+:width it is :size cells wide (16), and without :height its cells are square. Example, a 4-state transition \
+table: (matrix :rows 4 :cols 4 :min 0 :max 8 :round true :value weights \
+:width 12 :height 12 :control :grid \
+:on-cell-change (lambda (r c v) (set-weight! r c v)))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "value", "rows", "cols", "min", "max", "round", "toggle", "default", "on-cell-change",
+            "on-change", "on-cell-press", "on-cell-release", "on-right-click", "control", "zero",
+            "diverging", "fill-color", "negative-fill-color", "empty-fill-color",
+            "background-color", "stroke-color", "stroke-width", "stroke-active-only",
+            "hover-border-color", "size", "width", "height",
+        ]
     }
 
     fn measure(
@@ -1494,6 +1524,32 @@ mod tests {
         };
         assert_eq!(*first_row[0].borrow(), Value::Number(1.0));
         assert_eq!(*first_row[1].borrow(), Value::Number(0.25));
+    }
+
+    #[test]
+    fn hover_inside_scrolled_container_maps_to_content_row() {
+        let mut props = HashMap::new();
+        props.insert("rows".to_string(), Value::Number(4.0));
+        props.insert("cols".to_string(), Value::Number(1.0));
+        let mut node = matrix_node(props);
+        // Laid out 20 content rows down; the container is scrolled 18 rows,
+        // so the pointer arrives 18 rows above the content-space rect.
+        node.rect.row = 20.0;
+        crate::widget_render::scroll::set_current_event_scroll_offset(Some(18.0));
+        let _ = MATRIX_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Moved,
+            0.5,
+            8.5,
+            None,
+            None,
+            KeyModifiers::empty(),
+            1.0,
+            1.0,
+        );
+        crate::widget_render::scroll::set_current_event_scroll_offset(None);
+        // Content row 26.5 is 6.5 rows into an 8-row matrix: row 3 of 4.
+        assert_eq!(get_state(node.widget_id).hovered_cell, Some(3));
     }
 
     #[test]

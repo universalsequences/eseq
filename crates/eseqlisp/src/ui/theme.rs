@@ -1646,10 +1646,92 @@ pub fn parse_widget_value(value: &Value) -> Option<String> {
     }
 }
 
+thread_local! {
+    /// Slots a package paints with a widget (`override-theme-slot`), over the
+    /// theme's own: slot field name (underscored) -> defwidget. Per thread,
+    /// like the VM whose overrides they mirror, so the agent's headless copy
+    /// never repaints the app's.
+    static SLOT_WIDGET_OVERRIDES: std::cell::RefCell<WidgetSlotMap> =
+        std::cell::RefCell::default();
+}
+
+thread_local! {
+    /// Built-in faces a package paints with another widget (`restyle-face`):
+    /// face name -> defwidget. Per thread, like [`SLOT_WIDGET_OVERRIDES`].
+    static FACE_OVERRIDES: std::cell::RefCell<WidgetSlotMap> = std::cell::RefCell::default();
+}
+
+/// Replace `cell`'s map with `map`. A change is a theme change: it bumps
+/// the generation.
+fn replace_widget_map(
+    cell: &'static std::thread::LocalKey<std::cell::RefCell<WidgetSlotMap>>,
+    map: WidgetSlotMap,
+) {
+    let changed = cell.with(|cell| {
+        if *cell.borrow() == map {
+            return false;
+        }
+        cell.replace(map);
+        true
+    });
+    if changed {
+        THEME_GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Replace this thread's package slot widgets with `slots` (slot name ->
+/// defwidget).
+pub fn set_slot_widget_overrides(slots: impl IntoIterator<Item = (String, String)>) {
+    let slots = slots.into_iter().map(|(slot, widget)| (normalize_name(&slot), widget)).collect();
+    replace_widget_map(&SLOT_WIDGET_OVERRIDES, slots);
+}
+
+/// Replace this thread's package faces with `faces` (face -> defwidget).
+pub fn set_face_overrides(faces: impl IntoIterator<Item = (String, String)>) {
+    replace_widget_map(&FACE_OVERRIDES, faces.into_iter().collect());
+}
+
+/// The widget a package paints built-in face `face` with, if one does.
+pub fn face_override(face: &str) -> Option<String> {
+    FACE_OVERRIDES.with(|cell| cell.borrow().get(face).cloned())
+}
+
+/// A package's widget for slot `name`, if one holds it.
+fn slot_widget_override(name: &str) -> Option<String> {
+    // Runs per box: normalize only when a package holds a slot.
+    SLOT_WIDGET_OVERRIDES.with(|cell| {
+        let slots = cell.borrow();
+        if slots.is_empty() {
+            None
+        } else {
+            slots.get(&normalize_name(name)).cloned()
+        }
+    })
+}
+
 /// The widget theme slot `name` (a keyword such as `instrument-group-bg`)
-/// is painted with, if it holds one.
+/// is painted with, if it holds one: a package's, else the theme's.
 pub fn named_widget(name: &str) -> Option<String> {
-    named_widget_in(&current(), name)
+    slot_widget_override(name).or_else(|| named_widget_in(&current(), name))
+}
+
+/// [`named_widget`] with `theme` in place of the current one, for shader
+/// codegen that bakes against an explicit theme.
+pub fn slot_widget_in(theme: &Theme, name: &str) -> Option<String> {
+    slot_widget_override(name).or_else(|| named_widget_in(theme, name))
+}
+
+/// `widget` was just (re)defined. Shaders that inline it for a slot baked
+/// its old source, so a widget in use counts as a theme change.
+pub fn note_widget_redefined(widget: &str) {
+    let in_use = SLOT_WIDGET_OVERRIDES.with(|cell| cell.borrow().values().any(|w| w == widget))
+        || {
+            let widgets = current().widgets;
+            widgets != WidgetSlots::NONE && widgets.map().values().any(|w| w == widget)
+        };
+    if in_use {
+        THEME_GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// [`named_widget`] against an explicit theme.

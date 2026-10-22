@@ -25,8 +25,8 @@ use crate::graph::GraphManifest;
 use eseqlisp::vm::KindField;
 pub use eseqlisp::vm::{SCRATCH_KIND_PACKAGE, kind_id, kind_name_of};
 
-pub const DEF_KIND_SIGNATURE: &str = "(def-kind name :sequencer (graph-body ...) | :generator (:resolution r :requires (m ...) :tick body) :document ((field default) | (field type :default d) ...) :state ((field default) | (field type :default d) ...) :view f :keymap mode :icon widget :on-create f) | (def-kind name :key () | (index) | (parent index) :host ((field type :set f :range (lo hi) :doc \"...\") ...) :state (...))";
-pub const DEF_KIND_DOCS: &str = "Define an instance kind. The host owns instances of it: each one publishes the :sequencer graph body (or the :generator tick body, in which `self` reads the instance's document) under its own id, carries its own :document (per pattern, saved, undoable) and :state cells, and renders (view instance) in its own buffer and step tab (whose keymap is the optional :keymap mode; the optional :icon names a defwidget the tab draws in a chip beside the label, its shader reading `selected`). The optional :on-create function runs once with a freshly created instance (not a duplicate, kit load or reopened project) to write document defaults the :sequencer body cannot express. Returns the kind id \"<package>:<name>\". A field's type is inferred from its default or declared as (field type :default d): :number :int :bool :rgb :point :string :any, a kind name, or (list-of type); writes of another type are errors. With :key () the kind is a singleton: def-kind creates its one instance and binds the kind's name to it. With :key (index) the host registers the instances by key and the kind's name is bound to the constructor (name i), which answers the instance under key i or nil; with :key (parent index) they are reached through the parent. Kinds with a :key take only :host fields (typed, pushed by the host; (set! x.field v) calls the field's :set function, and without one the field is read-only) and :state fields, and are never project instances.";
+pub const DEF_KIND_SIGNATURE: &str = "(def-kind name :sequencer (graph-body ...) | :generator (:resolution r :requires (m ...) :tick body :trigger track-expr) :document ((field default) | (field type :default d) ...) :state ((field default) | (field type :default d) ...) :view f :keymap mode :icon widget :on-create f) | (def-kind name :key () | (index) | (parent index) :host ((field type :set f :range (lo hi) :doc \"...\") ...) :state (...))";
+pub const DEF_KIND_DOCS: &str = "Define an instance kind. The host owns instances of it: each one publishes the :sequencer graph body (or the :generator tick body, in which `self` reads the instance's document) under its own id, carries its own :document (per pattern, saved, undoable) and :state cells, and renders (view instance) in its own buffer and step tab (whose keymap is the optional :keymap mode; the optional :icon names a defwidget the tab draws in a chip beside the label, its shader reading `selected`). A :generator's optional :trigger (e.g. self.trig-source) names a track whose played steps open the instance's gate on their own boundaries, with their length, note offset and velocity; the tick reads it with (gen-gate) (a rack-owned instance names a member of its rack; negative is none). The optional :on-create function runs once with a freshly created instance (not a duplicate, kit load or reopened project) to write document defaults the :sequencer body cannot express. Returns the kind id \"<package>:<name>\". A field's type is inferred from its default or declared as (field type :default d): :number :int :bool :rgb :point :string :any, a kind name, or (list-of type); writes of another type are errors. With :key () the kind is a singleton: def-kind creates its one instance and binds the kind's name to it. With :key (index) the host registers the instances by key and the kind's name is bound to the constructor (name i), which answers the instance under key i or nil; with :key (parent index) they are reached through the parent. Kinds with a :key take only :host fields (typed, pushed by the host; (set! x.field v) calls the field's :set function, and without one the field is read-only) and :state fields, and are never project instances.";
 pub const DEF_KIND_KEYWORDS: &[&str] = &[
     "key",
     "host",
@@ -243,6 +243,10 @@ pub fn instance_published_sequencer(
             requires: template.requires.clone(),
             graph: None,
             owner_rack,
+            trigger_source: template
+                .trigger_source
+                .as_ref()
+                .map(|body| instance_generator_tick_source(&kind.id, id, body)),
         });
     }
     let mut manifest = kind.sequencer.clone()?;
@@ -257,6 +261,7 @@ pub fn instance_published_sequencer(
         requires: Vec::new(),
         graph: Some(manifest),
         owner_rack: None,
+        trigger_source: None,
     })
 }
 
@@ -275,8 +280,9 @@ pub fn instance_document_slot_owner(slot: &str) -> Option<u64> {
     rest.split_once('/')?.0.parse().ok()
 }
 
-/// A generator instance's shipped tick: the kind's body with `self` bound to
-/// the instance's document, resolved from the scheduler chunk's pattern.
+/// A generator instance's shipped tick (or `:trigger`): the kind's body with
+/// `self` bound to the instance's document, resolved from the scheduler
+/// chunk's pattern.
 pub fn instance_generator_tick_source(kind_id: &str, id: u64, body: &str) -> String {
     format!(
         "(let ((self ({INSTANCE_DOCUMENT_NATIVE} {id} {}))) {body})",

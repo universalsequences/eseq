@@ -418,9 +418,9 @@
 ;; :active).
 (def rack-slot-strip (inst slot sd)
   (let ((selected (get slot :selected))
-        (delete-target #'sd.delete-target)
-        (muted sd.muted-display)
-        (soloed sd.soloed-display))
+      (delete-target #'sd.delete-target)
+      (muted sd.muted-display)
+      (soloed sd.soloed-display))
     (box :key (str "rack-slot-row-" (get slot :idx))
       :width 34.6
       :height 1.65
@@ -444,7 +444,7 @@
       :on-drop (lambda (event) (rack-slot-drop-fx slot event))
       :on-click |x y r| (rack-slot-select slot)
       (h-stack :width :fill :height :fill :gap 0.15 :align :center
-        (box :width 1)
+        (box :width 0.5)
         ;; The slot number doubles as the live-set enable toggle (eseq-bw9v):
         ;; a disabled slot gets no triggers and runs no DSP, so a set can park
         ;; one instrument per bank without paying for the parked ones.
@@ -454,9 +454,9 @@
           :background-color (if (get slot :enabled) :transparent :mixer-control-bg)
           :color (if (get slot :enabled) (if selected :fg :gray) :dim)
           :on-click |x y r| (rack-slot-set-enabled slot (not (get slot :enabled))))
-        (box :width 1)
+        (box :width 0.5)
         (box :key (str "rack-slot-label-" (get slot :idx))
-          :width 9.5 :height :fill  :padding 0
+          :width 10.0 :height :fill  :padding 0
           :selected delete-target
           :background-color :transparent
           :selected-background-color :fx-panel-header-selected-bg
@@ -467,46 +467,42 @@
             (label (substring (get slot :display-name) 0 14)
               :font-size 10.5
               :color (if (get slot :enabled) :fg :dim)
+              :v-align :baseline
               :active delete-target
               :active-color :white
               :bg :transparent)))
         
-        (rack-slot-param-wrapper inst slot sd "base-note"
-          (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
-            (label "T" :font-size 8.2 :color :dim :bg :transparent)
-            (number-picker :value #'sd.base-note-display
-              :min (get slot :base-note-min) :max (get slot :base-note-max) :decimals 0
-              :noui true :font-size 9.4
-              :text-align :center :text-color :dim :edit-color :yellow
-              :width 3.55 :height 0.84
-              :on-change (lambda (v) (rack-slot-set-base-note slot v)))))
+        
         (rack-slot-param-wrapper inst slot sd "gain"
-          (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
-            (label "G" :font-size 8.2 :color :dim :bg :transparent)
+          (v-stack :width 5.05 :height 1.9 :gap 0.05 :align :center
+            (label "Volume" :font-size 8.2 :color :dim :bg :transparent)
             (number-picker :value #'sd.gain-display
               :min (get slot :gain-min) :max (get slot :gain-max) :decimals 2
-              :noui true :font-size 9.4
+              :mode :slider :font-size 9.4
               :text-align :center :text-color :dim :edit-color :yellow
-              :width 3.55 :height 0.84
+              :corner-radius 0
+              :width 5.05 :height 0.84
               :on-change (lambda (v) (rack-slot-set-gain slot v)))))
-        (rack-slot-param-wrapper inst slot sd "pan"
-          (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
-            (label "P" :font-size 8.2 :color :dim :bg :transparent)
+        (rack-slot-param-wrapper inst slot sd "base-note"
+          (v-stack :width 5.05 :height 1.9 :gap 0.05 :align :center
+            (label "Note" :font-size 8.2 :color :dim :bg :transparent)
+            (number-picker :value #'sd.base-note-display
+              :min (get slot :base-note-min) :max (get slot :base-note-max) :decimals 0
+              :mode :slider :font-size 9.4
+              :text-align :center :text-color :dim :edit-color :yellow
+              :corner-radius 0
+              :width 5.05 :height 0.84
+              :on-change (lambda (v) (rack-slot-set-base-note slot v)))))        (rack-slot-param-wrapper inst slot sd "pan"
+          (v-stack :width 5.05 :height 1.9 :gap 0.05 :align :center
+            (label "Pan" :font-size 8.2 :color :dim :bg :transparent)
             (number-picker :value #'sd.pan-display
               :min (get slot :pan-min) :max (get slot :pan-max) :decimals 2
-              :noui true :font-size 9.4
+              :mode :slider :font-size 9.4
+              :corner-radius 0
               :text-align :center :text-color :dim :edit-color :yellow
-              :width 3.55 :height 0.84
+              :width 5.05 :height 0.84
               :on-change (lambda (v) (rack-slot-set-pan slot v)))))
-        (rack-slot-param-wrapper inst slot sd "max-polyphony"
-          (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
-            (label "V" :font-size 8.2 :color :dim :bg :transparent)
-            (number-picker :value #'sd.voices-display
-              :min (get slot :max-polyphony-min) :max (get slot :max-polyphony-max) :decimals 0
-              :noui true :font-size 9.4
-              :text-align :center :text-color :dim :edit-color :yellow
-              :width 3.55 :height 0.84
-              :on-change (lambda (v) (rack-slot-set-max-polyphony slot v)))))
+        (box :flex 1 :height 1)
         (rack-slot-param-wrapper inst slot sd "mute"
           (button "M"
             :width 2.0 :height 1.02 :padding 0 :font-size 9
@@ -520,13 +516,16 @@
             :border-color :transparent
             :background-color (if soloed :control-on-bg :mixer-control-bg)
             :color (if soloed :control-on-fg :dim)
-            :on-click |x y r| (rack-slot-set-solo slot (not soloed))))))))
+            :on-click |x y r| (rack-slot-set-solo slot (not soloed)))
+          )
+        (box :width 0.2)
+        ))))
 
 (def rack-empty-selected-panel (inst)
   (box :debug-name "rack-empty-selected-panel"
        :width 34
        :height st/fx-fixed-panel-height
-       :background "fx-panel-bg"
+       :background (pf/panel-surface)
        :color :instrument-panel-bg
        :header :fx-panel-header-bg
        :selected-header :fx-panel-header-selected-bg
@@ -574,7 +573,7 @@
     (if (< slot-idx 0)
       (box :width 0 :height 0)
       (let ((slot (nth (get inst :slots) slot-idx)))
-        (box :debug-name "rack-slot-fx-drop-panel"
+        (box :debug-name "rack-slot-fx-drop-panel" :part "fx/drop-zone"
              :background-color :buffer-bg
              :corner-radius 10
              :border-color :mixer-strip-border
@@ -659,7 +658,7 @@
     :drop-meta (dict :track (get inst :track))
     :drop-hover-border-color :mixer-strip-selected-border
     :on-drop (lambda (event) (rack-panel-drop-on-container event))
-    :background "fx-panel-bg"
+    :background (pf/panel-surface)
     :color :instrument-panel-bg
     :header :fx-panel-header-bg
     :selected-header :fx-panel-header-selected-bg
@@ -715,12 +714,13 @@
         (mp/modulator-panel inst)
         (box
           (v-stack :debug-name "instrument-panel-vstack" :gap 0 :height :fill
-            (box :debug-name "instrument-header-box" :height 1 :padding 0 :v-align :center :h-align :start :width :fill
+            (box :debug-name "instrument-header-box" :height 1.0 :padding 0 :v-align :center :h-align :start :width :fill
               (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center :width :fill
                 (pf/fx-panel-header-leading-spacer)
                 (ep/enabled-toggle (ep/enabled-param (get inst :synth)) false "instrument-enabled")
-                (h-stack :v-align :center :height st/fx-panel-header-height :gap 1 :padding 0.1
+                (h-stack :v-align :center  :gap 1 :padding 0.1
                   (label (substring (get inst :display-name) 0 12)
+                    :v-align :baseline
                     :font-size 11  :color :fg :bg :transparent)
                   (ep/instrument-synth-button)
                   (ep/instrument-mods-toggle-button)
@@ -746,7 +746,8 @@
             (str "instrument-panel-" (get inst :track))
             (str "rack-instrument-panel-" (get inst :track) "-" (get inst :rack-slot)))
           :debug-name "instrument-panel"
-          :background "fx-panel-bg"
+          :part "instrument/panel" :device (get inst :display-name)
+          :background (pf/panel-surface)
           :color :instrument-panel-bg
           :header :fx-panel-header-bg
           :selected-header :fx-panel-header-selected-bg

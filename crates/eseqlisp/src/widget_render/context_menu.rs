@@ -402,6 +402,39 @@ impl WidgetDefinition for ContextMenuWidget {
         &["context-menu"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A pointer-anchored action menu (a right-click menu) drawn above everything; it takes \
+no space where it is written. Its children are menu-item and menu-separator rows. It \
+is open while :is-open is true and :anchor is a point (a map with :col and :row, \
+which a pointer event's e.at is; nil keeps it closed); :anchor-col and :anchor-row \
+are the plain-number alternative. The panel opens with its top-left corner at the \
+anchor, flips left or up near the window edges, is at least 8 cells (or :width) \
+wide, and a long menu scrolls with the wheel. :on-close receives no arguments and \
+runs on Escape, on a click outside, and after any item is chosen; it is a request, \
+so it must set the open flag false. The usual idiom imports eseq.view-kit :refer \
+(open-menu! menu-of): keep (def-kind m :key () :state ((open false) (at :point \
+:default nil))), call (open-menu! m e) from a widget's :on-right-click handler, and \
+render (menu-of m items...), which builds the context-menu with :is-open m.open, \
+:anchor m.at and an :on-close that clears m.open. Arrow keys move between items, \
+Right opens a submenu, Left or Escape backs out. Example: (box :on-right-click \
+(lambda (e) (open-menu! m e)) (v-stack (label \"Track\") (menu-of m (menu-item \
+\"Rename\" :on-select (lambda (e) (rename!))) (menu-separator) (menu-item \"Delete\" \
+:on-select (lambda (e) (delete!))))))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "is-open",
+            "anchor",
+            "anchor-col",
+            "anchor-row",
+            "width",
+            "on-close",
+            "background-color",
+            "border-color",
+        ]
+    }
+
     fn is_container(&self) -> bool {
         true
     }
@@ -506,6 +539,38 @@ impl WidgetDefinition for ContextMenuWidget {
 impl WidgetDefinition for MenuItemWidget {
     fn names(&self) -> &'static [&'static str] {
         &["menu-item"]
+    }
+
+    fn doc(&self) -> &'static str {
+        "One row of a context-menu: (menu-item \"Label\" ...). Clicking it, or Enter while it \
+has keyboard focus, calls :on-select with one map: :phase \"select\", :text (the \
+label) and :value (the item's own :value prop, for one shared handler); the menu \
+then asks to close through its :on-close. :disabled true greys the row out and \
+ignores it. :checked marks a toggle: any :checked prop reserves a check column so \
+labels line up, and true (or a number above 0.5) draws the tick. :icon names an icon \
+drawn before the label; :shortcut shows a right-aligned key hint (display only, it \
+binds nothing). menu-item children make it a submenu that opens on hover or Right \
+arrow; such an item does not fire :on-select itself. Colours: :text-color, \
+:hover-color, :icon-color, :shortcut-color; :font-size overrides the menu size. \
+Example: (menu-item \"Snap to grid\" :checked snap? :shortcut \"Cmd-G\" :on-select \
+(lambda (e) (set! snap? (not snap?))))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "text",
+            "value",
+            "on-select",
+            "disabled",
+            "checked",
+            "icon",
+            "shortcut",
+            "font-size",
+            "text-color",
+            "hover-color",
+            "icon-color",
+            "shortcut-color",
+        ]
     }
 
     // Keyboard focus uses the same inset row as pointer hover. Do not let the
@@ -667,7 +732,7 @@ impl WidgetDefinition for MenuItemWidget {
                         crate::theme::DROPDOWN_FG(),
                     )),
                     bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }
@@ -687,7 +752,7 @@ impl WidgetDefinition for MenuItemWidget {
                 text: "›".to_string(),
                 font_size, scale: 1.0,
                 fg: dim(crate::theme::DROPDOWN_FG()), bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             }));
         }
         if let Some(Value::String(shortcut)) = node.props.get("shortcut")
@@ -708,7 +773,7 @@ impl WidgetDefinition for MenuItemWidget {
                     scale: 1.0,
                     fg: dim(fg),
                     bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }
@@ -719,6 +784,18 @@ impl WidgetDefinition for MenuItemWidget {
 impl WidgetDefinition for MenuSeparatorWidget {
     fn names(&self) -> &'static [&'static str] {
         &["menu-separator"]
+    }
+
+    fn doc(&self) -> &'static str {
+        "A thin divider line between groups of menu-item rows inside a context-menu. It takes \
+no children and no handlers; :color overrides the line colour (default: the menu \
+border colour). Example: (menu-separator)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "color",
+        ]
     }
 
     fn measure(

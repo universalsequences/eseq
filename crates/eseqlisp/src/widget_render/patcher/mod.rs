@@ -1549,6 +1549,34 @@ impl WidgetDefinition for PatcherWidget {
         &["patcher"]
     }
 
+    fn doc(&self) -> &'static str {
+        "The visual patch editor (Max-style boxes and cables) for a DGenLisp dsp.lisp \
+instrument or effect. :path (alias :file) names the dsp.lisp source the canvas \
+loads and edits, and :intent is :instrument (default) or :effect. The widget \
+owns all editing gestures itself (place, connect, move, inline text, undo, \
+keyboard commands) and keeps its state per :path; the host reacts through :on-change. \
+:on-change receives one map whose :status says what happened: :valid (:path \
+:source :compile-source :layout, the regenerated Lisp to write back and \
+compile), :invalid (:path :diagnostic), :layout (:path :layout, a \
+layout-only move), :changed (:path, with :deferred-preview true, where the \
+host regenerates later) or :agentic-submit (:path :intent :bubble-id \
+:generation :prompt :macro-name :x :y, an in-canvas agent prompt). \
+:on-right-click receives the usual pointer event map. :fit true zooms to fit \
+the patch, :initial-zoom sets a starting zoom, :breadcrumb-overlay shows or \
+hides the subpatch breadcrumb, :defmacro-library-root points at the macro \
+library, :agent-model labels the agent model. Default size 96 x 38 cells; \
+:width/:height accept :fill. Example: (patcher :intent :effect :width :fill \
+:height :fill :path \"effects/lexilush/dsp.lisp\" :on-change on-patch-change)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "path", "file", "intent", "on-change", "on-right-click", "fit", "initial-zoom",
+            "deferred-preview", "breadcrumb-overlay", "defmacro-library-root", "agent-model",
+            "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

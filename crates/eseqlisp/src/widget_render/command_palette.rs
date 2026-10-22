@@ -396,7 +396,7 @@ pub fn primitives(frame: &PaletteFrame, viewport: WidgetViewport) -> Vec<GpuPrim
         let max = (content_right - content_left).max(0.0);
         let signature = truncate_text_to_width(signature, max, FOOTER_FONT_SIZE, viewport.cell_w);
         prims.push(GpuPrimitive::ProportionalText(GpuProportionalTextPrimitive {
-            mono: true,
+            face: crate::ui::glyph_atlas::TextFace::Mono,
             ..text_primitive(top + 0.3, content_left, signature, FOOTER_FONT_SIZE, fg.with_alpha(0.75))
         }));
         if !summary.is_empty() {

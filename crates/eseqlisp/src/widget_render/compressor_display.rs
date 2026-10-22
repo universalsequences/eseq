@@ -137,6 +137,25 @@ impl WidgetDefinition for CompressorDisplayWidget {
         &["compressor-display"]
     }
 
+    fn doc(&self) -> &'static str {
+        "Specific to the built-in Compressor effect: a scrolling history of its output \
+level (filled), the gain reduction hanging from the top, and a threshold line, on a \
++6..-60 dB axis. Display only, no callbacks. :source is the effect selector, \
+(dict :kind :track-effect :index track :slot slot) or :bus-effect; the data is that \
+compressor's own meter ring, so it shows nothing on other effects. :threshold is in \
+dB (bind the effective param value so the line follows the knob); :window is the \
+seconds of history across the width (4). Colours: :background-color, :level-color, \
+:gr-color, :threshold-color. \
+Example: (compressor-display :source (effect-source fx) :threshold thr :width 23.6 :height 6)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "source", "threshold", "window", "background-color", "level-color", "gr-color",
+            "threshold-color", "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

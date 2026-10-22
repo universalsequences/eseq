@@ -1397,6 +1397,29 @@ pub(in crate::lisp_host) fn register_process_natives(
         },
     );
 
+    let process_eval_for_origin = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "trigger-origin",
+        "(trigger-origin)",
+        "Where the trigger this step process runs on came from: :step (the step sequencer), or, for a `:triggers :all` process, :neural, :graph, :generator or :process.",
+        move |args, _ctx| {
+            if !args.is_empty() {
+                return Err("trigger-origin expects no arguments".to_string());
+            }
+            let guard = process_eval_for_origin
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("trigger-origin called outside process execution".to_string());
+            };
+            let origin = match &ctx.event {
+                Some(EValue::Map(map)) => map.get("origin").map(|value| value.borrow().clone()),
+                _ => None,
+            };
+            Ok(origin.unwrap_or_else(|| EValue::Keyword("step".to_string())))
+        },
+    );
+
     let process_eval_for_current_note = Arc::clone(&process_eval);
     runtime.register_native_with_docs(
         "current-note",
@@ -3682,6 +3705,7 @@ pub(in crate::lisp_host) fn parse_process_accumulator_def(
         state: Vec::new(),
         every: None,
         seed_policy,
+        triggers: Default::default(),
         ports: vec![target_port],
         accumulator: Some(crate::process::ProcessAccumulatorSpec {
             amount_inlet: amount.name,

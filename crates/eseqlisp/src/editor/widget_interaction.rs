@@ -254,6 +254,11 @@ fn nearest_widget_gesture_node(
         if node.widget_id != hit_node.widget_id && hit_node_handles_pointer && !is_pointer_capture {
             return None;
         }
+        // Each candidate maps the pointer through its own scroll ancestors:
+        // an ancestor outside the hit widget's container is not displaced.
+        crate::widget_render::scroll::set_current_event_scroll_offset(
+            event_scroll_offset_for(Some(layout), node.widget_id),
+        );
         let gesture_data = begin_widget_gesture_data(&node, local_col, local_row, modifiers, cell_dims.0, cell_dims.1);
         if gesture_data.is_some() {
             Some((node.clone(), gesture_data))
@@ -1070,7 +1075,10 @@ impl Editor {
             hit::to_local(precise_col, precise_row, content_col, content_row)
         else {
             if matches!(mouse.kind, MouseEventKind::Moved) {
-                for output in widget_render::sexp_slot::pointer_moved_to(None) {
+                for output in widget_render::sexp_slot::pointer_moved_to(None)
+                    .into_iter()
+                    .chain(widget_render::pointer_moved_over(None))
+                {
                     let _ = self.apply_widget_output(Some(output));
                 }
                 if widget_render::set_pointer_hover_widget(None) {
@@ -1080,9 +1088,13 @@ impl Editor {
             return false;
         };
         if matches!(mouse.kind, MouseEventKind::Moved) {
-            // A sexp-slot's :on-hover hears the pointer leave it.
-            let hovered = self.widget_node_at_local(local_col, local_row).map(|node| node.widget_id);
-            for output in widget_render::sexp_slot::pointer_moved_to(hovered) {
+            // A sexp-slot's :on-hover hears the pointer leave it; any other
+            // widget's hears it enter and leave.
+            let hovered = self.widget_node_at_local(local_col, local_row);
+            for output in widget_render::sexp_slot::pointer_moved_to(hovered.as_ref().map(|node| node.widget_id))
+                .into_iter()
+                .chain(widget_render::pointer_moved_over(hovered.as_ref()))
+            {
                 let _ = self.apply_widget_output(Some(output));
             }
         }
@@ -1257,7 +1269,9 @@ impl Editor {
         }
 
         let widget_col = local_col + self.widget_layout_scroll_left() - node.rect.col;
-        let widget_row = local_row + self.total_scroll_top() - node.rect.row;
+        let widget_row = local_row + self.total_scroll_top() - node.rect.row
+            + event_scroll_offset_for(self.runtime.current_layout.as_deref(), node.widget_id)
+                .unwrap_or(0.0);
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         let px_w = node.rect.width * cell_w;
         let px_h = node.rect.height * cell_h;
@@ -1368,7 +1382,8 @@ impl Editor {
         }
 
         let widget_col = layout_col - node.rect.col;
-        let widget_row = layout_row - node.rect.row;
+        let widget_row = layout_row - node.rect.row
+            + event_scroll_offset_for(Some(&layout), node.widget_id).unwrap_or(0.0);
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         let px_w = node.rect.width * cell_w;
         let px_h = node.rect.height * cell_h;
@@ -1413,21 +1428,12 @@ impl Editor {
         }
         let scrolled_col = local_col + self.widget_layout_scroll_left();
         let scrolled_row = local_row + self.total_scroll_top();
-        let event_scroll_offset = self
-            .runtime
-            .current_layout
-            .as_ref()
-            .and_then(|layout| find_scroll_ancestor(layout, node.widget_id))
-            .map(|scroll_node| {
-                crate::widget_render::scroll::get_scroll_state(
-                    crate::widget_render::scroll::scroll_state_key(&scroll_node),
-                )
-                .offset_y
-            });
+        let event_scroll_offset =
+            event_scroll_offset_for(self.runtime.current_layout.as_deref(), node.widget_id);
         crate::widget_render::scroll::set_current_event_scroll_offset(event_scroll_offset);
         if let Some(widget_event) = map_double_click_event(&node, scrolled_col, scrolled_row, modifiers) {
-            crate::widget_render::scroll::set_current_event_scroll_offset(None);
             let output = handle_event(&node, widget_event);
+            crate::widget_render::scroll::set_current_event_scroll_offset(None);
             let _ = self.apply_widget_output(output);
             self.runtime.invalidate_layout_deferred();
             self.mark_needs_redraw();
@@ -1448,8 +1454,8 @@ impl Editor {
             crate::widget_render::scroll::set_current_event_scroll_offset(None);
             return false;
         };
-        crate::widget_render::scroll::set_current_event_scroll_offset(None);
         let output = handle_event(&double_click_node, widget_event);
+        crate::widget_render::scroll::set_current_event_scroll_offset(None);
         let _ = self.apply_widget_output(output);
         self.runtime.invalidate_layout_deferred();
         self.mark_needs_redraw();
@@ -1557,18 +1563,6 @@ impl Editor {
     ) {
         let scrolled_col = local_col + self.widget_layout_scroll_left();
         let scrolled_row = local_row + self.total_scroll_top();
-        let event_scroll_offset = self
-            .runtime
-            .current_layout
-            .as_ref()
-            .and_then(|layout| find_scroll_ancestor(layout, hit_node.widget_id))
-            .map(|scroll_node| {
-                crate::widget_render::scroll::get_scroll_state(
-                    crate::widget_render::scroll::scroll_state_key(&scroll_node),
-                )
-                .offset_y
-            });
-        crate::widget_render::scroll::set_current_event_scroll_offset(event_scroll_offset);
         let gesture_node = self.runtime.current_layout.as_ref().and_then(|layout| {
             nearest_widget_gesture_node(layout, &hit_node, scrolled_col, scrolled_row, modifiers, self.runtime.layout_cell_dims())
         });
@@ -2079,17 +2073,8 @@ impl Editor {
         let total_scroll_left = self.widget_layout_scroll_left();
         let local_col = precise_col - content_col as f32 + total_scroll_left;
         let local_row = precise_row - content_row as f32 + total_scroll_top;
-        let event_scroll_offset = self
-            .runtime
-            .current_layout
-            .as_ref()
-            .and_then(|layout| find_scroll_ancestor(layout, node.widget_id))
-            .map(|scroll_node| {
-                crate::widget_render::scroll::get_scroll_state(
-                    crate::widget_render::scroll::scroll_state_key(&scroll_node),
-                )
-                .offset_y
-            });
+        let event_scroll_offset =
+            event_scroll_offset_for(self.runtime.current_layout.as_deref(), node.widget_id);
         let drag_start = drag_start.map(|(start_col, start_row)| {
             (
                 start_col - content_col as f32 + total_scroll_left,
@@ -2112,11 +2097,14 @@ impl Editor {
             node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers, cell_w, cell_h,
         );
         crate::widget_render::set_hidden_drag_event(false);
-        crate::widget_render::scroll::set_current_event_scroll_offset(None);
-        match outcome {
+        // Kept through `handle_event`: handlers that turn the pointer into
+        // rect-relative positions (`pointer_event_info`) read it too.
+        let output = match outcome {
             MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
             MouseEventOutcome::Dispatch(widget_event) => handle_event(node, widget_event),
-        }
+        };
+        crate::widget_render::scroll::set_current_event_scroll_offset(None);
+        output
     }
 
     pub(super) fn dispatch_gesture_widget_mouse_event(
@@ -2505,15 +2493,25 @@ fn find_scroll_ancestor(node: &LayoutNode, target_id: u64) -> Option<LayoutNode>
 /// scrolled container needs this, or the widget's local row is off by the
 /// container offset — hover cursors, scroll/zoom gestures, and hit regions
 /// then miss for anything below the fold.
+///
+/// Nested containers add up, as `hit_test_layout` applies each one's offset
+/// on the way down; `None` when no `scroll` encloses the widget.
 fn event_scroll_offset_for(layout: Option<&LayoutNode>, widget_id: u64) -> Option<f32> {
-    layout
-        .and_then(|layout| find_scroll_ancestor(layout, widget_id))
-        .map(|scroll_node| {
-            crate::widget_render::scroll::get_scroll_state(
-                crate::widget_render::scroll::scroll_state_key(&scroll_node),
-            )
-            .offset_y
+    // `Some(offset)` once the target is found; offsets are added while
+    // unwinding, so scroll containers off the target's path cost nothing.
+    fn walk(node: &LayoutNode, target_id: u64) -> Option<Option<f32>> {
+        if node.widget_id == target_id {
+            return Some(None);
+        }
+        let inner = node.children.iter().find_map(|child| walk(child, target_id))?;
+        Some(if node.widget_type == "scroll" {
+            let key = crate::widget_render::scroll::scroll_state_key(node);
+            Some(inner.unwrap_or(0.0) + crate::widget_render::scroll::scroll_offset_y(key))
+        } else {
+            inner
         })
+    }
+    walk(layout?, widget_id).flatten()
 }
 
 fn find_scroll_ancestor_impl(

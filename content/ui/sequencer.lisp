@@ -51,7 +51,7 @@
                            remove-process! bind-port! add-fanout! unbind-port! clear-port!
                            remove-fanout! graph-of))
 
-(export lane-patchbay-node lane-patch-register-node lane-patch-node-namespace
+(export sequencer-body lane-patchbay-node lane-patch-register-node lane-patch-node-namespace
         harmony-snap-meter lane-patch-expr-error lane-patch-hidden-in-port-count
         lane-patch-node-selected-id lane-patch-node-select lane-patch-node-host? node-of
         process-of
@@ -60,6 +60,10 @@
         seq-view
         clip-menu
         clip-rename
+        begin-clip-rename
+        begin-clip-bulk-rename
+        finish-clip-rename
+        clip-bulk-rename-preview
         lane-edit
         patch-view
         card-menu
@@ -178,8 +182,9 @@
           (modes '())
           (cursors '())))
 
-;; The rack clip menu (where it opened, the clip it targets) and the inline
-;; clip rename in progress (the clip, nil when none is, and the draft).
+;; The rack clip menu (where it opened, the clip it targets) and the rename
+;; modal in progress (the clip, nil when none is, and the draft). `bulk`
+;; renames the clip's whole bank in order, the draft being the prefix.
 (def-kind clip-menu
   :key ()
   :state ((open false)
@@ -189,7 +194,8 @@
 (def-kind clip-rename
   :key ()
   :state ((clip rack-clip :default nil)
-          (draft "")))
+          (draft "")
+          (bulk false)))
 
 ;; The lane strip's edit scope (`all`: project lanes edit the shared slot
 ;; every track inherits, else this track's fork) and the UI-only slider step
@@ -1036,11 +1042,11 @@
 ;; badge in the header derive their heights from this one number, so it sets
 ;; how tall (or how dense) the whole sequencer reads. No shader change is
 ;; needed: the step widgets scale their artwork with the box.
-(defcustom step-cell-width 3.05
+(defcustom step-cell-width 3
   :type :number :min 1.5 :max 6 :step 0.05
   :doc "Width (cells) of each step in the sequencer grid; the playhead bar under each row spans the same width.")
 
-(defcustom step-cell-height 1.55
+(defcustom step-cell-height 1
   :type :number :min 1 :max 4 :step 0.05
   :doc "Height (cells) of each step in the sequencer grid; track rows and the colour badge scale with it.")
 
@@ -1098,7 +1104,7 @@
         (header-toggle "S" (str "solo-" i) #'t.soloed
           :on-click (track-toggle-click t (lambda () (toggle! t.soloed))))
         (box :width 8.6 :height 1
-          :key (str "select-" i)
+          :key (str "select-" i) :part "sequencer/track-name" :track t
           :background-color :transparent
           :on-click (lambda (event) (track-click event t))
           :on-double-click (lambda (evt) (open-piano-roll-for-track t))
@@ -1263,7 +1269,8 @@
       :off-fill (if (= (step-odd s.index) 1)
         :sequencer-step-off-fill-alt
         :sequencer-step-off-fill)
-      :background "seqv-step-shell")))
+      :background "seqv-step-shell"
+      :part "sequencer/step")))
 
 (def playhead-row (t row)
   (box
@@ -3164,21 +3171,22 @@
                       (label (fmt " {} " (+ page 1))
                         :font-size 11
                         :active (= page shown)
+                        :v-align :baseline
                         :active-color :scene-active-fg
                         :color :dim
                         :bg :transparent)))
-                 ; (number-picker
-                 ;   :key (str "expanded-bar-transpose-" t.tid "-" page)
-                 ;   :value transpose
-                 ;   :min -60 :max 60 :step 1 :decimals 0
-                 ;   :active (not (= transpose 0))
-                 ;   :active-color :white
-                 ;   :text-color :dim
-                 ;   :noui true
-                 ;   :text-align :center
-                 ;   :on-change (lambda (v) (set-bar-transpose! t page v))
-                 ;   :width sgi/page-button-width
-                 ;   :height 1.1 :font-size 7)
+                  ; (number-picker
+                  ;   :key (str "expanded-bar-transpose-" t.tid "-" page)
+                  ;   :value transpose
+                  ;   :min -60 :max 60 :step 1 :decimals 0
+                  ;   :active (not (= transpose 0))
+                  ;   :active-color :white
+                  ;   :text-color :dim
+                  ;   :noui true
+                  ;   :text-align :center
+                  ;   :on-change (lambda (v) (set-bar-transpose! t page v))
+                  ;   :width sgi/page-button-width
+                  ;   :height 1.1 :font-size 7)
                   )))))))))
 
 ;; The row's quick controls over t's editor in mode `mode` (`lane` its lane,
@@ -3199,6 +3207,7 @@
           (v-stack :align :center
             (label "-"
               :font-size 12
+              :v-align :baseline
               :color :white
               :bg :transparent)))
         (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
@@ -3208,6 +3217,7 @@
             (label "+"
               :font-size 12
               :color :white
+              :v-align :baseline
               :bg :transparent)))
         (expanded-pages t)))))
 
@@ -3235,7 +3245,7 @@
 ;; and carries its own gap.
 (def expanded-track-editor (t mode lane)
   (box :padding 0.85
-    (box
+    (box :part "sequencer/track-editor"
       :background-color :buffer-bg :corner-radius (eseq.seq-core-state/radius 16)
       (v-stack :width :fill :padding 0.35 :gap 0.1
         (expanded-param-tabs t lane)
@@ -3319,17 +3329,53 @@
 (def group-element-key (g element)
   (str (group-ui-kind g) "-" element "-" g.gid))
 
-;; Keep group fills opaque because the rounded-box renderer draws its border
-;; behind the inset fill. Reproduce the old alpha-0.22 track tint by compositing
-;; it over the active theme's buffer surface in Lisp; selection then changes
-;; only the border without changing the original fill appearance.
-(def group-container-bg (c)
-  (let ((bg THEME.buffer_bg))
-    (rgba
-      (+ (* (rgb-part c 0) 0.10) (* (nth bg 0) 0.90))
-      (+ (* (rgb-part c 1) 0.10) (* (nth bg 1) 0.9))
-      (+ (* (rgb-part c 2) 0.10) (* (nth bg 2) 0.9))
-      1.0)))
+;; Channel i of a group's fill: keep it opaque because the box's border draws
+;; behind the fill. Reproduce the old alpha-0.22 track tint by compositing it
+;; over the active theme's buffer surface in Lisp; selection then changes only
+;; the border without changing the fill.
+(def group-container-part (c i)
+  (+ (* (rgb-part c i) 0.02) (* (nth THEME.buffer_bg i) 0.98)))
+
+;; A group's enclosure: its flat fill (fill-*) given texture — a soft mottle
+;; and inner rim in the group's color (tint-*), a faint top sheen, and fine
+;; grain. Noise runs in design pixels, so the texture keeps its scale however
+;; tall the group grows. The rounded box paints this inside its border,
+;; clipped to its shape; the fill's radius, `surface-radius` −
+;; `surface-border`, gives the rim its edge.
+(defwidget seqv-group-surface
+  :width 4 :height 4
+  :state (fill-r fill-g fill-b tint-r tint-g tint-b surface-radius surface-border)
+  :shader
+  (let ((px (/ (+  x) design-px))
+      (py (/ (- x y) design-px))
+      (mottle (+ (* 9.2 (eseq.materials/surface-noise (/ px 110.0) (/ py 110.0)))
+          (* 3.8 (eseq.materials/surface-noise (/ px 7.0) (/ py 37.0)))))
+      (grain (- (eseq.materials/surface-hash (floor px) (floor py)) 0.5))
+      (sheen (* 0.5 (- 1.0 (/ y height))))
+      (base (vec3 fill-r fill-g fill-b))
+      (tint (vec3 (* 0.3 tint-r) (* 0.3 tint-g) (* 0.3 tint-b))))
+    (sdf/layer
+      (sdf/fill
+        (sdf/rounded-rect width height
+          (* (max 0.0 (- surface-radius surface-border)) design-px))
+        (material 
+          :lighting (lighting :edge-min -0.004 :edge-max 0.1 :light (vec3 1 3 4))
+          :color
+          (let ((rim (smoothstep (* -18.0 design-px) 0.1 d))
+              (lift (+ (* 0.008 sheen) (*  0.21 grain))))
+            (mix (vec4 fill-r fill-g fill-b 1)
+              (eseq.materials/color-cell 
+                (rgba (+ base
+                    (* 2.2 tint (+ (* 0.035 (- mottle 0.45)) (* 0.045 rim)))
+                    (* 0.8 (vec3 lift lift lift)))
+                  1.0)
+                (rgba (+ base
+                    (* tint (+ (* 0.035 (- mottle 0.45)) (* 0.045 rim)))
+                    (vec3 lift lift lift))
+                  1.0)              
+                )
+              0.3
+              )))))))
 
 ;; Volume/meter for a group's backing bus b; a spacer while it has none.
 (def group-volume-control (g b)
@@ -3449,8 +3495,9 @@
 ;; A collapsed rack is no longer a dead row: it shows the rack's clip bank as a
 ;; Max-style preset box grid. The cell the CURRENT scene plays is lit;
 ;; clicking one launches it (quantized exactly like a scene launch),
-;; right-clicking opens a menu (rename in place, launch, save what the rack
-;; is playing now as a new clip, delete), and the trailing number picker
+;; right-clicking opens a menu (rename, rename the whole bank in order, launch,
+;; save what the rack is playing now as a new clip, delete), and the trailing
+;; number picker
 ;; shows the lit clip's number and launches whatever number is typed in.
 ;; Drag reorder is not wired yet; the bank order is the create order.
 
@@ -3459,9 +3506,8 @@
 ;; lit when active. They sit in a `wrap` that fills the header's right half,
 ;; so the column count follows the panel width and a long bank wraps onto
 ;; more rows rather than stretching the row past the window.
-(def rack-clip-cell-width 3.2)
-(def rack-clip-cell-height 1.6)
-(def rack-clip-rename-width 4.6)
+(def rack-clip-cell-width 4.34)
+(def rack-clip-cell-height 2.17)
 
 ;; Whether the held clip rc is still in its rack's bank (a delete, an undo or
 ;; a project load drops it).
@@ -3470,15 +3516,76 @@
 
 (def begin-clip-rename (rc)
   (set! clip-menu.open false)
+  (set! clip-rename.bulk false)
   (set! clip-rename.draft rc.name)
   (set! clip-rename.clip rc))
 
+;; Finder-style bulk rename of rc's whole bank: "<prefix> 1..N".
+(def begin-clip-bulk-rename (rc)
+  (set! clip-menu.open false)
+  (set! clip-rename.bulk true)
+  (set! clip-rename.draft "")
+  (set! clip-rename.clip rc))
+
+;; A blank name (or prefix) clears names back to "Clip N".
 (def finish-clip-rename (commit)
   (let ((rc clip-rename.clip))
     (when (and commit (clip-listed? rc))
-      (set! rc.name clip-rename.draft))
+      (if clip-rename.bulk
+        (host-command "rename-rack-clips-in-order"
+          (dict :group-id rc.group.gid :prefix clip-rename.draft))
+        (set! rc.name clip-rename.draft)))
     (set! clip-rename.clip nil)
     (set! clip-rename.draft "")))
+
+;; The names a bulk rename with the current prefix gives the bank.
+(def clip-bulk-rename-preview (rc)
+  (let ((n (len rc.group.clips))
+        (prefix (string-trim clip-rename.draft))
+        (stem (if (= prefix "") "Clip" prefix)))
+    (if (< n 3)
+      (if (= n 2) (str stem " 1, " stem " 2") (str stem " 1"))
+      (str stem " 1, " stem " 2, … " stem " " n))))
+
+(def clip-rename-body (rc)
+  (let ((bulk clip-rename.bulk))
+    (v-stack :width :fill :height :fill :gap 0.6
+      (label (if bulk
+               (str "Renames all " (len rc.group.clips) " clips of "
+                    rc.group.name " in order.")
+               (str "Clip " (+ rc.index 1) " of " rc.group.name))
+        :key "rack-clip-rename-info" :bg :transparent :font-size 11 :color :dim)
+      (v-stack :width :fill :gap 0.3
+        (label (if bulk "Prefix" "Name") :bg :transparent :font-size 11)
+        (text-input :key "rack-clip-rename-input" :width :fill :height 1.35 :font-size 11
+          :value clip-rename.draft
+          :placeholder (if bulk "Clip" (str "Clip " (+ rc.index 1)))
+          :auto-focus true
+          :select-all-on-focus true
+          :on-change (lambda (v) (set! clip-rename.draft v))
+          :on-submit (lambda () (finish-clip-rename true))
+          :on-cancel (lambda () (finish-clip-rename false))))
+      (label (if bulk
+               (clip-bulk-rename-preview rc)
+               "Leave blank to show the clip's number.")
+        :key "rack-clip-rename-hint" :bg :transparent :font-size 10.5 :color :dim :flex 1)
+      (h-stack :width :fill :gap 0.8 :align :center
+        (box :height 0 :flex 1)
+        (button "Cancel" :key "rack-clip-rename-cancel" :variant :ghost
+          :on-click |event| (finish-clip-rename false))
+        (button (if bulk "Rename All" "Rename") :key "rack-clip-rename-commit"
+          :on-click |event| (finish-clip-rename true))))))
+
+;; Mounted once at the buffer root, like the clip menu.
+(def rack-clip-rename-modal ()
+  (let ((rc clip-rename.clip)
+        (open (clip-listed? rc)))
+    (modal :key "rack-clip-rename-modal" :is-open open
+      :on-close (lambda () (finish-clip-rename false))
+      :title (if clip-rename.bulk "Rename All Clips" "Rename Clip")
+      :width-px 460 :height-px 230
+      ;; Closed, the buffer's rebuilds must not evaluate the body.
+      (if open (clip-rename-body rc) (nothing)))))
 
 (def open-clip-menu (event rc)
   (set! clip-menu.clip rc)
@@ -3497,6 +3604,8 @@
   (menu-of clip-menu
     (menu-item "Rename…" :key "rack-clip-menu-rename"
       :on-select (clip-menu-action begin-clip-rename))
+    (menu-item "Rename All Clips in Order…" :key "rack-clip-menu-rename-all"
+      :on-select (clip-menu-action begin-clip-bulk-rename))
     (menu-item "Launch" :key "rack-clip-menu-launch"
       :on-select (clip-menu-action launch-rack-clip!))
     (menu-separator)
@@ -3508,9 +3617,8 @@
 ;; The rack color c, scaled by `k`.
 (def tint (c k) (map (lambda (i) (* k (rgb-part c i))) (range 0 3)))
 
-;; Clip rc's launch cell, tinted `tinted` (its rack's color, dimmed). A
-;; subtree of its own: a rename's start, its keystrokes and its end re-run
-;; this cell alone.
+;; Clip rc's launch cell, tinted `tinted` (its rack's color, dimmed), labelled
+;; with its bank position (the number the picker and unnamed clips use).
 (def rack-clip-cell (g rc tinted)
   (subtree :key (str "rack-clip-cell-" g.gid "-" rc.cid)
     ;; An unkeyed root: the subtree's key would replace the cell's, which
@@ -3518,40 +3626,28 @@
     (h-stack (rack-clip-cell-body g rc tinted))))
 
 (def rack-clip-cell-body (g rc tinted)
-  (let ((renaming (= clip-rename.clip rc)))
-    (box :key (str "rack-clip-" g.gid "-" rc.cid)
-      :debug-name "rack-clip-cell"
-      :width (if renaming rack-clip-rename-width rack-clip-cell-width)
-      :height rack-clip-cell-height
-      :padding (if renaming 0.1 0.3)
-      :bg :transparent
-      :background "track-pattern-cell-bg"
-      :active #'rc.active
-      :assigned 1
-      :override 0
-      :selected 0
-      :track-r (nth tinted 0)
-      :track-g (nth tinted 1)
-      :track-b (nth tinted 2)
-      :on-click (lambda (event)
-        (if event.shift
-          (begin-clip-rename rc)
-          (launch-rack-clip! rc)))
-      :on-right-click (lambda (event) (open-clip-menu event rc))
-      (if renaming
-        (text-input
-          :key (str "rack-clip-rename-" g.gid "-" rc.cid)
-          :width 4.3 :height 0.7 :font-size 10
-          :value clip-rename.draft
-          :auto-focus true
-          :select-all-on-focus true
-          :on-change (lambda (name) (set! clip-rename.draft name))
-          :on-submit (lambda () (finish-clip-rename true))
-          :on-cancel (lambda () (finish-clip-rename false))
-          :on-blur (lambda () (finish-clip-rename true)))
-        (label rc.cid
-          :color :dimmer :active #'rc.active :active-color :white
-          :font-size 10 :bg :transparent :v-align :center :h-align :center)))))
+  (box :key (str "rack-clip-" g.gid "-" rc.cid)
+    :debug-name "rack-clip-cell"
+    :width rack-clip-cell-width
+    :height rack-clip-cell-height
+    :padding 0.3
+    :bg :transparent
+    :background "track-pattern-cell-bg"
+    :active #'rc.active
+    :assigned 1
+    :override 0
+    :selected 0
+    :track-r (nth tinted 0)
+    :track-g (nth tinted 1)
+    :track-b (nth tinted 2)
+    :on-click (lambda (event)
+      (if event.shift
+        (begin-clip-rename rc)
+        (launch-rack-clip! rc)))
+    :on-right-click (lambda (event) (open-clip-menu event rc))
+    (label (+ rc.index 1)
+      :color :clock-fg :active #'rc.active :active-color :white
+      :font-size 8  :bg :transparent :v-align :center :h-align :center)))
 
 ;; The last cell is a number picker showing the lit clip's number (0 while
 ;; the rack is silent): read it at a glance, or type/drag a number to launch
@@ -3564,7 +3660,7 @@
 
 (def rack-clip-number-run (g tinted)
   (let ((clips g.clips)
-        (playing g.rack-clip))
+      (playing g.rack-clip))
     (h-stack
       (number-picker :key (str "rack-clip-number-" g.gid)
         :width 5.2 :height rack-clip-cell-height :font-size 10
@@ -3572,12 +3668,15 @@
         ;; cell shader's 70% dark layer composited over that tint.
         :border-color (rgba (nth tinted 0) (nth tinted 1) (nth tinted 2) 1.0)
         :border-width 2
+        :text-color :clock-fg
+        :tri-color :clock-fg
+        :height 1.5
         :background-color (rgba
           (+ (* 0.3 (nth tinted 0)) 0.014)
           (+ (* 0.3 (nth tinted 1)) 0.0175)
           (+ (* 0.3 (nth tinted 2)) 0.021)
           1.0)
-        :corner-radius 4
+        :corner-radius 16
         :value (if playing (+ playing.index 1) 0)
         :min 1 :max (max 1 (len clips)) :step 1 :decimals 0
         :on-change (lambda (v)
@@ -3598,7 +3697,7 @@
 
 (def rack-clip-grid (g)
   (let ((clips g.clips)
-        (tinted (tint g.color 0.65)))
+      (tinted (tint g.color 0.65)))
     (when (and g.rack (> (len clips) 0))
       (h-stack :key (str "rack-clip-run-" g.gid) :gap 0.4 :align :center :width :fill :flex 1
         ;; Lines the first cell up with the member rows' step grids.
@@ -3608,7 +3707,9 @@
             :width 48 :gap 0.01 :row-gap 0.01 :align :center
             (each clips |rc|
               (rack-clip-cell g rc tinted))
-            (rack-clip-number-picker g tinted)))
+            (box :width 0.3)
+            (rack-clip-number-picker g tinted)
+            ))
         (box :height 0.1 :width :fill :flex 1)
         (rack-activity-strip g)
         (box :width 1.0 :height 0.0 :bg :transparent)))))
@@ -3618,19 +3719,27 @@
     (group-header-body g)))
 
 (def group-block (g)
-  (let ((c g.color))
+  (let ((c g.color)
+        (radius (eseq.seq-core-state/radius 10))
+        (border 2))
     (box :width :fill
       :key (group-element-key g "block")
       ;; Selection visibility binds the *sel-sync* `bus-highlight`, never a
       ;; raw `selected-bus` read: this block wraps every member row, so a
       ;; render-time read re-rendered the whole group on each selection.
       :selected (eseq.seq-core-state/group-selected-ref g)
-      :background-color (group-container-bg c)
-      :selected-background-color (group-container-bg c)
-      :border-width 2
+      :bg :transparent
+      :background "seqv-group-surface"
+      :fill-r (group-container-part c 0)
+      :fill-g (group-container-part c 1)
+      :fill-b (group-container-part c 2)
+      :tint-r (rgb-part c 0) :tint-g (rgb-part c 1) :tint-b (rgb-part c 2)
+      :surface-radius radius
+      :surface-border border
+      :border-width border
       :border-color :mixer-strip-border
       :selected-border-color :mixer-strip-selected-border
-      :corner-radius (eseq.seq-core-state/radius 10)
+      :corner-radius radius
       :padding 0.345
       ;; Hit testing chooses the deepest clickable widget, so member-track
       ;; clicks keep selecting the track; only exposed container chrome reaches
@@ -3858,6 +3967,53 @@
     :width 1.4 :font-size 6.2 :bg :transparent :text-align :right
     :color (if (and p (not (= p.role ""))) :white :dim)))
 
+;; A pad cell's width in columns: square against its 2.3-row height.
+(def pad-cell-width 5.4)
+
+;; A pad cell's glass, layered like the clip cells' `track-pattern-cell-bg`
+;; (ui/mixer.lisp) but untinted: an empty cell is a dark well, an occupied one
+;; a slightly lifted grey, a sounding one (`selected`, bound to `p.triggered`)
+;; lights in the theme's accent, and the focused pad wears a pale
+;; ring.
+(defwidget rack-pad-cell-bg
+  :width 1 :height 1
+  :paint-margin 0.04
+  :state (selected occupied focused)
+  :shader
+  (let ((base (if (= selected 1)
+          :clock-fg
+          (rgba 0.5 0.52 0.56 1)))
+      (glow (if (= selected 1) 1.15 (if (= occupied 1) 0.74 0.1)))
+      (outer (* base (rgba (* glow 0.5) (* glow 0.5) (* glow 0.5) 1)))
+      ;; The focus ring paints only the outermost layer; the glass inside
+      ;; keeps its own gradient ends.
+      (ring (if (= focused 1) (rgba 0.94 0.96 1.0 1.0) outer))
+      (middle (* base (rgba glow glow glow 1)))
+      (inner-k (if (= selected 1) 0.65 (if (= occupied 1) 0.42 0.17)))
+      (inner (* base (rgba inner-k inner-k inner-k 1.4)))
+      ;; How much of color-cell's diagonal sheen survives: unlit glass keeps
+      ;; only a hint of it over a flat fill, a sounding pad all of it.
+      (sheen (if (= selected 1) 0.2 0.1)))
+    (sdf/layer
+      (sdf/fill (sdf/rounded-rect width height 0.3)
+        (material :color ring))
+      (sdf/fill (sdf/rounded-rect (* 0.93 width) (* 0.93 height) 0.2)
+        (material
+          :lighting (lighting
+            :light (vec3 3.0 -0.1 3.5) :shininess 83
+            :edge-max 3.8 :edge-min -0.4)
+          :color (mix middle (eseq.materials/color-cell middle (* 2 outer)) sheen)))
+      (sdf/fill (sdf/rounded-rect (* 0.92 width) (* 0.92 height) 0.2)
+        (material
+          :lighting (lighting
+            :light (vec3 2.0 1.1 1.5) :shininess 83
+            :edge-max 1.8 :edge-min -0.2)
+          :color 
+          (mix (mix inner :fg (smoothstep (if (= selected 1) -0.1 -0.09) 1 d)) 
+            (eseq.materials/color-cell inner outer) sheen)
+          )
+        ))))
+
 ;; Pad trigger light (eseq-4b5.16): a pad is lit for as long as its member
 ;; track is sounding whatever fired it — a hit on this cell, an armed rack's
 ;; keys, or its own sequenced steps. It rides the box's bound `selected` state
@@ -3867,17 +4023,17 @@
 ;; shows, `pads` the rack's pads by map slot (`pads-by-note`).
 (def pad-cell (g pads page cell)
   (let ((note (eseq.drum-rack-v2/cell-note page cell))
-        (p (nth pads (pad-map-slot note))))
+      (p (nth pads (pad-map-slot note))))
     (box
       :key (str "rack-pad-cell-" g.gid "-" cell)
-      :width 6.4 :height 2.3 :padding 0.15
-      :background-color (if p :mixer-strip-bg :bg)
+      :width pad-cell-width :height 2.4 :padding 0.15
+      :bg :transparent
+      :background "rack-pad-cell-bg"
       :selected (if p #'p.triggered false)
-      :selected-background-color :accent
+      :occupied (if p 1 0)
+      :focused (if (pad-selected? p) 1 0)
       :border-width 1
-      :border-color (if (pad-selected? p)
-        :mixer-strip-selected-border
-        '(rgba 0.30 0.31 0.32 1.0))
+      :border-color :transparent
       :drop-hover-border-color :mixer-strip-selected-border
       :drop-hover-background-color :mixer-control-bg
       :corner-radius (eseq.seq-core-state/radius 8)
@@ -3898,6 +4054,7 @@
       ;; Right-click: the pad menu (Role ▸ …).
       :on-right-click (lambda (event) (when p (open-pad-menu event p)))
       (v-stack :width :fill :height :fill :gap 0.05
+        (box :height 0.1)
         ;; The note is the cell's own, so an empty cell still says which note
         ;; a drop here would claim. The role tag balances a same-width spacer
         ;; on the left so the note stays centred.
@@ -3906,15 +4063,18 @@
           (label (if p p.label (eseq.drum-rack-v2/note-label note))
             :font-size 8 :color (if p :dim '(rgba 0.42 0.44 0.46 1.0))
             :active (if p #'p.triggered false)
-            :active-color :black
+            :active-color :white
             :bg :transparent
             :flex 1 :width :fill :text-align :center)
           (pad-role-tag-label p))
-        (label (if p (substring p.track.name 0 12) "")
+        (label (if p (substring p.track.name 0 8) "")
           :active (if p #'p.triggered false)
-          :active-color :black
+          :active-color :white
+          :width 5
+          :v-align :baseline
+          :h-align :center
           :font-size 6.8 :color :white :bg :transparent
-          :width :fill :text-align :center)
+          :text-align :center)
         (label (if (and p (> p.choke 0)) (str "choke " p.choke) "")
           :font-size 6.2 :color :dim :bg :transparent
           :width :fill :text-align :center)))))
@@ -3926,7 +4086,7 @@
     (each (range 0 4) |col|
       (pad-cell g pads page (+ (* row 4) col)))))
 
-(def pad-grid-intrinsic-width 26.45)
+(def pad-grid-intrinsic-width (+ (* 4 pad-cell-width) 1.05))
 
 ;; Rack g's pad grid as a component: the *fx* rack panel draws it at its
 ;; intrinsic width beside the rack's own controls. It lives here, next to
@@ -4022,13 +4182,15 @@
       :key (str "rack-pad-map-" g.gid)
       :width pad-map-intrinsic-width :height :fill :padding 0.15
       :background-color :bg
-      :corner-radius (eseq.seq-core-state/radius 8)
+      :corner-radius (eseq.seq-core-state/radius 2)
       :v-align :center :h-align :center
       (v-stack :gap 0.05 :align :center
         (each (range 0 (eseq.drum-rack-v2/pad-map-row-count)) |row|
           (pad-map-row g pads row page))))))
 
-(effect-buffer "*sequencer*"
+;; The whole *sequencer* buffer, named so a package can restyle the tile edge
+;; to edge with an :around (a buffer body runs on every redraw).
+(def sequencer-body ()
   (v-stack :key "sequencer-grid" :width :fill :fill-content-style true :padding 0.00 :gap 0.0
     ;; Sample import modal: opened by Rust after a file drop; renders as a
     ;; centered overlay (modal spec) with zero footprint here while closed.
@@ -4046,6 +4208,8 @@
       (eseq.factory-promote/panel))
     (subtree :key "seq-rack-clip-menu"
       (rack-clip-context-menu))
+    (subtree :key "seq-rack-clip-rename"
+      (rack-clip-rename-modal))
     (v-stack :key "sequencer-tracks" :width :fill :gap 0
       (each (grid-items) |item|
         (grid-render-item item)))
@@ -4067,6 +4231,8 @@
         :color :transparent
         :bg :transparent))))
 
+(effect-buffer "*sequencer*"
+  (sequencer-body))
 
 (set-buffer-mode-for "*sequencer*" "eseq.seq-grid-mode/seq-grid-mode")
 

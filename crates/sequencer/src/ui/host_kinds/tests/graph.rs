@@ -909,6 +909,21 @@ fn gate_generator_takes_a_generator_of_the_graphs_owner() {
     );
 }
 
+/// eseq-hvni: `:trigger` is shipped like `:tick`, with `self` bound to the
+/// instance's document.
+#[test]
+fn a_generators_trigger_is_shipped_per_instance_like_its_tick() {
+    let mut h = Harness::new();
+    h.eval("(def-kind trg :generator (:resolution :16 :tick nil :trigger self.src) :document ((src 2)))");
+    let kind = sequencer::lisp_host::registered_kind("scratch:trg").expect("registered");
+    assert_eq!(kind.generator.as_ref().and_then(|g| g.trigger_source.as_deref()), Some("self.src"));
+    let published = sequencer::lisp_host::instance_published_sequencer(&kind, 7, None).expect("generator");
+    assert_eq!(
+        published.trigger_source,
+        Some(sequencer::lisp_host::instance_generator_tick_source("scratch:trg", 7, "self.src"))
+    );
+}
+
 #[test]
 fn graph_params_keep_their_handles_by_name_across_re_evaluation() {
     let mut h = Harness::new();

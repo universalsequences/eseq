@@ -125,7 +125,9 @@ pub(crate) fn arrangement_action_song_commands(
     match kind.as_str() {
         // Scene-lane span drag: the ghost's final start moves the scene
         // event the dragged span belongs to. The span IS the event, so the
-        // gesture carries its start beat directly.
+        // gesture carries its start beat directly. Scene-lane edge and body
+        // drags re-print the patterns wherever the boundary swept
+        // (`place-patterns`), like a scene drop does.
         "finish-move-items" => {
             let from_beat = require_beat(map, "from-beat")?;
             let start_beat = require_beat(map, "start")?;
@@ -136,6 +138,9 @@ pub(crate) fn arrangement_action_song_commands(
                 payload(vec![
                     ("from-beat", Value::Number(from_beat)),
                     ("to-beat", Value::Number(start_beat)),
+                    ("place-patterns", Value::Bool(true)),
+                    // A body drag, not an edge resize: undo reads "Move".
+                    ("span-move", Value::Bool(true)),
                 ]),
             )])
         }
@@ -154,16 +159,23 @@ pub(crate) fn arrangement_action_song_commands(
                     payload(vec![
                         ("from-beat", Value::Number(next)),
                         ("to-beat", Value::Number(end_beat)),
+                        ("place-patterns", Value::Bool(true)),
                     ]),
                 )]),
                 None => Ok(vec![(
                     "song-set-end",
-                    payload(vec![("end-beat", Value::Number(end_beat))]),
+                    payload(vec![
+                        ("end-beat", Value::Number(end_beat)),
+                        ("place-patterns", Value::Bool(true)),
+                    ]),
                 )]),
             }
         }
         // Create (double-click draw or scene drop): insert a scene change
-        // recalling the chosen scene state without editing clips. A create beyond the committed song end
+        // recalling the chosen scene state. A draw leaves the clips alone; a
+        // transport-pill drop carries `:place-patterns` and also stamps the
+        // scene's track patterns and rack clips under the new span, like a
+        // recorded launch would. A create beyond the committed song end
         // first extends the end to the gesture's :end (DAW convention:
         // dropping past the end grows the arrangement) — that gesture is two
         // primitives and therefore two undo entries.
@@ -189,11 +201,13 @@ pub(crate) fn arrangement_action_song_commands(
                     ));
                 }
             }
+            let place_patterns = super::history_commands::map_bool(map, "place-patterns");
             commands.push((
                 "arrangement-scene-insert",
                 payload(vec![
                     ("beat", Value::Number(start_beat)),
                     ("scene", Value::Number(scene)),
+                    ("place-patterns", Value::Bool(place_patterns)),
                 ]),
             ));
             Ok(commands)
@@ -429,6 +443,16 @@ mod tests {
         }
     }
 
+    fn payload_bool(command: &SongCommand, key: &str) -> bool {
+        let Value::Map(map) = &command.1 else {
+            panic!("payload must be a map");
+        };
+        match &*map[key].borrow() {
+            Value::Bool(value) => *value,
+            other => panic!("payload :{key} must be a bool, got {other:?}"),
+        }
+    }
+
     /// Scene-lane move: the dragged span names its scene event by start beat,
     /// which is exactly what the beat-addressed primitive takes.
     #[test]
@@ -443,6 +467,8 @@ mod tests {
         assert_eq!(commands[0].0, "arrangement-scene-move");
         assert_eq!(payload_number(&commands[0], "from-beat"), 16.0);
         assert_eq!(payload_number(&commands[0], "to-beat"), 12.5);
+        assert!(payload_bool(&commands[0], "place-patterns"), "scene drags re-print patterns");
+        assert!(payload_bool(&commands[0], "span-move"), "a body drag records a move");
     }
 
     /// A scene span ends where the NEXT scene change starts, so its end-edge
@@ -461,6 +487,7 @@ mod tests {
         // The dragged span starts at 0; the next scene change is at 16.
         assert_eq!(payload_number(&commands[0], "from-beat"), 16.0);
         assert_eq!(payload_number(&commands[0], "to-beat"), 20.0);
+        assert!(payload_bool(&commands[0], "place-patterns"), "scene drags re-print patterns");
     }
 
     #[test]
@@ -474,6 +501,8 @@ mod tests {
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].0, "song-set-end");
         assert_eq!(payload_number(&commands[0], "end-beat"), 40.0);
+
+        assert!(payload_bool(&commands[0], "place-patterns"), "scene drags re-print patterns");
     }
 
     #[test]
@@ -488,6 +517,22 @@ mod tests {
         assert_eq!(commands[0].0, "arrangement-scene-insert");
         assert_eq!(payload_number(&commands[0], "beat"), 24.0);
         assert_eq!(payload_number(&commands[0], "scene"), 2.0);
+        assert!(!payload_bool(&commands[0], "place-patterns"), "a draw leaves clips alone");
+    }
+
+    /// A transport-pill drop asks the insert to stamp the scene's patterns.
+    #[test]
+    fn scene_drop_forwards_place_patterns_to_the_insert() {
+        let action = value_map(vec![
+            ("type", Value::Keyword("finish-create-item".to_string())),
+            ("start", Value::Number(24.0)),
+            ("scene", Value::Number(2.0)),
+            ("place-patterns", Value::Bool(true)),
+        ]);
+        let commands = lower(&action).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, "arrangement-scene-insert");
+        assert!(payload_bool(&commands[0], "place-patterns"));
     }
 
     #[test]

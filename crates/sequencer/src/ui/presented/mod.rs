@@ -66,6 +66,10 @@ pub(crate) struct Presented {
     pub(crate) export: Area<ExportView>,
     pub(crate) settings: Area<SettingsView>,
     pub(crate) agent: Area<u64>,
+    /// The agent pane's conversation generation.
+    pub(crate) agent_pane: Area<u64>,
+    /// The agent pane's conversation shape (`Transcript::shape`).
+    pub(crate) agent_pane_shape: Area<u64>,
     pub(crate) promote: Area<PromoteView>,
 }
 
@@ -140,6 +144,12 @@ pub(crate) fn present_settings(_rt: &mut Runtime, edit: impl FnOnce(&mut Setting
 /// Record the agent's generation.
 pub(crate) fn present_agent(_rt: &mut Runtime, generation: u64) -> bool {
     present(|p| &mut p.agent, |agent| *agent = generation)
+}
+
+/// Record the agent pane's conversation generation and shape.
+pub(crate) fn present_agent_pane(generation: u64, shape: u64) -> bool {
+    let reshaped = present(|p| &mut p.agent_pane_shape, |pane| *pane = shape);
+    present(|p| &mut p.agent_pane, |pane| *pane = generation) || reshaped
 }
 
 /// Edit Promote to factory.

@@ -53,9 +53,8 @@
 
 (def enabled-toggle (p fx subtree-key)
   (subtree :key subtree-key
-    (box :width 1.55 :height 1.35 :v-align :start :h-align :center :padding 0
+    (box :width 1.55 :height 0.99 :v-align :center :h-align :center :padding 0
       (v-stack :gap 0 :align :center
-        (box :width 1.55 :height 0.04)
         (if p
           (fx-enabled-dot
             :active (pc/fx-param-value-for fx p)
@@ -98,7 +97,8 @@
         (if (get fx :midi-fx)
           (pb/midi-fx-panel-body fx)
           (pb/audio-fx-panel-body fx params))))
-    :background "fx-panel-bg"
+    :part "fx/panel" :device title
+    :background (pf/panel-surface)
     :color :fx-panel-bg
     :header :fx-panel-header-bg
     :selected-header :fx-panel-header-selected-bg
@@ -123,7 +123,8 @@
       (pf/fx-panel-body "midi-fx-panel-content"
         (subtree :key (str "midi-fx-panel-body-" (get fx :slot-idx) "-" (get fx :name))
           (pb/midi-fx-panel-body fx))))
-    :background "fx-panel-bg"
+    :part "fx/panel" :device title
+    :background (pf/panel-surface)
     :color :fx-panel-bg
     :header :fx-panel-header-bg
     :selected-header :fx-panel-header-selected-bg
@@ -156,15 +157,15 @@
   (v-stack :height 0.9 :gap 0
     (button text
       :width (* 1.5 width)
-      :height 2.0
+      :height 0.9
       :padding 0.55
       :font-size 11
       :shape :tab
       :active (if active 1 0)
       :background-color :transparent
-      :active-background-color :bg
+      :active-background-color :instrument-control-bg
       :color :dim
-      :active-color :white
+      :active-color :fg
       :border-color :transparent
       :on-click click)))
 

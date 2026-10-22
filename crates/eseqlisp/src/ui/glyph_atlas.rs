@@ -55,6 +55,31 @@ const CAP_HEIGHT_REFERENCE_GLYPHS: [char; 2] = ['H', 'X'];
 /// glyph at all.
 const FALLBACK_CAP_HEIGHT_RATIO: f32 = 0.72;
 
+/// Which face a proportional text run draws with. `Regular` is the system UI
+/// font, `Mono` the editor's monospace face (`label :mono true`), `Bold` the
+/// UI font's bold weight (`label :bold true`). A face that did not resolve on
+/// this machine falls back to `Regular`, consistently for measurement and
+/// rasterization.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TextFace {
+    #[default]
+    Regular,
+    Mono,
+    Bold,
+}
+
+impl TextFace {
+    /// The face for a label's `:mono` / `:bold` props. Mono wins when both
+    /// are set: there is no bold monospace face.
+    pub fn from_flags(mono: bool, bold: bool) -> Self {
+        match (mono, bold) {
+            (true, _) => Self::Mono,
+            (false, true) => Self::Bold,
+            (false, false) => Self::Regular,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FontLineMetrics {
     pub ascent: f32,
@@ -476,6 +501,31 @@ fn load_system_ui_font() -> Option<LoadedFont> {
     .or_else(|| load_any_font(false))
 }
 
+/// The bold weight of `regular`'s family (the resolved system UI font), so
+/// bold labels share the UI typeface. `None` when that family has no bold
+/// face (fontdb's query would otherwise hand back the regular one).
+#[cfg(not(target_os = "macos"))]
+fn load_system_ui_bold_font(regular: &LoadedFont) -> Option<LoadedFont> {
+    let db = system_fonts();
+    let family = db
+        .faces()
+        .find(|face| face.post_script_name == regular.post_script_name)?
+        .families
+        .first()?
+        .0
+        .clone();
+    let id = db.query(&Query {
+        families: &[Family::Name(&family)],
+        weight: fontdb::Weight::BOLD,
+        ..Query::default()
+    })?;
+    let face = db.face(id)?;
+    if face.weight.0 < fontdb::Weight::SEMIBOLD.0 {
+        return None;
+    }
+    load_font_by_id(id)
+}
+
 // ── CoreText backend (macOS) ──────────────────────────────────────────────
 
 /// Size a face is created at before anything asks for a specific one. CTFont
@@ -775,6 +825,27 @@ fn load_system_ui_font() -> Option<LoadedFont> {
     let post_script_name = post_script_name(&font);
     Some(LoadedFont {
         face: FontFace::new(font),
+        post_script_name,
+    })
+}
+
+/// The bold weight of `regular` (the resolved system UI font), derived
+/// through its symbolic traits so it is the same family and optical design.
+/// `None` when CoreText finds no bold variant.
+#[cfg(target_os = "macos")]
+fn load_system_ui_bold_font(regular: &LoadedFont) -> Option<LoadedFont> {
+    use objc2_core_text::CTFontSymbolicTraits;
+    let bold = unsafe {
+        regular.face.base.copy_with_symbolic_traits(
+            CORE_TEXT_BASE_SIZE,
+            std::ptr::null(),
+            CTFontSymbolicTraits::TraitBold,
+            CTFontSymbolicTraits::TraitBold,
+        )
+    }?;
+    let post_script_name = post_script_name(&bold);
+    Some(LoadedFont {
+        face: FontFace::new(bold),
         post_script_name,
     })
 }
@@ -1100,6 +1171,52 @@ fn cached_advance(table: &mut AdvanceTable, face: &FontFace, ch: char, px: f32) 
     *table.other.entry(ch).or_insert_with(|| face.advance(ch, px))
 }
 
+/// The proportional faces a label can draw with, each a scalable
+/// `SizedFontCache`. Measurers and the glyph atlas share this one face lookup
+/// so measurement and rasterization always agree on the fallback.
+pub struct FaceFonts {
+    /// The system UI font.
+    pub regular: SizedFontCache,
+    /// The editor's monospace face; `None` when no mono font resolved.
+    pub mono: Option<SizedFontCache>,
+    /// The UI font's bold weight; `None` when its family has no bold face.
+    pub bold: Option<SizedFontCache>,
+}
+
+impl FaceFonts {
+    pub fn new(scale: f64) -> Option<Self> {
+        let regular = load_system_ui_font()?;
+        let bold = load_system_ui_bold_font(&regular)
+            .and_then(|loaded| SizedFontCache::with_loaded(scale, loaded));
+        Some(Self {
+            regular: SizedFontCache::with_loaded(scale, regular)?,
+            mono: SizedFontCache::new_mono(scale),
+            bold,
+        })
+    }
+
+    /// The face a run actually draws with: the requested one when it
+    /// resolved on this machine, `Regular` otherwise.
+    pub fn resolve(&self, face: TextFace) -> TextFace {
+        let available = match face {
+            TextFace::Regular => true,
+            TextFace::Mono => self.mono.is_some(),
+            TextFace::Bold => self.bold.is_some(),
+        };
+        if available { face } else { TextFace::Regular }
+    }
+
+    /// The cache for `face`, after `resolve`'s fallback.
+    pub fn get_mut(&mut self, face: TextFace) -> &mut SizedFontCache {
+        let variant = match face {
+            TextFace::Regular => None,
+            TextFace::Mono => self.mono.as_mut(),
+            TextFace::Bold => self.bold.as_mut(),
+        };
+        variant.unwrap_or(&mut self.regular)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ProportionalGlyphEntry {
     pub uv_min: [f32; 2],
@@ -1114,12 +1231,11 @@ pub struct ProportionalGlyphEntry {
 pub struct ProportionalGlyphAtlas {
     pub bitmap: AtlasBitmap,
     allocator: AtlasAllocator,
-    /// Keyed by (char, size tenths, mono face).
-    glyphs: HashMap<(char, u16, bool), ProportionalGlyphEntry>,
-    pub fonts: SizedFontCache,
-    /// Monospace face sharing this atlas bitmap; `None` when no mono font
-    /// resolved, in which case mono runs fall back to the proportional face.
-    pub mono_fonts: Option<SizedFontCache>,
+    /// Keyed by (char, size tenths, resolved face).
+    glyphs: HashMap<(char, u16, TextFace), ProportionalGlyphEntry>,
+    /// Every face shares this atlas bitmap; glyph keys use the face after
+    /// `FaceFonts::resolve`, so a fallback never rasterizes a glyph twice.
+    pub fonts: FaceFonts,
 }
 
 impl ProportionalGlyphAtlas {
@@ -1131,50 +1247,44 @@ impl ProportionalGlyphAtlas {
                 PROP_ATLAS_SIZE as i32,
             )),
             glyphs: HashMap::new(),
-            fonts: SizedFontCache::new(scale)?,
-            mono_fonts: SizedFontCache::new_mono(scale),
+            fonts: FaceFonts::new(scale)?,
         })
     }
 
-    /// The face a run draws with: the mono cache when asked for and
-    /// available, the proportional system face otherwise.
-    fn fonts_for(&mut self, mono: bool) -> &mut SizedFontCache {
-        match (mono, self.mono_fonts.as_mut()) {
-            (true, Some(fonts)) => fonts,
-            _ => &mut self.fonts,
-        }
-    }
-
     pub fn line_height(&mut self, size_tenths: u16) -> f32 {
-        self.fonts.line_height(size_tenths)
+        self.fonts.regular.line_height(size_tenths)
     }
 
     pub fn ascent(&mut self, size_tenths: u16) -> f32 {
-        self.fonts.ascent(size_tenths)
+        self.fonts.regular.ascent(size_tenths)
     }
 
     pub fn descent(&mut self, size_tenths: u16) -> f32 {
-        self.fonts.descent(size_tenths)
+        self.fonts.regular.descent(size_tenths)
     }
 
     pub fn cap_height(&mut self, size_tenths: u16) -> f32 {
-        self.fonts.cap_height(size_tenths)
+        self.fonts.regular.cap_height(size_tenths)
     }
 
     pub fn measure_text(&mut self, text: &str, size_tenths: u16) -> f32 {
-        self.fonts.measure_text(text, size_tenths)
+        self.fonts.regular.measure_text(text, size_tenths)
     }
 
-    pub fn line_height_face(&mut self, size_tenths: u16, mono: bool) -> f32 {
-        self.fonts_for(mono).line_height(size_tenths)
+    pub fn measure_text_face(&mut self, text: &str, size_tenths: u16, face: TextFace) -> f32 {
+        self.fonts.get_mut(face).measure_text(text, size_tenths)
     }
 
-    pub fn descent_face(&mut self, size_tenths: u16, mono: bool) -> f32 {
-        self.fonts_for(mono).descent(size_tenths)
+    pub fn line_height_face(&mut self, size_tenths: u16, face: TextFace) -> f32 {
+        self.fonts.get_mut(face).line_height(size_tenths)
     }
 
-    pub fn cap_height_face(&mut self, size_tenths: u16, mono: bool) -> f32 {
-        self.fonts_for(mono).cap_height(size_tenths)
+    pub fn descent_face(&mut self, size_tenths: u16, face: TextFace) -> f32 {
+        self.fonts.get_mut(face).descent(size_tenths)
+    }
+
+    pub fn cap_height_face(&mut self, size_tenths: u16, face: TextFace) -> f32 {
+        self.fonts.get_mut(face).cap_height(size_tenths)
     }
 
     pub fn get_or_rasterize(
@@ -1182,25 +1292,25 @@ impl ProportionalGlyphAtlas {
         ch: char,
         size_tenths: u16,
     ) -> Option<&ProportionalGlyphEntry> {
-        self.get_or_rasterize_face(ch, size_tenths, false)
+        self.get_or_rasterize_face(ch, size_tenths, TextFace::Regular)
     }
 
     pub fn get_or_rasterize_face(
         &mut self,
         ch: char,
         size_tenths: u16,
-        mono: bool,
+        face: TextFace,
     ) -> Option<&ProportionalGlyphEntry> {
-        let mono = mono && self.mono_fonts.is_some();
-        let key = (ch, size_tenths, mono);
+        let face = self.fonts.resolve(face);
+        let key = (ch, size_tenths, face);
         if !self.glyphs.contains_key(&key) {
-            self.rasterize(ch, size_tenths, mono)?;
+            self.rasterize(ch, size_tenths, face)?;
         }
         self.glyphs.get(&key)
     }
 
-    fn rasterize(&mut self, ch: char, size_tenths: u16, mono: bool) -> Option<()> {
-        let fonts = self.fonts_for(mono);
+    fn rasterize(&mut self, ch: char, size_tenths: u16, face: TextFace) -> Option<()> {
+        let fonts = self.fonts.get_mut(face);
         let line_metrics = fonts.metrics(size_tenths)?;
         let (glyph, glyph_pixels) = fonts.rasterize(ch, size_tenths);
         let advance = glyph.advance_width;
@@ -1228,7 +1338,7 @@ impl ProportionalGlyphAtlas {
         self.bitmap.write(x, y, raster_w, raster_h, &pixels);
         let size = PROP_ATLAS_SIZE as f32;
         self.glyphs.insert(
-            (ch, size_tenths, mono),
+            (ch, size_tenths, face),
             ProportionalGlyphEntry {
                 uv_min: [x as f32 / size, y as f32 / size],
                 uv_max: [
@@ -1331,7 +1441,7 @@ impl MetalProportionalGlyphAtlas {
         ch: char,
         size_tenths: u16,
     ) -> Option<&ProportionalGlyphEntry> {
-        self.get_or_rasterize_face(ch, size_tenths, false)
+        self.get_or_rasterize_face(ch, size_tenths, TextFace::Regular)
     }
 
     /// Rasterizes through the inner atlas and uploads any newly written
@@ -1341,11 +1451,11 @@ impl MetalProportionalGlyphAtlas {
         &mut self,
         ch: char,
         size_tenths: u16,
-        mono: bool,
+        face: TextFace,
     ) -> Option<&ProportionalGlyphEntry> {
-        let mono = mono && self.atlas.mono_fonts.is_some();
+        let face = self.atlas.fonts.resolve(face);
         let previous_revision = self.atlas.bitmap.revision();
-        let entry = *self.atlas.get_or_rasterize_face(ch, size_tenths, mono)?;
+        let entry = *self.atlas.get_or_rasterize_face(ch, size_tenths, face)?;
         if self.atlas.bitmap.revision() != previous_revision {
             upload_entry(
                 &self.texture,
@@ -1355,7 +1465,7 @@ impl MetalProportionalGlyphAtlas {
                 entry.raster_h,
             );
         }
-        self.atlas.glyphs.get(&(ch, size_tenths, mono))
+        self.atlas.glyphs.get(&(ch, size_tenths, face))
     }
 }
 
@@ -1736,7 +1846,7 @@ mod tests {
                         offset.abs() <= 1.0,
                         "'{ch}' at {size_tenths} tenths in a {cell_h}px cell is off center \
                          by {offset:+.2}px (font {})",
-                        atlas.fonts.post_script_name
+                        atlas.fonts.regular.post_script_name
                     );
                 }
             }
@@ -1759,7 +1869,7 @@ mod tests {
                     "'{ch}' at zoom {scale} is off the center of its {:.1}px row by \
                      {offset:+.2}px (font {})",
                     cell_h * scale,
-                    atlas.fonts.post_script_name
+                    atlas.fonts.regular.post_script_name
                 );
             }
         }
@@ -1777,14 +1887,51 @@ mod tests {
 
         let mut proportional = ProportionalGlyphAtlas::new(1.0)
             .expect("an installed system sans font");
-        let narrow = proportional.fonts.char_advance('i', 140);
-        let wide = proportional.fonts.char_advance('W', 140);
+        let narrow = proportional.fonts.regular.char_advance('i', 140);
+        let wide = proportional.fonts.regular.char_advance('W', 140);
         assert!(wide > narrow, "system sans font should be proportional");
         let glyph = proportional
             .get_or_rasterize('g', 140)
             .expect("g glyph");
         assert!(glyph.raster_w > 0 && glyph.raster_h > 0);
         assert!(proportional.bitmap.revision() > 0);
+    }
+
+    #[test]
+    fn bold_face_measures_wider_and_rasterizes_its_own_heavier_glyphs() {
+        let mut atlas = ProportionalGlyphAtlas::new(2.0).expect("proportional atlas");
+        #[cfg(target_os = "macos")]
+        assert!(atlas.fonts.bold.is_some(), "CoreText derives the bold system UI face");
+        if atlas.fonts.bold.is_none() {
+            // No bold weight installed: bold falls back to regular wholesale.
+            assert_eq!(atlas.fonts.resolve(TextFace::Bold), TextFace::Regular);
+            return;
+        }
+        let text = "Bold weight text";
+        let regular = atlas.measure_text_face(text, 140, TextFace::Regular);
+        let bold = atlas.measure_text_face(text, 140, TextFace::Bold);
+        assert!(bold > regular, "bold {bold} should measure wider than regular {regular}");
+
+        let ink = |atlas: &mut ProportionalGlyphAtlas, face: TextFace| {
+            let entry = *atlas.get_or_rasterize_face('H', 140, face).expect("H glyph");
+            let x0 = (entry.uv_min[0] * PROP_ATLAS_SIZE as f32).round() as usize;
+            let y0 = (entry.uv_min[1] * PROP_ATLAS_SIZE as f32).round() as usize;
+            let coverage: usize = (0..entry.raster_h)
+                .flat_map(|row| {
+                    let start = (y0 + row) * PROP_ATLAS_SIZE + x0;
+                    atlas.bitmap.pixels()[start..start + entry.raster_w].to_vec()
+                })
+                .map(usize::from)
+                .sum();
+            (entry.uv_min, coverage)
+        };
+        let (regular_uv, regular_ink) = ink(&mut atlas, TextFace::Regular);
+        let (bold_uv, bold_ink) = ink(&mut atlas, TextFace::Bold);
+        assert_ne!(regular_uv, bold_uv, "bold glyphs get their own atlas entries");
+        assert!(
+            bold_ink > regular_ink,
+            "bold H should carry more ink: bold={bold_ink} regular={regular_ink}"
+        );
     }
 
     #[test]

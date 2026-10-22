@@ -596,6 +596,14 @@ impl PendingQuantizedLaunches {
     pub(crate) fn adopted_pattern(&self) -> Option<usize> {
         self.adopted_patterns.first().map(|adopted| adopted.pattern)
     }
+
+    /// Whether `base` predates the mirror of the newest audible launch: its
+    /// scene is not the one that launch will publish.
+    pub(crate) fn base_predates_mirror(&self, base: &SequencerSnapshot) -> bool {
+        self.adopted_patterns
+            .last()
+            .is_some_and(|adopted| adopted.pattern != base.transport.current_pattern)
+    }
 }
 
 fn live_transport_matches(snapshot: &SequencerSnapshot, base: &SequencerSnapshot) -> bool {

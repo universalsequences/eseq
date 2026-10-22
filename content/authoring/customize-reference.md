@@ -1,0 +1,326 @@
+# Customizing eseq
+
+For requests about the app itself rather than about music: "make the mute
+buttons red", "add a column to the step panel", "bind a key to …", "make the
+mixer wider". Every panel is eseqlisp in a factory module (`eseq.*`). You change
+one without editing its file: from outside, with an `override`, a knob, or a
+theme delta.
+
+## Where a change belongs
+
+Decide this before writing anything. A small tweak is not a package.
+
+| Home | Lasts | For |
+|---|---|---|
+| `try` (live, unsaved) | until Keep, Revert or restart | showing the user how a change looks |
+| `user.init` (`~/.eseq.d/init.lisp`) | always, every project | personal preferences: a colour, a key, a knob value |
+| a Local package | while attached | a named set the user turns on and off or shares (a whole alternative mixer look) |
+| the project's scratch | that project only | what belongs to one set; the user writes it, not you |
+
+The test: would the user give it a name and switch it on and off? Then make a
+package. Otherwise it is how they like the app: `user.init`.
+
+## The flow
+
+1. Find what draws it (below).
+2. `try` the change. It runs in the user's open app, as module `user.try`, so
+   they see it at once. Later `try` calls replace a definition or override of
+   the same name, so iterate freely.
+3. Say what changed and where to look, and ask whether to keep it. The pane
+   shows them **Keep** (the forms go into init.lisp) and **Revert**.
+4. If they tell you in chat to keep it, call `keep_tried`: it does what Keep
+   does, creating init.lisp if need be. To change something already in
+   `user.init` later, `define_form` into `user.init`.
+
+`eval` and `capture` run in the headless copy, not the user's app: an override
+made there changes nothing they can see. Use them to check a layout before
+`try`.
+
+A package you write (`create_module`, `define_form`) is loaded into the
+headless copy only. It reaches the user's app when they press **Load** on its
+card in this pane, so `look` shows the factory look until then. Check it with
+`capture` and `what_draws`, then tell them to press Load to see it, and how to
+tell it worked.
+
+## Finding what draws it
+
+- `look` at the user's window first: it shows their project, selection
+  and packages as they see them, which the headless copy does not have
+  (another instrument on the selected track, other tracks). `look` with a
+  buffer shows that tile and lists its hooks; `what_draws_live` the spot
+  they mean (pixel x, y in that image). Neither changes anything.
+- In the headless copy, `capture` a buffer, then `what_draws` a spot of it,
+  to check your own changes. Both list, for each widget, its hooks: the
+  theme slots it paints with, its part, its background widget, the face it
+  paints with, and the function that built it.
+- Take the least fragile hook that changes what the user asked for:
+  1. a theme slot, `override-theme-slot` (every box background and
+     control face painted from that slot, in every panel; text in that
+     colour stays a colour);
+  2. a part, `restyle` (that kind of widget wherever it is built);
+  3. the building function, `override … :around` merging into what it
+     returns (that function's widgets);
+  4. replacing the function outright, only when the change is to what the
+     widget does, not how it looks.
+  Walking a function's result for a `:key` or a debug name is a last
+  resort: those are not kept stable across updates.
+- `search_source` for the words on screen or a field name (`muted`), with
+  `filter` set to the area (`mixer`), when the spot is not on screen.
+- `form_source` the building function, then the helpers it calls. Override
+  the smallest function that draws the thing, not the whole panel.
+- `outline` a module for its functions. A module's `(export …)` lists its
+  public ones; overriding a private one works but warns, since it may change
+  on update.
+- An installed package may already replace the panel (search finds its
+  `override`s): ask which one the user means.
+
+## override
+
+```lisp
+(import eseq.mixer)
+
+;; Replace the function outright: the strip's buttons become one label.
+(override eseq.mixer/strip-buttons (t) (label t.name :color :accent))
+
+;; Wrap it: `original` is the factory version, to call or not.
+(override eseq.mixer/strip-buttons :around (original t)
+  (v-stack :gap 0.2 (label "custom") (original t)))
+```
+
+- The target is written qualified, `module/name`, and read as syntax.
+- An override belongs to the module it is written in. Evaluating that module
+  again replaces it; it never stacks. A reload of the target keeps it. When
+  two modules override one function, the one evaluated last wins.
+- One that throws is switched off and the factory version comes back.
+- `(remove-override module/name)` drops it; `disable-override` and
+  `enable-override` switch it; `(disable-module-overrides some.module)` switches
+  off everything a package overrides.
+
+### Restyling a part
+
+Widgets the factory marks with `:part` are restyled by name, wherever they
+are built: inside a subtree, inside an instrument's own UI, in every
+instrument at once. The function gets the widget as built and returns what
+to draw, usually `(merge node …)`:
+
+```lisp
+(restyle "instrument/screen"
+  |node| (merge node :background "tv-screen"
+                     :color (get node :background-color)
+                     :background-color (rgba 0 0 0 0)))
+```
+
+Reach for a part before an override that walks a widget tree. Like an
+override, a `restyle` belongs to its module: detaching the package reverts
+it, and one that throws is switched off. `(parts)` lists the parts built
+so far; `search_source` for `:part "` finds where each is built.
+
+| Part | What | Also on the node |
+|---|---|---|
+| `instrument/screen` | an instrument's display screen (PM, drum kits, Digi Syn, …) | its colour in `:background-color` |
+| `fx/drop-zone` | the *fx* panel's effect drop boxes, a rack slot's too | |
+| `step/param-picker` | a *step* parameter's number picker | |
+| `sequencer/step` | a step cell's shell | `:step`, `:track` |
+| `sequencer/track-name` | a track's name plate in the sequencer | `:track` |
+| `sequencer/track-editor` | an expanded track's editor panel | |
+| `mixer/bus-name` | a bus strip's name button | `:bus` |
+| `mixer/output-picker` | a strip's output dropdown | `:track` or `:bus` |
+| `mixer/drop-zone` | the mixer's "drop sounds here" box | |
+| `fx/panel` | an effect's card | `:device`, the effect's name |
+| `instrument/panel` | an instrument's card | `:device`, the instrument's name |
+
+A part's subject (`:track`, `:bus`, `:step`) is the live instance: read its
+fields (`(get node :track)` then `t.audible`, `t.color`), or let a
+background widget whose shader reads `track.color` bind to it.
+
+### Changing one prop deep inside
+
+For a widget with no `:part`, an `:around` can change what `original`
+returned instead of copying a long function. A widget is a dict; find it by
+its authored `:key`:
+
+```lisp
+(def recolor (w key)
+  (if (and w (= (get w :key) key))
+    (merge w :active-background-color :red)
+    (if (and w (get w :children))
+      (merge w :children (map |c| (recolor c key) (get w :children)))
+      w)))
+
+(override eseq.mixer/track-collapsed-strip :around (original t)
+  (recolor (original t) (str "track-collapsed-mute-" t.index)))
+```
+
+`merge` takes keyword/value pairs, not a second dict.
+
+## Colours
+
+A colour is a theme slot keyword (`:red`, `:accent`, `:dim`, `:control-on-bg`,
+`:mixer-control-bg`, …) or `(rgba r g b a)` with 0..1 parts. Prefer a slot: it
+follows the user's theme. `(apply-theme (dict :accent '(0.95 0.25 0.65)))` changes
+slots everywhere; unmentioned slots keep their values. Revert does not undo a
+theme change; restarting the app does.
+
+## Textured backgrounds
+
+To give a panel texture (brushed metal, grain, a gradient), keep its box and
+swap the flat fill for a shader: `(merge w :background "my-texture")`, leaving
+its `:corner-radius`, `:border-width` and `:border-color` as they are. A
+rounded box clips its `:background` widget to its own shape, so the shader is
+only a colour expression in `x`/`y` (`(rgba …)`), with no `sdf/rounded-rect`,
+no inset for the border and no second box behind it:
+
+```lisp
+(defwidget brushed-steel
+  :width 4 :height 4
+  :shader (let ((grain (* 0.05 (sin (* y 90.0)))))
+            (rgba (+ 0.62 grain) (+ 0.64 grain) (+ 0.7 grain) 1.0)))
+```
+
+`x` runs across the box and `y` down it, each about -1..1 on the shorter side;
+`design-px` is one design pixel, for detail that keeps its size as the box
+grows. Draw shapes with `sdf/…` only for marks inside the panel.
+
+To texture a whole tile, wrap its buffer body: `eseq.sequencer/sequencer-body`,
+`eseq.mixer/mixer-body`, and in `eseq.effects.buffers` `step-buffer-body`,
+`track-buffer-body` and `fx-buffer-body`. Every effect and instrument card
+paints the widget `eseq.effects.panel-frame/panel-surface` returns; override it
+to restyle them all (the widget takes the card's `selected`, `header-r/g/b`
+and `selected-header-r/g/b`).
+
+A colour used across many files (the boxes inside every instrument UI use
+`:instrument-group-bg`, `:instrument-panel-bg` and `:instrument-control-bg`)
+is restyled by its theme slot: `(override-theme-slot :instrument-group-bg
+"my-texture")` paints every box with that background with your widget. It is
+an override owned by your module, so detaching the package reverts it, which
+`apply-theme` does not.
+
+Effect UIs draw their sections with `:fx-inner-panel-bg` and their wells
+with `:mixer-control-bg`, which the mixer, browser and arrangement use too.
+To repaint a slot inside one container only, put it in that container's
+`:faces` (below): a box under it whose background is that slot paints with
+your widget, and the slot is unchanged everywhere else.
+
+```lisp
+(def device-faces ()
+  (dict :fx-inner-panel-bg "my-section" :mixer-control-bg "my-well"))
+(restyle "fx/panel" |card| (merge card :faces (device-faces)))
+(restyle "instrument/panel" |card| (merge card :faces (device-faces)))
+```
+
+Knobs paint their parts from theme slots too (`content/ui/widgets.lisp`), so
+one slot restyles that part of every knob, the rest unchanged:
+`:widget-knob-filled` is the filled arc and its dot, `:widget-knob-track`
+the unfilled ring and the pointer. The widget is drawn inside the part's
+shape, so it is only a colour expression, and `slot-color` is the colour
+the slot would have been: scale it to keep the theme's hue.
+
+```lisp
+(defwidget brushed-arc
+  :width 2 :height 2
+  :shader (let ((k (+ 0.8 (* 0.2 (sin (* (length (vec2 x y)) 300.0))))))
+            (* slot-color (rgba k k k 1.0))))
+(override-theme-slot :widget-knob-filled "brushed-arc")
+```
+
+A widget standing in for a slot this way takes no `:state`. A knob given
+its own `:arc-color`, or p-locked, keeps that colour.
+
+Buttons and number pickers work the same way: their face is
+`:button-secondary-bg` (and `:button-primary-bg`, `:button-ghost-bg`,
+`:button-danger-bg` by variant) or a number picker's `:dropdown-bg`, their
+rim `:button-border`. A dropdown paints its surface from `:dropdown-bg` and
+`:dropdown-border`, its badge from `:dropdown-badge-bg` and
+`:dropdown-badge-border`, its chevron from `:dropdown-chevron`. The bezel's lighting and rim stay; a held button still
+darkens or lightens your face. One with its own `:background-color` or
+`:border-color` keeps it.
+
+### Replacing a control's whole face
+
+A slot only recolours the parts a control already has. To change its
+shape (a ridged hardware knob, a pill button), replace its face, the
+`defwidget` in `content/ui/widgets.lisp` that draws it. The control keeps
+its drag, value and text; your widget draws inside its square, gets
+`value_t` (0..1), `x`/`y`, `design-px`, `input-color` (the arc's colour,
+the p-lock colour while locked), and any of the factory face's states it
+declares by name. For `knob-number-face` they are `plock`, `default-t`
+(the unlocked value while locked) and `origin-t`; show `plock` so a
+locked knob still reads as locked.
+
+| Face | Draws |
+|---|---|
+| `knob-number-face` | the device panels' and mixer's labelled knobs |
+| `knob-face` | plain `knob`s |
+| `bezel-face` | buttons and number pickers |
+| `bezel-tab-face` | the active tab button |
+| `dropdown-face` | a dropdown's lit surface; states `radius`, `light`, `grad`, `fill-slot`, `border-slot` |
+| `dropdown-badge-face` | the badge behind its chevron; the same states |
+| `dropdown-chevron-face` | the chevron; state `chevron-slot` |
+
+A dropdown's own `:face` replaces its surface only; its badge and chevron
+change through `:faces` or `restyle-face`.
+
+Three scopes, the narrowest winning:
+
+```lisp
+;; Everywhere.
+(restyle-face "knob-number-face" "ik-knob")
+
+;; Every knob inside one panel: :faces on a container reaches the
+;; controls under it, however they are built.
+(restyle "fx/panel"
+  |node| (if (= (get node :device) "Compressor")
+           (merge node :faces (dict :knob-number-face "ik-knob"))
+           node))
+
+;; One control you build yourself.
+(knob-number :value v :face "ik-knob")
+```
+
+`fx/panel` is an effect's card and `instrument/panel` an instrument's; both
+carry the device's name in `:device`. `what_draws` names the face a
+control paints with.
+
+## Knobs, keys and hooks
+
+- A factory module's `defcustom` is a knob: `(setopt eseq.mixer/track-strip-width 14)`.
+  `apropos` with the area's name lists them. The user's Customize dialog keeps
+  its own `setopt`s in a managed block at the end of init.lisp; leave that block
+  alone.
+- A `defcustom` of your own, in what you `try` or in a package you write,
+  shows in the pane as a control the user can tweak live. Keep keeps a
+  tried one at the value they left it. Declare the few numbers worth
+  tuning that way, each with a `:doc` and a `:min`/`:max`: a width, a
+  speed, a tint. Then mention them. A shader cannot read a `defcustom`;
+  give its widget a `:state` and pass the knob where the widget is used:
+  `(defwidget ripples :state (speed) :shader …)`, then
+  `(merge node :background "ripples" :speed ripple-speed)`. A widget given
+  to `override-theme-slot` takes no state, so it cannot have a knob.
+- `(bind-key "C-c m" "user.init/focus-mixer")` binds a key to a command: any
+  `def` of a declared module, by its qualified name.
+- `(add-hook "hook-name" "my-entry-key" (lambda (…) …))` runs code at a factory
+  extension point; the entry key keeps a reload from adding it twice.
+
+Revert removes overrides only. A key binding or hook added by `try` stays until
+the app restarts.
+
+## Gotchas
+
+- An `:around` that changes what a function returns only sticks if that
+  function is called on every redraw. One that returns a `(subtree :key …)`
+  is called once: the subtree redraws by running its own body, and your
+  change is gone the first time it does (a picker reverts after its value
+  changes). Override the function the subtree's body calls instead (the
+  mixer's `track-output-picker`, not `track-output-dropdown`).
+- `(track 1).muted` does not parse. Bind it first:
+  `(let ((t (track 1))) t.muted)`.
+- Include the `(import …)` lines your forms need in every `try`; repeats are
+  skipped.
+- Mute and solo through `eval` change the headless copy only.
+- To see a step drawn on before you `try`, switch it on in the headless copy,
+  then `capture`:
+  `(import eseq.kinds :refer (track))`
+  `(let ((t (track 0)) (s (nth t.steps 3))) (set! s.active true))`
+- A host command the headless copy cannot run comes back named as "Not
+  applied in this headless copy". Another route to the same change will not
+  work either; check the look another way, or say what you could not check.

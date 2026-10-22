@@ -17,8 +17,8 @@ const OPENAI_CHAT_COMPLETIONS_URL: &str = "https://api.openai.com/v1/chat/comple
 const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const DEEPSEEK_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/chat/completions";
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
-const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_VERSION: &str = "2023-06-01";
+pub(crate) const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
 const MAX_TOOL_ROUNDS: usize = 8;
 const MAX_READ_ONLY_TOOL_CALLS: usize = 4;
 const MAX_REPEAT_TOOL_FAILURES: usize = 2;
@@ -1268,7 +1268,7 @@ fn format_tool_loop_error(
     }
 }
 
-fn format_reqwest_error(error: &reqwest::Error) -> String {
+pub(crate) fn format_reqwest_error(error: &reqwest::Error) -> String {
     let mut parts = vec![error.to_string()];
     if error.is_timeout() {
         parts.push("timeout=true".to_string());

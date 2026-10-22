@@ -141,6 +141,10 @@ a `:continue` jaki back to the start of its song.
 ## 7. Out of scope (follow-ups)
 
 - `jak` surface form `:mode` (non-instance generators have no route id).
-- Gate sources other than graphs (MIDI notes, processes, other generators).
-  The trigger struct is source-agnostic; only the graph stage pushes today.
+- Gate sources other than graphs and track steps (MIDI notes, processes,
+  other generators). The trigger struct is source-agnostic. Track steps
+  push since eseq-hvni: a generator kind's `:trigger self.FIELD` names a
+  track, and each step played there pushes a play trigger at the step's
+  straight beat, for its length, with its transpose and velocity, from the
+  step loop (before either generator pass), so it gates its own boundary.
 - Per-row modes.

@@ -6,6 +6,19 @@ use std::fmt::Write;
 
 mod geometry;
 
+/// The colour of the theme slot a widget is painting for (see
+/// `ShaderEmitter::emit_slot_material`).
+pub const SLOT_COLOR_SYMBOL: &str = "slot-color";
+
+/// A built-in control face's second input colour (the first is
+/// `input-color`), e.g. a button's border.
+pub const SECOND_COLOR_SYMBOL: &str = "second-color";
+
+/// The symbols a shader reads as a colour without declaring it.
+fn is_color_symbol(name: &str) -> bool {
+    name == "input-color" || name == SLOT_COLOR_SYMBOL || name == SECOND_COLOR_SYMBOL
+}
+
 #[derive(Debug)]
 pub enum CodegenError {
     UnsupportedExpression(String),
@@ -57,12 +70,16 @@ impl SdfLightingQuality {
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 pub struct SdfShaderOptions {
     pub lighting_quality: SdfLightingQuality,
+    /// Leave out the rounded-box clip mask: for a built-in control's face,
+    /// which is never painted as a box's background.
+    pub skip_box_clip: bool,
 }
 
 impl SdfShaderOptions {
     pub const fn flat_lighting() -> Self {
         Self {
             lighting_quality: SdfLightingQuality::Flat,
+            skip_box_clip: false,
         }
     }
 
@@ -74,7 +91,7 @@ impl SdfShaderOptions {
             Err(std::env::VarError::NotPresent) => SdfLightingQuality::Full,
             Err(error) => return Err(format!("cannot read ESEQ_SDF_LIGHTING_QUALITY: {error}")),
         };
-        Ok(Self { lighting_quality })
+        Ok(Self { lighting_quality, skip_box_clip: false })
     }
 }
 
@@ -91,6 +108,9 @@ struct ShaderEmitter {
     theme: theme::Theme,
     current_region_id: Option<usize>,
     next_region_id: usize,
+    /// Theme slots whose widget is being inlined, innermost last: the slot's
+    /// own keyword inside its widget is the plain colour.
+    splicing: Vec<String>,
 }
 
 struct MaterialSpec<'a> {
@@ -168,6 +188,56 @@ impl ShaderEmitter {
             theme,
             current_region_id: None,
             next_region_id: 0,
+            splicing: Vec::new(),
+        }
+    }
+
+    /// A theme slot that holds a widget (`override-theme-slot`) paints with
+    /// that widget's shader wherever the slot's keyword is read, with
+    /// `slot-color` bound to the slot's colour. Only a widget whose shader is
+    /// a colour and takes no state, no hit regions and no time can stand in;
+    /// otherwise, or if it fails to emit here, the keyword stays the colour.
+    fn emit_slot_material(&mut self, slot: &str) -> Option<String> {
+        if self.splicing.iter().any(|s| s == slot) {
+            return None;
+        }
+        let widget = theme::slot_widget_in(&self.theme, slot)?;
+        let def = crate::widget_render::sdf_widget::sdf_widget_def(&widget)?;
+        if !def.state_uniforms.is_empty()
+            || def.region_count > 0
+            || def.animates
+            || !expr_returns_float4(&def.sdf_expr)
+        {
+            return None;
+        }
+        let spliced = Expression::List(vec![
+            Expression::Symbol("let".into()),
+            Expression::List(vec![Expression::List(vec![
+                Expression::Symbol(SLOT_COLOR_SYMBOL.into()),
+                Expression::Keyword(slot.to_string()),
+            ])]),
+            def.sdf_expr.clone(),
+        ]);
+        let statements = self.statements.len();
+        let regions = (self.current_region_id, self.next_region_id);
+        // The widget's free names (x, y, uv, ...) are its own coordinates,
+        // not whatever the face around the slot keyword rebound them to:
+        // hide the outer `let` scopes while the splice is emitted.
+        let scopes = std::mem::take(&mut self.scopes);
+        let type_scopes = std::mem::take(&mut self.type_scopes);
+        self.splicing.push(slot.to_string());
+        let result = self.emit_expr(&spliced);
+        self.splicing.pop();
+        self.scopes = scopes;
+        self.type_scopes = type_scopes;
+        match result {
+            Ok(out) => Some(out),
+            Err(error) => {
+                eprintln!("theme slot :{slot} widget '{widget}' not inlined: {error}");
+                self.statements.truncate(statements);
+                (self.current_region_id, self.next_region_id) = regions;
+                None
+            }
         }
     }
 
@@ -221,7 +291,9 @@ impl ShaderEmitter {
         match name {
             "itime" => return "itime".to_string(),
             "aspect" => return "aspect".to_string(),
+            "design-px" => return "design_px".to_string(),
             "input-color" => return format!("{}.color_a", self.input_name()),
+            SECOND_COLOR_SYMBOL => return format!("{}.color_d", self.input_name()),
             "hit/hover" => {
                 return if let Some(rid) = self.current_region_id {
                     match self.language {
@@ -257,6 +329,11 @@ impl ShaderEmitter {
         }
         if let Some(uniform_name) = self.uniform_symbols.get(name) {
             return uniform_name.clone();
+        }
+        // Outside a slot it stands in for, a slot material is drawn as its
+        // own widget: its slot colour is the widget's input colour.
+        if name == SLOT_COLOR_SYMBOL {
+            return self.resolve_symbol("input-color");
         }
         // Remap Lisp names to Metal-safe identifiers
         name.replace('-', "_")
@@ -294,16 +371,36 @@ impl ShaderEmitter {
             Expression::List(items) => matches!(
                 items.first(),
                 Some(Expression::Symbol(head))
-                    if matches!(head.as_str(), "=" | "<" | ">" | "<=" | ">=")
+                    if matches!(head.as_str(), "=" | "<" | ">" | "<=" | ">=" | "and" | "or" | "not")
             ),
             _ => false,
         }
     }
 
+    /// `expr` as a bool: a comparison or bool as it is, a number as true
+    /// when nonzero (WGSL converts neither implicitly).
+    fn emit_condition(&mut self, expr: &Expression) -> Result<String, CodegenError> {
+        let value = self.emit_expr(expr)?;
+        Ok(if self.expr_is_bool(expr) { value } else { format!("({value} != 0.0)") })
+    }
+
+    /// `(and a b …)` / `(or a b …)`: every argument as a condition, joined
+    /// by `op`; both shader languages short-circuit.
+    fn emit_logical(&mut self, op: &str, args: &[Expression]) -> Result<String, CodegenError> {
+        if args.is_empty() {
+            return Ok(if op == "&&" { "true" } else { "false" }.to_string());
+        }
+        let conditions = args
+            .iter()
+            .map(|arg| self.emit_condition(arg))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(format!("({})", conditions.join(&format!(" {op} "))))
+    }
+
     fn expr_type(&self, expr: &Expression) -> Option<&'static str> {
         match expr {
             Expression::Keyword(_) => Some("float4"),
-            Expression::Symbol(name) if name == "input-color" => Some("float4"),
+            Expression::Symbol(name) if is_color_symbol(name) => Some("float4"),
             Expression::Symbol(name) => self.resolve_symbol_type(name),
             Expression::List(items) if items.is_empty() => None,
             Expression::List(items) => {
@@ -343,6 +440,9 @@ impl ShaderEmitter {
             Expression::Symbol(name) => Ok(self.resolve_symbol(name)),
 
             Expression::Keyword(name) => {
+                if let Some(spliced) = self.emit_slot_material(name) {
+                    return Ok(spliced);
+                }
                 let color = theme::named_color_in(&self.theme, name)
                     .ok_or_else(|| CodegenError::UnknownThemeColor(name.clone()))?;
                 Ok(format!(
@@ -376,6 +476,14 @@ impl ShaderEmitter {
                     // Comparison operators
                     "=" => self.emit_binary_op("==", args),
                     "<" | ">" | "<=" | ">=" => self.emit_binary_op(head, args),
+
+                    // Logic, over conditions (a number is true when nonzero)
+                    "and" => self.emit_logical("&&", args),
+                    "or" => self.emit_logical("||", args),
+                    "not" => match args {
+                        [arg] => Ok(format!("(!{})", self.emit_condition(arg)?)),
+                        _ => Err(CodegenError::UnsupportedExpression("not takes 1 arg".into())),
+                    },
 
                     // min/max are variadic in Lisp, binary in Metal
                     "min" | "max" => self.emit_variadic_func(head, args),
@@ -1164,19 +1272,15 @@ impl ShaderEmitter {
                 "if needs 3 args".into(),
             ));
         }
-        let cond = self.emit_expr(&args[0])?;
+        let cond = match self.language {
+            ShaderLanguage::Metal => self.emit_expr(&args[0])?,
+            ShaderLanguage::Wgsl => self.emit_condition(&args[0])?,
+        };
         let then = self.emit_expr(&args[1])?;
         let else_ = self.emit_expr(&args[2])?;
         match self.language {
             ShaderLanguage::Metal => Ok(format!("(({}) ? ({}) : ({}))", cond, then, else_)),
-            ShaderLanguage::Wgsl => {
-                let condition = if self.expr_is_bool(&args[0]) {
-                    cond
-                } else {
-                    format!("({cond} != 0.0)")
-                };
-                Ok(format!("select(({}), ({}), ({}))", else_, then, condition))
-            }
+            ShaderLanguage::Wgsl => Ok(format!("select(({}), ({}), ({}))", else_, then, cond)),
         }
     }
 
@@ -1294,8 +1398,18 @@ fn format_float(n: f64) -> String {
 }
 
 fn expr_returns_float4(expr: &Expression) -> bool {
+    returns_float4_with(expr, &mut Vec::new())
+}
+
+/// [`expr_returns_float4`] with `scope` the `let` names in scope, innermost
+/// last, each with whether it is bound to a colour.
+fn returns_float4_with<'a>(expr: &'a Expression, scope: &mut Vec<(&'a str, bool)>) -> bool {
     match expr {
         Expression::Keyword(_) => true,
+        Expression::Symbol(name) => match scope.iter().rev().find(|(bound, _)| bound == name) {
+            Some(&(_, color)) => color,
+            None => is_color_symbol(name),
+        },
         Expression::List(items) if items.is_empty() => false,
         Expression::List(items) => {
             let Some(Expression::Symbol(head)) = items.first() else {
@@ -1303,10 +1417,33 @@ fn expr_returns_float4(expr: &Expression) -> bool {
             };
             match head.as_str() {
                 "vec4" | "rgba" | "sdf/region" | "sdf/fill" | "sdf/paint" | "sdf/stroke" | "sdf/stroke-px" | "sdf/layer" => true,
-                "let" => items.last().is_some_and(expr_returns_float4),
-                "do" => items.last().is_some_and(expr_returns_float4),
-                "if" => items.get(2).is_some_and(expr_returns_float4),
-                "mix" => items.get(1).is_some_and(expr_returns_float4),
+                "let" => {
+                    // Bindings are sequential: each sees the colours before it.
+                    let outer = scope.len();
+                    if let Some(Expression::List(bindings)) = items.get(1) {
+                        for binding in bindings {
+                            if let Expression::List(pair) = binding
+                                && let [Expression::Symbol(name), value] = pair.as_slice()
+                            {
+                                let color = returns_float4_with(value, scope);
+                                scope.push((name, color));
+                            }
+                        }
+                    }
+                    let returns = items.len() > 2
+                        && items.last().is_some_and(|body| returns_float4_with(body, scope));
+                    scope.truncate(outer);
+                    returns
+                }
+                "do" => items.last().is_some_and(|body| returns_float4_with(body, scope)),
+                // As `expr_type`: the then branch or the else, the first
+                // operand or (for `mix`) the second.
+                "if" => items.iter().skip(2).take(2).any(|branch| returns_float4_with(branch, scope)),
+                "mix" => items.iter().skip(1).take(2).any(|operand| returns_float4_with(operand, scope)),
+                // A colour scaled or offset: `(* slot-color (rgba k k k 1))`.
+                "+" | "-" | "*" | "/" => {
+                    items.get(1).is_some_and(|first| returns_float4_with(first, scope))
+                }
                 _ => false,
             }
         }
@@ -1519,10 +1656,13 @@ pub fn builtin_shader_symbols() -> HashSet<String> {
         "value_t".to_string(),
         "itime".to_string(),
         "aspect".to_string(),
+        "design-px".to_string(),
         "hit/hover".to_string(),
         "hit/active".to_string(),
         "hit/region".to_string(),
         "input-color".to_string(),
+        SLOT_COLOR_SYMBOL.to_string(),
+        SECOND_COLOR_SYMBOL.to_string(),
     ])
 }
 
@@ -1594,6 +1734,35 @@ fn compile_sdf_to_metal_with_state_and_theme(
     )
 }
 
+/// `box_mask`: 1, or for a widget painting a rounded box's background
+/// (`box_clip` > 0, the box's normalized corner radius) the box's rounded
+/// shape, with the box shader's own geometry and edge so the two line up.
+/// Computed unconditionally: `fwidth` needs uniform control flow. With
+/// `skip` it is just 1.
+fn emit_box_clip_mask(shader: &mut String, language: ShaderLanguage, skip: bool) {
+    let lines: &[&str] = match (language, skip) {
+        (ShaderLanguage::Metal, true) => &["float box_mask = 1.0;"],
+        (ShaderLanguage::Wgsl, true) => &["let box_mask: f32 = 1.0;"],
+        (ShaderLanguage::Metal, false) => &[
+            "float2 box_p = float2((logical_uv.x - 0.5) * 2.0 * aspect, (logical_uv.y - 0.5) * 2.0);",
+            "float box_r = min(in.box_clip, min(aspect, 1.0));",
+            "float box_d = sdf_rounded_rect(box_p, float2(aspect, 1.0), box_r);",
+            "float box_edge = fwidth(box_d) * 1.2;",
+            "float box_mask = in.box_clip > 0.0 ? smoothstep(box_edge, -box_edge, box_d) : 1.0;",
+        ],
+        (ShaderLanguage::Wgsl, false) => &[
+            "let box_p: vec2<f32> = vec2<f32>((logical_uv.x - 0.5) * 2.0 * aspect, (logical_uv.y - 0.5) * 2.0);",
+            "let box_r: f32 = min(input.box_clip, min(aspect, 1.0));",
+            "let box_d: f32 = sdf_rounded_rect(box_p, vec2<f32>(aspect, 1.0), box_r);",
+            "let box_edge: f32 = fwidth(box_d) * 1.2;",
+            "let box_mask: f32 = select(1.0, smoothstep(box_edge, -box_edge, box_d), input.box_clip > 0.0);",
+        ],
+    };
+    for line in lines {
+        writeln!(shader, "    {line}").unwrap();
+    }
+}
+
 fn compile_sdf_to_metal_with_state_theme_and_options(
     expr: &Expression,
     state_symbols: &[String],
@@ -1643,6 +1812,10 @@ fn compile_sdf_to_metal_with_state_theme_and_options(
     .unwrap();
     writeln!(shader, "    float value_t = in.value_t;").unwrap();
     writeln!(shader, "    float itime = in.itime;").unwrap();
+    // SDF units per design pixel (`sdf_design_px`), for chrome sized like a
+    // box's :corner-radius / :border-width.
+    writeln!(shader, "    float design_px = in.corner_radius;").unwrap();
+    emit_box_clip_mask(&mut shader, ShaderLanguage::Metal, options.skip_box_clip);
 
     if region_count > 0 {
         // Hit region uniforms packed into color_b
@@ -1663,12 +1836,13 @@ fn compile_sdf_to_metal_with_state_theme_and_options(
         )
         .unwrap();
         writeln!(shader, "    result.rgb *= style_brightness;").unwrap();
+        writeln!(shader, "    result.a *= box_mask;").unwrap();
         writeln!(shader, "    if (result.a < 0.001) discard_fragment();").unwrap();
         writeln!(shader, "    return result;").unwrap();
     } else {
         writeln!(shader, "    float d = {};", result_expr).unwrap();
         writeln!(shader, "    float aa = max(fwidth(d), 0.001);").unwrap();
-        writeln!(shader, "    float mask = smoothstep(aa, -aa, d);").unwrap();
+        writeln!(shader, "    float mask = smoothstep(aa, -aa, d) * box_mask;").unwrap();
         writeln!(shader, "    if (mask < 0.001) discard_fragment();").unwrap();
         writeln!(shader, "    float4 fill_color = in.color_a;").unwrap();
         writeln!(
@@ -1788,6 +1962,8 @@ fn compile_sdf_to_wgsl_with_state_theme_and_options(
     .unwrap();
     writeln!(shader, "    let value_t: f32 = input.value_t;").unwrap();
     writeln!(shader, "    let itime: f32 = input.itime;").unwrap();
+    writeln!(shader, "    let design_px: f32 = input.corner_radius;").unwrap();
+    emit_box_clip_mask(&mut shader, ShaderLanguage::Wgsl, options.skip_box_clip);
 
     if region_count > 0 {
         writeln!(shader, "    let hit_region: f32 = input.color_b.x;").unwrap();
@@ -1812,7 +1988,7 @@ fn compile_sdf_to_wgsl_with_state_theme_and_options(
         .unwrap();
         writeln!(
             shader,
-            "    result = vec4<f32>(result.rgb * style_brightness, result.a);"
+            "    result = vec4<f32>(result.rgb * style_brightness, result.a * box_mask);"
         )
         .unwrap();
         writeln!(shader, "    if (result.a < 0.001) {{ discard; }}").unwrap();
@@ -1820,7 +1996,7 @@ fn compile_sdf_to_wgsl_with_state_theme_and_options(
     } else {
         writeln!(shader, "    let d: f32 = {};", result_expr).unwrap();
         writeln!(shader, "    let aa: f32 = max(fwidth(d), 0.001);").unwrap();
-        writeln!(shader, "    let mask: f32 = smoothstep(aa, -aa, d);").unwrap();
+        writeln!(shader, "    let mask: f32 = smoothstep(aa, -aa, d) * box_mask;").unwrap();
         writeln!(shader, "    if (mask < 0.001) {{ discard; }}").unwrap();
         writeln!(shader, "    let fill_color: vec4<f32> = input.color_a;").unwrap();
         writeln!(
@@ -2325,6 +2501,23 @@ mod tests {
     }
 
     #[test]
+    fn and_or_not_join_conditions_a_number_counting_when_nonzero() {
+        let (_, result) = codegen_expr("(and (> x 0) value_t)");
+        assert_eq!(result, "((x > 0.0) && (value_t != 0.0))");
+        let (_, result) = codegen_expr("(or (< x 0) (> y 0) (not itime))");
+        assert_eq!(result, "((x < 0.0) || (y > 0.0) || (!(itime != 0.0)))");
+
+        // Valid WGSL in a condition, a let and a select, as numbers and bools.
+        let output = compile_sdf_to_wgsl(&parse_one_expr(
+            "(let ((on (and (> x 0) value_t))
+                   (edge (or on (not (< y 0.5)))))
+               (if (and edge (or on itime)) (rgba 1 1 1 1) (rgba 0 0 0 0)))",
+        ))
+        .unwrap();
+        assert_valid_wgsl(&output.shader_source);
+    }
+
+    #[test]
     fn wgsl_distance_shader_is_valid() {
         let output = compile_sdf_to_wgsl(&parse_one_expr(
             "(let ((wrapped (mod (+ value_t 1) 1))
@@ -2473,8 +2666,10 @@ mod tests {
             assert_valid_wgsl(&wgsl.shader_source);
             assert_eq!(metal.region_count, 0);
             assert_eq!(wgsl.region_count, 0);
-            assert!(!metal.shader_source.contains("smoothstep"));
-            assert!(!wgsl.shader_source.contains("smoothstep"));
+            // The stroke itself is pixel-exact; only the box clip smooths.
+            for shader in [&metal.shader_source, &wgsl.shader_source] {
+                assert!(shader.lines().filter(|line| !line.contains("box_mask")).all(|line| !line.contains("smoothstep")));
+            }
         }
     }
 
@@ -2549,6 +2744,40 @@ mod tests {
         assert!(stmts.iter().any(|s| s.contains("smoothstep")));
         assert!(stmts.iter().any(|s| s.contains("float4")));
         assert!(result.starts_with("_v"));
+    }
+
+    #[test]
+    fn a_slot_widget_reads_its_own_coordinates_inside_an_outer_let() {
+        let mut runtime = crate::runtime::Runtime::new();
+        runtime
+            .eval_str(
+                "(defwidget splice-stripes :width 2 :height 2
+                   :shader (rgba (* y 0.777) 0.0 0.0 1.0))",
+            )
+            .unwrap();
+        theme::set_slot_widget_overrides([(
+            "widget-knob-filled".to_string(),
+            "splice-stripes".to_string(),
+        )]);
+        let result = compile_sdf_expr_with_theme(
+            &parse_one_expr(
+                "(let ((y (- y 0.5)))
+                   (mix (rgba 0 0 0 0) :widget-knob-filled 1.0))",
+            ),
+            theme::current(),
+        );
+        theme::set_slot_widget_overrides(std::iter::empty());
+        let (stmts, out) = result.unwrap();
+        let all = format!("{}\n{out}", stmts.join("\n"));
+        let line = all
+            .lines()
+            .find(|line| line.contains("0.777"))
+            .unwrap_or_else(|| panic!("slot widget not inlined:\n{all}"));
+        assert!(
+            line.contains("(y * 0.777)"),
+            "the splice reads the widget's y, not the outer rebinding: {line}"
+        );
+        assert!(!line.contains("_v0"), "the outer `let` leaked into the splice: {line}");
     }
 
     #[test]

@@ -87,6 +87,26 @@ impl WidgetDefinition for GrooveLaneWidget {
         &["groove-lane"]
     }
 
+    fn doc(&self) -> &'static str {
+        "One row of a rack groove (swing/feel) display: a bar of timing slots on a centre \
+line, read-only. :cells is a list of signed slot offsets in slots (positive = \
+late, drawn up in :late-color; negative = early, drawn down in :early-color; \
+0.4 fills half the height); :measured is a parallel list of booleans and dims \
+the slots that were not measured. When :cells is empty, :hits (per-slot \
+booleans) puts a dot (:dot-color, :dot-radius px, default 2.5) on each hit, and \
+:slots gives the slot count of a blank bar. Faint ticks (:line-color) mark each \
+quarter of the bar; :background-color is optional. No callbacks. Default height \
+is 1 cell. Example: (groove-lane :flex 1 :height 1 :cells offsets :measured \
+measured :hits hits :slots 16)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "cells", "measured", "hits", "slots", "late-color", "early-color", "line-color",
+            "dot-color", "dot-radius", "background-color", "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

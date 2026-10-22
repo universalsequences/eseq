@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, GpuPrimitive, GpuProportionalTextPrimitive, MouseEventOutcome,
-    PointerEvent, WidgetDefinition, WidgetEvent, get_bool_prop, get_f32_prop, label::label_text_row, ndc_bounds,
+    PointerEvent, WidgetDefinition, WidgetEvent, get_bool_prop, get_f32_prop, has_color_prop, label::label_text_row, ndc_bounds,
     plock_active, plock_color, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -18,6 +18,116 @@ use crate::vm::Value;
 pub struct ButtonWidget;
 
 pub static BUTTON_WIDGET: ButtonWidget = ButtonWidget;
+
+/// The `defwidget`s that paint a button's and a number picker's bezel, and
+/// an active tab button's, when they are defined (content/ui/widgets.lisp).
+pub const BEZEL_FACE_WIDGET: &str = "bezel-face";
+pub const BEZEL_TAB_FACE_WIDGET: &str = "bezel-tab-face";
+
+/// The bezel faces' `:state`, in the order [`bezel_primitive`] passes them.
+const BEZEL_FACE_STATES: [&str; 12] = [
+    "radius", "fill-slot", "border-slot", "press",
+    "hl-r", "hl-g", "hl-b", "hl-a", "sh-r", "sh-g", "sh-b", "sh-a",
+];
+
+/// The theme slot a bezel fills from. The discriminant is the face's
+/// `fill-slot`, in the order of widgets.lisp's slot chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BezelFill {
+    Primary = 1,
+    Secondary,
+    Ghost,
+    Danger,
+    Dropdown,
+}
+
+impl BezelFill {
+    pub(super) fn slot(self) -> &'static str {
+        match self {
+            BezelFill::Primary => "button-primary-bg",
+            BezelFill::Secondary => "button-secondary-bg",
+            BezelFill::Ghost => "button-ghost-bg",
+            BezelFill::Danger => "button-danger-bg",
+            BezelFill::Dropdown => "dropdown-bg",
+        }
+    }
+}
+
+/// How a control's bezel is painted.
+pub(super) struct BezelPaint {
+    /// Corner radius over the half-height.
+    pub radius: f32,
+    pub tab: bool,
+    /// The theme slot the fill comes from when the control has no fill of
+    /// its own.
+    pub fill_slot: Option<BezelFill>,
+    /// Whether the border is the theme's `:button-border`.
+    pub border_slot: bool,
+    /// [`press_shift`] while a button is held.
+    pub press: f32,
+    pub fill: Color,
+    pub border: Color,
+    pub highlight: Color,
+    pub shadow: Color,
+}
+
+/// A control's bezel over `rect`: its face (content/ui/widgets.lisp), or
+/// the built-in `native` shader when that is not defined. The face fills
+/// from the slot only when a package paints it with a widget; otherwise
+/// with `fill`, which already has any press in it.
+pub(super) fn bezel_primitive(
+    paint: &BezelPaint,
+    props: &HashMap<String, Value>,
+    rect: Rect,
+    viewport: super::WidgetViewport,
+    native: &str,
+) -> GpuPrimitive {
+    let fill_slot = paint
+        .fill_slot
+        .filter(|fill| super::sdf_widget::slot_paints_with_widget(fill.slot()))
+        .map_or(0.0, |fill| fill as u8 as f32);
+    let flag = |on: bool| if on { 1.0 } else { 0.0 };
+    let (hl, sh) = (paint.highlight, paint.shadow);
+    let face = super::sdf_widget::face_primitive(
+        if paint.tab { BEZEL_TAB_FACE_WIDGET } else { BEZEL_FACE_WIDGET },
+        props,
+        &BEZEL_FACE_STATES,
+        &[
+            paint.radius, fill_slot, flag(paint.border_slot), paint.press,
+            hl.r, hl.g, hl.b, hl.a, sh.r, sh.g, sh.b, sh.a,
+        ],
+        rect,
+        viewport,
+        0.0,
+        [paint.fill.to_rgba(), paint.border.to_rgba()],
+    );
+    super::sdf_widget::as_background(face.unwrap_or_else(|| {
+        let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
+        let px_w = rect.width * viewport.cell_w;
+        let px_h = rect.height * viewport.cell_h;
+        GpuPrimitive::WidgetInstance {
+            widget_type: native.to_string(),
+            instance: super::WidgetInstance {
+                ndc_min,
+                ndc_max,
+                value_t: 0.0,
+                orientation: 0.0,
+                itime: viewport.time_seconds,
+                uniform_a: [flag(paint.tab), 0.0, 0.0, 0.0],
+                uniform_b: [0.0; 4],
+                uniform_c: [0.0; 4],
+                uniform_d: [0.0; 4],
+                color_a: paint.fill.to_rgba(),
+                color_b: paint.border.to_rgba(),
+                color_c: hl.to_rgba(),
+                color_d: sh.to_rgba(),
+                corner_radius: paint.radius,
+                pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+            },
+            is_background: true,
+        }
+    }))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ButtonVariant {
@@ -80,7 +190,7 @@ fn button_is_active(props: &HashMap<String, Value>) -> bool {
     }
 }
 
-fn button_is_active_tab(props: &HashMap<String, Value>) -> bool {
+pub(super) fn button_is_active_tab(props: &HashMap<String, Value>) -> bool {
     matches!(
         props.get("shape"),
         Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "tab"
@@ -128,6 +238,27 @@ fn is_filled(props: &HashMap<String, Value>) -> bool {
     matches!(variant(props), ButtonVariant::Primary | ButtonVariant::Danger)
 }
 
+/// The theme slot a button's fill comes from, unless it has its own (as
+/// [`variant_bg`] decides).
+pub(super) fn button_fill_slot(props: &HashMap<String, Value>) -> Option<BezelFill> {
+    if (button_is_active(props) && has_color_prop(props, "active-background-color"))
+        || has_color_prop(props, "background-color")
+    {
+        return None;
+    }
+    Some(match variant(props) {
+        ButtonVariant::Primary => BezelFill::Primary,
+        ButtonVariant::Secondary => BezelFill::Secondary,
+        ButtonVariant::Ghost => BezelFill::Ghost,
+        ButtonVariant::Danger => BezelFill::Danger,
+    })
+}
+
+/// Whether [`button_border`] is the theme's `:button-border`.
+pub(super) fn button_border_is_slot(props: &HashMap<String, Value>) -> bool {
+    !plock_active(props) && !is_filled(props) && !has_color_prop(props, "border-color")
+}
+
 fn button_border(props: &HashMap<String, Value>) -> Color {
     if plock_active(props) {
         return plock_color(props);
@@ -162,22 +293,33 @@ fn pressed_background(bg: Color, variant: ButtonVariant, amount: f32) -> Color {
     if amount <= 0.0 {
         return bg;
     }
-    let base = if bg.a < 0.05 {
+    let base = press_base(bg);
+    let shift = press_shift(base, variant, amount);
+    let mut pressed = base.mix(if shift > 0.0 { Color::WHITE } else { Color::BLACK }, shift.abs());
+    pressed.a = base.a + (base.a.max(0.6) - base.a) * amount;
+    pressed
+}
+
+/// The fill a press moves from: `bg`, or a ghost backing for a transparent
+/// one so the press still shows.
+fn press_base(bg: Color) -> Color {
+    if bg.a < 0.05 {
         let ghost = theme::BUTTON_GHOST_BG();
         Color::rgba(ghost.r, ghost.g, ghost.b, bg.a)
     } else {
         bg
-    };
-    let target = match variant {
-        ButtonVariant::Primary | ButtonVariant::Danger => base.mix(Color::BLACK, 0.18),
-        ButtonVariant::Secondary | ButtonVariant::Ghost if base.luma() < 0.5 => {
-            base.mix(Color::WHITE, 0.12)
-        }
-        ButtonVariant::Secondary | ButtonVariant::Ghost => base.mix(Color::BLACK, 0.10),
-    };
-    let mut pressed = base.mix(target, amount);
-    pressed.a = base.a + (base.a.max(0.6) - base.a) * amount;
-    pressed
+    }
+}
+
+/// How far a button held `amount` (0..1) moves its fill `bg` (a
+/// [`press_base`]) toward white (+) or black (-).
+fn press_shift(bg: Color, variant: ButtonVariant, amount: f32) -> f32 {
+    let amount = amount.clamp(0.0, 1.0);
+    match variant {
+        ButtonVariant::Primary | ButtonVariant::Danger => -0.18 * amount,
+        ButtonVariant::Secondary | ButtonVariant::Ghost if bg.luma() < 0.5 => 0.12 * amount,
+        ButtonVariant::Secondary | ButtonVariant::Ghost => -0.10 * amount,
+    }
 }
 
 fn pressed_rect(rect: Rect, amount: f32) -> Rect {
@@ -817,6 +959,27 @@ impl WidgetDefinition for ButtonWidget {
         ]
     }
 
+    fn doc(&self) -> &'static str {
+        "A push button with an optional icon. The label is the first argument (stored \
+as :text). :on-click receives one pointer event map (e.phase \"click\", e.shift, \
+e.cmd, ...); Enter or Space fire it too when the button is focused, reporting the \
+top-left position. For a momentary button give :on-press and :on-release instead: \
+each receives a pointer event map (phase \"press\" / \"release\", modifiers false), \
+the release arrives even when the pointer leaves, and a button with :on-press no \
+longer fires :on-click from the mouse. :disabled true ignores input. :variant picks \
+the look: :secondary (default grey), :primary (filled accent, one per view), \
+:ghost (no fill) or :danger. :active true shows the on state of a toggle-style \
+button (with :active-color / :active-background-color); :shape :tab draws an \
+active tab. :icon names a glyph drawn left of the text (:plus, :folder, :piano, \
+:sliders, :waveform, :sine, :check, :heart, :pencil, :link, :save, ...); \
+:icon-color, or :track-r/-g/-b, fills it. Colours: :color, :background-color, \
+:border-color, :muted-color (while :muted); :corner-radius in pixels (default 9), \
+:font-size, :padding per side (default 1.9 cells), :h-align (default center). \
+`badge` looks the same but ignores clicks and keys (a tag or name chip); \
+`button-icon` is the internal icon pass. Example: \
+(button \"Save\" :variant :primary :icon :save :on-click (lambda (e) (save-preset)))"
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "text",
@@ -997,7 +1160,7 @@ impl WidgetDefinition for ButtonWidget {
         // position but no modifier state.
         let (callback_name, phase, modifiers, col, row) = match event {
             WidgetEvent::Activate(modifiers) => {
-                ("on-click", "click", modifiers, node.rect.col, node.rect.row)
+                ("on-click", "click", modifiers, node.rect.col, super::scroll::event_viewport_row(node.rect.row))
             }
             WidgetEvent::PointerDown(pe) => {
                 ("on-press", "press", KeyModifiers::empty(), pe.local_col, pe.local_row)
@@ -1050,43 +1213,29 @@ impl WidgetDefinition for ButtonWidget {
         } else {
             0.0
         };
-        let bg = pressed_background(variant_bg(&node.props), variant(&node.props), press);
+        let kind = variant(&node.props);
+        let idle_bg = variant_bg(&node.props);
+        let bg = pressed_background(idle_bg, kind, press);
         if bg.a > 0.0 {
             let surface_rect = pressed_rect(node.rect, press);
-            let (ndc_min, ndc_max) = ndc_bounds(surface_rect, viewport);
-            let px_w = surface_rect.width * viewport.cell_w;
-            let px_h = surface_rect.height * viewport.cell_h;
             let corner_radius_px = get_f32_prop(&node.props, "corner-radius", 9.0).max(0.0);
-            prims.push(GpuPrimitive::WidgetInstance {
-                widget_type: "button".to_string(),
-                instance: super::WidgetInstance {
-                    ndc_min,
-                    ndc_max,
-                    value_t: 0.0,
-                    orientation: 0.0,
-                    itime: viewport.time_seconds,
-                    uniform_a: [
-                        if button_is_active_tab(&node.props) {
-                            1.0
-                        } else {
-                            0.0
-                        },
-                        0.0,
-                        0.0,
-                        0.0,
-                    ],
-                    uniform_b: [0.0; 4],
-                    uniform_c: [0.0; 4],
-                    uniform_d: [0.0; 4],
-                    color_a: bg.to_rgba(),
-                    color_b: button_border(&node.props).to_rgba(),
-                    color_c: button_highlight(&node.props).to_rgba(),
-                    color_d: button_shadow(&node.props).to_rgba(),
-                    corner_radius: normalized_corner_radius(surface_rect, viewport, corner_radius_px),
-                    pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+            prims.push(bezel_primitive(
+                &BezelPaint {
+                    radius: normalized_corner_radius(surface_rect, viewport, corner_radius_px),
+                    tab: button_is_active_tab(&node.props),
+                    fill_slot: button_fill_slot(&node.props),
+                    border_slot: button_border_is_slot(&node.props),
+                    press: press_shift(press_base(idle_bg), kind, press),
+                    fill: bg,
+                    border: button_border(&node.props),
+                    highlight: button_highlight(&node.props),
+                    shadow: button_shadow(&node.props),
                 },
-                is_background: true,
-            });
+                &node.props,
+                surface_rect,
+                viewport,
+                "button",
+            ));
         }
 
         if let Some(icon) = icon_value(&node.props) {
@@ -1156,7 +1305,7 @@ impl WidgetDefinition for ButtonWidget {
                     scale: 1.0,
                     fg: variant_fg(&node.props),
                     bg,
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }
@@ -1170,6 +1319,64 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    #[test]
+    fn a_bezel_fills_from_its_slot_only_while_a_package_paints_it() {
+        use super::super::sdf_widget::{SdfWidgetDef, register_sdf_widget};
+        let define = |name: &str, states: Vec<String>| {
+            register_sdf_widget(SdfWidgetDef {
+                name: name.to_string(),
+                shader_source: String::new(),
+                sdf_expr: crate::parser::Expression::Symbol("shape".to_string()),
+                state_uniforms: states,
+                state: Default::default(),
+                region_count: 0,
+                width: 4.0,
+                height: 1.0,
+                paint_margin: 0.0,
+                animates: false,
+            })
+        };
+        define(BEZEL_FACE_WIDGET, BEZEL_FACE_STATES.map(String::from).to_vec());
+        define("test-brushed", Vec::new());
+        struct ClearSlots;
+        impl Drop for ClearSlots {
+            fn drop(&mut self) {
+                theme::set_slot_widget_overrides(std::iter::empty());
+            }
+        }
+        let _clear = ClearSlots;
+        let paint = BezelPaint {
+            radius: 0.5,
+            tab: false,
+            fill_slot: Some(BezelFill::Secondary),
+            border_slot: true,
+            press: 0.1,
+            fill: Color::rgba(0.2, 0.2, 0.2, 1.0),
+            border: Color::rgba(0.4, 0.4, 0.4, 1.0),
+            highlight: Color::rgba(1.0, 1.0, 1.0, 0.1),
+            shadow: Color::rgba(0.0, 0.0, 0.0, 0.3),
+        };
+        let rect = Rect { row: 0.0, col: 0.0, width: 8.0, height: 2.0 };
+        let fill_slot = || match bezel_primitive(&paint, &HashMap::new(), rect, test_viewport(), "button") {
+            GpuPrimitive::WidgetInstance { widget_type, instance, is_background } => {
+                assert_eq!(widget_type, BEZEL_FACE_WIDGET);
+                assert!(is_background, "a bezel draws behind its text");
+                instance.uniform_a[1]
+            }
+            _ => panic!("expected the bezel face"),
+        };
+        let paint_slot = |widget: &str| {
+            theme::set_slot_widget_overrides([("button-secondary-bg".to_string(), widget.to_string())])
+        };
+        // The theme's colour: the control's own fill, press and all.
+        assert_eq!(fill_slot(), 0.0);
+        // A slot naming no widget is still the theme's colour.
+        paint_slot("undefined-widget");
+        assert_eq!(fill_slot(), 0.0);
+        paint_slot("test-brushed");
+        assert_eq!(fill_slot(), 2.0, "secondary is the second fill slot");
+    }
 
     fn color_value(r: f64, g: f64, b: f64, a: f64) -> Value {
         Value::List(

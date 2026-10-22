@@ -63,7 +63,7 @@
 
 ;; ── Knobs ──
 
-(def parameter-knob (fx label-text p decimals)
+(def parameter-knob (fx label-text p decimals height)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "reverb-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "reverb-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
@@ -80,7 +80,6 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :track-color :mixer-strip-selected-bg
         :text-color :dim
         :label-color :dim
         :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
@@ -88,10 +87,10 @@
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-        :width 4.25 :height 2.48 :knob-size 1.82
+        :width 5.25 :height height :knob-size 3.82
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
-(def percent-knob (fx label-text p)
+(def percent-knob (fx label-text p height)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "reverb-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "reverb-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
@@ -113,16 +112,15 @@
         :label-color :dim
         :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
-        :track-color :mixer-strip-selected-bg
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-        :width 4.25 :height 2.48 :knob-size 1.82
+        :width 5.25 :height height :knob-size 3.82
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
 ;; Placeholder the size of a knob, so mode-conditional rows keep their shape.
-(def knob-gap ()
-  (box :width 4.25 :height 2.48))
+(def knob-gap (height)
+  (box :width 5.25 :height height))
 
 ;; Value field in the digidrift lego style: dim title over a left-aligned
 ;; number picker (same metrics as `ui-lego-num`, bound to a builtin fx param).
@@ -214,7 +212,7 @@
     :background-color :fx-inner-panel-bg :corner-radius 12
     (v-stack :gap 0.22 :align :start
       (h-stack :gap 0 (box :width 0.5)
-        (label "Input Filter" :font-size 10.0 :width 22.2 :color :dim :bg :transparent :v-align :center)
+        (label "Input Filter" :bold true :font-size 10.0 :width 22.2 :color :dim :bg :transparent :v-align :center)
         )
         (box :width 22.2 :height (curve-h)
           (subtree :key (builtin-fx-param-subtree-key fx locut-p "curve")
@@ -229,8 +227,8 @@
               :grid-color (curve-grid) :stroke-color (accent) :stroke-width 4.5 :point-color (curve-point)
               :on-action |event| (reverb-input-curve-action fx locut-p hicut-p event))))
         (h-stack :gap 0.6 :align :start
-          (num-field fx "lo cut" locut-p 0 "Hz" 7.0)
-          (num-field fx "hi cut" hicut-p 0 "Hz" 7.0)))))
+          (num-field fx "low cut" locut-p 0 "Hz" 7.0)
+          (num-field fx "high cut" hicut-p 0 "Hz" 7.0)))))
 
 (def mode-dropdown (fx p)
   (subtree :key (builtin-fx-param-subtree-key fx p "mode")
@@ -246,7 +244,7 @@
       :border-color :mixer-strip-bg
       :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
       :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-      :width 6.4 :height 1.05 :font-size 9.5)))
+      :width 7.0 :height 1.05 :font-size 9.5)))
 
 ;; Bottom row: mode dropdown plus every knob, Ableton style. Galaxy exposes its
 ;; own feedback/tone knobs; plate and hall share the Dattorro/224 decay +
@@ -254,7 +252,7 @@
 (def mode-row (fx mode-p galaxy? bright-p replace-p decay-p diffusion-p size-p predelay-p depth-p)
   (box :debug-name "reverb-mode-section"
     :width 54.3 :height 3.05 :padding 0.28
-    :background-color :mixer-control-bg :corner-radius 12
+    :background-color :fx-inner-panel-bg :corner-radius 12
     (h-stack :gap 0.3 :align :center
       (box :width 1)
       (v-stack :gap 0.15 :align :center
@@ -262,25 +260,25 @@
         (mode-dropdown fx mode-p))
       (box :width 0.4)
       (if galaxy?
-        (percent-knob fx "bright" bright-p)
-        (percent-knob fx "decay" decay-p))
+        (percent-knob fx "bright" bright-p 5.5)
+        (percent-knob fx "decay" decay-p 5.5))
       (if galaxy?
-        (percent-knob fx "replace" replace-p)
-        (percent-knob fx "diffuse" diffusion-p))
-      (percent-knob fx "size" size-p)
-      (parameter-knob fx "pre ms" predelay-p 1)
-      (if galaxy? (knob-gap) (percent-knob fx "mod depth" depth-p)))))
+        (percent-knob fx "replace" replace-p 5.5)
+        (percent-knob fx "diffuse" diffusion-p 5.5))
+      (percent-knob fx "size" size-p 5.5)
+      (parameter-knob fx "pre ms" predelay-p 1 5.5)
+      (if galaxy? (knob-gap 5.5) (percent-knob fx "mod depth" depth-p 5.5)))))
 
 ;; Right-hand column, spanning both rows: the knobs you reach for most.
 (def output-box (fx gain-p width-p mix-p)
   (box :debug-name "reverb-output-section"
-       :width 5.4 :height (+ (section-h) 0.15 3.05) :padding 0.50
+       :width 6.4 :height (+ (section-h) 0.15 3.05) :padding 0.50
        :background-color :fx-inner-panel-bg :corner-radius 12
     (v-stack :gap 0.3 :align :center
-      (label "Output" :font-size 10.0 :width 4.4 :color :dim :bg :transparent :v-align :center)
-      (parameter-knob fx "wet db" gain-p 1)
-      (percent-knob fx "stereo" width-p)
-      (percent-knob fx "dry/wet" mix-p))))
+      (label "Output" :bold true :font-size 10.0 :width 4.4 :color :dim :bg :transparent :v-align :center)
+      (parameter-knob fx "wet" gain-p 1 2.5)
+      (percent-knob fx "stereo" width-p 2.5)
+      (percent-knob fx "dry/wet" mix-p 2.5))))
 
 (def network-box (fx lo-freq-p lo-gain-p hi-freq-p hi-gain-p)
   (box :debug-name "reverb-network-section"
@@ -288,7 +286,7 @@
     :background-color :fx-inner-panel-bg :corner-radius 12
     (v-stack :gap 0.22 :align :start
       (h-stack :gap 0 (box :width 0.5)
-        (label "Diffusion Network" :font-size 10.0 :width 22.2 :color :dim :bg :transparent :v-align :center)
+        (label "Diffusion Network" :bold true :font-size 10.0 :width 22.2 :color :dim :bg :transparent :v-align :center)
         )
         (box :width 22.2 :height (curve-h)
           (subtree :key (builtin-fx-param-subtree-key fx lo-freq-p "curve")
@@ -313,7 +311,7 @@
        :width 7.6 :height (section-h) :padding 0.50
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.4 :align :start
-      (label "Chorus" :font-size 10.0 :width 6.8 :color :dim :bg :transparent :v-align :center)
+      (label "Chorus" :bold true :font-size 10.0 :width 6.8 :color :dim :bg :transparent :v-align :center)
       (box :height 0.3)
       (num-field fx "amount" chorus-p 2 "" 6.6)
       (num-field fx "rate" rate-p 2 "Hz" 6.6))))

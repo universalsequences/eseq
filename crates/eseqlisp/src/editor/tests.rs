@@ -244,6 +244,45 @@ fn focused_text_input_survives_on_change_rerender() {
 }
 
 #[test]
+fn a_widget_on_hover_hears_the_pointer_enter_and_leave() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def hovered (state ""))
+            (effect
+              (v-stack :width 24 :height 6
+                (label "one" :key "one" :width 10 :on-hover |over| (set! hovered (if over "one" "")))
+                (label "two" :key "two" :width 10 :on-hover |over| (if over (set! hovered "two") nil))))
+            "#,
+        )
+        .expect("build labels");
+    editor.refresh_runtime_side_effects();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(30, 8);
+    let hover = |editor: &mut Editor, key: Option<&str>| {
+        let layout = editor.widget_layout().expect("layout");
+        let (col, row) = match key {
+            Some(key) => {
+                let node = super::find_layout_node_by_stable_key(layout.as_ref(), key).expect("label");
+                (node.rect.col + 1.0, node.rect.row + 0.5)
+            }
+            None => (28.0, 7.5),
+        };
+        editor.handle_mouse_precise(mouse_event(MouseEventKind::Moved, col as u16, row as u16), 0, 0, 30, 8, col, row);
+        editor.runtime_mut().eval_str("hovered").unwrap()
+    };
+    assert_eq!(hover(&mut editor, Some("one")), Some(Value::String("one".into())));
+    assert_eq!(hover(&mut editor, Some("one")), Some(Value::String("one".into())), "moving within it is no new enter");
+    // Leaving one (it clears) comes before entering two (it sets).
+    assert_eq!(hover(&mut editor, Some("two")), Some(Value::String("two".into())));
+    assert_eq!(hover(&mut editor, None), Some(Value::String("two".into())), "two ignores its leave");
+    assert_eq!(hover(&mut editor, Some("one")), Some(Value::String("one".into())));
+    assert_eq!(hover(&mut editor, None), Some(Value::String("".into())));
+}
+
+#[test]
 fn remapped_focus_after_relayout_does_not_reselect_all() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor
@@ -8985,6 +9024,30 @@ fn hidden_ui_only_status_bar_reappears_in_inspect_mode() {
 }
 
 #[test]
+fn describe_shows_a_widgets_doc_and_props() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    let text = editor.describe_function_text("matrix");
+    assert!(text.contains("An editable grid of numbers"), "{text}");
+    assert!(text.contains("Props: :value :rows :cols"), "{text}");
+    assert!(text.contains("Every widget also takes :key"), "{text}");
+}
+
+/// The agent learns widgets from `describe`: a widget without a doc or a
+/// props list is one it will rebuild from boxes.
+#[test]
+fn every_builtin_widget_documents_itself_and_its_props() {
+    let undocumented: Vec<&str> = crate::widgets::BUILTIN_WIDGET_NAMES
+        .iter()
+        .copied()
+        .filter(|name| {
+            crate::widget_render::widget_definition(name)
+                .is_some_and(|definition| definition.doc().is_empty() || definition.completion_props().is_empty())
+        })
+        .collect();
+    assert!(undocumented.is_empty(), "widgets missing a doc or completion_props: {undocumented:?}");
+}
+
+#[test]
 fn explicit_source_navigation_reuses_the_inspect_source_pane() {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -9769,6 +9832,212 @@ fn eval_tabbed_test_layout(editor: &mut Editor) {
         )
         .unwrap();
     editor.refresh_runtime_side_effects();
+}
+
+#[test]
+fn side_pane_survives_a_layout_change_and_keeps_its_width() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*main*", "");
+    editor.open_scratch_buffer("*fx*", "");
+    editor.open_scratch_buffer("*pane*", "");
+    let eval = |editor: &mut Editor, source: &str| {
+        editor.runtime_mut().eval_str(source).unwrap();
+        editor.refresh_runtime_side_effects();
+    };
+    let pane_split = |editor: &Editor| match &editor.tile_root.content {
+        crate::tile::TileNode::Split(split) => match &*split.b {
+            crate::tile::TileNode::Leaf(leaf) if editor.buffers[leaf.buffer_idx].name == "*pane*" => {
+                Some((split.id, split.ratio))
+            }
+            _ => None,
+        },
+        crate::tile::TileNode::Leaf(_) => None,
+    };
+
+    eval(&mut editor, r#"(set-layout (list :rows 0.6 "*main*" 0.4 "*fx*"))"#);
+    eval(&mut editor, r#"(select-window-for "*fx*")"#);
+    eval(&mut editor, r#"(show-in-side-pane "*pane*")"#);
+    let (split_id, _) = pane_split(&editor).expect("the pane opens on the right");
+    editor.tile_root.content.find_split_mut(split_id).unwrap().ratio = 0.6;
+
+    // From the pane, set-window-buffer shows the buffer in the tile used last.
+    editor.open_scratch_buffer("*other*", "");
+    eval(&mut editor, r#"(show-in-side-pane "*pane*")"#);
+    eval(&mut editor, r#"(set-window-buffer "*other*")"#);
+    let shown: Vec<&str> = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .map(|id| editor.buffers[editor.tile_root.find_leaf(id).unwrap().buffer_idx].name.as_str())
+        .collect();
+    assert_eq!(shown, ["*main*", "*other*", "*pane*"]);
+
+    // An agent-pane button that shows a buffer and re-lays the project out:
+    // the buffer lands in the project's tile and the pane stays, as wide.
+    eval(
+        &mut editor,
+        r#"(do (set-window-buffer "*fx*") (set-layout (list :rows 0.5 "*fx*" 0.5 "*main*")))"#,
+    );
+    let (_, ratio) = pane_split(&editor).expect("the pane survives the new layout");
+    assert!((ratio - 0.6).abs() < 1e-6, "pane width kept, got {ratio}");
+    assert_eq!(editor.tile_root.leaf_ids().len(), 3);
+
+    // Closed, it stays closed.
+    eval(&mut editor, r#"(close-window-for "*pane*")"#);
+    eval(&mut editor, r#"(set-layout (list :rows 0.6 "*main*" 0.4 "*fx*"))"#);
+    assert!(pane_split(&editor).is_none());
+    assert_eq!(editor.tile_root.leaf_ids().len(), 2);
+}
+
+#[test]
+fn side_pane_takes_the_layouts_tile_chrome() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*bar*", "");
+    editor.open_scratch_buffer("*main*", "");
+    editor.open_scratch_buffer("*pane*", "");
+    let eval = |editor: &mut Editor, source: &str| {
+        editor.runtime_mut().eval_str(source).unwrap();
+        editor.refresh_runtime_side_effects();
+    };
+    let pane = |editor: &Editor| match &editor.tile_root.content {
+        crate::tile::TileNode::Split(split) => match &*split.b {
+            crate::tile::TileNode::Leaf(leaf) => (
+                split.gap,
+                leaf.show_status,
+                leaf.border_radius_px,
+                leaf.border_width_px,
+                leaf.background_color_name.clone(),
+            ),
+            _ => panic!("the pane is a leaf"),
+        },
+        _ => panic!("the pane opens on the right"),
+    };
+    let layout = |radius: u32, gap: f32| {
+        format!(
+            r#"(set-layout (list :rows :gap 1 :outer-gap {gap}
+                 0.1 (list :buf "*bar*" :hide-status true :borderless true)
+                 0.9 (list :buf "*main*" :hide-status true :border-radius {radius}
+                       :border-width 3 :background-color :buffer-bg)))"#
+        )
+    };
+
+    // Beside a borderless bar and a rounded tile, the pane takes the rounded
+    // tile's chrome and the layout's tile gap, with no status line.
+    eval(&mut editor, &layout(16, 1.5));
+    eval(&mut editor, r#"(select-window-for "*bar*")"#);
+    eval(&mut editor, r#"(show-in-side-pane "*pane*")"#);
+    assert_eq!(pane(&editor), (1.5, false, 16.0, 3.0, Some("buffer-bg".to_string())));
+
+    // A new layout restyles the carried pane and sets its gap.
+    eval(&mut editor, &layout(8, 0.5));
+    assert_eq!((pane(&editor).0, pane(&editor).2), (0.5, 8.0));
+}
+
+#[test]
+fn buffers_shown_beside_the_side_pane_stack_to_its_right() {
+    use crate::tile::{SplitDir, TileNode};
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*main*", "");
+    editor.open_scratch_buffer("*pane*", "");
+    editor.runtime_mut().eval_str(r#"(set-layout (list :rows 1.0 "*main*"))"#).unwrap();
+    editor.runtime_mut().eval_str(r#"(show-in-side-pane "*pane*")"#).unwrap();
+    editor.refresh_runtime_side_effects();
+    let root_ratio = |editor: &Editor| match &editor.tile_root.content {
+        TileNode::Split(split) => split.ratio,
+        TileNode::Leaf(_) => panic!("the pane is open"),
+    };
+    let narrow = root_ratio(&editor);
+    for name in ["*one*", "*two*", "*three*"] {
+        editor.upsert_read_only_lisp_buffer(name, "(def x 1)");
+        assert!(editor.show_buffer_beside("*pane*", name));
+    }
+    assert!(editor.show_buffer_beside("*pane*", "*two*"), "one already showing stays put");
+    assert_eq!(editor.tile_root.leaf_ids().len(), 5);
+    assert!(root_ratio(&editor) < narrow, "the pane widened");
+
+    // The pane, then to its right a column of the three, one height each.
+    let TileNode::Split(root) = &editor.tile_root.content else { unreachable!() };
+    let TileNode::Split(pane) = root.b.as_ref() else { panic!("the pane split") };
+    assert_eq!(pane.dir, SplitDir::Vertical);
+    let TileNode::Split(column) = pane.b.as_ref() else { panic!("a column") };
+    assert_eq!(column.dir, SplitDir::Horizontal);
+    assert!((column.ratio - 1.0 / 3.0).abs() < 1e-6, "{}", column.ratio);
+    let TileNode::Split(rest) = column.b.as_ref() else { panic!("two more") };
+    assert!((rest.ratio - 0.5).abs() < 1e-6);
+
+    // Closing one evens out the rest; closing the pane takes them along and
+    // the next opening starts narrow again.
+    assert!(editor.close_tile_showing_buffer_named("*one*"));
+    assert!(!editor.buffer_named_is_showing("*one*"));
+    assert!(editor.buffer_named_is_showing("*three*"));
+    assert!(editor.close_tile_showing_buffer_named("*two*"));
+    assert!(editor.close_tile_showing_buffer_named("*three*"));
+    assert!((root_ratio(&editor) - narrow).abs() < 1e-6, "narrow again once none is beside it");
+    editor.show_buffer_beside("*pane*", "*one*");
+    assert!(editor.close_tile_showing_buffer_named("*pane*"));
+    assert_eq!(editor.tile_root.leaf_ids().len(), 1, "the pane's neighbours closed with it");
+
+    // C-x 0 on the last tile beside the pane narrows it too.
+    editor.runtime_mut().eval_str(r#"(show-in-side-pane "*pane*")"#).unwrap();
+    editor.refresh_runtime_side_effects();
+    let narrow = root_ratio(&editor);
+    editor.show_buffer_beside("*pane*", "*two*");
+    assert!(editor.switch_active_tile_to_buffer_named("*two*"));
+    assert!(editor.delete_active_tile());
+    assert!((root_ratio(&editor) - narrow).abs() < 1e-6, "C-x 0 narrows the pane again");
+
+    // A new layout drops them, and the next one starts a fresh column.
+    editor.show_buffer_beside("*pane*", "*three*");
+    editor.runtime_mut().eval_str(r#"(set-layout (list :rows 1.0 "*main*"))"#).unwrap();
+    editor.refresh_runtime_side_effects();
+    assert!(!editor.buffer_named_is_showing("*three*"));
+    assert!(editor.beside_tiles.is_empty() && editor.beside_widened.is_none());
+}
+
+#[test]
+fn side_pane_closes_when_dragged_through_its_minimum_width() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*main*", "");
+    editor.open_scratch_buffer("*pane*", "");
+    let show_pane = |editor: &mut Editor| {
+        editor.runtime_mut().eval_str(r#"(show-in-side-pane "*pane*")"#).unwrap();
+        editor.refresh_runtime_side_effects();
+    };
+    editor.runtime_mut().eval_str(r#"(set-layout (list :rows 1.0 "*main*"))"#).unwrap();
+    show_pane(&mut editor);
+    let (split_id, dir) = match &editor.tile_root.content {
+        crate::tile::TileNode::Split(split) => (split.id, split.dir),
+        crate::tile::TileNode::Leaf(_) => panic!("the pane opens on the right"),
+    };
+    let area = crate::layout::Rect { row: 0.0, col: 0.0, width: 200.0, height: 50.0 };
+    let drag_to = |editor: &mut Editor, col: f32| {
+        editor.active_tile_resize_drag = Some(super::TileResizeDrag { split_id, dir, area });
+        editor.handle_tile_resize_drag(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), col as u16, 10),
+            col,
+            10.0,
+        );
+    };
+
+    // Narrower than its minimum, it stops at the minimum and stays open.
+    drag_to(&mut editor, 200.0 - 30.0);
+    match &editor.tile_root.content {
+        crate::tile::TileNode::Split(split) => {
+            let width = area.width * (1.0 - split.ratio);
+            assert!((width - super::SIDE_PANE_MIN_WIDTH).abs() < 1e-3, "pane width {width}");
+        }
+        crate::tile::TileNode::Leaf(_) => panic!("a short drag keeps the pane"),
+    }
+
+    // Through a quarter of its minimum, it closes, and the gesture is spent.
+    drag_to(&mut editor, 200.0 - 20.0);
+    assert_eq!(editor.tile_root.leaf_ids().len(), 1, "the pane closed");
+    assert!(editor.active_tile_resize_drag.is_none());
+    assert!(editor.suppress_mouse_until_left_up);
+
+    // It opens again as usual.
+    show_pane(&mut editor);
+    assert_eq!(editor.tile_root.leaf_ids().len(), 2);
 }
 
 #[test]
@@ -18446,4 +18715,239 @@ fn theme_pick_reports_theme_keywords_of_a_defwidget_background() {
         assert!(slots.contains(&expected.to_string()), "{expected} missing: {groups:?}");
     }
     assert!(!slots.contains(&"color".to_string()), "material arg keywords are not slots");
+}
+
+#[test]
+fn matrix_click_below_the_fold_hits_the_cell_under_the_pointer_when_tile_scrolled() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(20, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def weights (state (list (list 0) (list 0) (list 0) (list 0))))
+                (effect
+                  (v-stack
+                    (box :width 10 :height 20)
+                    (matrix
+                      :rows 4
+                      :cols 1
+                      :min 0
+                      :max 1
+                      :toggle true
+                      :width 4
+                      :height 8
+                      :value weights
+                      :on-change (lambda (next) (set! weights next)))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(20, 10);
+    editor.active_leaf_mut().widget_scroll_top = 18.0;
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 20, 10);
+    assert_eq!(editor.total_scroll_top(), 18.0);
+
+    // Content rows 20..28 hold the matrix; screen row 8.5 is content 26.5,
+    // i.e. the last of the four 2-row cells.
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 8),
+        0, 0, 20, 10, 1.5, 8.5,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 8),
+        0, 0, 20, 10, 1.5, 8.5,
+    );
+
+    let value = editor.runtime.eval_str("weights").unwrap().unwrap();
+    let Value::List(rows) = value else { panic!("rows") };
+    let Value::List(last) = &*rows[3].borrow() else { panic!("row 3") };
+    assert_eq!(*last[0].borrow(), Value::Number(1.0), "the cell under the pointer flips");
+}
+
+/// A 30x12 `scroll` holding a 20-row spacer then a 4x1 matrix (content rows
+/// 20..28) and a clickable box below it, scrolled 18 rows: screen row 8.5 is
+/// content row 26.5, the matrix's last cell.
+fn scrolled_container_editor() -> Editor {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 20);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def weights (state (list (list 0) (list 0) (list 0) (list 0))))
+                (def click-y (state -1))
+                (effect
+                  (scroll :key "probe-scroll" :width 30 :height 12
+                    (v-stack
+                      (box :width 10 :height 20)
+                      (matrix :rows 4 :cols 1 :min 0 :max 1 :toggle true
+                        :width 4 :height 8 :value weights
+                        :on-change (lambda (next) (set! weights next)))
+                      (box :width 10 :height 4
+                        :on-click (lambda (e) (set! click-y (get e :y)))))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(60, 20);
+    let layout = editor.widget_layout().expect("layout");
+    let scroll = find_widget_of_type(&layout, "scroll").expect("scroll");
+    crate::widget_render::scroll::set_scroll_state(
+        crate::widget_render::scroll::scroll_state_key(scroll),
+        crate::widget_render::scroll::ScrollState {
+            offset_y: 18.0,
+            viewport_height: 12.0,
+            content_height: 32.0,
+            synced_selection: None,
+            applied_center_bits: None,
+        },
+    );
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    editor
+}
+
+fn click_at(editor: &mut Editor, col: f32, row: f32) {
+    for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)] {
+        editor.handle_mouse_precise(
+            mouse_event(kind, col as u16, row as u16), 0, 0, 60, 20, col, row,
+        );
+    }
+}
+
+#[test]
+fn matrix_click_inside_scrolled_container_hits_the_cell_under_the_pointer() {
+    let mut editor = scrolled_container_editor();
+    click_at(&mut editor, 1.5, 8.5);
+    let value = editor.runtime.eval_str("weights").unwrap().unwrap();
+    let Value::List(rows) = value else { panic!("rows") };
+    let flipped: Vec<f64> = rows
+        .iter()
+        .map(|row| match &*row.borrow() {
+            Value::List(cells) => match &*cells[0].borrow() {
+                Value::Number(n) => *n,
+                other => panic!("cell {other:?}"),
+            },
+            other => panic!("row {other:?}"),
+        })
+        .collect();
+    assert_eq!(flipped, vec![0.0, 0.0, 0.0, 1.0], "only the bottom cell flips");
+}
+
+#[test]
+fn pointer_y_inside_scrolled_container_is_relative_to_the_widget() {
+    // The box spans content rows 28..32: screen row 10.5 is content 28.5.
+    let mut editor = scrolled_container_editor();
+    click_at(&mut editor, 1.5, 10.5);
+    assert!(
+        (eval_number(editor.runtime_mut(), "click-y") - 0.5).abs() < 1e-3,
+        ":y measures from the box's top edge despite the container scroll"
+    );
+}
+
+#[test]
+fn matrix_menu_inside_scrolled_container_opens_at_the_pointer() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = scrolled_container_editor();
+    right_click_at(&mut editor, 1.5, 8.5);
+    let entry = crate::widget_render::topmost_overlay().expect("matrix menu overlay");
+    assert!(
+        (entry.rect.col - 1.5).abs() < 0.5 && (entry.rect.row - 8.5).abs() < 0.5,
+        "menu {:?} opens at the pointer, not shifted by the container scroll",
+        entry.rect
+    );
+}
+
+#[test]
+fn button_click_inside_scrolled_container_reports_its_own_top_left() {
+    // A click activates the button, which reports its top-left: :y must stay
+    // 0 rather than pick up the container's scroll offset.
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 20);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def click-y (state -1))
+                (effect
+                  (scroll :key "button-scroll" :width 30 :height 10
+                    (v-stack
+                      (box :width 10 :height 20)
+                      (button "go" :width 10 :height 2
+                        :on-click (lambda (e) (set! click-y (get e :y)))))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(60, 20);
+    let layout = editor.widget_layout().expect("layout");
+    let scroll = find_widget_of_type(&layout, "scroll").expect("scroll");
+    crate::widget_render::scroll::set_scroll_state(
+        crate::widget_render::scroll::scroll_state_key(scroll),
+        crate::widget_render::scroll::ScrollState {
+            offset_y: 12.0,
+            viewport_height: 10.0,
+            content_height: 22.0,
+            synced_selection: None,
+            applied_center_bits: None,
+        },
+    );
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    // Content rows 20..22 sit at screen rows 8..10.
+    click_at(&mut editor, 2.5, 8.5);
+    assert_eq!(eval_number(editor.runtime_mut(), "click-y"), 0.0);
+}
+
+/// `describe-key` names the next key and what it runs instead of running
+/// it, following a chord to its end.
+#[test]
+fn describe_key_names_the_next_key_and_its_binding_without_running_it() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*described*", "");
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+(def bank-next () (host-command "bank-next-ran" true))
+(def commit () (host-command "commit-ran" true))
+(define-mode "described-mode")
+(mode-bind-key "described-mode" "C-S-RIGHT" "bank-next")
+(mode-bind-key "described-mode" "C-c C-c" "commit")
+(set-buffer-mode-for "*described*" "described-mode")
+"#,
+        )
+        .expect("install bindings");
+    editor.refresh_runtime_side_effects();
+    let describe = |editor: &mut Editor, keys: &[KeyEvent]| {
+        editor.run_command("describe-key");
+        for key in keys {
+            editor.handle_key(*key);
+        }
+        editor.minibuffer.clone().unwrap_or_default()
+    };
+
+    let ctrl_shift_right = KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    assert_eq!(
+        describe(&mut editor, &[ctrl_shift_right]),
+        "C-S-RIGHT runs bank-next (described-mode keymap)"
+    );
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(
+        describe(&mut editor, &[ctrl_c, ctrl_c]),
+        "C-c C-c runs commit (described-mode keymap)"
+    );
+    assert_eq!(
+        describe(&mut editor, &[KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE)]),
+        "F(9) is undefined here"
+    );
+    assert!(
+        editor.drain_host_commands().iter().all(|c| !matches!(c, HostCommand::Custom { .. })),
+        "a described key does not run"
+    );
+    // Afterwards keys run again.
+    editor.handle_key(ctrl_shift_right);
+    assert!(editor
+        .drain_host_commands()
+        .iter()
+        .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "bank-next-ran")));
 }

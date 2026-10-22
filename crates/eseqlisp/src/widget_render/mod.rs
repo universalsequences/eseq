@@ -169,6 +169,9 @@ static WIDGET_STATE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static POINTER_HOVER_WIDGET_ID: RefCell<Option<u64>> = const { RefCell::new(None) };
+    /// The widget with an `:on-hover` the pointer is over, and its callback
+    /// (to report the leave once the widget is gone).
+    static ON_HOVER_WIDGET: RefCell<Option<(u64, Value)>> = const { RefCell::new(None) };
     static WIDGET_STATE_REVISIONS: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
     /// Text measurer available to render-pass code. Widget metrics that are
     /// normally cached as a side effect of measure() (e.g. text-input
@@ -254,6 +257,36 @@ pub fn set_pointer_hover_widget(widget_id: Option<u64>) -> bool {
         *hovered = widget_id;
         if let Some(id) = widget_id { bump_widget_state_revision(id); }
         true
+    })
+}
+
+/// A widget's `:on-hover`, unless it is switched off.
+pub(crate) fn hover_callback(node: &LayoutNode) -> Option<Value> {
+    node.props.get("on-hover").filter(|v| !matches!(v, Value::Nil | Value::Bool(false))).cloned()
+}
+
+/// The pointer is now over `node`, the topmost widget under it (or none):
+/// a widget with an `:on-hover` it left hears `false`, one it entered hears
+/// `true`, in that order. Only that widget hears it, not its containers. A
+/// sexp-slot's `:on-hover` reports its item instead (sexp_slot.rs).
+pub fn pointer_moved_over(node: Option<&LayoutNode>) -> Vec<EventOutput> {
+    let entered = node
+        .filter(|node| node.widget_type != "sexp-slot")
+        .and_then(|node| Some((node.widget_id, hover_callback(node)?)));
+    ON_HOVER_WIDGET.with(|current| {
+        let mut current = current.borrow_mut();
+        if current.as_ref().map(|(id, _)| *id) == entered.as_ref().map(|(id, _)| *id) {
+            return Vec::new();
+        }
+        let mut outputs = Vec::new();
+        if let Some((_, callback)) = current.take() {
+            outputs.push(EventOutput { callback, args: vec![Value::Bool(false)] });
+        }
+        if let Some((_, callback)) = &entered {
+            outputs.push(EventOutput { callback: callback.clone(), args: vec![Value::Bool(true)] });
+        }
+        *current = entered;
+        outputs
     })
 }
 
@@ -828,9 +861,10 @@ pub struct GpuProportionalTextPrimitive {
     pub scale: f32,
     pub fg: Color,
     pub bg: Color,
-    /// Draw with the editor's monospace face instead of the system UI font
-    /// (`label :mono true`); digits and note names then line up by column.
-    pub mono: bool,
+    /// The face to draw with: the system UI font, the editor's monospace
+    /// face (`label :mono true`; digits and note names line up by column),
+    /// or the UI font's bold weight (`label :bold true`).
+    pub face: crate::ui::glyph_atlas::TextFace,
 }
 
 #[derive(Clone, PartialEq)]
@@ -1148,6 +1182,12 @@ pub trait WidgetDefinition: Sync {
     fn bindable_props(&self) -> &'static [&'static str] {
         &[]
     }
+    /// What the widget is for, the props that matter and what each handler
+    /// receives: `(describe 'NAME)` shows it, and the agent reads it before
+    /// building a panel. Plain text, a few sentences and a short example.
+    fn doc(&self) -> &'static str {
+        ""
+    }
     /// Public Lisp keyword arguments understood by this widget constructor.
     /// This drives context-aware text completion and should include layout,
     /// styling, interaction, and reactive properties accepted by the widget.
@@ -1447,27 +1487,26 @@ pub fn proportional_text_baseline_offset(
     row_offset: f32,
     ctx: &MeasureCtx<'_>,
 ) -> f32 {
-    proportional_text_baseline_offset_face(font_size, row_offset, ctx, false)
+    proportional_text_baseline_offset_face(
+        font_size,
+        row_offset,
+        ctx,
+        crate::ui::glyph_atlas::TextFace::Regular,
+    )
 }
 
-/// `proportional_text_baseline_offset` for either face; a mono label centers
-/// the mono face's cap band.
+/// `proportional_text_baseline_offset` for any face; a mono or bold label
+/// centers its own face's cap band.
 pub fn proportional_text_baseline_offset_face(
     font_size: f32,
     row_offset: f32,
     ctx: &MeasureCtx<'_>,
-    mono: bool,
+    face: crate::ui::glyph_atlas::TextFace,
 ) -> f32 {
     let cell_h = ctx.cell_h.max(1.0);
     let cap_height = ctx
         .text_measurer
-        .map(|measurer| {
-            if mono {
-                measurer.mono_cap_height_px(font_size)
-            } else {
-                measurer.cap_height_px(font_size)
-            }
-        })
+        .map(|measurer| measurer.cap_height_face_px(font_size, face))
         .unwrap_or(cell_h * 0.7);
     row_offset + crate::ui::glyph_atlas::centered_text_baseline_px(cell_h, cap_height, 1.0) / cell_h
 }
@@ -1723,6 +1762,11 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
             .hash(&mut hasher);
     }
     theme::generation().hash(&mut hasher);
+    // Any cacheable widget can paint with a defwidget defined or redefined
+    // after its first paint: `knob-face`, `bezel-face`, a `:face` prop, an
+    // inherited `:faces` map, `restyle-face`, or a box background slot. Key
+    // on the registry generation for all of them, as the retained scene does.
+    sdf_widget::sdf_widget_registry_generation().hash(&mut hasher);
     viewport.cell_w.to_bits().hash(&mut hasher);
     viewport.cell_h.to_bits().hash(&mut hasher);
     viewport.vp_w.to_bits().hash(&mut hasher);
@@ -2574,7 +2618,7 @@ fn collect_gpu_primitives_recursive(
             ..node_viewport
         };
         primitives.extend(widget_primitives_for_node(node, node_viewport));
-        primitives.push(GpuPrimitive::PushClipRect(node.rect));
+        primitives.push(GpuPrimitive::PushClipRect(box_widget::background_rect(node)));
         for child in &node.children {
             collect_gpu_primitives_recursive(
                 child,
@@ -2706,7 +2750,7 @@ fn collect_gpu_primitive_runs_recursive(
             }));
         }
         own.extend(widget_primitives_for_node(node, node_viewport));
-        own.push(GpuPrimitive::PushClipRect(node.rect));
+        own.push(GpuPrimitive::PushClipRect(box_widget::background_rect(node)));
         push_primitive_run(
             runs,
             run_ordinals,
@@ -2916,7 +2960,7 @@ fn collect_gpu_primitive_runs_retained_recursive(
                     }));
                 }
                 own.extend(widget_primitives_for_node(node, node_viewport));
-                own.push(GpuPrimitive::PushClipRect(node.rect));
+                own.push(GpuPrimitive::PushClipRect(box_widget::background_rect(node)));
                 own
             },
         );
@@ -3150,7 +3194,7 @@ fn refresh_gpu_primitive_runs_retained_in_place_recursive(
                     }));
                 }
                 own.extend(widget_primitives_for_node(node, node_viewport));
-                own.push(GpuPrimitive::PushClipRect(node.rect));
+                own.push(GpuPrimitive::PushClipRect(box_widget::background_rect(node)));
                 own
             },
         );
@@ -3350,7 +3394,7 @@ pub(crate) fn pointer_event_info(
         Rc::new(RefCell::new(Value::String(phase.to_string()))),
     );
     let wc = local_col - node.rect.col;
-    let wr = local_row - node.rect.row;
+    let wr = scroll::event_content_row(local_row) - node.rect.row;
     let sx = if node.rect.width > 0.0 {
         wc / node.rect.width * 2.0 - 1.0
     } else {
@@ -3371,8 +3415,10 @@ pub(crate) fn pointer_event_info(
     // frame-anchored widget reconciles the two via `current_frame_viewport`,
     // which reports the frame in this same content space.
     //
-    // Not folded in: the offset of an enclosing `scroll` WIDGET, which
-    // children read separately via `scroll::current_event_scroll_offset`.
+    // Not folded in: the offset of an enclosing `scroll` WIDGET (menus
+    // anchored inside one open at the pointer in this space). `x`/`y` and
+    // the normalized positions above do fold it in, via
+    // `scroll::event_content_row`, since they measure against the rect.
     info.insert("col".to_string(), num(local_col));
     info.insert("row".to_string(), num(local_row));
     info.insert("sx".to_string(), num(sx));
@@ -3561,7 +3607,13 @@ pub fn get_f32_prop(props: &HashMap<String, Value>, key: &str, default: f32) -> 
 }
 
 pub fn get_bool_prop(props: &HashMap<String, Value>, key: &str, default: bool) -> bool {
-    match props.get(key) {
+    bool_prop_value(props.get(key), default)
+}
+
+/// `get_bool_prop`'s reading of one prop value, for callers that hold the
+/// value without a cloned prop map. Bound props resolve their reactive slot.
+pub fn bool_prop_value(value: Option<&Value>, default: bool) -> bool {
+    match value {
         Some(Value::Bool(b)) => *b,
         Some(Value::Number(n)) => *n > 0.5,
         Some(Value::ReactiveRef { slot, .. }) => crate::reactive::read_float_slot(slot) > 0.5,
@@ -3580,6 +3632,66 @@ pub fn plock_color(props: &HashMap<String, Value>) -> Color {
         b: get_f32_prop(props, "plock-color-b", 0.862_745_1),
         a: 1.0,
     }
+}
+
+/// The face (content/ui/widgets.lisp) a built-in control paints with, and
+/// the theme slots it paints from (not those the control has its own
+/// colour for), or None for a widget without a face.
+pub fn builtin_face_of(node: &LayoutNode) -> Option<(&'static str, Vec<&'static str>)> {
+    let props = &node.props;
+    let own = |prop: &str| has_color_prop(props, prop);
+    let knob_slots = || {
+        let mut slots = Vec::new();
+        // A p-locked knob's arc is the p-lock colour.
+        if !plock_active(props) && !own("arc-color") {
+            slots.push("widget-knob-filled");
+        }
+        if !own("track-color") {
+            slots.push("widget-knob-track");
+        }
+        slots
+    };
+    Some(match node.widget_type.as_str() {
+        "knob" | "inline-knob" => {
+            (knob::KNOB_FACE_WIDGET, vec!["widget-knob-filled", "widget-knob-track"])
+        }
+        "knob-number" => (knob_number::KNOB_NUMBER_FACE_WIDGET, knob_slots()),
+        "button" => {
+            let face = if button::button_is_active_tab(props) {
+                button::BEZEL_TAB_FACE_WIDGET
+            } else {
+                button::BEZEL_FACE_WIDGET
+            };
+            let fill = button::button_fill_slot(props);
+            (face, bezel_slots(fill, button::button_border_is_slot(props)))
+        }
+        // The trigger's surface; its badge and chevron have faces of their
+        // own (dropdown-badge-face, dropdown-chevron-face), not reported here.
+        "dropdown" if !dropdown::is_action_menu(props) => {
+            (dropdown::DROPDOWN_FACE_WIDGET, dropdown::trigger_slots(props).into_iter().flatten().collect())
+        }
+        "number-picker" if !number_picker::number_picker_slider_mode(props) => {
+            let fill = number_picker::number_picker_own_bg(props)
+                .is_none()
+                .then_some(button::BezelFill::Dropdown);
+            (button::BEZEL_FACE_WIDGET, bezel_slots(fill, number_picker::number_picker_border_is_slot(props)))
+        }
+        _ => return None,
+    })
+}
+
+/// The theme slots a bezel paints from: its fill slot, and the border's.
+fn bezel_slots(fill: Option<button::BezelFill>, border_slot: bool) -> Vec<&'static str> {
+    let mut slots: Vec<&'static str> = fill.map(button::BezelFill::slot).into_iter().collect();
+    if border_slot {
+        slots.push("button-border");
+    }
+    slots
+}
+
+/// Whether `props` gives `key` a colour of its own (one that parses).
+pub fn has_color_prop(props: &HashMap<String, Value>, key: &str) -> bool {
+    props.get(key).and_then(theme::parse_color_value).is_some()
 }
 
 pub fn resolve_named_color(props: &HashMap<String, Value>, key: &str, default: Color) -> Color {
@@ -4170,6 +4282,60 @@ mod tests {
             widget_state_generation(),
             stamp_before,
             "the global change stamp must advance so a repaint is scheduled"
+        );
+    }
+
+    /// A button's `:face` (or a box's `:faces` slot) may name a defwidget
+    /// that is defined only after the first paint; registering it must
+    /// invalidate the cached primitives, not just knobs'.
+    #[test]
+    fn defwidget_registration_invalidates_cached_button_and_box_keys() {
+        let rect = Rect {
+            row: 1.0,
+            col: 1.0,
+            width: 6.0,
+            height: 2.0,
+        };
+        let button = test_node(
+            9201,
+            "button",
+            rect,
+            HashMap::from([
+                ("text".to_string(), Value::String("Go".to_string())),
+                (
+                    "face".to_string(),
+                    Value::String("test-late-bezel".to_string()),
+                ),
+            ]),
+            Vec::new(),
+        );
+        let boxed = test_node(9202, "box", rect, HashMap::new(), Vec::new());
+        let viewport = test_viewport();
+        let button_before = widget_primitive_cache_key(&button, viewport).expect("cacheable");
+        let box_before = widget_primitive_cache_key(&boxed, viewport).expect("cacheable");
+
+        sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
+            name: "test-late-bezel".to_string(),
+            shader_source: String::new(),
+            sdf_expr: crate::parser::Expression::Number(0.0),
+            state_uniforms: Vec::new(),
+            state: Default::default(),
+            region_count: 0,
+            width: 1.0,
+            height: 1.0,
+            paint_margin: 0.0,
+            animates: false,
+        });
+
+        assert_ne!(
+            widget_primitive_cache_key(&button, viewport).expect("cacheable"),
+            button_before,
+            "a late defwidget must invalidate a cached button face"
+        );
+        assert_ne!(
+            widget_primitive_cache_key(&boxed, viewport).expect("cacheable"),
+            box_before,
+            "a late defwidget must invalidate a cached box background"
         );
     }
 

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -520,6 +521,7 @@ fn sdf_widget_hit_region(
 /// Resolve the handle once, at pointer-down. The editor owns its lifetime.
 pub fn sdf_begin_gesture(node: &LayoutNode, col: f32, row: f32, cell_w: f32, cell_h: f32) -> Value {
     let aspect = node.rect.width * cell_w / (node.rect.height * cell_h).max(0.0001);
+    let row = super::scroll::event_content_row(row);
     let (index, name) = sdf_widget_hit_region(node, col - node.rect.col, row - node.rect.row, aspect);
     name.map(Value::Keyword).unwrap_or(Value::Number(index as f64))
 }
@@ -544,7 +546,7 @@ pub fn sdf_map_mouse_event(
     let region = gesture.cloned().unwrap_or_else(||
         sdf_begin_gesture(node, local_col, local_row, cell_w, cell_h));
     let sx = (local_col - node.rect.col) / node.rect.width * 2.0 - 1.0;
-    let sy = (local_row - node.rect.row) / node.rect.height * 2.0 - 1.0;
+    let sy = (super::scroll::event_content_row(local_row) - node.rect.row) / node.rect.height * 2.0 - 1.0;
     super::MouseEventOutcome::Dispatch(super::WidgetEvent::Custom(Value::List(
         vec![Value::Keyword(phase.into()), Value::Number(sx as f64), Value::Number(sy as f64), region]
             .into_iter().map(|v| Rc::new(RefCell::new(v))).collect(),
@@ -591,7 +593,7 @@ pub fn sdf_handle_event(
         .clone();
 
     let wc = local_col - node.rect.col;
-    let wr = local_row - node.rect.row;
+    let wr = super::scroll::event_content_row(local_row) - node.rect.row;
     let sx = (wc / node.rect.width * 2.0 - 1.0) as f64;
     let sy = (wr / node.rect.height * 2.0 - 1.0) as f64;
     let pixel_aspect = if node.rect.height > 0.0 {
@@ -669,6 +671,35 @@ pub fn resolve_theme_keywords(def: &SdfWidgetDef) {
     }
 }
 
+/// Whether `name` is the face a built-in control paints with
+/// (content/ui/widgets.lisp), never a box background.
+pub fn is_builtin_face(name: &str) -> bool {
+    BUILTIN_FACES.contains(&name)
+}
+
+/// Whether a package or the theme paints theme slot `slot` with a defined
+/// widget, as a box background or a shader reading the slot would.
+pub fn slot_paints_with_widget(slot: &str) -> bool {
+    crate::theme::named_widget(slot).is_some_and(|widget| sdf_widget_def(&widget).is_some())
+}
+
+/// The defined widget that paints theme slot `slot` for a node with
+/// `props`: what its containers' `:faces` give the slot, else a package's
+/// or the theme's widget for it.
+pub fn slot_widget(props: &HashMap<String, Value>, slot: &str) -> Option<String> {
+    inherited_face(props, slot)
+        .or_else(|| crate::theme::named_widget(slot))
+        .filter(|widget| sdf_widget_def(widget).is_some())
+}
+
+/// `primitive` drawn as its widget's background (behind its text).
+pub fn as_background(mut primitive: GpuPrimitive) -> GpuPrimitive {
+    if let GpuPrimitive::WidgetInstance { is_background, .. } = &mut primitive {
+        *is_background = true;
+    }
+    primitive
+}
+
 pub fn sdf_widget_def(name: &str) -> Option<Rc<SdfWidgetDef>> {
     SDF_WIDGETS.with(|w| w.borrow().get(name).cloned())
 }
@@ -704,6 +735,221 @@ pub fn sdf_widget_tui_render(
     _buf: &mut CellBuffer,
 ) {
     // Future: Milestone 6 TUI fallback rendering
+}
+
+/// A control's own face (`:face "widget"`).
+pub const FACE_PROP: &str = "face";
+/// A container's faces for the controls under it (`:faces (dict :knob-face "widget")`).
+pub const FACES_PROP: &str = "faces";
+/// The faces a control's containers give it, filled in at layout: the id of
+/// a face map ([`faces_with`]), so it copies and compares as a number.
+pub const INHERITED_FACES_PROP: &str = "__inherited-faces";
+
+/// The built-in faces a package can replace (content/ui/widgets.lisp).
+pub const BUILTIN_FACES: [&str; 7] = [
+    super::knob::KNOB_FACE_WIDGET,
+    super::knob_number::KNOB_NUMBER_FACE_WIDGET,
+    super::button::BEZEL_FACE_WIDGET,
+    super::button::BEZEL_TAB_FACE_WIDGET,
+    super::dropdown::DROPDOWN_FACE_WIDGET,
+    super::dropdown::DROPDOWN_BADGE_FACE_WIDGET,
+    super::dropdown::DROPDOWN_CHEVRON_FACE_WIDGET,
+];
+
+thread_local! {
+    /// Every face map `:faces` has built (face -> widget), each once: a
+    /// handful per session.
+    static FACE_MAPS: RefCell<Vec<std::collections::BTreeMap<String, String>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// The face map `inherited` (an id from this function) with the `:faces`
+/// `own` over it, as an id; None when `own` is not a map.
+pub fn faces_with(inherited: Option<&Value>, own: &Value) -> Option<Value> {
+    let Value::Map(own) = own else {
+        return None;
+    };
+    FACE_MAPS.with(|maps| {
+        let mut maps = maps.borrow_mut();
+        let mut faces = face_map_id(inherited)
+            .and_then(|id| maps.get(id).cloned())
+            .unwrap_or_default();
+        faces.extend(own.iter().filter_map(|(face, widget)| {
+            Some((face.clone(), super::live_audio::keyword_or_string(&widget.borrow())?))
+        }));
+        let id = maps.iter().position(|map| *map == faces).unwrap_or_else(|| {
+            maps.push(faces);
+            maps.len() - 1
+        });
+        Some(Value::Number(id as f64))
+    })
+}
+
+fn face_map_id(faces: Option<&Value>) -> Option<usize> {
+    match faces {
+        Some(Value::Number(id)) => Some(*id as usize),
+        _ => None,
+    }
+}
+
+/// What the `:faces` of a node's containers give `name`: a built-in face
+/// or a theme slot (`mixer-control-bg`), so a container can repaint a slot
+/// only inside itself.
+pub fn inherited_face(props: &HashMap<String, Value>, name: &str) -> Option<String> {
+    let id = face_map_id(props.get(INHERITED_FACES_PROP))?;
+    FACE_MAPS.with(|maps| maps.borrow().get(id)?.get(name).cloned())
+}
+
+/// Faces that paint one part of a control whose own `:face` replaces
+/// another (a dropdown's trigger), so that `:face` does not reach them.
+const PART_FACES: [&str; 2] = [
+    super::dropdown::DROPDOWN_BADGE_FACE_WIDGET,
+    super::dropdown::DROPDOWN_CHEVRON_FACE_WIDGET,
+];
+
+/// A uniform's 1 for `on`, 0 otherwise.
+pub fn flag(on: bool) -> f32 {
+    if on { 1.0 } else { 0.0 }
+}
+
+/// The widget a control with built-in face `face` paints with: its own
+/// `:face` (for its main face), else what its containers' `:faces` give
+/// `face`, else a package's `restyle-face`, else `face` itself.
+pub fn chosen_face(face: &'static str, props: &HashMap<String, Value>) -> Cow<'static, str> {
+    (!PART_FACES.contains(&face))
+        .then(|| super::live_audio::prop_keyword(props, FACE_PROP))
+        .flatten()
+        .or_else(|| inherited_face(props, face))
+        .or_else(|| crate::theme::face_override(face))
+        .map_or(Cow::Borrowed(face), Cow::Owned)
+}
+
+/// The widget that paints a control with built-in face `face`: the
+/// [`chosen_face`] when it is defined, else `face` when that is, else None.
+pub fn painted_face(face: &'static str, props: &HashMap<String, Value>) -> Option<Cow<'static, str>> {
+    let chosen = chosen_face(face, props);
+    if sdf_widget_def(&chosen).is_some() {
+        Some(chosen)
+    } else {
+        sdf_widget_def(face).map(|_| Cow::Borrowed(face))
+    }
+}
+
+/// A face, cached for one registry generation: its definition and, for the
+/// caller's state names, the uniform slot each name fills.
+struct FaceEntry {
+    /// The built-in face the caller paints, whose state names it passes.
+    face: &'static str,
+    /// The widget that paints it ([`chosen_face`]).
+    widget: String,
+    generation: u64,
+    def: Option<Rc<SdfWidgetDef>>,
+    /// Index into the caller's `names` for each of the face's uniform slots.
+    slots: Vec<Option<usize>>,
+    /// The caller's `names`, which `slots` indexes (checked in debug).
+    names_len: usize,
+}
+
+thread_local! {
+    static FACES: RefCell<Vec<FaceEntry>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The definition of `widget` painting built-in face `face`, and the
+/// uniforms `values` fill for it, or None if `widget` is not defined.
+fn face_uniforms(
+    face: &'static str,
+    widget: &str,
+    names: &[&str],
+    values: &[f32],
+) -> Option<(Rc<SdfWidgetDef>, [f32; MAX_SDF_STATE_UNIFORMS])> {
+    let generation = sdf_widget_registry_generation();
+    FACES.with(|faces| {
+        let mut faces = faces.borrow_mut();
+        let index = match faces.iter().position(|entry| entry.face == face && entry.widget == widget) {
+            Some(index) => index,
+            None => {
+                faces.push(FaceEntry {
+                    face,
+                    widget: widget.to_string(),
+                    generation: 0,
+                    def: None,
+                    slots: Vec::new(),
+                    names_len: names.len(),
+                });
+                faces.len() - 1
+            }
+        };
+        let entry = &mut faces[index];
+        debug_assert_eq!(entry.names_len, names.len(), "{face} called with other state names");
+        if entry.generation != generation {
+            entry.generation = generation;
+            entry.def = sdf_widget_def(widget);
+            entry.slots = entry.def.as_ref().map_or_else(Vec::new, |def| {
+                def.state_uniforms
+                    .iter()
+                    .take(MAX_SDF_STATE_UNIFORMS)
+                    .map(|uniform| names.iter().position(|name| name == uniform))
+                    .collect()
+            });
+        }
+        let def = entry.def.clone()?;
+        let mut uniforms = [0.0; MAX_SDF_STATE_UNIFORMS];
+        for (slot, index) in entry.slots.iter().enumerate() {
+            if let Some(value) = index.and_then(|i| values.get(i)) {
+                uniforms[slot] = *value;
+            }
+        }
+        Some((def, uniforms))
+    })
+}
+
+/// Paint a built-in control at `rect` with its face: the `defwidget` `face`
+/// (content/ui/widgets.lisp), or the one [`painted_face`] picks for it from
+/// `props`, or None if neither is defined. The face reads the control's
+/// value as `value_t`, `colors` as `input-color` and `second-color`, and
+/// `values[i]` as its `:state` `names[i]`; a state it does not declare is
+/// dropped, one it declares but is not given reads 0. `names` must be the
+/// same for every call with one `face`.
+#[allow(clippy::too_many_arguments)]
+pub fn face_primitive(
+    face: &'static str,
+    props: &HashMap<String, Value>,
+    names: &[&str],
+    values: &[f32],
+    rect: Rect,
+    viewport: WidgetViewport,
+    value_t: f32,
+    colors: [[f32; 4]; 2],
+) -> Option<GpuPrimitive> {
+    let widget = painted_face(face, props)?;
+    let (def, uniforms) = face_uniforms(face, &widget, names, values)?;
+    let quad = |i: usize| [uniforms[i], uniforms[i + 1], uniforms[i + 2], uniforms[i + 3]];
+    let paint_rect = sdf_widget_paint_rect(rect, def.paint_margin);
+    let (ndc_min, ndc_max) = super::ndc_bounds(paint_rect, viewport);
+    let px_w = rect.width * viewport.cell_w;
+    let px_h = rect.height * viewport.cell_h;
+    Some(GpuPrimitive::WidgetInstance {
+        widget_type: widget.into_owned(),
+        instance: super::WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t,
+            orientation: 0.0,
+            itime: viewport.time_seconds,
+            uniform_a: quad(0),
+            uniform_b: quad(4),
+            uniform_c: quad(8),
+            uniform_d: quad(12),
+            color_a: colors[0],
+            color_b: [0.0; 4],
+            color_c: sdf_widget_logical_uv_bounds(rect, paint_rect),
+            // A negative alpha would read as a hover-scale animation.
+            color_d: colors[1].map(|c| c.max(0.0)),
+            corner_radius: sdf_design_px(rect, viewport),
+            pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+        },
+        is_background: false,
+    })
 }
 
 /// Build the material overlay layer (Layer 2) for a slider with a :material shader.
@@ -768,7 +1014,7 @@ pub fn build_material_overlay(
             ],
             color_c: logical_uv,
             color_d: [0.0; 4],
-            corner_radius: 0.0,
+            corner_radius: sdf_design_px(node.rect, viewport),
             pixel_aspect,
         },
         is_background: false,
@@ -808,6 +1054,17 @@ pub(super) fn visual_style_paint_bounds(widget_id: u64, props: &HashMap<String, 
     Some(Rect { col: rect.col - rect.width * (scale - 1.0) * 0.5,
         row: rect.row - rect.height * (scale - 1.0) * 0.5,
         width: rect.width * scale, height: rect.height * scale })
+}
+
+/// The shader's `design-px`: SDF units per design pixel for a widget laid out
+/// at `rect`. The SDF space spans 2 units across the widget's shorter side,
+/// so a shader sizes chrome in the units a box's `:corner-radius` and
+/// `:border-width` use (e.g. to match its box's rounded corners) at any
+/// window scale. Carried in the instance's `corner_radius` slot, which SDF
+/// widgets do not otherwise read.
+pub fn sdf_design_px(rect: Rect, viewport: WidgetViewport) -> f32 {
+    let short_px = (rect.width * viewport.cell_w).min(rect.height * viewport.cell_h);
+    if short_px > 0.0 { 2.0 * super::ui_design_px(1.0) / short_px } else { 0.0 }
 }
 
 pub fn sdf_widget_logical_uv_bounds(logical_rect: Rect, paint_rect: Rect) -> [f32; 4] {
@@ -1038,7 +1295,7 @@ pub fn sdf_widget_primitives(
             ],
             color_c: logical_uv_bounds,
             color_d: visual_scale,
-            corner_radius: 0.0,
+            corner_radius: sdf_design_px(node.rect, viewport),
             pixel_aspect,
         },
         is_background: false,
@@ -1121,7 +1378,7 @@ pub fn sdf_widget_background_primitives(
             ],
             color_c: logical_uv_bounds,
             color_d: visual_scale,
-            corner_radius: 0.0,
+            corner_radius: sdf_design_px(rect, viewport),
             pixel_aspect,
         },
         is_background: true,
@@ -1142,6 +1399,77 @@ pub fn sdf_widget_shader_sources() -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use crate::parser::Expression;
+
+    #[test]
+    fn a_face_reads_the_states_it_declares_by_name() {
+        register_sdf_widget(SdfWidgetDef {
+            name: "test-face".to_string(),
+            shader_source: String::new(),
+            sdf_expr: Expression::Symbol("shape".to_string()),
+            state_uniforms: ["b", "unpassed", "a"].map(String::from).to_vec(),
+            state: Default::default(),
+            region_count: 0,
+            width: 1.0,
+            height: 1.0,
+            paint_margin: 0.0,
+            animates: false,
+        });
+        let viewport = WidgetViewport {
+            vp_w: 100.0,
+            vp_h: 100.0,
+            cell_w: 10.0,
+            cell_h: 10.0,
+            scroll_top: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 10.0,
+            inherited_hover: false,
+            time_seconds: 0.0,
+            scroll_left: 0.0,
+        };
+        let rect = Rect { row: 0.0, col: 0.0, width: 2.0, height: 2.0 };
+        // `undeclared` is dropped, `unpassed` reads 0, the rest by name.
+        let names = ["a", "undeclared", "b"];
+        let face = |values: &[f32]| {
+            face_primitive("test-face", &HashMap::new(), &names, values, rect, viewport, 0.5, [[1.0; 4], [0.5; 4]])
+        };
+        let Some(GpuPrimitive::WidgetInstance { widget_type, instance, .. }) = face(&[1.0, 9.0, 2.0])
+        else {
+            panic!("a defined face paints the control");
+        };
+        assert_eq!(widget_type, "test-face");
+        assert_eq!(instance.uniform_a, [2.0, 0.0, 1.0, 0.0]);
+        assert_eq!((instance.value_t, instance.color_a, instance.color_d), (0.5, [1.0; 4], [0.5; 4]));
+
+        assert!(face_primitive("no-such-face", &HashMap::new(), &[], &[], rect, viewport, 0.0, [[0.0; 4]; 2]).is_none());
+
+        // A face standing in for it gets the same states by name; a control's
+        // own :face wins over its containers', and one not defined leaves the
+        // control's own face.
+        register_sdf_widget(SdfWidgetDef {
+            name: "test-other-face".to_string(),
+            state_uniforms: ["a"].map(String::from).to_vec(),
+            ..sdf_widget_def("test-face").unwrap().as_ref().clone()
+        });
+        let painted = |props: &HashMap<String, Value>| {
+            match face_primitive("test-face", props, &names, &[1.0, 9.0, 2.0], rect, viewport, 0.5, [[1.0; 4]; 2]) {
+                Some(GpuPrimitive::WidgetInstance { widget_type, instance, .. }) => (widget_type, instance.uniform_a[0]),
+                _ => panic!("painted"),
+            }
+        };
+        let inherited = faces_with(
+            None,
+            &Value::Map(HashMap::from([(
+                "test-face".to_string(),
+                Rc::new(RefCell::new(Value::Keyword("no-such-face".into()))),
+            )])),
+        )
+        .unwrap();
+        let mut props = HashMap::from([(INHERITED_FACES_PROP.to_string(), inherited)]);
+        assert_eq!(painted(&props), ("test-face".to_string(), 2.0));
+        props.insert("face".to_string(), Value::String("test-other-face".into()));
+        assert_eq!(painted(&props), ("test-other-face".to_string(), 1.0));
+    }
 
     #[test]
     fn animation_clock_follows_itime_and_deadline_keeps_frames_until_it_passes() {

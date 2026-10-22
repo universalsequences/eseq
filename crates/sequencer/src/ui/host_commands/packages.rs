@@ -1200,11 +1200,8 @@ pub(crate) fn detach_module_with_instances(
     // The evaluated import is gone already, so this reports (and switches
     // the overrides off for) the draft line only.
     let removed_line = detach_module(editor, app, module, AttachmentDestination::Scratch)?;
-    if removed_from_evaluated
-        && !removed_line
-        && !module_still_attached_elsewhere(&app.state, module, AttachmentDestination::Scratch)
-    {
-        set_module_overrides_enabled(editor, module, false);
+    if removed_from_evaluated && !removed_line {
+        switch_off_detached(editor, &app.state, module, AttachmentDestination::Scratch);
     }
     let mut status = detachment_status(module, AttachmentDestination::Scratch, removed_line || removed_from_evaluated);
     if !removed.is_empty() {
@@ -1224,6 +1221,7 @@ pub(crate) fn apply_replayed_scratch_imports(
     state: &SequencerState,
     imports: &[app::history::ScratchImportState],
 ) {
+    let package_of = package_lookup();
     for import in imports {
         let module = import.module.as_str();
         let Some(buffer) = editor
@@ -1244,11 +1242,16 @@ pub(crate) fn apply_replayed_scratch_imports(
             if removed {
                 buffer.set_text(&updated);
             }
-            if !module_still_attached_elsewhere(state, module, AttachmentDestination::Scratch) {
+            if package_of(module).is_none()
+                && !module_still_attached_elsewhere(state, module, AttachmentDestination::Scratch)
+            {
                 set_module_overrides_enabled(editor, module, false);
             }
         }
         editor.mark_needs_redraw();
+    }
+    if !imports.is_empty() {
+        sync_package_overrides(editor, state);
     }
 }
 
@@ -1365,8 +1368,9 @@ pub(crate) fn attach_module(
     };
     if result.is_ok() {
         // A module detached earlier this session had its overrides switched
-        // off; attaching it again switches them back on (idempotent).
-        set_module_overrides_enabled(editor, module, true);
+        // off; attaching it again switches them back on (idempotent), and
+        // its package's other modules with it.
+        switch_on_attached(editor, &app.state, module);
     }
     result
 }
@@ -1428,6 +1432,88 @@ fn module_still_attached_elsewhere(state: &SequencerState, module: &str, removed
     }
 }
 
+/// Switch every package's overrides (installed or Local) on or off to match whether
+/// the project's scratch, init.lisp or what the agent is trying imports a
+/// module of it. A module the user switched off by hand stays off. `import` is
+/// load-once and nothing unloads, so this is how a package stops showing:
+/// after a project switch, when the new project does not attach it, and
+/// after a detach, for its other modules too (`brushed.mixer` imports
+/// `brushed.panels`, whose overrides are part of the same skin).
+pub(crate) fn sync_package_overrides(editor: &mut Editor, state: &SequencerState) {
+    let init = std::fs::read_to_string(user_init_path()).unwrap_or_default();
+    // What the agent is trying attaches a package it imports too.
+    let imports: HashSet<String> = [state.scratch_source(), init, crate::agent_pane::tried_source()]
+        .iter()
+        .flat_map(|source| import_modules(source))
+        .collect();
+    sync_overrides_to_imports(editor, &imports, package_lookup());
+}
+
+/// The package a module is in: an installed package by its manifest, or
+/// a Local package (a folder with no manifest) by the folder its file is in:
+/// `pond.controls` is in `pond`, as ~/.eseq.d/packages/local/pond/controls.lisp.
+fn package_lookup() -> impl Fn(&str) -> Option<String> {
+    let paths = sequencer::app_paths::app_paths();
+    // Read once: the catalog checks the package folders on every call.
+    let catalog = paths.package_catalog();
+    let local = paths.local_modules_dir();
+    move |module| {
+        catalog
+            .package_for_module(module)
+            .map(|package| package.manifest.name.clone())
+            .or_else(|| local_package_of(&local, module))
+    }
+}
+
+/// The Local package folder under `local` that holds `module`, as
+/// `local:<folder>`.
+fn local_package_of(local: &Path, module: &str) -> Option<String> {
+    let (folder, _) = module.split_once('.')?;
+    local.join(folder).is_dir().then(|| format!("local:{folder}"))
+}
+
+/// [`sync_package_overrides`] for these imports, `package_of` naming the
+/// installed package a module is in.
+fn sync_overrides_to_imports(
+    editor: &mut Editor,
+    imports: &HashSet<String>,
+    package_of: impl Fn(&str) -> Option<String>,
+) {
+    let attached: HashSet<String> = imports.iter().filter_map(|module| package_of(module)).collect();
+    for (module, on) in editor.runtime().override_modules() {
+        let Some(package) = package_of(&module) else {
+            continue;
+        };
+        let wanted = attached.contains(&package);
+        if on && !wanted || wanted && editor.runtime().is_module_unattached(&module) {
+            if let Err(error) = editor.runtime_mut().set_module_attached(&module, wanted) {
+                eprintln!("metal_seq: could not switch overrides for {module}: {error}");
+            }
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
+        }
+    }
+}
+
+/// After `module`'s import was added: it shows (even if switched off by
+/// hand before: attaching it is asking for it), and so do its package's
+/// other modules that were off only for being unattached.
+fn switch_on_attached(editor: &mut Editor, state: &SequencerState, module: &str) {
+    set_module_overrides_enabled(editor, module, true);
+    sync_package_overrides(editor, state);
+}
+
+/// After `module`'s import left `removed_from`: its package's overrides go
+/// off unless something still attaches the package; a module of no
+/// package goes off on its own.
+fn switch_off_detached(editor: &mut Editor, state: &SequencerState, module: &str, removed_from: AttachmentDestination) {
+    if package_lookup()(module).is_some() {
+        sync_package_overrides(editor, state);
+    } else if !module_still_attached_elsewhere(state, module, removed_from) {
+        set_module_overrides_enabled(editor, module, false);
+    }
+}
+
 /// Remove `module`'s import from one destination. `Ok(true)` when a line was
 /// removed. `import` is load-once and there is no unload, so the module's
 /// plain definitions stay in this session; its `override` entries are
@@ -1448,8 +1534,8 @@ pub(crate) fn detach_module(
             detach_from_user_init_at(editor, &user_init_path(), module)?
         }
     };
-    if removed && !module_still_attached_elsewhere(&app.state, module, destination) {
-        set_module_overrides_enabled(editor, module, false);
+    if removed {
+        switch_off_detached(editor, &app.state, module, destination);
     }
     Ok(removed)
 }
@@ -1545,10 +1631,6 @@ fn attach_to_user_init_at(editor: &mut Editor, path: &Path, module: &str) -> Res
     let persisted = read_user_init(path)?;
     let (source, _, already_present) = source_with_import(&persisted, module);
     if !already_present {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("Could not create '{}': {error}", parent.display()))?;
-        }
         write_text_atomically(path, &source)?;
     }
     if let Some(buffer) = editor.buffers.iter_mut().find(|buffer| buffer.path.as_deref() == Some(path)) {
@@ -1561,6 +1643,27 @@ fn attach_to_user_init_at(editor: &mut Editor, path: &Path, module: &str) -> Res
         editor.mark_needs_redraw();
     }
     Ok(already_present)
+}
+
+/// Rewrite the user init at `path` by `edit` and reload it; a reload that
+/// fails puts the old file back. Refused while the file is open with unsaved
+/// edits.
+pub(crate) fn edit_user_init(
+    editor: &mut Editor,
+    path: &Path,
+    edit: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    if editor.buffers.iter().any(|buffer| buffer.path.as_deref() == Some(path) && buffer.dirty) {
+        return Err("Save or revert your open init.lisp first.".to_string());
+    }
+    let before = read_user_init(path)?;
+    write_text_atomically(path, &edit(&before)?)?;
+    let report = editor.runtime_mut().reload_paths_transactional(vec![path.to_path_buf()], Vec::new());
+    if !report.success {
+        write_text_atomically(path, &before)?;
+        return Err(format!("init.lisp did not load with them, so it was put back:\n{}", report.diagnostics.join("\n")));
+    }
+    Ok(())
 }
 
 fn read_user_init(path: &Path) -> Result<String, String> {
@@ -1614,12 +1717,14 @@ fn detach_from_user_init_at(editor: &mut Editor, path: &Path, module: &str) -> R
     Ok(removed || draft_removed)
 }
 
-pub(super) fn write_text_atomically(path: &Path, source: &str) -> Result<(), String> {
+/// Write `source` to `path` through a temporary file, making its folder first.
+pub(crate) fn write_text_atomically(path: &Path, source: &str) -> Result<(), String> {
     use std::io::Write;
 
     let parent = path
         .parent()
         .ok_or_else(|| format!("Invalid file path: {}", path.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| format!("Could not create '{}': {error}", parent.display()))?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("System clock is before UNIX epoch: {error}"))?
@@ -1667,10 +1772,8 @@ fn open_user_init_tab(editor: &mut Editor) -> Result<String, String> {
     open_source_tab(editor, &path, "init.lisp", false)
 }
 
-pub(super) fn user_init_path() -> PathBuf {
-    sequencer::app_paths::app_paths()
-        .user_lisp_root()
-        .join("init.lisp")
+pub(crate) fn user_init_path() -> PathBuf {
+    sequencer::paths::user_init_path().expect("the user Lisp root is always set")
 }
 
 fn buffer_source(editor: &Editor, path: &Path, name: &str) -> Option<String> {
@@ -1827,6 +1930,8 @@ pub(super) fn refresh_package_listings(editor: &mut Editor, ctx: &mut LoopCtx<'_
         refresh_packages_view(editor, ctx);
     }
     let _ = editor.runtime_mut().eval_str("(eseq.browser/refresh-buffer)");
+    // The agent pane shows whether its packages are loaded.
+    crate::agent_pane::refresh();
     editor.refresh_runtime_side_effects();
     editor.mark_needs_redraw();
 }
@@ -2968,6 +3073,66 @@ mod tests {
         ));
         set_module_overrides_enabled(&mut editor, "t.pkg", true);
         assert_eq!(seam(&mut editor), Some(Value::String("package".into())));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_local_package_is_the_folder_its_modules_are_in() {
+        let local = temp_root("local-package");
+        std::fs::create_dir_all(local.join("pond")).unwrap();
+        assert_eq!(local_package_of(&local, "pond.controls").as_deref(), Some("local:pond"));
+        assert_eq!(local_package_of(&local, "pond.skin"), local_package_of(&local, "pond.mixer"));
+        assert_eq!(local_package_of(&local, "user.init"), None, "no folder: no package");
+        assert_eq!(local_package_of(&local, "pond"), None);
+        std::fs::remove_dir_all(local).unwrap();
+    }
+
+    #[test]
+    fn a_package_shows_only_while_something_imports_one_of_its_modules() {
+        let mut editor = Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let root = temp_root("override-sync");
+        std::fs::create_dir_all(root.join("t")).unwrap();
+        std::fs::create_dir_all(root.join("skin")).unwrap();
+        std::fs::write(root.join("t/factory.lisp"),
+            "(module t.factory)\n(export seam other)\n(def seam () \"factory\")\n(def other () \"factory\")\n").unwrap();
+        // skin.mixer imports skin.panels; both override, as one skin.
+        std::fs::write(root.join("skin/panels.lisp"),
+            "(module skin.panels)\n(import t.factory)\n(override t.factory/other () \"skin\")\n").unwrap();
+        std::fs::write(root.join("skin/mixer.lisp"),
+            "(module skin.mixer)\n(import t.factory)\n(import skin.panels)\n(override t.factory/seam () \"skin\")\n").unwrap();
+        editor.runtime_mut().set_scoped_module_load_path(vec![eseqlisp::ModuleLoadRoot { path: root.clone(), module_prefix: None }]);
+        editor.runtime_mut().eval_str("(import skin.mixer)").unwrap();
+        let shown = |editor: &mut Editor| {
+            let seam = editor.runtime_mut().eval_str("(t.factory/seam)").unwrap();
+            let other = editor.runtime_mut().eval_str("(t.factory/other)").unwrap();
+            (seam, other)
+        };
+        let skin = (Some(Value::String("skin".into())), Some(Value::String("skin".into())));
+        let factory = (Some(Value::String("factory".into())), Some(Value::String("factory".into())));
+        let package_of = |module: &str| module.strip_prefix("skin.").map(|_| "skin".to_string());
+        let imports = |modules: &[&str]| modules.iter().map(|module| module.to_string()).collect::<HashSet<_>>();
+        assert_eq!(shown(&mut editor), skin);
+
+        // A project that does not attach the skin: both its modules go off.
+        sync_overrides_to_imports(&mut editor, &imports(&[]), package_of);
+        assert_eq!(shown(&mut editor), factory);
+        let customize = editor.runtime_mut().eval_str("(disabled-override-modules)").unwrap();
+        assert!(matches!(customize, Some(Value::List(list)) if list.len() == 2));
+        assert!(editor.runtime().is_module_unattached("skin.mixer") && editor.runtime().is_module_unattached("skin.panels"),
+            "Customize does not save these as the user's choice");
+
+        // Back to the project that attaches it: on again, though `import` is load-once.
+        sync_overrides_to_imports(&mut editor, &imports(&["skin.mixer"]), package_of);
+        assert_eq!(shown(&mut editor), skin);
+        assert!(!editor.runtime().is_module_unattached("skin.mixer"));
+
+        // A skin the user switched off stays off in a project attaching it,
+        // though it was off for being unattached when they did.
+        sync_overrides_to_imports(&mut editor, &imports(&[]), package_of);
+        set_module_overrides_enabled(&mut editor, "skin.mixer", true);
+        set_module_overrides_enabled(&mut editor, "skin.mixer", false);
+        sync_overrides_to_imports(&mut editor, &imports(&["skin.mixer"]), package_of);
+        assert_eq!(shown(&mut editor).0, Some(Value::String("factory".into())));
         std::fs::remove_dir_all(root).unwrap();
     }
 

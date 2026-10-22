@@ -219,6 +219,25 @@ impl WidgetDefinition for ScaleEditorWidget {
         &["scale-editor"]
     }
 
+    fn doc(&self) -> &'static str {
+        "An editor for a track's tuned (microtonal) scale, one column per scale degree. \
+All pitches are in cents. :base lists each degree's base pitch above the root, \
+:offsets each degree's detune (default 0), :pitches the pitch that actually \
+sounds (default base + offset), :enabled a parallel list of booleans, :labels \
+optional degree names. The top strip draws the pitches as a staircase over \
+0..:period (default 1200, an octave); the middle draws detune bars on a \
++/- :range axis (default 100 cents); the bottom row has one on/off dot per \
+degree. :selected is the highlighted degree index. :on-change receives (kind \
+degree value): :set with the new detune in whole cents while pressing or \
+dragging the bars (shift snaps to 5), :finish with the final offset on release, \
+:clear on double-click or alt-press, :toggle when a degree's dot is pressed and \
+:select when the staircase is pressed (value 0 for the last three). Colours: \
+:color, :sharp-color, :flat-color, :grid-color, :text-color, :background; \
+:font-size and :dot-size size the labels and dots. Example: (scale-editor \
+:base (list 0 200 400 500 700 900 1100) :offsets offs :height 5 :on-change \
+(lambda (kind i v) (on-degree kind i v)))"
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }
@@ -239,7 +258,10 @@ impl WidgetDefinition for ScaleEditorWidget {
             "sharp-color",
             "flat-color",
             "grid-color",
+            "text-color",
             "background",
+            "font-size",
+            "dot-size",
             "on-change",
         ]
     }
@@ -302,12 +324,15 @@ impl WidgetDefinition for ScaleEditorWidget {
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = super::scroll::event_content_row(local_row);
         let degrees = degrees(&node.props);
         let count = degrees.count();
         let bands = bands(node.rect, shows_labels(&node.props));
         let in_bars = |row: f32| row >= bands.bars.row && row <= bands.bars.row + bands.bars.height;
         // A drag keeps editing the column (and band) the press landed in.
-        let (anchor_col, anchor_row) = drag_start.unwrap_or((local_col, local_row));
+        let (anchor_col, anchor_row) = drag_start
+            .map(|(col, row)| (col, super::scroll::event_content_row(row)))
+            .unwrap_or((local_col, local_row));
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let Some(degree) = column_at(node.rect, count, local_col) else {
@@ -357,6 +382,7 @@ impl WidgetDefinition for ScaleEditorWidget {
         local_row: f32,
         _modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
+        let local_row = super::scroll::event_content_row(local_row);
         let degrees = degrees(&node.props);
         let bands = bands(node.rect, shows_labels(&node.props));
         if local_row < bands.bars.row || local_row > bands.bars.row + bands.bars.height {
@@ -540,7 +566,7 @@ impl WidgetDefinition for ScaleEditorWidget {
                     scale: 1.0,
                     fg: if degrees.enabled[degree] { text } else { with_alpha(text, 0.4) },
                     bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 }));
             }
         }

@@ -185,7 +185,7 @@
   (box :width 9.9 :height 9.75 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
-      (label "INPUT" :font-size 8.0 :width 8.6 :color (control-on-color) :bg :transparent)
+      (label "INPUT" :bold true :font-size 8.0 :width 8.6 :color (control-on-color) :bg :transparent)
       (h-stack :gap 0.22 :align :center
         (parameter-knob fx "input" input-p 1)
         (v-stack :gap 0.10 :align :center
@@ -204,7 +204,7 @@
 
 (def filter-column (fx title freq-p res-p mode-p)
   (v-stack :gap 0.16 :align :center
-    (label title :font-size 8.0 :width 4.4 :color (control-on-color) :bg :transparent)
+    (label title :bold true :font-size 8.0 :width 4.4 :color (control-on-color) :bg :transparent)
     (freq-knob fx "freq" freq-p)
     (percent-knob fx "res" res-p)
     (percent-knob fx "mode" mode-p)
@@ -214,8 +214,8 @@
 ;; weight of the column between the two filters.
 (def link-column (fx harmonics-p correction-p serpar-p crunch-p)
   (v-stack :gap 0.18 :align :center
-    (label "HARMONICS" :font-size 8.5 :width 6.0 :color (control-on-color) :bg :transparent)
-    (option fx harmonics-p 6.0 1.45 11.0)
+    (label "HARMONICS" :bold true :font-size 8.5 :width 6.0 :color (control-on-color) :bg :transparent)
+    (option fx harmonics-p 8.0 1.45 11.0)
     (box :height 0.20)
     (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "corr" correction-p)
     (percent-knob fx "ser/par" serpar-p)
@@ -224,7 +224,7 @@
 (def filters-box (fx f1-freq-p f1-res-p f1-mode-p
                    f2-freq-p f2-res-p f2-mode-p
                    harmonics-p correction-p serpar-p crunch-p)
-  (box :width 17.6 :height 9.75 :padding 0.30
+  (box :width 19.0 :height 9.75 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (h-stack :gap 0.35 :align :start
       (filter-column fx "FILTER 1" f1-freq-p f1-res-p f1-mode-p)
@@ -240,7 +240,7 @@
   (box :width 23.4 :height 9.75 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.16 :align :center
-      (label "MODULATION" :font-size 8.0 :width 21.6 :color (control-on-color) :bg :transparent)
+      (label "MODULATION" :bold true :font-size 8.0 :width 21.6 :color (control-on-color) :bg :transparent)
       (h-stack :gap 0.22 :align :center
         (v-stack :gap 0.14 :align :center
           (choice fx envmode-p 0 "ADSR" 3.1)
@@ -258,11 +258,11 @@
         (if (eseq.effects.param-controls/fx-param-on-for? fx sync-p)
           (v-stack :gap 0.14 :align :center
             (label "lfo div" :font-size 9.0 :width 4.35 :color :dim :bg :transparent)
-            (option fx div-p 4.35 1.05 9.5))
+            (option fx div-p 6.35 1.05 9.5))
           (parameter-knob fx "lfo rate" rate-p 2))
         (percent-knob fx "lfo depth" depth-p)
         (v-stack :gap 0.14 :align :center
-          (option fx wave-p 5.0 1.05 9.5)
+          (option fx wave-p 6.0 1.05 9.5)
           (h-stack :gap 0.14
             (parameter-toggle fx trig-p "Trig" 2.4)
             (parameter-toggle fx sync-p "Sync" 2.4))))
@@ -279,7 +279,7 @@
   (box :width 9.9 :height 9.75 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
-      (label "OUTPUT" :font-size 8.0 :width 8.6 :color (control-on-color) :bg :transparent)
+      (label "OUTPUT" :bold true :font-size 8.0 :width 8.6 :color (control-on-color) :bg :transparent)
       (h-stack :gap 0.22 :align :center
         (parameter-knob fx "ar atk" ar-attack-p 1)
         (parameter-knob fx "ar rel" ar-release-p 0))

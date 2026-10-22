@@ -200,7 +200,7 @@
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "builtin-fx-mini-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (builtin-fx-param-subtree-key fx p "mini-num")
       (h-stack :gap 0.18 :align :baseline
-        (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
+        (label label-text :font-size 8.5 :width 3.0 :color :dim :bg :transparent)
         (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
           :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals 2
           :noui true :font-size 9.5 :text-color :dim
@@ -209,22 +209,23 @@
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
           :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))
-          :width 4.6 :height 1.0)))))
+          :width 4.6 :height 0.8)))))
 
 (def builtin-fx-filter-mini-cutoff (fx p)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "builtin-fx-mini-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (builtin-fx-param-subtree-key fx p "mini-cut")
-      (h-stack :gap 0.18 :align :baseline
-        (label "cut" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
+      (h-stack :gap 0.18 :align :center
+        (label "cutoff" :font-size 8.5 :width 4.0 :color :dim :bg :transparent)
         (number-picker :value (filter-cutoff-value fx p)
           :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals 2
-          :noui true :font-size 9.5 :text-color :dim
+          :noui false :font-size 9.5 :text-color :dim
+          :mode :slider
           :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
           :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))
-          :width 4.6 :height 1.0)))))
+          :width 4.6 :height 0.8)))))
 
 (def filter-mini-resonance (fx p)
   (subtree :key (builtin-fx-param-subtree-key fx p "mini-res")
@@ -291,17 +292,18 @@
 (def builtin-fx-filter-mini-percent (fx label-text p)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "builtin-fx-mini-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (builtin-fx-param-subtree-key fx p "mini-pct")
-      (h-stack :gap 0.18 :align :baseline
-        (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
+      (h-stack :gap 0.18 :align :center
+        (label label-text :font-size 8.5 :width 3.00 :color :dim :bg :transparent)
         (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
           :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
-          :noui true :font-size 9.5 :text-color :dim
+          :noui false :font-size 9.5 :text-color :dim
+          :mode :slider
           :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
           :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))
-          :width 4.6 :height 1.0)))))
+          :width 4.6 :height 0.8)))))
 
 (def builtin-fx-filter-mini-option (fx p)
   (subtree :key (builtin-fx-param-subtree-key fx p "mini-opt")

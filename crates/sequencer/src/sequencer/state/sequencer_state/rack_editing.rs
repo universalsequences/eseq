@@ -534,6 +534,38 @@ impl SequencerState {
         }
     }
 
+    /// Switch rack slot `slot_idx` off in every Patch except the one the
+    /// track's effective pattern plays, leaving the live slot as it is. A
+    /// slot added this way sounds only where it was added (docs/rig-spec.md
+    /// §4); patterns that share the current Patch share the slot's state.
+    /// Returns false when the track has no effective pattern (nothing changes).
+    pub fn park_rack_slot_outside_current_pattern(&self, track: usize, slot_idx: usize) -> bool {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(id) = scenes.effective_pattern_id(track) else {
+            return false;
+        };
+        let Some(pool) = scenes.track_pools.get_mut(track) else {
+            return false;
+        };
+        let Some(current) = pool.refs(id).map(|sound| sound.patch) else {
+            return false;
+        };
+        for (patch_id, patch) in pool.sounds.patches.iter_mut() {
+            if *patch_id == current {
+                continue;
+            }
+            let Some(slot) = Arc::make_mut(patch)
+                .rack_track
+                .as_mut()
+                .and_then(|rack| rack.slots.get_mut(slot_idx))
+            else {
+                continue;
+            };
+            slot.enabled = false;
+        }
+        true
+    }
+
     pub fn remove_rack_slot_from_all_pattern_snapshots(
         &self,
         track: usize,

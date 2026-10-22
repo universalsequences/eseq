@@ -161,6 +161,34 @@ impl WidgetDefinition for GridWidget {
         &["grid"]
     }
 
+    fn doc(&self) -> &'static str {
+        "Places children in equal cells, row by row, left to right. :cols N sets the column \
+count; the default is 1 (a single column), and :cols :auto fits as many columns as \
+the width allows. Every column is :col-width wide and every row :row-height tall; \
+each defaults to the widest / tallest child, so one large child enlarges every cell. \
+:gap sets the space between cells on both axes, or use :col-gap and :row-gap. :align \
+places each child inside its cell (:start default, :center, :end, :stretch), or per \
+axis with :h-align and :v-align; a child bigger than its cell is shrunk to it. \
+Natural size is the columns times :col-width by the rows times :row-height, plus \
+gaps; columns do not stretch to fill spare width (responsive-grid does that). Build \
+the cells with each. Example: (grid :cols 4 :gap 0.5 :align :center (each pads |p i| \
+(pad-view p i)))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "cols",
+            "col-width",
+            "row-height",
+            "gap",
+            "col-gap",
+            "row-gap",
+            "align",
+            "h-align",
+            "v-align",
+        ]
+    }
+
     fn is_container(&self) -> bool {
         true
     }
@@ -338,6 +366,31 @@ impl WidgetDefinition for GridWidget {
 impl WidgetDefinition for ResponsiveGridWidget {
     fn names(&self) -> &'static [&'static str] {
         &["responsive-grid"]
+    }
+
+    fn doc(&self) -> &'static str {
+        "A grid that divides its full width into equal columns and picks how many from the \
+space it has: card galleries and panels that reflow as a pane is resized. It uses \
+the largest column count from :levels (a list, default (1 2 3); or the range \
+:min-columns..:max-columns) whose columns stay at least :min-item-width wide \
+(default 12 cells). Every child is stretched to fill its slot. Rows are :row-height \
+tall; without it a row is the slot width times :row-aspect (default 1), or the \
+tallest child if that is taller. :gap (default 0) is used between both columns and \
+rows. Its width is whatever the parent gives it, so put it where it gets the full \
+width. Example: (responsive-grid :levels (list 1 2 4) :min-item-width 16 :gap 0.5 \
+:row-height 6 (each presets |p i| (preset-card p)))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "levels",
+            "min-columns",
+            "max-columns",
+            "min-item-width",
+            "gap",
+            "row-height",
+            "row-aspect",
+        ]
     }
 
     fn is_container(&self) -> bool {

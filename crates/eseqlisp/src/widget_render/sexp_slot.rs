@@ -48,6 +48,7 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
+use super::hover_callback;
 use super::menu_style::{self, PANEL_PADDING_V, ROW_HEIGHT as MENU_ROW_HEIGHT};
 use super::{
     CellBuffer, EventOutput, GpuPrimitive, GpuProportionalTextPrimitive, MouseEventOutcome,
@@ -148,10 +149,6 @@ pub fn pointer_moved_to(widget_id: Option<u64>) -> Vec<EventOutput> {
             .map(|(callback, _)| EventOutput { callback, args: vec![Value::Nil] })
             .collect()
     })
-}
-
-fn hover_callback(node: &LayoutNode) -> Option<Value> {
-    node.props.get("on-hover").filter(|v| !matches!(v, Value::Nil | Value::Bool(false))).cloned()
 }
 
 /// Record the hovered top-level item; the event to dispatch when it changed.
@@ -848,7 +845,7 @@ fn text(row: f32, col: f32, text: String, font_size: f32, fg: Color) -> GpuPrimi
         scale: 1.0,
         fg,
         bg: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
-        mono: false,
+        face: crate::ui::glyph_atlas::TextFace::Regular,
     })
 }
 
@@ -903,6 +900,28 @@ impl WidgetDefinition for SexpSlotWidget {
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["value", "schema", "width", "max-width", "height", "font-size", "wrap"]
+    }
+
+    fn doc(&self) -> &'static str {
+        "An editor for one small, guarded piece of Lisp data: a number, a word, a list \
+of those, or a form like (every 2 (rev swap)). Numbers show as scrubbable cells, \
+words and form heads as pop-up choices, lists inside real parens with a + to \
+append. :schema is a data s-expression saying what is allowed, e.g. \
+(num :min 1 :max 16 :step 1 :decimals 0 :default 4), (word rev swap stac), \
+(or ...), (form every (num ...) (word ...)), (forms ...) for a row of forms, \
+(fixed ...) to forbid lists, (dyn SOURCE) for host-supplied names; :value is the \
+current datum. Every committed edit calls :on-change with ONE value, the whole new \
+datum (store it and pass it back as :value). The slot is a single focus stop: \
+Left/Right move between items, Up/Down leave or enter a list, digits type a \
+number, a letter or ( opens a text field with completions, Enter commits or opens \
+choices, Backspace deletes an item, Esc closes; drag a number to scrub, click a \
+word to choose. :on-hover receives the top-level item under the pointer, or nil \
+when it leaves. :wrap false keeps it on one line. :lit (a bitmask) and \
+:lit-values ring the sounding items in :lit-color; :tint-args colours chosen \
+arguments in :tint-color; :dyn-context is passed to (dyn ...) sources and names \
+they reject draw in :error-color. Example: \
+(sexp-slot :key \"mods\" :schema '(word rev swap stac) :value mod \
+:on-change (lambda (v) (set! mod v)))"
     }
 
     fn completion_props(&self) -> &'static [&'static str] {
@@ -975,8 +994,8 @@ impl WidgetDefinition for SexpSlotWidget {
         }
         let schema = parse_schema(&node.props).ok()?;
         let value = value_datum(&node.props, &schema);
-        let layout = node_layout(node, &schema, &value, &state, last_cell_w());
-        let (stop, _) = layout.stop_at(local_col - node.rect.col, local_row - node.rect.row, line_height(&node.props))?;
+        let layout = node_layout(node, &schema, &value, &state, drawn_cell_w(0.0));
+        let (stop, _) = layout.stop_at(local_col - node.rect.col, super::scroll::event_content_row(local_row) - node.rect.row, line_height(&node.props))?;
         let Stop::Item(path) = stop else { return None };
         let Some(Datum::Num(start)) = value.get(&path) else { return None };
         let cell = |v: Value| std::rc::Rc::new(RefCell::new(v));
@@ -997,7 +1016,9 @@ impl WidgetDefinition for SexpSlotWidget {
         cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
-        remember_cell_w(cell_w);
+        // Hit-test the layout as drawn: the render's cell width, which can
+        // differ from the event's, decides where the pieces wrap.
+        let cell_w = drawn_cell_w(cell_w);
         let Ok(schema) = parse_schema(&node.props) else { return MouseEventOutcome::Consume };
         let value = value_datum(&node.props, &schema);
         let lookup = dyn_lookup(node);
@@ -1034,7 +1055,7 @@ impl WidgetDefinition for SexpSlotWidget {
                 }
                 let layout = node_layout(node, &schema, &value, &state, cell_w);
                 let line_h = line_height(&node.props);
-                let Some((stop, placed)) = layout.stop_at(local_col - node.rect.col, local_row - node.rect.row, line_h) else {
+                let Some((stop, placed)) = layout.stop_at(local_col - node.rect.col, super::scroll::event_content_row(local_row) - node.rect.row, line_h) else {
                     return MouseEventOutcome::Consume;
                 };
                 state.place(&slot, stop.clone());
@@ -1091,7 +1112,7 @@ impl WidgetDefinition for SexpSlotWidget {
             MouseEventKind::Moved if hover_callback(node).is_some() => {
                 let layout = node_layout(node, &schema, &value, &state, cell_w);
                 let item = layout
-                    .stop_at(local_col - node.rect.col, local_row - node.rect.row, line_height(&node.props))
+                    .stop_at(local_col - node.rect.col, super::scroll::event_content_row(local_row) - node.rect.row, line_height(&node.props))
                     .and_then(|(stop, _)| match stop {
                         Stop::Item(path) => path.first().copied(),
                         Stop::Plus(_) => None,
@@ -1427,7 +1448,7 @@ thread_local! {
     static LAST_CELL_W: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
 }
 
-/// Gestures begin without the cell width; the last one drawn or clicked is it.
+/// The cell width the last render laid slots out at.
 fn remember_cell_w(cell_w: f32) {
     if cell_w > 0.0 {
         LAST_CELL_W.with(|last| last.set(cell_w));
@@ -1436,6 +1457,14 @@ fn remember_cell_w(cell_w: f32) {
 
 fn last_cell_w() -> f32 {
     LAST_CELL_W.with(|last| last.get())
+}
+
+/// The cell width pointer events and gestures lay a slot out at: the last
+/// render's (`last_cell_w`), since they hit-test what was drawn and the
+/// event's own cell width can differ, which moves where pieces wrap;
+/// `fallback` before anything has been drawn.
+fn drawn_cell_w(fallback: f32) -> f32 {
+    Some(last_cell_w()).filter(|w| *w > 0.0).unwrap_or(fallback)
 }
 
 #[cfg(test)]
@@ -1552,6 +1581,82 @@ mod tests {
         assert!(long.width > short.width);
         let replaced = layout_slot(&slot, Some((&Stop::Item(vec![0]), "(le")), &chars, f32::INFINITY);
         assert_eq!(kinds(&replaced), vec!["[(le]", "[+]"]);
+    }
+
+    #[test]
+    fn a_click_on_a_wrapped_line_hits_the_piece_drawn_there() {
+        // One px per char per font-size point: at cell_w 8 a 10pt char is
+        // 1.25 cells wide, at cell_w 16 it is 0.625. Pointer events used to
+        // re-lay the slot out at the event's cell width, so when it differed
+        // from the render's the pieces wrapped elsewhere and a click on the
+        // second line landed on a piece of the first.
+        struct FixedMeasurer;
+        impl crate::layout::TextMeasurer for FixedMeasurer {
+            fn measure_text_px(&self, text: &str, font_size: f32) -> f32 {
+                text.chars().count() as f32 * font_size
+            }
+            fn line_height_px(&self, font_size: f32) -> f32 {
+                font_size
+            }
+        }
+        crate::widget_render::set_render_text_measurer(std::rc::Rc::new(FixedMeasurer));
+        let mut props = HashMap::new();
+        props.insert(
+            "schema".to_string(),
+            read_value(
+                "(forms (word left right accent rev stac ghost swap)
+                        (form fast (num :min 1 :max 8 :step 1 :decimals 0 :default 2)))",
+            )
+            .unwrap(),
+        );
+        props.insert("value".to_string(), read_value("(left right accent rev stac ghost swap)").unwrap());
+        props.insert("font-size".to_string(), Value::Number(10.0));
+        let node = LayoutNode {
+            widget_id: 4242,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "sexp-slot".to_string(),
+            rect: Rect { row: 0.0, col: 0.0, width: 16.0, height: 6.0 },
+            props,
+            children: Vec::new(),
+            focusable: true,
+            animation: Default::default(),
+        };
+        let viewport = WidgetViewport {
+            cell_w: 8.0,
+            cell_h: 16.0,
+            vp_w: 640.0,
+            vp_h: 360.0,
+            time_seconds: 0.0,
+            focused_widget_id: Some(node.widget_id),
+            focused_branch: false,
+            overlay_viewport_bottom: 18.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let _ = SEXP_SLOT_WIDGET.build_primitives("sexp-slot", &node, viewport);
+        let schema = parse_schema(&node.props).unwrap();
+        let value = value_datum(&node.props, &schema);
+        let drawn = node_layout(&node, &schema, &value, &SlotState::default(), 8.0);
+        assert!(drawn.lines > 1, "the slot wraps as drawn");
+        let target = drawn.placed.iter().find(|p| p.line == 1).expect("a second-line piece");
+        let Piece::Word { path, .. } = &target.piece else { panic!("{:?}", target.piece) };
+        let line_h = line_height(&node.props);
+        let _ = SEXP_SLOT_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Down(MouseButton::Left),
+            target.col + target.width * 0.5,
+            SlotLayout::line_row(1, line_h) + line_h * 0.5,
+            None,
+            None,
+            KeyModifiers::NONE,
+            16.0,
+            32.0,
+        );
+        assert_eq!(get_state(&node).cursor, Stop::Item(path.clone()));
     }
 
     #[test]

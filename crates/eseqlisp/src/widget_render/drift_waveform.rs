@@ -212,6 +212,26 @@ impl WidgetDefinition for DriftWaveformWidget {
     fn names(&self) -> &'static [&'static str] {
         &["drift-waveform"]
     }
+    fn doc(&self) -> &'static str {
+        "Specific to the Digi Syn / Digi Drift instruments: a one-cycle diagram of their \
+mixed oscillator source (before the filter), recomputed from the patch's own \
+parameters. Not an oscilloscope and not for general panels. Feed each parameter as a \
+number or binding: :osc1-wave (0..6), :osc1-shape (0..1), :osc1-octave, :osc1-on, \
+:osc1-gain-db, :osc2-wave (0..4), :osc2-octave, :osc2-detune, :osc2-on, :osc2-gain-db, \
+:noise-gain-db, :noise-on; any NAME-mod prop (e.g. :osc1-shape-mod) is added to NAME as \
+a live modulation offset. :release 1 = Digi Drift math, 2 = Digi Syn. Colours: \
+:wave-color, :background-color. \
+Example: (drift-waveform :release 2 :width 14 :height 2.3 :osc1-wave (syn-preview-binding \"osc1_wave\"))"
+    }
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "osc1-wave", "osc1-shape", "osc1-octave", "osc1-on", "osc1-gain-db", "osc2-wave",
+            "osc2-octave", "osc2-detune", "osc2-on", "osc2-gain-db", "noise-gain-db",
+            "noise-on", "release", "osc1-shape-mod", "osc1-gain-db-mod", "osc2-detune-mod",
+            "osc2-gain-db-mod", "noise-gain-db-mod", "wave-color", "background-color", "width",
+            "height",
+        ]
+    }
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

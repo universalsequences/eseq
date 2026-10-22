@@ -12,6 +12,24 @@ use super::*;
 /// transport simply starts this much later; nothing is skipped or doubled.
 const ROLL_PLAY_START_HOLD: Duration = Duration::from_millis(50);
 
+/// Every process body the scheduler VM may compile into its run cache for
+/// this authoring snapshot: class and instance `:run` bodies and listener
+/// handlers.
+fn process_run_sources(
+    authoring: &crate::process::ProcessAuthoringSnapshot,
+) -> std::collections::HashSet<String> {
+    let defs = authoring.defs.iter().flat_map(|def| {
+        def.run_source
+            .iter()
+            .chain(def.listens.iter().map(|listen| &listen.handler_source))
+    });
+    let instances = authoring
+        .instances
+        .iter()
+        .filter_map(|instance| instance.run_source.as_ref());
+    defs.chain(instances).cloned().collect()
+}
+
 /// Reconcile a topology publication without throwing away valid lookahead
 /// when queued event meaning is unchanged. Track appends join at the current
 /// frontier and rack slot changes are resolved from the latest audio snapshot;
@@ -83,6 +101,18 @@ pub(crate) struct SchedulerDriver {
     published_sequencers_version: u64,
     published_process_authoring_version: u64,
     scratch_runtime: Option<lisp_host::ScratchControlRuntime>,
+    /// Process body sources (run bodies and listener handlers) in the
+    /// authoring snapshot last synced into `process_runtime`. The scheduler
+    /// VM caches one compiled callback per distinct body; when a republish
+    /// drops a body from this set its callback is stale and the cache is
+    /// dropped, so live-edited bodies do not accumulate for the session.
+    process_run_sources: std::collections::HashSet<String>,
+    /// How many times `advance` rebuilt the scheduler VM.
+    #[cfg(test)]
+    pub(super) scratch_runtime_builds: u32,
+    /// How many process-only republishes dropped the VM's run cache.
+    #[cfg(test)]
+    pub(super) process_run_cache_clears: u32,
     debug_accum: bool,
     debug_graph: bool,
     runtime_errors: Vec<String>,
@@ -136,6 +166,11 @@ impl SchedulerDriver {
             published_sequencers_version: u64::MAX,
             published_process_authoring_version: u64::MAX,
             scratch_runtime: None,
+            process_run_sources: std::collections::HashSet::new(),
+            #[cfg(test)]
+            scratch_runtime_builds: 0,
+            #[cfg(test)]
+            process_run_cache_clears: 0,
             runtime_errors: Vec::new(),
             debug_accum: std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some(),
             debug_graph: std::env::var_os("TINYSEQ_DEBUG_GRAPH").is_some(),
@@ -272,11 +307,23 @@ impl SchedulerDriver {
         let latest_published_sequencers_version = state.published_sequencers_version();
         let latest_published_process_authoring_version =
             state.published_process_authoring_version();
-        if latest_scratch_source_version != self.scratch_source_version
+        let process_authoring_changed = latest_published_process_authoring_version
+            != self.published_process_authoring_version;
+        // Only the scratch source and the published generators live in the
+        // scheduler VM. Process bodies ship as source in the authoring
+        // snapshot and compile lazily into the VM's run cache, so a
+        // process-only republish (a panel re-declaring a track's chain on
+        // every slider tick) keeps the VM and its cache: rebuilding it
+        // re-evaluates the builtin libraries on this thread, which outlasts
+        // the lookahead and plays the next hits late.
+        let rebuild_runtime = latest_scratch_source_version != self.scratch_source_version
             || latest_published_sequencers_version != self.published_sequencers_version
-            || latest_published_process_authoring_version
-                != self.published_process_authoring_version
-        {
+            || (process_authoring_changed && self.scratch_runtime.is_none());
+        if rebuild_runtime {
+            #[cfg(test)]
+            {
+                self.scratch_runtime_builds += 1;
+            }
             let user_source = state.scratch_source();
             if debug_accum {
                 eprintln!(
@@ -347,13 +394,17 @@ impl SchedulerDriver {
                             "failed to register published sequencer {:?} ({}): {error}",
                             seq.name, seq.id
                         );
+                    } else if let Err(error) =
+                        runtime.set_sequencer_trigger(seq.id, seq.trigger_source.as_deref())
+                    {
+                        self.runtime_errors.push(format!("sequencer {:?} ({}): {error}", seq.name, seq.id));
+                        eprintln!("failed to register sequencer trigger {:?} ({}): {error}", seq.name, seq.id);
+                        state.report_generator_tick_error(seq.id, seq.name.clone(), error);
                     }
                 }
             }
             self.scratch_source_version = latest_scratch_source_version;
             self.published_sequencers_version = latest_published_sequencers_version;
-            self.published_process_authoring_version =
-                latest_published_process_authoring_version;
             let generator_defs = self.scratch_runtime
                 .as_ref()
                 .map(|runtime| runtime.sequencer_defs())
@@ -363,17 +414,6 @@ impl SchedulerDriver {
             // (eseq-85a.5): the parked-on-error set is scoped to one
             // runtime build.
             self.lookahead_state.parked_generators.clear();
-            let process_authoring = self.scratch_runtime
-                .as_ref()
-                .map(|runtime| runtime.process_authoring_snapshot())
-                .unwrap_or_default();
-            let process_authoring = crate::process::merge_authoring_snapshots(
-                process_authoring,
-                published_process_authoring.to_runtime(),
-            );
-            self.lookahead_state
-                .process_runtime
-                .sync_authoring(process_authoring, self.lookahead_state.clock.total_beats);
 
             let new_manifests: Vec<crate::graph::GraphManifest> =
                 published.iter().filter_map(|s| s.graph.clone()).collect();
@@ -400,6 +440,45 @@ impl SchedulerDriver {
                 );
             }
             self.loaded_graph_overrides = Some(snapshot.graph_overrides.clone());
+            self.lookahead_state.graph_overrides_applied = Some(snapshot.graph_overrides.clone());
+        }
+        if rebuild_runtime || process_authoring_changed {
+            self.published_process_authoring_version =
+                latest_published_process_authoring_version;
+            let process_authoring = self.scratch_runtime
+                .as_ref()
+                .map(|runtime| runtime.process_authoring_snapshot())
+                .unwrap_or_default();
+            let process_authoring = crate::process::merge_authoring_snapshots(
+                process_authoring,
+                state.published_process_authoring().to_runtime(),
+            );
+            let run_sources = process_run_sources(&process_authoring);
+            // A rebuilt VM starts with an empty run cache. On a kept VM, a
+            // body that left the snapshot (an edited def-process, a replaced
+            // expr class) would otherwise stay compiled forever. Unchanged
+            // bodies, as on a panel's per-tick chain republish, keep the
+            // cache warm.
+            if !rebuild_runtime
+                && !self.process_run_sources.is_subset(&run_sources)
+            {
+                if let Some(runtime) = self.scratch_runtime.as_mut() {
+                    // `eval` drops every cached process callback before it
+                    // evaluates; `nil` itself does nothing.
+                    if let Err(error) = runtime.eval("nil") {
+                        self.runtime_errors
+                            .push(format!("process run cache reset: {error}"));
+                    }
+                    #[cfg(test)]
+                    {
+                        self.process_run_cache_clears += 1;
+                    }
+                }
+            }
+            self.process_run_sources = run_sources;
+            self.lookahead_state
+                .process_runtime
+                .sync_authoring(process_authoring, self.lookahead_state.clock.total_beats);
         }
 
         if self.loaded_graph_overrides.as_ref() != Some(&snapshot.graph_overrides) {
@@ -417,6 +496,7 @@ impl SchedulerDriver {
                 self.lookahead_state.clock.total_beats,
             );
             self.loaded_graph_overrides = Some(snapshot.graph_overrides.clone());
+            self.lookahead_state.graph_overrides_applied = Some(snapshot.graph_overrides.clone());
         }
 
         let graph_control_commands = state.drain_graph_control_commands();
@@ -585,7 +665,7 @@ impl SchedulerDriver {
                 if clear_graph_deltas {
                     graph.reset_transport(0.0);
                 } else {
-                    graph.reset(0.0);
+                    graph.rewind(0.0);
                 }
             }
             publish_graph_visualizations(state, &self.lookahead_state.graph_runtimes, 0.0);
@@ -846,4 +926,88 @@ pub fn spawn_scheduler_thread(
                 thread::sleep(advanced.poll_after);
             }
         });
+}
+
+#[cfg(test)]
+mod process_run_cache_tests {
+    use super::*;
+    use crate::sequencer::{default_empty_effect_chain, SequencerState};
+
+    fn step_transposes<const CAPACITY: usize>(
+        queue: &ScheduledEventQueue<CAPACITY>,
+    ) -> Vec<f32> {
+        let mut out = Vec::new();
+        while let Some(event) = queue.pop_owned() {
+            if let ScheduledEventKind::ResolvedTrigger { resolved, .. } = event.kind {
+                out.push(resolved.transpose);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn edited_process_body_drops_the_kept_vm_run_cache() {
+        std::thread::Builder::new()
+            .stack_size(SCHEDULER_THREAD_STACK_SIZE)
+            .spawn(|| {
+                let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+                state.pattern.track_params[0].set_num_steps(4);
+                for step in 0..4 {
+                    state.pattern.patterns[0].set_step_active(step, true);
+                }
+                let mut ui = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+                let define = |ui: &mut lisp_host::ScratchControlRuntime, run: &str| {
+                    ui.eval(&format!(
+                        "(def-process shift-test
+                           :target (step-param :transpose)
+                           :in ((by :float -24 24 :default 0))
+                           :run {run})"
+                    ))
+                    .expect("define process");
+                };
+                let declare = |ui: &mut lisp_host::ScratchControlRuntime, by: i32| {
+                    ui.eval(&format!("(processes :track 0 (shift-test :by {by}))"))
+                        .expect("declare chain");
+                    state.publish_process_authoring(
+                        ui.process_authoring_snapshot().to_published().expect("publishable"),
+                    );
+                    state.publish_scheduler_snapshot();
+                };
+                define(&mut ui, "(target-add! (in :by))");
+                state.transport.playing.store(true, Ordering::Relaxed);
+                declare(&mut ui, 3);
+
+                let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+                let mut driver = SchedulerDriver::new(state.clone(), 48_000, 512, queue.clone());
+                let input = SchedulerInput::Offline;
+                driver.advance(0, 24_000, input);
+                let first = step_transposes(&queue);
+                assert!(!first.is_empty());
+                assert!(first.iter().all(|t| *t == 3.0), "{first:?}");
+
+                // Port-only republishes keep every body: the cache stays.
+                declare(&mut ui, 5);
+                driver.advance(24_000, 48_000, input);
+                let ported = step_transposes(&queue);
+                assert!(!ported.is_empty());
+                assert!(ported.iter().all(|t| *t == 5.0), "{ported:?}");
+                assert_eq!(driver.process_run_cache_clears, 0);
+
+                // A live-edited body replaces the old one: its callback goes.
+                define(&mut ui, "(target-add! (+ 1 (in :by)))");
+                declare(&mut ui, 5);
+                driver.advance(48_000, 72_000, input);
+                let edited = step_transposes(&queue);
+                assert!(!edited.is_empty());
+                assert!(edited.iter().all(|t| *t == 6.0), "{edited:?}");
+                assert_eq!(driver.process_run_cache_clears, 1);
+                assert_eq!(
+                    driver.scratch_runtime_builds, 1,
+                    "the edit must still not rebuild the scheduler VM"
+                );
+            })
+            .expect("spawn")
+            .join()
+            .expect("test panicked");
+    }
 }

@@ -478,17 +478,18 @@ pub(super) fn enqueue_neural_output_with_midi_fx(
     queue: &impl ScheduledEventSink,
     snapshot: &SequencerSnapshot,
     track_output_events: &mut Vec<TrackOutputEvent>,
-    runtime: Option<&mut lisp_host::ScratchControlRuntime>,
+    scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
+    process_runtime: &mut crate::process::ProcessRuntime,
     mut quantizer_state: Option<&mut MidiFxQuantizerState>,
     pattern_epoch: u64,
     sample_time: u64,
     samples_per_quarter: f32,
-    global_transpose: f32,
     arp_phase_beats: f32,
     output: NeuralOutput,
     debug_accum: bool,
 ) -> bool {
     let mut event = output.event;
+    let global_transpose = process_runtime.global_transpose();
     let (seed, neuron) = match event.source.clone() {
         EventSource::Network { seed, neuron, .. } => (seed, neuron),
         EventSource::Step { .. } => {
@@ -497,7 +498,7 @@ pub(super) fn enqueue_neural_output_with_midi_fx(
                     queue,
                     snapshot,
                     track_output_events,
-                    runtime,
+                    scratch_runtime.as_mut(),
                     quantizer_state.as_deref_mut(),
                     pattern_epoch,
                     sample_time,
@@ -523,11 +524,25 @@ pub(super) fn enqueue_neural_output_with_midi_fx(
     if !output.emit_trigger {
         return true;
     }
+    // A track's `:triggers :all` processes run on this hit like on a trig.
+    let Some(midi_fx_params) = run_track_chain_on_foreign_trigger(
+        scratch_runtime,
+        process_runtime,
+        snapshot,
+        &mut event,
+        arp_phase_beats as f64,
+        sample_time,
+        samples_per_quarter,
+        ForeignTriggerOrigin::Neural,
+        debug_accum,
+    ) else {
+        return true;
+    };
     enqueue_step_event_with_midi_fx(
         queue,
         snapshot,
         track_output_events,
-        runtime,
+        scratch_runtime.as_mut(),
         quantizer_state,
         pattern_epoch,
         sample_time,
@@ -536,7 +551,7 @@ pub(super) fn enqueue_neural_output_with_midi_fx(
         global_transpose,
         arp_phase_beats,
         event,
-        Vec::new(),
+        midi_fx_params,
         debug_accum,
     )
 }
@@ -582,6 +597,14 @@ impl EmittedNetworkEventSource {
         }
     }
 
+    pub(super) fn trigger_origin(self) -> ForeignTriggerOrigin {
+        match self {
+            Self::Generator { .. } => ForeignTriggerOrigin::Generator,
+            Self::Process { runtime_id } => ForeignTriggerOrigin::Process { runtime_id },
+            Self::Graph { .. } => ForeignTriggerOrigin::Graph,
+        }
+    }
+
     pub(super) fn resolve_track(self, emitted_track: Option<usize>) -> Option<usize> {
         match self {
             Self::Generator { .. } | Self::Process { .. } => emitted_track.or(Some(0)),
@@ -594,13 +617,13 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
     queue: &impl ScheduledEventSink,
     snapshot: &SequencerSnapshot,
     track_output_events: &mut Vec<TrackOutputEvent>,
-    runtime: Option<&mut lisp_host::ScratchControlRuntime>,
+    scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
+    process_runtime: &mut crate::process::ProcessRuntime,
     quantizer_state: Option<&mut MidiFxQuantizerState>,
     pattern_epoch: u64,
     sample_time: u64,
     samples_per_quarter: f32,
     arp_phase_beats: f32,
-    global_transpose: f32,
     source: EmittedNetworkEventSource,
     emitted: lisp_host::EmittedAccumulatorEvent,
     landing: Option<StepLanding>,
@@ -695,7 +718,7 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
     // landing stamp so it is the most specific source for this hit.
     let mut midi_fx_params = Vec::new();
     if !emitted.named_params.is_empty() {
-        let midi_fx = runtime
+        let midi_fx = scratch_runtime
             .as_ref()
             .map(|runtime| runtime.midi_fx_descriptor_source());
         apply_named_params(
@@ -706,18 +729,33 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
             &mut midi_fx_params,
         );
     }
+    // A track's `:triggers :all` processes run on this hit like on a trig.
+    let Some(chain_midi_fx_params) = run_track_chain_on_foreign_trigger(
+        scratch_runtime,
+        process_runtime,
+        snapshot,
+        &mut event,
+        arp_phase_beats as f64,
+        sample_time,
+        samples_per_quarter,
+        source.trigger_origin(),
+        debug_accum,
+    ) else {
+        return true;
+    };
+    midi_fx_params.extend(chain_midi_fx_params);
 
     enqueue_step_event_with_midi_fx(
         queue,
         snapshot,
         track_output_events,
-        runtime,
+        scratch_runtime.as_mut(),
         quantizer_state,
         pattern_epoch,
         sample_time,
         arp_phase_beats as f64,
         samples_per_quarter,
-        global_transpose,
+        process_runtime.global_transpose(),
         arp_phase_beats,
         event,
         midi_fx_params,
@@ -745,7 +783,38 @@ pub(super) fn enqueue_due_process_emissions(
     landing: Option<&dyn Fn(usize, f64) -> Option<StepLanding>>,
     debug_accum: bool,
 ) -> bool {
-    for item in process_runtime.take_due_events(up_to_beat) {
+    // A `:triggers :all` chain running on an emission below can schedule
+    // ratchets that are already due, so refill until nothing is. Refills are
+    // bounded: mirrored `:triggers :all` chains on two tracks that emit to each
+    // other at offset 0 keep scheduling at the beat just taken, and nothing
+    // else (the per-invocation cascade limit resets on every refill) would
+    // stop that cycle from spinning the scheduler thread forever.
+    let mut due = std::collections::VecDeque::new();
+    let mut refills = 0usize;
+    loop {
+        if due.is_empty() {
+            let next = process_runtime.take_due_events(up_to_beat);
+            if next.is_empty() {
+                break;
+            }
+            refills += 1;
+            if refills > PROCESS_EVENT_CASCADE_LIMIT + 1 {
+                // Drop what the runaway cycle produced so it does not resume
+                // on the next chunk at the same beat.
+                if debug_accum || debug_routing_enabled() {
+                    eprintln!(
+                        "[process] emission refill limit exceeded limit={} dropped={}",
+                        PROCESS_EVENT_CASCADE_LIMIT,
+                        next.len()
+                    );
+                }
+                break;
+            }
+            due.extend(next);
+        }
+        let Some(item) = due.pop_front() else {
+            break;
+        };
         let straight_sample_time = chunk_start_sample.saturating_add(
             ((item.beat - chunk_start_beats).max(0.0) * samples_per_quarter).round() as u64,
         );
@@ -825,13 +894,13 @@ pub(super) fn enqueue_due_process_emissions(
                     queue,
                     snapshot,
                     track_output_events,
-                    scratch_runtime.as_mut(),
+                    scratch_runtime,
+                    process_runtime,
                     Some(&mut *quantizer_state),
                     pattern_epoch,
                     sample_time,
                     samples_per_quarter as f32,
                     item.beat as f32,
-                    process_runtime.global_transpose(),
                     source,
                     event,
                     landing,
@@ -886,3 +955,132 @@ pub(super) fn enqueue_due_process_emissions(
     true
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sequencer::default_empty_effect_chain;
+    use std::cell::Cell;
+
+    /// Accepts every event and counts it, so a runaway emission cycle is not
+    /// cut short by a full queue.
+    #[derive(Default)]
+    struct CountingSink(Cell<usize>);
+
+    impl ScheduledEventSink for CountingSink {
+        fn push(&self, _event: ScheduledEvent) -> Result<(), ScheduledEvent> {
+            self.0.set(self.0.get() + 1);
+            Ok(())
+        }
+    }
+
+    fn hit(track: usize) -> lisp_host::EmittedAccumulatorEvent {
+        lisp_host::EmittedAccumulatorEvent {
+            origin_note: None,
+            offset_beats: 0.0,
+            track: Some(track),
+            resolved: ResolvedStep {
+                duration: 1.0,
+                velocity: 1.0,
+                speed: 1.0,
+                aux_a: 0.0,
+                aux_b: 0.0,
+                transpose: 0.0,
+                pan: 0.0,
+                chop: 1.0,
+                retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+            },
+            chord: Vec::new(),
+            chord_durations: Vec::new(),
+            chord_step_transpose: 0.0,
+            effect_params: Vec::new(),
+            instrument_params: Vec::new(),
+            named_params: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mirrored_triggers_all_emitters_on_two_tracks_do_not_refill_forever() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        let mut scratch = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            vec![Vec::new(), Vec::new()],
+            vec![
+                EffectDescriptor::builtin_sampler(),
+                EffectDescriptor::builtin_sampler(),
+            ],
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process echo-to-1 :triggers :all :run (emit :track 1))
+                (def-process echo-to-0 :triggers :all :run (emit :track 0))
+                (processes :track 0 (echo-to-1))
+                (processes :track 1 (echo-to-0))
+                "#,
+            )
+            .expect("define mirrored processes");
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut process_runtime = crate::process::ProcessRuntime::default();
+        process_runtime.sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+        let mut scratch = Some(scratch);
+        let mut track_output_events = Vec::new();
+        let mut quantizer = MidiFxQuantizerState::default();
+        let sink = CountingSink::default();
+
+        // A generator hit on track 0 runs echo-to-1, which schedules the
+        // first emission of the cycle at beat 0.
+        assert!(enqueue_emitted_network_event_with_midi_fx(
+            &sink,
+            &snapshot,
+            &mut track_output_events,
+            &mut scratch,
+            &mut process_runtime,
+            Some(&mut quantizer),
+            0,
+            0,
+            24_000.0,
+            0.0,
+            EmittedNetworkEventSource::Generator { index: 0 },
+            hit(0),
+            None,
+            false,
+        ));
+
+        let mut drain = |sink: &CountingSink| {
+            enqueue_due_process_emissions(
+                sink,
+                &snapshot,
+                &mut track_output_events,
+                &mut scratch,
+                &mut quantizer,
+                &mut process_runtime,
+                0,
+                0.0,
+                0,
+                1.0,
+                24_000.0,
+                crate::groove::GrooveFloor::at(0),
+                None,
+                false,
+            )
+        };
+        let first = CountingSink::default();
+        assert!(drain(&first), "the refill loop returns instead of spinning");
+        assert!(first.0.get() > PROCESS_EVENT_CASCADE_LIMIT, "the cycle did play before the bound: {}", first.0.get());
+        assert!(
+            first.0.get() <= 4 * (PROCESS_EVENT_CASCADE_LIMIT + 2),
+            "bounded emissions: {}",
+            first.0.get()
+        );
+        let next = CountingSink::default();
+        assert!(drain(&next));
+        assert_eq!(next.0.get(), 0, "the runaway cycle does not resume next chunk");
+    }
+}

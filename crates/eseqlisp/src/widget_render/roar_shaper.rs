@@ -177,6 +177,26 @@ impl WidgetDefinition for RoarShaperWidget {
         &["roar-shaper"]
     }
 
+    fn doc(&self) -> &'static str {
+        "Specific to the built-in Roar effect: the selected stage's waveshaper transfer \
+curve (input across, output up) with :amount drive and :bias baked in, a marker at the \
+shifted centre, and a translucent band showing how much of the curve the live input \
+is currently driving. Display only, no callbacks. :shaper is the shaper type index \
+(0..11, Roar's list), :amount 0..1, :bias -1..1, :stage 0..2 picks which stage's \
+meter to read; bind them to the effective param values. :source is the Roar effect \
+selector (dict :kind :track-effect :index track :slot slot) or :bus-effect, used only \
+for the drive band. Colours: :background-color, :grid-color, :curve-color, \
+:bias-color. \
+Example: (roar-shaper :source (effect-source fx) :stage 0 :shaper shp :amount amt :bias bias :width 9.4 :height 4.6)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "shaper", "amount", "bias", "stage", "source", "background-color", "grid-color",
+            "curve-color", "bias-color", "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

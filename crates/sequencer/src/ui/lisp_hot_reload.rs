@@ -307,7 +307,7 @@ fn refresh_clean_open_buffer(editor: &mut Editor, buffer_idx: usize, text: &str)
         scroll_top.min(editor.buffers[buffer_idx].lines.len().saturating_sub(1));
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     watch_path(a) == watch_path(b)
 }
 

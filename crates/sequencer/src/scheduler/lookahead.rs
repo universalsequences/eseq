@@ -19,6 +19,10 @@ pub(super) struct SchedulerLookaheadState {
     pub(super) resolved_read_pattern_epoch: Option<u64>,
     pub(super) graph_manifests: Vec<crate::graph::GraphManifest>,
     pub(super) graph_runtimes: Vec<crate::graph::GraphRuntime>,
+    /// The graph overrides `graph_runtimes` were last reconciled against:
+    /// the live snapshot's (worker) or an arranged row's / launched scene's
+    /// (adopted here at the boundary, ahead of the control-side mirror).
+    pub(super) graph_overrides_applied: Option<Vec<crate::graph::ProjectGraphOverrides>>,
     pub(super) debug_graph_drive_chunks: u32,
     pub(super) debug_accum_invocations: u64,
     pub(super) quantized_launches: crate::quantized_launch::PendingQuantizedLaunches,
@@ -146,6 +150,7 @@ impl SchedulerLookaheadState {
             resolved_read_pattern_epoch: None,
             graph_manifests: Vec::new(),
             graph_runtimes: Vec::new(),
+            graph_overrides_applied: None,
             debug_graph_drive_chunks: 0,
             debug_accum_invocations: 0,
             quantized_launches: crate::quantized_launch::PendingQuantizedLaunches::default(),
@@ -158,6 +163,33 @@ impl SchedulerLookaheadState {
             live_rack_config_chunk: None,
         }
     }
+}
+
+/// Point every graph at the overrides of the snapshot a chunk boundary
+/// switches to (an arranged row or a launched scene) from that boundary on.
+/// The live snapshot only catches up once the control thread mirrors the
+/// audible switch, which leaves the graph running the previous scene's
+/// config for the first steps of the new one.
+fn adopt_graph_overrides(
+    manifests: &mut Vec<crate::graph::GraphManifest>,
+    runtimes: &mut Vec<crate::graph::GraphRuntime>,
+    applied: &mut Option<Vec<crate::graph::ProjectGraphOverrides>>,
+    overrides: &[crate::graph::ProjectGraphOverrides],
+    rack_memberships: &[crate::graph::RackMembership],
+    total_beats: f64,
+) {
+    if applied.as_deref() == Some(overrides) {
+        return;
+    }
+    reconcile_graph_runtimes(
+        std::mem::take(manifests),
+        overrides,
+        rack_memberships,
+        runtimes,
+        manifests,
+        total_beats,
+    );
+    *applied = Some(overrides.to_vec());
 }
 
 /// Flag accumulator resets for exactly the tracks whose resolved SOURCE
@@ -388,6 +420,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let published_process_channel_epoch = &mut scheduler.published_process_channel_epoch;
     let graph_manifests = &mut scheduler.graph_manifests;
     let graph_runtimes = &mut scheduler.graph_runtimes;
+    let graph_overrides_applied = &mut scheduler.graph_overrides_applied;
     let session_launches = &mut scheduler.quantized_launches;
     let mut debug_graph_drive_chunks = scheduler.debug_graph_drive_chunks;
     let mut debug_accum_invocations = scheduler.debug_accum_invocations;
@@ -497,7 +530,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             &mut track_output_events,
             scratch_runtime,
             midi_fx_quantizer_state,
-            process_runtime.global_transpose(),
+            process_runtime,
             pattern_epoch,
             rendered,
             scheduled_until_sample,
@@ -564,6 +597,26 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         } else {
             None
         };
+        if song_playback.is_none() {
+            // Graphs follow whatever this chunk schedules from: a launch
+            // awaiting its mirror, else the live scene, re-checked every chunk
+            // so a cancelled launch hands the graph straight back. A launch
+            // whose mirror is acked but missing from this pass's base snapshot
+            // holds the graph where it is.
+            let target = session_launch_snapshot
+                .as_deref()
+                .or((!session_launches.base_predates_mirror(base_snapshot)).then_some(base_snapshot));
+            if let Some(target) = target {
+                adopt_graph_overrides(
+                    graph_manifests,
+                    graph_runtimes,
+                    graph_overrides_applied,
+                    &target.graph_overrides,
+                    &base_snapshot.rack_memberships,
+                    clock.total_beats,
+                );
+            }
+        }
         if let Some(song) = song_playback.as_mut() {
             let prev_row = song.current_row();
             match song.next_chunk(
@@ -581,6 +634,27 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 } => {
                     chunk_frames = frames;
                     song_row_snapshot = Some(song.row_snapshot(row));
+                    // Graphs follow the governing row, unless a scene latch
+                    // (a manual scene launch, or Play's auto-latch on an
+                    // empty arrangement) handed scene-level authority to the
+                    // session. Re-checked every chunk, so a latch taken or
+                    // released mid-song moves the graph with it.
+                    let target = if state.song_scene_latch() {
+                        &base_snapshot.graph_overrides
+                    } else {
+                        &song_row_snapshot
+                            .as_deref()
+                            .expect("row snapshot set above")
+                            .graph_overrides
+                    };
+                    adopt_graph_overrides(
+                        graph_manifests,
+                        graph_runtimes,
+                        graph_overrides_applied,
+                        target,
+                        &base_snapshot.rack_memberships,
+                        clock.total_beats,
+                    );
                     if row_changed {
                         for graph in graph_runtimes.iter_mut() {
                             graph.clear_deltas();
@@ -610,10 +684,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         // from its start without stale state; the wrap chunk
                         // begins exactly at the end-beat sample, so the edge
                         // trigger fires exactly once.
+                        let wrap_beats = clock.total_beats;
                         clock.reset();
                         midi_fx_quantizer_state.reset();
                         neural_runtime.reset_state(0.0);
-                        generator_runtime.reset(0.0);
+                        generator_runtime.reset_for_wrap(wrap_beats, samples_per_quarter);
                         // Hand the reads the previous run's tail first, so
                         // the reset drops it instead of the next chunk's
                         // feed replaying it into the new run.
@@ -765,6 +840,26 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 }
             }
             scratch.set_scene_slot_snapshot(chunk_slots);
+        }
+        // Generators fed by a track's steps (`:trigger`): which project track
+        // opens which generator's gate this chunk, read against the documents
+        // just installed. A rack-owned generator names a member of its rack.
+        let mut failed_triggers = Vec::new();
+        let generator_trigger_tracks: Vec<(u64, usize)> = match scratch_runtime.as_mut() {
+            Some(scratch) => scratch
+                .generator_trigger_tracks(&mut failed_triggers)
+                .into_iter()
+                .filter_map(|(id, track)| match generator_owner_racks.get(&id) {
+                    Some(group_id) => crate::graph::rack_members(&snapshot.rack_memberships, *group_id)
+                        .and_then(|members| members.get(track).copied())
+                        .map(|track| (id, track)),
+                    None => Some((id, track)),
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        for (id, name, error) in failed_triggers {
+            state.report_generator_tick_error(id, name, error);
         }
         // A process roll (`roll!`) releases on its deadline beat exactly:
         // never let a chunk straddle it, so the next chunk starts on the
@@ -1867,10 +1962,13 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         let seed_beats = trigger.absolute_beats;
                         neural_runtime.process_seed_at(&seed_event, seed_beats);
                         if clock.graph_seed_is_new(seed_beats, samples_per_quarter.into()) {
-                            seed_graph_runtimes(
+                            seed_step_listeners(
                                 graph_runtimes,
+                                generator_runtime,
+                                &generator_trigger_tracks,
                                 &seed_event,
                                 seed_beats,
+                                trigger.boundary_beats,
                                 samples_per_quarter.into(),
                             );
                         }
@@ -1912,10 +2010,13 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         let seed_beats = trigger.absolute_beats;
                         neural_runtime.process_seed_at(&step_event, seed_beats);
                         if clock.graph_seed_is_new(seed_beats, samples_per_quarter.into()) {
-                            seed_graph_runtimes(
+                            seed_step_listeners(
                                 graph_runtimes,
+                                generator_runtime,
+                                &generator_trigger_tracks,
                                 &step_event,
                                 seed_beats,
+                                trigger.boundary_beats,
                                 samples_per_quarter.into(),
                             );
                         }
@@ -1962,10 +2063,13 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     // frontier already seeded the graphs, which were not
                     // rewound (their emissions are replayed instead).
                     if clock.graph_seed_is_new(seed_beats, samples_per_quarter.into()) {
-                        seed_graph_runtimes(
+                        seed_step_listeners(
                             graph_runtimes,
+                            generator_runtime,
+                            &generator_trigger_tracks,
                             &step_event,
                             seed_beats,
+                            trigger.boundary_beats,
                             samples_per_quarter.into(),
                         );
                     }
@@ -2080,12 +2184,12 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 queue,
                 snapshot,
                 &mut track_output_events,
-                scratch_runtime.as_mut(),
+                scratch_runtime,
+                process_runtime,
                 Some(&mut *midi_fx_quantizer_state),
                 pattern_epoch,
                 sample_time,
                 samples_per_quarter as f32,
-                process_runtime.global_transpose(),
                 event_beats,
                 output,
                 debug_accum,
@@ -2445,13 +2549,13 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     queue,
                     snapshot,
                     &mut track_output_events,
-                    scratch_runtime.as_mut(),
+                    scratch_runtime,
+                    process_runtime,
                     Some(&mut *midi_fx_quantizer_state),
                     pattern_epoch,
                     emission.sample_time,
                     samples_per_quarter as f32,
                     event_beats,
-                    process_runtime.global_transpose(),
                     graph_source,
                     emission.event,
                     landing,
@@ -2502,6 +2606,28 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 |id| gated_generators.contains(&id),
             )
         {
+            break;
+        }
+        // Ratchets a `:triggers :all` chain scheduled on a graph, generator
+        // or neural hit above are due in this chunk too.
+        if !enqueue_due_process_emissions(
+            queue,
+            snapshot,
+            &mut track_output_events,
+            scratch_runtime,
+            midi_fx_quantizer_state,
+            process_runtime,
+            pattern_epoch,
+            chunk_start_beats,
+            scheduled_until_sample,
+            chunk_end_beats,
+            samples_per_quarter,
+            groove_floor,
+            Some(&|track, beats| {
+                StepLanding::resolve(&*clock, state, snapshot, track, beats, samples_per_quarter)
+            }),
+            debug_accum,
+        ) {
             break;
         }
         feed_track_output_reads(process_runtime, &track_output_events, &mut track_output_read_cursor);
@@ -2893,13 +3019,13 @@ fn run_generator_stage<const QUEUE_CAP: usize>(
             queue,
             snapshot,
             track_output_events,
-            scratch_runtime.as_mut(),
+            scratch_runtime,
+            process_runtime,
             Some(&mut *midi_fx_quantizer_state),
             pattern_epoch,
             emission.sample_time,
             samples_per_quarter as f32,
             event_beats,
-            process_runtime.global_transpose(),
             generator_source,
             emission.event,
             landing,
@@ -2927,7 +3053,7 @@ fn replay_retained_graph_emissions<const QUEUE_CAP: usize>(
     track_output_events: &mut Vec<TrackOutputEvent>,
     scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
     midi_fx_quantizer_state: &mut MidiFxQuantizerState,
-    global_transpose: f32,
+    process_runtime: &mut crate::process::ProcessRuntime,
     pattern_epoch: u64,
     rendered: u64,
     chunk_start_sample: u64,
@@ -3014,13 +3140,13 @@ fn replay_retained_graph_emissions<const QUEUE_CAP: usize>(
             queue,
             snapshot,
             track_output_events,
-            scratch_runtime.as_mut(),
+            scratch_runtime,
+            process_runtime,
             Some(&mut *midi_fx_quantizer_state),
             pattern_epoch,
             sample_time,
             samples_per_quarter as f32,
             event_beats,
-            global_transpose,
             source,
             emission.event,
             landing,
@@ -3038,7 +3164,7 @@ fn replay_retained_graph_emissions<const QUEUE_CAP: usize>(
 /// §4): emission `:track` n is member n, the same member-relative rule graph
 /// routes use, so the instance plays its own pads wherever the rack sits. A
 /// member index past the rack's size (or an untracked emission) drops.
-fn map_rack_member_emissions(
+pub(crate) fn map_rack_member_emissions(
     emitted: &mut Vec<crate::lisp_host::EmittedAccumulatorEvent>,
     members: &[usize],
 ) {

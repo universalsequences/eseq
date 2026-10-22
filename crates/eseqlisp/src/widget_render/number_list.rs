@@ -185,6 +185,20 @@ impl WidgetDefinition for NumberListWidget {
         &["width", "height"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A read-only row of small numeric chips, e.g. the notes or transposes \
+something is currently sounding. :values is a list of numbers (or float bindings); \
+:count (bindable) says how many of them are live, all of them when omitted. Each \
+chip is :chip-width cells wide (default 2.4) with :gap between (default 0.25), so \
+the layout never depends on the values; when more are live than fit, the last chip \
+reads \"…k\" for the k hidden ones. :decimals (default 0) formats them and :signed \
+true prefixes positives with +. :levels, a parallel list of 0..1, fades each chip \
+(e.g. by velocity) down to :min-alpha (default 0.2). It has no callbacks. Colours: \
+:chip-color for the chip, :color for the text; :corner-radius in pixels (default \
+4), :font-size. Without :width it is 10 cells wide and 1 tall. Example: \
+(number-list :values '(-12 0 7) :signed true :width 12)"
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "values", "count", "levels", "min-alpha", "decimals", "signed", "chip-width", "gap", "chip-color",
@@ -259,7 +273,7 @@ impl WidgetDefinition for NumberListWidget {
                 scale: 1.0,
                 fg: text_color,
                 bg: chip_color,
-                mono: false,
+                face: crate::ui::glyph_atlas::TextFace::Regular,
             }));
         }
         prims

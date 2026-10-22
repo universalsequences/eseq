@@ -1090,6 +1090,7 @@
          (soloed    :bool   :set set-track-soloed)
          (collapsed :bool   :set set-track-collapsed :doc "Lane collapsed in the sequencer")
          (playhead  :int    :doc "The playing step, -1 while stopped")
+         (triggered :bool   :doc "Lit for a moment after each trigger, however it was played (a pad's pad.triggered)")
          (playhead-page :int :doc "The 16-step page the playhead is on (playhead / 16), -1 while stopped")
          (length-step :int  :doc "The step a length lane (length!) last set the pattern length to, while playing; -1 when none")
          (playhead-row :int :doc "The row the playhead lights on a grid as tall as the longest pattern, where a shorter track repeats (a tracker's): the transport's step modulo the grid's height when that repeat plays, else playhead; -1 while stopped")
@@ -1394,7 +1395,9 @@
   :host ((group  group  :doc "The rack")
          (cid    :int    :doc "The host's stable clip id")
          (index  :int    :doc "Position in the rack's bank, from 0")
-         (name   :string :set (rack-clip-setter "name") :doc "Non-empty")
+         (name   :string :set (rack-clip-setter "name")
+                 :doc "Its own name; empty (set \"\" to clear) while unnamed")
+         (label  :string :doc "The name shown: name, else \"Clip N\" (index + 1)")
          (active :bool   :doc "The current scene plays it")
          (scenes (list-of scene) :doc "The scenes that play it")
          (groove groove  :doc "The clip's own groove, or nil while it follows the rack's")
@@ -1781,7 +1784,9 @@
 ;; The agent.
 (def-kind agent
   :key ()
-  :host ((generation :int :doc "Moves whenever an agent session changes")))
+  :host ((generation :int :doc "Moves whenever an agent session changes")
+         (pane-generation :int :doc "Moves whenever the agent pane's conversation changes")
+         (pane-shape :int :doc "Moves when the agent pane's rows change: an entry added, a tool finished, a turn started or ended, a package card changed. Not as text streams into the last entry")))
 
 ;; Promote to factory: what the open promotion copies and skips
 ;; (`factory-promote-open`), and what its commit reported. `kind` is a
@@ -1890,15 +1895,29 @@
 
 ;; ── Collections and actions ──
 
+;; The project's tracks, in order: `track` instances (t.index, t.name,
+;; t.color, …; (describe-kind 'track) lists them all).
 (def tracks () project.tracks)
+;; The project's scenes, in order (`scene` instances).
 (def scenes () project.scenes)
+;; The project's scene banks (`bank` instances).
 (def banks () project.banks)
+;; The mixer's buses (`bus` instances).
 (def buses () project.buses)
+;; The project's track groups and racks (`group` instances): a rack's
+;; g.tracks are its pads, in pad order; an instance a rack owns has that
+;; group's gid as its self.owner.
 (def groups () project.groups)
+;; The project's send routes (`route` instances).
 (def routes () project.routes)
+;; The project's macros (`macro` instances).
 (def macros () project.macros)
+;; The project's graph sequencers (`graph` instances).
 (def graphs () project.graphs)
+;; The project's neural networks (`network` instances).
 (def networks () project.networks)
+;; The project's generators, one per sequencer instance with a :generator
+;; (`generator` instances); (generator-of self) is an instance's own.
 (def generators () project.generators)
 
 ;; Graph sequencers (spec §14.2k). The graph of a created instance (self) or

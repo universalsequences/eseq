@@ -117,6 +117,8 @@ use panel_kinds_seed::*;
     }
 
     fn register_agent_test_natives(runtime: &mut Runtime) {
+        // The agent pane's natives are inert until the pane is used.
+        crate::agent_pane::register_agent_pane_natives(runtime, String::new);
         runtime.register_native("agent/new", |_args, _ctx| Ok(Value::Number(1.0)));
         runtime.register_native("agent/send", |_args, _ctx| Ok(Value::Nil));
         runtime.register_native("agent/cancel", |_args, _ctx| Ok(Value::Nil));
@@ -14440,6 +14442,8 @@ use panel_kinds_seed::*;
             .id;
         editor.set_active_buffer(mixer_id);
         editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::UiOnly;
+        // The fixture measures the clip grid, which the factory hides by default.
+        editor.runtime_mut().eval_str("(setopt eseq.seq-core-state/mixer-show-clip-grid true)").unwrap();
         editor.set_layout_viewport(160, 34);
         editor.refresh_runtime_side_effects();
         let layout = editor
@@ -22732,6 +22736,11 @@ use panel_kinds_seed::*;
                 "drop position snaps down to the bar grid"
             );
             assert_eq!(action_field(&recorded[8], "scene"), Value::Number(1.0));
+            assert_eq!(
+                action_field(&recorded[8], "place-patterns"),
+                Value::Bool(true),
+                "a pill drop stamps the scene's track/rack clips"
+            );
         }
 
         // Start-edge drag on a track clip: NOT a move and not an end resize —
@@ -24431,7 +24440,8 @@ use panel_kinds_seed::*;
         assert!(commands.iter().any(|command| matches!(command,
             eseqlisp::host::HostCommand::Custom { name, payload }
                 if name == "arrangement-scene-insert" && *payload == map_value([
-                    ("beat", Value::Number(0.0)), ("scene", Value::Number(1.0))]))));
+                    ("beat", Value::Number(0.0)), ("scene", Value::Number(1.0)),
+                    ("place-patterns", Value::Bool(true))]))));
 
         let right_click = |editor: &mut eseqlisp::Editor| {
             eseqlisp::widget_render::clear_overlay();
@@ -24463,7 +24473,8 @@ use panel_kinds_seed::*;
         assert!(commands.iter().any(|command| matches!(command,
             eseqlisp::host::HostCommand::Custom { name, payload }
                 if name == "arrangement-scene-insert" && *payload == map_value([
-                    ("beat", Value::Number(8.0)), ("scene", Value::Number(1.0))]))));
+                    ("beat", Value::Number(8.0)), ("scene", Value::Number(1.0)),
+                    ("place-patterns", Value::Bool(true))]))));
 
         seed_kind_spans(&mut editor, &[(0.0, 16.0, 0)]);
         editor.refresh_runtime_side_effects();
@@ -24482,6 +24493,35 @@ use panel_kinds_seed::*;
             eseqlisp::host::HostCommand::Custom { name, payload }
                 if name == "arrangement-scene-patterns-place" && *payload == map_value([
                     ("beat", Value::Number(0.0))]))));
+
+        // Two banks: the scene choices split into one submenu per bank, and
+        // picking a scene in bank B replaces the span's clips with its own.
+        seed_kind_scene_banks(&mut editor, &[(1, Some("A"), 1), (2, Some("B"), 1)], 0, None);
+        seed_kind_spans(&mut editor, &[]);
+        editor.refresh_runtime_side_effects();
+        right_click(&mut editor);
+        let key = |editor: &mut eseqlisp::Editor, code| {
+            editor.handle_key(crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE));
+        };
+        key(&mut editor, crossterm::event::KeyCode::Right);
+        let layout = editor.widget_layout().unwrap();
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/arr-set-scene-bank-1").is_some());
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/arr-set-scene-1").is_none(),
+            "scenes sit inside their bank's submenu");
+        key(&mut editor, crossterm::event::KeyCode::Down);
+        key(&mut editor, crossterm::event::KeyCode::Right);
+        let layout = editor.widget_layout().unwrap();
+        let choice = find_layout_node_by_stable_key_suffix(&layout, "/arr-set-scene-1")
+            .expect("bank B's scene");
+        let callback = choice.props.get("on-select").unwrap().clone();
+        editor.drain_host_commands();
+        editor.runtime_mut().invoke(callback, vec![Value::Nil]).unwrap();
+        let commands = editor.drain_host_commands();
+        assert!(commands.iter().any(|command| matches!(command,
+            eseqlisp::host::HostCommand::Custom { name, payload }
+                if name == "arrangement-scene-insert" && *payload == map_value([
+                    ("beat", Value::Number(8.0)), ("scene", Value::Number(1.0)),
+                    ("place-patterns", Value::Bool(true))]))));
     }
 
     #[test]
@@ -26983,6 +27023,8 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_rack_clip_run_renders_launches_and_swaps_the_rack_menu() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        // The clip run stands in for the clip grid (off by default).
+        editor.runtime_mut().eval_str("(setopt eseq.seq-core-state/mixer-show-clip-grid true)").unwrap();
         let mut kind_rack = rack_group_fixture(true);
         kind_rack.id = 8;
         kind_rack.name = "Break".to_string();
@@ -27239,6 +27281,66 @@ use panel_kinds_seed::*;
                 );
             }
             command => panic!("expected custom ungroup command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_rack_context_menu_attaches_and_detaches_instances_of_any_kind() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mut rack = rack_group_fixture(false);
+        rack.id = 8;
+        rack.members = Vec::new();
+        seed_kind_groups(&mut editor, &[rack]);
+        let instance = |id: f64, kind: &str, label: &str, owner_rack: Option<f64>| {
+            map_value([
+                ("id", Value::Number(id)),
+                ("kind", Value::String(kind.into())),
+                ("label", Value::String(label.into())),
+                ("owner-rack", owner_rack.map_or(Value::Nil, Value::Number)),
+                ("owner-label", Value::String(String::new())),
+                ("registered?", Value::Bool(true)),
+            ])
+        };
+        // A generator kind (no graph), a graph kind on this rack, and one
+        // owned by another rack, which this rack must not offer.
+        let rt = editor.runtime_mut();
+        let project = kind_singleton_rt(rt, "project");
+        set_field(rt, project, "instances", test_list(vec![
+            instance(3.0, "local/chordchain:chordchain", "chordchain 1", None),
+            instance(4.0, "alez/neural:neural", "neural 1", Some(8.0)),
+            instance(5.0, "alez/neural:neural", "neural 2", Some(9.0)),
+        ]));
+        rt.eval_str(
+            "(let ((m eseq.mixer/strip-menu))
+               (set! m.group (first (filter (lambda (g) (= g.gid 8)) (eseq.kinds/groups)))))",
+        ).expect("target the rack");
+        let summary = rt.eval_str(
+            "(map (lambda (a) (list (get a :id) (get a :sequencer-id) (get a :label)))
+                  (filter (lambda (a) (get a :sequencer-id)) (eseq.mixer/track-context-menu-actions)))",
+        ).expect("menu actions");
+        assert_eq!(
+            format!("{summary:?}"),
+            format!("{:?}", rt.eval_str(
+                "(list (list :move-sequencer-into-rack 3 \"Attach chordchain 1 to rack\")
+                       (list :detach-sequencer 4 \"Detach neural 1\"))",
+            ).unwrap()),
+        );
+
+        editor.drain_host_commands();
+        editor.runtime_mut().eval_str(
+            "(eseq.mixer/select-track-menu-action
+               (nth (filter (lambda (a) (= (get a :id) :move-sequencer-into-rack))
+                      (eseq.mixer/track-context-menu-actions)) 0))",
+        ).expect("attach chordchain");
+        match &editor.drain_host_commands()[..] {
+            [eseqlisp::host::HostCommand::Custom { name, payload }] => {
+                assert_eq!(name, "move-sequencer-into-rack");
+                let Value::Map(payload) = payload else { panic!("{payload:?}") };
+                let field = |key: &str| payload.get(key).map(|value| value.borrow().clone());
+                assert_eq!(field("group-id"), Some(Value::Number(8.0)));
+                assert_eq!(field("sequencer-id"), Some(Value::Number(3.0)));
+            }
+            other => panic!("expected one move-sequencer-into-rack command, got {other:?}"),
         }
     }
 
@@ -30282,6 +30384,8 @@ use panel_kinds_seed::*;
 
         let track_count = 10;
         let mut editor = full_grid_editor_for_scroll_tests();
+        // The retained layouts include the clip grid (off by default).
+        editor.runtime_mut().eval_str("(setopt eseq.seq-core-state/mixer-show-clip-grid true)").unwrap();
         set_full_grid_track_count(&mut editor, track_count, 16);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -43126,6 +43230,8 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(&src)
             .expect("load mixer lisp");
+        // The clicks reach pattern cells: show the clip grid (off by default).
+        editor.runtime_mut().eval_str("(setopt eseq.seq-core-state/mixer-show-clip-grid true)").unwrap();
         editor.refresh_runtime_side_effects();
         let mixer_id = editor
             .buffers

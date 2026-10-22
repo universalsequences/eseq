@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent,
-    get_bool_prop, get_f32_prop, plock_active, plock_color, resolve_named_color,
+    get_bool_prop, get_f32_prop, has_color_prop, plock_active, plock_color, resolve_named_color,
     should_trigger_integer_haptic, styled_cell, trigger_level_change_haptic,
 };
 use crate::layout::{
@@ -782,12 +782,16 @@ fn cursor_x_from_cache(text: &str, cursor_pos: usize, font_size: f32, cell_w: f3
     })
 }
 
-fn number_picker_bg(props: &HashMap<String, Value>) -> Color {
+/// A number picker's own fill, if it has one; otherwise it is `:dropdown-bg`.
+pub(super) fn number_picker_own_bg(props: &HashMap<String, Value>) -> Option<Color> {
     props
         .get("background-color")
         .and_then(theme::parse_color_value)
         .or_else(|| props.get("bg-color").and_then(theme::parse_color_value))
-        .unwrap_or_else(theme::DROPDOWN_BG)
+}
+
+fn number_picker_bg(props: &HashMap<String, Value>) -> Color {
+    number_picker_own_bg(props).unwrap_or_else(theme::DROPDOWN_BG)
 }
 
 fn number_picker_border(props: &HashMap<String, Value>) -> Color {
@@ -802,7 +806,13 @@ fn number_picker_shadow(props: &HashMap<String, Value>) -> Color {
     resolve_named_color(props, "shadow-color", theme::BUTTON_SHADOW())
 }
 
-fn number_picker_slider_mode(props: &HashMap<String, Value>) -> bool {
+/// Whether its bezel's border is the theme's `:button-border` (the slider
+/// mode draws no bezel).
+pub(super) fn number_picker_border_is_slot(props: &HashMap<String, Value>) -> bool {
+    !plock_active(props) && !has_color_prop(props, "border-color")
+}
+
+pub(super) fn number_picker_slider_mode(props: &HashMap<String, Value>) -> bool {
     matches!(
         props.get("mode"),
         Some(Value::Keyword(mode) | Value::String(mode)) if mode == "slider"
@@ -848,6 +858,28 @@ impl WidgetDefinition for NumberPickerWidget {
             "process-value",
             "process-clamped",
         ]
+    }
+
+    fn doc(&self) -> &'static str {
+        "A compact numeric field you drag or type into (BPM, a step count, a time in \
+ms): a pill with a small triangle and the value. :value is a number in :min..:max \
+(default 0..1); :decimals (default 2) sets the digits shown, and with 0 decimals \
+the value snaps to whole numbers; :step snaps explicitly. :unit is appended to the \
+readout, :value-scale multiplies what is shown and typed, and :value-labels names \
+special values, e.g. '((0 \"Off\") (-1 \"inf\")). Drag up or down to change it: \
+dragging up toward the top of the view reaches :max (:drag-rows N pins the \
+travel instead, and :taper \"log\"/\"square\"/\"cube\" bends it); :drag :relative \
+moves :drag-step per row instead (Shift is 10x) with :min/:max open unless given. \
+When focused, typing digits starts an edit, Enter commits (or starts editing), Esc \
+cancels. :on-change receives one number, already clamped and snapped; \
+:on-release receives no arguments when a drag ends. :mode :slider draws a filled \
+bar instead of the triangle; :noui true draws only the text. Colours: \
+:text-color, :background-color, :border-color, :fill-color (slider mode), \
+:tri-color, :edit-color; :corner-radius in pixels (default 12). :plock-active 1 \
+marks a parameter lock (:plock-style :underline for just a line). It is 8 by 1.4 \
+cells by default. The -tri and -slider names are internal draw passes. Example: \
+(number-picker :value bpm :min 40 :max 240 :decimals 0 :unit \"bpm\" \
+:on-change (lambda (v) (set! bpm v)))"
     }
 
     fn completion_props(&self) -> &'static [&'static str] {
@@ -1352,30 +1384,25 @@ impl WidgetDefinition for NumberPickerWidget {
             // Slider mode uses one flat surface primitive below. The standard
             // mode keeps the softly lit button surface.
             if !slider_mode {
-                let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
-                let px_w = node.rect.width * viewport.cell_w;
-                let px_h = node.rect.height * viewport.cell_h;
-                prims.push(GpuPrimitive::WidgetInstance {
-                    widget_type: "number-picker".to_string(),
-                    instance: WidgetInstance {
-                        ndc_min,
-                        ndc_max,
-                        value_t: 0.0,
-                        orientation: 0.0,
-                        itime: viewport.time_seconds,
-                        uniform_a: [0.0; 4],
-                        uniform_b: [0.0; 4],
-                        uniform_c: [0.0; 4],
-                        uniform_d: [0.0; 4],
-                        color_a: bg_color.to_rgba(),
-                        color_b: border_color.to_rgba(),
-                        color_c: highlight_color.to_rgba(),
-                        color_d: shadow_color.to_rgba(),
-                        corner_radius: normalized_corner_radius(node.rect, viewport, corner_radius),
-                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                prims.push(super::button::bezel_primitive(
+                    &super::button::BezelPaint {
+                        radius: normalized_corner_radius(node.rect, viewport, corner_radius),
+                        tab: false,
+                        fill_slot: number_picker_own_bg(&node.props)
+                            .is_none()
+                            .then_some(super::button::BezelFill::Dropdown),
+                        border_slot: number_picker_border_is_slot(&node.props),
+                        press: 0.0,
+                        fill: bg_color,
+                        border: border_color,
+                        highlight: highlight_color,
+                        shadow: shadow_color,
                     },
-                    is_background: true,
-                });
+                    &node.props,
+                    node.rect,
+                    viewport,
+                    "number-picker",
+                ));
             }
 
             if slider_mode {
@@ -1573,7 +1600,7 @@ impl WidgetDefinition for NumberPickerWidget {
                     scale: 1.0,
                     fg,
                     bg: transparent,
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }

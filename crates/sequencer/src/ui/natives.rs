@@ -6644,6 +6644,8 @@ pub(crate) fn init_runtime(
         Duration::from_millis(150),
     )));
     register_sample_browser_native(&mut runtime, sample_browser.clone());
+    let scratch_state = state.clone();
+    super::agent_pane::register_agent_pane_natives(&mut runtime, move || scratch_state.scratch_source());
 
     let sample_db_for_tree = sample_db.clone();
     runtime.register_native("seq-sample-tree", move |_args, _ctx| {
@@ -7460,7 +7462,10 @@ fn agent_audition_value(audition: sequencer::agent::store::AuditionResult) -> Va
 }
 
 fn document_metal_seq_natives(runtime: &mut Runtime) {
+    // Tick natives run in the scheduler's runtime, but ticks are written here.
+    runtime.document_symbols(sequencer::lisp_host::GENERATOR_TICK_NATIVE_DOCS.iter().copied());
     runtime.document_symbols([
+        ("now-ms", "(now-ms)", "Wall-clock milliseconds since the Unix epoch, for gesture timing (hold-to-select)."),
         (
             "seq-toggle-step",
             "(seq-toggle-step step)",

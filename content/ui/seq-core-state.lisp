@@ -221,7 +221,7 @@
 
 ;; Compact mode: hide the clip launch grid entirely. Strips lose the whole
 ;; clip area and the *mixer* tile shrinks with them.
-(defcustom mixer-show-clip-grid true
+(defcustom mixer-show-clip-grid false
   :type :bool
   :doc "Show the pattern clip launch grid at the top of each mixer track strip; off gives a compact mixer.")
 
@@ -241,9 +241,9 @@
 ;; Rounded-corner scale for the sequencer and mixer chrome: 1 is the stock
 ;; look, 0 squares every corner. `radius` is the multiplier every
 ;; `:corner-radius` / `:border-radius` literal in those views goes through.
-(defcustom corner-radius-scale 1
-  :type :number :min 0 :max 1.5 :step 0.05
-  :doc "Rounded-corner amount for the sequencer and mixer chrome: 1 is fully rounded, 0 is square.")
+(defcustom corner-radius-scale 1.5
+  :type :number :min 0 :max 2 :step 0.05
+  :doc "Rounded-corner amount for the sequencer and mixer chrome: 0 is square, larger rounds more.")
 
 (def radius (r)
   (* r corner-radius-scale))

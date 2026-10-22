@@ -74,8 +74,8 @@ pub(crate) struct KindsShared {
     /// (`group.armed`).
     pub(super) group_gids: Vec<u64>,
     /// Each pad instance's member track position, as of the last rack sync,
-    /// and the pad lights by track position, copied by the tick
-    /// (`pad.triggered`).
+    /// and the trigger lights by track position, copied by the tick
+    /// (`pad.triggered`, `track.triggered`).
     pub(super) pad_tracks: HashMap<InstanceId, usize>,
     pad_triggers: Vec<bool>,
     /// The tick's modulation display sample, copied when it changes while
@@ -636,6 +636,9 @@ pub(super) fn live_value<S: KindStore>(
                 ),
                 f::TRACK_PLAYHEAD => {
                     number(sources.playing_step(track).map_or(-1.0, |step| step as f64))
+                }
+                f::TRACK_TRIGGERED => {
+                    Value::Bool(shared.borrow().pad_triggers.get(track).copied().unwrap_or(false))
                 }
                 f::TRACK_PLAYHEAD_PAGE => number(
                     sources

@@ -14,6 +14,25 @@ impl WidgetDefinition for VStackWidget {
         &["v-stack"]
     }
 
+    fn doc(&self) -> &'static str {
+        "Stacks children top to bottom: the basic column. :gap is the space between children \
+(default 0) and :padding the inset on every side, both in cells. :align places \
+children across the width: :start (default), :center, :end, or :stretch (every child \
+takes the full inner width; a child with :width :fill does too). :justify spreads \
+leftover height when no child has :flex: :start (default), :center, :end, \
+:space-between, :space-around, :space-evenly. A child's :flex N takes a share of the \
+leftover height in proportion to N, which only exists when the v-stack is taller \
+than its content (give it :height N, or :flex in a parent column that has room). \
+Natural size is the widest child by the summed heights plus gaps; children are \
+measured at the v-stack's width, so wrapped labels wrap to it. A child's :min-height \
+floors its height. When children overflow and at least one has :shrink N, the \
+overflow comes out of :flex children first and then the :shrink children (weighted \
+by N), never below :min-height; a shrinking child should be a scroll. Without any \
+:shrink nothing shrinks and the content overflows. Build repeated children with \
+each, not map. Example: (v-stack :gap 0.4 :padding 0.6 :align :stretch (label \
+\"Filter\") (h-stack :gap 0.5 (knob :bind cutoff) (knob :bind res)))"
+    }
+
     fn is_container(&self) -> bool {
         true
     }

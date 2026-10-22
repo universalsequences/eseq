@@ -410,6 +410,7 @@ pub(crate) fn run_event_loop(
         prev_multi_track_selection: Vec::new(),
         prev_active_buffer_name: editor.active_buffer().name.clone(),
         prev_agent_generation_watermark: agent_generation_watermark(&app),
+        prev_agent_pane_generation: 0,
         prev_sampler_analysis_key: None,
         // Force one complete track/rack publication on the first frame; an
         // analysis may have completed between graph binding and loop startup.
@@ -565,6 +566,7 @@ pub(crate) fn run_event_loop(
                 "Failed to query samples.db browser state: {error}"
             )));
         }
+        agent_pane::publish(&mut editor, Some(&mut *backend), &mut frame.prev_agent_pane_generation);
         if let Some(watcher) = lisp_hot_reload_watcher.as_mut() {
             let source_revision = editor.runtime().lisp_source_revision();
             if source_revision != lisp_hot_reload_source_revision {
@@ -699,38 +701,42 @@ pub(crate) fn run_event_loop(
             match event {
                 BackendEvent::Quit => editor.request_quit(),
                 BackendEvent::FileDrop(paths, drop_position) => {
-                    match editor.handle_patcher_file_drop(&paths, drop_position, 0) {
-                        Ok(Some(imported)) => {
-                            editor.show_transient_message(format!(
-                                "Imported {imported} tensor asset into the patch draft"
-                            ));
-                        }
-                        Err(error) => {
-                            editor.show_transient_message(format!("Asset import failed: {error}"));
-                        }
-                        Ok(None) => {
-                            match SampleImportDraft::from_drop(
-                                paths,
-                                &sequencer::app_paths::app_paths().sample_db_path(),
-                            ) {
-                                Ok(draft) => {
-                                    if draft.is_empty() {
-                                        editor.show_transient_message(
-                                            "No supported audio files found in dropped items",
-                                        );
-                                    } else {
-                                        let count = draft.len();
-                                        install_draft(draft);
-                                        open_sample_import_modal(&mut editor);
+                    if let Some(message) = agent_pane::attach_dropped(&mut editor, &paths) {
+                        editor.show_transient_message(message);
+                    } else {
+                        match editor.handle_patcher_file_drop(&paths, drop_position, 0) {
+                            Ok(Some(imported)) => {
+                                editor.show_transient_message(format!(
+                                    "Imported {imported} tensor asset into the patch draft"
+                                ));
+                            }
+                            Err(error) => {
+                                editor.show_transient_message(format!("Asset import failed: {error}"));
+                            }
+                            Ok(None) => {
+                                match SampleImportDraft::from_drop(
+                                    paths,
+                                    &sequencer::app_paths::app_paths().sample_db_path(),
+                                ) {
+                                    Ok(draft) => {
+                                        if draft.is_empty() {
+                                            editor.show_transient_message(
+                                                "No supported audio files found in dropped items",
+                                            );
+                                        } else {
+                                            let count = draft.len();
+                                            install_draft(draft);
+                                            open_sample_import_modal(&mut editor);
+                                            editor.show_transient_message(format!(
+                                                "Staged {count} sample(s) for import"
+                                            ));
+                                        }
+                                    }
+                                    Err(error) => {
                                         editor.show_transient_message(format!(
-                                            "Staged {count} sample(s) for import"
+                                            "Sample import failed: {error}"
                                         ));
                                     }
-                                }
-                                Err(error) => {
-                                    editor.show_transient_message(format!(
-                                        "Sample import failed: {error}"
-                                    ));
                                 }
                             }
                         }

@@ -763,6 +763,7 @@ struct WidgetVaryings {
     @location(10) @interpolate(flat) color_d: vec4<f32>,
     @location(11) @interpolate(flat) aspect: f32,
     @location(12) @interpolate(flat) corner_radius: f32,
+    @location(13) @interpolate(flat) box_clip: f32,
 };
 
 struct WidgetVertexOutput {
@@ -780,6 +781,7 @@ struct WidgetVertexOutput {
     @location(10) @interpolate(flat) color_d: vec4<f32>,
     @location(11) @interpolate(flat) aspect: f32,
     @location(12) @interpolate(flat) corner_radius: f32,
+    @location(13) @interpolate(flat) box_clip: f32,
 };
 
 fn sdf_rounded_rect(p: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
@@ -850,6 +852,7 @@ fn widget_vert(
     out.color_d = inst.color_d;
     out.aspect = inst.pixel_aspect;
     out.corner_radius = inst.corner_radius;
+    out.box_clip = inst.orientation;
     return out;
 }
 "#;

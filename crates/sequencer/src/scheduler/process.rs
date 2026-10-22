@@ -1311,7 +1311,37 @@ pub(super) fn step_event_with_process_overlay(
     samples_per_step: f32,
     resolved: ResolvedStep,
     overlay: &ProcessTargetOverlay,
+    base_event: Option<&StepEvent>,
 ) -> StepEvent {
+    // A trigger the sequencer did not make (graph, generator, process or
+    // neural hit) carries its own chord and params; its copies keep them
+    // rather than re-resolving whichever (track, step) the chain ran against.
+    if let Some(base) = base_event {
+        let mut effect_params = base.effect_params.clone();
+        let mut instrument_params = base.instrument_params.clone();
+        upsert_effect_params(&mut effect_params, overlay.effect_params.clone());
+        upsert_instrument_params(&mut instrument_params, overlay.instrument_params.clone());
+        let mut event = step_event_from_resolved(
+            snapshot,
+            track,
+            step,
+            samples_per_step,
+            resolved,
+            base.chord.clone(),
+            effect_params,
+            instrument_params,
+            base.instrument_tensor_params.clone(),
+        );
+        event.sampler_params = base.sampler_params.clone();
+        event.rack_slot_params = base.rack_slot_params.clone();
+        event.rack_macro_values = base.rack_macro_values;
+        for (value, written) in event.rack_macro_values.iter_mut().zip(overlay.rack_macro_values) {
+            if written.is_some() {
+                *value = written;
+            }
+        }
+        return event;
+    }
     // Process-materialized events (ratchets) have no SequencerState handle to
     // consult the device-print override; a printing hold misses these hits
     // for at most one frame until the printed p-lock publish catches up.
@@ -1367,6 +1397,7 @@ pub(super) fn materialize_process_ratchet(
     base_resolved: ResolvedStep,
     overlay: &ProcessTargetOverlay,
     request: &crate::process::ProcessRatchetRequest,
+    base_event: Option<&StepEvent>,
 ) -> Result<(), String> {
     if request.times == 0 {
         return Ok(());
@@ -1417,6 +1448,7 @@ pub(super) fn materialize_process_ratchet(
             samples_per_step,
             event.resolved,
             overlay,
+            base_event,
         );
         scheduled_events.push((
             absolute_beats + event.offset_beats as f64,
@@ -1448,8 +1480,52 @@ pub(super) fn apply_step_process_commands(
     overlay: &mut ProcessTargetOverlay,
     process_base_alive: &mut bool,
     commands: &[crate::process::ProcessRunCommand],
+    process_inlet_context: Option<&mut ProcessInletWriteContext<'_>>,
+    debug_accum: bool,
+) {
+    apply_step_process_commands_with_base(
+        scratch,
+        process_runtime,
+        process_runtime_id,
+        snapshot,
+        midi_fx_descriptors,
+        track,
+        step,
+        absolute_beats,
+        samples_per_step,
+        slot,
+        resolved,
+        overlay,
+        process_base_alive,
+        commands,
+        process_inlet_context,
+        debug_accum,
+        None,
+    );
+}
+
+/// [`apply_step_process_commands`] for a chain run on a trigger that carries
+/// its own params: `ratchet!` copies are built from `base_event` (its chord,
+/// p-locks, tensor and rack params) instead of re-resolving `(track, step)`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_step_process_commands_with_base(
+    scratch: &mut lisp_host::ScratchControlRuntime,
+    process_runtime: &mut crate::process::ProcessRuntime,
+    process_runtime_id: u64,
+    snapshot: &SequencerSnapshot,
+    midi_fx_descriptors: &[EffectDescriptor],
+    track: usize,
+    step: usize,
+    absolute_beats: f64,
+    samples_per_step: f32,
+    slot: Option<&crate::process::TrackProcessSlot>,
+    resolved: &mut ResolvedStep,
+    overlay: &mut ProcessTargetOverlay,
+    process_base_alive: &mut bool,
+    commands: &[crate::process::ProcessRunCommand],
     mut process_inlet_context: Option<&mut ProcessInletWriteContext<'_>>,
     debug_accum: bool,
+    base_event: Option<&StepEvent>,
 ) {
     for command in commands {
         match command {
@@ -1490,6 +1566,7 @@ pub(super) fn apply_step_process_commands(
                     *resolved,
                     overlay,
                     request,
+                    base_event,
                 ) {
                     if debug_accum || debug_routing_enabled() {
                         eprintln!("[process] {err}");
@@ -1663,6 +1740,166 @@ pub(super) fn process_step_event_value(
     map.insert("pan".to_string(), number(resolved.pan as f64));
     map.insert("chop".to_string(), number(resolved.chop as f64));
     eseqlisp::vm::Value::Map(map)
+}
+
+/// Where a trigger the step sequencer did not make came from. A process reads
+/// it as `(trigger-origin)`; the step sequencer's own trigs read `:step`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ForeignTriggerOrigin {
+    Neural,
+    Graph,
+    Generator,
+    Process { runtime_id: u64 },
+}
+
+impl ForeignTriggerOrigin {
+    fn keyword(self) -> &'static str {
+        match self {
+            Self::Neural => "neural",
+            Self::Graph => "graph",
+            Self::Generator => "generator",
+            Self::Process { .. } => "process",
+        }
+    }
+}
+
+/// Run the `:triggers :all` slots of `event.track`'s chain on a trigger the
+/// step sequencer did not make, the way the step loop runs the chain on a
+/// trig: target writes land on the event, `veto!` drops it, `ratchet!`
+/// schedules copies (as process step events, which no chain sees again). A
+/// process emission from this track's own chain is skipped, so a chain never
+/// runs on what it made. Returns `None` when a slot vetoed the event, else
+/// the MIDI-FX overrides the chain wrote.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_track_chain_on_foreign_trigger(
+    scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
+    process_runtime: &mut crate::process::ProcessRuntime,
+    snapshot: &SequencerSnapshot,
+    event: &mut StepEvent,
+    beat: f64,
+    sample_time: u64,
+    samples_per_quarter: f32,
+    origin: ForeignTriggerOrigin,
+    debug_accum: bool,
+) -> Option<Vec<ProcessMidiFxParamOverride>> {
+    let track = event.track;
+    let Some(track_snapshot) = snapshot.tracks.get(track) else {
+        return Some(Vec::new());
+    };
+    let chain = &track_snapshot.process_chain;
+    let slots: Vec<&crate::process::TrackProcessSlot> = chain
+        .slots
+        .iter()
+        .filter(|slot| process_runtime.slot_runs_on_all_triggers(slot))
+        .collect();
+    if slots.is_empty() {
+        return Some(Vec::new());
+    }
+    if let ForeignTriggerOrigin::Process { runtime_id } = origin {
+        if chain
+            .slots
+            .iter()
+            .any(|slot| crate::process::track_process_slot_runtime_id(slot, track).0 == runtime_id)
+        {
+            return Some(Vec::new());
+        }
+    }
+    let step = match event.source {
+        EventSource::Network { seed: Some((seed_track, step)), .. } if seed_track == track => step,
+        _ => 0,
+    };
+    // The track's own step, not the hit's: an emission carries no step
+    // length of its own, and `(step-length)` must mean the grid it lands on.
+    let num_steps = track_snapshot.params.num_steps.max(1);
+    let step_beats = track_snapshot.params.timebase.step_beats(num_steps) as f32;
+    let cycle_beats = num_steps as f64 * step_beats as f64;
+    let cycle = if cycle_beats > 0.0 { (beat / cycle_beats).floor().max(0.0) as u64 } else { 0 };
+    let samples_per_step = step_beats * samples_per_quarter;
+    let mut resolved = event.resolved;
+    let mut overlay = ProcessTargetOverlay::default();
+    let mut alive = true;
+    // Ratchet copies are built from the hit itself, not from track step `step`.
+    let base_event: &StepEvent = event;
+    // Built on first target write only: building clones every midi-fx's params.
+    let midi_fx_descriptors = std::cell::OnceCell::new();
+    for slot in slots {
+        let mut value =
+            process_step_event_value(track, step, cycle, beat, sample_time, resolved, step_beats);
+        if let eseqlisp::vm::Value::Map(map) = &mut value {
+            map.insert(
+                "origin".to_string(),
+                Rc::new(RefCell::new(eseqlisp::vm::Value::Keyword(origin.keyword().to_string()))),
+            );
+        }
+        let Some(invocation) = process_runtime.step_process_invocation_with_inlet_writes(
+            slot,
+            crate::process::ProcessStepRunContext {
+                track,
+                step,
+                cycle,
+                beat,
+                sample_time,
+                step_beats,
+                resolved,
+                note: resolved.transpose,
+                event: value,
+                fire_seed: None,
+                after_reset: false,
+                delay_offset_steps: 0.0,
+            },
+            None,
+        ) else {
+            continue;
+        };
+        invoke_process_cascade(
+            scratch_runtime,
+            process_runtime,
+            invocation,
+            debug_accum,
+            |scratch, process_runtime, runtime_id, commands| {
+                let writes = commands
+                    .iter()
+                    .any(|command| matches!(command, crate::process::ProcessRunCommand::TargetWrite(_)));
+                let descriptors: &[EffectDescriptor] = if writes {
+                    midi_fx_descriptors
+                        .get_or_init(|| scratch.midi_fx_descriptor_source().descriptors())
+                } else {
+                    &[]
+                };
+                apply_step_process_commands_with_base(
+                    scratch,
+                    process_runtime,
+                    runtime_id,
+                    snapshot,
+                    descriptors,
+                    track,
+                    step,
+                    beat,
+                    samples_per_step,
+                    Some(slot),
+                    &mut resolved,
+                    &mut overlay,
+                    &mut alive,
+                    commands,
+                    None,
+                    debug_accum,
+                    Some(base_event),
+                );
+            },
+        );
+        if !alive {
+            return None;
+        }
+    }
+    event.resolved = resolved;
+    upsert_effect_params(&mut event.effect_params, overlay.effect_params);
+    upsert_instrument_params(&mut event.instrument_params, overlay.instrument_params);
+    for (value, written) in event.rack_macro_values.iter_mut().zip(overlay.rack_macro_values) {
+        if written.is_some() {
+            *value = written;
+        }
+    }
+    Some(overlay.midi_fx_params)
 }
 
 /// A cross-track network fire lands on its destination's step grid: instead of
@@ -2406,5 +2643,75 @@ mod retrig_process_param_tests {
         );
         assert_eq!(resolved.retrig, 3.0);
         assert_eq!(resolved.retrig_rate, 12.0);
+    }
+
+    /// A foreign trigger (graph, generator, process, neural hit) carries its
+    /// own chord and params; `ratchet!` copies of it must keep them, with the
+    /// chain's overlay on top, not re-resolve the track's step it ran against.
+    #[test]
+    fn foreign_trigger_ratchet_copies_keep_the_hits_chord_and_params() {
+        let state = std::sync::Arc::new(crate::sequencer::SequencerState::new(
+            1,
+            vec![crate::sequencer::default_empty_effect_chain()],
+        ));
+        state.pattern.track_params[0].set_num_steps(16);
+        state.pattern.patterns[0].set_step_active(0, true);
+        let snapshot = state.publish_scheduler_snapshot();
+
+        let mut chord = step_chord_data(&snapshot, 0, 0);
+        chord.count = 2;
+        chord.notes[0] = 3.0;
+        chord.notes[1] = 10.0;
+        chord.durations[0] = 1.0;
+        chord.durations[1] = 1.0;
+        let hit_param = |idx: u64, value: f32| ScheduledEffectParam {
+            logical_id: 42,
+            idx,
+            value,
+            live_value: None,
+        };
+        let mut rack_macro_values = [None; crate::sequencer::RACK_MACRO_COUNT];
+        rack_macro_values[0] = Some(0.25);
+        rack_macro_values[1] = Some(0.5);
+        let base = StepEvent {
+            track: 0,
+            samples_per_step: 1.0,
+            resolved: neutral_step(),
+            chord: chord.clone(),
+            effect_params: vec![hit_param(0, 0.2), hit_param(1, 0.7)],
+            instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
+            sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values,
+            rack_slot_params: Default::default(),
+            source: EventSource::Network { seed: None, neuron: 3, instrument_fingerprint: 0 },
+        };
+        let mut overlay = ProcessTargetOverlay::default();
+        overlay.effect_params.push(hit_param(1, 0.9));
+        overlay.rack_macro_values[1] = Some(0.75);
+        let mut resolved = neutral_step();
+        resolved.velocity = 0.5;
+
+        let copy = step_event_with_process_overlay(
+            &snapshot,
+            0,
+            0,
+            6_000.0,
+            resolved,
+            &overlay,
+            Some(&base),
+        );
+        assert_eq!(copy.chord, chord);
+        assert_eq!(copy.effect_params, vec![hit_param(0, 0.2), hit_param(1, 0.9)]);
+        assert_eq!(copy.rack_macro_values[0], Some(0.25));
+        assert_eq!(copy.rack_macro_values[1], Some(0.75));
+        assert_eq!(copy.resolved.velocity, 0.5);
+        assert_eq!(copy.samples_per_step, 6_000.0);
+
+        // Without a base event the copy still resolves from the track's step.
+        let stepped =
+            step_event_with_process_overlay(&snapshot, 0, 0, 6_000.0, resolved, &overlay, None);
+        assert_eq!(stepped.chord, step_chord_data(&snapshot, 0, 0));
+        assert_eq!(stepped.rack_macro_values[0], None);
     }
 }

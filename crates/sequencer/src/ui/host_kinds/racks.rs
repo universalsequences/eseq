@@ -325,6 +325,8 @@ impl HostKinds {
                 pusher.push(id, f::RACK_CLIP_CID, number(row.cid as f64));
                 pusher.push(id, f::RACK_CLIP_INDEX, number(index as f64));
                 pusher.push(id, f::RACK_CLIP_NAME, text(&row.name));
+                let label = sequencer::sequencer::rack_clip_label(&row.name, index);
+                pusher.push(id, f::RACK_CLIP_LABEL, text(&label));
                 let active = current == Some(row.cid);
                 pusher.push(id, f::RACK_CLIP_ACTIVE, Value::Bool(active));
                 let scenes = row.scenes.iter();

@@ -85,6 +85,32 @@ impl WidgetDefinition for WrapWidget {
         &["wrap"]
     }
 
+    fn doc(&self) -> &'static str {
+        "Flows children left to right and starts a new line whenever the next child would \
+pass the available width, like words in a paragraph: tag chips, button banks, a pad \
+bank of unknown size. :gap is the space between children on a line (default 0.5) and \
+:row-gap the space between lines (defaults to :gap); :padding insets every side. \
+:align places each child within its line's height: :center (default), :start, :end, \
+:stretch. :justify distributes each line's leftover width: :start (default), \
+:center, :end, :space-between, :space-around, :space-evenly. It wraps at the width \
+its parent gives it, at :width N, or at the parent's full width with :width :fill. \
+Children keep their natural size (clamped to the line width); :flex has no effect \
+inside a wrap. Natural height is the line heights plus row gaps, so it grows as the \
+width shrinks. Example: (wrap :width :fill :gap 0.4 (each tags |t i| (button t :key \
+(str \"tag-\" i) :on-click (lambda (e) (pick-tag t)))))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "padding",
+            "gap",
+            "row-gap",
+            "align",
+            "justify",
+            "width",
+        ]
+    }
+
     fn is_container(&self) -> bool {
         true
     }

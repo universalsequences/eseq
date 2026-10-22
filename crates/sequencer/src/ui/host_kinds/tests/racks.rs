@@ -404,7 +404,10 @@ fn rack_setters_go_through_history_and_undo() {
         0.5,
         "the rack's own stays"
     );
-    h.rejects_7h("(set! rc.name \"  \")", "a non-empty name");
+    // A blank name clears it: the clip shows its bank position again.
+    h.run_7h("(set! rc.name \"  \")");
+    assert_eq!(h.eval_7h("rc.name"), s(""));
+    assert_eq!(h.eval_7h("rc.label"), s(&format!("Clip {}", num(h.eval_7h("rc.index")) + 1.0)));
     h.run_7h("(set! rc.own-groove false)");
     assert_eq!(h.eval_7h("rc.groove"), Value::Nil);
     app::edit::undo(&mut h.app);
@@ -418,6 +421,45 @@ fn rack_setters_go_through_history_and_undo() {
     app::edit::undo(&mut h.app);
     h.sync();
     assert_eq!(h.eval_7h("pg.name"), s("Swing"));
+}
+
+/// Unnamed clips read "Clip N" by bank position; the bulk rename numbers
+/// the bank under a prefix, and a blank rename clears a name back.
+#[test]
+fn rack_clip_labels_follow_position_and_bulk_rename() {
+    let mut h = Harness::new();
+    h.drum_rack();
+    h.run_7h("(save-rack-clip-as! g \"\") (save-rack-clip-as! g \"yo\")");
+    let labels = |h: &mut Harness| -> Vec<Value> { list(h.eval_7h("(map |c| c.label g.clips)")) };
+    let before = labels(&mut h);
+    let n = before.len();
+    assert!(n >= 2);
+    assert_eq!(before[n - 1], s("yo"), "an explicit name is kept");
+    for (i, label) in before[..n - 1].iter().enumerate() {
+        assert_eq!(*label, s(&format!("Clip {}", i + 1)), "unnamed clips show their position");
+    }
+    let undo = h.app.history.undo_len();
+    h.run_7h("(host-command \"rename-rack-clips-in-order\" (dict :group-id g.gid :prefix \"Break\"))");
+    assert_eq!(h.app.history.undo_len() - undo, 1, "one entry for the whole bank");
+    let expected: Vec<Value> = (1..=n).map(|i| s(&format!("Break {i}"))).collect();
+    assert_eq!(labels(&mut h), expected);
+    // A blank single rename clears the name: the clip shows its number.
+    h.run_7h("(let ((c (first g.clips))) (set! c.name \"\"))");
+    assert_eq!(h.eval_7h("(let ((c (first g.clips))) c.name)"), s(""));
+    assert_eq!(labels(&mut h)[0], s("Clip 1"));
+    // The modal's own handlers: a bulk rename previews, then commits.
+    h.eval_7h("(import eseq.sequencer) (eseq.sequencer/begin-clip-bulk-rename (first g.clips))");
+    h.eval_7h("(let ((r eseq.sequencer/clip-rename)) (set! r.draft \"Fill\"))");
+    let preview = h.eval_7h("(eseq.sequencer/clip-bulk-rename-preview (first g.clips))");
+    let expected = if n == 2 { "Fill 1, Fill 2".to_string() } else { format!("Fill 1, Fill 2, … Fill {n}") };
+    assert_eq!(preview, s(&expected));
+    h.run_7h("(eseq.sequencer/finish-clip-rename true)");
+    assert_eq!(labels(&mut h)[0], s("Fill 1"));
+    // ... and a single rename through the modal sets one name.
+    h.eval_7h("(eseq.sequencer/begin-clip-rename (first g.clips))");
+    h.eval_7h("(let ((r eseq.sequencer/clip-rename)) (set! r.draft \"yo\"))");
+    h.run_7h("(eseq.sequencer/finish-clip-rename true)");
+    assert_eq!(labels(&mut h)[0], s("yo"));
 }
 
 #[test]

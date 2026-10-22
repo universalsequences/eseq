@@ -68,6 +68,19 @@ impl WidgetDefinition for GateLedWidget {
         &["gate-led"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A small round lamp that lights while the built-in Filterbank effect's envelope \
+gate is open. Specific to that device: it reads the meter frames the Filterbank \
+publishes, so on any other effect it stays dark. :source is the effect selector, \
+(dict :kind :track-effect :index track :slot slot) or :bus-effect with :index/:id. \
+Colours: :on-color (lit), :off-color, :bezel-color. Default 0.9 x 0.9 cells. \
+Example: (gate-led :on-color :filterbank-control-on :source (effect-source fx))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &["source", "on-color", "off-color", "bezel-color", "width", "height"]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

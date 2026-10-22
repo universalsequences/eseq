@@ -111,8 +111,9 @@ fn box_state_active(props: &std::collections::HashMap<String, Value>, key: &str)
 }
 
 /// The defwidget a background color prop paints with instead of a flat
-/// color: set when the prop names a theme slot holding `(:widget "name")`
-/// (see `theme::named_widget`) and that widget is defined.
+/// color: set when the prop names a theme slot that a container's `:faces`
+/// maps to a widget, or that holds `(:widget "name")` (see
+/// `theme::named_widget`), and that widget is defined.
 fn theme_background_widget(
     props: &std::collections::HashMap<String, Value>,
     prop: &str,
@@ -121,8 +122,7 @@ fn theme_background_widget(
         Value::Keyword(text) | Value::String(text) => text,
         _ => return None,
     };
-    let widget = crate::theme::named_widget(name)?;
-    super::sdf_widget::sdf_widget_def(&widget).map(|_| widget)
+    super::sdf_widget::slot_widget(props, name)
 }
 
 fn state_color_prop<'a>(
@@ -191,9 +191,17 @@ fn box_drag_value(node: &LayoutNode, drag_type: &str) -> Value {
     Value::Map(map)
 }
 
+/// `:corner-radius :pill`, as a radius: past any box's half height, so the
+/// short ends round fully (the shader caps it at the half extent).
+const PILL_RADIUS_PX: f32 = 1.0e6;
+
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
     if radius_px <= 0.0 {
         return 0.001;
+    }
+    // A pill's inner radius (less its border) is still a pill.
+    if radius_px >= PILL_RADIUS_PX * 0.5 {
+        return 1.0;
     }
     let radius_px = super::ui_design_px(radius_px);
     let px_h = (rect.height * viewport.cell_h).max(1.0);
@@ -247,6 +255,30 @@ impl WidgetDefinition for BoxWidget {
         &["box"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A one-child container that paints a background, border and rounded corners, and the \
+usual target for pointer handlers and drag and drop. It lays out ONLY its first \
+child; wrap several in a v-stack or h-stack. :padding insets the child; :align \
+(default :stretch, the child fills the inner area) or the per-axis :h-align / \
+:v-align (:start, :center, :end, :stretch) place it. Without :width/:height the box \
+is its child's size plus padding; :width N with :aspect R (pixel width over height) \
+derives the height. Look: :background-color, :border-color, :border-width (px, \
+default 1, drawn only when a border colour is set), :corner-radius (px); :selected \
+true or :muted true switch to :selected-background-color / :muted-background-color \
+and the matching -border-color; :background \"name\" paints a defwidget instead of a \
+flat colour. :on-click, :on-mouse-down, :on-drag, :on-mouse-up, :on-right-click \
+(ctrl+click too) and :on-double-click each receive one pointer event map (e.phase, \
+e.u, e.v, e.x, e.y, e.at, e.shift, e.cmd ...). :on-click fires on press, and when \
+:on-mouse-down is also set only :on-mouse-down runs; :focusable true lets \
+Enter/Space fire :on-click. Drag and drop: :drag-type \"t\" with :drag-payload makes \
+the box a drag source (:drag-modifier :shift, :alt, :ctrl or :cmd requires that \
+key); a box with :on-drop and :drop-types (list \"t\") accepts it, highlights with \
+:drop-hover-background-color, and :on-drop receives the pointer map plus :drag-type, \
+:payload and :target (its own :drop-meta). Example: (box :padding 0.5 :corner-radius \
+6 :background-color :buffer-bg :on-click (lambda (e) (select! i)) (v-stack (label \
+name) (label detail :color :dim)))"
+    }
+
     fn is_container(&self) -> bool {
         true
     }
@@ -270,6 +302,7 @@ impl WidgetDefinition for BoxWidget {
             "drop-hover-border-color", "drag-type", "drag-payload", "drag-modifier",
             "capture-pointer", "focusable", "key", "on-click", "on-right-click",
             "on-double-click", "on-drag", "on-drop", "on-mouse-down", "on-mouse-up",
+            "drop-types", "drop-meta", "macro-owned", "plock-any",
         ]
     }
 
@@ -388,11 +421,20 @@ impl WidgetDefinition for BoxWidget {
                     );
                 }
 
+                // An aligned (non-stretch) child keeps its natural height and
+                // overflows a shorter box, as a tile-filling backdrop around a
+                // body taller than the tile needs; only a `:height :fill`
+                // child takes the box's height.
+                let max_height = if v_align == Align::Stretch || prop_is_keyword(child, "height", "fill") {
+                    inner_height
+                } else {
+                    f32::INFINITY
+                };
                 let inner_constraints = Constraints {
                     min_width: 0.0,
                     max_width: inner_width,
                     min_height: 0.0,
-                    max_height: inner_height,
+                    max_height,
                     aspect: 1.0,
                 };
                 let size = measure_child(child, inner_constraints).unwrap_or(Size {
@@ -573,7 +615,10 @@ impl WidgetDefinition for BoxWidget {
         let (callback_name, arg) = match event {
             WidgetEvent::Activate(modifiers) => (
                 "on-click",
-                super::pointer_event_info("click", modifiers, node, node.rect.col, node.rect.row),
+                super::pointer_event_info(
+                    "click", modifiers, node, node.rect.col,
+                    super::scroll::event_viewport_row(node.rect.row),
+                ),
             ),
             WidgetEvent::Custom(value) => {
                 let phase = match &value {
@@ -620,6 +665,7 @@ impl WidgetDefinition for BoxWidget {
         let mut prims = Vec::new();
         let corner_radius_px = match node.props.get("corner-radius") {
             Some(Value::Number(n)) => (*n as f32).max(0.0),
+            Some(Value::Keyword(k)) if k == "pill" => PILL_RADIUS_PX,
             _ => 0.0,
         };
         let border_width_design_px = match node.props.get("border-width") {
@@ -651,16 +697,40 @@ impl WidgetDefinition for BoxWidget {
             background_prop
                 .map(|prop| resolve_named_color(&node.props, prop, Color::rgba(0.0, 0.0, 0.0, 0.0)))
         };
-        let push_background_widget = |prims: &mut Vec<GpuPrimitive>, rect: Rect| {
-            if let Some(widget) = &background_widget {
-                prims.extend(super::sdf_widget::sdf_widget_background_primitives(
-                    widget,
-                    node.widget_id,
-                    rect,
-                    viewport,
-                    &node.props,
-                ));
+        // The rect the box paints as its shape: its own, or with
+        // `:background-extent :content` everything it holds (a backdrop that
+        // follows its contents past a rect layout capped at the viewport).
+        let shape_rect = if matches!(node.props.get("background-extent"),
+            Some(Value::Keyword(k)) if k == "content")
+        {
+            background_rect(node)
+        } else {
+            node.rect
+        };
+        // A rounded box's area inside its border, and that area's corner
+        // radius as the box shader takes it: a background widget paints
+        // there, clipped to the same shape a flat background fills.
+        let inner_rect = if viewport.cell_w > 0.0 && viewport.cell_h > 0.0 {
+            inset_rect(shape_rect, border_width_px / viewport.cell_w, border_width_px / viewport.cell_h)
+        } else {
+            shape_rect
+        };
+        let inner_radius_px = (corner_radius_px - border_width_design_px).max(0.0);
+        let push_shaped_background = |prims: &mut Vec<GpuPrimitive>, widget: &str| {
+            let mut background = super::sdf_widget::sdf_widget_background_primitives(
+                widget,
+                node.widget_id,
+                inner_rect,
+                viewport,
+                &node.props,
+            );
+            let clip = normalized_corner_radius(inner_rect, viewport, inner_radius_px);
+            for primitive in &mut background {
+                if let GpuPrimitive::WidgetInstance { instance, .. } = primitive {
+                    instance.orientation = clip;
+                }
             }
+            prims.extend(background);
         };
         let border_color = if hover_drop && node.props.contains_key("drop-hover-border-color") {
             Some(resolve_named_color(
@@ -681,38 +751,29 @@ impl WidgetDefinition for BoxWidget {
         if has_rounded_corners {
             if let Some(color) = border_color {
                 if color.a > 0.0 && border_width_px > 0.0 {
-                    push_rounded_rect(&mut prims, node.rect, color, viewport, corner_radius_px);
+                    push_rounded_rect(&mut prims, shape_rect, color, viewport, corner_radius_px);
                 }
             }
-            let inset_x = if viewport.cell_w > 0.0 {
-                border_width_px / viewport.cell_w
-            } else {
-                0.0
-            };
-            let inset_y = if viewport.cell_h > 0.0 {
-                border_width_px / viewport.cell_h
-            } else {
-                0.0
-            };
             if let Some(color) = background_color {
                 if color.a > 0.0 {
-                    push_rounded_rect(
-                        &mut prims,
-                        inset_rect(node.rect, inset_x, inset_y),
-                        color,
-                        viewport,
-                        (corner_radius_px - border_width_design_px).max(0.0),
-                    );
+                    push_rounded_rect(&mut prims, inner_rect, color, viewport, inner_radius_px);
                 }
             }
-            // Widget backgrounds paint square (the widget draws its own shape).
-            push_background_widget(&mut prims, inset_rect(node.rect, inset_x, inset_y));
+            if let Some(widget) = &background_widget {
+                push_shaped_background(&mut prims, widget);
+            }
         } else if let Some(color) = background_color {
             if color.a > 0.0 {
-                push_rounded_rect(&mut prims, node.rect, color, viewport, 0.0);
+                push_rounded_rect(&mut prims, shape_rect, color, viewport, 0.0);
             }
-        } else {
-            push_background_widget(&mut prims, node.rect);
+        } else if let Some(widget) = &background_widget {
+            prims.extend(super::sdf_widget::sdf_widget_background_primitives(
+                widget,
+                node.widget_id,
+                node.rect,
+                viewport,
+                &node.props,
+            ));
         }
 
         // A borderless box still draws its background and state indicators below.
@@ -756,16 +817,22 @@ impl WidgetDefinition for BoxWidget {
         }
 
         if let Some(Value::String(bg_type)) = node.props.get("background") {
-            // Scroll-containing boxes use their own layout rect: content_extent
-            // would include scroll children, but node.rect is the viewport.
-            let bg_rect = background_rect(node);
-            prims.extend(super::sdf_widget::sdf_widget_background_primitives(
-                bg_type,
-                node.widget_id,
-                bg_rect,
-                viewport,
-                &node.props,
-            ));
+            if has_rounded_corners {
+                // A rounded box owns its shape: the widget paints a pattern
+                // in it, clipped as a flat background would be.
+                push_shaped_background(&mut prims, bg_type);
+            } else {
+                // Scroll-containing boxes use their own layout rect: content_extent
+                // would include scroll children, but node.rect is the viewport.
+                let bg_rect = background_rect(node);
+                prims.extend(super::sdf_widget::sdf_widget_background_primitives(
+                    bg_type,
+                    node.widget_id,
+                    bg_rect,
+                    viewport,
+                    &node.props,
+                ));
+            }
         }
 
         // Corner state dots. `macro-owned` marks a param a macro drives;
@@ -888,6 +955,59 @@ mod tests {
             assert!(BOX_WIDGET.build_primitives("box", &node, viewport).is_empty(),
                 "inactive {prop} should leave a plain borderless box empty");
         }
+    }
+
+    #[test]
+    fn pill_corners_and_content_extent_shape_the_box() {
+        let node = |props: &[(&str, Value)], child_width: f32| LayoutNode {
+            widget_id: 2,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "box".to_string(),
+            rect: Rect { col: 0.0, row: 0.0, width: 10.0, height: 2.0 },
+            props: props.iter().map(|(key, value)| (key.to_string(), value.clone())).collect(),
+            children: vec![LayoutNode {
+                widget_id: 3,
+                stable_widget_id: None,
+                subtree_root_id: None,
+                parent_subtree_root_id: None,
+                stable_key: None,
+                widget_type: "box".to_string(),
+                rect: Rect { col: 0.0, row: 0.0, width: child_width, height: 2.0 },
+                props: std::collections::HashMap::new(),
+                children: Vec::new(),
+                focusable: false,
+                animation: Default::default(),
+            }],
+            focusable: false,
+            animation: Default::default(),
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0, cell_h: 20.0, vp_w: 400.0, vp_h: 100.0, time_seconds: 0.0,
+            focused_widget_id: None, focused_branch: false, overlay_viewport_bottom: 5.0,
+            scroll_top: 0.0, scroll_left: 0.0, inherited_hover: false,
+        };
+        let fill = |node: &LayoutNode| {
+            BOX_WIDGET.build_primitives("box", node, viewport).into_iter().find_map(|primitive| match primitive {
+                GpuPrimitive::WidgetInstance { instance, .. } => Some(instance),
+                _ => None,
+            }).expect("a rounded fill")
+        };
+        let flat = ("background-color", Value::Keyword("blue".into()));
+
+        // A pill rounds its short ends fully; a number keeps its cap.
+        let pill = fill(&node(&[flat.clone(), ("corner-radius", Value::Keyword("pill".into()))], 4.0));
+        assert_eq!(pill.corner_radius, 1.0);
+        let rounded = fill(&node(&[flat.clone(), ("corner-radius", Value::Number(400.0))], 4.0));
+        assert!(rounded.corner_radius <= 0.5);
+
+        // Overflowing contents widen the shape only with :background-extent :content.
+        let own = fill(&node(&[flat.clone(), ("corner-radius", Value::Number(8.0))], 30.0));
+        let content = fill(&node(&[flat, ("corner-radius", Value::Number(8.0)),
+            ("background-extent", Value::Keyword("content".into()))], 30.0));
+        assert!(content.ndc_max[0] > own.ndc_max[0] + 0.1, "{:?} vs {:?}", content.ndc_max, own.ndc_max);
     }
 
     #[test]

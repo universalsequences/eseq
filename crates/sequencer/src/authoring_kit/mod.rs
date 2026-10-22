@@ -25,6 +25,12 @@ pub const AGENTS_FILE: &str = "AGENTS.md";
 pub const CLAUDE_FILE: &str = "CLAUDE.md";
 pub const SKILL_FILE: &str = ".claude/skills/eseq-authoring/SKILL.md";
 
+/// The project an authoring check renders a sequencer against (`eseq
+/// sequencer check`, `metal_seq mcp`): four empty sampler tracks to route to.
+pub const SEQUENCER_CHECK_PROJECT: &str = "(capture-project\n  (track :sampler :name \"Kick\")\n  \
+    (track :sampler :name \"Snare\")\n  (track :sampler :name \"Hat\")\n  \
+    (track :sampler :name \"Perc\"))\n";
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum SeedOutcome {
     Written(PathBuf),

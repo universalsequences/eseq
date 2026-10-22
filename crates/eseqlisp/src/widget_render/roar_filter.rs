@@ -109,6 +109,23 @@ impl WidgetDefinition for RoarFilterWidget {
         &["roar-filter"]
     }
 
+    fn doc(&self) -> &'static str {
+        "Specific to the built-in Roar effect: the magnitude response of one stage's \
+filter on a log frequency axis (20 Hz..20 kHz, +-24 dB). Display only, no callbacks, \
+computed from props rather than live audio. :filter is Roar's filter type index \
+(0..8), :freq the cutoff in Hz (20..16000), :res 0..1; bind them to the effective \
+param values so the curve follows knobs and modulation. :stage (0..2) picks the \
+stage tint for the curve. Colours: :background-color, :grid-color, :curve-color. \
+Example: (roar-filter :filter ftype :freq freq :res res :width 9.4 :height 4.6)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "filter", "freq", "res", "stage", "background-color", "grid-color", "curve-color",
+            "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
     }

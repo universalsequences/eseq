@@ -46,7 +46,7 @@ use crate::backend::{
 use crate::layout::TextMeasurer;
 use crate::live_audio;
 use crate::theme;
-use crate::ui::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
+use crate::ui::glyph_atlas::{FaceFonts, GlyphAtlas, ProportionalGlyphAtlas, TextFace};
 use crate::ui::gpu_adapter;
 use crate::ui::gpu_scene::{self, PatchCableDrawInstance, PropTextLayoutCache, TextOffset};
 use crate::ui::gpu_geometry::{
@@ -79,8 +79,7 @@ pub enum TiledRenderStatus {
 /// after the surface maps to an output; the font cache rebuilds lazily on the
 /// first measurement after a change.
 pub(crate) struct PropTextMeasurer {
-    fonts: std::cell::RefCell<SizedFontCache>,
-    mono_fonts: std::cell::RefCell<Option<SizedFontCache>>,
+    fonts: std::cell::RefCell<FaceFonts>,
     scale_bits: Arc<AtomicU64>,
     built_scale_bits: std::cell::Cell<u64>,
 }
@@ -88,10 +87,9 @@ pub(crate) struct PropTextMeasurer {
 impl PropTextMeasurer {
     pub(crate) fn new(scale_bits: Arc<AtomicU64>) -> Option<Self> {
         let bits = scale_bits.load(Ordering::Relaxed);
-        let fonts = SizedFontCache::new(f64::from_bits(bits))?;
+        let fonts = FaceFonts::new(f64::from_bits(bits))?;
         Some(Self {
             fonts: std::cell::RefCell::new(fonts),
-            mono_fonts: std::cell::RefCell::new(SizedFontCache::new_mono(f64::from_bits(bits))),
             scale_bits,
             built_scale_bits: std::cell::Cell::new(bits),
         })
@@ -102,10 +100,9 @@ impl PropTextMeasurer {
         if bits == self.built_scale_bits.get() {
             return;
         }
-        if let Some(fonts) = SizedFontCache::new(f64::from_bits(bits)) {
+        if let Some(fonts) = FaceFonts::new(f64::from_bits(bits)) {
             *self.fonts.borrow_mut() = fonts;
         }
-        *self.mono_fonts.borrow_mut() = SizedFontCache::new_mono(f64::from_bits(bits));
         self.built_scale_bits.set(bits);
     }
 }
@@ -117,48 +114,42 @@ impl TextMeasurer for PropTextMeasurer {
         }
         self.sync_scale();
         let size_tenths = (font_size * 10.0).round() as u16;
-        self.fonts.borrow_mut().measure_text(text, size_tenths)
+        self.fonts.borrow_mut().regular.measure_text(text, size_tenths)
     }
 
     fn line_height_px(&self, font_size: f32) -> f32 {
         self.sync_scale();
         let size_tenths = (font_size * 10.0).round() as u16;
-        self.fonts.borrow_mut().line_height(size_tenths)
+        self.fonts.borrow_mut().regular.line_height(size_tenths)
     }
 
     fn cap_height_px(&self, font_size: f32) -> f32 {
         self.sync_scale();
         let size_tenths = (font_size * 10.0).round() as u16;
-        self.fonts.borrow_mut().cap_height(size_tenths)
+        self.fonts.borrow_mut().regular.cap_height(size_tenths)
     }
     fn descent_px(&self, font_size: f32) -> f32 {
         self.sync_scale();
         let size_tenths = (font_size * 10.0).round() as u16;
-        self.fonts.borrow_mut().descent(size_tenths)
+        self.fonts.borrow_mut().regular.descent(size_tenths)
     }
     fn text_ink_extents_px(&self, text: &str, font_size: f32) -> (f32, f32) {
         self.sync_scale();
         let size_tenths = (font_size * 10.0).round() as u16;
-        self.fonts.borrow().text_ink_extents(text, size_tenths)
+        self.fonts.borrow().regular.text_ink_extents(text, size_tenths)
     }
-    fn measure_mono_text_px(&self, text: &str, font_size: f32) -> f32 {
+    fn measure_text_face_px(&self, text: &str, font_size: f32, face: TextFace) -> f32 {
         if text.is_empty() {
             return 0.0;
         }
         self.sync_scale();
         let size_tenths = (font_size * 10.0).round() as u16;
-        match self.mono_fonts.borrow_mut().as_mut() {
-            Some(fonts) => fonts.measure_text(text, size_tenths),
-            None => self.fonts.borrow_mut().measure_text(text, size_tenths),
-        }
+        self.fonts.borrow_mut().get_mut(face).measure_text(text, size_tenths)
     }
-    fn mono_cap_height_px(&self, font_size: f32) -> f32 {
+    fn cap_height_face_px(&self, font_size: f32, face: TextFace) -> f32 {
         self.sync_scale();
         let size_tenths = (font_size * 10.0).round() as u16;
-        match self.mono_fonts.borrow_mut().as_mut() {
-            Some(fonts) => fonts.cap_height(size_tenths),
-            None => self.fonts.borrow_mut().cap_height(size_tenths),
-        }
+        self.fonts.borrow_mut().get_mut(face).cap_height(size_tenths)
     }
 }
 
@@ -2161,7 +2152,7 @@ impl WgpuAppBackend {
                         } else {
                             group_bg
                         },
-                        mono: false,
+                        face: TextFace::Regular,
                     },
                 ));
                 if tab.close_visible
@@ -2182,7 +2173,7 @@ impl WgpuAppBackend {
                             } else {
                                 group_bg
                             },
-                            mono: false,
+                            face: TextFace::Regular,
                         },
                     ));
                 }

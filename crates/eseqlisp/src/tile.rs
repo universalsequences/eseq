@@ -706,6 +706,15 @@ impl TileNode {
         }
     }
 
+    /// Take the leaf with tile ID `id` out of a tree that is being discarded.
+    pub fn into_leaf(self, id: TileId) -> Option<TileLeaf> {
+        match self {
+            TileNode::Leaf(leaf) if leaf.id == id => Some(leaf),
+            TileNode::Leaf(_) => None,
+            TileNode::Split(s) => s.a.into_leaf(id).or_else(|| s.b.into_leaf(id)),
+        }
+    }
+
     /// Collect all leaf tile IDs in order (left-to-right / top-to-bottom).
     pub fn leaf_ids(&self) -> Vec<TileId> {
         match self {

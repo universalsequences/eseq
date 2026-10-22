@@ -55,7 +55,8 @@ pub(crate) fn drum_rack_pad_label(pad_note: i32) -> String {
 /// zero frames, while a held pad key keeps refreshing this and stays lit.
 pub(crate) const RACK_PAD_TRIGGER_HOLD: Duration = Duration::from_millis(140);
 
-/// Pad lights for every track, `false` everywhere outside a drum rack.
+/// Trigger lights for every track: drum-rack pads read them as
+/// `pad.triggered`, any track as `track.triggered`.
 ///
 /// Two sources feed it. `trigger_flash` is the audio thread's per-track latch,
 /// set by every trigger path there is (sequenced steps, live keyboard, rack
@@ -73,25 +74,20 @@ pub(crate) fn read_rack_pad_trigger_flags(
     let track_count = app.tracks.len();
     triggered_at.resize(track_count, None);
     let mut flags = vec![false; track_count];
-    for group in app.groups.iter().filter(|group| group.is_rack()) {
-        for &track in &group.members {
-            if track >= track_count {
-                continue;
-            }
-            let latched = state
-                .transport
-                .trigger_flash
-                .get(track)
-                .is_some_and(|flash| flash.swap(0, Ordering::Relaxed) != 0);
-            let sounding = track_active_notes
-                .get(track)
-                .is_some_and(|notes| !notes.is_empty());
-            if latched || sounding {
-                triggered_at[track] = Some(now);
-            }
-            flags[track] = triggered_at[track]
-                .is_some_and(|at| now.duration_since(at) < RACK_PAD_TRIGGER_HOLD);
+    for track in 0..track_count {
+        let latched = state
+            .transport
+            .trigger_flash
+            .get(track)
+            .is_some_and(|flash| flash.swap(0, Ordering::Relaxed) != 0);
+        let sounding = track_active_notes
+            .get(track)
+            .is_some_and(|notes| !notes.is_empty());
+        if latched || sounding {
+            triggered_at[track] = Some(now);
         }
+        flags[track] = triggered_at[track]
+            .is_some_and(|at| now.duration_since(at) < RACK_PAD_TRIGGER_HOLD);
     }
     flags
 }

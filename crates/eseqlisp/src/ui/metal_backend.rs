@@ -59,7 +59,7 @@ mod inner {
     use crate::glyph_atlas::{
         MetalGlyphAtlas as GlyphAtlas,
         MetalProportionalGlyphAtlas as ProportionalGlyphAtlas,
-        SizedFontCache,
+        FaceFonts, TextFace,
     };
     use crate::layout::{LayoutNode, Rect, TextMeasurer};
     use crate::live_audio;
@@ -76,16 +76,13 @@ mod inner {
     /// Lightweight TextMeasurer that delegates to `SizedFontCache` for font
     /// metrics without needing a GPU atlas. Used by the layout engine.
     pub(crate) struct PropTextMeasurer {
-        fonts: std::cell::RefCell<SizedFontCache>,
-        mono_fonts: std::cell::RefCell<Option<SizedFontCache>>,
+        fonts: std::cell::RefCell<FaceFonts>,
     }
 
     impl PropTextMeasurer {
         pub(crate) fn new(scale: f64) -> Option<Self> {
-            let fonts = SizedFontCache::new(scale)?;
             Some(Self {
-                fonts: std::cell::RefCell::new(fonts),
-                mono_fonts: std::cell::RefCell::new(SizedFontCache::new_mono(scale)),
+                fonts: std::cell::RefCell::new(FaceFonts::new(scale)?),
             })
         }
     }
@@ -96,42 +93,36 @@ mod inner {
                 return 0.0;
             }
             let size_tenths = (font_size * 10.0).round() as u16;
-            self.fonts.borrow_mut().measure_text(text, size_tenths)
+            self.fonts.borrow_mut().regular.measure_text(text, size_tenths)
         }
 
         fn line_height_px(&self, font_size: f32) -> f32 {
             let size_tenths = (font_size * 10.0).round() as u16;
-            self.fonts.borrow_mut().line_height(size_tenths)
+            self.fonts.borrow_mut().regular.line_height(size_tenths)
         }
 
         fn cap_height_px(&self, font_size: f32) -> f32 {
             let size_tenths = (font_size * 10.0).round() as u16;
-            self.fonts.borrow_mut().cap_height(size_tenths)
+            self.fonts.borrow_mut().regular.cap_height(size_tenths)
         }
         fn descent_px(&self, font_size: f32) -> f32 {
             let size_tenths = (font_size * 10.0).round() as u16;
-            self.fonts.borrow_mut().descent(size_tenths)
+            self.fonts.borrow_mut().regular.descent(size_tenths)
         }
         fn text_ink_extents_px(&self, text: &str, font_size: f32) -> (f32, f32) {
             let size_tenths = (font_size * 10.0).round() as u16;
-            self.fonts.borrow().text_ink_extents(text, size_tenths)
+            self.fonts.borrow().regular.text_ink_extents(text, size_tenths)
         }
-        fn measure_mono_text_px(&self, text: &str, font_size: f32) -> f32 {
+        fn measure_text_face_px(&self, text: &str, font_size: f32, face: TextFace) -> f32 {
             if text.is_empty() {
                 return 0.0;
             }
             let size_tenths = (font_size * 10.0).round() as u16;
-            match self.mono_fonts.borrow_mut().as_mut() {
-                Some(fonts) => fonts.measure_text(text, size_tenths),
-                None => self.fonts.borrow_mut().measure_text(text, size_tenths),
-            }
+            self.fonts.borrow_mut().get_mut(face).measure_text(text, size_tenths)
         }
-        fn mono_cap_height_px(&self, font_size: f32) -> f32 {
+        fn cap_height_face_px(&self, font_size: f32, face: TextFace) -> f32 {
             let size_tenths = (font_size * 10.0).round() as u16;
-            match self.mono_fonts.borrow_mut().as_mut() {
-                Some(fonts) => fonts.cap_height(size_tenths),
-                None => self.fonts.borrow_mut().cap_height(size_tenths),
-            }
+            self.fonts.borrow_mut().get_mut(face).cap_height(size_tenths)
         }
     }
 
@@ -213,22 +204,58 @@ mod inner {
 
     impl TiledCaptureTarget {
         pub fn rgba(&self) -> Vec<u8> {
-            let width = self.texture.width();
-            let height = self.texture.height();
-            let mut pixels = vec![0u8; width * height * 4];
-            unsafe {
-                self.texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
-                    NonNull::new(pixels.as_mut_ptr().cast()).unwrap(), width * 4,
-                    MTLRegion {
-                        origin: MTLOrigin { x: 0, y: 0, z: 0 },
-                        size: MTLSize { width, height, depth: 1 },
-                    }, 0,
-                );
+            let (width, height) = (self.texture.width() as u32, self.texture.height() as u32);
+            self.rgba_region(crate::ui::capture::PixelRegion { x: 0, y: 0, width, height }).1
+        }
+
+        /// The target's RGBA pixels in `region`, clamped to the target, and
+        /// the clamped region.
+        pub fn rgba_region(
+            &self,
+            region: crate::ui::capture::PixelRegion,
+        ) -> (crate::ui::capture::PixelRegion, Vec<u8>) {
+            let (width, height) = (self.texture.width() as u32, self.texture.height() as u32);
+            let x = region.x.min(width);
+            let y = region.y.min(height);
+            let region = crate::ui::capture::PixelRegion {
+                x, y, width: region.width.min(width - x), height: region.height.min(height - y),
+            };
+            let mut pixels = vec![0u8; region.width as usize * region.height as usize * 4];
+            if !pixels.is_empty() {
+                unsafe {
+                    self.texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                        NonNull::new(pixels.as_mut_ptr().cast()).unwrap(), region.width as usize * 4,
+                        MTLRegion {
+                            origin: MTLOrigin { x: x as usize, y: y as usize, z: 0 },
+                            size: MTLSize { width: region.width as usize, height: region.height as usize, depth: 1 },
+                        }, 0,
+                    );
+                }
             }
             for pixel in pixels.chunks_exact_mut(4) {
                 pixel.swap(0, 2);
             }
-            pixels
+            (region, pixels)
+        }
+
+        /// The target's pixels in `region` as a PNG, each PNG pixel `scale`
+        /// target pixels across.
+        pub fn region_png(&self, region: crate::ui::capture::PixelRegion, scale: u32) -> Result<Vec<u8>, String> {
+            let (region, pixels) = self.rgba_region(region);
+            let image = image::RgbaImage::from_raw(region.width, region.height, pixels)
+                .ok_or("the region's pixels do not fit its size")?;
+            let scale = scale.max(1);
+            let image = if scale > 1 {
+                image::imageops::resize(&image, (image.width() / scale).max(1), (image.height() / scale).max(1),
+                    image::imageops::FilterType::Triangle)
+            } else {
+                image
+            };
+            let mut png = Vec::new();
+            image::DynamicImage::ImageRgba8(image)
+                .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .map_err(|error| error.to_string())?;
+            Ok(png)
         }
 
         pub fn save_png(&self, path: &std::path::Path) -> Result<(), image::ImageError> {
@@ -943,6 +970,9 @@ struct WidgetVaryings {
     float4 color_d       [[flat]];
     float  aspect        [[flat]];
     float  corner_radius [[flat]];
+    // An SDF widget painting a rounded box's background: the box's
+    // normalized corner radius, its output clipped to that shape; 0 = none.
+    float  box_clip      [[flat]];
 };
 
 float sdf_rounded_rect(float2 p, float2 half_size, float radius) {
@@ -1016,6 +1046,7 @@ vertex WidgetVaryings widget_vert(
     out.color_d = inst.color_d.w < 0.0 ? float4(0.0) : inst.color_d;
     out.aspect = inst.pixel_aspect;
     out.corner_radius = inst.corner_radius;
+    out.box_clip = inst.orientation;
     return out;
 }
 "#;
@@ -1076,7 +1107,7 @@ vertex WidgetVaryings widget_vert(
                 scale: 1.0,
                 fg: Color::rgba(0.8, 0.7, 0.6, 1.0),
                 bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                mono: false,
+                face: TextFace::Regular,
             }
         }
 
@@ -1991,7 +2022,7 @@ fragment float4 live_spectrogram_frag(
     struct ProportionalTextLayoutKey {
         text: String,
         size_tenths: u16,
-        mono: bool,
+        face: TextFace,
     }
 
     #[derive(Clone, Copy)]
@@ -2018,7 +2049,7 @@ fragment float4 live_spectrogram_frag(
     struct ProportionalTextVertexKey {
         text: String,
         size_tenths: u16,
-        mono: bool,
+        face: TextFace,
         row_bits: u32,
         col_bits: u32,
         align_width_bits: u32,
@@ -2043,7 +2074,7 @@ fragment float4 live_spectrogram_frag(
             Self {
                 text: run.text.clone(),
                 size_tenths: (run.font_size * 10.0).round() as u16,
-                mono: run.mono,
+                face: run.face,
                 row_bits: run.row.to_bits(),
                 col_bits: run.col.to_bits(),
                 align_width_bits: run.align_width.to_bits(),
@@ -2116,14 +2147,14 @@ fragment float4 live_spectrogram_frag(
             let key = ProportionalTextLayoutKey {
                 text: run.text.clone(),
                 size_tenths: (run.font_size * 10.0).round() as u16,
-                mono: run.mono,
+                face: run.face,
             };
             if !self.layouts.contains_key(&key) {
                 let mut pen_x = 0.0_f32;
                 let mut glyphs = Vec::new();
                 for ch in key.text.chars() {
                     let Some(entry) =
-                        prop_atlas.get_or_rasterize_face(ch, key.size_tenths, key.mono)
+                        prop_atlas.get_or_rasterize_face(ch, key.size_tenths, key.face)
                     else {
                         continue;
                     };
@@ -2140,9 +2171,9 @@ fragment float4 live_spectrogram_frag(
                 }
                 let layout = CachedProportionalTextLayout {
                     text_width_px: pen_x,
-                    line_height_px: prop_atlas.line_height_face(key.size_tenths, key.mono),
-                    descent_px: prop_atlas.descent_face(key.size_tenths, key.mono),
-                    cap_height_px: prop_atlas.cap_height_face(key.size_tenths, key.mono),
+                    line_height_px: prop_atlas.line_height_face(key.size_tenths, key.face),
+                    descent_px: prop_atlas.descent_face(key.size_tenths, key.face),
+                    cap_height_px: prop_atlas.cap_height_face(key.size_tenths, key.face),
                     glyphs,
                     last_used_frame: self.frame_index,
                 };
@@ -4361,6 +4392,14 @@ fragment float4 live_spectrogram_frag(
             Some(Box::new(measurer))
         }
 
+        /// The window's drawable size in pixels, or None without a window.
+        pub fn window_pixel_size(&self) -> Option<(u32, u32)> {
+            self.window.as_ref().map(|window| {
+                let size = window.inner_size();
+                (size.width, size.height)
+            })
+        }
+
         pub fn cell_dimensions(&self) -> (f32, f32) {
             self.atlas
                 .as_ref()
@@ -4418,6 +4457,19 @@ fragment float4 live_spectrogram_frag(
             show_status: bool,
             path: P,
         ) -> Result<(), BackendError> {
+            self.render_frame_region_png(frame, width_px, height_px, region, show_status)
+                .and_then(|png| std::fs::write(path, png).map_err(|_| BackendError::MetalError))
+        }
+
+        /// [`Self::render_frame_region_to_png`], returning the PNG bytes.
+        pub fn render_frame_region_png(
+            &mut self,
+            frame: &RenderFrame,
+            width_px: u32,
+            height_px: u32,
+            region: Option<crate::ui::capture::PixelRegion>,
+            show_status: bool,
+        ) -> Result<Vec<u8>, BackendError> {
             let region = region.unwrap_or(crate::ui::capture::PixelRegion {
                 x: 0, y: 0, width: width_px, height: height_px,
             });
@@ -4468,15 +4520,13 @@ fragment float4 live_spectrogram_frag(
             for px in bgra.chunks_exact(4) {
                 rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
             }
-            image::save_buffer_with_format(
-                path,
-                &rgba,
-                region.width,
-                region.height,
-                image::ColorType::Rgba8,
-                image::ImageFormat::Png,
-            )
-            .map_err(|_| BackendError::MetalError)
+            let image = image::RgbaImage::from_raw(region.width, region.height, rgba)
+                .ok_or(BackendError::MetalError)?;
+            let mut png = Vec::new();
+            image
+                .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .map_err(|_| BackendError::MetalError)?;
+            Ok(png)
         }
 
         fn render_frame_into_texture(
@@ -6175,7 +6225,7 @@ fragment float4 live_spectrogram_frag(
                             } else {
                                 group_bg
                             },
-                            mono: false,
+                            face: TextFace::Regular,
                         },
                     ));
                     if tab.close_visible
@@ -6196,7 +6246,7 @@ fragment float4 live_spectrogram_frag(
                                 } else {
                                     group_bg
                                 },
-                                mono: false,
+                                face: TextFace::Regular,
                             },
                         ));
                     }

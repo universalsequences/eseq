@@ -1701,12 +1701,12 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            Some(&mut runtime),
+            &mut Some(runtime),
+            &mut crate::process::ProcessRuntime::default(),
             None,
             0,
             1_000,
             48_000.0,
-            0.0,
             0.0,
             EmittedNetworkEventSource::Generator { index: 0 },
             lisp_host::EmittedAccumulatorEvent {
@@ -1750,6 +1750,135 @@
         assert_eq!(track_output_events[0].transpose, 12.0);
     }
 
+    /// Enqueue one emitted hit on track 0 through `scratch`'s process
+    /// authoring and return the transposes it put in the queue.
+    fn emitted_hit_transposes(
+        state: &Arc<SequencerState>,
+        scratch: lisp_host::ScratchControlRuntime,
+        source: EmittedNetworkEventSource,
+    ) -> (lisp_host::ScratchControlRuntime, Vec<f32>) {
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut process_runtime = crate::process::ProcessRuntime::default();
+        process_runtime.sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+        let queue = ScheduledEventQueue::<16>::new();
+        let mut track_output_events = Vec::new();
+        let mut scratch = Some(scratch);
+        assert!(super::enqueue_emitted_network_event_with_midi_fx(
+            &queue,
+            &snapshot,
+            &mut track_output_events,
+            &mut scratch,
+            &mut process_runtime,
+            None,
+            0,
+            1_000,
+            48_000.0,
+            0.0,
+            source,
+            lisp_host::EmittedAccumulatorEvent {
+                origin_note: None,
+                offset_beats: 0.0,
+                track: Some(0),
+                resolved: test_resolved_step(),
+                chord: Vec::new(),
+                chord_durations: Vec::new(),
+                chord_step_transpose: 0.0,
+                effect_params: Vec::new(),
+                instrument_params: Vec::new(),
+                named_params: Vec::new(),
+            },
+            None,
+            false,
+        ));
+        let mut transposes = Vec::new();
+        while let Some(event) = queue.pop_owned() {
+            if let ScheduledEventKind::NetworkTrigger { resolved, .. } = event.kind {
+                transposes.push(resolved.transpose);
+            }
+        }
+        (scratch.expect("scratch runtime"), transposes)
+    }
+
+    #[test]
+    fn triggers_all_processes_run_on_emitted_hits_and_skip_their_own() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            vec![Vec::new()],
+            vec![EffectDescriptor::builtin_sampler()],
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process bump-steps
+                  :target (step-param :transpose)
+                  :run (target-add! 5))
+                (def-process bump-all
+                  :triggers :all
+                  :target (step-param :transpose)
+                  :run (target-add! 7))
+                (def-process drop-generated
+                  :triggers :all
+                  :run (if (= (trigger-origin) :generator) (veto!) nil))
+                (processes :track 0 (bump-steps) (bump-all))
+                "#,
+            )
+            .expect("define processes");
+        let generator = EmittedNetworkEventSource::Generator { index: 0 };
+
+        // Only the :triggers :all slot runs on a generator hit.
+        let (scratch, transposes) = emitted_hit_transposes(&state, scratch, generator);
+        assert_eq!(transposes, vec![7.0]);
+
+        // A hit this track's own chain emitted is not run through it again.
+        let own = state.track_process_chain(0).expect("chain").slots[1].clone();
+        let own_id = crate::process::track_process_slot_runtime_id(&own, 0).0;
+        let (mut scratch, transposes) = emitted_hit_transposes(
+            &state,
+            scratch,
+            EmittedNetworkEventSource::Process { runtime_id: own_id },
+        );
+        assert_eq!(transposes, vec![0.0]);
+        let (_, transposes) = emitted_hit_transposes(
+            &state,
+            {
+                scratch.eval("(processes :track 0 (drop-generated))").expect("swap chain");
+                scratch
+            },
+            EmittedNetworkEventSource::Process { runtime_id: own_id + 1 },
+        );
+        assert_eq!(transposes, vec![0.0], "another process's emission plays");
+
+        // (trigger-origin) tells the process where the hit came from.
+        let mut scratch = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            vec![Vec::new()],
+            vec![EffectDescriptor::builtin_sampler()],
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process drop-generated
+                  :triggers :all
+                  :run (if (= (trigger-origin) :generator) (veto!) nil))
+                (processes :track 0 (drop-generated))
+                "#,
+            )
+            .expect("define veto process");
+        let (scratch, transposes) = emitted_hit_transposes(&state, scratch, generator);
+        assert!(transposes.is_empty(), "generator hit vetoed: {transposes:?}");
+        let (_, transposes) = emitted_hit_transposes(
+            &state,
+            scratch,
+            EmittedNetworkEventSource::Graph { graph_index: 0, node_index: 0 },
+        );
+        assert_eq!(transposes, vec![0.0], "graph hit plays");
+    }
+
     #[test]
     fn emitted_network_event_trigger_to_track_copies_to_selected_target_track() {
         let state = Arc::new(SequencerState::new(
@@ -1791,12 +1920,12 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            Some(&mut runtime),
+            &mut Some(runtime),
+            &mut crate::process::ProcessRuntime::default(),
             None,
             0,
             1_000,
             48_000.0,
-            0.0,
             0.0,
             EmittedNetworkEventSource::Generator { index: 0 },
             lisp_host::EmittedAccumulatorEvent {
@@ -2402,13 +2531,13 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            Some(&mut runtime),
+            &mut Some(runtime),
+            &mut crate::process::ProcessRuntime::default(),
             None,
             0,
             graph_emissions[0].sample_time,
             48_000.0,
             1.0,
-            0.0,
             EmittedNetworkEventSource::Graph {
                 graph_index: 0,
                 node_index: graph_emissions[0].node_index,
@@ -2456,12 +2585,12 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            None,
+            &mut None,
+            &mut crate::process::ProcessRuntime::default(),
             None,
             0,
             1_000,
             48_000.0,
-            0.0,
             0.0,
             EmittedNetworkEventSource::Graph {
                 graph_index: 0,
@@ -2525,12 +2654,12 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            Some(&mut runtime),
+            &mut Some(runtime),
+            &mut crate::process::ProcessRuntime::default(),
             None,
             0,
             1_000,
             48_000.0,
-            0.0,
             0.0,
             EmittedNetworkEventSource::Graph {
                 graph_index: 0,
@@ -2889,6 +3018,7 @@
                     requires: vec!["alez.jaki.doc".to_string()],
                     graph: None,
                     owner_rack: None,
+                    trigger_source: None,
                 }),
                 document: vec![
                     ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
@@ -3231,18 +3361,19 @@
 
     #[test]
     fn a_neuron_on_a_jaki_restart_input_rewinds_a_looping_pattern() {
-        // The neuron fires on beat 1.5 and then every 3 units (2.25, 3.0,
-        // 3.75). The looping `. . . .` (L R L R on tracks 1 / 2) runs free
-        // until the first fire, then replays its first three units from
-        // every fire, velocity model fresh each time.
+        // The neuron is seeded by track 0's downbeat step and fires 3 units
+        // later, on beat 0.75, then every 3 units (1.5, 2.25, 3.0, 3.75). The
+        // looping `. . . .` (L R L R on tracks 1 / 2) runs free from the
+        // downbeat until the first fire, then replays its first three units
+        // from every fire, velocity model fresh each time.
         let hits = jaki_driven_by_neuron(":loop", 1, 3, true);
         let tracks: Vec<usize> = hits.iter().map(|hit| hit.track).collect();
         assert_eq!(
             tracks,
-            vec![1, 2, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2],
+            vec![1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1],
             "rewound on every fire: {hits:#?}"
         );
-        for fire_beat in [1.5_f64, 2.25, 3.0, 3.75] {
+        for fire_beat in [0.75_f64, 1.5, 2.25, 3.0, 3.75] {
             let hit = hits
                 .iter()
                 .find(|hit| hit.sample_time == (fire_beat * 24_000.0) as u64)
@@ -3412,8 +3543,7 @@
 
     #[test]
     fn a_jaki_quant_row_lands_every_hit_on_its_grid() {
-        // `. .` ×2 on sixteenths (this harness plays unit k at (k + 1) *
-        // 6000). (quant :8) snaps units 0 1 2 3 onto eighths 0 2 2 0: two
+        // `. .` ×2 on sixteenths (unit k plays at k * 6000). (quant :8) snaps units 0 1 2 3 onto eighths 0 2 2 0: two
         // hits per 4-unit cycle, both on the eighth grid, since hits snapped
         // onto one point sound once. (every-fig 2 (quant :4)) snaps only
         // figure 1 (units 2 3) onto the bar line: units 0 and 1 remain.
@@ -3425,7 +3555,7 @@
             96_000,
         );
         let times = |track: usize| -> Vec<u64> {
-            triggers.iter().filter(|(t, _)| *t == track).map(|(_, time)| *time - 6_000).collect()
+            triggers.iter().filter(|(t, _)| *t == track).map(|(_, time)| *time).collect()
         };
         assert_eq!(times(0), vec![0, 12_000, 24_000, 36_000, 48_000, 60_000, 72_000, 84_000]);
         assert_eq!(times(1), vec![0, 6_000, 24_000, 30_000, 48_000, 54_000, 72_000, 78_000]);
@@ -3472,6 +3602,151 @@
         assert_eq!(notes, [12.0, 5.0, 5.0, 5.0].repeat(4), "{triggers:?}");
     }
 
+    /// A generator instance whose `:trigger` names track 0 (eseq-hvni):
+    /// every step played there opens its gate on that step's own boundary.
+    /// The tick emits one hit on track 1 per new gate epoch; returns the
+    /// samples of track 0's steps and of track 1's hits over two bars, one
+    /// sixteenth per lookahead call like the live driver, and the generator
+    /// errors reported.
+    fn generator_triggered_by_track(trigger_source: &'static str) -> (Vec<u64>, Vec<u64>, Vec<String>) {
+        run_with_scheduler_stack(move || {
+            let state = Arc::new(SequencerState::new(
+                4,
+                (0..4).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            for step in [0, 4] {
+                state.toggle_step_and_clear_plocks(0, step);
+            }
+            let mut values = Runtime::new();
+            let mut literal = |source: &str| {
+                let value = values.eval_str(source).expect("literal").expect("a value");
+                crate::process::ProcessLiteral::from_value(&value).expect("portable")
+            };
+            let kind = lisp_host::KindDefinition {
+                id: "test:gated".to_string(),
+                name: "gated".to_string(),
+                package: None,
+                module: None,
+                sequencer: None,
+                generator: Some(crate::sequencer::PublishedSequencer {
+                    id: 0,
+                    name: "gated".to_string(),
+                    resolution: crate::sequencer::Timebase::Sixteenth as u8,
+                    tick_source: "(let ((epoch (get (gen-gate) :epoch))) \
+                                  (if (> epoch (state-get \"epoch\" 0)) \
+                                    (do (state-set! \"epoch\" epoch) \
+                                        (seq-emit :track 1 :at :now :note 0 :vel 1 :dur 0.1)) \
+                                    nil))"
+                        .to_string(),
+                    requires: Vec::new(),
+                    graph: None,
+                    owner_rack: None,
+                    trigger_source: Some(trigger_source.to_string()),
+                }),
+                document: vec![("src".to_string(), literal("0"))],
+                state_fields: Vec::new(),
+                has_view: true,
+                keymap: None,
+            };
+            lisp_host::register_kind(kind.clone());
+            state
+                .write_current_scene_slot(lisp_host::instance_document_slot(5, "src"), literal("0"))
+                .expect("src");
+            let published = lisp_host::instance_published_sequencer(&kind, 5, None).expect("generator");
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(); 4],
+                vec![EffectDescriptor::builtin_sampler(); 4],
+                0,
+                0,
+            );
+            scratch
+                .register_published_sequencer(
+                    published.id,
+                    published.name.clone(),
+                    crate::sequencer::Timebase::from_index(published.resolution as u32),
+                    published.tick_source.clone(),
+                    &published.requires,
+                )
+                .expect("register");
+            scratch
+                .set_sequencer_trigger(published.id, published.trigger_source.as_deref())
+                .expect("trigger");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler.generator_runtime.sync_definitions(&scratch.sequencer_defs(), 0.0);
+            let mut scratch_runtime = Some(scratch);
+            let snapshot = state.publish_scheduler_snapshot();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            // 24000 samples per quarter: a sixteenth is 6000, a bar 96000.
+            let chunk = 6_000u64;
+            let (mut now, mut until) = (0u64, 0u64);
+            let mut observed = Vec::new();
+            while now < 2 * 96_000 {
+                let queue = ScheduledEventQueue::<256>::new();
+                let result = schedule_playing_lookahead(
+                    &mut scheduler,
+                    &state,
+                    &snapshot,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    snapshot.transport.pattern_epoch,
+                    now,
+                    now + chunk,
+                    48_000,
+                    6_000,
+                    24_000.0,
+                    until,
+                    false,
+                    false,
+                );
+                until = result.scheduled_until_sample;
+                observed.extend(observed_triggers(&queue));
+                now += chunk;
+            }
+            let errors: Vec<String> =
+                state.drain_generator_tick_errors().into_iter().map(|notice| notice.error).collect();
+            let on = |track| {
+                // The lookahead runs ahead of `now`: keep the two bars.
+                let mut samples: Vec<u64> = observed
+                    .iter()
+                    .filter(|t| t.track == track && t.sample_time < 2 * 96_000)
+                    .map(|t| t.sample_time)
+                    .collect();
+                samples.sort();
+                samples
+            };
+            (on(0), on(1), errors)
+        })
+    }
+
+    #[test]
+    fn a_generators_trigger_track_opens_its_gate_on_each_steps_own_boundary() {
+        let (steps, hits, errors) = generator_triggered_by_track("self.src");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(steps, [0, 24_000, 96_000, 120_000], "track 0 plays steps 0 and 4 each bar");
+        assert_eq!(hits, steps, "each step gates the generator on its own boundary, downbeats included");
+    }
+
+    #[test]
+    fn a_generator_without_a_trigger_track_stays_closed() {
+        let (steps, hits, errors) = generator_triggered_by_track("-1");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(steps.len(), 4);
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    #[test]
+    fn a_trigger_that_errors_is_reported_once_and_parked() {
+        let (steps, hits, errors) = generator_triggered_by_track("(no-such-function self.src)");
+        assert_eq!(steps.len(), 4, "the track still plays");
+        assert!(hits.is_empty(), "{hits:?}");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("trigger:"), "{errors:?}");
+    }
+
     /// Perf probe: a five-row jaki instance (two `. -` figures, modifier-heavy
     /// rows) ticked for 16 bars, one sixteenth per lookahead call like the
     /// live driver. Prints per-call percentiles; ~1.5 ms of each call is the
@@ -3508,6 +3783,7 @@
                     requires: vec!["alez.jaki.doc".to_string()],
                     graph: None,
                     owner_rack: None,
+                    trigger_source: None,
                 }),
                 document: vec![
                     ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
@@ -3678,6 +3954,7 @@
                 requires: vec!["alez.jaki.doc".to_string()],
                 graph: None,
                 owner_rack: None,
+                trigger_source: None,
             }),
             document: vec![
                 ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
@@ -3989,7 +4266,7 @@
                 false,
             );
 
-            // One :4 boundary (beat 1.0 → sample 24000) fires inside the
+            // One :4 boundary (the downbeat, sample 0) fires inside the
             // horizon; both holds land in the mailbox stamped from it.
             let due = state.scheduled_mixer_controls().drain_due(u64::MAX);
             assert_eq!(due.len(), 2, "{due:?}");
@@ -3998,15 +4275,15 @@
                 due[0].target,
                 crate::mixer_control::MixerControlTarget::Track(0)
             );
-            assert_eq!(due[0].engage_sample, 24_000);
-            assert_eq!(due[0].release_sample, 30_000);
+            assert_eq!(due[0].engage_sample, 0);
+            assert_eq!(due[0].release_sample, 6_000);
             assert_eq!(due[1].op, crate::mixer_control::MixerControlOp::Solo);
             assert_eq!(
                 due[1].target,
                 crate::mixer_control::MixerControlTarget::Group("Drums".to_string())
             );
-            assert_eq!(due[1].engage_sample, 27_000);
-            assert_eq!(due[1].release_sample, 39_000);
+            assert_eq!(due[1].engage_sample, 3_000);
+            assert_eq!(due[1].release_sample, 15_000);
         });
     }
 
@@ -10574,12 +10851,12 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            None,
+            &mut None,
+            &mut crate::process::ProcessRuntime::default(),
             None,
             0,
             1_000,
             48_000.0,
-            0.0,
             0.0,
             NeuralOutput {
                 sample_time: 1_000,
@@ -12058,12 +12335,12 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            None,
+            &mut None,
+            &mut crate::process::ProcessRuntime::default(),
             None,
             7,
             1234,
             48_000.0,
-            0.0,
             0.0,
             NeuralOutput {
                 sample_time: 1234,
@@ -12186,12 +12463,12 @@
             &queue,
             &snapshot,
             &mut track_output_events,
-            None,
+            &mut None,
+            &mut crate::process::ProcessRuntime::default(),
             None,
             7,
             1234,
             48_000.0,
-            0.0,
             0.0,
             NeuralOutput {
                 sample_time: 1234,
@@ -12998,6 +13275,505 @@
             loop_enabled,
             next_row_id,
         }));
+    }
+
+    /// Song-mode graph harness: a variable `line` graph of 2 nodes seeded from track 0 with a
+    /// 2-step delay, node 1 routed to track 1, resetting every 4 beats.
+    /// Scene 0 leaves the 0->1 edge at weight 0 (silent); scene 1 opens it
+    /// and starts node 1 hot on every reset, so node 1 fires alone one step
+    /// after each reset, before the first seed arrives. The live session
+    /// stays on scene 0 throughout, as it does in the app until the control
+    /// thread mirrors the audible row.
+    fn song_graph_scene_fixture() -> Arc<SequencerState> {
+        let (state, _) = song_mode_fixture();
+        publish_test_graph_sequencer(
+            Arc::clone(&state),
+            r#"
+            (def-sequencer "song-row-graph"
+              :shape (line :default 2 :min 1 :max 4)
+              :energy-decay 1
+              :reset-every 4
+              :seed-on-reset 0
+              :max-poly 8
+              :max-poly-selection :deterministic
+              :duration (steps 1)
+              (def-node nrn
+                :resolution :16
+                :delay 2
+                :quantize :16
+                :route 1
+                :seed-from 0
+                :reduce :sum
+                :params ((threshold :float 0 4 :default 0.5))
+                :state ((energy :leak (per-step :energy-decay)))
+                :update (if (>= (energy) (param :threshold))
+                          (emit :note (in-note) :vel (in-vel))
+                          false))
+              (edges
+                :from nrn
+                :to nrn
+                :topology (all-to-all)
+                :gather (edge :weight)
+                :params ((weight :float -1 1 :default 0))))
+            "#,
+        );
+        let published = state
+            .published_sequencers()
+            .into_iter()
+            .find(|seq| seq.name == "song-row-graph")
+            .expect("published graph");
+        let manifest = published.graph.as_ref().expect("graph manifest");
+        let edge_group = crate::graph::edge_set_group_id(&manifest.edge_sets[0]);
+        let overrides = |weight: f64, hot: f64| ProjectGraphOverrides {
+            sequencer_id: published.id,
+            sequencer_name: published.name.clone(),
+            owner_rack: None,
+            node_intrinsics: vec![ProjectGraphNodeIntrinsicOverride {
+                group: "nrn".to_string(),
+                instance: 1,
+                resolution: None,
+                delay_steps: None,
+                quantize: None,
+                route: None,
+                seed_from: Some(ProjectGraphSeedFrom::Tracks(Vec::new())),
+                seed_on_reset: Some(hot),
+                duration: None,
+                swing: None,
+                neural_group: None,
+                process_chain: None,
+            }],
+            node_params: Vec::new(),
+            edge_params: vec![ProjectGraphEdgeParamOverride {
+                group: edge_group.clone(),
+                from: 0,
+                to: 1,
+                param: "weight".to_string(),
+                value: weight,
+            }],
+            reset_every_beats: None,
+            max_poly: None,
+            max_poly_selection: None,
+            node_count: None,
+            group_gain: None,
+            group_coupling: None,
+            group_trace_decay: None,
+            group_coupling_scale: None,
+            group_excite_floor: None,
+        };
+        state.with_scenes_mut(|scenes| {
+            scenes.scenes[0].graph_overrides = vec![overrides(0.0, 0.0)];
+            scenes.scenes[1].graph_overrides = vec![overrides(1.0, 2.0)];
+        });
+        state
+    }
+
+    /// Drive a committed song through the production lookahead in small
+    /// blocks, with graph runtimes reconciled from the LIVE snapshot and
+    /// rewound first (as the worker does on Play), and return track-1 graph triggers as
+    /// `(sample, transpose)`.
+    fn drive_song_graph(
+        state: &Arc<SequencerState>,
+        rows: Vec<crate::sequencer::ProjectSongRow>,
+        end_beat: f64,
+    ) -> Vec<(u64, f32)> {
+        song_mode_commit(state, rows, end_beat, false);
+        let song = state.preflight_runtime_song().expect("preflight song");
+        state.transport.playing.store(true, Ordering::Relaxed);
+        let base = state.publish_scheduler_snapshot();
+        let samples_per_quarter = 48_000.0 * 60.0 / base.transport.bpm as f64;
+        let queue = Box::new(ScheduledEventQueue::<256>::new());
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        let manifests = state
+            .published_sequencers()
+            .into_iter()
+            .filter_map(|seq| seq.graph)
+            .collect::<Vec<_>>();
+        reconcile_graph_runtimes(
+            manifests,
+            &base.graph_overrides,
+            &[],
+            &mut scheduler.graph_runtimes,
+            &mut scheduler.graph_manifests,
+            0.0,
+        );
+        // Play rewinds every graph before the song's first chunk.
+        for graph in &mut scheduler.graph_runtimes {
+            graph.reset_transport(0.0);
+        }
+        scheduler.song = Some(
+            crate::sequencer::SongPlaybackRuntime::new(song, 0.0, samples_per_quarter)
+                .expect("song playback runtime"),
+        );
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let mut scratch_runtime =
+            Some(lisp_host::scratch_runtime_with_fallbacks(Arc::clone(state), 0, 0));
+        let block = 1_000_usize;
+        let end_sample = (end_beat * samples_per_quarter) as u64;
+        let mut scheduled_until = 0_u64;
+        let mut rendered = 0_u64;
+        let mut fires = Vec::new();
+        while rendered < end_sample {
+            let result = schedule_playing_lookahead(
+                &mut scheduler,
+                state,
+                &base,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                base.transport.pattern_epoch,
+                rendered,
+                4_000,
+                48_000,
+                block,
+                samples_per_quarter,
+                scheduled_until,
+                false,
+                false,
+            );
+            scheduled_until = result.scheduled_until_sample;
+            fires.extend(
+                observed_triggers(&queue)
+                    .into_iter()
+                    .filter(|event| event.kind == ScheduledTriggerKind::Network && event.track == 1)
+                    .map(|event| (event.sample_time, event.transpose)),
+            );
+            rendered += block as u64;
+        }
+        fires.sort_by_key(|(sample, _)| *sample);
+        fires
+    }
+
+    /// An arranged switch onto a scene must drive the graph exactly as
+    /// starting the transport on that scene does: the row's own graph
+    /// overrides govern from its first beat (here the reset boundary), not
+    /// the live session's until the control thread mirrors the row.
+    #[test]
+    fn song_row_switch_drives_graph_like_a_fresh_start_on_that_scene() {
+        run_with_scheduler_stack(|| {
+            let beat = 24_000_u64;
+            let fresh = drive_song_graph(
+                &song_graph_scene_fixture(),
+                vec![song_mode_row(1, 0.0, 1, Vec::new())],
+                4.0,
+            );
+            assert!(!fresh.is_empty(), "scene 1 opens the graph edge");
+
+            let switched = drive_song_graph(
+                &song_graph_scene_fixture(),
+                vec![
+                    song_mode_row(1, 0.0, 0, Vec::new()),
+                    song_mode_row(2, 4.0, 1, Vec::new()),
+                ],
+                8.0,
+            );
+            let second_row = switched
+                .iter()
+                .filter(|(sample, _)| *sample >= 4 * beat)
+                .map(|(sample, transpose)| (sample - 4 * beat, *transpose))
+                .collect::<Vec<_>>();
+            assert_eq!(second_row, fresh);
+        });
+    }
+
+    /// Play on an empty arrangement auto-latches the selected scene (takes
+    /// spec 10): the scene latch hands scene-level authority to the session,
+    /// so the graph must run the live scene's overrides, not the unscened
+    /// row's empty set.
+    #[test]
+    fn scene_latched_song_drives_graph_from_the_live_scene() {
+        run_with_scheduler_stack(|| {
+            let fresh = drive_song_graph(
+                &song_graph_scene_fixture(),
+                vec![song_mode_row(1, 0.0, 1, Vec::new())],
+                4.0,
+            );
+            assert!(!fresh.is_empty(), "scene 1 opens the graph edge");
+
+            let state = song_graph_scene_fixture();
+            // The auto-latch launches the selected scene into the session.
+            state
+                .launch_scene(
+                    1,
+                    2,
+                    &[-1, -1],
+                    &[48_000, 48_000],
+                    &[String::from("a"), String::from("b")],
+                    &[crate::sequencer::InstrumentType::Sampler, crate::sequencer::InstrumentType::Sampler],
+                )
+                .expect("launch scene 1");
+            state.latch_song_manual_override_all(2);
+            let mut empty = song_mode_row(1, 0.0, 0, Vec::new());
+            empty.scene = None;
+            let latched = drive_song_graph(&state, vec![empty], 4.0);
+            assert_eq!(latched, fresh);
+        });
+    }
+
+    /// A first row whose overrides change the graph's node count rebuilds
+    /// the runtime on the Play rewind beat; the rebuilt graph must still run
+    /// that rewind (and its reset seeds) instead of free-running from a
+    /// realign.
+    #[test]
+    fn graph_rebuilt_on_the_play_beat_plays_like_a_fresh_start() {
+        run_with_scheduler_stack(|| {
+            let fresh = drive_song_graph(
+                &song_graph_scene_fixture(),
+                vec![song_mode_row(1, 0.0, 1, Vec::new())],
+                4.0,
+            );
+            assert!(!fresh.is_empty(), "scene 1 opens the graph edge");
+
+            let state = song_graph_scene_fixture();
+            state.with_scenes_mut(|scenes| {
+                scenes.scenes[0].graph_overrides[0].node_count = Some(3);
+            });
+            let rebuilt = drive_song_graph(&state, vec![song_mode_row(1, 0.0, 1, Vec::new())], 4.0);
+            assert_eq!(rebuilt, fresh);
+        });
+    }
+
+    /// A quantized session launch onto a scene, landing on its reset
+    /// boundary, must drive the graph exactly as starting the transport on
+    /// that scene does, even though the control-side mirror (and the worker's
+    /// reconcile to the live scene) lands a few blocks after the boundary.
+    #[test]
+    fn session_boundary_launch_drives_graph_like_a_fresh_start_on_that_scene() {
+        use crate::quantized_launch::{LaunchQuantize, PatternLaunchTarget, QuantizedLaunchOwner};
+
+        run_with_scheduler_stack(|| {
+            let beat = 24_000_u64;
+            let fresh = drive_song_graph(
+                &song_graph_scene_fixture(),
+                vec![song_mode_row(1, 0.0, 1, Vec::new())],
+                4.0,
+            );
+            assert!(!fresh.is_empty(), "scene 1 opens the graph edge");
+
+            let state = song_graph_scene_fixture();
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut base = state.publish_scheduler_snapshot();
+            let launch = state
+                .preflight_pattern_launch_snapshot(&PatternLaunchTarget::Scene { scene: 1 })
+                .expect("scene 1 preflights");
+            state
+                .quantized_launches()
+                .schedule(
+                    PatternLaunchTarget::Scene { scene: 1 },
+                    LaunchQuantize::Bar,
+                    QuantizedLaunchOwner::Transport,
+                    3,
+                    2,
+                    Some(launch),
+                )
+                .expect("schedule boundary launch");
+            let queue = Box::new(ScheduledEventQueue::<256>::new());
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let manifests = state
+                .published_sequencers()
+                .into_iter()
+                .filter_map(|seq| seq.graph)
+                .collect::<Vec<_>>();
+            reconcile_graph_runtimes(
+                manifests,
+                &base.graph_overrides,
+                &[],
+                &mut scheduler.graph_runtimes,
+                &mut scheduler.graph_manifests,
+                0.0,
+            );
+            scheduler.graph_overrides_applied = Some(base.graph_overrides.clone());
+            let mut loaded = base.graph_overrides.clone();
+            for graph in &mut scheduler.graph_runtimes {
+                graph.reset_transport(0.0);
+            }
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime =
+                Some(lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0));
+            let block = 1_000_u64;
+            let mut scheduled_until = 0_u64;
+            let mut rendered = 0_u64;
+            let mut mirrored = false;
+            let mut fires = Vec::new();
+            while rendered < 8 * beat {
+                state.quantized_launches().process_scheduler(
+                    &mut scheduler.quantized_launches,
+                    rendered as f64 / beat as f64,
+                    scheduler.clock.total_beats,
+                    true,
+                    false,
+                );
+                // The control thread mirrors a few blocks after the boundary
+                // sounds; the worker then reconciles graphs to the live scene.
+                if !mirrored && rendered >= 4 * beat + 3 * block {
+                    for due in state.quantized_launches().drain_valid_due() {
+                        state
+                            .launch_scene_mirror(
+                                1,
+                                2,
+                                &[-1, -1],
+                                &[48_000, 48_000],
+                                &[String::from("a"), String::from("b")],
+                                &[crate::sequencer::InstrumentType::Sampler, crate::sequencer::InstrumentType::Sampler],
+                            )
+                            .expect("mirror scene 1");
+                        state.quantized_launches().acknowledge_mirror(due.token).expect("ack");
+                    }
+                    base = state.latest_scheduler_snapshot();
+                    if base.graph_overrides != loaded {
+                        reconcile_graph_runtimes(
+                            scheduler.graph_manifests.clone(),
+                            &base.graph_overrides,
+                            &[],
+                            &mut scheduler.graph_runtimes,
+                            &mut scheduler.graph_manifests,
+                            scheduler.clock.total_beats,
+                        );
+                        loaded = base.graph_overrides.clone();
+                        scheduler.graph_overrides_applied = Some(loaded.clone());
+                    }
+                    mirrored = true;
+                }
+                let result = schedule_playing_lookahead(
+                    &mut scheduler,
+                    &state,
+                    &base,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    base.transport.pattern_epoch,
+                    rendered,
+                    4_000,
+                    48_000,
+                    block as usize,
+                    24_000.0,
+                    scheduled_until,
+                    false,
+                    false,
+                );
+                scheduled_until = result.scheduled_until_sample;
+                fires.extend(
+                    observed_triggers(&queue)
+                        .into_iter()
+                        .filter(|event| event.kind == ScheduledTriggerKind::Network && event.track == 1)
+                        .map(|event| (event.sample_time, event.transpose)),
+                );
+                rendered += block;
+            }
+            assert!(mirrored);
+            fires.sort_by_key(|(sample, _)| *sample);
+            let after_launch = fires
+                .iter()
+                .filter(|(sample, _)| (4 * beat..8 * beat).contains(sample))
+                .map(|(sample, transpose)| (sample - 4 * beat, *transpose))
+                .collect::<Vec<_>>();
+            assert_eq!(after_launch, fresh);
+        });
+    }
+
+    /// The control thread publishes a boundary launch's mirror before it
+    /// acks, but the worker loads its snapshot before draining the ack, so a
+    /// pass can see the install released while its base is still the old
+    /// scene. The graph must hold the launch's overrides through that pass,
+    /// not swing back to the old scene's and forward again.
+    #[test]
+    fn graph_holds_a_mirrored_launchs_overrides_until_the_live_scene_catches_up() {
+        use crate::quantized_launch::{LaunchQuantize, PatternLaunchTarget, QuantizedLaunchOwner};
+
+        run_with_scheduler_stack(|| {
+            let state = song_graph_scene_fixture();
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let base = state.publish_scheduler_snapshot();
+            let launch = state
+                .preflight_pattern_launch_snapshot(&PatternLaunchTarget::Scene { scene: 1 })
+                .expect("scene 1 preflights");
+            let launched = launch.graph_overrides.clone();
+            assert_ne!(launched, base.graph_overrides);
+            state
+                .quantized_launches()
+                .schedule(
+                    PatternLaunchTarget::Scene { scene: 1 },
+                    LaunchQuantize::Bar,
+                    QuantizedLaunchOwner::Transport,
+                    3,
+                    2,
+                    Some(launch),
+                )
+                .expect("schedule boundary launch");
+
+            let queue = Box::new(ScheduledEventQueue::<256>::new());
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let manifests = state
+                .published_sequencers()
+                .into_iter()
+                .filter_map(|seq| seq.graph)
+                .collect::<Vec<_>>();
+            reconcile_graph_runtimes(
+                manifests,
+                &base.graph_overrides,
+                &[],
+                &mut scheduler.graph_runtimes,
+                &mut scheduler.graph_manifests,
+                0.0,
+            );
+            scheduler.graph_overrides_applied = Some(base.graph_overrides.clone());
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = None;
+            let mut pass = |scheduler: &mut SchedulerLookaheadState, rendered: u64, until: u64| {
+                schedule_playing_lookahead(
+                    scheduler,
+                    &state,
+                    &base,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    base.transport.pattern_epoch,
+                    rendered,
+                    24_000,
+                    48_000,
+                    6_000,
+                    24_000.0,
+                    until,
+                    false,
+                    false,
+                )
+                .scheduled_until_sample
+            };
+
+            // The bar boundary (sample 96_000) installs the launch.
+            state.quantized_launches().process_scheduler(
+                &mut scheduler.quantized_launches,
+                0.0,
+                scheduler.clock.total_beats,
+                true,
+                false,
+            );
+            let until = pass(&mut scheduler, 96_000, 0);
+            assert_eq!(scheduler.graph_overrides_applied.as_deref(), Some(&launched[..]));
+
+            // Mirror acked while this pass still holds the scene-0 base.
+            state.quantized_launches().process_scheduler(
+                &mut scheduler.quantized_launches,
+                4.0,
+                scheduler.clock.total_beats,
+                true,
+                false,
+            );
+            let due = state.quantized_launches().drain_valid_due();
+            assert_eq!(due.len(), 1);
+            state.quantized_launches().acknowledge_mirror(due[0].token).expect("ack");
+            state.quantized_launches().process_scheduler(
+                &mut scheduler.quantized_launches,
+                4.1,
+                scheduler.clock.total_beats,
+                true,
+                false,
+            );
+            pass(&mut scheduler, 102_000, until);
+            assert_eq!(scheduler.graph_overrides_applied.as_deref(), Some(&launched[..]));
+        });
     }
 
     /// Run the production lookahead pass in song mode from sample 0 and
@@ -16308,6 +17084,109 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
     }
 
     #[test]
+    fn scheduler_driver_process_only_republish_keeps_the_runtime() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(4);
+            for step in 0..4 {
+                state.pattern.patterns[0].set_step_active(step, true);
+            }
+            // A panel re-declaring a track's chain on every slider tick: the
+            // UI VM republishes process authoring, nothing else.
+            let mut ui = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+            ui.eval(
+                r#"
+                (def-process shift-test
+                  :target (step-param :transpose)
+                  :in ((by :float -24 24 :default 0))
+                  :run (target-add! (in :by)))
+                "#,
+            )
+            .expect("define process");
+            let declare = |ui: &mut lisp_host::ScratchControlRuntime, by: i32| {
+                ui.eval(&format!("(processes :track 0 (shift-test :by {by}))"))
+                    .expect("declare chain");
+                state.publish_process_authoring(
+                    ui.process_authoring_snapshot().to_published().expect("publishable"),
+                );
+                state.publish_scheduler_snapshot();
+            };
+            state.transport.playing.store(true, Ordering::Relaxed);
+            declare(&mut ui, 3);
+
+            let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+            let mut driver =
+                super::worker::SchedulerDriver::new(state.clone(), 48_000, 512, queue.clone());
+            let input = super::worker::SchedulerInput::Offline;
+            driver.advance(0, 24_000, input);
+            let first = observed_triggers(&queue);
+            assert!(!first.is_empty());
+            assert!(first.iter().all(|event| event.transpose == 3.0), "{first:?}");
+            assert_eq!(driver.scratch_runtime_builds, 1);
+
+            for (pass, by) in [5, -2, 7].into_iter().enumerate() {
+                declare(&mut ui, by);
+                let start = 24_000 * (pass as u64 + 1);
+                driver.advance(start, start + 24_000, input);
+                let events = observed_triggers(&queue);
+                assert!(!events.is_empty());
+                assert!(
+                    events.iter().all(|event| event.transpose == by as f32),
+                    "by={by}: {events:?}"
+                );
+            }
+            assert_eq!(
+                driver.scratch_runtime_builds, 1,
+                "a process-only republish must not rebuild the scheduler VM"
+            );
+
+            // An identical republish is not a change at all.
+            let version = state.published_process_authoring_version();
+            state.publish_process_authoring(
+                ui.process_authoring_snapshot().to_published().expect("publishable"),
+            );
+            assert_eq!(state.published_process_authoring_version(), version);
+        });
+    }
+
+    #[test]
+    fn track_step_process_state_survives_between_steps() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(4);
+            for step in 0..4 {
+                state.pattern.patterns[0].set_step_active(step, true);
+            }
+            // `(processes :track …)` gives the slot the authored instance's
+            // runtime id; the run's `:state` must still reach the next step.
+            let mut ui = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+            ui.eval(
+                r#"
+                (def-process count-up
+                  :target (step-param :transpose)
+                  :state ((n 0))
+                  :run (do (set! n (+ n 1)) (target-set! n)))
+                (processes :track 0 (count-up))
+                "#,
+            )
+            .expect("declare counting process");
+            state.publish_process_authoring(
+                ui.process_authoring_snapshot().to_published().expect("publishable"),
+            );
+            state.transport.playing.store(true, Ordering::Relaxed);
+            state.publish_scheduler_snapshot();
+            let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+            let mut driver =
+                super::worker::SchedulerDriver::new(state.clone(), 48_000, 512, queue.clone());
+            // Four 16ths at 120 bpm: one cycle in 24_000 samples.
+            driver.advance(0, 24_000, super::worker::SchedulerInput::Offline);
+            let transposes: Vec<f32> =
+                observed_triggers(&queue).iter().map(|event| event.transpose).collect();
+            assert_eq!(transposes, vec![1.0, 2.0, 3.0, 4.0]);
+        });
+    }
+
+    #[test]
     fn scheduler_driver_preserves_live_roll_start_hold_with_an_injected_clock() {
         run_with_scheduler_stack(|| {
             let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
@@ -18862,4 +19741,6 @@ fn prebuilt_chunks_take_their_scenes_live_groove_table() {
         super::lookahead::with_live_rack_config(&mut cache, Arc::new(verse_chunk), &base);
     assert!(Arc::ptr_eq(&patched.track_grooves, &verse));
 }
+
+
 

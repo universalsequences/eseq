@@ -61,6 +61,7 @@
                            delete-scene! launch-quantize-options record-quantize-options))
 (import eseq.menus :as menus)
 (import eseq.application-menus)
+(import eseq.materials)
 
 (export transport-stop
         seq-set-scene-launch-quantize
@@ -163,46 +164,46 @@
   :state (level)
   :shader
   (let ((lvl (min 1.0 (max 0.0 level)))
-        (track (sdf/rounded-rect width height height))
-        (green-end (min lvl 0.60))
-        (yellow-end (min lvl 0.85))
-        (red-end lvl))
+      (track (sdf/rounded-rect width height height))
+      (green-end (min lvl 0.60))
+      (yellow-end (min lvl 0.85))
+      (red-end lvl))
     (sdf/layer
       (sdf/fill track
         (material :color (rgba 0.06 0.07 0.08 1)))
       (if (> green-end 0.005)
         (sdf/fill
           (let ((__start 0.0)
-                (__end green-end)
-                (__half_w (* 0.5 aspect (- __end __start)))
-                (__half_h 0.32)
-                (__radius (min 0.16 (min __half_h (max __half_w 0.001)))))
+              (__end green-end)
+              (__half_w (* 0.5 aspect (- __end __start)))
+              (__half_h 0.32)
+              (__radius (min 0.16 (min __half_h (max __half_w 0.001)))))
             (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
-                  (y (* 0.5 y)))
+                (y (* 0.5 y)))
               (sdf/rounded-rect __half_w __half_h __radius)))
           (material :color (rgba 0.34 0.86 0.40 1)))
         (rgba 0 0 0 0))
       (if (> (- yellow-end 0.60) 0.005)
         (sdf/fill
           (let ((__start 0.60)
-                (__end yellow-end)
-                (__half_w (* 0.5 aspect (- __end __start)))
-                (__half_h 0.32)
-                (__radius (min 0.16 (min __half_h (max __half_w 0.001)))))
+              (__end yellow-end)
+              (__half_w (* 0.5 aspect (- __end __start)))
+              (__half_h 0.32)
+              (__radius (min 0.16 (min __half_h (max __half_w 0.001)))))
             (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
-                  (y (* 0.5 y)))
+                (y (* 0.5 y)))
               (sdf/rounded-rect __half_w __half_h __radius)))
           (material :color (rgba 0.86 0.72 0.22 1)))
         (rgba 0 0 0 0))
       (if (> (- red-end 0.85) 0.005)
         (sdf/fill
           (let ((__start 0.85)
-                (__end red-end)
-                (__half_w (* 0.5 aspect (- __end __start)))
-                (__half_h 0.32)
-                (__radius (min 0.16 (min __half_h (max __half_w 0.001)))))
+              (__end red-end)
+              (__half_w (* 0.5 aspect (- __end __start)))
+              (__half_h 0.32)
+              (__radius (min 0.16 (min __half_h (max __half_w 0.001)))))
             (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
-                  (y (* 0.5 y)))
+                (y (* 0.5 y)))
               (sdf/rounded-rect __half_w __half_h __radius)))
           (material :color (rgba 0.92 0.24 0.22 1)))
         (rgba 0 0 0 0))
@@ -214,6 +215,23 @@
             (+ 0.02 (* 0.03 (smoothstep 0.0 0.8 (- y))))
             (+ 0.03 (* 0.05 (smoothstep 0.0 0.8 (- y))))
             0.18))))))
+
+(defwidget transport-led-container
+  :width 1 :height 1
+  :shader
+  (sdf/layer
+    (sdf/fill (sdf/rounded-rect width height 0.54)
+      (material
+        :lighting (lighting :edge-min -0.215 :edge-max 0.843
+          :light (vec3 0.51 4.5 4.5) :shininess 91.0)
+        :color
+        (eseq.materials/color-cell :transport-led-bg :mixer-strip-bg )
+          
+        ))
+    (sdf/fill (sdf/rounded-rect (* 0.999 width) (* 0.98 height) 0.54)
+      (* (* (smoothstep 0.8 -0.3 d) 0.99) :transport-led-bg)
+      )
+    ))
 
 (defwidget pattern-pill-bg
   :width 1 :height 1
@@ -228,14 +246,25 @@
             :light (vec3 -0.51 -1.851 2.5) :shininess 91.0)
           :color
           (if (> active 0)
-            (let ((base :scene-active-base)
-                  (lit (+ 0.06 (* 0.03 diffuse)))
-                  (shine (* 0.25 specular)))
-              (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
+            (eseq.materials/color-cell :scene-active-base :scene-active-base)        
+            (rgba 0 0 0 0)
+            )
+        ))
+      (sdf/fill (sdf/rounded-rect (* 0.94 width) (* 0.94 height) 0.54)
+        (material
+          :lighting (lighting :edge-min -0.115 :edge-max 1.2413
+            :light (vec3 -0.51 -1.851 1.5) :shininess 91.0)
+          :color
+          ;; The inner face of an active pill keeps the active tint: every
+          ;; theme's `:scene-active-base` is opaque, while `:scene-hover-base`
+          ;; is translucent grey in most themes and would bury the cue for
+          ;; which scene is playing.
+          (if (> active 0)
+            (eseq.materials/color-cell :scene-active-base :scene-active-base)
             (if hit/hover
               (let ((base :scene-hover-base)
-                    (lit (+ 0.06 (* 0.03 diffuse)))
-                    (shine (* 0.25 specular)))
+                  (lit (+ 0.06 (* 0.03 diffuse)))
+                  (shine (* 0.25 specular)))
                 (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
               (rgba 0 0 0 0)))))
       (if (> push-amount 0.001)
@@ -245,8 +274,8 @@
               :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
             :color
             (let ((amount (clamp push-amount 0.0 1.0))
-                  (lit (* amount (+ 0.04 (* 0.05 diffuse))))
-                  (shine (* amount 0.24 specular)))
+                (lit (* amount (+ 0.04 (* 0.05 diffuse))))
+                (shine (* amount 0.24 specular)))
               (* (+ :scene-push-base (rgba (+ lit shine) (+ lit shine) (+ lit shine) 0))
                 (rgba 1 1 1 (* 0.88 amount))))))
         (rgba 0 0 0 0)))))
@@ -574,21 +603,26 @@
   :shader
   (if (= active 1)
     (sdf/layer
+      
       (sdf/fill (sdf/rounded-rect (* 0.75 height) (* 0.75 height) 0.4)
         (material
           :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
             :light (vec3 -0.31 -0.851 1.3) :shininess 51.0)
           :color
-          (let ((lit (+ 0.04 (* 0.10 diffuse)))
-                (shine (* 0.20 specular)))
-            (+ :arrangement-return-base
-               (rgba lit (* 0.6 lit) (* 0.3 lit) 1)
-               (rgba shine shine shine 0)))))
+          (eseq.materials/color-cell :arrangement-return-base :white)
+          ))      
+      (sdf/fill (sdf/rounded-rect (* 0.72 height) (* 0.72 height) 0.4)
+        (material
+          :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
+            :light (vec3 -0.31 -0.851 1.3) :shininess 51.0)
+          :color
+          (+  (* 0.8 (eseq.materials/color-cell :arrangement-return-base :arrangement-return-base)) (rgba 0 0 0 0.2))
+          ))
       (sdf/fill
         (let ((p1x -0.62) (p1y -0.34) (p2x -0.62) (p2y 0.34) (p3x -0.10) (p3y 0.0))
           (let ((d1 (- (* (- p2x p1x) (- y p1y)) (* (- p2y p1y) (- x p1x))))
-                (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
-                (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
+              (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
+              (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
             (max (max d1 d2) d3)))
         (material :color :arrangement-return-fg))
       (sdf/fill (sdf/translate 0.38 -0.28 (sdf/rounded-rect 0.28 0.055 0.03))
@@ -751,11 +785,9 @@
       (dropdown :key "scene-bank-dropdown"
         :value b.label
         :options (append (scene-bank-labels) (list "New bank"))
-        :on-change select-scene-bank
+        :on-change   select-scene-bank
         :bg-color :transport-led-bg
-        :border-color :bg
-        :badge-color :transparent
-        :chevron-color :fg
+        :text-color :clock-fg
         :width 5.0 :height 0.5 :font-size 10))))
 
 ;; A new scene at the end of the viewed bank.
@@ -1082,10 +1114,7 @@
       (subtree :key "transport-scene-launch-quantize"
         (dropdown
           :bg-color :transport-led-bg
-          :border-color :bg
           :text-color :clock-fg
-          :badge-color :transparent
-          :chevron-color :fg
           :key "transport-scene-launch-quantize-dropdown"
           :debug-name "transport-scene-launch-quantize"
           :value (launch-quantize)
@@ -1095,9 +1124,6 @@
       (subtree :key "transport-record-quantize"
         (dropdown
           :bg-color :transport-led-bg
-          :border-color :bg
-          :badge-color :transparent
-          :chevron-color :fg
           :text-color :clock-fg
           :key "transport-record-quantize-dropdown"
           :debug-name "transport-record-quantize"
@@ -1119,6 +1145,7 @@
       (subtree :key "transport-roll-toggle"
         (box :debug-name "transport-roll-toggle"
           :width 5.5 :height 1.0
+          :v-align :center
           :background-color (if transport.sequence-rolling
             '(rgba 0.72 0.10 0.12 1)
             "pattern-pill-bg")
@@ -1134,7 +1161,10 @@
 ;; The LED: one dark panel, two rows tall, holding the clock group on its
 ;; left half and the scene launcher, wrapped onto two rows, on its right.
 (def transport-led ()
-  (box :key "transport-led" :background-color :transport-led-bg :corner-radius 64 :height 2.8
+  (box :key "transport-led" 
+    :background-color :transport-led-bg 
+    :background "transport-led-container"
+    :corner-radius 64 :height 2.8
     (h-stack :align :center :gap 0.8
       (box :width 0.4)
       (transport-clock-panel)
@@ -1229,6 +1259,7 @@
       (v-stack :align :center
         (label (fmt " {} " s.number)
           :font-size 11
+          :v-align :baseline
           :color (if s.queued :scene-active-fg :dimmer)
           :active #'s.active :active-color :scene-active-fg
           :bg :transparent)))))
@@ -1242,6 +1273,7 @@
     (v-stack :align :center
       (label text
         :font-size 12
+        :v-align :baseline
         :color (if enabled :white :dark-gray)
         :bg :transparent))))
 

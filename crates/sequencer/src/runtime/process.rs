@@ -344,6 +344,19 @@ pub enum ProcessSeedPolicy {
     PerCycle,
 }
 
+/// Which triggers a track step process runs on (`def-process :triggers`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProcessTriggerScope {
+    /// Only the step sequencer's trigs (every process before `:triggers`).
+    #[default]
+    Steps,
+    /// Every trigger that lands on the track: step trigs plus neural, graph,
+    /// generator and other processes' emissions. Never a trigger this
+    /// track's own chain made (its ratchets and emits).
+    All,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProcessTargetHint {
@@ -1305,6 +1318,7 @@ pub struct ProcessDef {
     pub state: Vec<ProcessStateDef>,
     pub every: Option<ProcessTimeExpr>,
     pub seed_policy: ProcessSeedPolicy,
+    pub triggers: ProcessTriggerScope,
     pub ports: Vec<ProcessPortDef>,
     pub accumulator: Option<ProcessAccumulatorSpec>,
     pub run_source: Option<String>,
@@ -1537,6 +1551,7 @@ pub struct PublishedProcessDef {
     pub state: Vec<PublishedProcessStateDef>,
     pub every: Option<ProcessTimeExpr>,
     pub seed_policy: ProcessSeedPolicy,
+    pub triggers: ProcessTriggerScope,
     pub ports: Vec<ProcessPortDef>,
     pub accumulator: Option<ProcessAccumulatorSpec>,
     pub run_source: Option<String>,
@@ -1636,6 +1651,7 @@ impl ProcessAuthoringSnapshot {
                             .collect::<Result<Vec<_>, String>>()?,
                         every: def.every.clone(),
                         seed_policy: def.seed_policy,
+                        triggers: def.triggers,
                         ports: def.ports.clone(),
                         accumulator: def.accumulator.clone(),
                         run_source: def.run_source.clone(),
@@ -1756,6 +1772,7 @@ impl PublishedProcessAuthoringSnapshot {
                         .collect(),
                     every: def.every.clone(),
                     seed_policy: def.seed_policy,
+                    triggers: def.triggers,
                     ports: def.ports.clone(),
                     accumulator: def.accumulator.clone(),
                     run_source: def.run_source.clone(),
@@ -3143,6 +3160,12 @@ impl ProcessRuntime {
         let mut propagated_outputs = Vec::new();
         let mut channel_sends = Vec::new();
         let mut field_suggestions = Vec::new();
+        // A track slot sharing this instance's runtime id keeps its state
+        // here (see `step_process_invocation_with_inlet_writes`): its state
+        // cells still feed the UI's scope histories.
+        if self.step_process_runtime_ids.contains(&result.runtime_id) {
+            self.record_step_process_scope(result.runtime_id, &result.state);
+        }
         {
             let instance = &mut self.instances[pos];
             instance.state = result.state;
@@ -3560,6 +3583,16 @@ impl ProcessRuntime {
         self.step_process_invocation_with_inlet_writes(slot, ctx, None)
     }
 
+    /// Whether `slot` runs on triggers the step sequencer did not make
+    /// (`def-process :triggers :all`).
+    pub fn slot_runs_on_all_triggers(&self, slot: &TrackProcessSlot) -> bool {
+        slot.enabled
+            && self
+                .defs
+                .get(&slot.class_name)
+                .is_some_and(|def| def.triggers == ProcessTriggerScope::All)
+    }
+
     pub fn step_process_invocation_with_inlet_writes(
         &mut self,
         slot: &TrackProcessSlot,
@@ -3580,10 +3613,21 @@ impl ProcessRuntime {
             .then_some(EXPR_PROCESS_STEP_BUDGET);
         let instance_id = track_process_slot_runtime_id(slot, ctx.track);
         self.step_process_runtime_ids.insert(instance_id.0);
-        let existing_state = self
-            .step_process_states
-            .remove(&instance_id)
-            .unwrap_or_default();
+        // A slot declared as `(processes :track n (class …))` shares its
+        // runtime id with the authored instance, so `apply_run_result` keeps
+        // the run's state on that instance: read it back from there, or the
+        // slot's `:state` would reset on every step.
+        let existing_state = match self
+            .instances
+            .iter()
+            .find(|instance| instance.runtime_id == instance_id.0)
+        {
+            Some(instance) => instance.state.clone(),
+            None => self
+                .step_process_states
+                .remove(&instance_id)
+                .unwrap_or_default(),
+        };
         let state = reconciled_state(existing_state, Some(&def));
         self.step_process_states.insert(instance_id, state.clone());
         Some(ProcessRunInvocation {
@@ -4521,6 +4565,7 @@ mod tests {
                     }],
                     every: None,
                     seed_policy: ProcessSeedPolicy::default(),
+                    triggers: ProcessTriggerScope::default(),
                     ports: Vec::new(),
                     accumulator: None,
                     run_source: Some("nil".to_string()),
@@ -4878,6 +4923,7 @@ mod tests {
                         state: Vec::new(),
                         every: None,
                         seed_policy: ProcessSeedPolicy::default(),
+                        triggers: ProcessTriggerScope::default(),
                         ports: Vec::new(),
                         accumulator: None,
                         run_source: None,
@@ -4894,6 +4940,7 @@ mod tests {
                         state: Vec::new(),
                         every: None,
                         seed_policy: ProcessSeedPolicy::default(),
+                        triggers: ProcessTriggerScope::default(),
                         ports: Vec::new(),
                         accumulator: None,
                         run_source: None,
@@ -4983,6 +5030,7 @@ mod tests {
                     state: Vec::new(),
                     every: None,
                     seed_policy: ProcessSeedPolicy::default(),
+                    triggers: ProcessTriggerScope::default(),
                     ports: Vec::new(),
                     accumulator: None,
                     run_source: None,
@@ -5048,6 +5096,7 @@ mod tests {
                     state: Vec::new(),
                     every: None,
                     seed_policy: ProcessSeedPolicy::default(),
+                    triggers: ProcessTriggerScope::default(),
                     ports: vec![ProcessPortDef::default_with_target(
                         ProcessTargetHint::StepParam {
                             param: "transpose".to_string(),

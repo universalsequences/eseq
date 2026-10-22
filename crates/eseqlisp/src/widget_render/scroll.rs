@@ -106,6 +106,18 @@ pub fn get_scroll_state(widget_id: u64) -> ScrollState {
     SCROLL_STATES.with(|s| s.borrow().get(&widget_id).cloned().unwrap_or_default())
 }
 
+/// The inverse of `event_content_row`: a rect-space row (a widget's own
+/// top-left, reported when an activation carries no pointer position) in the
+/// viewport space pointer events arrive in.
+pub fn event_viewport_row(content_row: f32) -> f32 {
+    content_row - current_event_scroll_offset()
+}
+
+/// `get_scroll_state(key).offset_y` without cloning the state.
+pub fn scroll_offset_y(key: u64) -> f32 {
+    SCROLL_STATES.with(|s| s.borrow().get(&key).map_or(0.0, |state| state.offset_y))
+}
+
 pub fn set_scroll_state(widget_id: u64, state: ScrollState) {
     let changed = SCROLL_STATES.with(|s| {
         let mut states = s.borrow_mut();
@@ -137,6 +149,15 @@ pub fn scroll_state_key_for_value(node: &Value) -> Option<u64> {
 /// into content coordinates inside a scroll container.
 pub fn current_event_scroll_offset() -> f32 {
     CURRENT_EVENT_SCROLL_OFFSET.with(|offset| offset.borrow().unwrap_or(0.0))
+}
+
+/// A pointer row as handed to a widget event, mapped into the content space
+/// its layout rect lives in. Pointer rows arrive in the enclosing `scroll`
+/// container's viewport space (tile scroll already folded in), so any
+/// comparison against `node.rect` needs this; the pointer `:row` reported to
+/// Lisp stays unshifted, since context-menu anchors expect that space.
+pub fn event_content_row(local_row: f32) -> f32 {
+    local_row + current_event_scroll_offset()
 }
 
 pub fn set_current_event_scroll_offset(offset_y: Option<f32>) {
@@ -260,6 +281,36 @@ pub static SCROLL_WIDGET: ScrollWidget = ScrollWidget;
 impl WidgetDefinition for ScrollWidget {
     fn names(&self) -> &'static [&'static str] {
         &["scroll"]
+    }
+
+    fn doc(&self) -> &'static str {
+        "A vertically scrolling viewport around ONE child (wrap several in a v-stack). The \
+child is laid out at the scroll's width with unbounded height and clipped, with a \
+thin scrollbar on the right when it is taller than the viewport. The scroll's \
+natural height is 0, so give it :height N, or :flex 1 inside a column with room (the \
+usual form: (scroll :width :fill :flex 1 ...)), or :fit-content true to report the \
+content height so a parent sizes it to its content and clips only when space runs \
+out (pair with :shrink 1 in a v-stack). Width is :width N or the parent's width. \
+Wheel and trackpad scroll vertically only; sideways gestures pass through. \
+:stick-to-bottom true keeps the view at the end as content grows (a log) unless the \
+user has scrolled up. :center-row R (cells, a number or a bound value) scrolls so \
+the band from R to R + :center-span (default 1) is centred, only when R changes, so \
+manual scrolling is not fought; a negative R is no request. A tree child's selected \
+row is scrolled into view automatically. A child with :height :fill gets at least \
+the viewport height. Give the scroll a :key so its position survives rebuilds. \
+Example: (scroll :key \"log\" :width :fill :flex 1 :stick-to-bottom true (v-stack \
+(each lines |l i| (label l :key (str \"line-\" i)))))"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "width",
+            "height",
+            "fit-content",
+            "stick-to-bottom",
+            "center-row",
+            "center-span",
+        ]
     }
 
     fn is_container(&self) -> bool {

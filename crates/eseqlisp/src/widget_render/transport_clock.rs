@@ -39,6 +39,25 @@ impl WidgetDefinition for TransportClockWidget {
         &["transport-clock"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A read-only bar.beat.sixteenth counter (like 12 . 3 . 2) for a transport bar. \
+:playhead is the position in sixteenth steps (0 = bar 1 beat 1); with \
+:use-song-position true it instead shows :song-position-beats, a position in \
+beats. Bind either to a reactive field (#'transport.position) so the clock \
+ticks without re-rendering the panel. There are no callbacks or gestures. \
+:font-size defaults to 15, :color sets the digits (named theme colour or rgba), \
+and :bg :transparent drops the background fill. Without :width/:height it is \
+11 x 1.2 cells. Example: (transport-clock :playhead #'transport.position \
+:font-size 17 :color :clock-fg)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "playhead", "song-position-beats", "use-song-position", "font-size", "color", "bg",
+            "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height", "font-size"]
     }
@@ -110,7 +129,7 @@ impl WidgetDefinition for TransportClockWidget {
                     scale: 1.0,
                     fg,
                     bg,
-                    mono: false,
+                    face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
         }

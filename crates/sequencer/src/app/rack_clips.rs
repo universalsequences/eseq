@@ -146,38 +146,15 @@ impl App {
     /// rack is converted first (§4.3) in the same undo entry, so every other
     /// scene keeps its member slices as clips instead of falling silent the
     /// moment the rack becomes clip-bearing; the new clip is then forked from
-    /// the current scene's clip.
-    /// "Clip N" with the smallest N no clip of this rack already uses, so a
-    /// bank that converted from scenes reads "Scene 1, Scene 2, Clip 3" rather
-    /// than a run of identical "Clip" entries.
-    fn next_rack_clip_name(&self, group_id: u64) -> String {
-        self.state.with_scenes(|scenes| {
-            let names: Vec<&str> = scenes
-                .rack_bank(group_id)
-                .map(|bank| bank.clips.iter().map(|clip| clip.name.as_str()).collect())
-                .unwrap_or_default();
-            let mut n = names.len() + 1;
-            loop {
-                let candidate = format!("Clip {n}");
-                if !names.iter().any(|name| *name == candidate) {
-                    return candidate;
-                }
-                n += 1;
-            }
-        })
-    }
-
+    /// the current scene's clip. A blank `name` leaves it unnamed (shown as
+    /// its bank position).
     pub fn save_rack_clip_as_recorded(
         &mut self,
         group_id: u64,
         name: &str,
     ) -> Result<RackClipId, String> {
         let members = self.rack_members(group_id)?;
-        let name = if name.trim().is_empty() {
-            self.next_rack_clip_name(group_id)
-        } else {
-            name.trim().to_string()
-        };
+        let name = name.trim().to_string();
         self.apply_recorded_bus_group_structure_mutation("Save rack clip", move |app| {
             Ok(app.state.with_scenes_mut(|scenes| {
                 let scene = scenes.current_scene;
@@ -254,10 +231,8 @@ impl App {
         clip: RackClipId,
         name: &str,
     ) -> Result<(), String> {
+        // Blank clears the name: the clip shows its bank position again.
         let name = name.trim().to_string();
-        if name.is_empty() {
-            return Err("A clip name cannot be empty".to_string());
-        }
         self.apply_recorded_bus_group_structure_mutation("Rename rack clip", move |app| {
             if app
                 .state
@@ -266,6 +241,26 @@ impl App {
                 Ok(())
             } else {
                 Err("That rack clip no longer exists".to_string())
+            }
+        })
+    }
+
+    /// Rename every clip of the rack in bank order, "`prefix` 1..N" (blank:
+    /// back to unnamed), as one undo entry.
+    pub fn rename_rack_clips_in_order_recorded(
+        &mut self,
+        group_id: u64,
+        prefix: &str,
+    ) -> Result<(), String> {
+        let prefix = prefix.to_string();
+        self.apply_recorded_bus_group_structure_mutation("Rename rack clips", move |app| {
+            if app
+                .state
+                .with_scenes_mut(|scenes| scenes.rename_rack_clips_in_order(group_id, &prefix))
+            {
+                Ok(())
+            } else {
+                Err("That rack has no clips".to_string())
             }
         })
     }

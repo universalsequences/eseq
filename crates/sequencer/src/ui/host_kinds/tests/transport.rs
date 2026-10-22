@@ -206,6 +206,30 @@ fn cmd_arrows_step_scenes_across_banks_without_wrapping() {
 }
 
 #[test]
+fn bank_steps_show_the_neighbouring_bank_without_launching() {
+    let mut h = distro();
+    h.command("create-scene-bank", Value::Nil);
+    h.command("create-scene-bank", Value::Nil);
+    h.sync();
+    h.show_all();
+    h.eval("(eseq.scene-banks/view-scene-bank! (first (banks)))");
+    let scene = h.app.state.current_scene_index();
+    let mut step = |h: &mut Harness, verb: &str| {
+        h.eval(&format!("(eseq.sequencer-keys/{verb})"));
+        h.drain();
+        h.sync();
+        assert_eq!(h.app.state.current_scene_index(), scene, "{verb} launches nothing");
+        h.eval("(eseq.scene-banks/scene-viewed-bank-index)")
+    };
+    // No wrap at either end.
+    assert_eq!(step(&mut h, "bank-previous"), Value::Number(0.0));
+    assert_eq!(step(&mut h, "bank-next"), Value::Number(1.0));
+    assert_eq!(step(&mut h, "bank-next"), Value::Number(2.0));
+    assert_eq!(step(&mut h, "bank-next"), Value::Number(2.0));
+    assert_eq!(step(&mut h, "bank-previous"), Value::Number(1.0));
+}
+
+#[test]
 fn a_scene_launch_only_repaints_the_transport() {
     let mut h = distro();
     h.command("clone-pattern", Value::Nil);

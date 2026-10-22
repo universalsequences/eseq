@@ -287,6 +287,7 @@ pub(crate) mod f {
     pub(crate) const TRACK_SOLOED: FieldKey = (TRACK, "soloed");
     pub(crate) const TRACK_COLLAPSED: FieldKey = (TRACK, "collapsed");
     pub(crate) const TRACK_PLAYHEAD: FieldKey = (TRACK, "playhead");
+    pub(crate) const TRACK_TRIGGERED: FieldKey = (TRACK, "triggered");
     pub(crate) const TRACK_PLAYHEAD_PAGE: FieldKey = (TRACK, "playhead-page");
     pub(crate) const TRACK_LENGTH_STEP: FieldKey = (TRACK, "length-step");
     pub(crate) const TRACK_PLAYHEAD_ROW: FieldKey = (TRACK, "playhead-row");
@@ -645,6 +646,8 @@ pub(crate) mod f {
     pub(crate) const SETTINGS_MIDI_PERSISTENT: FieldKey = (SETTINGS, "midi-persistent");
 
     pub(crate) const AGENT_GENERATION: FieldKey = (AGENT, "generation");
+    pub(crate) const AGENT_PANE_GENERATION: FieldKey = (AGENT, "pane-generation");
+    pub(crate) const AGENT_PANE_SHAPE: FieldKey = (AGENT, "pane-shape");
 
     pub(crate) const PROMOTE_TARGET: FieldKey = (FACTORY_PROMOTE, "target");
     pub(crate) const PROMOTE_DESTINATION: FieldKey = (FACTORY_PROMOTE, "destination");
@@ -806,6 +809,8 @@ pub(crate) mod f {
     pub(crate) const RACK_CLIP_CID: FieldKey = (RACK_CLIP, "cid");
     pub(crate) const RACK_CLIP_INDEX: FieldKey = (RACK_CLIP, "index");
     pub(crate) const RACK_CLIP_NAME: FieldKey = (RACK_CLIP, "name");
+    /// What the clip is called on screen: `name`, or "Clip N" while blank.
+    pub(crate) const RACK_CLIP_LABEL: FieldKey = (RACK_CLIP, "label");
     pub(crate) const RACK_CLIP_ACTIVE: FieldKey = (RACK_CLIP, "active");
     pub(crate) const RACK_CLIP_SCENES: FieldKey = (RACK_CLIP, "scenes");
     pub(crate) const RACK_CLIP_GROOVE: FieldKey = (RACK_CLIP, "groove");
@@ -1325,6 +1330,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_SOLOED, ":bool", Live),
     (f::TRACK_COLLAPSED, ":bool", Live),
     (f::TRACK_PLAYHEAD, ":int", Live),
+    (f::TRACK_TRIGGERED, ":bool", Live),
     (f::TRACK_PLAYHEAD_PAGE, ":int", Live),
     (f::TRACK_LENGTH_STEP, ":int", Live),
     (f::TRACK_PLAYHEAD_ROW, ":int", Live),
@@ -1397,6 +1403,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::RACK_CLIP_CID, ":int", Model),
     (f::RACK_CLIP_INDEX, ":int", Model),
     (f::RACK_CLIP_NAME, ":string", Model),
+    (f::RACK_CLIP_LABEL, ":string", Model),
     (f::RACK_CLIP_ACTIVE, ":bool", Model),
     (f::RACK_CLIP_SCENES, "(list-of scene)", Model),
     (f::RACK_CLIP_GROOVE, "groove", Model),
@@ -2198,6 +2205,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SETTINGS_MIDI_ERROR, ":string", Model),
     (f::SETTINGS_MIDI_PERSISTENT, ":bool", Model),
     (f::AGENT_GENERATION, ":int", Model),
+    (f::AGENT_PANE_GENERATION, ":int", Model),
+    (f::AGENT_PANE_SHAPE, ":int", Model),
     (f::PROMOTE_TARGET, ":string", Model),
     (f::PROMOTE_DESTINATION, ":string", Model),
     (f::PROMOTE_SKIPPED, "(list-of :string)", Model),

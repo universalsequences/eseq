@@ -601,6 +601,37 @@ impl WidgetDefinition for EventViewWidget {
         &["event-view"]
     }
 
+    fn doc(&self) -> &'static str {
+        "A read-only visualisation of recent note events, e.g. what a generative graph or \
+a set of tracks has been playing. :events is a list of maps {:node :track :beat \
+:transpose :velocity} (any numeric keys) or positional rows (node track beat \
+transpose velocity), negative node/track meaning none. :x, :y, :z and \
+:brightness name the field for each axis (defaults :transpose, :node, \
+:beat-phase, :velocity; :beat-phase is :beat modulo :phase-beats, default 16), \
+each normalised by :x-min/:x-max (-24..24), :y-min/:y-max (0..7), :z-min/:z-max \
+(0..phase-beats). Only events within :window-beats (16) before :current-beat (or \
+the latest event) are shown. :renderer :heatmap (default) bins x by y into \
+:x-bins by :y-bins cells; :renderer :isometric draws points in a rotatable 3-D \
+cube: drag to orbit, :auto-rotate true spins it. :color-by names a field to \
+colour by, as a :color-low..:color-high gradient (:color-min/:color-max) or with \
+:color-mode :categorical a palette (:color-palette, :color-count); otherwise \
+points use :color. No callbacks. Default size 26 x 12 cells. Example: \
+(event-view :events g.events :current-beat #'g.beat :renderer :isometric :y-max \
+15 :width 12 :height 6)"
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "events", "current-beat", "renderer", "x", "y", "z", "brightness", "phase-beats",
+            "window-beats", "x-min", "x-max", "y-min", "y-max", "z-min", "z-max", "x-bins",
+            "y-bins", "color-by", "color-mode", "color-min", "color-max", "color-low",
+            "color-high", "color-palette", "color-count", "color", "background", "cube-color",
+            "grid-color", "cube-padding", "point-radius-px", "cube-line-radius-px",
+            "grid-line-radius-px", "auto-rotate", "auto-rotate-speed", "rotation-sensitivity",
+            "width", "height",
+        ]
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height", "renderer", "x-bins", "y-bins"]
     }

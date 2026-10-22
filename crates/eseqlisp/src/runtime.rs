@@ -542,9 +542,19 @@ fn fill_sdf_state_props(
 fn compile_expanded_sdf(
     expanded: &crate::parser::Expression,
     state_symbols: &[String],
+    options: crate::lang::sdf_codegen::SdfShaderOptions,
 ) -> Result<crate::lang::sdf_codegen::SdfShaderOutput, String> {
-    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
     compile_sdf_for_platform_backend(expanded, state_symbols, options).map_err(|e| e.to_string())
+}
+
+/// `options` as `defwidget` `widget` compiles with them: a built-in
+/// control's face skips the box clip mask.
+fn widget_shader_options(
+    mut options: crate::lang::sdf_codegen::SdfShaderOptions,
+    widget: &str,
+) -> crate::lang::sdf_codegen::SdfShaderOptions {
+    options.skip_box_clip = crate::widget_render::sdf_widget::is_builtin_face(widget);
+    options
 }
 
 /// Plan a shader's state (kind-bindings spec §7.3) and hold it to the
@@ -569,7 +579,8 @@ fn compile_sdf_value(value: &Value, vm: &mut VM) -> Result<SdfCompileResult, Str
     let expr = crate::lang::sdf_codegen::value_to_expression(value).map_err(|e| e.to_string())?;
     let expanded = expand_sdf_expression(&expr, vm)?;
     let state_symbols = plan_sdf_state("sdf->metal", vm, &[], &expanded)?.uniforms();
-    let output = compile_expanded_sdf(&expanded, &state_symbols)?;
+    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
+    let output = compile_expanded_sdf(&expanded, &state_symbols, options)?;
     Ok(SdfCompileResult {
         output,
         expanded_expr: expanded,
@@ -595,7 +606,10 @@ fn compile_defwidget_shader(
     let expanded = expand_sdf_expression(&expr, vm).map_err(shader_error)?;
     let plan = plan_sdf_state(widget, vm, state_names, &expanded)?;
     let state_symbols = plan.uniforms();
-    let output = compile_expanded_sdf(&expanded, &state_symbols).map_err(shader_error)?;
+    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env().map_err(shader_error)?;
+    let output =
+        compile_expanded_sdf(&expanded, &state_symbols, widget_shader_options(options, widget))
+            .map_err(shader_error)?;
     Ok((
         SdfCompileResult {
             output,
@@ -660,6 +674,7 @@ pub fn recompile_theme_dependent_sdf_shaders() -> bool {
         if !expression_contains_keyword(&def.sdf_expr) {
             continue;
         }
+        let options = widget_shader_options(options, &def.name);
         match compile_sdf_for_platform_backend(&def.sdf_expr, &def.state_uniforms, options) {
             Ok(output) => {
                 if output.shader_source != def.shader_source {
@@ -1945,6 +1960,7 @@ impl Runtime {
                     paint_margin,
                     animates,
                 });
+                crate::theme::note_widget_redefined(&name);
 
                 let widget_type = name.clone();
                 vm.register_ref_aware_native_with_vm(&name, move |args, vm| {
@@ -1959,6 +1975,7 @@ impl Runtime {
                     }
                     let mut widget = crate::widgets::build_widget(&widget_type, args);
                     vm.qualify_widget_stable_key(&mut widget);
+                    let mut widget = vm.restyle_part(widget);
                     if let Value::Map(map) = &mut widget
                         && let Err(error) = fill_sdf_state_props(vm, &widget_type, map)
                     {
@@ -1980,6 +1997,7 @@ impl Runtime {
                 .register_ref_aware_native_with_vm(widget_name, move |args, vm| {
                     let mut widget = crate::widgets::build_widget(&wtype, args);
                     vm.qualify_widget_stable_key(&mut widget);
+                    let mut widget = vm.restyle_part(widget);
                     if let Value::Map(map) = &mut widget {
                         if let Some(material_cell) = map.get("material") {
                             let material_val = material_cell.borrow().clone();
@@ -2222,6 +2240,123 @@ impl Runtime {
         self.document_symbols([
             ("dict", "(dict :key value ...)", "Return a map from keyword/value pairs."),
             (
+                "override",
+                "(override module/name (args...) body...) | (override module/name :around (original args...) body...)",
+                "Change what a function of another module (the factory's included, exported or not) does, without editing its file. The plain form replaces it; :around receives the original first, to call or not: (override eseq.mixer/strip-buttons :around (original t) (v-stack (label \"custom\") (original t))). The target is read as syntax, so qualify it with its module (or an imported alias). The override belongs to the module it is written in: re-evaluating that module replaces it rather than stacking, a reload of the target keeps it, and the newest module's override wins when two override the same function. Undo with remove-override, or switch one off with disable-override.",
+            ),
+            (
+                "remove-override",
+                "(remove-override module/name)",
+                "Drop every override of module/name, at once: it is the factory's function again.",
+            ),
+            (
+                "disable-override",
+                "(disable-override module/name)",
+                "Switch the overrides of module/name off, keeping them for enable-override.",
+            ),
+            (
+                "enable-override",
+                "(enable-override module/name)",
+                "Switch the overrides of module/name back on.",
+            ),
+            (
+                "disable-module-overrides",
+                "(disable-module-overrides module)",
+                "Switch off every override written in `module` (a bare module name), across reloads, until enable-module-overrides.",
+            ),
+            (
+                "enable-module-overrides",
+                "(enable-module-overrides module)",
+                "Switch the overrides written in `module` back on.",
+            ),
+            (
+                "override-theme-slot",
+                "(override-theme-slot :slot \"widget\")",
+                "Paint every box whose background is theme slot :slot with defwidget \"widget\", and every shader that reads the slot's colour (a knob's :widget-knob-filled / :widget-knob-track, a button's :button-secondary-bg, a number picker's :dropdown-bg, their :button-border) with it inlined, `slot-color` bound to that colour, while the calling module's overrides stand (detaching or disabling it reverts).",
+            ),
+            (
+                "restyle-face",
+                "(restyle-face \"knob-number-face\" \"widget\")",
+                "Paint every built-in control whose face is the first name (knob-face, knob-number-face, bezel-face for buttons and number pickers, bezel-tab-face, dropdown-face, dropdown-badge-face, dropdown-chevron-face) with defwidget \"widget\" instead: the whole control, not one colour. The widget gets value_t, x/y and the states the factory face declares, by name (a knob-number's plock, default-t, origin-t). While the calling module's overrides stand (detaching or disabling it reverts). A control's own :face, or :faces (dict :knob-number-face \"widget\") on a container it is in, wins.",
+            ),
+            (
+                "restyle",
+                "(restyle \"area/part\" (lambda (node) ...))",
+                "Pass every widget built with :part \"area/part\" to the function, built, and draw what it returns (usually (merge node ...)) in its place, wherever the part is built, while the calling module's overrides stand (detaching or disabling it reverts). A part may carry its subject (:track, :bus, :step) to read. (parts) lists the parts built so far.",
+            ),
+            (
+                "parts",
+                "(parts)",
+                "The :part names widgets have been built with so far, sorted: what (restyle ...) can target.",
+            ),
+            (
+                "instance-ref",
+                "(instance-ref id)",
+                "The live instance with this id, as a value (what a kind's :view receives as `self`), or nil. Read and write its fields with a `let`: (let ((e (instance-ref 1))) (set! e.rings (list)) e.rings).",
+            ),
+            (
+                "describe-kind",
+                "(describe-kind 'name)",
+                "A kind's fields as text: group, name, type, :default, :set, :range and :doc.",
+            ),
+            (
+                "field",
+                "(field instance :name)",
+                "Read field `name` of an instance, as `instance.name` does (a tracked read), for code handed a field by name.",
+            ),
+            (
+                "set-field!",
+                "(set-field! instance :name value)",
+                "Write field `name` of an instance, as `(set! instance.name value)` does.",
+            ),
+            (
+                "field-info",
+                "(field-info #'instance.name) or (field-info instance :name)",
+                "What the kind declares about a field: a map of :kind :field :type and, when declared, :range (lo hi), :default, :options, :doc, :settable. Nil for anything else.",
+            ),
+            (
+                "instance-icon",
+                "(instance-icon id)",
+                "The :icon defwidget name of the live instance's kind, or nil.",
+            ),
+            (
+                "drop-instance",
+                "(drop-instance x)",
+                "Drop a view-local instance (it turns stale and its constructor's readers re-run); whether it was live. Host and singleton instances are an error.",
+            ),
+            (
+                "rerender-log!",
+                "(rerender-log! on)",
+                "Turn the re-render reason log on or off; read it with (rerender-reasons).",
+            ),
+            (
+                "rerender-reasons",
+                "(rerender-reasons)",
+                "The re-render reason log's lines since the last call, oldest first (see rerender-log!).",
+            ),
+            (
+                "module-loaded?",
+                "(module-loaded? \"eseq.sequencer\")",
+                "Whether that module has been loaded, so a library can call an optional module only under a root that loads it.",
+            ),
+            (
+                "setopt-by-name",
+                "(setopt-by-name \"module/name\" value)",
+                "Set a defcustom (or defstate) by its registration name string, as setopt does: `module/name`, or the bare name in a file without (module …).",
+            ),
+            (
+                "read-string",
+                "(read-string text)",
+                "One s-expression of data read from text, never evaluated; nil when the text is not exactly one piece of data.",
+            ),
+            ("number?", "(number? x)", "Whether x is a number."),
+            ("string?", "(string? x)", "Whether x is a string."),
+            (
+                "current-source-path",
+                "(current-source-path)",
+                "The path of the file being evaluated, or \"\" outside a file.",
+            ),
+            (
                 "ui/style",
                 "(ui/style :state style-map ...)",
                 "Return a widget style map, commonly keyed by :pressed, :hover, or :focused.",
@@ -2387,6 +2522,9 @@ impl Runtime {
                     keyword_args: Vec::new(),
                 });
             if let Some(definition) = definition {
+                if !definition.doc().is_empty() {
+                    metadata.docs = definition.doc().to_string();
+                }
                 let props = definition.completion_props();
                 if !props.is_empty() {
                     metadata.keyword_args = normalize_keyword_args(props.iter().copied());
@@ -2552,6 +2690,33 @@ impl Runtime {
         self.vm.take_source_load_errors()
     }
 
+    /// See [`crate::vm::VM::override_modules`].
+    pub fn override_modules(&self) -> std::collections::BTreeMap<String, bool> {
+        self.vm.override_modules()
+    }
+
+    /// Switch `module`'s overrides on or off because something does or
+    /// does not attach its package; see
+    /// [`crate::vm::VM::unattached_override_modules`].
+    pub fn set_module_attached(&mut self, module: &str, attached: bool) -> Result<(), String> {
+        let form = format!("({}-module-overrides {module})", if attached { "enable" } else { "disable" });
+        self.eval_str(&form).map_err(|error| format!("{form}: {error:?}"))?;
+        if !attached {
+            self.vm.unattached_override_modules.insert(module.to_string());
+        }
+        Ok(())
+    }
+
+    /// Whether `module` is off only because nothing attaches its package.
+    pub fn is_module_unattached(&self, module: &str) -> bool {
+        self.vm.unattached_override_modules.contains(module)
+    }
+
+    /// See [`crate::vm::VM::remove_module_overrides`].
+    pub fn remove_module_overrides(&mut self, module: &str) -> Vec<String> {
+        self.vm.remove_module_overrides(module)
+    }
+
     /// Path-based evals judge a source by the load errors its own `import` /
     /// `load` forms raise. Anything already queued came from an earlier
     /// `eval_str` (an interactive `(import …)` that failed and returned its
@@ -2638,13 +2803,14 @@ impl Runtime {
         self.vm.begin_inline_widget_capture();
         let path = self.vm.source_manager.canonicalize_path(&path);
         let revision = crate::hot_reload::hash_source(source);
-        let result = self.vm.eval_module_source(path, source, revision);
+        let result = self.vm.eval_module_source(path.clone(), source, revision);
         let load_errors = self.vm.take_source_load_errors();
         if !load_errors.is_empty() {
             for error in load_errors {
                 self.vm.source_manager.push_diagnostic(error);
             }
             let _ = self.vm.take_inline_widgets();
+            self.vm.forget_comment_docs(&path);
             return Err(crate::vm::VMError::CompileError);
         }
         if result.is_ok() {
@@ -3892,6 +4058,13 @@ impl Runtime {
         }
     }
 
+    /// The views and effects that threw since the last call (see
+    /// [`crate::vm::VM::take_reactive_failures`]): how a host says why a
+    /// buffer did not draw.
+    pub fn take_reactive_errors(&mut self) -> Vec<String> {
+        self.vm.take_reactive_failures()
+    }
+
     fn flush_vm_reactive_sets(&mut self) {
         for (namespace, field, value) in self.vm.take_pending_reactive_sets() {
             let outcome = self.reactive_registry.set(&namespace, &field, value, false);
@@ -4188,6 +4361,19 @@ impl Runtime {
         }
 
         let mut metadata = self.symbol_metadata.clone();
+        // A definition documented by its source (a `:doc` slot, docstring or
+        // the comment above it), latest load first among those; a native's
+        // registered docs and a `:doc` header (below) win over it.
+        let mut documented: HashMap<String, SymbolMetadata> = HashMap::new();
+        for (global, signature, docs) in self.vm.comment_docs() {
+            documented.insert(
+                crate::modules::strip_implicit(&global).to_string(),
+                SymbolMetadata { signature, docs, keyword_args: Vec::new() },
+            );
+        }
+        for (name, meta) in documented {
+            metadata.entry(name).or_insert(meta);
+        }
         // A documented Lisp `def` is the live definition, so its header wins
         // over a native it shadows.
         for (global, header) in &self.vm.definition_headers {
@@ -5621,6 +5807,78 @@ mod theme_shader_recompile_tests {
         // Guarded by theme generation: a second pass is a no-op.
         assert!(!super::recompile_theme_dependent_sdf_shaders());
     }
+
+    #[test]
+    fn a_builtin_face_compiles_without_the_box_clip_mask() {
+        let mut runtime = super::Runtime::new();
+        runtime
+            .eval_str(
+                "(defwidget knob-face :width 2 :height 2 :shader :accent)
+                 (defwidget not-a-face :width 2 :height 2 :shader :accent)",
+            )
+            .unwrap();
+        let clips = |name: &str| sdf_widget_def(name).unwrap().shader_source.contains("box_d");
+        assert!(!clips("knob-face"));
+        assert!(clips("not-a-face"));
+
+        // A theme change re-emits it the same way.
+        super::recompile_theme_dependent_sdf_shaders();
+        let mut theme = theme::current();
+        theme.accent = Color::from_hex(0x04, 0x05, 0x06);
+        theme::set_current(theme);
+        assert!(super::recompile_theme_dependent_sdf_shaders());
+        assert!(!clips("knob-face"));
+        assert!(clips("not-a-face"));
+    }
+
+    #[test]
+    fn a_slot_widget_is_inlined_where_shaders_read_the_slot() {
+        let mut runtime = super::Runtime::new();
+        runtime
+            .eval_str(
+                "(defwidget splice-face :width 2 :height 2
+                   :shader (mix (rgba 0 0 0 0) :widget-knob-filled 1.0))
+                 (defwidget splice-brass :width 2 :height 2
+                   :shader (mix (rgba 0.123 0.456 0.789 1.0) slot-color 0.5))
+                 (defwidget splice-seeded :width 2 :height 2 :state (seed)
+                   :shader (rgba seed 0.0 0.0 1.0))
+                 (defwidget splice-self :width 2 :height 2
+                   :shader (mix :widget-knob-filled (rgba 0.321 0.0 0.0 1.0) 0.5))",
+            )
+            .unwrap();
+        let source = || sdf_widget_def("splice-face").unwrap().shader_source.clone();
+        let use_slot = |widget: &str| {
+            theme::set_slot_widget_overrides([("widget-knob-filled".to_string(), widget.to_string())]);
+            super::recompile_theme_dependent_sdf_shaders();
+        };
+        super::recompile_theme_dependent_sdf_shaders();
+        let plain = source();
+
+        use_slot("splice-brass");
+        assert!(source().contains("0.123"), "the slot's widget is inlined");
+
+        // A widget that takes state has nothing to read it from here.
+        use_slot("splice-seeded");
+        assert_eq!(source(), plain);
+
+        // One that reads its own slot gets the colour there, not itself.
+        use_slot("splice-self");
+        assert!(source().contains("0.321"));
+
+        // Redefining the widget in use re-emits the shaders inlining it.
+        runtime
+            .eval_str(
+                "(defwidget splice-self :width 2 :height 2
+                   :shader (rgba 0.654 0.0 0.0 1.0))",
+            )
+            .unwrap();
+        assert!(super::recompile_theme_dependent_sdf_shaders());
+        assert!(source().contains("0.654"));
+
+        theme::set_slot_widget_overrides(std::iter::empty());
+        super::recompile_theme_dependent_sdf_shaders();
+        assert_eq!(source(), plain);
+    }
 }
 
 #[cfg(test)]
@@ -5659,7 +5917,13 @@ mod observer_tests {
             "dependent buffer must rerender: {:?}",
             report.rerendered_roots
         );
-        let text = runtime
+        let text = pending_tree_text(&mut runtime);
+        assert!(text.contains("override-grid"), "{text}");
+    }
+
+    /// Every widget tree the runtime has published since the last take.
+    fn pending_tree_text(runtime: &mut Runtime) -> String {
+        runtime
             .take_pending_buffer_widget_trees()
             .iter()
             .map(|t| match t {
@@ -5667,8 +5931,64 @@ mod observer_tests {
                 crate::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => format!("{tree:?}"),
             })
             .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("override-grid"), "{text}");
+            .join("\n")
+    }
+
+    #[test]
+    fn a_restyle_redraws_its_part_wherever_it_is_built() {
+        let mut runtime = Runtime::new();
+        let owner = std::env::temp_dir()
+            .join(format!("eseqlisp-restyle-owner-{}.lisp", std::process::id()));
+        // The part is built inside a subtree, which an override of the
+        // function that returns it could not reach.
+        let factory = "(module test.factory)\n\
+             (def strip () (subtree :key \"strip\" (label \"factory-plate\" :part \"test/plate\")))\n\
+             (effect-buffer \"*m*\" (strip))";
+        let report = runtime.eval_source_transactional(Some(owner), factory, Vec::new());
+        assert!(report.success, "{:?}", report.diagnostics);
+        runtime.take_pending_buffer_widget_trees();
+
+        let report = runtime.eval_source_transactional(
+            None,
+            "(module test.pkg)\n(restyle \"test/plate\" (lambda (n) (merge n :text \"restyled-plate\")))",
+            Vec::new(),
+        );
+        assert!(report.success, "{:?}", report.diagnostics);
+        // The buffer that built the part redraws with it restyled.
+        let text = pending_tree_text(&mut runtime);
+        assert!(text.contains("restyled-plate"), "{text}");
+        assert!(!text.contains("factory-plate"), "{text}");
+
+        // Detaching the package draws the part as the factory builds it.
+        runtime.vm.remove_module_overrides("test.pkg");
+        runtime.vm.rerender_dirty_effects().unwrap();
+        runtime.flush_widget_trees();
+        let text = pending_tree_text(&mut runtime);
+        assert!(text.contains("factory-plate"), "{text}");
+    }
+
+    #[test]
+    fn a_failing_restyle_is_quarantined_and_a_self_building_one_terminates() {
+        let mut runtime = Runtime::new();
+        let text_of = |runtime: &mut Runtime, src: &str| match runtime.eval_str(src).unwrap() {
+            Some(Value::Map(map)) => format!("{:?}", map.get("text").map(|cell| cell.borrow().clone())),
+            other => panic!("expected a widget, got {other:?}"),
+        };
+        runtime
+            .eval_str(
+                "(module test.pkg)
+                 (restyle \"test/nested\" (lambda (n) (box (label \"inner\" :part \"test/nested\"))))
+                 (restyle \"test/broken\" (lambda (n) (car 1)))",
+            )
+            .unwrap();
+        // Building its own part inside the restyle gets the part as built.
+        let nested = runtime.eval_str("(label \"outer\" :part \"test/nested\")").unwrap();
+        assert!(format!("{nested:?}").contains("inner"), "{nested:?}");
+        // A restyle that throws leaves the part as built, now and after.
+        assert!(text_of(&mut runtime, "(label \"as-built\" :part \"test/broken\")").contains("as-built"));
+        assert!(text_of(&mut runtime, "(label \"again\" :part \"test/broken\")").contains("again"));
+        let parts = format!("{:?}", runtime.eval_str("(parts)").unwrap());
+        assert!(parts.contains("test/nested") && parts.contains("test/broken"), "{parts}");
     }
 
     #[test]
@@ -5823,5 +6143,32 @@ mod observer_tests {
         assert_eq!(seen.borrow().len(), 2);
         assert!(matches!(seen.borrow()[1], Value::Number(2.0)));
         assert!(runtime.take_pending_buffer_widget_trees().is_empty());
+    }
+
+    #[test]
+    fn a_module_definitions_comment_documents_it_for_describe() {
+        let mut runtime = Runtime::new();
+        let source = "(module doc.demo)\n(export menu-of)\n\n;; The menu for m.\n(def menu-of (m) m)\n";
+        runtime.eval_source_at_path(std::path::PathBuf::from("/virtual/doc/demo.lisp"), source).unwrap();
+        let meta = runtime.completion_metadata_for("doc.demo/menu-of").expect("documented");
+        assert_eq!((meta.signature.as_str(), meta.docs.as_str()), ("(menu-of m)", "The menu for m."));
+    }
+
+    #[test]
+    fn a_view_that_throws_is_kept_for_the_host_even_when_its_eval_error_is_dropped() {
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str("(defstate broken 0)\n(effect-buffer \"*view*\" (if (> broken 0) (undefined-widget-call) (label \"ok\")))")
+            .unwrap();
+        runtime.run_reactive_cycle();
+        assert!(runtime.take_reactive_errors().is_empty());
+        // The dirty effect runs after this eval; a host that drops the
+        // eval's result still learns why the view stopped drawing.
+        let _ = runtime.eval_str("(set! broken 1)");
+        runtime.run_reactive_cycle();
+        let errors = runtime.take_reactive_errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("UnknownVariable(\"undefined-widget-call\")"), "{errors:?}");
+        assert!(runtime.take_reactive_errors().is_empty(), "taking drains");
     }
 }
