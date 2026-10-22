@@ -313,11 +313,7 @@ impl PendingQuantizedLaunches {
                     self.boundary
                         .retain(|launch| launch.request.token != replaced);
                 }
-                if playing
-                    && !song_active
-                    && request.quantize != LaunchQuantize::Off
-                    && request.snapshot.is_some()
-                {
+                if playing && !song_active && request.snapshot.is_some() {
                     // Scheduler-applied boundary launch: the deadline is the
                     // next grid boundary after the SCHEDULING frontier, so
                     // the boundary is guaranteed not to be scheduled yet and
@@ -325,9 +321,18 @@ impl PendingQuantizedLaunches {
                     // frontier runs ahead of the rendered position by the
                     // lookahead window, so this occasionally lands one grid
                     // slot later than the strictly-next audible boundary —
-                    // never earlier.
+                    // never earlier. An unquantized live launch takes the
+                    // frontier itself: what is already scheduled plays as the
+                    // old scene and everything after it is the new one, so
+                    // nothing is taken back, doubled or played late.
                     let deadline_beats =
                         launch_deadline(frontier_beats, playing, request.quantize);
+                    if crate::scheduled_event::launch_trace_enabled() {
+                        eprintln!(
+                            "[launch] sched-receive token={} target={:?} quantize={:?} rendered_beats={rendered_beats:.4} frontier_beats={frontier_beats:.4} deadline_beats={deadline_beats:.4}",
+                            request.token, request.target, request.quantize
+                        );
+                    }
                     self.boundary.push(PendingBoundaryLaunch {
                         request,
                         deadline_beats,
@@ -356,6 +361,12 @@ impl PendingQuantizedLaunches {
                 self.due_backlog.retain(|due| due.owner != owner);
             }
             QuantizedLaunchMessage::CancelAll => {
+                if crate::scheduled_event::launch_trace_enabled() {
+                    eprintln!(
+                        "[launch] sched-cancel-all pending={} boundary={} installed={}",
+                        self.pending.len(), self.boundary.len(), self.installed.len()
+                    );
+                }
                 self.pending.clear();
                 self.owner_tokens.clear();
                 self.due_backlog.clear();
@@ -363,6 +374,9 @@ impl PendingQuantizedLaunches {
                 self.clear_installed();
             }
             QuantizedLaunchMessage::BoundaryMirrored(token) => {
+                if crate::scheduled_event::launch_trace_enabled() {
+                    eprintln!("[launch] sched-mirror-ack token={token} rendered_beats={rendered_beats:.4}");
+                }
                 self.drop_installed_token(token);
             }
         }
@@ -451,6 +465,12 @@ impl PendingQuantizedLaunches {
             }
             let launch = self.boundary.remove(idx);
             let token = launch.request.token;
+            if crate::scheduled_event::launch_trace_enabled() {
+                eprintln!(
+                    "[launch] sched-install token={token} target={:?} quantize={:?} deadline_beats={:.4} clock_beats={clock_beats:.4} spq={samples_per_quarter:.1}",
+                    launch.request.target, launch.request.quantize, launch.deadline_beats
+                );
+            }
             if self.owner_tokens.get(&launch.request.owner) == Some(&token) {
                 self.owner_tokens.remove(&launch.request.owner);
             }

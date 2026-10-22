@@ -432,14 +432,9 @@ impl SequencerState {
         // needs the target prebuilt as a snapshot. A failed preflight falls
         // back to the legacy control-side apply so the launch error still
         // surfaces at the boundary.
-        let snapshot = if quantize != crate::quantized_launch::LaunchQuantize::Off
-            && self.is_playing()
-            && !self.song_playback.shared().is_active()
-        {
-            self.preflight_pattern_launch_snapshot(&target)
-        } else {
-            None
-        };
+        let snapshot = (quantize != crate::quantized_launch::LaunchQuantize::Off)
+            .then(|| self.session_launch_snapshot(&target))
+            .flatten();
         self.quantized_launches.schedule(
             target,
             quantize,
@@ -448,6 +443,44 @@ impl SequencerState {
             self.active_track_count(),
             snapshot,
         )
+    }
+
+    /// Unquantized launch during session playback: the scheduler switches at
+    /// its scheduling frontier from the target's prebuilt snapshot, so hits
+    /// already handed to the audio thread play out as the old scene. `None`
+    /// when this is not a live launch (stopped, song playback) or the target
+    /// does not preflight; the caller applies it immediately instead.
+    pub fn schedule_live_pattern_launch(
+        &self,
+        target: crate::quantized_launch::PatternLaunchTarget,
+        owner: crate::quantized_launch::QuantizedLaunchOwner,
+    ) -> Option<
+        Result<
+            crate::quantized_launch::QuantizedLaunchToken,
+            crate::quantized_launch::QuantizedLaunchSubmitError,
+        >,
+    > {
+        let snapshot = self.session_launch_snapshot(&target)?;
+        Some(self.quantized_launches.schedule(
+            target,
+            crate::quantized_launch::LaunchQuantize::Off,
+            owner,
+            self.scene_count(),
+            self.active_track_count(),
+            Some(snapshot),
+        ))
+    }
+
+    /// The prebuilt snapshot a scheduler-applied launch carries: only during
+    /// session playback (the scheduler applies launches only there).
+    fn session_launch_snapshot(
+        &self,
+        target: &crate::quantized_launch::PatternLaunchTarget,
+    ) -> Option<Arc<SequencerSnapshot>> {
+        if !self.is_playing() || self.song_playback.shared().is_active() {
+            return None;
+        }
+        self.preflight_pattern_launch_snapshot(target)
     }
 
     pub fn is_scene_silenced(&self, track: usize) -> bool {

@@ -55,6 +55,19 @@ pub(super) struct SchedulerLookaheadState {
     /// ([`with_live_rack_config`]), so a song row that plays for many
     /// chunks after a groove or member edit is cloned once, not per chunk.
     pub(super) live_rack_config_chunk: Option<LiveRackConfigChunk>,
+    /// The manual-override latch mask and live scene the latched lanes last
+    /// scheduled from during song playback, to spot a lane whose source
+    /// changed (a latched launch, or a latch just taken) at a chunk start.
+    pub(super) latched_sources: LatchedSources,
+}
+
+/// See [`SchedulerLookaheadState::latched_sources`].
+#[derive(Clone, Copy, Default)]
+pub(super) struct LatchedSources {
+    /// The manual-override latch mask.
+    mask: u64,
+    /// The live scene, while any lane is latched.
+    scene: Option<usize>,
 }
 
 /// A prebuilt chunk snapshot (`source`) re-pointed at the live rack config
@@ -161,6 +174,7 @@ impl SchedulerLookaheadState {
             last_scene_slot_debug: None,
             graph_replay: Vec::new(),
             live_rack_config_chunk: None,
+            latched_sources: LatchedSources::default(),
         }
     }
 }
@@ -428,6 +442,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let parked_generators = &mut scheduler.parked_generators;
     let generator_owner_racks = &scheduler.generator_owner_racks;
     let graph_replay = &mut scheduler.graph_replay;
+    let latched_sources = &mut scheduler.latched_sources;
     // Read once per call: nothing scans p-locks while nothing observes them.
     let record_plocks = state.plock_output_observed();
     let mut track_output_events = Vec::new();
@@ -551,6 +566,8 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         // cloning, no asset loading on this path (spec 9).
         let mut chunk_frames = max_chunk_frames;
         let mut song_row_snapshot: Option<Arc<SequencerSnapshot>> = None;
+        // What a session launch switched at this chunk's start.
+        let mut session_installed = crate::quantized_launch::SessionLaunchInstall::None;
         if song_playback.is_none() {
             // A song that just stopped must not leave stale per-lane phase
             // anchors behind: session playback free-runs (anchor 0/0).
@@ -567,7 +584,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 max_chunk_frames,
             );
             chunk_frames = frames;
-            match install {
+            match &install {
                 crate::quantized_launch::SessionLaunchInstall::None => {}
                 crate::quantized_launch::SessionLaunchInstall::AllTracks => {
                     // Scene launches restart accumulator evolution on every
@@ -580,7 +597,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     }
                 }
                 crate::quantized_launch::SessionLaunchInstall::Tracks(tracks) => {
-                    for track in tracks {
+                    for &track in tracks {
                         if track < MAX_TRACKS {
                             pending_accum_reset[track] = true;
                             clock.clear_pattern_length(track);
@@ -588,6 +605,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     }
                 }
             }
+            session_installed = install;
         }
         // While a boundary launch awaits its control-side mirror, chunks
         // schedule from its snapshot override (full scene) or a base+mask
@@ -769,6 +787,29 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             merged.transport.num_tracks.max(merged.tracks.len());
                         song_row_snapshot = Some(Arc::new(merged));
                     }
+                    // A latched launch is mirrored without an epoch bump (it
+                    // must not drop the hits already handed to the audio), so
+                    // its lanes switch here, at the frontier, and often
+                    // mid-step. Like a row adopting a new source, the step in
+                    // progress already played as the old source: a launched
+                    // pattern of another length must not fire it again.
+                    let live_scene = base_snapshot.transport.current_pattern;
+                    let LatchedSources { mask: last_latch, scene: last_scene } = *latched_sources;
+                    if latch != 0 && (latch != last_latch || last_scene != Some(live_scene)) {
+                        let snapshot = song_row_snapshot.as_deref().expect("row snapshot set above");
+                        for track in 0..snapshot.tracks.len().min(MAX_TRACKS).min(64) {
+                            let newly_latched = last_latch >> track & 1 == 0;
+                            if latch >> track & 1 == 1
+                                && (newly_latched || last_scene != Some(live_scene))
+                            {
+                                clock.adopt_track_source(track, snapshot);
+                            }
+                        }
+                    }
+                    *latched_sources = LatchedSources {
+                        mask: latch,
+                        scene: (latch != 0).then_some(live_scene),
+                    };
                 }
             }
         }
@@ -797,6 +838,26 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 with_live_rack_config(&mut scheduler.live_rack_config_chunk, prebuilt, base_snapshot)
             });
         let snapshot: &SequencerSnapshot = prebuilt_snapshot.as_deref().unwrap_or(base_snapshot);
+        // A launch that lands mid-step (an unquantized live launch at the
+        // frontier) must not fire the step in progress again: the old scene
+        // already played it, and a launched pattern of another length maps
+        // this position to a different step index. An onset on this very
+        // sample still fires from the launched snapshot, like a song row
+        // adopting a new source.
+        let count = snapshot.tracks.len().min(MAX_TRACKS);
+        match &session_installed {
+            crate::quantized_launch::SessionLaunchInstall::None => {}
+            crate::quantized_launch::SessionLaunchInstall::AllTracks => {
+                for track in 0..count {
+                    clock.adopt_track_source(track, snapshot);
+                }
+            }
+            crate::quantized_launch::SessionLaunchInstall::Tracks(tracks) => {
+                for &track in tracks.iter().filter(|track| **track < count) {
+                    clock.adopt_track_source(track, snapshot);
+                }
+            }
+        }
         // Process-driven pattern length (`length!`): a change due at this
         // chunk's start lands before the clock steps, no chunk straddles the
         // next pending boundary, and the chunk snapshot carries each track's

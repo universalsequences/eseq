@@ -363,6 +363,23 @@ impl Ord for TimedEvent {
     }
 }
 
+/// `ESEQ_DEBUG_LAUNCH=1`: trace scene launches and every step trigger from
+/// scheduling to dispatch on stderr (debug aid, not for performance runs).
+pub fn launch_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ESEQ_DEBUG_LAUNCH").is_some())
+}
+
+/// One `[launch]` line for a step trigger; other event kinds are skipped.
+pub fn trace_step_trigger(label: &str, event: &ScheduledEvent, extra: std::fmt::Arguments<'_>) {
+    if let ScheduledEventKind::ResolvedTrigger { track, step, .. } = &event.kind {
+        eprintln!(
+            "[launch] {label} track={track} step={step} sample={} epoch={} {extra}",
+            event.sample_time, event.pattern_epoch
+        );
+    }
+}
+
 pub struct ScheduledEventQueue<const CAPACITY: usize> {
     ready: ArrayQueue<Arc<ScheduledEvent>>,
     // Only producers access this mutex. A retained owner guarantees that
@@ -404,6 +421,9 @@ impl<const CAPACITY: usize> ScheduledEventQueue<CAPACITY> {
                 effect_params.sort_by_key(|param| (param.logical_id, param.idx));
             }
             _ => {}
+        }
+        if launch_trace_enabled() {
+            trace_step_trigger("sched-push", &event, format_args!(""));
         }
         let event = Arc::new(event);
         retained.push(Arc::clone(&event));

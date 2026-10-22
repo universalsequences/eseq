@@ -144,32 +144,13 @@ fn run(quantized: bool) {
     // Fail instead of silently omitting them from this control-only fixture.
     assert!(project.groups.iter().all(|group| group.rack.as_ref()
         .is_none_or(|rack| rack.sequencers.is_empty())), "use UI fixture for rack-authored scripts");
-    let owner = EngineOwner(engine::init_headless_engine(48_000, 2).unwrap());
+    let (owner, mut app, _control_runtime) = load_saved_project(project);
     let engine = &owner.0;
     let state = Arc::clone(&engine.state);
-    let mut app = App::new(Arc::clone(&state), engine.lg_ptr, engine.sample_rate,
-        engine.buses.clone(), Arc::clone(&engine.master_recorder), engine.keyboard_tx.clone());
-    app.sample_analysis = crate::analysis::AnalysisService::synchronous();
-    let name = project.name.clone();
-    // Same loader, with missing samples treated as errors instead of fallback.
-    app.queue_bounce_project(&name, project).unwrap();
-    let load_start = Instant::now();
-    let mut progress = 0;
-    while app.has_pending_project_load() {
-        app.advance_pending_project_load().unwrap();
-        prepare_graph(&app);
-        progress += 1;
-        eprintln!("launch benchmark: load phase {progress}, {:.1}s", load_start.elapsed().as_secs_f64());
-    }
-    app.sample_analysis.require_complete().unwrap();
-    app.publish_all_sampler_analysis_runtime();
-    let mut control_runtime = crate::lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
-    control_runtime.eval(&state.scratch_source()).expect("restore project scratch/kind definitions");
     for instance in &app.instances.list {
         assert!(crate::lisp_host::registered_kind(&instance.kind).is_some(),
             "project kind must be registered: {}", instance.kind);
     }
-    app.publish_instance_sequencers();
     assert!(app.state.scene_count() >= 2);
     let scene_count = state.scene_count();
     let lock_memory = stored_lock_memory(&state);
@@ -299,6 +280,37 @@ fn run(quantized: bool) {
     write_report(&output, &report);
 }
 
+/// Load `project` into a headless engine through the production loader, with
+/// missing samples treated as errors instead of fallback, then restore its
+/// scratch/kind definitions and publish its sequencers. Keep the returned
+/// control runtime alive while the App plays.
+fn load_saved_project(
+    project: crate::project::ProjectFile,
+) -> (EngineOwner, App, crate::lisp_host::ScratchControlRuntime) {
+    let owner = EngineOwner(engine::init_headless_engine(48_000, 2).unwrap());
+    let engine = &owner.0;
+    let state = Arc::clone(&engine.state);
+    let mut app = App::new(Arc::clone(&state), engine.lg_ptr, engine.sample_rate,
+        engine.buses.clone(), Arc::clone(&engine.master_recorder), engine.keyboard_tx.clone());
+    app.sample_analysis = crate::analysis::AnalysisService::synchronous();
+    let name = project.name.clone();
+    app.queue_bounce_project(&name, project).unwrap();
+    let load_start = Instant::now();
+    let mut progress = 0;
+    while app.has_pending_project_load() {
+        app.advance_pending_project_load().unwrap();
+        prepare_graph(&app);
+        progress += 1;
+        eprintln!("saved project: load phase {progress}, {:.1}s", load_start.elapsed().as_secs_f64());
+    }
+    app.sample_analysis.require_complete().unwrap();
+    app.publish_all_sampler_analysis_runtime();
+    let mut control_runtime = crate::lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+    control_runtime.eval(&state.scratch_source()).expect("restore project scratch/kind definitions");
+    app.publish_instance_sequencers();
+    (owner, app, control_runtime)
+}
+
 fn advance(driver: &mut SchedulerDriver, queue: &ScheduledEventQueue<4096>,
     state: &SequencerState, rendered: &mut u64, block: usize, sample_rate: u32) -> Value
 {
@@ -330,3 +342,212 @@ fn saved_project_immediate_launch_latency() { run(false); }
 #[test]
 #[ignore = "manual release benchmark; verifies composed rack contents before timing quantized launches"]
 fn saved_project_quantized_launch_latency() { run(true); }
+
+/// Scene-switch timing repro on a saved project: immediate launches between
+/// two scenes at offsets swept through one step, checking that every step
+/// both scenes share sounds exactly once. ESEQ_SWITCH_PROJECT (absolute
+/// path), ESEQ_SWITCH_SCENES="a,b" (0-based), ESEQ_SWITCH_STEP (0-based step
+/// the switch lands in).
+#[test]
+#[ignore = "manual repro; ESEQ_SWITCH_PROJECT must be an absolute path"]
+fn saved_project_immediate_scene_switch_keeps_shared_hits() {
+    use crate::scheduler::scheduled_event::ScheduledEventKind;
+    let input = PathBuf::from(std::env::var("ESEQ_SWITCH_PROJECT").expect("ESEQ_SWITCH_PROJECT"));
+    let scenes: Vec<usize> = std::env::var("ESEQ_SWITCH_SCENES").unwrap_or("1,2".into())
+        .split(',').map(|s| s.trim().parse().unwrap()).collect();
+    let switch_step: f64 = std::env::var("ESEQ_SWITCH_STEP").ok()
+        .map(|v| v.parse().unwrap()).unwrap_or(6.0);
+    // ESEQ_SWITCH_LEGACY=1 launches through the old take-back resync.
+    let legacy = std::env::var_os("ESEQ_SWITCH_LEGACY").is_some();
+    // ESEQ_SWITCH_SIXTEENTH=1 launches quantized to the next 16th instead.
+    let sixteenth = std::env::var_os("ESEQ_SWITCH_SIXTEENTH").is_some();
+    // ESEQ_SWITCH_GROOVED=1 tolerates grooved hits off their straight sample.
+    let grooved = std::env::var_os("ESEQ_SWITCH_GROOVED").is_some();
+    crate::paths::enter_sequencer_dir().unwrap();
+    let project = crate::project::load_project_from_path(&input).unwrap();
+    let (owner, mut app, _control_runtime) = load_saved_project(project);
+    let engine = &owner.0;
+    let state = Arc::clone(&engine.state);
+
+    let tracks = app.tracks.len();
+    // active[scene][track][step]
+    let active: Vec<Vec<Vec<bool>>> = scenes.iter().map(|&scene| (0..tracks).map(|track| {
+        state.with_project_scenes(|s| s.composed_scene_cell(scene, track)
+            .and_then(|id| s.track_pools[track].seq(id).map(|seq| (0..16).map(|step|
+                seq.track_bits[step / 64] & (1u64 << (step % 64)) != 0).collect()))
+            .unwrap_or_else(|| vec![false; 16]))
+    }).collect()).collect();
+    for (i, scene) in scenes.iter().enumerate() {
+        for track in 0..tracks {
+            let row: String = active[i][track].iter().map(|a| if *a { 'x' } else { '.' }).collect();
+            eprintln!("scene {} track {track:2} {:<28} {row}", scene + 1, app.tracks[track]);
+        }
+    }
+
+    app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: scenes[0] }).unwrap();
+    prepare_graph(&app);
+    // Play as the app does: the arrangement transport, which auto-latches the
+    // selected scene on a silent start, so every switch is a latched launch.
+    // ESEQ_SWITCH_SESSION=1 plays plain session playback instead.
+    if std::env::var_os("ESEQ_SWITCH_SESSION").is_some() {
+        state.start_playback();
+    } else {
+        app.song_transport_play(false).expect("play the arrangement transport");
+    }
+    prepare_graph(&app);
+    let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+    let block = engine.block_size as u64;
+    let mut driver = SchedulerDriver::new(Arc::clone(&state), engine.sample_rate,
+        engine.block_size, Arc::clone(&queue));
+    let spq = 48_000.0 * 60.0 / state.latest_scheduler_snapshot().transport.bpm as f64;
+    let step_samples = spq / 4.0;
+    let bar = spq * 4.0;
+    eprintln!("block {block}, step {step_samples:.1} samples, bar {bar:.1}");
+    // The audio callback, modelled in production order: refresh the snapshot
+    // (its epoch is what counts), drop stale countdowns, drain the queue
+    // dropping stale events, dispatch the block (late events at offset 0),
+    // render, and only then publish `rendered_samples = block_end`.
+    struct Audio { epoch: u64, countdown: Vec<(u64, usize, usize, u64)>, played: Vec<(u64, usize, usize)> }
+    impl Audio {
+        fn dispatch(&mut self, state: &SequencerState, queue: &ScheduledEventQueue<4096>,
+            block_start: u64, block: u64)
+        {
+            self.epoch = state.latest_scheduler_snapshot().transport.pattern_epoch;
+            let epoch = self.epoch;
+            self.countdown.retain(|(_, _, _, e)| *e == epoch);
+            while let Some(event) = queue.pop() {
+                if let ScheduledEventKind::ResolvedTrigger { track, step, .. } = &event.kind {
+                    let track = *track;
+                    if event.pattern_epoch == epoch {
+                        self.countdown.push((event.sample_time, track, *step, event.pattern_epoch));
+                    }
+                }
+            }
+            let end = block_start + block;
+            let (due, rest): (Vec<_>, Vec<_>) = self.countdown.drain(..).partition(|(s, _, _, _)| *s < end);
+            self.countdown = rest;
+            self.played.extend(due.into_iter().map(|(s, t, step, _)| (s.max(block_start), t, step)));
+        }
+    }
+    #[derive(Clone, Copy, Debug)]
+    enum Phase { BeforeCallback, DuringRender, SchedulerAfterCallback }
+    let phases = [Phase::BeforeCallback, Phase::DuringRender, Phase::SchedulerAfterCallback];
+    let mut audio = Audio { epoch: 0, countdown: Vec::new(), played: Vec::new() };
+    let mut switches: Vec<(u64, usize, Phase)> = Vec::new();
+    let offsets = 4;
+    let bars = offsets * phases.len() * 2 + 2;
+    let mut rendered = 0u64;
+    let mut next_switch = 1;
+    let mut target = 0;
+    let pass = |driver: &mut SchedulerDriver, rendered: u64| {
+        let result = driver.advance(rendered, rendered + block * 4, SchedulerInput::Offline);
+        assert!(driver.take_runtime_errors().is_empty());
+        assert_eq!(result.queue_rejections, 0);
+    };
+    while (rendered as f64) < bar * bars as f64 {
+        let n = next_switch - 1;
+        // Land the switch in the block holding `switch_step`'s boundary, or
+        // a few blocks before it.
+        let due = bar * next_switch as f64 + step_samples * switch_step
+            - (n % offsets) as f64 * block as f64;
+        let switching = next_switch < bars - 1 && (rendered + block) as f64 > due;
+        let launch = |app: &mut App, target: &mut usize| {
+            *target = 1 - *target;
+            let launch = PatternLaunchTarget::Scene { scene: scenes[*target] };
+            if sixteenth {
+                app.state.schedule_quantized_pattern_launch(launch, LaunchQuantize::Sixteenth,
+                    QuantizedLaunchOwner::Transport).unwrap();
+            } else if legacy {
+                app.apply_manual_pattern_launch(&launch).unwrap();
+            } else if !app.try_queue_live_pattern_launch(&launch).unwrap() {
+                app.apply_manual_pattern_launch(&launch).unwrap();
+            }
+            prepare_graph(app);
+        };
+        if switching {
+            let phase = phases[(n / offsets) % phases.len()];
+            switches.push((rendered, 1 - target, phase));
+            next_switch += 1;
+            match phase {
+                Phase::BeforeCallback => {
+                    launch(&mut app, &mut target);
+                    pass(&mut driver, rendered);
+                    audio.dispatch(&state, &queue, rendered, block);
+                }
+                Phase::DuringRender => {
+                    pass(&mut driver, rendered);
+                    audio.dispatch(&state, &queue, rendered, block);
+                    // The UI publishes and the scheduler wakes while this
+                    // block renders: `rendered_samples` is still its start.
+                    launch(&mut app, &mut target);
+                    pass(&mut driver, rendered);
+                }
+                Phase::SchedulerAfterCallback => {
+                    pass(&mut driver, rendered);
+                    launch(&mut app, &mut target);
+                    audio.dispatch(&state, &queue, rendered, block);
+                }
+            }
+        } else {
+            pass(&mut driver, rendered);
+            audio.dispatch(&state, &queue, rendered, block);
+        }
+        // The UI loop mirrors scheduler-applied launches.
+        for result in app.drain_due_pattern_launches() {
+            result.expect("live launch mirrors");
+        }
+        rendered += block;
+    }
+    // Grooves move a hit off its straight boundary by the same amount every
+    // bar; the first bar, before any switch, measures each step's offset.
+    let groove_offset = |track: usize, step: usize| -> Option<i64> {
+        let boundary = (step as f64 * step_samples).round() as i64;
+        audio.played.iter()
+            .find(|(s, t, st)| *t == track && *st == step
+                && (*s as i64 - boundary).abs() < step_samples as i64)
+            .map(|(s, _, _)| *s as i64 - boundary)
+    };
+    let mut problems = Vec::new();
+    // A rack track's steps come from its rack clips, not the scene cell, so
+    // only the doubled-hit check covers it.
+    let rack_tracks: Vec<bool> = {
+        let snapshot = state.latest_scheduler_snapshot();
+        (0..tracks).map(|t| snapshot.tracks.get(t).is_some_and(|track| track.rack_track.is_some())).collect()
+    };
+    let mut sorted = audio.played.clone();
+    sorted.sort();
+    for (i, (s, t, st)) in sorted.iter().enumerate() {
+        if let Some((s2, _, _)) = sorted[i + 1..].iter()
+            .take_while(|(s2, _, _)| s2 - s < (step_samples / 2.0) as u64)
+            .find(|(_, t2, st2)| t2 == t && st2 == st)
+        {
+            problems.push(format!("track {t} {} step {} doubled at {s} and {s2}", app.tracks[*t], st + 1));
+        }
+    }
+    for (index, (at, to, phase)) in switches.iter().enumerate() {
+        let bar_start = (*at as f64 / bar).floor() * bar;
+        for step in 0..16usize {
+            let boundary = (bar_start + step as f64 * step_samples).round() as u64;
+            for track in 0..tracks {
+                if rack_tracks[track] || !(active[0][track][step] && active[1][track][step]) { continue; }
+                // Grooves/swing can move a hit off its straight boundary.
+                let found: Vec<_> = audio.played.iter()
+                    .filter(|(s, t, st)| *t == track && *st == step && s.abs_diff(boundary) < step_samples as u64)
+                    .map(|(s, _, _)| *s).collect();
+                // Exactly once, on its own sample: a late replay lands on a
+                // block start instead.
+                let expected = boundary as i64 + groove_offset(track, step).unwrap_or(0);
+                let exact = found.len() == 1
+                    && (grooved || (found[0] as i64 - expected).abs() <= 1);
+                if !exact {
+                    problems.push(format!(
+                        "switch {index} {phase:?} at {at} (step {:.2}) -> scene {}: track {track} {} step {} sounded {}x at {found:?} (boundary {boundary})",
+                        (*at as f64 - bar_start) / step_samples + 1.0, scenes[*to] + 1, app.tracks[track], step + 1, found.len()));
+                }
+            }
+        }
+    }
+    state.stop_playback();
+    for problem in &problems { eprintln!("problem: {problem}"); }
+    assert!(problems.is_empty(), "{} problems", problems.len());
+}

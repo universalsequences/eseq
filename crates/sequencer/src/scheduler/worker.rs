@@ -771,6 +771,28 @@ impl SchedulerDriver {
             && self.lookahead_state
                 .quantized_launches
                 .observe_pattern_switch(pattern);
+        if crate::scheduled_event::launch_trace_enabled()
+            && (self.last_pattern != pattern
+                || self.last_pattern_epoch != pattern_epoch
+                || self.last_topology_epoch != topology_epoch)
+        {
+            let resync = if !self.last_playing {
+                "play-start"
+            } else if self.last_topology_epoch != topology_epoch {
+                "topology"
+            } else if !song_playback_active && self.last_pattern_epoch != pattern_epoch {
+                "pattern-epoch"
+            } else if !song_playback_active && self.last_pattern != pattern && !pattern_adopted {
+                "pattern-switch"
+            } else {
+                "none"
+            };
+            eprintln!(
+                "[launch] sched-observe pattern {}->{pattern} pattern_epoch {}->{pattern_epoch} topology_epoch {}->{topology_epoch} adopted={pattern_adopted} resync={resync} rendered={rendered} scheduled_until={}",
+                self.last_pattern, self.last_pattern_epoch, self.last_topology_epoch,
+                self.scheduled_until_sample
+            );
+        }
 
         if !self.last_playing {
             queue.clear();
