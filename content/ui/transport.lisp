@@ -781,11 +781,9 @@
       (dropdown :key "scene-bank-dropdown"
         :value b.label
         :options (append (scene-bank-labels) (list "New bank"))
-        :on-change select-scene-bank
+        :on-change   select-scene-bank
         :bg-color :transport-led-bg
-        :border-color :bg
-        :badge-color :transparent
-        :chevron-color :fg
+        :text-color :clock-fg
         :width 5.0 :height 0.5 :font-size 10))))
 
 ;; A new scene at the end of the viewed bank.
@@ -1112,10 +1110,7 @@
       (subtree :key "transport-scene-launch-quantize"
         (dropdown
           :bg-color :transport-led-bg
-          :border-color :bg
           :text-color :clock-fg
-          :badge-color :transparent
-          :chevron-color :fg
           :key "transport-scene-launch-quantize-dropdown"
           :debug-name "transport-scene-launch-quantize"
           :value (launch-quantize)
@@ -1125,9 +1120,6 @@
       (subtree :key "transport-record-quantize"
         (dropdown
           :bg-color :transport-led-bg
-          :border-color :bg
-          :badge-color :transparent
-          :chevron-color :fg
           :text-color :clock-fg
           :key "transport-record-quantize-dropdown"
           :debug-name "transport-record-quantize"
@@ -1149,6 +1141,7 @@
       (subtree :key "transport-roll-toggle"
         (box :debug-name "transport-roll-toggle"
           :width 5.5 :height 1.0
+          :v-align :center
           :background-color (if transport.sequence-rolling
             '(rgba 0.72 0.10 0.12 1)
             "pattern-pill-bg")

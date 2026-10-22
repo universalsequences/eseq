@@ -15,8 +15,8 @@
 ;; mode-bind-key from user lisp; `M-x describe-key` shows the winner.
 (module eseq.sequencer-keys)
 
-(import eseq.kinds :refer (tracks selection scenes transport launch!))
-(import eseq.scene-banks :refer (view-scene-bank!))
+(import eseq.kinds :refer (tracks selection scenes banks transport launch!))
+(import eseq.scene-banks :refer (view-scene-bank! scene-viewed-bank))
 
 (export mode-name
         cursor-left
@@ -30,6 +30,8 @@
         track-relative
         scene-previous
         scene-next
+        bank-previous
+        bank-next
         open-command-palette)
 
 (def mode-name "eseq.sequencer-keys/sequencer-keys")
@@ -90,6 +92,20 @@
 (def scene-previous () (scene-step -1))
 (def scene-next () (scene-step 1))
 
+;; Cmd+Option+LEFT / RIGHT: show the previous / next scene bank in the strip
+;; without launching anything; the playing scene keeps playing. No wrap.
+(def bank-step (delta)
+  (let ((viewed (scene-viewed-bank)))
+    (when viewed
+      (let ((all (banks))
+            (i (+ viewed.index delta)))
+        (when (and (>= i 0) (< i (len all)))
+          (view-scene-bank! (nth all i)))))
+    true))
+
+(def bank-previous () (bank-step -1))
+(def bank-next () (bank-step 1))
+
 ;; /: the command palette. Only sequencer views bind it, so a slash still
 ;; types into code buffers and focused text fields.
 (def open-command-palette () (do (command-palette) true))
@@ -108,4 +124,6 @@
 (mode-bind-key mode-name "s-RIGHT" "scene-next")
 (mode-bind-key mode-name "C-LEFT" "scene-previous")
 (mode-bind-key mode-name "C-RIGHT" "scene-next")
+(mode-bind-key mode-name "M-s-LEFT" "bank-previous")
+(mode-bind-key mode-name "M-s-RIGHT" "bank-next")
 (mode-bind-key mode-name "/" "open-command-palette")
