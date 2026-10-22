@@ -13148,7 +13148,7 @@
         }));
     }
 
-    /// Song-mode graph harness: `line 2` graph seeded from track 0 with a
+    /// Song-mode graph harness: a variable `line` graph of 2 nodes seeded from track 0 with a
     /// 2-step delay, node 1 routed to track 1, resetting every 4 beats.
     /// Scene 0 leaves the 0->1 edge at weight 0 (silent); scene 1 opens it
     /// and starts node 1 hot on every reset, so node 1 fires alone one step
@@ -13161,7 +13161,7 @@
             Arc::clone(&state),
             r#"
             (def-sequencer "song-row-graph"
-              :shape (line 2)
+              :shape (line :default 2 :min 1 :max 4)
               :energy-decay 1
               :reset-every 4
               :seed-on-reset 0
@@ -13378,6 +13378,272 @@
             empty.scene = None;
             let latched = drive_song_graph(&state, vec![empty], 4.0);
             assert_eq!(latched, fresh);
+        });
+    }
+
+    /// A first row whose overrides change the graph's node count rebuilds
+    /// the runtime on the Play rewind beat; the rebuilt graph must still run
+    /// that rewind (and its reset seeds) instead of free-running from a
+    /// realign.
+    #[test]
+    fn graph_rebuilt_on_the_play_beat_plays_like_a_fresh_start() {
+        run_with_scheduler_stack(|| {
+            let fresh = drive_song_graph(
+                &song_graph_scene_fixture(),
+                vec![song_mode_row(1, 0.0, 1, Vec::new())],
+                4.0,
+            );
+            assert!(!fresh.is_empty(), "scene 1 opens the graph edge");
+
+            let state = song_graph_scene_fixture();
+            state.with_scenes_mut(|scenes| {
+                scenes.scenes[0].graph_overrides[0].node_count = Some(3);
+            });
+            let rebuilt = drive_song_graph(&state, vec![song_mode_row(1, 0.0, 1, Vec::new())], 4.0);
+            assert_eq!(rebuilt, fresh);
+        });
+    }
+
+    /// A quantized session launch onto a scene, landing on its reset
+    /// boundary, must drive the graph exactly as starting the transport on
+    /// that scene does, even though the control-side mirror (and the worker's
+    /// reconcile to the live scene) lands a few blocks after the boundary.
+    #[test]
+    fn session_boundary_launch_drives_graph_like_a_fresh_start_on_that_scene() {
+        use crate::quantized_launch::{LaunchQuantize, PatternLaunchTarget, QuantizedLaunchOwner};
+
+        run_with_scheduler_stack(|| {
+            let beat = 24_000_u64;
+            let fresh = drive_song_graph(
+                &song_graph_scene_fixture(),
+                vec![song_mode_row(1, 0.0, 1, Vec::new())],
+                4.0,
+            );
+            assert!(!fresh.is_empty(), "scene 1 opens the graph edge");
+
+            let state = song_graph_scene_fixture();
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut base = state.publish_scheduler_snapshot();
+            let launch = state
+                .preflight_pattern_launch_snapshot(&PatternLaunchTarget::Scene { scene: 1 })
+                .expect("scene 1 preflights");
+            state
+                .quantized_launches()
+                .schedule(
+                    PatternLaunchTarget::Scene { scene: 1 },
+                    LaunchQuantize::Bar,
+                    QuantizedLaunchOwner::Transport,
+                    3,
+                    2,
+                    Some(launch),
+                )
+                .expect("schedule boundary launch");
+            let queue = Box::new(ScheduledEventQueue::<256>::new());
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let manifests = state
+                .published_sequencers()
+                .into_iter()
+                .filter_map(|seq| seq.graph)
+                .collect::<Vec<_>>();
+            reconcile_graph_runtimes(
+                manifests,
+                &base.graph_overrides,
+                &[],
+                &mut scheduler.graph_runtimes,
+                &mut scheduler.graph_manifests,
+                0.0,
+            );
+            scheduler.graph_overrides_applied = Some(base.graph_overrides.clone());
+            let mut loaded = base.graph_overrides.clone();
+            for graph in &mut scheduler.graph_runtimes {
+                graph.reset_transport(0.0);
+            }
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime =
+                Some(lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0));
+            let block = 1_000_u64;
+            let mut scheduled_until = 0_u64;
+            let mut rendered = 0_u64;
+            let mut mirrored = false;
+            let mut fires = Vec::new();
+            while rendered < 8 * beat {
+                state.quantized_launches().process_scheduler(
+                    &mut scheduler.quantized_launches,
+                    rendered as f64 / beat as f64,
+                    scheduler.clock.total_beats,
+                    true,
+                    false,
+                );
+                // The control thread mirrors a few blocks after the boundary
+                // sounds; the worker then reconciles graphs to the live scene.
+                if !mirrored && rendered >= 4 * beat + 3 * block {
+                    for due in state.quantized_launches().drain_valid_due() {
+                        state
+                            .launch_scene_mirror(
+                                1,
+                                2,
+                                &[-1, -1],
+                                &[48_000, 48_000],
+                                &[String::from("a"), String::from("b")],
+                                &[crate::sequencer::InstrumentType::Sampler, crate::sequencer::InstrumentType::Sampler],
+                            )
+                            .expect("mirror scene 1");
+                        state.quantized_launches().acknowledge_mirror(due.token).expect("ack");
+                    }
+                    base = state.latest_scheduler_snapshot();
+                    if base.graph_overrides != loaded {
+                        reconcile_graph_runtimes(
+                            scheduler.graph_manifests.clone(),
+                            &base.graph_overrides,
+                            &[],
+                            &mut scheduler.graph_runtimes,
+                            &mut scheduler.graph_manifests,
+                            scheduler.clock.total_beats,
+                        );
+                        loaded = base.graph_overrides.clone();
+                        scheduler.graph_overrides_applied = Some(loaded.clone());
+                    }
+                    mirrored = true;
+                }
+                let result = schedule_playing_lookahead(
+                    &mut scheduler,
+                    &state,
+                    &base,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    base.transport.pattern_epoch,
+                    rendered,
+                    4_000,
+                    48_000,
+                    block as usize,
+                    24_000.0,
+                    scheduled_until,
+                    false,
+                    false,
+                );
+                scheduled_until = result.scheduled_until_sample;
+                fires.extend(
+                    observed_triggers(&queue)
+                        .into_iter()
+                        .filter(|event| event.kind == ScheduledTriggerKind::Network && event.track == 1)
+                        .map(|event| (event.sample_time, event.transpose)),
+                );
+                rendered += block;
+            }
+            assert!(mirrored);
+            fires.sort_by_key(|(sample, _)| *sample);
+            let after_launch = fires
+                .iter()
+                .filter(|(sample, _)| (4 * beat..8 * beat).contains(sample))
+                .map(|(sample, transpose)| (sample - 4 * beat, *transpose))
+                .collect::<Vec<_>>();
+            assert_eq!(after_launch, fresh);
+        });
+    }
+
+    /// The control thread publishes a boundary launch's mirror before it
+    /// acks, but the worker loads its snapshot before draining the ack, so a
+    /// pass can see the install released while its base is still the old
+    /// scene. The graph must hold the launch's overrides through that pass,
+    /// not swing back to the old scene's and forward again.
+    #[test]
+    fn graph_holds_a_mirrored_launchs_overrides_until_the_live_scene_catches_up() {
+        use crate::quantized_launch::{LaunchQuantize, PatternLaunchTarget, QuantizedLaunchOwner};
+
+        run_with_scheduler_stack(|| {
+            let state = song_graph_scene_fixture();
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let base = state.publish_scheduler_snapshot();
+            let launch = state
+                .preflight_pattern_launch_snapshot(&PatternLaunchTarget::Scene { scene: 1 })
+                .expect("scene 1 preflights");
+            let launched = launch.graph_overrides.clone();
+            assert_ne!(launched, base.graph_overrides);
+            state
+                .quantized_launches()
+                .schedule(
+                    PatternLaunchTarget::Scene { scene: 1 },
+                    LaunchQuantize::Bar,
+                    QuantizedLaunchOwner::Transport,
+                    3,
+                    2,
+                    Some(launch),
+                )
+                .expect("schedule boundary launch");
+
+            let queue = Box::new(ScheduledEventQueue::<256>::new());
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let manifests = state
+                .published_sequencers()
+                .into_iter()
+                .filter_map(|seq| seq.graph)
+                .collect::<Vec<_>>();
+            reconcile_graph_runtimes(
+                manifests,
+                &base.graph_overrides,
+                &[],
+                &mut scheduler.graph_runtimes,
+                &mut scheduler.graph_manifests,
+                0.0,
+            );
+            scheduler.graph_overrides_applied = Some(base.graph_overrides.clone());
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = None;
+            let mut pass = |scheduler: &mut SchedulerLookaheadState, rendered: u64, until: u64| {
+                schedule_playing_lookahead(
+                    scheduler,
+                    &state,
+                    &base,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    base.transport.pattern_epoch,
+                    rendered,
+                    24_000,
+                    48_000,
+                    6_000,
+                    24_000.0,
+                    until,
+                    false,
+                    false,
+                )
+                .scheduled_until_sample
+            };
+
+            // The bar boundary (sample 96_000) installs the launch.
+            state.quantized_launches().process_scheduler(
+                &mut scheduler.quantized_launches,
+                0.0,
+                scheduler.clock.total_beats,
+                true,
+                false,
+            );
+            let until = pass(&mut scheduler, 96_000, 0);
+            assert_eq!(scheduler.graph_overrides_applied.as_deref(), Some(&launched[..]));
+
+            // Mirror acked while this pass still holds the scene-0 base.
+            state.quantized_launches().process_scheduler(
+                &mut scheduler.quantized_launches,
+                4.0,
+                scheduler.clock.total_beats,
+                true,
+                false,
+            );
+            let due = state.quantized_launches().drain_valid_due();
+            assert_eq!(due.len(), 1);
+            state.quantized_launches().acknowledge_mirror(due[0].token).expect("ack");
+            state.quantized_launches().process_scheduler(
+                &mut scheduler.quantized_launches,
+                4.1,
+                scheduler.clock.total_beats,
+                true,
+                false,
+            );
+            pass(&mut scheduler, 102_000, until);
+            assert_eq!(scheduler.graph_overrides_applied.as_deref(), Some(&launched[..]));
         });
     }
 

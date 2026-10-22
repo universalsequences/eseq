@@ -1716,7 +1716,7 @@ impl GraphRuntime {
     }
 
     /// Whether a transport rewind at `total_beats` is still unplayed.
-    pub fn rewound_at(&self, total_beats: f64) -> bool {
+    fn rewound_at(&self, total_beats: f64) -> bool {
         self.rewound_at
             .is_some_and(|beat| (beat - total_beats).abs() <= 1e-9)
     }

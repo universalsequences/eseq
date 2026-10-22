@@ -2331,6 +2331,11 @@ impl App {
                         });
                     if scheduler_applied {
                         let _ = self.state.quantized_launches().acknowledge_mirror(token);
+                        if result.is_err() {
+                            // The scene it adopted never publishes; drop the
+                            // expectation so nothing keeps waiting for it.
+                            let _ = self.state.quantized_launches().cancel_token(token);
+                        }
                         if result.is_ok() {
                             // No pattern-epoch bump on the mirror, so the UI's
                             // epoch-keyed pattern resync (scene number, step

@@ -599,18 +599,23 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         };
         if song_playback.is_none() {
             // Graphs follow whatever this chunk schedules from: a launch
-            // awaiting its mirror, else the live scene. Re-checked every
-            // chunk, so a launch adopted ahead of the audio that never becomes
-            // the scene (Stop first, cancelled) hands the graph straight back.
-            let target = session_launch_snapshot.as_deref().unwrap_or(base_snapshot);
-            adopt_graph_overrides(
-                graph_manifests,
-                graph_runtimes,
-                graph_overrides_applied,
-                &target.graph_overrides,
-                &base_snapshot.rack_memberships,
-                clock.total_beats,
-            );
+            // awaiting its mirror, else the live scene, re-checked every chunk
+            // so a cancelled launch hands the graph straight back. A launch
+            // whose mirror is acked but missing from this pass's base snapshot
+            // holds the graph where it is.
+            let target = session_launch_snapshot
+                .as_deref()
+                .or((!session_launches.base_predates_mirror(base_snapshot)).then_some(base_snapshot));
+            if let Some(target) = target {
+                adopt_graph_overrides(
+                    graph_manifests,
+                    graph_runtimes,
+                    graph_overrides_applied,
+                    &target.graph_overrides,
+                    &base_snapshot.rack_memberships,
+                    clock.total_beats,
+                );
+            }
         }
         if let Some(song) = song_playback.as_mut() {
             let prev_row = song.current_row();
