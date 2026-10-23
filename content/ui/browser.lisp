@@ -1743,6 +1743,30 @@ Previews each preset as you move through the list; Esc puts the loaded one back.
       (dict :module (get item :module) :kind kind-id)
       (dict :module (get item :module) :kind kind-id :group-id group-id))))
 
+;; The palette's "New Instance" choices: every kind, attached or not (see
+;; `seq-package-kind-choices`), each labelled with the module defining it.
+(def palette-instance-kind-choices ()
+  (map (lambda (choice)
+         (dict :label (get choice :name)
+               :value choice
+               :detail (if (get choice :module) (get choice :module) "project")))
+    (seq-package-kind-choices)))
+
+(def new-package-instance (choice)
+  :doc "Create an instance of a package kind (a sequencer like plockchain).
+Lists every kind in your Local, Installed and Factory packages, attached or
+not; picking one attaches its package to the project first when needed,
+then creates the instance and opens its tab."
+  :command "New Instance"
+  :icon :midi-fx
+  :searchable true
+  :prompt "Kind"
+  :choices palette-instance-kind-choices
+  ;; A kind read off an unloaded module's source has no :kind id yet; the
+  ;; host resolves it by :kind-name once the attach has loaded it.
+  (host-command "packages-new-instance"
+    (dict :module (get choice :module) :kind (get choice :kind) :kind-name (get choice :name))))
+
 ;; Enter or double-click (instance-kinds spec §8.3). An instance row opens
 ;; its tab (a placeholder row only says why it cannot). A module row: no kinds -> attach it (the host loads the module
 ;; first, writes the import line once it evaluates, and answers "already
