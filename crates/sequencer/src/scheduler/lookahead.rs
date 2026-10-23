@@ -1022,11 +1022,20 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         let mut pending_pattern_lengths: Vec<(usize, usize, f64)> = Vec::new();
         // Generators a graph node gates run in a second pass after the
         // graph stage, so a fire reaches the generator's tick on the same
-        // boundary (docs/jaki-trig-modes-spec.md §4.1).
+        // boundary (docs/jaki-trig-modes-spec.md §4.1). So do generators
+        // with a `:trigger` track (bar `:before-steps` ones): graph and
+        // first-pass generator hits landing on that track open their gate
+        // too, and must arrive before they tick.
         let gated_generators: std::collections::HashSet<u64> = graph_runtimes
             .iter()
             .filter(|graph| !graph.is_empty())
             .flat_map(|graph| graph.gate_targets())
+            .chain(
+                generator_trigger_tracks
+                    .iter()
+                    .map(|&(id, _)| id)
+                    .filter(|id| !generator_before_steps.contains(id)),
+            )
             .collect();
         // `:before-steps` generators tick ahead of the step sequencer, so a
         // `seq-emit :lock` hold they start on a boundary covers the steps on
@@ -1052,6 +1061,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 groove_floor,
                 debug_accum,
                 true,
+                &generator_trigger_tracks,
                 |id| generator_before_steps.contains(&id) && !gated_generators.contains(&id),
             )
         {
@@ -2374,6 +2384,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 groove_floor,
                 debug_accum,
                 false,
+                &generator_trigger_tracks,
                 |id| !gated_generators.contains(&id) && !generator_before_steps.contains(&id),
             )
         {
@@ -2630,6 +2641,23 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         samples_per_quarter,
                     )
                 });
+                // Like a step there, the fire opens the gate of generators
+                // whose `:trigger` is its track (they tick in the second pass).
+                if let Some(track) = graph_source.resolve_track(emission.event.track) {
+                    seed_generator_gates_from_hit(
+                        generator_runtime,
+                        &generator_trigger_tracks,
+                        track,
+                        crate::generator::GateTrigger {
+                            kind: crate::generator::GateTriggerKind::Play,
+                            beat: emission.grid_beats,
+                            duration_beats: emission.event.resolved.duration as f64,
+                            note: emission.event.resolved.transpose as f32,
+                            velocity: emission.event.resolved.velocity as f32,
+                        },
+                        None,
+                    );
+                }
                 // A fire aimed at a rack member plays through the rack's
                 // groove, keyed on its straight (quantized) beat (rack
                 // groove spec §Sites 2). No groove: unchanged.
@@ -2735,6 +2763,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 groove_floor,
                 debug_accum,
                 false,
+                &generator_trigger_tracks,
                 |id| gated_generators.contains(&id),
             )
         {
@@ -2961,6 +2990,7 @@ fn run_generator_stage<const QUEUE_CAP: usize>(
     groove_floor: crate::groove::GrooveFloor,
     debug_accum: bool,
     allow_locks: bool,
+    trigger_tracks: &[(u64, usize)],
     include: impl Fn(u64) -> bool,
 ) -> bool {
     let mut chunk_enqueued = true;
@@ -3118,6 +3148,28 @@ fn run_generator_stage<const QUEUE_CAP: usize>(
                 samples_per_quarter,
             )
         });
+        // Like a step there, the hit opens the gate of other generators
+        // whose `:trigger` is its track, at its straight beat.
+        if let Some(track) = generator_source.resolve_track(emission.event.track) {
+            seed_generator_gates_from_hit(
+                generator_runtime,
+                trigger_tracks,
+                track,
+                crate::generator::GateTrigger {
+                    kind: crate::generator::GateTriggerKind::Play,
+                    beat: sample_time_to_beats(
+                        chunk_start_beats,
+                        scheduled_until_sample,
+                        emission.sample_time,
+                        samples_per_quarter,
+                    ),
+                    duration_beats: emission.event.resolved.duration as f64,
+                    note: emission.event.resolved.transpose as f32,
+                    velocity: emission.event.resolved.velocity as f32,
+                },
+                generator_runtime.id_at(emission.generator_index),
+            );
+        }
         // Generator hits aimed at a rack member play through its
         // groove like every other trig source; their sample time is
         // their straight beat. A track-less hit sounds on the generator's

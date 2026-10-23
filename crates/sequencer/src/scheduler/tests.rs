@@ -3610,6 +3610,17 @@
     /// sixteenth per lookahead call like the live driver, and the generator
     /// errors reported.
     fn generator_triggered_by_track(trigger_source: &'static str) -> (Vec<u64>, Vec<u64>, Vec<String>) {
+        let (steps, hits, _, errors) = generator_triggered_with_driver(trigger_source, None);
+        (steps, hits, errors)
+    }
+
+    /// [`generator_triggered_by_track`] plus an optional ungated `driver`
+    /// generator (its tick source) registered ahead of the gated one; also
+    /// returns track 2's samples.
+    fn generator_triggered_with_driver(
+        trigger_source: &'static str,
+        driver: Option<&'static str>,
+    ) -> (Vec<u64>, Vec<u64>, Vec<u64>, Vec<String>) {
         run_with_scheduler_stack(move || {
             let state = Arc::new(SequencerState::new(
                 4,
@@ -3674,6 +3685,17 @@
             scratch
                 .set_sequencer_trigger(published.id, published.trigger_source.as_deref())
                 .expect("trigger");
+            if let Some(driver) = driver {
+                scratch
+                    .register_published_sequencer(
+                        9,
+                        "driver".to_string(),
+                        crate::sequencer::Timebase::Sixteenth,
+                        driver.to_string(),
+                        &[],
+                    )
+                    .expect("register driver");
+            }
             state.transport.playing.store(true, Ordering::Relaxed);
             let mut scheduler = SchedulerLookaheadState::new(48_000);
             scheduler.generator_runtime.sync_definitions(&scratch.sequencer_defs(), 0.0);
@@ -3720,7 +3742,7 @@
                 samples.sort();
                 samples
             };
-            (on(0), on(1), errors)
+            (on(0), on(1), on(2), errors)
         })
     }
 
@@ -4633,6 +4655,7 @@
         assert!(errors.iter().any(|error| error.contains(":before-steps")), "{errors:?}");
         assert!(hits.iter().all(|hit| (hit.1 - 2.0).abs() > 1e-6), "{hits:?}");
     }
+
 
     /// takes spec 10 × defscene: a scene-latched manual launch suspends the
     /// song's scene-level authority, so shipped ticks must resolve scene
@@ -19886,5 +19909,27 @@ fn prebuilt_chunks_take_their_scenes_live_groove_table() {
     assert!(Arc::ptr_eq(&patched.track_grooves, &verse));
 }
 
+    /// Sixteenths 2 and 10 of every bar, from a generator.
+    const DRIVER_ON_TRACK_2: &str = "(if (= (mod (gen-tick) 8) 2) \
+                                     (seq-emit :track 2 :at :now :note 0 :vel 1 :dur 0.1) nil)";
+    const DRIVER_ON_TRACK_1: &str = "(if (= (mod (gen-tick) 8) 2) \
+                                     (seq-emit :track 1 :at :now :note 0 :vel 1 :dur 0.1) nil)";
 
+    #[test]
+    fn another_generators_hits_on_the_trigger_track_open_the_gate_on_their_own_boundary() {
+        let (_, hits, driven, errors) = generator_triggered_with_driver("2", Some(DRIVER_ON_TRACK_2));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(driven, [12_000, 60_000, 108_000, 156_000], "the driver plays track 2");
+        assert_eq!(hits, driven, "each driver hit gates the generator on its own boundary");
+    }
 
+    #[test]
+    fn a_generators_own_hits_on_its_trigger_track_do_not_gate_it() {
+        // The gated generator plays track 1 and listens to track 1: only the
+        // driver's hits open it, or it would retrigger itself every sixteenth.
+        let (_, hits, _, errors) = generator_triggered_with_driver("1", Some(DRIVER_ON_TRACK_1));
+        assert!(errors.is_empty(), "{errors:?}");
+        let driver = [12_000, 60_000, 108_000, 156_000];
+        let expected: Vec<u64> = driver.iter().flat_map(|&s| [s, s]).collect();
+        assert_eq!(hits, expected, "driver hit + one gated hit per driver hit");
+    }
