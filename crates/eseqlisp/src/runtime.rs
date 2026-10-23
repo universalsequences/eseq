@@ -1665,7 +1665,8 @@ impl NativeContext {
     pub fn effective_theme(&self) -> crate::theme::Theme {
         let mut theme = crate::theme::current();
         if let Some(pending) = self.shared.borrow().pending_apply_theme.as_ref() {
-            crate::theme::apply_value_to(&mut theme, &crate::theme::with_inherited_slots(pending.clone()));
+            let inherited = crate::theme::with_inherited_slots(pending.clone(), &theme);
+            crate::theme::apply_value_to(&mut theme, &inherited);
         }
         theme
     }
@@ -4704,7 +4705,7 @@ impl Runtime {
     /// Apply a theme map by updating each reactive THEME field and syncing the
     /// global theme. This ensures the reactive namespace stays in sync.
     pub(crate) fn apply_theme_map(&mut self, map: Value) {
-        let map = crate::theme::with_inherited_slots(map);
+        let map = crate::theme::with_inherited_slots(map, &crate::theme::current());
         if let Value::Map(ref entries) = map {
             for (field, value) in entries {
                 // Theme struct fields use underscores (status_ui_bg) but Lisp

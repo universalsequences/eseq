@@ -197,25 +197,20 @@ fn a_following_editor_shows_the_playheads_page() {
     assert_eq!(label["value"], Value::Number(1.0), "the cursor's page");
 }
 
-/// The pages' bar transposes read `t.bar-transposes` and set it through
-/// `set-bar-transpose!`: one undo entry, and the picker shows the value.
+/// A page's bar transpose reads `t.bar-transposes` and is set through
+/// `set-bar-transpose!` as one undo entry. (Its picker under the page
+/// buttons is hidden for now, so the setter is driven directly.)
 #[test]
-fn a_bar_transpose_picker_shows_and_sets_its_bar() {
+fn a_bar_transpose_sets_its_bar_as_one_undo_entry() {
     let mut h = editor_harness();
     h.shared.state.pattern.track_params[0].set_num_steps(32);
     h.sync();
-    h.run_editor("(eseq.sequencer/set-track-expanded (track 0) true)");
-    let tid = h.tid(0);
-    let picker = h.sequencer_widget(&format!("expanded-bar-transpose-{tid}-1"));
-    assert_eq!(picker["value"], Value::Number(0.0));
-    assert_eq!(picker["active"], Value::Bool(false), "a bar at 0 is dim");
+    assert_eq!(h.eval_all("(let ((t (track 0))) (nth t.bar-transposes 1))"), Value::Number(0.0));
     let undo = h.app.history.undo_len();
-    h.fire_and_show(&picker, "on-change", Value::Number(5.0));
+    h.run_editor("(eseq.kinds/set-bar-transpose! (track 0) 1 5)");
     assert_eq!(h.app.history.undo_len(), undo + 1);
     assert_eq!(h.shared.state.bar_transpose(0, 1), 5.0);
-    let picker = h.sequencer_widget(&format!("expanded-bar-transpose-{tid}-1"));
-    assert_eq!(picker["value"], Value::Number(5.0));
-    assert_eq!(picker["active"], Value::Bool(true));
+    assert_eq!(h.eval_all("(let ((t (track 0))) (nth t.bar-transposes 1))"), Value::Number(5.0));
 }
 
 /// A slot's slider edits its step (one undo entry), or every selected step

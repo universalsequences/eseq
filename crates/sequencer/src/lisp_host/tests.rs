@@ -2939,8 +2939,26 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         fn unnormalized_rates(source: &str) -> Vec<usize> {
             use eseqlisp::parser::{Parser, Token};
             let tokens = Parser::new(source.to_string()).parse_spanned().expect("tokenize DSP");
+            // Whether `byte` sits inside a `[...]` literal (tensor `@data`):
+            // a table of values, not a timing constant.
+            let in_brackets = |byte: usize| {
+                let (mut depth, mut comment) = (0_i32, false);
+                for b in source.as_bytes()[..byte].iter() {
+                    match b {
+                        b'\n' => comment = false,
+                        b';' => comment = true,
+                        b'[' if !comment => depth += 1,
+                        b']' if !comment => depth -= 1,
+                        _ => {}
+                    }
+                }
+                depth > 0
+            };
             tokens.iter().enumerate().filter_map(|(i, token)| {
                 if !matches!(token.token, Token::Number(n) if n == 44_100.0 || n == 44.1) {
+                    return None;
+                }
+                if in_brackets(token.span.start_byte) {
                     return None;
                 }
                 // DGen's biquad frequency API uses a fixed 44.1 kHz reference.
@@ -2957,6 +2975,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert!(unnormalized_rates("(param f @default 644.1) ; 44100\n(tensor @data [1.2441008])").is_empty());
         assert!(unnormalized_rates("(* hz (/ 44100.0 samplerate))").is_empty());
         assert_eq!(unnormalized_rates("(/ hz 44100.0)"), vec![1]);
+        assert!(unnormalized_rates("(tensor @shape [2] @data [44100 22050])").is_empty());
 
         fn visit(dir: &std::path::Path, failures: &mut Vec<String>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
@@ -14481,10 +14500,16 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
 
         let result = authoring
-            .eval_str("(def c (defchan c 0)) (tap c (lambda (v) (transpose! v)))")
+            // The compiler no longer quotes process sugar (98484052a), so
+            // the source and handler are passed as quoted forms.
+            .eval_str("(def c (defchan c 0)) (tap 'c '(lambda (v) (transpose! v)))")
             .expect("tap evaluation should publish listener process");
 
-        assert!(matches!(result, Some(Value::HostHandle { kind, .. }) if kind == "process"));
+        assert!(
+            matches!(&result, Some(Value::HostHandle { kind, .. }) if kind == "process"),
+            "{result:?}: {:?}",
+            authoring.take_status_message()
+        );
         assert!(
             ui_epoch.load(Ordering::Acquire) > 0,
             "regular runtime tap should publish"
@@ -14521,7 +14546,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
 
         authoring
-            .eval_str("(def c (defchan c 0)) (on (channel c) (lambda (v) (transpose! (+ v 1))))")
+            // Quoted forms: see `process_tap_from_regular_runtime_publishes_listener_process`.
+            .eval_str("(def c (defchan c 0)) (on '(channel c) '(lambda (v) (transpose! (+ v 1))))")
             .expect("on evaluation should publish listener process");
 
         let mut scratch = ScratchControlRuntime::new(

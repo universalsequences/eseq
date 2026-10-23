@@ -1446,7 +1446,9 @@ fn promote_again_updates_my_own_class_for_every_card_using_it() {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("(gain :float -1000000 1000000 :default 2 :lane true)"), "{text}");
         assert!(!text.contains("(decay "), "{text}");
-        assert!(text.contains("(string-from-char-code 34)"), "{text}");
+        // Quotes in the body are written as string escapes; the reload
+        // below proves the file reads back.
+        assert!(text.contains(r#":expr "; the \"gain\" card"#), "{text}");
         assert!(text.contains(":doc \"the 'gain' card\""), "{text}");
         assert_eq!(eval(&mut ui, &format!("(load \"{}\")", path.display())), Value::String(class.clone()), "reload");
         let rebind = node_eval(&mut ui, 1, "graph-node-process-rebind-class", &format!("{a} \"{class}\""));

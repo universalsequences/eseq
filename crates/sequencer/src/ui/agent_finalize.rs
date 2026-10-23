@@ -12,7 +12,7 @@ pub(super) const AGENT_INSTRUMENT_STUB_DSP: &str = r#"; Provisional silent instr
 "#;
 
 pub(super) const AGENT_INSTRUMENT_STUB_UI: &str = r#"(defsynth-ui
-  (box :width 70 :height :fill :padding 0 :debug-name "agent-instrument-stub-skeleton"
+  (box :width 70 :height 10 :padding 0 :debug-name "agent-instrument-stub-skeleton"
     (label "Designing instrument")))
 "#;
 

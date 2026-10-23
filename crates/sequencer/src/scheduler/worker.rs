@@ -424,6 +424,7 @@ impl SchedulerDriver {
             // (eseq-85a.5): the parked-on-error set is scoped to one
             // runtime build.
             self.lookahead_state.parked_generators.clear();
+            self.lookahead_state.gate_conflicts_reported.clear();
 
             let new_manifests: Vec<crate::graph::GraphManifest> =
                 published.iter().filter_map(|s| s.graph.clone()).collect();

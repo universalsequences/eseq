@@ -186,7 +186,7 @@ fn cmd_arrows_step_scenes_across_banks_without_wrapping() {
     h.sync();
     h.show_all();
     let viewed = |h: &mut Harness| h.eval("(eseq.scene-banks/scene-viewed-bank-index)");
-    let mut step = |h: &mut Harness, verb: &str| {
+    let step = |h: &mut Harness, verb: &str| {
         h.eval(&format!("(eseq.sequencer-keys/{verb})"));
         h.drain();
         h.sync();
@@ -214,7 +214,7 @@ fn bank_steps_show_the_neighbouring_bank_without_launching() {
     h.show_all();
     h.eval("(eseq.scene-banks/view-scene-bank! (first (banks)))");
     let scene = h.app.state.current_scene_index();
-    let mut step = |h: &mut Harness, verb: &str| {
+    let step = |h: &mut Harness, verb: &str| {
         h.eval(&format!("(eseq.sequencer-keys/{verb})"));
         h.drain();
         h.sync();

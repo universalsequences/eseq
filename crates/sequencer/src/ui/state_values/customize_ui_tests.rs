@@ -156,6 +156,10 @@ fn customize_lists_the_mixer_clip_knob_under_its_module_and_edits_resize_the_mix
 #[test]
 fn customize_lists_overrides_by_module_and_a_module_toggle_reverts_to_factory() {
     let mut editor = full_grid_editor_for_scroll_tests();
+    // The factory height, whatever the layout currently ships.
+    let Value::Number(factory) = eval(&mut editor, "(eseq.seq-layout/transport-height)") else {
+        panic!("transport height is a number");
+    };
     let package = std::env::temp_dir().join(format!(
         "customize-override-pkg-{}.lisp",
         std::process::id()
@@ -170,7 +174,7 @@ fn customize_lists_overrides_by_module_and_a_module_toggle_reverts_to_factory() 
     assert!(report.success, "{:?}", report.diagnostics);
     assert_eq!(
         eval(&mut editor, "(eseq.seq-layout/transport-height)"),
-        Value::Number(5.4)
+        Value::Number(factory + 3.0)
     );
 
     eval(&mut editor, "(eseq.customize/open-customize)");
@@ -202,7 +206,7 @@ fn customize_lists_overrides_by_module_and_a_module_toggle_reverts_to_factory() 
     );
     assert_eq!(
         eval(&mut editor, "(eseq.seq-layout/transport-height)"),
-        Value::Number(2.4),
+        Value::Number(factory),
         "disabling the package returns the factory value"
     );
     let disabled = eval(&mut editor, "(disabled-override-modules)");
@@ -231,7 +235,7 @@ fn customize_lists_overrides_by_module_and_a_module_toggle_reverts_to_factory() 
     );
     assert_eq!(
         eval(&mut editor, "(eseq.seq-layout/transport-height)"),
-        Value::Number(5.4)
+        Value::Number(factory + 3.0)
     );
     let _ = std::fs::remove_file(package);
 }

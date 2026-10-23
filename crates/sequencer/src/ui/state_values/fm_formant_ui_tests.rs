@@ -176,5 +176,13 @@ fn fm_formant_pages_expose_bound_visible_controls() {
     let expected: std::collections::HashSet<_> = dsp.lines().map(str::trim)
         .filter(|line| line.starts_with("(param "))
         .map(|line| line.split_whitespace().nth(1).unwrap().to_string()).collect();
-    assert_eq!(seen, expected, "Every DSP parameter must be reachable through the panel");
+    let mut unreachable: Vec<_> = expected.difference(&seen).collect();
+    let mut unknown: Vec<_> = seen.difference(&expected).collect();
+    unreachable.sort();
+    unknown.sort();
+    assert!(
+        unreachable.is_empty() && unknown.is_empty(),
+        "Every DSP parameter must be reachable through the panel: \
+         unreachable {unreachable:?}, not in the DSP {unknown:?}"
+    );
 }

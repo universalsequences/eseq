@@ -5237,9 +5237,15 @@
         use crate::scheduler::scheduled_event::{ScheduledEventKind, ScheduledEventQueue};
 
         #[derive(Clone, Copy, Debug, PartialEq)]
-        enum Mode { Bar, Sixteenth, BarMirrorRace, Off, Live, SongLive }
+        enum Mode { Bar, Sixteenth, BarMirrorRace, Off, Live, SongLive, SongLiveTracks }
         let mut failures = Vec::new();
-        for mode in [Mode::Bar, Mode::Sixteenth, Mode::BarMirrorRace, Mode::Off, Mode::Live, Mode::SongLive] {
+        for mode in [
+            Mode::Bar, Mode::Sixteenth, Mode::BarMirrorRace, Mode::Off, Mode::Live, Mode::SongLive,
+            // A per-track launch leaves the live scene alone: the scheduler
+            // still re-adopts the lane it switched.
+            Mode::SongLiveTracks,
+        ] {
+            let song = matches!(mode, Mode::SongLive | Mode::SongLiveTracks);
             // Scene 1 plays the same quarter notes as a 4-step pattern, so a
             // mid-step switch maps the playhead to another step index.
             for (drain_every, short_scene) in [(1_usize, false), (3, false), (8, false), (1, true), (3, true)] {
@@ -5253,7 +5259,7 @@
                     second.track_bits[0][0] = 1;
                     second.track_params[0].num_steps = 4;
                 }
-                let mut app = if mode == Mode::SongLive {
+                let mut app = if song {
                     // The arrangement transport needs a track lane per track:
                     // patterns go in before the App exists, as on project load.
                     let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
@@ -5271,7 +5277,7 @@
                 };
                 app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 })
                     .expect("load scene 0");
-                if mode == Mode::SongLive {
+                if song {
                     // Play as the app does: the empty arrangement auto-latches
                     // the selected scene, so every switch is a latched launch.
                     // Play past the arrangement's end: jam space.
@@ -5342,15 +5348,19 @@
                     let beat = rendered as f64 / spq;
                     let ask_at = match (short_scene, mode) {
                         (true, _) => 2.02,
-                        (false, Mode::SongLive) => 2.97,
+                        (false, Mode::SongLive | Mode::SongLiveTracks) => 2.97,
                         (false, _) => 2.3,
                     };
                     if (beat % 4.0 - ask_at).abs() < 512.0 / spq / 2.0 {
                         scene = 1 - scene;
-                        let target = PatternLaunchTarget::Scene { scene };
+                        let target = if mode == Mode::SongLiveTracks {
+                            PatternLaunchTarget::SceneTracks { scene, tracks: vec![0] }
+                        } else {
+                            PatternLaunchTarget::Scene { scene }
+                        };
                         match mode {
                             Mode::Off => { app.apply_manual_pattern_launch(&target).expect("launch"); }
-                            Mode::Live | Mode::SongLive => {
+                            Mode::Live | Mode::SongLive | Mode::SongLiveTracks => {
                                 let live = app.try_queue_live_pattern_launch(&target).expect("launch");
                                 assert!(live, "a launch during playback goes live");
                             }

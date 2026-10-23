@@ -176,6 +176,7 @@ impl SequencerState {
                 num_tracks: AtomicU32::new(num_tracks as u32),
                 track_playheads: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 track_process_lengths: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
+                track_launch_generations: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 track_playhead_phases: (0..MAX_TRACKS)
                     .map(|_| AtomicU32::new(0.0_f32.to_bits()))
                     .collect(),
@@ -446,34 +447,33 @@ impl SequencerState {
     }
 
     /// Unquantized launch during session playback: the scheduler switches at
-    /// its scheduling frontier from the target's prebuilt snapshot, so hits
-    /// already handed to the audio thread play out as the old scene. `None`
-    /// when this is not a live launch (stopped, song playback) or the target
-    /// does not preflight; the caller applies it immediately instead.
+    /// its scheduling frontier from the target's prebuilt `snapshot` (from
+    /// [`Self::session_launch_snapshot`]), so hits already handed to the
+    /// audio thread play out as the old scene.
     pub fn schedule_live_pattern_launch(
         &self,
         target: crate::quantized_launch::PatternLaunchTarget,
         owner: crate::quantized_launch::QuantizedLaunchOwner,
-    ) -> Option<
-        Result<
-            crate::quantized_launch::QuantizedLaunchToken,
-            crate::quantized_launch::QuantizedLaunchSubmitError,
-        >,
+        snapshot: Arc<SequencerSnapshot>,
+    ) -> Result<
+        crate::quantized_launch::QuantizedLaunchToken,
+        crate::quantized_launch::QuantizedLaunchSubmitError,
     > {
-        let snapshot = self.session_launch_snapshot(&target)?;
-        Some(self.quantized_launches.schedule(
+        self.quantized_launches.schedule(
             target,
             crate::quantized_launch::LaunchQuantize::Off,
             owner,
             self.scene_count(),
             self.active_track_count(),
             Some(snapshot),
-        ))
+        )
     }
 
     /// The prebuilt snapshot a scheduler-applied launch carries: only during
-    /// session playback (the scheduler applies launches only there).
-    fn session_launch_snapshot(
+    /// session playback (the scheduler applies launches only there). `None`
+    /// when stopped, during song playback, or when the target does not
+    /// preflight.
+    pub fn session_launch_snapshot(
         &self,
         target: &crate::quantized_launch::PatternLaunchTarget,
     ) -> Option<Arc<SequencerSnapshot>> {

@@ -315,8 +315,8 @@ impl LockHolds {
         self.holds.retain(|hold| live(hold.generator_id));
     }
 
-    pub fn covers(&self, track: usize, sample: u64) -> bool {
-        self.params_at(track, sample).next().is_some()
+    pub fn covers(&self, track: usize, sample: u64, exclude_generator: Option<u64>) -> bool {
+        self.params_at(track, sample, exclude_generator).next().is_some()
     }
 
     /// Forget holds that ended at or before `sample`. The scheduler passes
@@ -339,16 +339,23 @@ impl LockHolds {
         });
     }
 
-    /// The params of every hold on `track` covering `sample`, engage order.
+    /// The params of every hold on `track` covering `sample`, engage order,
+    /// bar those of `exclude_generator` (a hold covers only the hits other
+    /// sources play).
     pub fn params_at(
         &self,
         track: usize,
         sample: u64,
+        exclude_generator: Option<u64>,
     ) -> impl Iterator<Item = &[(crate::process::ParamRef, f32)]> {
         self.holds
             .iter()
             .take_while(move |hold| hold.engage_sample <= sample)
-            .filter(move |hold| hold.track == track && sample < hold.release_sample)
+            .filter(move |hold| {
+                hold.track == track
+                    && sample < hold.release_sample
+                    && Some(hold.generator_id) != exclude_generator
+            })
             .map(|hold| hold.params.as_slice())
     }
 }
@@ -549,6 +556,56 @@ impl GeneratorRuntime {
         block_start_sample: u64,
         samples_per_quarter: f64,
         include: I,
+        tick_fn: F,
+        out: &mut Vec<GeneratorEmission>,
+        control_out: &mut Vec<MixerControlEmission>,
+        lock_out: &mut Vec<LockHoldEmission>,
+    ) where
+        I: Fn(u64) -> bool,
+        F: FnMut(GeneratorTickInput) -> GeneratorTickResult,
+    {
+        self.process_range_selected(
+            (start_beats, block_start_sample),
+            start_beats,
+            end_beats,
+            samples_per_quarter,
+            include,
+            tick_fn,
+            out,
+            control_out,
+            lock_out,
+        );
+    }
+
+    /// The earliest boundary of a generator `include` accepts later than
+    /// `after_beats` and before `end_beats`: where the scheduler splits a
+    /// block so one generator's hits reach another's gate on that boundary.
+    pub fn next_boundary_in(
+        &self,
+        after_beats: f64,
+        end_beats: f64,
+        samples_per_quarter: f64,
+        include: impl Fn(u64) -> bool,
+    ) -> Option<f64> {
+        let limit = end_beats - boundary_tolerance(samples_per_quarter);
+        self.instances
+            .iter()
+            .filter(|inst| include(inst.id))
+            .map(|inst| inst.clock.boundary_after(after_beats, samples_per_quarter))
+            .filter(|boundary| *boundary <= limit)
+            .min_by(f64::total_cmp)
+    }
+
+    /// [`Self::process_block_selected`] over `[start_beats, end_beats)` of a
+    /// block whose samples count from `anchor` `(beats, sample)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_range_selected<I, F>(
+        &mut self,
+        anchor: (f64, u64),
+        start_beats: f64,
+        end_beats: f64,
+        samples_per_quarter: f64,
+        include: I,
         mut tick_fn: F,
         out: &mut Vec<GeneratorEmission>,
         control_out: &mut Vec<MixerControlEmission>,
@@ -573,10 +630,10 @@ impl GeneratorRuntime {
             let mut state = std::mem::take(&mut self.instances[generator_index].state);
             let mut gate = std::mem::take(&mut self.instances[generator_index].gate);
             let resolution_beats = clock.resolution_beats;
-            clock.process(
+            clock.process_anchored(
+                anchor,
                 start_beats,
                 end_beats,
-                block_start_sample,
                 samples_per_quarter,
                 |beat, _grid_index, boundary_sample| {
                     let gate_view = gate.deliver(beat);

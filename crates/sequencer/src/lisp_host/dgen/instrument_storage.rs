@@ -938,7 +938,7 @@ fn resolve_instrument_storage_path_with_paths(
         }
     }
 
-    let mut remember = |resolved: PathBuf| {
+    let remember = |resolved: PathBuf| {
         resolved_walk_cache()
             .lock()
             .unwrap()

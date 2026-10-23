@@ -1,6 +1,12 @@
 use super::*;
 use sequencer::sequencer::{RackMacroCurve, RackMacroId, RackMacroMapping, RackMacroTarget, RackSlotParam};
 
+/// The slot params the rack row shows a control for: the voices picker left
+/// the row in the slider rework.
+fn row_params() -> impl Iterator<Item = RackSlotParam> {
+    RackSlotParam::ALL.into_iter().filter(|param| *param != RackSlotParam::MaxPolyphony)
+}
+
 pub(super) fn rack_slot_indicator_editor() -> (app::App, eseqlisp::Editor) {
     let app = test_app_with_rack_panel();
     {
@@ -40,7 +46,7 @@ fn rack_slot_plock_indicators_and_menus_follow_each_parameter() {
     let (app, mut editor) = rack_slot_indicator_editor();
     seed_value("current-track", Value::Number(0.0));
     seed_value("selected-steps", test_list(vec![]));
-    for locked_param in RackSlotParam::ALL {
+    for locked_param in row_params() {
         for locked in [true, false] {
             {
                 let mut racks = app.state.pattern.rack_tracks.lock().unwrap();
@@ -59,7 +65,7 @@ fn rack_slot_plock_indicators_and_menus_follow_each_parameter() {
             let layout = editor.widget_layout().expect("rack lock layout");
             let panel = find_layout_node_by_debug_name(&layout, "rack-panel").unwrap();
             for slot in 0..2 {
-                for param in RackSlotParam::ALL {
+                for param in row_params() {
                     let key = format!("rack-slot-control-{slot}-{}", param.name());
                     let wrapper = find_layout_node_by_debug_name(panel, &key).unwrap();
                     let expected = locked && slot == 1 && param == locked_param;
@@ -114,7 +120,7 @@ fn rack_slot_plock_indicators_and_menus_follow_each_parameter() {
 fn rack_slot_macro_indicators_follow_mapping_changes() {
     let (mut app, mut editor) = rack_slot_indicator_editor();
     let macro_id = RackMacroId::from_index(0).unwrap();
-    for mapped_param in RackSlotParam::ALL {
+    for mapped_param in row_params() {
         app.map_rack_macro(0, macro_id, RackMacroMapping {
             target: RackMacroTarget::SlotParam {
                 slot: 0,
@@ -134,7 +140,7 @@ fn rack_slot_macro_indicators_follow_mapping_changes() {
             let layout = editor.widget_layout().expect("rack slot indicator layout");
             let panel = find_layout_node_by_debug_name(&layout, "rack-panel").unwrap();
             for slot in 0..2 {
-                for param in RackSlotParam::ALL {
+                for param in row_params() {
                     let key = format!("rack-slot-control-{slot}-{}", param.name());
                     let wrapper = find_layout_node_by_debug_name(panel, &key)
                         .unwrap_or_else(|| panic!("missing {key}"));

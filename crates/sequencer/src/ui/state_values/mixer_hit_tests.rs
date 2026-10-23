@@ -187,14 +187,22 @@ fn first_badge_click(editor: &mut Editor, buffer: &str, key: &str) -> (f32, f32)
     let layout = tile.frame.widget_layout.as_deref().unwrap();
     let badge = find_layout_node_by_stable_key_suffix(layout, key).unwrap();
     assert_finite_nonzero_rect(badge, "badge pointer target");
+    // The badge's upper part: in a short mixer tile the bottom row of strip
+    // labels sits partly below the tile edge.
     let at = (
         tile.rect.col + badge.rect.col + badge.rect.width * 0.7
             - tile.frame.widget_layout_scroll_left,
-        tile.rect.row + badge.rect.row + badge.rect.height * 0.5
+        tile.rect.row + badge.rect.row + badge.rect.height * 0.25
             - tile.frame.widget_scroll_top,
     );
     assert!(at.0 >= tile.rect.col && at.0 < tile.rect.col + tile.rect.width);
-    assert!(at.1 >= tile.rect.row && at.1 < tile.rect.row + tile.rect.height);
+    assert!(
+        at.1 >= tile.rect.row && at.1 < tile.rect.row + tile.rect.height,
+        "{key} at {at:?} outside tile {:?}; badge {:?}, scroll top {}",
+        tile.rect,
+        badge.rect,
+        tile.frame.widget_scroll_top
+    );
     editor.active_leaf_mut().last_widget_click = None;
     click_at(editor, at);
     at

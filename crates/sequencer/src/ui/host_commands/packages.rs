@@ -2085,7 +2085,7 @@ pub(crate) fn register_package_tree_natives(runtime: &mut Runtime, state: Arc<Se
                 "",
             );
             let kinds = instance_kinds(&catalog, &sequencer::lisp_host::registered_kinds());
-            let choices = package_kind_choices(&tree, &kinds, |path| std::fs::read_to_string(path).ok());
+            let choices = package_kind_choices(&tree, &kinds, cached_def_kind_names);
             Ok(crate::values::list_value(choices.into_iter().map(|choice| {
                 crate::values::map_value(vec![
                     ("name", Value::String(choice.name)),
@@ -2173,37 +2173,69 @@ pub(crate) struct KindChoice {
 /// (manifests + registry), then the `def-kind`s in the source of every
 /// module row no known kind already covers, so a local package nobody has
 /// attached yet is still one palette search away.
+/// `def_kinds` lists the `def-kind` names in a module file
+/// ([`cached_def_kind_names`] in the app).
 pub(crate) fn package_kind_choices(
     roots: &[PackageTreeNode],
     kinds: &[TreeKind],
-    read_source: impl Fn(&Path) -> Option<String>,
+    def_kinds: impl Fn(&Path) -> Vec<String>,
 ) -> Vec<KindChoice> {
     fn walk(
         nodes: &[PackageTreeNode],
         choices: &mut Vec<KindChoice>,
-        read_source: &dyn Fn(&Path) -> Option<String>,
+        def_kinds: &dyn Fn(&Path) -> Vec<String>,
     ) {
         for node in nodes {
             if let (true, Some(module), Some(path)) =
                 (node.kind == "module", node.module.as_ref(), node.path.as_deref())
             {
-                let source = read_source(path).unwrap_or_default();
-                let forms = sequencer::agent::forms::top_level_forms(&source).unwrap_or_default();
-                for name in forms.into_iter().filter(|form| form.head == "def-kind").filter_map(|form| form.name) {
+                for name in def_kinds(path) {
                     if !choices.iter().any(|choice| &choice.module == module && choice.name == name) {
                         choices.push(KindChoice { name, module: module.clone(), id: None });
                     }
                 }
             }
-            walk(&node.children, choices, read_source);
+            walk(&node.children, choices, def_kinds);
         }
     }
     let mut choices: Vec<KindChoice> = kinds
         .iter()
         .map(|kind| KindChoice { name: kind.name.clone(), module: kind.module.clone(), id: Some(kind.id.clone()) })
         .collect();
-    walk(roots, &mut choices, &read_source);
+    walk(roots, &mut choices, &def_kinds);
     choices
+}
+
+/// The top-level `def-kind` names in `source`.
+fn def_kind_names(source: &str) -> Vec<String> {
+    sequencer::agent::forms::top_level_forms(source)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|form| form.head == "def-kind")
+        .filter_map(|form| form.name)
+        .collect()
+}
+
+/// [`def_kind_names`] of the module file at `path`, parsed again only when
+/// its size or modification time changed: the palette asks for every
+/// module's kinds each time it opens.
+fn cached_def_kind_names(path: &Path) -> Vec<String> {
+    type Stamp = (Option<std::time::SystemTime>, u64);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (Stamp, Vec<String>)>>> =
+        std::sync::OnceLock::new();
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Vec::new();
+    };
+    let stamp = (metadata.modified().ok(), metadata.len());
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
+    if let Some((cached, names)) = cache.get(path) {
+        if *cached == stamp {
+            return names.clone();
+        }
+    }
+    let names = def_kind_names(&std::fs::read_to_string(path).unwrap_or_default());
+    cache.insert(path.to_path_buf(), (stamp, names.clone()));
+    names
 }
 
 /// Parse `project.instances` (the host kinds' rows, one dict per instance).
@@ -3504,7 +3536,9 @@ mod tests {
         let tree = build_package_tree(&local, &catalog, &installed, "", "");
         let known = [TreeKind { id: "euclid:euclid".into(), name: "euclid".into(), module: "euclid".into() }];
 
-        let choices = package_kind_choices(&tree, &known, |path| std::fs::read_to_string(path).ok());
+        let choices = package_kind_choices(&tree, &known, |path| {
+            def_kind_names(&std::fs::read_to_string(path).unwrap_or_default())
+        });
         assert_eq!(
             choices,
             [

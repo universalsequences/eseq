@@ -357,6 +357,31 @@
       :list-icon-preset                   '(0.611 0.808 0.338)
       :list-icon-lfo                      '(0.611 0.808 0.338)
       :list-icon-misc                     '(0.390 0.516 0.216)
+      ;; Newer slots; the split-off ones take their parent's color here
+      :dropdown-border                      '(1.0 1.0 1.0 0.11)  ; hairline around a dropdown trigger
+      :dropdown-badge-border                '(1.0 1.0 1.0 0.16)
+      :sampler-control-bg                   '(0.035 0.055 0.008)  ; follows :instrument-control-bg
+      :sampler-grid                         '(0.400 0.570 0.250)  ; follows :dim
+      :mod-panel-bg                         '(0.035 0.055 0.008)  ; follows :black
+      :modal-bg                             '(0.056 0.080 0.033)  ; follows :dropdown-menu-bg
+      :filterbank-heading                   '(0.43 0.69 0.24 1.0)  ; follows :filterbank-control-on
+      :curve-editor-grid                    '(0.090 0.130 0.045)  ; follows :border-inactive
+      :curve-editor-bg                      '(0.035 0.055 0.008)  ; follows :instrument-control-bg
+      :curve-editor-fg                      '(0.400 0.570 0.250)  ; follows :dim
+      :timeline-ruler-bg                    '(0.043 0.061 0.031)  ; follows :status-bg
+      :timeline-ruler-fg                    '(0.400 0.570 0.250)  ; follows :fg-muted
+      :compressor-text                      '(0.400 0.570 0.250)  ; follows :dim
+      :transport-led-dim                    '(0.310 0.430 0.200)  ; follows :dimmer
+      :rack-cell-fg                         '(0.55 0.76 0.32 1.0)  ; follows :clock-fg
+      :param-adsr-bg                        '(0.035 0.055 0.008)  ; follows :instrument-control-bg
+      :instrument-control-contrast          '(0.910 0.910 0.918 1.0)
+      :lego-header-bg                       '(0.0 0.0 0.0 0.0)
+      :param-mod-bg                         '(0.03 0.20 0.35 0.94)
+      :param-mod-border                     '(0.18 0.48 0.95 0.84)
+      :modal-shadow                         '(0.0 0.0 0.0 0.30)
+      :rack-cell-wash                       '(0.0 0.0 0.0 0.0)
+      :track-name-muted-fg                  '(0.4 0.4 0.4 0.6)
+      :list-selected-fg                     '(0.0 0.0 0.0 0.0)
       )))
 
 (phosphor-theme)

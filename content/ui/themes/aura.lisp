@@ -355,6 +355,31 @@
       :list-icon-preset                    '(1.000 0.792 0.522)
       :list-icon-lfo                       '(0.510 0.886 1.000)
       :list-icon-misc                      '(0.427 0.427 0.427)
+      ;; Newer slots; the split-off ones take their parent's color here
+      :dropdown-border                      '(1.0 1.0 1.0 0.11)  ; hairline around a dropdown trigger
+      :dropdown-badge-border                '(1.0 1.0 1.0 0.16)
+      :sampler-control-bg                   '(0.067 0.059 0.094)  ; follows :instrument-control-bg
+      :sampler-grid                         '(0.424 0.424 0.439)  ; follows :dim
+      :mod-panel-bg                         '(0.067 0.059 0.094)  ; follows :black
+      :modal-bg                             '(0.125 0.122 0.165)  ; follows :dropdown-menu-bg
+      :filterbank-heading                   '(0.635 0.467 1.000 1.000)  ; follows :filterbank-control-on
+      :curve-editor-grid                    '(0.231 0.200 0.294)  ; follows :border-inactive
+      :curve-editor-bg                      '(0.067 0.059 0.094)  ; follows :instrument-control-bg
+      :curve-editor-fg                      '(0.424 0.424 0.439)  ; follows :dim
+      :timeline-ruler-bg                    '(0.071 0.063 0.086)  ; follows :status-bg
+      :timeline-ruler-fg                    '(0.427 0.427 0.427)  ; follows :fg-muted
+      :compressor-text                      '(0.424 0.424 0.439)  ; follows :dim
+      :transport-led-dim                    '(0.302 0.290 0.353)  ; follows :dimmer
+      :rack-cell-fg                         '(0.804 0.800 0.808 1.000)  ; follows :clock-fg
+      :param-adsr-bg                        '(0.067 0.059 0.094)  ; follows :instrument-control-bg
+      :instrument-control-contrast          '(0.910 0.910 0.918 1.0)
+      :lego-header-bg                       '(0.0 0.0 0.0 0.0)
+      :param-mod-bg                         '(0.03 0.20 0.35 0.94)
+      :param-mod-border                     '(0.18 0.48 0.95 0.84)
+      :modal-shadow                         '(0.0 0.0 0.0 0.30)
+      :rack-cell-wash                       '(0.0 0.0 0.0 0.0)
+      :track-name-muted-fg                  '(0.4 0.4 0.4 0.6)
+      :list-selected-fg                     '(0.0 0.0 0.0 0.0)
       )))
 
 (aura-theme)

@@ -386,7 +386,7 @@ fn rack_slot_devices_hold_the_slot_instrument_its_voices_and_effects() {
     h.eval_all("(unlock-param! start (list (nth t2.steps 2) (nth t2.steps 5) (nth t2.steps 7)))");
     h.drain_and_sync();
     let plocks = h.rack_slot().instrument_slot.plocks;
-    assert_eq!((plocks[2][START], plocks[5][START]), (None, None));
+    assert_eq!((plocks.cell(2, START), plocks.cell(5, START)), (None, None));
     assert_eq!(h.app.history.undo_len(), before + 1);
     assert_eq!(
         h.eval_all("(list start.locked start.has-locks)"),

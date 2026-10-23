@@ -228,7 +228,6 @@
       :list-icon-lfo        '(0.68 0.35 0.85)
       :list-icon-misc       '(0.74 0.77 0.77)
       :tree-row-alt-bg '(0.600 0.602 0.618)
-      :dark-gray            '(0.360 0.372 0.388)
       
       :fx-panel-bg       '(0.685 0.695 0.710)
       :fx-inner-panel-bg '(0.650 0.662 0.678)

@@ -1722,6 +1722,7 @@
                 named_params: Vec::new(),
             },
             None,
+            None,
             false,
         ));
 
@@ -1787,6 +1788,7 @@
                 instrument_params: Vec::new(),
                 named_params: Vec::new(),
             },
+            None,
             None,
             false,
         ));
@@ -1943,6 +1945,7 @@
                 instrument_params: Vec::new(),
                 named_params: Vec::new(),
             },
+            None,
             None,
             false,
         ));
@@ -2544,6 +2547,7 @@
             },
             graph_emissions.remove(0).event,
             None,
+            None,
             false,
         ));
 
@@ -2611,6 +2615,7 @@
                 instrument_params: Vec::new(),
                 named_params: Vec::new(),
             },
+            None,
             None,
             false,
         ));
@@ -2680,6 +2685,7 @@
                 instrument_params: Vec::new(),
                 named_params: Vec::new(),
             },
+            None,
             None,
             false,
         ));
@@ -3621,6 +3627,16 @@
         trigger_source: &'static str,
         driver: Option<&'static str>,
     ) -> (Vec<u64>, Vec<u64>, Vec<u64>, Vec<String>) {
+        generator_triggered_with_driver_in_chunks(trigger_source, driver, 6_000)
+    }
+
+    /// [`generator_triggered_with_driver`], `chunk` samples per lookahead
+    /// call.
+    fn generator_triggered_with_driver_in_chunks(
+        trigger_source: &'static str,
+        driver: Option<&'static str>,
+        chunk: u64,
+    ) -> (Vec<u64>, Vec<u64>, Vec<u64>, Vec<String>) {
         run_with_scheduler_stack(move || {
             let state = Arc::new(SequencerState::new(
                 4,
@@ -3704,7 +3720,6 @@
             let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
                 std::array::from_fn(|_| LiveMidiFxTrackState::default());
             // 24000 samples per quarter: a sixteenth is 6000, a bar 96000.
-            let chunk = 6_000u64;
             let (mut now, mut until) = (0u64, 0u64);
             let mut observed = Vec::new();
             while now < 2 * 96_000 {
@@ -4527,6 +4542,20 @@
     }
 
     fn lock_hold_hits_and_errors(before_steps: bool) -> (Vec<(u64, f32, bool)>, Vec<String>) {
+        lock_hold_run(
+            before_steps,
+            r#"(seq-emit :track 0 :at :now :dur 0.25 :lock true
+                         :params (list "instrument:speed" 2))"#,
+        )
+    }
+
+    /// [`lock_hold_hits_and_errors`] with `locker_tick` as the locker's tick
+    /// body. The errors include the scheduler VM's status message, where a
+    /// native's error lands.
+    fn lock_hold_run(
+        before_steps: bool,
+        locker_tick: &'static str,
+    ) -> (Vec<(u64, f32, bool)>, Vec<String>) {
         run_with_scheduler_stack(move || {
             let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
             state.pattern.track_params[0].set_num_steps(16);
@@ -4559,9 +4588,7 @@
                     r#"(__register-sequencer "locker"
                          :resolution :4
                          :before-steps {before_steps}
-                         :tick (lambda ()
-                           (seq-emit :track 0 :at :now :dur 0.25 :lock true
-                                     :params (list "instrument:speed" 2))))"#
+                         :tick (lambda () {locker_tick}))"#
                 ))
                 .expect("register locker");
             scratch
@@ -4609,6 +4636,7 @@
                 .drain_generator_tick_errors()
                 .into_iter()
                 .map(|notice| notice.error)
+                .chain(scratch_runtime.as_mut().and_then(|runtime| runtime.take_status_message()))
                 .collect();
 
             let mut hits = Vec::new();
@@ -4645,6 +4673,48 @@
                 assert!((speed - 2.0).abs() > 1e-6, "{hits:?}");
             }
         }
+    }
+
+    #[test]
+    fn lock_hold_skips_the_locking_generators_own_hits() {
+        let (hits, errors) = lock_hold_run(
+            true,
+            r#"(do
+                 (seq-emit :track 0 :at :now :dur 0.25 :lock true
+                           :params (list "instrument:speed" 2))
+                 (seq-emit :track 0 :at 0.05))"#,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        // The locker's own +0.05 hit (1_200 samples into the beat) sits in
+        // its window but keeps the base speed; the player's +0.1 hit locks.
+        let own: Vec<_> = hits.iter().filter(|hit| hit.0 % 24_000 == 1_200).collect();
+        assert_eq!(own.len(), 2, "{hits:?}");
+        assert!(own.iter().all(|hit| (hit.1 - 2.0).abs() > 1e-6), "{hits:?}");
+        assert!(
+            hits.iter()
+                .filter(|hit| hit.0 % 24_000 == 2_400)
+                .all(|hit| (hit.1 - 2.0).abs() < 1e-6),
+            "{hits:?}"
+        );
+    }
+
+    #[test]
+    fn lock_zero_is_false_and_lock_needs_an_explicit_dur() {
+        // eseqlisp's 0 is false: `:lock 0` plays a hit with its own params.
+        let (hits, errors) = lock_hold_run(
+            true,
+            r#"(seq-emit :track 0 :at :now :lock 0 :params (list "instrument:speed" 2))"#,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(hits.iter().filter(|hit| !hit.2).count(), 6, "{hits:?}");
+        // No :dur: a hit's one-beat default is not a lock window, so the
+        // seq-emit fails and nothing locks.
+        let (hits, errors) = lock_hold_run(
+            true,
+            r#"(seq-emit :track 0 :at :now :lock true :params (list "instrument:speed" 2))"#,
+        );
+        assert!(errors.iter().any(|error| error.contains(":dur")), "{errors:?}");
+        assert!(hits.iter().all(|hit| (hit.1 - 2.0).abs() > 1e-6), "{hits:?}");
     }
 
     #[test]
@@ -5248,7 +5318,10 @@
                          :resolution :4
                          :tick (lambda () (seq-emit :track 0 :at :now :vel (chan-get "warp" 0.25))))
                        (def drive (defchan drive 0))
-                       (tap drive (lambda (value) (send warp 0.8)))
+                       (def-process drive-warp
+                         :listen ((event (channel drive)))
+                         :on-event (lambda (value) (send warp 0.8)))
+                       (start (drive-warp))
                        (def wave (defchan wave 0))
                        (def-process "wave-driver"
                          :state ((phase 0))
@@ -5355,8 +5428,13 @@
                 !driven.is_empty(),
                 "generator emitted nothing after process write"
             );
+            // The tap runs in the process stage, after the chunk's generator
+            // tick, so the hit on the write's own chunk still reads 0.9 and
+            // every later one the process-driven 0.8.
+            let (first, rest) = driven.split_first().expect("a hit");
+            assert!((first - 0.9).abs() < 1e-6, "{driven:?}");
             assert!(
-                driven.iter().all(|vel| (vel - 0.8).abs() < 1e-6),
+                !rest.is_empty() && rest.iter().all(|vel| (vel - 0.8).abs() < 1e-6),
                 "expected the process-driven channel value, got {driven:?}"
             );
             assert_eq!(
@@ -18663,9 +18741,11 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
         fn step_derived_process_emission_on_velocity_grooved_member_is_grooved_once() {
             let events = render_grooved_process_fixture(
                 r#"
-                (on (track-fires 0)
-                  (lambda (ev)
+                (def-process groove-echo
+                  :listen ((event (track-fires 0)))
+                  :on-event (lambda (ev)
                     (emit :track 0 :after 0.5 :vel (get ev :velocity))))
+                (start (groove-echo))
                 "#,
             );
             assert_velocities(&events, &[0, 12_000], 0.4);
@@ -19921,6 +20001,17 @@ fn prebuilt_chunks_take_their_scenes_live_groove_table() {
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(driven, [12_000, 60_000, 108_000, 156_000], "the driver plays track 2");
         assert_eq!(hits, driven, "each driver hit gates the generator on its own boundary");
+    }
+
+    #[test]
+    fn a_driver_hit_gates_on_its_own_boundary_whatever_the_buffer_size() {
+        // A quarter per lookahead call holds four sixteenth boundaries: the
+        // driver's hit still opens the gate on the boundary it plays on.
+        let (_, hits, driven, errors) =
+            generator_triggered_with_driver_in_chunks("2", Some(DRIVER_ON_TRACK_2), 24_000);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(driven, [12_000, 60_000, 108_000, 156_000], "the driver plays track 2");
+        assert_eq!(hits, driven);
     }
 
     #[test]

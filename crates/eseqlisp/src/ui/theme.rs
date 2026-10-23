@@ -1595,17 +1595,31 @@ const INHERITED_SLOTS: &[(&str, &str)] = &[
     ("param_adsr_bg", "instrument_control_bg"),
 ];
 
-/// `map` with each [`INHERITED_SLOTS`] child the map leaves unset copied
-/// from its parent, when the map sets the parent.
-pub fn with_inherited_slots(map: Value) -> Value {
+/// `map`, applied over `base`, with each [`INHERITED_SLOTS`] child the map
+/// leaves unset copied from its parent when the map sets the parent and the
+/// child still follows it in `base` (same color, or never set). A child the
+/// theme gave its own color keeps it through a partial map.
+pub fn with_inherited_slots(map: Value, base: &Theme) -> Value {
     let Value::Map(mut entries) = map else {
         return map;
     };
     let key_for = |entries: &HashMap<String, Rc<RefCell<Value>>>, field: &str| {
         entries.keys().find(|key| normalize_name(key) == field).cloned()
     };
+    let colors = |theme: &Theme| -> HashMap<String, Color> {
+        slot_colors_in(theme)
+            .into_iter()
+            .map(|(name, color)| (name.replace('-', "_"), color))
+            .collect()
+    };
+    let (current, defaults) = (colors(base), colors(&default_theme()));
     for (child, parent) in INHERITED_SLOTS {
         if key_for(&entries, child).is_some() {
+            continue;
+        }
+        let follows = current.get(*child) == current.get(*parent)
+            || current.get(*child) == defaults.get(*child);
+        if !follows {
             continue;
         }
         if let Some(parent_key) = key_for(&entries, parent) {
@@ -1992,10 +2006,33 @@ mod tests {
             ("modal-bg".to_string(), Rc::new(RefCell::new(color(0.75)))),
         ]));
         let mut theme = default_theme();
-        apply_value_to(&mut theme, &with_inherited_slots(map));
+        apply_value_to(&mut theme, &with_inherited_slots(map, &default_theme()));
         assert_eq!(theme.sampler_control_bg, Color::rgba(0.25, 0.0, 0.0, 1.0));
         assert_eq!(theme.modal_bg, Color::rgba(0.75, 0.0, 0.0, 1.0));
         assert_eq!(theme.mod_panel_bg, default_theme().mod_panel_bg, "parent unset");
+
+        // A later partial map that sets only the parent moves the children
+        // that follow it and leaves the one the theme set on its own.
+        let partial = Value::Map(HashMap::from([(
+            "instrument-control-bg".to_string(),
+            Rc::new(RefCell::new(color(0.5))),
+        )]));
+        let base = theme.clone();
+        apply_value_to(&mut theme, &with_inherited_slots(partial, &base));
+        assert_eq!(theme.sampler_control_bg, Color::rgba(0.5, 0.0, 0.0, 1.0), "followed");
+        let own = Value::Map(HashMap::from([
+            ("curve-editor-bg".to_string(), Rc::new(RefCell::new(color(0.125)))),
+        ]));
+        let base = theme.clone();
+        apply_value_to(&mut theme, &with_inherited_slots(own, &base));
+        let partial = Value::Map(HashMap::from([(
+            "instrument-control-bg".to_string(),
+            Rc::new(RefCell::new(color(1.0))),
+        )]));
+        let base = theme.clone();
+        apply_value_to(&mut theme, &with_inherited_slots(partial, &base));
+        assert_eq!(theme.curve_editor_bg, Color::rgba(0.125, 0.0, 0.0, 1.0), "own color kept");
+        assert_eq!(theme.sampler_control_bg, Color::rgba(1.0, 0.0, 0.0, 1.0));
     }
 
     #[test]

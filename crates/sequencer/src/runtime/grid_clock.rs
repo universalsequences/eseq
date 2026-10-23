@@ -164,6 +164,27 @@ impl DownbeatClock {
         end_beats: f64,
         block_start_sample: u64,
         samples_per_quarter: f64,
+        callback: F,
+    ) {
+        self.process_anchored(
+            (start_beats, block_start_sample),
+            start_beats,
+            end_beats,
+            samples_per_quarter,
+            callback,
+        );
+    }
+
+    /// [`Self::process`] over part of a block: boundaries in
+    /// `[start_beats, end_beats)` take their samples from the block's
+    /// `anchor` `(beats, sample)`, so a block ticked in pieces lands every
+    /// boundary on the sample ticking it whole would.
+    pub fn process_anchored<F: FnMut(f64, u64, u64)>(
+        &mut self,
+        anchor: (f64, u64),
+        start_beats: f64,
+        end_beats: f64,
+        samples_per_quarter: f64,
         mut callback: F,
     ) {
         let tolerance = boundary_tolerance(samples_per_quarter);
@@ -178,10 +199,18 @@ impl DownbeatClock {
             if !(boundary_beats <= end_beats - tolerance) {
                 return;
             }
-            let sample_time = sample_time_for_beat(start_beats, block_start_sample, samples_per_quarter, boundary_beats);
+            let sample_time = sample_time_for_beat(anchor.0, anchor.1, samples_per_quarter, boundary_beats);
             callback(boundary_beats, self.next_index, sample_time);
             self.next_index += 1;
         }
+    }
+
+    /// The first boundary later than `after_beats` by more than the block
+    /// edge tolerance.
+    pub fn boundary_after(&self, after_beats: f64, samples_per_quarter: f64) -> f64 {
+        let tolerance = boundary_tolerance(samples_per_quarter);
+        let index = ((after_beats + tolerance) / self.resolution_beats).floor().max(-1.0) + 1.0;
+        index * self.resolution_beats
     }
 }
 

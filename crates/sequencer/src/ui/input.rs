@@ -3378,6 +3378,10 @@ mod live_keyboard_tests {
                 (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
                 (def eseq.step-grid-interactions/delete-selected-steps () (set! delete-count (+ delete-count 1)))
                 (def eseq.effects.track-panels/plock-row-selected? () plock-row-selected)
+                ;; Delete tries a selected patch-bay cable first, then needs a
+                ;; step selection.
+                (def eseq.sequencer/lane-patch-delete-selected () false)
+                (def seq-has-selection? () true)
                 (def eseq.drum-rack-v2/track-relative (t delta) nil)
                 (def eseq.sequencer/select-track-for-edit (t)
                   (do

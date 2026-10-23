@@ -24,7 +24,7 @@ pub const SCENE_SLOT_REACTIVE_NAMESPACE: &str = "__scene-slot";
 pub const DEF_SEQUENCER_SIGNATURE: &str =
     "(def-sequencer name :resolution timebase :res timebase :tick callback :tick-source source :init callback :requires (module ...) :before-steps bool :shape shape :energy-decay amount :reset-every duration :seed-on-reset amount :max-poly count :max-poly-selection mode :duration duration :dur duration :swing amount ...)";
 pub const DEF_SEQUENCER_DOCS: &str =
-    "Define a self-clocked Lisp generator with :tick, or a graph sequencer with :shape and graph forms. :resolution/:res select the timebase; :tick-source is the internal prebuilt-source path; :init is reserved for generator initialization; :requires lists module names the tick body calls into, imported by the scheduler VM before compiling the shipped tick. :before-steps true ticks the generator before each chunk's step sequencer instead of after it, so a `seq-emit :lock` hold that starts on a boundary covers the steps on that boundary; such a generator cannot read this chunk's step outputs or be gated by its steps.";
+    "Define a self-clocked Lisp generator with :tick, or a graph sequencer with :shape and graph forms. :resolution/:res select the timebase; :tick-source is the internal prebuilt-source path; :init is reserved for generator initialization; :requires lists module names the tick body calls into, imported by the scheduler VM before compiling the shipped tick. :before-steps true ticks the generator before each chunk's step sequencer instead of after it, so a `seq-emit :lock` hold that starts on a boundary covers the steps on that boundary; such a generator cannot read this chunk's step outputs, and step or generator hits on its :trigger track open its gate a boundary late. A graph gating it overrides :before-steps (its locks are then refused).";
 pub const DEF_SEQUENCER_KEYWORDS: &[&str] = &[
     ":resolution", ":res", ":tick", ":tick-source", ":init", ":requires", ":before-steps", ":shape", ":energy-decay", ":reset-every",
     ":seed-on-reset", ":max-poly", ":max-poly-selection", ":duration", ":dur", ":swing",
@@ -1120,9 +1120,6 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
             };
             let (event, lock) = build_seq_emit_event(&args, ctx)?;
             if lock {
-                if event.resolved.duration <= 0.0 {
-                    return Err("seq-emit :lock needs :dur > 0".to_string());
-                }
                 if event.named_params.is_empty() {
                     return Err("seq-emit :lock needs :params".to_string());
                 }
@@ -3472,7 +3469,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
             "requires" => requires = parse_requires_arg(value)?,
             // Shipped like :tick: re-read each chunk (generator kinds).
             "trigger" => trigger = Some(sequencer_tick_source(value)),
-            "before-steps" => before_steps = super::process_dsl_parse::process_truthy(value),
+            "before-steps" => before_steps = lisp_flag(value),
             _ => return Err(format!("def-sequencer unknown key :{key}")),
         }
         idx += 1;
@@ -3605,12 +3602,20 @@ pub(in crate::lisp_host) fn build_seq_emit_control(
     })
 }
 
+/// A boolean keyword value with eseqlisp's own truthiness (`if`): nil,
+/// false, 0, "" and () are false.
+fn lisp_flag(value: &EValue) -> bool {
+    !eseqlisp::vm::is_falsey(value)
+}
+
 pub(in crate::lisp_host) fn build_seq_emit_event(
     args: &[EValue],
     ctx: &GeneratorTickContext,
 ) -> Result<(EmittedAccumulatorEvent, bool), String> {
     let mut resolved = crate::generator::default_resolved();
     let mut lock = false;
+    // A hit defaults to a one-beat note; a lock's window must be stated.
+    let mut dur_given = false;
     let mut chord: Vec<f32> = Vec::new();
     let mut offset_beats: f32 = 0.0;
     let mut target_track: Option<usize> = None;
@@ -3644,7 +3649,10 @@ pub(in crate::lisp_host) fn build_seq_emit_event(
                 resolved.velocity = acc_emit_number(value, "velocity")?.clamp(0.0, 1.0)
             }
             "note" | "transpose" | "trn" => resolved.transpose = acc_emit_number(value, "note")?,
-            "dur" | "duration" => resolved.duration = acc_emit_number(value, "duration")?.max(0.0),
+            "dur" | "duration" => {
+                resolved.duration = acc_emit_number(value, "duration")?.max(0.0);
+                dur_given = true;
+            }
             "speed" | "spd" => resolved.speed = acc_emit_number(value, "speed")?.max(0.0),
             "pan" => resolved.pan = acc_emit_number(value, "pan")?.clamp(-1.0, 1.0),
             "chop" | "chp" => resolved.chop = acc_emit_number(value, "chop")?.max(1.0),
@@ -3682,7 +3690,7 @@ pub(in crate::lisp_host) fn build_seq_emit_event(
                 };
             }
             "params" => named_params = parse_seq_emit_named_params(value)?,
-            "lock" => lock = super::process_dsl_parse::process_truthy(value),
+            "lock" => lock = lisp_flag(value),
             _ => return Err(format!("seq-emit unknown key :{key}")),
         }
         idx += 1;
@@ -3701,6 +3709,9 @@ pub(in crate::lisp_host) fn build_seq_emit_event(
         };
         let snapped = (snapped_units * grid_beats).max(target);
         offset_beats = (snapped - ctx.beat) as f32;
+    }
+    if lock && !(dur_given && resolved.duration > 0.0) {
+        return Err("seq-emit :lock needs :dur > 0".to_string());
     }
     Ok((EmittedAccumulatorEvent {
         origin_note: None,

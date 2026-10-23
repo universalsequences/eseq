@@ -2330,30 +2330,61 @@ impl App {
         if !self.state.is_playing() {
             return Ok(false);
         }
+        let song = self.song_playback_authority_active();
         if crate::scheduled_event::launch_trace_enabled() {
             eprintln!(
-                "[launch] control-live-request target={target:?} song={} rendered_beats={:.4}",
-                self.song_playback_authority_active(),
+                "[launch] control-live-request target={target:?} song={song} rendered_beats={:.4}",
                 self.state.scheduler_rendered_beats()
             );
         }
+        // Preflight before the preamble, so a launch that falls back to
+        // `apply_manual_pattern_launch` runs it once.
+        let snapshot = if song {
+            None
+        } else {
+            match self.state.session_launch_snapshot(target) {
+                Some(snapshot) => Some(snapshot),
+                None => return Ok(false),
+            }
+        };
         let state = Arc::clone(&self.state);
         state.coalesce_publishes(|| {
             let touched = self.reset_scene_launch_state();
             self.send_macro_targets(touched);
-            if self.song_playback_authority_active() {
+            let Some(snapshot) = snapshot else {
                 self.apply_pattern_launch_inner(target, None, true)?;
+                // The scheduler re-adopts the lanes this switched (it reads
+                // latched lanes live, so nothing else tells it).
+                match target {
+                    PatternLaunchTarget::Scene { .. } => {
+                        self.state.bump_track_launch_generations(0..self.tracks.len())
+                    }
+                    PatternLaunchTarget::SceneTracks { tracks, .. } => {
+                        self.state.bump_track_launch_generations(tracks.iter().copied())
+                    }
+                    PatternLaunchTarget::TrackPattern { track, .. } => {
+                        self.state.bump_track_launch_generations([*track])
+                    }
+                }
+                self.state.publish_transport_only();
                 self.song_row_mirror_epoch += 1;
                 return Ok(true);
-            }
-            // A full request channel launches through the immediate path too.
-            Ok(self
+            };
+            if self
                 .state
                 .schedule_live_pattern_launch(
                     target.clone(),
                     crate::quantized_launch::QuantizedLaunchOwner::Transport,
+                    snapshot,
                 )
-                .is_some_and(|scheduled| scheduled.is_ok()))
+                .is_err()
+            {
+                // A full request channel launches immediately; the
+                // preamble already ran.
+                self.apply_pattern_launch(target)?;
+                self.song_row_mirror_epoch += 1;
+            }
+            Ok(true)
         })
     }
 

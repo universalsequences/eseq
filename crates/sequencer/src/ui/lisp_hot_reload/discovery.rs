@@ -55,6 +55,8 @@ struct Mailbox {
 #[derive(Default, Clone)]
 struct WorkerProbe {
     passes: usize,
+    /// Native watcher notifications that woke the worker.
+    native_events: usize,
     directories_scanned: usize,
     custom: BTreeSet<PathBuf>,
     sources: BTreeSet<PathBuf>,
@@ -76,6 +78,8 @@ impl Mailbox {
                 pending.rescan = true;
             }
         }
+        #[cfg(test)]
+        { self.probe.lock().unwrap().native_events += 1; }
         let now = Instant::now();
         pending.first_event.get_or_insert(now);
         pending.last_event = Some(now);
@@ -583,16 +587,32 @@ mod tests {
         for index in 0..64 { instrument(&root.join(format!("synth-{index}"))); }
         let worker = DiscoveryWorker::start(Vec::new(), move || roots(&root)).unwrap();
         wait_for(&worker, "initial index", |probe, _| probe.custom.len() == 64);
-        // Let any initial native subscription events settle before measuring idle.
-        std::thread::sleep(Duration::from_millis(400));
-        let before = worker.mailbox.probe.lock().unwrap().clone();
+        // Let the native events for the fixture's own writes settle before
+        // measuring idle: FSEvents can deliver them well after the watch
+        // starts, so wait for the worker to go quiet, not a fixed delay.
+        let settle_started = Instant::now();
+        let mut before = worker.mailbox.probe.lock().unwrap().clone();
+        loop {
+            std::thread::sleep(Duration::from_millis(600));
+            let now = worker.mailbox.probe.lock().unwrap().clone();
+            if now.passes == before.passes { break; }
+            assert!(settle_started.elapsed() < Duration::from_secs(15), "discovery never went idle");
+            before = now;
+        }
         let started = Instant::now();
         for _ in 0..100_000 { assert!(worker.poll().is_empty()); }
         let poll_time = started.elapsed();
         std::thread::sleep(Duration::from_millis(1200));
         let after = worker.mailbox.probe.lock().unwrap().clone();
         assert_eq!(after.directories_scanned, before.directories_scanned);
-        assert_eq!(after.passes, before.passes, "worker sleeps until a notification");
+        // The OS may still touch the fixture (Spotlight metadata), and each
+        // such notification may wake the worker; the polls never do.
+        assert!(
+            after.passes - before.passes <= after.native_events - before.native_events,
+            "worker sleeps until a notification: {} passes for {} native events",
+            after.passes - before.passes,
+            after.native_events - before.native_events
+        );
         eprintln!("100000 idle UI polls: {poll_time:?}; additional directory scans: 0; worker passes: 0");
     }
 }

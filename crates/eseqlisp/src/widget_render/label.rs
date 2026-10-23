@@ -328,7 +328,7 @@ mod tests {
                 if on { 1.0_f64 } else { 0.0 }.to_bits(),
             )),
         };
-        let mut width = |bold: Value| {
+        let width = |bold: Value| {
             let (props, value) = label(bold);
             let measured = LABEL_WIDGET.measure(&value, &[], constraints, &ctx, &mut |_, _| None).unwrap().width;
             (props, measured)

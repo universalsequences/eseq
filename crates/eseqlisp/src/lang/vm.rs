@@ -1303,7 +1303,7 @@ fn parse_fmt_placeholder(template: &str, start: usize) -> Option<(usize, FmtSpec
     ))
 }
 
-fn is_falsey(value: &Value) -> bool {
+pub fn is_falsey(value: &Value) -> bool {
     match value {
         Value::Bool(false) | Value::Nil => true,
         Value::Number(n) => *n == 0.0,

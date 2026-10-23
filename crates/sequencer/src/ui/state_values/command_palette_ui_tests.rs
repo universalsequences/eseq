@@ -39,11 +39,14 @@ fn change_theme_picks_from_the_registry_with_the_current_theme_checked() {
     let checked: Vec<_> = frame.rows.iter().filter(|row| row.checked).map(|row| row.label.as_str()).collect();
     assert_eq!(checked, ["macOS Dark"], "the startup theme is checked");
 
-    type_text(&mut editor, "aura");
+    // Only curated themes are offered (`seq-theme-choices`).
+    let labels: Vec<_> = frame.rows.iter().map(|row| row.label.as_str()).collect();
+    assert!(!labels.contains(&"Aura"), "uncurated themes stay off the list: {labels:?}");
+    type_text(&mut editor, "phosphor blue");
     enter(&mut editor);
     assert!(editor.palette_frame().is_none());
     let current = editor.runtime_mut().eval_str("seq-current-theme").expect("read theme");
-    assert_eq!(current, Some(Value::String("aura".into())));
+    assert_eq!(current, Some(Value::String("phosphor-blue".into())));
 }
 
 #[test]
@@ -80,7 +83,8 @@ fn change_theme_previews_while_browsing_and_restores_on_escape() {
     editor.refresh_runtime_side_effects();
     let theme = |editor: &mut eseqlisp::Editor| editor.runtime_mut().eval_str("seq-current-theme").expect("theme");
     editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(theme(&mut editor), Some(Value::String("mac-osx-light-theme".into())), "highlight previews");
+    // The next curated theme after macOS Dark.
+    assert_eq!(theme(&mut editor), Some(Value::String("mac-osx-haze".into())), "highlight previews");
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(theme(&mut editor), Some(Value::String("mac-osx-dark".into())), "Esc restores");
 }
