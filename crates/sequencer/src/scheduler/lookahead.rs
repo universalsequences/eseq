@@ -43,6 +43,9 @@ pub(super) struct SchedulerLookaheadState {
     /// docs/jaki-kind-spec.md §4): its emissions' `:track` is a member index.
     /// Re-filled by the worker whenever it re-registers published sequencers.
     pub(super) generator_owner_racks: std::collections::HashMap<u64, u64>,
+    /// Generators published with `:before-steps`: ticked ahead of each
+    /// chunk's step sequencer (`seq-emit :lock` holds on a boundary).
+    pub(super) generator_before_steps: std::collections::HashSet<u64>,
     /// Last line emitted by the ESEQ_DEBUG_SCENE_SLOTS trace, so the seam
     /// reports changes rather than one line per chunk boundary.
     pub(super) last_scene_slot_debug: Option<(usize, usize, usize, String)>,
@@ -171,6 +174,7 @@ impl SchedulerLookaheadState {
             roll: RollState::new(),
             parked_generators: std::collections::HashSet::new(),
             generator_owner_racks: std::collections::HashMap::new(),
+            generator_before_steps: std::collections::HashSet::new(),
             last_scene_slot_debug: None,
             graph_replay: Vec::new(),
             live_rack_config_chunk: None,
@@ -441,6 +445,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let song_playback = &mut scheduler.song;
     let parked_generators = &mut scheduler.parked_generators;
     let generator_owner_racks = &scheduler.generator_owner_racks;
+    let generator_before_steps = &scheduler.generator_before_steps;
     let graph_replay = &mut scheduler.graph_replay;
     let latched_sources = &mut scheduler.latched_sources;
     // Read once per call: nothing scans p-locks while nothing observes them.
@@ -529,6 +534,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     };
 
     let groove_floor = clock.groove_floor(rendered);
+    process_runtime.lock_holds.release_through(rendered);
     clock.forget_sounded_step_hits(rendered);
     // Graph emissions a mid-play resync cleared from the queue: the graph
     // runtimes already consumed those boundaries, so re-enqueue what they
@@ -707,6 +713,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         midi_fx_quantizer_state.reset();
                         neural_runtime.reset_state(0.0);
                         generator_runtime.reset_for_wrap(wrap_beats, samples_per_quarter);
+                        process_runtime.lock_holds.end_at(scheduled_until_sample);
                         // Hand the reads the previous run's tail first, so
                         // the reset drops it instead of the next chunk's
                         // feed replaying it into the new run.
@@ -1013,6 +1020,43 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         // `length!` requests (track, steps, firing beat), stamped with the
         // track's next cycle boundary once the trigger loop is done.
         let mut pending_pattern_lengths: Vec<(usize, usize, f64)> = Vec::new();
+        // Generators a graph node gates run in a second pass after the
+        // graph stage, so a fire reaches the generator's tick on the same
+        // boundary (docs/jaki-trig-modes-spec.md §4.1).
+        let gated_generators: std::collections::HashSet<u64> = graph_runtimes
+            .iter()
+            .filter(|graph| !graph.is_empty())
+            .flat_map(|graph| graph.gate_targets())
+            .collect();
+        // `:before-steps` generators tick ahead of the step sequencer, so a
+        // `seq-emit :lock` hold they start on a boundary covers the steps on
+        // it. They see none of this chunk's step output.
+        if !generator_before_steps.is_empty()
+            && !run_generator_stage(
+                generator_runtime,
+                scratch_runtime,
+                process_runtime,
+                parked_generators,
+                generator_owner_racks,
+                clock,
+                state,
+                snapshot,
+                queue,
+                &mut track_output_events,
+                midi_fx_quantizer_state,
+                pattern_epoch,
+                chunk_start_beats,
+                chunk_end_beats,
+                scheduled_until_sample,
+                samples_per_quarter,
+                groove_floor,
+                debug_accum,
+                true,
+                |id| generator_before_steps.contains(&id) && !gated_generators.contains(&id),
+            )
+        {
+            break;
+        }
         for trigger in triggers {
             if trigger.recovered_lag.is_some() {
                 // A grooved step whose straight boundary a mid-play resync
@@ -1963,18 +2007,32 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         .is_empty()
                 {
                     if let Some(runtime) = scratch_runtime.as_mut() {
-                        let seed_chord = step_chord_data(snapshot, target_track, trigger.step);
-                        let seed_event = step_event_from_resolved(
+                        let mut midi_fx_params = midi_fx_params;
+                        let mut seed_event = step_event_from_resolved(
                             snapshot,
                             target_track,
                             trigger.step,
                             trigger.samples_per_step,
                             resolved,
-                            seed_chord,
-                            effect_params.clone(),
-                            instrument_params.clone(),
+                            step_chord_data(snapshot, target_track, trigger.step),
+                            effect_params,
+                            instrument_params,
                             instrument_tensor_params.clone(),
                         );
+                        // The window events are built from the seed's parts,
+                        // so a `seq-emit :lock` hold folds in here (its
+                        // rack-slot values have nowhere to go on this path).
+                        apply_lock_holds(
+                            snapshot,
+                            midi_fx_descriptor_source.as_ref(),
+                            &process_runtime.lock_holds,
+                            step_boundary_sample_time,
+                            &mut seed_event,
+                            &mut midi_fx_params,
+                        );
+                        let resolved = seed_event.resolved;
+                        let effect_params = seed_event.effect_params.clone();
+                        let instrument_params = seed_event.instrument_params.clone();
                         let mut events = midi_fx_window_events_from_step(
                             snapshot,
                             midi_fx_descriptors_for_scheduling(),
@@ -2041,7 +2099,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 print_chord_duration_delta,
                             );
                         }
-                        let step_event = step_event_from_resolved(
+                        let mut step_event = step_event_from_resolved(
                             snapshot,
                             target_track,
                             trigger.step,
@@ -2051,6 +2109,15 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             effect_params,
                             instrument_params,
                             instrument_tensor_params,
+                        );
+                        apply_lock_holds(
+                            snapshot,
+                            midi_fx_descriptor_source.as_ref(),
+                            &process_runtime.lock_holds,
+                            step_boundary_sample_time,
+                            &mut step_event,
+                            // No chain runs on this path.
+                            &mut Vec::new(),
                         );
                         let ok = enqueue_step_event(
                             queue,
@@ -2091,7 +2158,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     if target_track == trigger.track {
                         shift_chord_durations_for_print(&mut chord, print_chord_duration_delta);
                     }
-                    let step_event = step_event_from_resolved(
+                    let mut step_event = step_event_from_resolved(
                         snapshot,
                         target_track,
                         trigger.step,
@@ -2101,6 +2168,15 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         effect_params,
                         instrument_params,
                         instrument_tensor_params,
+                    );
+                    apply_lock_holds(
+                        snapshot,
+                        midi_fx_descriptor_source.as_ref(),
+                        &process_runtime.lock_holds,
+                        step_boundary_sample_time,
+                        &mut step_event,
+                        // No chain runs on this path.
+                        &mut Vec::new(),
                     );
                     let ok = enqueue_step_event(
                         queue,
@@ -2266,15 +2342,8 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         // Lisp-defined generators: self-clocked over this chunk, additive
         // (like the neural layer). Each boundary invokes the generator's
         // :tick on the scheduler-side VM; seq-emit output is resolved to a
-        // NetworkTrigger here.
-        // Generators a graph node gates run in a second pass after the
-        // graph stage, so a fire reaches the generator's tick on the same
-        // boundary (docs/jaki-trig-modes-spec.md §4.1).
-        let gated_generators: std::collections::HashSet<u64> = graph_runtimes
-            .iter()
-            .filter(|graph| !graph.is_empty())
-            .flat_map(|graph| graph.gate_targets())
-            .collect();
+        // NetworkTrigger here. Graph-gated generators run after the graph
+        // stage below; `:before-steps` ones already ran.
         // Generator ticks read every track's harmony (jaki's `harmony`):
         // hand the process reads all output enqueued so far this chunk.
         if !generator_runtime.is_empty() {
@@ -2304,7 +2373,8 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 samples_per_quarter,
                 groove_floor,
                 debug_accum,
-                |id| !gated_generators.contains(&id),
+                false,
+                |id| !gated_generators.contains(&id) && !generator_before_steps.contains(&id),
             )
         {
             break;
@@ -2664,6 +2734,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 samples_per_quarter,
                 groove_floor,
                 debug_accum,
+                false,
                 |id| gated_generators.contains(&id),
             )
         {
@@ -2889,11 +2960,13 @@ fn run_generator_stage<const QUEUE_CAP: usize>(
     samples_per_quarter: f64,
     groove_floor: crate::groove::GrooveFloor,
     debug_accum: bool,
+    allow_locks: bool,
     include: impl Fn(u64) -> bool,
 ) -> bool {
     let mut chunk_enqueued = true;
     let mut generator_emissions = Vec::new();
     let mut generator_control_emissions = Vec::new();
+    let mut generator_lock_emissions = Vec::new();
     if let Some(scratch) = scratch_runtime.as_mut() {
         // Channel snapshot for chan-get: ticks in this chunk observe
         // process-channel writes from earlier chunks (processes run
@@ -2926,6 +2999,7 @@ fn run_generator_stage<const QUEUE_CAP: usize>(
                 let empty = crate::generator::GeneratorTickResult {
                     emitted: Vec::new(),
                     controls: Vec::new(),
+                    locks: Vec::new(),
                     random_state,
                     state: fallback_state,
                 };
@@ -2937,16 +3011,30 @@ fn run_generator_stage<const QUEUE_CAP: usize>(
                 let tick = scratch.invoke_sequencer_tick(generator_index, input);
                 timer.finish(generator_id, tick_beat);
                 match tick {
+                    // A hold opened after the step stage would cover this
+                    // chunk's steps only past the chunk edge: coverage would
+                    // depend on the buffer size.
+                    Ok(result) if !allow_locks && !result.locks.is_empty() => {
+                        tick_failures.push((
+                            generator_id,
+                            "seq-emit :lock needs a :before-steps generator no graph gates"
+                                .to_string(),
+                        ));
+                        parked_generators.insert(generator_id);
+                        empty
+                    }
                     Ok(mut result) => {
                         if let Some(group_id) = generator_owner_racks.get(&generator_id) {
-                            map_rack_member_emissions(
-                                &mut result.emitted,
-                                crate::graph::rack_members(
-                                    &snapshot.rack_memberships,
-                                    *group_id,
-                                )
-                                .unwrap_or(&[]),
-                            );
+                            let members = crate::graph::rack_members(
+                                &snapshot.rack_memberships,
+                                *group_id,
+                            )
+                            .unwrap_or(&[]);
+                            map_rack_member_emissions(&mut result.emitted, members);
+                            result.locks.retain_mut(|hold| {
+                                hold.track = hold.track.and_then(|member| members.get(member).copied());
+                                hold.track.is_some()
+                            });
                         }
                         result
                     }
@@ -2963,6 +3051,7 @@ fn run_generator_stage<const QUEUE_CAP: usize>(
             },
             &mut generator_emissions,
             &mut generator_control_emissions,
+            &mut generator_lock_emissions,
         );
         if !tick_failures.is_empty() {
             let generator_names: std::collections::HashMap<u64, String> = scratch
@@ -2990,6 +3079,15 @@ fn run_generator_stage<const QUEUE_CAP: usize>(
                 emission.control.op,
                 emission.control.target,
             );
+        }
+        // Lock holds stay on the scheduler: every hit enqueued on the track
+        // from here on takes their params while it is inside the window.
+        for emission in generator_lock_emissions.drain(..) {
+            // Track-less, like a track-less `seq-emit`, means track 0.
+            let track = emission.hold.track.unwrap_or(0);
+            if track < snapshot.tracks.len() {
+                process_runtime.lock_holds.engage(track, emission);
+            }
         }
     } else if debug_routing_enabled() {
         eprintln!(

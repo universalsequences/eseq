@@ -6306,6 +6306,7 @@ mod tests {
             graph: None,
             owner_rack: None,
             trigger_source: None,
+            before_steps: false,
         });
         state.publish_scene_slot_declaration(
             "a-slot".to_string(),

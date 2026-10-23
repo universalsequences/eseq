@@ -3019,6 +3019,7 @@
                     graph: None,
                     owner_rack: None,
                     trigger_source: None,
+                    before_steps: false,
                 }),
                 document: vec![
                     ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
@@ -3642,6 +3643,7 @@
                     graph: None,
                     owner_rack: None,
                     trigger_source: Some(trigger_source.to_string()),
+                    before_steps: false,
                 }),
                 document: vec![("src".to_string(), literal("0"))],
                 state_fields: Vec::new(),
@@ -3784,6 +3786,7 @@
                     graph: None,
                     owner_rack: None,
                     trigger_source: None,
+                    before_steps: false,
                 }),
                 document: vec![
                     ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
@@ -3955,6 +3958,7 @@
                 graph: None,
                 owner_rack: None,
                 trigger_source: None,
+                before_steps: false,
             }),
             document: vec![
                 ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
@@ -4488,6 +4492,146 @@
             assert!((speed - 2.0).abs() < 1e-6, "{hits:?}");
             assert!((mode - 3.0).abs() < 1e-6, "{hits:?}");
         }
+    }
+
+    /// A `:before-steps` generator holds `instrument:speed 2` on track 0 for
+    /// the first sixteenth of every beat (`seq-emit :lock`); track 0 steps on
+    /// every eighth with speed p-locked to 0.5, and a plain generator hits
+    /// track 0 at +0.1 and +0.6 beats. Returns (sample, speed, is_step).
+    fn lock_hold_hits(before_steps: bool) -> Vec<(u64, f32, bool)> {
+        let (hits, errors) = lock_hold_hits_and_errors(before_steps);
+        assert!(errors.is_empty(), "{errors:?}");
+        hits
+    }
+
+    fn lock_hold_hits_and_errors(before_steps: bool) -> (Vec<(u64, f32, bool)>, Vec<String>) {
+        run_with_scheduler_stack(move || {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(16);
+            let sampler_desc = EffectDescriptor::builtin_sampler();
+            let speed_idx = sampler_desc
+                .params
+                .iter()
+                .position(|param| param.name == "speed")
+                .expect("sampler speed param");
+            state.pattern.instrument_slots[0].apply_descriptor(&sampler_desc, 12);
+            for step in (0..16).step_by(2) {
+                state.pattern.patterns[0].set_step_active(step, true);
+                state.pattern.instrument_slots[0].set_plock(step, speed_idx, 0.5);
+            }
+            let effect_descriptors = vec![EffectDescriptor::default_full_chain()];
+            let instrument_descriptors = vec![sampler_desc];
+            state.set_scratch_runtime_descriptors(
+                effect_descriptors.clone(),
+                instrument_descriptors.clone(),
+            );
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                effect_descriptors,
+                instrument_descriptors,
+                0,
+                0,
+            );
+            scratch
+                .eval(&format!(
+                    r#"(__register-sequencer "locker"
+                         :resolution :4
+                         :before-steps {before_steps}
+                         :tick (lambda ()
+                           (seq-emit :track 0 :at :now :dur 0.25 :lock true
+                                     :params (list "instrument:speed" 2))))"#
+                ))
+                .expect("register locker");
+            scratch
+                .eval(
+                    r#"(__register-sequencer "player"
+                         :resolution :4
+                         :tick (lambda ()
+                           (do
+                             (seq-emit :track 0 :at 0.1)
+                             (seq-emit :track 0 :at 0.6))))"#,
+                )
+                .expect("register player");
+
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let defs = scratch.sequencer_defs();
+            scheduler.generator_runtime.sync_definitions(&defs, 0.0);
+            if before_steps {
+                let locker = defs.iter().find(|def| def.name == "locker").expect("locker");
+                scheduler.generator_before_steps.insert(locker.id);
+            }
+            let mut scratch_runtime = Some(scratch);
+            let snapshot = state.publish_scheduler_snapshot();
+            let queue = ScheduledEventQueue::<64>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                48_000,
+                48_000,
+                6_000,
+                24_000.0,
+                0,
+                false,
+                false,
+            );
+            let errors: Vec<_> = state
+                .drain_generator_tick_errors()
+                .into_iter()
+                .map(|notice| notice.error)
+                .collect();
+
+            let mut hits = Vec::new();
+            while let Some(event) = queue.pop_owned() {
+                match event.kind {
+                    ScheduledEventKind::ResolvedTrigger { sampler_params, .. } => {
+                        hits.push((event.sample_time, sampler_params.playback_speed, true))
+                    }
+                    ScheduledEventKind::NetworkTrigger { sampler_params, .. } => {
+                        hits.push((event.sample_time, sampler_params.playback_speed, false))
+                    }
+                    _ => {}
+                }
+            }
+            hits.sort_by(|a, b| a.0.cmp(&b.0));
+            (hits, errors)
+        })
+    }
+
+    #[test]
+    fn lock_hold_appends_params_to_other_sources_hits_inside_its_window() {
+        let hits = lock_hold_hits(true);
+        // Steps at every eighth (12_000 samples) plus two generator hits a
+        // beat, over two beats; the lock emits no hit of its own.
+        assert_eq!(hits.iter().filter(|hit| hit.2).count(), 4, "{hits:?}");
+        assert_eq!(hits.iter().filter(|hit| !hit.2).count(), 4, "{hits:?}");
+        for (sample, speed, _) in &hits {
+            // The window is the first sixteenth (6_000 samples) of each beat:
+            // the on-beat step and the +0.1 hit; the off-beat step and the
+            // +0.6 hit keep the step's own lock / the base value.
+            if sample % 24_000 < 6_000 {
+                assert!((speed - 2.0).abs() < 1e-6, "{hits:?}");
+            } else {
+                assert!((speed - 2.0).abs() > 1e-6, "{hits:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn lock_hold_from_an_after_steps_generator_is_a_tick_error() {
+        // Ticking after the step stage, its hold would cover this chunk's
+        // steps only past the chunk edge, so it is refused and nothing locks.
+        let (hits, errors) = lock_hold_hits_and_errors(false);
+        assert!(errors.iter().any(|error| error.contains(":before-steps")), "{errors:?}");
+        assert!(hits.iter().all(|hit| (hit.1 - 2.0).abs() > 1e-6), "{hits:?}");
     }
 
     /// takes spec 10 × defscene: a scene-latched manual launch suspends the

@@ -22,20 +22,20 @@ use super::super::*;
 pub const SCENE_SLOT_REACTIVE_NAMESPACE: &str = "__scene-slot";
 
 pub const DEF_SEQUENCER_SIGNATURE: &str =
-    "(def-sequencer name :resolution timebase :res timebase :tick callback :tick-source source :init callback :requires (module ...) :shape shape :energy-decay amount :reset-every duration :seed-on-reset amount :max-poly count :max-poly-selection mode :duration duration :dur duration :swing amount ...)";
+    "(def-sequencer name :resolution timebase :res timebase :tick callback :tick-source source :init callback :requires (module ...) :before-steps bool :shape shape :energy-decay amount :reset-every duration :seed-on-reset amount :max-poly count :max-poly-selection mode :duration duration :dur duration :swing amount ...)";
 pub const DEF_SEQUENCER_DOCS: &str =
-    "Define a self-clocked Lisp generator with :tick, or a graph sequencer with :shape and graph forms. :resolution/:res select the timebase; :tick-source is the internal prebuilt-source path; :init is reserved for generator initialization; :requires lists module names the tick body calls into, imported by the scheduler VM before compiling the shipped tick.";
+    "Define a self-clocked Lisp generator with :tick, or a graph sequencer with :shape and graph forms. :resolution/:res select the timebase; :tick-source is the internal prebuilt-source path; :init is reserved for generator initialization; :requires lists module names the tick body calls into, imported by the scheduler VM before compiling the shipped tick. :before-steps true ticks the generator before each chunk's step sequencer instead of after it, so a `seq-emit :lock` hold that starts on a boundary covers the steps on that boundary; such a generator cannot read this chunk's step outputs or be gated by its steps.";
 pub const DEF_SEQUENCER_KEYWORDS: &[&str] = &[
-    ":resolution", ":res", ":tick", ":tick-source", ":init", ":requires", ":shape", ":energy-decay", ":reset-every",
+    ":resolution", ":res", ":tick", ":tick-source", ":init", ":requires", ":before-steps", ":shape", ":energy-decay", ":reset-every",
     ":seed-on-reset", ":max-poly", ":max-poly-selection", ":duration", ":dur", ":swing",
 ];
 pub const SEQ_EMIT_SIGNATURE: &str =
-    "(seq-emit :track t :at offset :vel v :note n :dur beats :speed ratio :pan amount :chop count :chord (...) :quantize grid :params (label value ...))";
+    "(seq-emit :track t :at offset :vel v :note n :dur beats :speed ratio :pan amount :chop count :chord (...) :quantize grid :params (label value ...) :lock bool)";
 pub const SEQ_EMIT_DOCS: &str =
-    "Emit an event from a generator :tick at a musical offset; the engine resolves timing to samples. Long and abbreviated parameter names are both accepted. :params is a flat list of macro-editor labels and values (\"instrument:cutoff\" 5535 \"fx2:filterbank:freq\" 0.8), in each parameter's own units; they apply to this hit only, resolved by name on the destination track when it lands (unknown names are skipped).";
+    "Emit an event from a generator :tick at a musical offset; the engine resolves timing to samples. Long and abbreviated parameter names are both accepted. :params is a flat list of macro-editor labels and values (\"instrument:cutoff\" 5535 \"fx2:filterbank:freq\" 0.8), in each parameter's own units; they apply to this hit only, resolved by name on the destination track when it lands (unknown names are skipped). :lock true plays no note: it holds :params on :track from :at for :dur beats, and every hit another source plays there in that window takes them (a hit's own :params still win).";
 pub const SEQ_EMIT_KEYWORDS: &[&str] = &[
     ":track", ":at", ":vel", ":velocity", ":note", ":transpose", ":trn", ":dur",
-    ":duration", ":speed", ":spd", ":pan", ":chop", ":chp", ":chord", ":quantize", ":q", ":params",
+    ":duration", ":speed", ":spd", ":pan", ":chop", ":chp", ":chord", ":quantize", ":q", ":params", ":lock",
 ];
 pub const SEQ_EMIT_CONTROL_SIGNATURE: &str =
     "(seq-emit-control :op \"mute\"|\"solo\" :track idx | :group \"name\" :at offset-beats :dur beats)";
@@ -1118,8 +1118,23 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
             let Some(ctx) = guard.as_mut() else {
                 return Err("seq-emit called outside a generator tick".to_string());
             };
-            let event = build_seq_emit_event(&args, ctx)?;
-            ctx.emitted.push(event);
+            let (event, lock) = build_seq_emit_event(&args, ctx)?;
+            if lock {
+                if event.resolved.duration <= 0.0 {
+                    return Err("seq-emit :lock needs :dur > 0".to_string());
+                }
+                if event.named_params.is_empty() {
+                    return Err("seq-emit :lock needs :params".to_string());
+                }
+                ctx.locks.push(crate::generator::EmittedLockHold {
+                    track: event.track,
+                    offset_beats: event.offset_beats,
+                    duration_beats: event.resolved.duration,
+                    params: event.named_params,
+                });
+            } else {
+                ctx.emitted.push(event);
+            }
             Ok(EValue::Bool(true))
         },
     );
@@ -3332,6 +3347,8 @@ pub(in crate::lisp_host) fn register_sequencer_impl(
             // the tick calls into is already loaded (or the tick itself was
             // unresolvable and never got this far).
             "requires" => drop(parse_requires_arg(&args[idx])?),
+            // Scheduling order only; the published path carries it.
+            "before-steps" => {}
             _ => return Err(format!("def-sequencer unknown key :{key}")),
         }
         idx += 1;
@@ -3422,6 +3439,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
             graph: Some(manifest),
             owner_rack: None,
             trigger_source: None,
+            before_steps: false,
         });
     }
 
@@ -3430,6 +3448,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
     let mut prebuilt_tick_source: Option<String> = None;
     let mut requires: Vec<String> = Vec::new();
     let mut trigger: Option<String> = None;
+    let mut before_steps = false;
     let mut idx = 1;
     while idx < args.len() {
         let key = match &args[idx] {
@@ -3453,6 +3472,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
             "requires" => requires = parse_requires_arg(value)?,
             // Shipped like :tick: re-read each chunk (generator kinds).
             "trigger" => trigger = Some(sequencer_tick_source(value)),
+            "before-steps" => before_steps = super::process_dsl_parse::process_truthy(value),
             _ => return Err(format!("def-sequencer unknown key :{key}")),
         }
         idx += 1;
@@ -3472,6 +3492,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
         graph: None,
         owner_rack: None,
         trigger_source: trigger,
+        before_steps,
     })
 }
 
@@ -3587,8 +3608,9 @@ pub(in crate::lisp_host) fn build_seq_emit_control(
 pub(in crate::lisp_host) fn build_seq_emit_event(
     args: &[EValue],
     ctx: &GeneratorTickContext,
-) -> Result<EmittedAccumulatorEvent, String> {
+) -> Result<(EmittedAccumulatorEvent, bool), String> {
     let mut resolved = crate::generator::default_resolved();
+    let mut lock = false;
     let mut chord: Vec<f32> = Vec::new();
     let mut offset_beats: f32 = 0.0;
     let mut target_track: Option<usize> = None;
@@ -3660,6 +3682,7 @@ pub(in crate::lisp_host) fn build_seq_emit_event(
                 };
             }
             "params" => named_params = parse_seq_emit_named_params(value)?,
+            "lock" => lock = super::process_dsl_parse::process_truthy(value),
             _ => return Err(format!("seq-emit unknown key :{key}")),
         }
         idx += 1;
@@ -3679,7 +3702,7 @@ pub(in crate::lisp_host) fn build_seq_emit_event(
         let snapped = (snapped_units * grid_beats).max(target);
         offset_beats = (snapped - ctx.beat) as f32;
     }
-    Ok(EmittedAccumulatorEvent {
+    Ok((EmittedAccumulatorEvent {
         origin_note: None,
         offset_beats,
         track: target_track,
@@ -3690,7 +3713,7 @@ pub(in crate::lisp_host) fn build_seq_emit_event(
         effect_params: Vec::new(),
         instrument_params: Vec::new(),
         named_params,
-    })
+    }, lock))
 }
 
 /// `seq-emit :params`: a flat `label value …` list. Each label is parsed

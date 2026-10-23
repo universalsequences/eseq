@@ -128,6 +128,7 @@ pub fn simulate_instance(
             let skipped = |random_state| GeneratorTickResult {
                 emitted: Vec::new(),
                 controls: Vec::new(),
+                locks: Vec::new(),
                 random_state,
                 state: HashMap::new(),
             };
@@ -299,6 +300,7 @@ mod tests {
                 graph: None,
                 owner_rack: None,
                 trigger_source: None,
+                before_steps: false,
             }),
             document: vec![("cells".to_string(), literal("(list 0)"))],
             state_fields: Vec::new(),

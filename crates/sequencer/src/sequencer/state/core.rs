@@ -401,6 +401,10 @@ pub struct PublishedSequencer {
     /// `owner_rack` for a rack-owned generator), or a negative number for
     /// none. Re-read each chunk, like the tick.
     pub trigger_source: Option<String>,
+    /// Tick mode only: `:before-steps`. The scheduler ticks this generator
+    /// before each chunk's step sequencer rather than after, so a lock hold
+    /// it starts on a boundary covers that boundary's steps.
+    pub before_steps: bool,
 }
 
 /// First tick failure of a registered generator, reported once by the

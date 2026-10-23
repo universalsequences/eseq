@@ -716,11 +716,21 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
     );
     // `seq-emit :params`, by name against the destination, after the
     // landing stamp so it is the most specific source for this hit.
+    // `seq-emit :lock` holds on the track come first, so the hit's own
+    // :params still win.
     let mut midi_fx_params = Vec::new();
-    if !emitted.named_params.is_empty() {
+    if !emitted.named_params.is_empty() || process_runtime.lock_holds.covers(track_idx, sample_time) {
         let midi_fx = scratch_runtime
             .as_ref()
             .map(|runtime| runtime.midi_fx_descriptor_source());
+        apply_lock_holds(
+            snapshot,
+            midi_fx.as_ref(),
+            &process_runtime.lock_holds,
+            sample_time,
+            &mut event,
+            &mut midi_fx_params,
+        );
         apply_named_params(
             snapshot,
             midi_fx.as_ref(),

@@ -197,6 +197,25 @@ fn named_param_value(desc: &crate::effects::ParamDescriptor, value: f32) -> f32 
     value.clamp(lo, hi)
 }
 
+/// Fold every `seq-emit :lock` hold covering `sample_time` on `event.track`
+/// into `event`, in engage order: after the landing step's own p-locks,
+/// before a hit's own `seq-emit :params`.
+pub(super) fn apply_lock_holds(
+    snapshot: &SequencerSnapshot,
+    midi_fx: Option<&lisp_host::MidiFxDescriptorSource>,
+    holds: &crate::generator::LockHolds,
+    sample_time: u64,
+    event: &mut StepEvent,
+    midi_fx_params: &mut Vec<ProcessMidiFxParamOverride>,
+) {
+    if holds.is_empty() {
+        return;
+    }
+    for params in holds.params_at(event.track, sample_time) {
+        apply_named_params(snapshot, midi_fx, params, event, midi_fx_params);
+    }
+}
+
 /// Fold `seq-emit :params` (docs/jaki-plock-spec.md §3) into `event` after
 /// its landing stamp, resolving each label BY NAME against `event.track`, so
 /// a per-hit value beats the step's base, its stored p-lock and the print

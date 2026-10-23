@@ -246,6 +246,8 @@ pub(crate) struct GeneratorTickContext {
     /// Mixer-control holds pushed by `seq-emit-control`
     /// (docs/jaki-mixer-control-routes-spec.md).
     pub(super) controls: Vec<crate::mixer_control::EmittedMixerControl>,
+    /// Lock holds pushed by `seq-emit :lock true`.
+    pub(super) locks: Vec<crate::generator::EmittedLockHold>,
     /// The gate other sequencers hold on this generator at this boundary
     /// (`gen-gate`, docs/jaki-trig-modes-spec.md §4).
     pub(super) gate: crate::generator::GeneratorGateView,
@@ -1373,6 +1375,7 @@ impl ScratchControlRuntime {
                 state: input.state,
                 emitted: Vec::new(),
                 controls: Vec::new(),
+                locks: Vec::new(),
                 gate: input.gate,
             });
         }
@@ -1390,6 +1393,7 @@ impl ScratchControlRuntime {
         Ok(crate::generator::GeneratorTickResult {
             emitted: ctx.emitted,
             controls: ctx.controls,
+            locks: ctx.locks,
             random_state: ctx.random_state,
             state: ctx.state,
         })
