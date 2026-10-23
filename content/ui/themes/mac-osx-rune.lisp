@@ -40,8 +40,8 @@
       :adsr-bg                              '(0.035 0.038 0.043 1.0)
       :adsr-grid                            '(0.48 0.50 0.52 0.32)
       :adsr-point                           '(1.0 0.55 0.16 1.0)
-      :phaser-bg                            '(0.045 0.048 0.052 0.72)
-      :phaser-grid                          '(0.36 0.36 0.38 0.30)
+      :phaser-bg                            '(0.165 0.172 0.185 0.78) ; the shared curve-editor well
+      :phaser-grid                          '(1.0 1.0 1.0 0.16)
       :phaser-left                          '(1.0 0.62 0.25 1.0)
       :phaser-right                         '(0.45 0.78 0.95 1.0)
       :phaser-spectrum-min                  '(0.02 0.025 0.03 0.28)
@@ -49,13 +49,13 @@
       :phaser-spectrum-max                  '(0.35 0.68 0.72 0.30)
       :phaser-spectrum-line                 '(0.42 0.76 0.78 0.28)
       :phaser-spectrum-fill                 '(0.10 0.36 0.38 0.12)
-      :phaser-spectrum-bg                   '(0.02 0.025 0.03 1.0)
+      :phaser-spectrum-bg                   '(0.165 0.172 0.185 1.0)
       :phaser-wave-on-bg                    '(0.45 0.78 0.95 1.0)
-      :ott-high                             '(0.93 0.85 0.36 1.0)
-      :ott-mid                              '(0.45 0.78 0.95 1.0)
-      :ott-low                              '(1.00 0.62 0.25 1.0)
+      :ott-high                             '(0.55 0.45 0.02 1.0)
+      :ott-mid                              '(0.08 0.36 0.60 1.0)
+      :ott-low                              '(0.70 0.33 0.04 1.0)
       :ott-control-on                       '(0.94 0.69 0.32 1.0)
-      :ott-frequency-fg                     '(0.75 0.75 0.75 1.0)
+      :ott-frequency-fg                     '(0.22 0.23 0.25 1.0)
       :dynamics-knob-track                       '(0.4 0.4 0.4 1.0)
       :multiband-bg                         '(0.045 0.048 0.052 1.0)
       :multiband-grid                       '(0.36 0.36 0.38 0.34)
@@ -77,7 +77,7 @@
       :eq8-default-curve                    '(1.0 0.58 0.18 1.0)
       :eq8-inactive                         '(0.189 0.194 0.199 0.72)
       :eq8-grid                             '(0.42 0.43 0.45 0.34)
-      :filter-table-editor-bg               '(0.u30 0.040 0.055 1.0)
+      :filter-table-editor-bg               '(0.030 0.040 0.055 1.0)
       :filter-table-editor-grid             '(0.30 0.32 0.36 0.5)
       :filter-table-wave                    '(1.0 0.62 0.25 1.0)
       :filter-table-wave-inactive           '(0.20 0.43 0.72 0.14)
@@ -87,6 +87,14 @@
       :filter-table-spectrum-peak           '(0.36 0.62 0.92 0.58)
       :filterbank-control-on                '(0.98 0.78 0.14 1.0)
       :filterbank-readout                   '(0.93 0.88 0.72 1.0)
+      :filterbank-heading                   '(0.50 0.32 0.0 1.0)    ; section titles: dark amber on the light panel
+      :curve-editor-bg                      '(0.165 0.172 0.185 1.0) ; one dark well for every filter/curve editor
+      :curve-editor-grid                    '(1.0 1.0 1.0 0.10)
+      :curve-editor-fg                      '(0.66 0.68 0.71 1.0)   ; dots/labels on that well
+      :compressor-text                      '(0.62 0.64 0.67 1.0)   ; on the dark display
+      :rack-cell-wash                       '(0.70 0.71 0.73 0.55)  ; lift rack pads/clip cells off black
+      :rack-cell-fg                         '(0.12 0.13 0.14 1.0)
+      :param-adsr-bg                        '(0.180 0.188 0.200 1.0)
       ;; Semantic control roles preserve the original UI independently of accent.
       :scene-active-base              '(0.718 0.718 0.718 1.0)
       :scene-hover-base               '(0.448 0.448 0.448 0.72)
@@ -110,6 +118,8 @@
       :clock-fg                       '(0.85 0.85 0.85 1.0)
       :transport-led-bg               '(0.062 0.071 0.076 1.0)  ; LED panel: well below the playback container
       :transport-controls-bg          '(0.323 0.323 0.323 1.0)  ; playback buttons: a shade darker than :bg
+      :transport-led-dim              '(0.56 0.57 0.59 1.0)     ; unlit scene numbers, MET/ROLL/WAV
+      :track-name-muted-fg            '(0.16 0.17 0.18 0.80)    ; names on muted sequencer rows
       :preset-save-bg                 '(0.08 0.08 0.01 1.0)
       :preset-save-active-bg          '(0.00 0.35 0.82 1.0)
       :device-enabled                 '(1.0 0.8 0.12 1.0)
@@ -135,6 +145,8 @@
       :piano-black-lane               '(0.511 0.521 0.536 1.0)
       :piano-white-lane               '(0.635 0.645 0.660 1.0)
       :timeline-grid-minor            '(0.338 0.357 0.380 1.0)
+      :timeline-ruler-bg              '(0.470 0.480 0.500 1.0)  ; neutral ruler a step below the lanes
+      :timeline-ruler-fg              '(0.10 0.11 0.12 1.0)
       :timeline-playhead              '(0.90 0.68 0.28)
       :search-icon                    '(0.20 0.20 0.20 1.0)
       :text-input-bg                  '(0.655 0.660 0.67 1.0)
@@ -226,6 +238,15 @@
       :fx-panel-border   '(0.42 0.44 0.47)
       :instrument-panel-bg  '(0.705 0.705 0.730)            
       :instrument-control-bg '(0.64 0.64 0.64 1.0)
+      :instrument-control-contrast '(0.120 0.128 0.140 1.0) ; ink that reads on the light control bg
+      :sampler-control-bg   '(0.180 0.188 0.200 1.0)       ; dark well so the waveform pops
+      :sampler-grid         '(0.50 0.52 0.55 1.0)          ; ruler/grid/markers on that well
+      :lego-header-bg       '(0.120 0.128 0.140 1.0)       ; dark chip behind accent header text
+      :param-mod-bg         '(0.62 0.72 0.84 0.70)         ; pale blue wash, knobs stay legible
+      :param-mod-border     '(0.22 0.50 0.86 0.90)
+      :mod-panel-bg         '(0.560 0.570 0.585 1.0)       ; mods well a step darker than the panel
+      :modal-bg             '(0.780 0.790 0.805 1.0)       ; lifted above the light chrome
+      :modal-shadow         '(0.0 0.0 0.0 0.30)
       :instrument-group-bg '(0.61 0.612 0.628 1.0)
       :instrument-group-selected-bg '(0.205 0.255 0.245)
       :mixer-strip-bg    '(0.585 0.595 0.610)

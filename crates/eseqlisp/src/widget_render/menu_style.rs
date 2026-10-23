@@ -70,6 +70,37 @@ pub(crate) fn rounded_rect_primitive(
     shape_primitive("dropdown", rect, color, radius_px, true, viewport)
 }
 
+/// A soft drop shadow under a floating panel (modals, the command palette),
+/// in the theme's `:modal-shadow`: stacked rounded rects, each a step wider
+/// and carrying a share of its alpha, so the overlap darkens toward the
+/// panel. Transparent draws nothing.
+pub(crate) fn drop_shadow_primitives(
+    panel: Rect, radius_px: f32, viewport: WidgetViewport,
+) -> Vec<GpuPrimitive> {
+    const LAYERS: usize = 8;
+    const SPREAD_PX: f32 = 14.0;
+    const DROP_PX: f32 = 4.0;
+    let shadow = crate::theme::MODAL_SHADOW();
+    if shadow.a <= 0.0 {
+        return Vec::new();
+    }
+    let cell_w = viewport.cell_w.max(1.0);
+    let cell_h = viewport.cell_h.max(1.0);
+    let layer_color = Color::rgba(shadow.r, shadow.g, shadow.b, shadow.a / LAYERS as f32);
+    (1..=LAYERS)
+        .map(|layer| {
+            let spread_px = SPREAD_PX * layer as f32 / LAYERS as f32;
+            let rect = Rect {
+                row: panel.row + (DROP_PX - spread_px) / cell_h,
+                col: panel.col - spread_px / cell_w,
+                width: panel.width + spread_px * 2.0 / cell_w,
+                height: panel.height + spread_px * 2.0 / cell_h,
+            };
+            rounded_rect_primitive(rect, layer_color, radius_px + spread_px, viewport)
+        })
+        .collect()
+}
+
 pub(crate) fn emit_rounded_rect_overlay(
     rect: Rect, color: Color, radius_px: f32, viewport: WidgetViewport,
 ) {

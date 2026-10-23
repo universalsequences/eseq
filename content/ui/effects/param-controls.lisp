@@ -1017,12 +1017,12 @@
 
 (def param-mod-bg (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
-    (rgba 0.03 0.20 0.35 0.94)
+    :param-mod-bg
     :transparent))
 
 (def param-mod-border (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
-    (rgba 0.18 0.48 0.95 0.84)
+    :param-mod-border
     :transparent))
 
 (def param-mod-wrapper (fx p key body)

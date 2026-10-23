@@ -9,12 +9,19 @@
 (def el-text () :fg)
 
 (def el-surf () :instrument-group-bg)
-(def el-bord () :border-inactive)
+
+;; A flat section panel like the 808 Kick's: one thin padding, so the section
+;; badge sits tight in the top-left corner. Click selects the section.
+(def el-panel (section width height body)
+  (box :width width :height height :padding 0.18
+    :background-color (el-surf)
+    :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
+    body))
 
 (def el-panel-dense (section body)
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (eseq.effects.custom-ui-lego/ui-lego-col-w) (eseq.effects.custom-ui-lego/ui-lego-dense-h) (el-surf) (el-bord) false body))
+  (el-panel section (eseq.effects.custom-ui-lego/ui-lego-col-w) (eseq.effects.custom-ui-lego/ui-lego-dense-h) body))
 (def el-small-row (body)
-  (box :width :fill :height :fill :v-align :center body))
+  (box :width :fill :height :fill :v-align :start body))
 
 (def el-value (name fallback)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
@@ -47,28 +54,27 @@
 (def el-main-w () (eseq.effects.custom-ui-lego/ui-lego-wide-col-w))
 
 (def el-main-block ()
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s 0 (el-main-w) (el-main-h) (el-surf) (el-bord) false
-    (v-stack :width :fill :height :fill :gap 0.26 :align :start :padding 0.12
-      (h-stack :gap 0.22 :align :end
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 0 "ELEMENTS" 5.4 (el-head))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "model" "model" 9.0 '("Modal" "String" "Strings" "Ominous") (el-text)))
-      (h-stack :width :fill :gap 0.30 :align :center
+  (el-panel 0 (el-main-w) (el-main-h)
+    (v-stack :width :fill :height :fill :gap 0.26 :align :start
+      (eseq.effects.custom-ui-lego/ui-lego-section-badge-s 0 "ELEMENTS" 5.4 (el-head))
+      (h-stack :width :fill :gap 0.30 :align :start
         (h-stack :gap 0.10 :align :center
           (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 "geometry" "geometry" 4.9 4.2 3.6 (el-knob) 2)
           (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 "brightness" "bright" 4.9 4.2 3.6 (el-knob) 2)
           (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 "damping" "damping" 4.9 4.2 3.6 (el-knob) 2)
           (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 "position" "position" 4.9 4.2 3.6 (el-knob) 2))
         (v-stack :gap 0.10 :align :start
+          (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "model" "model" 8.4 '("Modal" "String" "Strings" "Ominous") (el-text))
           (el-help-line 0)
           (el-help-line 1)
           (el-help-line 2)
           (el-help-line 3))))))
 
 (def el-voice-block ()
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s 5 (el-main-w) (eseq.effects.custom-ui-lego/ui-lego-small-h) (el-surf) (el-bord) false
+  (el-panel 5 (el-main-w) (eseq.effects.custom-ui-lego/ui-lego-small-h)
     (el-small-row
       (h-stack :gap 0.18 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 5 "VOICE" 3.6 (el-head))
+        (eseq.effects.custom-ui-lego/ui-lego-section-badge-s 5 "VOICE" 3.6 (el-head))
         (eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s 5 4.4 (el-text))
         (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "tune" "tune" 4.4 1 "st" (el-text))
         (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "strength" "strength" 4.4 2 false (el-text))
@@ -77,9 +83,9 @@
 
 (def el-exciter (section title note a a-title b b-title c c-title)
   (el-panel-dense section
-    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+    (h-stack :width :fill :height :fill :gap 0.30 :align :start
       (v-stack :width 9.0 :gap 0.18 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-header-s section title 4.4 (el-head))
+        (eseq.effects.custom-ui-lego/ui-lego-section-badge-s section title 4.4 (el-head))
         (label note :font-size 9 :color :dim :bg :transparent))
       (h-stack :gap 0.08 :align :start
         (eseq.effects.custom-ui-lego/ui-lego-knob-full-s section a a-title 3.9 (el-knob) 2)
@@ -95,9 +101,9 @@
 
 (def el-space-block ()
   (el-panel-dense 4
-    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+    (h-stack :width :fill :height :fill :gap 0.30 :align :start
       (v-stack :width 9.0 :gap 0.18 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 4 "SPACE" 4.4 (el-head))
+        (eseq.effects.custom-ui-lego/ui-lego-section-badge-s 4 "SPACE" 4.4 (el-head))
         (h-stack :gap 0.30 :align :center
           (label "freeze" :font-size 9.0 :width 3.0 :color (el-text) :bg :transparent)
           (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 4 "freeze" "freeze" 4.6 '("off" "on") (el-text))))

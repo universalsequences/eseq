@@ -150,7 +150,7 @@
               (box :width 4.4 :height 1.72))))
         (box :debug-name "effect-lfo-curve-wrapper"
              :width 12.2 :height 5.7 :padding 0.22
-             :background-color :black
+             :background-color :mod-panel-bg
              :corner-radius 8
           (lfo-shape-curve fx section shape pulse-width phase 11.7 5.25))))))
 
@@ -178,7 +178,7 @@
   (box :debug-name "effect-mod-control-panel"
        :width 36.4
        :height st/fx-panel-body-content-height
-       :background-color :black
+       :background-color :mod-panel-bg
        :corner-radius 10
        :padding 0.25
     (h-stack :height :fill :gap 0.25 :align :stretch

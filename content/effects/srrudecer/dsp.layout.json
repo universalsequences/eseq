@@ -1,5 +1,6 @@
 {
-  "version": 1,
+  "version": 3,
+  "authored": true,
   "root": {
     "nodes": {
       "Left": {
@@ -50,11 +51,15 @@
         "x": 82.50279,
         "y": 24.736609
       },
-      "mix#0": {
+      "max-2": {
+        "x": 106.572266,
+        "y": 30.423468
+      },
+      "mix-0": {
         "x": 29.297499,
         "y": 11.636836
       },
-      "mix#1": {
+      "mix-1": {
         "x": 106.285,
         "y": 10.6825
       },
@@ -62,9 +67,13 @@
         "x": 54.815002,
         "y": 4.0
       },
+      "mod-2": {
+        "x": 107.77832,
+        "y": 26.053251
+      },
       "sr": {
-        "x": 100.64035,
-        "y": 23.156609
+        "x": 107.02498,
+        "y": 22.572104
       },
       "value1": {
         "x": 141.69995,
@@ -76,27 +85,27 @@
       }
     },
     "cables": {
-      "input_l:0->mix#0:0": {
+      "input_l:0->mix-0:0": {
         "segmented": true,
         "y": 8.13125
       },
-      "input_r:0->mix#1:0": {
+      "input_r:0->mix-1:0": {
         "segmented": true,
         "y": 6.8912506
       },
-      "mix#0:0->Left:0": {
+      "mix-0:0->Left:0": {
         "segmented": true,
         "y": 14.813749
       },
-      "mix#1:0->Right:0": {
+      "mix-1:0->Right:0": {
         "segmented": true,
         "y": 13.57375
       },
-      "mix-amt:0->mix#0:2": {
+      "mix-amt:0->mix-0:2": {
         "segmented": true,
         "y": 5.93
       },
-      "mix-amt:0->mix#1:2": {
+      "mix-amt:0->mix-1:2": {
         "segmented": true,
         "y": 5.93
       }
@@ -114,10 +123,514 @@
       "latch1:1": "cable",
       "latch2:0": "cable",
       "latch2:1": "cable",
-      "mix#0:1": "cable",
-      "mix#0:2": "inline-raw-param",
-      "mix#1:1": "cable"
+      "max-2:0": "cable",
+      "mix-0:1": "cable",
+      "mix-0:2": "inline-raw-param",
+      "mix-1:1": "cable",
+      "mod-2:0": "cable"
     }
   },
-  "macros": {}
+  "macros": {},
+  "graph": {
+    "nodes": [
+      {
+        "id": "history1",
+        "op": "make-history",
+        "kind": "history",
+        "label": "history",
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "value2",
+        "op": "44100",
+        "kind": "constant",
+        "label": "44100",
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "value1",
+        "op": "20000",
+        "kind": "constant",
+        "label": "20000",
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "add1",
+        "op": "+",
+        "kind": "builtin",
+        "label": "+ add1",
+        "args": [
+          {
+            "kind": "connected"
+          },
+          {
+            "kind": "literal",
+            "value": "1"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "sr",
+        "op": "param",
+        "kind": "param",
+        "label": "param sr @min 2000 @max 44100 @default 20000",
+        "outputs": [
+          "out"
+        ],
+        "param": {
+          "name": "sr",
+          "modulatable": true
+        }
+      },
+      {
+        "id": "div1",
+        "op": "/",
+        "kind": "builtin",
+        "label": "/ div1",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "value2"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "sr"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "ceil1",
+        "op": "ceil",
+        "kind": "builtin",
+        "label": "ceil ceil1",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "div1"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "generated1",
+        "op": "%",
+        "kind": "builtin",
+        "label": "% generated1",
+        "args": [
+          {
+            "kind": "connected"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "ceil1"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "generated2",
+        "op": "==",
+        "kind": "builtin",
+        "label": "== generated2",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "generated1"
+          },
+          {
+            "kind": "literal",
+            "value": "0"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "input_l",
+        "op": "in",
+        "kind": "in",
+        "label": "in 1 @name Left",
+        "args": [
+          {
+            "kind": "literal",
+            "value": "1"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "latch1",
+        "op": "latch",
+        "kind": "builtin",
+        "label": "latch latch1",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "input_l"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "generated2"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "input_r",
+        "op": "in",
+        "kind": "in",
+        "label": "in 2 @name Right",
+        "args": [
+          {
+            "kind": "literal",
+            "value": "2"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "latch2",
+        "op": "latch",
+        "kind": "builtin",
+        "label": "latch latch2",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "input_r"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "generated2"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "mix-amt",
+        "op": "param",
+        "kind": "param",
+        "label": "param mix @min 0 @max 1 @default 0.5",
+        "outputs": [
+          "out"
+        ],
+        "param": {
+          "name": "mix",
+          "modulatable": false
+        }
+      },
+      {
+        "id": "mix-0",
+        "op": "mix",
+        "kind": "builtin",
+        "label": "mix",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "input_l"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "latch1"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "mix-amt"
+          }
+        ],
+        "outputs": [
+          "out"
+        ],
+        "synthesized": true
+      },
+      {
+        "id": "Left",
+        "op": "out",
+        "kind": "out",
+        "label": "Left",
+        "args": [
+          {
+            "kind": "connected"
+          },
+          {
+            "kind": "literal",
+            "value": "1"
+          }
+        ]
+      },
+      {
+        "id": "mix-1",
+        "op": "mix",
+        "kind": "builtin",
+        "label": "mix",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "input_r"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "latch2"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "mix-amt"
+          }
+        ],
+        "outputs": [
+          "out"
+        ],
+        "synthesized": true
+      },
+      {
+        "id": "Right",
+        "op": "out",
+        "kind": "out",
+        "label": "Right",
+        "args": [
+          {
+            "kind": "connected"
+          },
+          {
+            "kind": "literal",
+            "value": "2"
+          }
+        ]
+      },
+      {
+        "id": "max-2",
+        "op": "max",
+        "kind": "builtin",
+        "label": "max 10",
+        "args": [
+          {
+            "kind": "connected"
+          },
+          {
+            "kind": "literal",
+            "value": "10"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "mod-2",
+        "op": "mod",
+        "kind": "builtin",
+        "label": "mod",
+        "args": [
+          {
+            "kind": "connected"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      }
+    ],
+    "connections": [
+      {
+        "fromNode": "history1",
+        "fromOutput": 0,
+        "toNode": "add1",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "value2",
+        "fromOutput": 0,
+        "toNode": "div1",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "div1",
+        "fromOutput": 0,
+        "toNode": "ceil1",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "history1",
+        "fromOutput": 0,
+        "toNode": "generated1",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "ceil1",
+        "fromOutput": 0,
+        "toNode": "generated1",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "generated1",
+        "fromOutput": 0,
+        "toNode": "generated2",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "input_l",
+        "fromOutput": 0,
+        "toNode": "latch1",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "generated2",
+        "fromOutput": 0,
+        "toNode": "latch1",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "input_r",
+        "fromOutput": 0,
+        "toNode": "latch2",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "generated2",
+        "fromOutput": 0,
+        "toNode": "latch2",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "input_l",
+        "fromOutput": 0,
+        "toNode": "mix-0",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "latch1",
+        "fromOutput": 0,
+        "toNode": "mix-0",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "mix-amt",
+        "fromOutput": 0,
+        "toNode": "mix-0",
+        "toInput": 2,
+        "kind": "forward",
+        "presentation": "inline-raw-param"
+      },
+      {
+        "fromNode": "mix-0",
+        "fromOutput": 0,
+        "toNode": "Left",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "input_r",
+        "fromOutput": 0,
+        "toNode": "mix-1",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "latch2",
+        "fromOutput": 0,
+        "toNode": "mix-1",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "mix-amt",
+        "fromOutput": 0,
+        "toNode": "mix-1",
+        "toInput": 2,
+        "kind": "forward",
+        "presentation": "inline-raw-param"
+      },
+      {
+        "fromNode": "mix-1",
+        "fromOutput": 0,
+        "toNode": "Right",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "add1",
+        "fromOutput": 0,
+        "toNode": "history1",
+        "toInput": 0,
+        "kind": "feedback",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "sr",
+        "fromOutput": 0,
+        "toNode": "mod-2",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "max-2",
+        "fromOutput": 0,
+        "toNode": "div1",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "mod-2",
+        "fromOutput": 0,
+        "toNode": "max-2",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      }
+    ]
+  }
 }

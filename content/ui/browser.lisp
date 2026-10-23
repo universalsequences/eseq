@@ -89,14 +89,16 @@
 ;; ── State ──
 
 ;; The sidebar: the tab it shows, its mode ("audition", or "create-sampler"
-;; while a sample picks a new track), and the search boxes (the tab's, and
-;; the preset list's).
+;; while a sample picks a new track), the search boxes (the tab's, and
+;; the preset list's), and `revision`, which `refresh-buffer` bumps so the
+;; trees read from disk (packages, saved instruments) list again.
 (def-kind browser-view
   :key ()
   :state ((tab "samples")
           (mode "audition")
           (search "")
-          (preset-search "")))
+          (preset-search "")
+          (revision 0)))
 
 ;; The Samples tab: the tag and origin filters, the sample the tree selected
 ;; and the one last auditioned, and the shown track and sample the filters
@@ -2267,13 +2269,20 @@ then creates the instance and opens its tab."
 ;; ── Reactive rendering (like ui/main.lisp) ──
 
 (def root-widget ()
-  (v-stack :width :fill :height :fill :gap 0.4 :padding 0.15
-    (build-widgets)
-    (package-context-menu)
-    (instrument-context-menu)))
+  (do
+    browser-view.revision
+    (v-stack :width :fill :height :fill :gap 0.4 :padding 0.15
+      (build-widgets)
+      (package-context-menu)
+      (instrument-context-menu))))
 
+;; Host commands call this after the files behind a tree change. It re-runs
+;; the `effect-buffer` below rather than rendering the tree a second way: a
+;; `render-widget-to-buffer` render gives every widget a different identity,
+;; so the next reactive render (opening a context menu, say) dropped the
+;; trees' open folders and scrolled them back to the top.
 (def refresh-buffer ()
-  (render-widget-to-buffer "*samples*" (root-widget)))
+  (set! browser-view.revision (+ browser-view.revision 1)))
 
 ;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
 (set-buffer-mode-for "*samples*" "eseq.sequencer-keys/sequencer-keys")

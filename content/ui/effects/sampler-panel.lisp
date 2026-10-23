@@ -454,11 +454,11 @@
           :height 3.6
           :header-height 0.3
           :ruler-font-size 8
-          :ruler-color :dim
-          :ruler-bg :instrument-control-bg
-          :grid-major-color :dim
+          :ruler-color :sampler-grid
+          :ruler-bg :sampler-control-bg
+          :grid-major-color :sampler-grid
           :grid-minor-color :dimmer
-          :bg :instrument-control-bg
+          :bg :sampler-control-bg
           :focusable true
           ;; Slice mode turns the body into a slice picker: no
           ;; range drag, and no start/end handles to grab.
@@ -466,7 +466,7 @@
           :marker-selection (not slicing)
           :active-slice #'sampler-view.selected-slice
           :active-marker sampler-view.active-marker
-          :marker-color :dim
+          :marker-color :sampler-grid
           :active-marker-color :widget-knob-filled
           :waveform-color :yellow
           :inactive-waveform-color '(rgba 0.25 0.25 0.25 1)

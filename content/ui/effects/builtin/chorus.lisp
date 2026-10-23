@@ -66,8 +66,8 @@
         (list (band lp 0 "lowpass") (band hp 1 "highpass")))
       :freq-min 20 :freq-max 20000 :gain-min -18 :gain-max 6
       :q-min 0.70710678 :q-max 0.70710678
-      :background-color :instrument-control-bg :corner-radius 4
-      :grid-color :border-inactive :stroke-color :blue
+      :background-color :curve-editor-bg :corner-radius 4
+      :grid-color :curve-editor-grid :stroke-color :blue
       :point-color :blue :stroke-width 2
       :width 29.0 :height 3.2
       :on-action |event|

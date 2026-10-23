@@ -227,9 +227,9 @@
                 :gain-max 12
                 :q-min (get filter-q-p :min)
                 :q-max (get filter-q-p :max)
-                :background-color :black
+                :background-color :curve-editor-bg
                 :corner-radius 16
-                :grid-color :instrument-panel-bg
+                :grid-color :curve-editor-grid
                 :stroke-color :blue
                 :point-color :yellow
                 :on-action |event| (handle-curve-action fx filter-freq-p filter-q-p event))))

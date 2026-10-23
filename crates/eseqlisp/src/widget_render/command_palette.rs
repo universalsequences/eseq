@@ -277,6 +277,9 @@ pub fn primitives(frame: &PaletteFrame, viewport: WidgetViewport) -> Vec<GpuPrim
     let text_pad = 1.0;
     let mut prims = Vec::new();
     let panel_bg = lift(theme::DROPDOWN_MENU_BG(), -0.22);
+    // Lifted off the interface by the theme's drop shadow (crucial on
+    // light themes, where the panel and what it covers are close in tone).
+    prims.extend(super::menu_style::drop_shadow_primitives(panel, PANEL_RADIUS_PX, viewport));
     // A faint light rim, as native popovers draw.
     prims.extend(panel_chrome_primitives(panel, panel_bg, fg.with_alpha(0.14), PANEL_RADIUS_PX, viewport));
     prims.push(GpuPrimitive::PushClipRect(panel));

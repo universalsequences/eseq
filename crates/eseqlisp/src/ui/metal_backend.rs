@@ -1054,7 +1054,7 @@ vertex WidgetVaryings widget_vert(
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::lang::sdf_codegen::compile_sdf_to_metal;
+        use crate::lang::sdf_codegen::{compile_sdf_to_metal, compile_sdf_to_metal_with_state};
 
         fn parse_one_expr(src: &str) -> crate::parser::Expression {
             let tokens = crate::parser::Parser::new(src.to_string()).parse().unwrap();
@@ -1190,6 +1190,26 @@ vertex WidgetVaryings widget_vert(
                        (material
                          :color (mix :accent :white (smoothstep -0.1 0.03 d))))))",
             ))
+            .unwrap();
+            compile_widget_shader_with_metal(&output.shader_source).unwrap();
+        }
+
+        /// The theme wash the rack pad and clip cell shaders use: a slot's
+        /// alpha read with `dot`, a color rebound in the same `let`, and an
+        /// rgb mask that keeps it opaque.
+        #[test]
+        fn generated_theme_wash_shader_compiles_in_metal() {
+            let output = compile_sdf_to_metal_with_state(
+                &parse_one_expr(
+                    "(let ((wash-k (* wash (dot :accent (vec4 0 0 0 1))))
+                           (inner (rgba 0.1 0.1 0.1 1))
+                           (inner (+ (* (mix inner :accent wash-k) (vec4 1 1 1 0)) (vec4 0 0 0 1))))
+                       (sdf/layer
+                         (sdf/fill (- (length (vec2 x y)) 0.5)
+                           (material :color inner))))",
+                ),
+                &["wash".to_string()],
+            )
             .unwrap();
             compile_widget_shader_with_metal(&output.shader_source).unwrap();
         }

@@ -70,11 +70,15 @@
     :on-change (lambda (v) (eseq.effects.param-controls/fx-set-effect-value fx p v))))
 
 (def mini-number (fx label-text p decimals w)
+  (mini-number-in fx label-text p decimals w :dim))
+
+;; color: the label and readout ink, :compressor-text on the dark display.
+(def mini-number-in (fx label-text p decimals w color)
   (h-stack :gap 0.18 :align :baseline
-    (label label-text :font-size 8.5 :color :dim :bg :transparent)
+    (label label-text :font-size 8.5 :color color :bg :transparent)
     (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
       :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
-      :noui true :font-size 9.5 :text-color :dim
+      :noui true :font-size 9.5 :text-color color
       :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
       :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -154,19 +158,19 @@
        :background-color :black :corner-radius 7
     (v-stack :gap 0.16 :align :start
       (h-stack :gap 0.6 :align :baseline
-        (mini-number fx "Thresh" thr-p 1 4.4)
+        (mini-number-in fx "Thresh" thr-p 1 4.4 :compressor-text)
         (label "GR" :font-size 8.5 :width 1.6 :color :compressor-gr :bg :transparent)
-        (label "Output" :font-size 8.5 :width 3.2 :color :dim :bg :transparent)
-        (mini-number fx "Out" out-p 1 4.4))
+        (label "Output" :font-size 8.5 :width 3.2 :color :compressor-text :bg :transparent)
+        (mini-number-in fx "Out" out-p 1 4.4 :compressor-text))
       (compressor-display
         :width 23.6 :height 6.0
         :source (effect-source fx)
         :threshold (eseq.effects.param-controls/param-effective-value thr-p))
       (h-stack :gap 0.55 :align :baseline
-        (mini-number fx "Knee" knee-p 1 3.6)
-        (label "Look." :font-size 8.5 :width 2.5 :color :dim :bg :transparent)
+        (mini-number-in fx "Knee" knee-p 1 3.6 :compressor-text)
+        (label "Look." :font-size 8.5 :width 2.5 :color :compressor-text :bg :transparent)
         (option fx look-p 4.4)
-        (label "Env" :font-size 8.5 :width 1.8 :color :dim :bg :transparent)
+        (label "Env" :font-size 8.5 :width 1.8 :color :compressor-text :bg :transparent)
         (choice fx env-p 0 "Lin" 2.2)
         (choice fx env-p 1 "Log" 2.2)))))
 

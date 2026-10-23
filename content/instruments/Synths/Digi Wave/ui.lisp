@@ -200,9 +200,9 @@
             :gain-max 12
             :q-min 0
             :q-max 1
-            :background-color :instrument-control-bg
+            :background-color :curve-editor-bg
             :corner-radius 5
-            :grid-color :border-inactive
+            :grid-color :curve-editor-grid
             :stroke-color (dw-knob)
             :stroke-width 4.5
             :point-color (dw-head)

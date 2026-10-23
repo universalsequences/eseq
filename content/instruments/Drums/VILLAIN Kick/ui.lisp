@@ -7,7 +7,6 @@
 (def vk-accent () (eseq.effects.custom-ui-lego/ui-accent-cyan))
 (def vk-text () :fg)
 (def vk-surf () :instrument-group-bg)
-(def vk-bord () :border-inactive)
 
 (def vk-family-file () "instruments/Drums/VILLAIN Kick/data/family.json")
 
@@ -46,8 +45,13 @@
 (def vk-armed () (vk-state-get :armed "a"))
 (def vk-page () (vk-state-get :page "hit"))
 
+;; A flat section panel like the 808 Kick's: one thin padding, so the section
+;; badge sits tight in the top-left corner. Click selects the section.
 (def vk-panel (section width height body)
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section width height (vk-surf) (vk-bord) false body))
+  (box :width width :height height :padding 0.18
+    :background-color (vk-surf)
+    :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
+    body))
 
 ;; A kick slot: its letter arms the map (a click on a dot loads that slot);
 ;; the big box under it is the param itself, showing the kick's number.
@@ -87,7 +91,7 @@
 (def vk-kicks-block ()
   (vk-panel 0 (vk-left-w) (vk-dense-h)
     (v-stack :width :fill :height :fill :gap 0.30 :align :start
-      (eseq.effects.custom-ui-lego/ui-lego-header-s 0 "KICKS" 4.0 (vk-accent))
+      (eseq.effects.custom-ui-lego/ui-lego-section-badge-s 0 "KICKS" 4.0 (vk-accent))
       (h-stack :width :fill :gap 0.40 :align :start
         (vk-kick-box "a" "kick_a")
         (vk-kick-box "b" "kick_b")))))
@@ -95,7 +99,7 @@
 (def vk-morph-block ()
   (vk-panel 0 (vk-left-w) (vk-pages-h)
     (v-stack :width :fill :height :fill :gap 0.20 :align :start
-      (eseq.effects.custom-ui-lego/ui-lego-header-s 0 "MORPH" 4.0 (vk-accent))
+      (eseq.effects.custom-ui-lego/ui-lego-section-badge-s 0 "MORPH" 4.0 (vk-accent))
       (h-stack :width :fill :gap 0.30 :align :start
         (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 0 "blend" "blend" 6.4 (vk-accent) 2)
         (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 0 "exaggerate" "exagg" 6.4 (vk-accent) 2)))))
@@ -122,7 +126,12 @@
           :tilt (vk-effective "tilt" 0) :drop-time (vk-effective "drop_time" 1)
           :armed (if (= (vk-armed) "b") 1 0)
           :accent (vk-accent)
-          :background-color :instrument-control-bg
+          :background-color :curve-editor-bg
+          :dot-color :curve-editor-fg
+          :grid-color :curve-editor-grid
+          :b-color :curve-editor-fg
+          :label-color :curve-editor-fg
+          :line-color :curve-editor-fg
           :x-label "deep" :y-label "swell"
           :width (- (vk-map-w) 0.4) :height (- (vk-total-h) 0.4)
           :on-pick (lambda (index slot)
@@ -131,9 +140,9 @@
 
 (def vk-family-block ()
   (vk-panel 1 (vk-right-w) (vk-dense-h)
-    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+    (h-stack :width :fill :height :fill :gap 0.30 :align :start
       (v-stack :width 5.0 :gap 0.18 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 1 "FAMILY" 5.0 (vk-accent)))
+        (eseq.effects.custom-ui-lego/ui-lego-section-badge-s 1 "FAMILY" 5.0 (vk-accent)))
       (h-stack :gap 0.10 :align :start
         (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 1 "pc1" "deep" 5.6 (vk-accent) 2)
         (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 1 "pc2" "swell" 5.6 (vk-accent) 2)

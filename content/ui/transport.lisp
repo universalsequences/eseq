@@ -1001,7 +1001,7 @@
 
 ;; A label on a pill: white while on (a value or a #' binding), else gray.
 (def pill-label (text on &key (font 9))
-  (label text :font-size font :color :dimmer :active on :active-color :arrangement-return-fg
+  (label text :font-size font :color :transport-led-dim :active on :active-color :arrangement-return-fg
     :height :fill
     :h-align :center
     :v-align :center
@@ -1217,7 +1217,7 @@
             :value #'engine.cpu-load
             :decimals 0 :min-integer-digits 2 :suffix "%"
             :font-size 12 :width 2.0 :height 1
-            :color :dim :active #'engine.overloaded :active-color :red
+            :color :gray :active #'engine.overloaded :active-color :red
             :bg :transparent)))
       (box :width 0.8)
       ;; The latency planner aligns every route to this delay. A latent FX
@@ -1260,7 +1260,7 @@
         (label (fmt " {} " s.number)
           :font-size 11
           :v-align :baseline
-          :color (if s.queued :scene-active-fg :dimmer)
+          :color (if s.queued :scene-active-fg :transport-led-dim)
           :active #'s.active :active-color :scene-active-fg
           :bg :transparent)))))
 

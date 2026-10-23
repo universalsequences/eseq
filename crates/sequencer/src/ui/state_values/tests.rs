@@ -3128,6 +3128,60 @@ use panel_kinds_seed::*;
         }
     }
 
+    /// Tree and scroll state (open folders, scroll offset) is keyed by the
+    /// widget's stable id. `refresh-buffer` used to render the browser a
+    /// second way (`render-widget-to-buffer`), which assigned different ids
+    /// than the `effect-buffer` render, so the next reactive render -- a
+    /// right-click opening the package menu -- collapsed the tree and
+    /// scrolled it to the top.
+    #[test]
+    fn metal_seq_browser_refresh_and_package_menu_keep_tree_identity() {
+        let mut editor = browser_editor_on_instrument_tab();
+        let listings = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = listings.clone();
+        editor.runtime_mut().register_native("seq-package-tree", move |_args, _ctx| {
+            counter.set(counter.get() + 1);
+            let empty = std::env::temp_dir().join("eseq-tests-no-such-packages-dir");
+            let tree = crate::host_commands::packages::build_package_tree(
+                &empty,
+                &eseqlisp::package::PackageCatalog::default(),
+                &empty,
+                "",
+                "",
+            );
+            Ok(crate::host_commands::packages::package_tree_to_value(&tree))
+        });
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""packages""#);
+        editor.refresh_runtime_side_effects();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(60, 20);
+        let ids = |editor: &mut eseqlisp::Editor| {
+            let layout = editor.widget_layout().unwrap();
+            let id = |suffix: &str| {
+                find_layout_node_by_stable_key_suffix(&layout, suffix).unwrap().stable_widget_id
+            };
+            (id("/packages-tab-tree"), id("/packages-tab-scroll"))
+        };
+        let shown = ids(&mut editor);
+
+        let before = listings.get();
+        editor.runtime_mut().eval_str("(eseq.browser/refresh-buffer)").unwrap();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(ids(&mut editor), shown, "refresh-buffer re-keyed the tree");
+        assert!(listings.get() > before, "refresh-buffer must list the packages again");
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/open-package-menu
+                     (dict :item (dict :kind "module" :label "skin.lisp" :module "pond.skin"
+                                       :path "/x/pond/skin.lisp")))"#,
+            )
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(ids(&mut editor), shown, "opening the package menu re-keyed the tree");
+    }
+
     #[test]
     fn metal_seq_browser_packages_tab_instance_rows_menus_and_double_click() {
         let mut editor = browser_editor_on_instrument_tab();

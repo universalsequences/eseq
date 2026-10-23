@@ -114,6 +114,7 @@
         ui-lego-panel-x-s
         ui-lego-tab-s
         ui-lego-header-s
+        ui-lego-section-badge-s
         ui-lego-vfader-s
         ui-lego-fader-s
         ui-lego-sel-surface
@@ -1060,15 +1061,18 @@
           (ui-adsr-number-s section :sustain sustain "sus" 2 false)
           (ui-adsr-number-s section :release release "rel" 0 "ms"))))))
 
+;; Page tab: the selected one is an accent-filled chip with dark text (the
+;; 808 Kick's bottom tabs), the rest plain text. Accent-colored text alone
+;; disappears on light panels.
 (def ui-lego-underline-tab (title width selected accent on-click debug-name)
-  (v-stack :width width :height 1.02 :gap 0.0 :align :stretch
-    (box :width :fill :height 0.96 :h-align :center :v-align :center
+  (box :width width :height 1.02 :padding 0.08 :v-align :center
+    (box :width :fill :height 0.82 :h-align :center :v-align :center
+         :corner-radius 3
+         :background-color (if selected accent :transparent)
          :debug-name debug-name :on-click on-click
       (label title :font-size 9.2
-        :color (if selected accent :dim)
-        :bg :transparent))
-    (box :width :fill :height 0.06
-      :background-color (if selected accent :transparent))))
+        :color (if selected :black :dim)
+        :bg :transparent))))
 
 (def ui-detail-adsr-wide-tab-s (section title width selected)
   (ui-lego-underline-tab
@@ -1206,15 +1210,28 @@
     ; (label text :font-size 8.8 :color text-color :bg :transparent)
     ))
 
-;; Accent text header with underline — alternative to ui-lego-badge-s.
+;; Accent text header — alternative to ui-lego-badge-s. The theme's
+;; :lego-header-bg puts a chip behind it (transparent by default) for themes
+;; whose panels are too light for the accent alone.
 (def ui-lego-header-s (section title width accent)
-  (box 
+  (box
     :width width :height 0.6 :v-align :end :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
-    (v-stack :width width :gap 0.14 :align :start
-      (label title :font-size 9.2 :width width :color accent :bg :transparent)
-      )
-    )
-  )
+    (box :width width :background-color :lego-header-bg :corner-radius 2 :padding-left 0.12
+      (label title :font-size 9.2 :color accent :bg :transparent))))
+
+;; Section badge in the 808 Kick style: an accent-filled tag with dark
+;; centered text and a generous margin either side of it. Roomier than
+;; ui-lego-header-s, for panels with space to spare. `width` is a minimum;
+;; the badge grows with its title. Click selects the section.
+(def ui-lego-section-badge-width (title width)
+  (max width (+ (* (len title) 0.62) 2.6)))
+
+(def ui-lego-section-badge-s (section title width accent)
+  (let ((w (ui-lego-section-badge-width title width)))
+    (box :width w :height 0.72 :background-color accent
+      :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
+      (label title :width w :height 0.72 :h-align :center :v-align :center
+        :font-size 8.2 :color :black :bg :transparent))))
 
 ;; Param-bound vertical fader.
 (def ui-lego-vfader-s (section name width height accent)

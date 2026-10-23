@@ -448,14 +448,20 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float gridT = fract(uv.x * axisSpan);
     float gridDist = min(gridT, 1.0 - gridT) / axisSpan;
     float gridAA = max(fwidth(uv.x), 0.0008);
-    float gridMask = smoothstep(gridAA * 1.6, 0.0, gridDist) * 0.6;
+    // Crisp 1px ticks: full coverage on the tick's pixel, none beside it.
+    float gridMask = clamp(1.0 - gridDist / gridAA, 0.0, 1.0) * 0.6;
     col.rgb = mix(col.rgb, in.color_c.rgb, gridMask * in.color_c.a);
 
     float aa = max(fwidth(uv.x), 0.0008);
+    float aaY = max(fwidth(uv.y), 0.0008);
     if (mode == 0) {
         // BLEND routes the LFO from common CENTER motion to SPREAD motion,
         // where outer notches fan in opposite directions around the anchor.
-        float yPad = smoothstep(0.04, 0.14, uv.y) * smoothstep(0.96, 0.86, uv.y);
+        // Notches run between hard insets, antialiased over one pixel.
+        float yPad = clamp((uv.y - 0.08) / aaY + 0.5, 0.0, 1.0)
+            * clamp((0.92 - uv.y) / aaY + 0.5, 0.0, 1.0);
+        // The sweep ranges shade once as a union, so overlaps don't muddy.
+        float bandUnion = 0.0;
         for (int i = 0; i < 12; i++) {
             if (i >= count) { break; }
             float offset = float(i) - (float(count) - 1.0) * 0.5;
@@ -466,11 +472,11 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                 float linearX = anchorX + log2(linearFactor) / 10.0;
                 float baseX = clamp(mix(exponentialX, linearX, blend), 0.0, 1.0);
                 float band = step(baseX - sweep, uv.x) * step(uv.x, baseX + sweep);
-                col.rgb = mix(col.rgb, in.color_a.rgb, band * 0.10 * yPad);
-                float lineL = smoothstep(aa * 2.2, aa * 0.4, abs(uv.x - (baseX + sweepL)));
-                float lineR = smoothstep(aa * 2.2, aa * 0.4, abs(uv.x - (baseX + sweepR)));
-                col.rgb = mix(col.rgb, in.color_a.rgb, lineL * 0.92 * yPad);
-                col.rgb = mix(col.rgb, in.color_d.rgb, lineR * 0.88 * yPad);
+                bandUnion = max(bandUnion, band);
+                float lineL = clamp(1.25 - abs(uv.x - (baseX + sweepL)) / aa, 0.0, 1.0);
+                float lineR = clamp(1.25 - abs(uv.x - (baseX + sweepR)) / aa, 0.0, 1.0);
+                col.rgb = mix(col.rgb, in.color_a.rgb, lineL * yPad);
+                col.rgb = mix(col.rgb, in.color_d.rgb, lineR * yPad);
                 continue;
             }
             float spreadL = clamp(
@@ -508,19 +514,21 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
             float bandMin = min(rangeNeg, rangePos);
             float bandMax = max(rangeNeg, rangePos);
             float band = step(bandMin, uv.x) * step(uv.x, bandMax);
-            col.rgb = mix(col.rgb, in.color_a.rgb, band * 0.10 * yPad);
-            float lineL = smoothstep(aa * 2.2, aa * 0.4, abs(uv.x - lineXL));
-            float lineR = smoothstep(aa * 2.2, aa * 0.4, abs(uv.x - lineXR));
-            col.rgb = mix(col.rgb, in.color_a.rgb, lineL * 0.92 * yPad);
-            col.rgb = mix(col.rgb, in.color_d.rgb, lineR * 0.88 * yPad);
+            bandUnion = max(bandUnion, band);
+            float lineL = clamp(1.25 - abs(uv.x - lineXL) / aa, 0.0, 1.0);
+            float lineR = clamp(1.25 - abs(uv.x - lineXR) / aa, 0.0, 1.0);
+            col.rgb = mix(col.rgb, in.color_a.rgb, lineL * yPad);
+            col.rgb = mix(col.rgb, in.color_d.rgb, lineR * yPad);
         }
+        col.rgb = mix(col.rgb, in.color_a.rgb, bandUnion * 0.08 * yPad);
     } else {
         // Two channel dots on the log-time axis with the sweep range behind.
         float baseX = anchorX;
         float2 dotL = float2(baseX + sweepL, 0.38);
         float2 dotR = float2(baseX + sweepR, 0.62);
         float band = step(baseX - sweep, uv.x) * step(uv.x, baseX + sweep);
-        float yBand = smoothstep(0.26, 0.36, uv.y) * smoothstep(0.74, 0.64, uv.y);
+        float yBand = clamp((uv.y - 0.30) / aaY + 0.5, 0.0, 1.0)
+            * clamp((0.70 - uv.y) / aaY + 0.5, 0.0, 1.0);
         col.rgb = mix(col.rgb, in.color_a.rgb, band * 0.07 * yBand);
 
         float dL = length(float2((uv.x - dotL.x) * aspect, uv.y - dotL.y));

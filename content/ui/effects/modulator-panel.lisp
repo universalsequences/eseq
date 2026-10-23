@@ -60,7 +60,7 @@
             (label "missing: fall" :font-size 10 :color :red :bg :transparent))
           (box :width 0.45 :height 1)
           (box :width 12.8 :height 5.9 :padding 0.22
-            :background-color :black
+            :background-color :mod-panel-bg
             :corner-radius 8
             :debug-name "modulator-curve-wrapper"
             (modulator-curve

@@ -2030,6 +2030,10 @@ pub(crate) fn register_package_tree_natives(runtime: &mut Runtime, state: Arc<Se
                 &state.scratch_source(),
                 &init,
             );
+            let app_root = [eseqlisp::ModuleLoadRoot { path: app_paths.factory_root(), module_prefix: None }];
+            hide_app_modules(&mut tree, |module| {
+                sequencer::agent::forms::resolve_module_file(&app_root, module).is_some()
+            });
             let kinds = module_kinds(&catalog, &registered_tree_kinds());
             annotate_package_kinds(&mut tree, &kinds, &instances);
             Ok(package_tree_to_value(&filter_package_tree(&tree, &query.trim().to_lowercase())))
@@ -2476,6 +2480,20 @@ fn loaded_section(
         instance_count: 0,
         instance: None,
     }
+}
+
+/// Drop the Loaded rows for the application's own modules (`eseq.kinds`,
+/// `eseq.sequencer`, ...): init.lisp imports them to script the app, but they
+/// are not packages, and listing them beside real ones only confuses. A row
+/// some tier located is a package whatever its name; of the rest, only an
+/// import nothing resolves stays (removing it is the useful action).
+pub(crate) fn hide_app_modules(roots: &mut [PackageTreeNode], is_app_module: impl Fn(&str) -> bool) {
+    let Some(loaded) = roots.iter_mut().find(|root| root.kind == "root" && root.tier == "loaded") else {
+        return;
+    };
+    loaded.children.retain(|row| {
+        row.path.is_some() || !row.module.as_deref().is_some_and(|module| is_app_module(module))
+    });
 }
 
 fn mark_attachments(
@@ -3388,6 +3406,21 @@ mod tests {
         assert_eq!(
             loaded.iter().map(|node| (node.label.as_str(), node.detail.as_deref())).collect::<Vec<_>>(),
             [("alec.drums.kit", None), ("my.euclid", None)]
+        );
+        // The app's own modules imported from init.lisp are not packages;
+        // a located package keeps its row whatever the predicate says, and
+        // an import nothing resolves stays so it can be removed.
+        let mut scripted = build_package_tree(
+            &local,
+            &catalog,
+            &installed,
+            "(import my.euclid)\n",
+            "(import eseq.kinds)\n(import eseq.sequencer)\n(import gone.pkg)\n",
+        );
+        hide_app_modules(&mut scripted, |module| module.starts_with("eseq.") || module == "my.euclid");
+        assert_eq!(
+            scripted[0].children.iter().map(|node| node.label.as_str()).collect::<Vec<_>>(),
+            ["gone.pkg", "my.euclid"]
         );
         assert_eq!(loaded[1].path, Some(local.join("my/euclid.lisp")));
         assert!(loaded[0].read_only && !loaded[1].read_only);
