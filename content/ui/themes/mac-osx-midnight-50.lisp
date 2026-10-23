@@ -380,6 +380,31 @@
       :list-icon-preset     '(0.94 0.71 0.30)
       :list-icon-lfo        '(0.66 0.39 0.94)
       :list-icon-misc       '(0.50 0.55 0.60)
+      ;; Newer slots; the split-off ones take their parent's color here
+      :dropdown-border                      '(1.0 1.0 1.0 0.11)  ; hairline around a dropdown trigger
+      :dropdown-badge-border                '(1.0 1.0 1.0 0.16)
+      :sampler-control-bg                   '(0.0130 0.0175 0.0230)  ; follows :instrument-control-bg
+      :sampler-grid                         '(0.62 0.67 0.72)  ; follows :dim
+      :mod-panel-bg                         '(0.0140 0.0175 0.0225)  ; follows :black
+      :modal-bg                             '(0.0450 0.0600 0.0800)  ; follows :dropdown-menu-bg
+      :filterbank-heading                   '(0.98 0.78 0.14 1.0)  ; follows :filterbank-control-on
+      :curve-editor-grid                    '(0.0575 0.0740 0.1020)  ; follows :border-inactive
+      :curve-editor-bg                      '(0.0130 0.0175 0.0230)  ; follows :instrument-control-bg
+      :curve-editor-fg                      '(0.62 0.67 0.72)  ; follows :dim
+      :timeline-ruler-bg                    '(0.0375 0.0475 0.0610)  ; follows :status-bg
+      :timeline-ruler-fg                    '(0.50 0.55 0.60)  ; follows :fg-muted
+      :compressor-text                      '(0.62 0.67 0.72)  ; follows :dim
+      :transport-led-dim                    '(0.435 0.485 0.54)  ; follows :dimmer
+      :rack-cell-fg                         '(0.85 0.85 0.85 1.0)  ; follows :clock-fg
+      :param-adsr-bg                        '(0.0130 0.0175 0.0230)  ; follows :instrument-control-bg
+      :instrument-control-contrast          '(0.910 0.910 0.918 1.0)
+      :lego-header-bg                       '(0.0 0.0 0.0 0.0)
+      :param-mod-bg                         '(0.03 0.20 0.35 0.94)
+      :param-mod-border                     '(0.18 0.48 0.95 0.84)
+      :modal-shadow                         '(0.0 0.0 0.0 0.30)
+      :rack-cell-wash                       '(0.0 0.0 0.0 0.0)
+      :track-name-muted-fg                  '(0.4 0.4 0.4 0.6)
+      :list-selected-fg                     '(0.0 0.0 0.0 0.0)
       )))
 
 (mac-osx-midnight-50-theme)

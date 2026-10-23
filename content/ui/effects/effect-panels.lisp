@@ -65,7 +65,7 @@
           (box :width 1.55 :height 1.0))))))
 
 (defwidget fx-mini-save-icon
-  :width 1.4 :height 0.8
+  :width 1.7 :height 0.8
   :paint-margin 0.2
   :state (active)
   :shader

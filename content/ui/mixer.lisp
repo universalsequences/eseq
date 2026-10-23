@@ -579,9 +579,12 @@
 (defwidget track-pattern-cell-bg
   :width 0.88 :height 0.38
   :paint-margin 0.04
-  :state (active assigned override selected skip-outer track-r track-g track-b)
+  :state (active assigned override selected skip-outer track-r track-g track-b wash)
   :shader
-  (let ((track-col (rgba track-r track-g track-b 1.0))
+  ;; wash 1 (a rack's clip cells) pulls the glass toward the theme's
+  ;; :rack-cell-wash by its alpha, like the rack pads, and stays opaque.
+  (let ((wash-k (* wash (dot :rack-cell-wash (vec4 0 0 0 1))))
+      (track-col (rgba track-r track-g track-b 1.0))
       (track-r (if (= active 1) (* 1.10 track-r) track-r))
       (track-g (if (= active 1) (* 1.1 track-g) track-g))
       (track-b (if (= active 1) (* 1.1 track-b) track-b))
@@ -598,7 +601,11 @@
       (inner (if (= active 0)
           (rgba (* track-r 0.1) (* track-g 0.1) (* track-b 0.1) 1)
           (rgba (* track-r 0.8) (* track-g 0.8) (* track-b 0.8) 1)
-          )))
+          ))
+      (outer (if (= selected 1) outer
+          (+ (* (mix outer :rack-cell-wash wash-k) (vec4 1 1 1 0)) (vec4 0 0 0 1))))
+      (middle (+ (* (mix middle :rack-cell-wash wash-k) (vec4 1 1 1 0)) (vec4 0 0 0 1)))
+      (inner (+ (* (mix inner :rack-cell-wash wash-k) (vec4 1 1 1 0)) (vec4 0 0 0 1))))
     ;; The play triangle moved into the sound-glyph shader (it must sit ON TOP
     ;; of the glyph; this background always draws underneath it). Liveness
     ;; comes from the host play-key store (sync_pattern_cell_glyph_frames),

@@ -7,7 +7,6 @@
 (def vh-accent () (eseq.effects.custom-ui-lego/ui-accent-cyan))
 (def vh-text () :fg)
 (def vh-surf () :instrument-group-bg)
-(def vh-bord () :border-inactive)
 
 (def vh-family-file () "instruments/Drums/VILLAIN Hat/data/family.json")
 
@@ -44,8 +43,13 @@
 (def vh-armed () (vh-state-get :armed "a"))
 (def vh-page () (vh-state-get :page "metal"))
 
+;; A flat section panel like the 808 Kick's: one thin padding, so the section
+;; badge sits tight in the top-left corner. Click selects the section.
 (def vh-panel (section width height body)
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section width height (vh-surf) (vh-bord) false body))
+  (box :width width :height height :padding 0.18
+    :background-color (vh-surf)
+    :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
+    body))
 
 ;; A hat slot: its letter arms the map (a click on a dot loads that slot);
 ;; the big box under it is the param itself, showing the hat's name.
@@ -85,7 +89,7 @@
 (def vh-slots-block ()
   (vh-panel 0 (vh-left-w) (vh-dense-h)
     (v-stack :width :fill :height :fill :gap 0.30 :align :start
-      (eseq.effects.custom-ui-lego/ui-lego-header-s 0 "HATS" 4.0 (vh-accent))
+      (eseq.effects.custom-ui-lego/ui-lego-section-badge-s 0 "HATS" 4.0 (vh-accent))
       (h-stack :width :fill :gap 0.40 :align :start
         (vh-slot-box "a" "hat_a")
         (vh-slot-box "b" "hat_b")))))
@@ -93,7 +97,7 @@
 (def vh-morph-block ()
   (vh-panel 0 (vh-left-w) (vh-pages-h)
     (v-stack :width :fill :height :fill :gap 0.20 :align :start
-      (eseq.effects.custom-ui-lego/ui-lego-header-s 0 "MORPH" 4.0 (vh-accent))
+      (eseq.effects.custom-ui-lego/ui-lego-section-badge-s 0 "MORPH" 4.0 (vh-accent))
       (h-stack :width :fill :gap 0.30 :align :start
         (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 0 "blend" "blend" 6.4 (vh-accent) 2)
         (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 0 "exaggerate" "exagg" 6.4 (vh-accent) 2)))))
@@ -117,7 +121,12 @@
           :blend (vh-effective "blend" 0) :exaggerate (vh-effective "exaggerate" 0)
           :armed (if (= (vh-armed) "b") 1 0)
           :accent (vh-accent)
-          :background-color :instrument-control-bg
+          :background-color :curve-editor-bg
+          :dot-color :curve-editor-fg
+          :grid-color :curve-editor-grid
+          :b-color :curve-editor-fg
+          :label-color :curve-editor-fg
+          :line-color :curve-editor-fg
           :x-label "bright" :y-label "long"
           :width (- (vh-map-w) 0.4) :height (- (vh-total-h) 0.4)
           :on-pick (lambda (index slot)
@@ -126,9 +135,9 @@
 
 (def vh-family-block ()
   (vh-panel 1 (vh-right-w) (vh-dense-h)
-    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+    (h-stack :width :fill :height :fill :gap 0.30 :align :start
       (v-stack :width 5.0 :gap 0.18 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 1 "NOTE" 5.0 (vh-accent)))
+        (eseq.effects.custom-ui-lego/ui-lego-section-badge-s 1 "NOTE" 5.0 (vh-accent)))
       (h-stack :gap 0.10 :align :start
         (eseq.effects.custom-ui-lego/ui-lego-log-knob-full-s 1 "release" "release" 5.6 (vh-accent) 0)
         (eseq.effects.custom-ui-lego/ui-lego-log-knob-full-s 1 "decay" "decay" 5.6 (vh-accent) 2)

@@ -134,7 +134,7 @@
                 :enabled true :selected (= id 0)))
               (range 0 (if (= (mod mode 2) 1) 2 1)))
             :freq-min 30 :freq-max 22000 :q-min 0.1 :q-max 100
-            :background-color :instrument-control-bg :grid-color :border-inactive
+            :background-color :curve-editor-bg :grid-color :curve-editor-grid
             :stroke-color (heat-accent) :point-color (heat-accent) :stroke-width 3.0 :corner-radius 2
             :on-action (lambda (event)
               (if (or (= (get event :type) :change-band) (= (get event :type) :commit-band))

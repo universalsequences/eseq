@@ -43,18 +43,34 @@ fn seed_generator_gates(
     beat: f64,
     samples_per_quarter: f64,
 ) {
-    for &(id, track) in trigger_tracks {
-        if track == event.track {
-            generators.push_gate_trigger(
-                id,
-                crate::generator::GateTrigger {
-                    kind: crate::generator::GateTriggerKind::Play,
-                    beat,
-                    duration_beats: step_duration_beats(event, samples_per_quarter),
-                    note: event.resolved.transpose as f32,
-                    velocity: event.resolved.velocity as f32,
-                },
-            );
+    seed_generator_gates_from_hit(
+        generators,
+        trigger_tracks,
+        event.track,
+        crate::generator::GateTrigger {
+            kind: crate::generator::GateTriggerKind::Play,
+            beat,
+            duration_beats: step_duration_beats(event, samples_per_quarter),
+            note: event.resolved.transpose as f32,
+            velocity: event.resolved.velocity as f32,
+        },
+        None,
+    );
+}
+
+/// Open the gate of each generator whose `:trigger` is `track` with `trigger`:
+/// a played step, or a graph or generator hit landing there. `from` is the
+/// generator that made the hit, which never gates itself.
+pub(super) fn seed_generator_gates_from_hit(
+    generators: &mut crate::generator::GeneratorRuntime,
+    trigger_tracks: &[(u64, usize)],
+    track: usize,
+    trigger: crate::generator::GateTrigger,
+    from: Option<u64>,
+) {
+    for &(id, trigger_track) in trigger_tracks {
+        if trigger_track == track && Some(id) != from {
+            generators.push_gate_trigger(id, trigger);
         }
     }
 }

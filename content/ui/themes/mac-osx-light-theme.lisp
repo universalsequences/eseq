@@ -382,6 +382,29 @@
       :list-icon-preset     '(0.96 0.79 0.10)
       :list-icon-lfo        '(0.68 0.17 0.94)
       :list-icon-misc       '(0.809 0.809 0.826 1.0)
+      ;; Newer slots; the split-off ones take their parent's color here
+      :sampler-control-bg                   '(0.889 0.889 0.889 1.0)  ; follows :instrument-control-bg
+      :sampler-grid                         '(0.316 0.293 0.293 1.0)  ; follows :dim
+      :mod-panel-bg                         '(0.815 0.815 0.827 1.0)  ; follows :black
+      :modal-bg                             '(0.992 0.992 0.996 0.98)  ; follows :dropdown-menu-bg
+      :filterbank-heading                   '(0.98 0.78 0.14 1.0)  ; follows :filterbank-control-on
+      :curve-editor-grid                    '(0.776 0.776 0.792)  ; follows :border-inactive
+      :curve-editor-bg                      '(0.889 0.889 0.889 1.0)  ; follows :instrument-control-bg
+      :curve-editor-fg                      '(0.316 0.293 0.293 1.0)  ; follows :dim
+      :timeline-ruler-bg                    '(0.797 0.797 0.834 1.0)  ; follows :status-bg
+      :timeline-ruler-fg                    '(0.383 0.383 0.436 1.0)  ; follows :fg-muted
+      :compressor-text                      '(0.316 0.293 0.293 1.0)  ; follows :dim
+      :transport-led-dim                    '(0.524 0.524 0.541)  ; follows :dimmer
+      :rack-cell-fg                         '(0.229 0.213 0.213 1.0)  ; follows :clock-fg
+      :param-adsr-bg                        '(0.889 0.889 0.889 1.0)  ; follows :instrument-control-bg
+      :instrument-control-contrast          '(0.120 0.128 0.140 1.0)
+      :lego-header-bg                       '(0.0 0.0 0.0 0.0)
+      :param-mod-bg                         '(0.62 0.72 0.84 0.70)
+      :param-mod-border                     '(0.22 0.50 0.86 0.90)
+      :modal-shadow                         '(0.0 0.0 0.0 0.18)
+      :rack-cell-wash                       '(0.0 0.0 0.0 0.0)
+      :track-name-muted-fg                  '(0.16 0.17 0.18 0.80)
+      :list-selected-fg                     '(0.0 0.0 0.0 0.0)
       )))
 
 (mac-osx-light-theme)

@@ -8004,6 +8004,7 @@ mod tests {
                 graph: None,
                 owner_rack: Some(group_id),
                 trigger_source: None,
+                before_steps: false,
             });
             if authored_scene_row {
                 app.arr_replace_rows(
@@ -9627,6 +9628,7 @@ mod tests {
             graph: Some(manifest),
             owner_rack: None,
             trigger_source: None,
+            before_steps: false,
         });
         let intrinsic = |instance: usize, route: usize| ProjectGraphNodeIntrinsicOverride {
             group: "nrn".into(),

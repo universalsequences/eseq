@@ -14,7 +14,9 @@ mod focus_steps;
 pub(crate) mod graph_node_processes;
 mod graphs;
 mod neural;
-pub(crate) use file_menu::{activate_dialog_tile, intercept_unsaved_quit};
+pub(crate) use file_menu::intercept_unsaved_quit;
+#[cfg(test)]
+pub(crate) use file_menu::activate_dialog_tile;
 mod menu_actions;
 pub(crate) mod instances;
 mod instrument_authoring;

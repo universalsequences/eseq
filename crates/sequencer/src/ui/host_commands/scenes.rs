@@ -16,6 +16,9 @@ fn switch_now_payload(scene: usize) -> Value {
         [
             ("idx".to_string(), Value::Number(scene as f64)),
             ("quantize".to_string(), Value::String("off".to_string())),
+            // Structural callers need the scene current when this returns,
+            // not at the scheduler's frontier (see `make_payload_scene_current`).
+            ("now".to_string(), Value::Bool(true)),
         ]
         .into_iter()
         .map(|(key, value)| (key, Rc::new(RefCell::new(value))))
@@ -800,6 +803,30 @@ pub(super) fn handle(
                             )),
                         }
                         return;
+                    }
+                    let now = extract_bool_from_payload(&payload, "now");
+                    if !now && state.is_playing() {
+                        // A live switch: hits already scheduled play out as
+                        // this scene and the new one starts right after them;
+                        // the UI follows when the scheduler's mirror lands.
+                        match app.try_queue_live_pattern_launch(
+                            &sequencer::quantized_launch::PatternLaunchTarget::Scene { scene: idx },
+                        ) {
+                            Ok(true) => {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Switching to scene {}",
+                                    idx + 1
+                                )));
+                                return;
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                editor.handle_host_event(HostEvent::Error(format!(
+                                    "Could not switch scene: {error:?}"
+                                )));
+                                return;
+                            }
+                        }
                     }
                     let switch_bus_elapsed = Duration::ZERO;
                     let state_switch_elapsed;

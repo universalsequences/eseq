@@ -2276,6 +2276,17 @@ impl App {
         })
     }
 
+    /// The manual-launch preamble: cancel pending quantized launches and end
+    /// every scene macro, returning the targets the caller must send (after
+    /// any remap it does first).
+    fn reset_scene_launch_state(&mut self) -> Vec<crate::macro_engine::ScopedParamTarget> {
+        let _ = self.state.quantized_launches().cancel_all();
+        self.scene_macro_runtime.clear();
+        let mut touched = self.macro_engine.release_all_scene_macros();
+        touched.extend(self.macro_engine.end_scene_push());
+        touched
+    }
+
     pub fn apply_manual_pattern_launch(
         &mut self,
         target: &PatternLaunchTarget,
@@ -2287,12 +2298,93 @@ impl App {
         }
         let state = Arc::clone(&self.state);
         state.coalesce_publishes(|| {
-            let _ = self.state.quantized_launches().cancel_all();
-            self.scene_macro_runtime.clear();
-            let mut touched = self.macro_engine.release_all_scene_macros();
-            touched.extend(self.macro_engine.end_scene_push());
+            let touched = self.reset_scene_launch_state();
             self.send_macro_targets(touched);
             self.apply_pattern_launch(target)
+        })
+    }
+
+    /// A performer's unquantized launch while the transport plays. Hits the
+    /// scheduler already handed to the audio thread play out as the old scene
+    /// and the new one starts right after them: nothing in flight is dropped
+    /// or rescheduled.
+    ///
+    /// - Song playback (Play always runs the arrangement; manual launches
+    ///   latch): applied here as a mirror, without the pattern-epoch bump that
+    ///   would drop the in-flight hits. The scheduler reads latched lanes from
+    ///   the live snapshot every chunk, so it switches at its frontier.
+    /// - Session playback: the scheduler applies it at its frontier (see
+    ///   `SequencerState::schedule_live_pattern_launch`) and the control
+    ///   thread mirrors it from `drain_due_pattern_launches`.
+    ///
+    /// `Ok(false)` when it cannot go live (stopped, or the target does not
+    /// preflight): the caller applies it with `apply_manual_pattern_launch`.
+    /// On `Ok(true)` the UI follows through `song_row_mirror_epoch`.
+    pub fn try_queue_live_pattern_launch(
+        &mut self,
+        target: &PatternLaunchTarget,
+    ) -> Result<bool, PatternLaunchError> {
+        if self.manual_launch_rejection().is_some() {
+            return Err(PatternLaunchError::SongPlaybackActive);
+        }
+        if !self.state.is_playing() {
+            return Ok(false);
+        }
+        let song = self.song_playback_authority_active();
+        if crate::scheduled_event::launch_trace_enabled() {
+            eprintln!(
+                "[launch] control-live-request target={target:?} song={song} rendered_beats={:.4}",
+                self.state.scheduler_rendered_beats()
+            );
+        }
+        // Preflight before the preamble, so a launch that falls back to
+        // `apply_manual_pattern_launch` runs it once.
+        let snapshot = if song {
+            None
+        } else {
+            match self.state.session_launch_snapshot(target) {
+                Some(snapshot) => Some(snapshot),
+                None => return Ok(false),
+            }
+        };
+        let state = Arc::clone(&self.state);
+        state.coalesce_publishes(|| {
+            let touched = self.reset_scene_launch_state();
+            self.send_macro_targets(touched);
+            let Some(snapshot) = snapshot else {
+                self.apply_pattern_launch_inner(target, None, true)?;
+                // The scheduler re-adopts the lanes this switched (it reads
+                // latched lanes live, so nothing else tells it).
+                match target {
+                    PatternLaunchTarget::Scene { .. } => {
+                        self.state.bump_track_launch_generations(0..self.tracks.len())
+                    }
+                    PatternLaunchTarget::SceneTracks { tracks, .. } => {
+                        self.state.bump_track_launch_generations(tracks.iter().copied())
+                    }
+                    PatternLaunchTarget::TrackPattern { track, .. } => {
+                        self.state.bump_track_launch_generations([*track])
+                    }
+                }
+                self.state.publish_transport_only();
+                self.song_row_mirror_epoch += 1;
+                return Ok(true);
+            };
+            if self
+                .state
+                .schedule_live_pattern_launch(
+                    target.clone(),
+                    crate::quantized_launch::QuantizedLaunchOwner::Transport,
+                    snapshot,
+                )
+                .is_err()
+            {
+                // A full request channel launches immediately; the
+                // preamble already ran.
+                self.apply_pattern_launch(target)?;
+                self.song_row_mirror_epoch += 1;
+            }
+            Ok(true)
         })
     }
 
@@ -2322,6 +2414,12 @@ impl App {
                     // without an epoch bump; the acknowledgement lets the
                     // scheduler drop its snapshot override — sent even on a
                     // failed mirror so the override never leaks.
+                    if crate::scheduled_event::launch_trace_enabled() {
+                        eprintln!(
+                            "[launch] control-mirror token={token} target={target:?} deadline_beats={deadline_beats:.4} scheduler_applied={scheduler_applied} epoch_before={}",
+                            self.state.transport.pattern_epoch.load(std::sync::atomic::Ordering::Relaxed)
+                        );
+                    }
                     let result = self
                         .apply_pattern_launch_at(&target, Some(deadline_beats), scheduler_applied)
                         .map(|mut outcome| {
@@ -2329,6 +2427,13 @@ impl App {
                             outcome.token = Some(token);
                             outcome
                         });
+                    if crate::scheduled_event::launch_trace_enabled() {
+                        eprintln!(
+                            "[launch] control-mirror-done token={token} ok={} epoch_after={}",
+                            result.is_ok(),
+                            self.state.transport.pattern_epoch.load(std::sync::atomic::Ordering::Relaxed)
+                        );
+                    }
                     if scheduler_applied {
                         let _ = self.state.quantized_launches().acknowledge_mirror(token);
                         if result.is_err() {
@@ -2375,20 +2480,14 @@ impl App {
         if source == target {
             return;
         }
-        let _ = self.state.quantized_launches().cancel_all();
-        self.scene_macro_runtime.clear();
-        let mut touched = self.macro_engine.release_all_scene_macros();
-        touched.extend(self.macro_engine.end_scene_push());
+        let touched = self.reset_scene_launch_state();
         self.macro_engine
             .remap_scene_targets_after_move(source, target);
         self.send_macro_targets(touched);
     }
 
     pub fn handle_scene_deleted(&mut self, deleted: usize) {
-        let _ = self.state.quantized_launches().cancel_all();
-        self.scene_macro_runtime.clear();
-        let mut touched = self.macro_engine.release_all_scene_macros();
-        touched.extend(self.macro_engine.end_scene_push());
+        let touched = self.reset_scene_launch_state();
         self.macro_engine
             .remap_scene_targets_after_delete(deleted, self.state.scene_count());
         self.send_macro_targets(touched);

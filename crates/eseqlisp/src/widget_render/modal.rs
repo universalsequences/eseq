@@ -174,6 +174,9 @@ pub(crate) fn emit_modal_panel_chrome(
     modal_rect: Rect,
     viewport: WidgetViewport,
 ) {
+    for shadow in super::menu_style::drop_shadow_primitives(modal_rect, PANEL_CORNER_RADIUS_PX, viewport) {
+        push_overlay_primitive(shadow);
+    }
     let border_px = 1.0;
     let border_row = border_px / viewport.cell_h.max(1.0);
     let border_col = border_px / viewport.cell_w.max(1.0);
@@ -191,7 +194,7 @@ pub(crate) fn emit_modal_panel_chrome(
         PANEL_CORNER_RADIUS_PX + border_px,
         viewport,
     );
-    let panel_bg = resolve_named_color(props, "background-color", crate::theme::DROPDOWN_MENU_BG());
+    let panel_bg = resolve_named_color(props, "background-color", crate::theme::MODAL_BG());
     emit_rounded_rect_overlay(modal_rect, panel_bg, PANEL_CORNER_RADIUS_PX, viewport);
 }
 

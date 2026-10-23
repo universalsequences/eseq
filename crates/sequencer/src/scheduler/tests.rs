@@ -1722,6 +1722,7 @@
                 named_params: Vec::new(),
             },
             None,
+            None,
             false,
         ));
 
@@ -1787,6 +1788,7 @@
                 instrument_params: Vec::new(),
                 named_params: Vec::new(),
             },
+            None,
             None,
             false,
         ));
@@ -1943,6 +1945,7 @@
                 instrument_params: Vec::new(),
                 named_params: Vec::new(),
             },
+            None,
             None,
             false,
         ));
@@ -2544,6 +2547,7 @@
             },
             graph_emissions.remove(0).event,
             None,
+            None,
             false,
         ));
 
@@ -2611,6 +2615,7 @@
                 instrument_params: Vec::new(),
                 named_params: Vec::new(),
             },
+            None,
             None,
             false,
         ));
@@ -2680,6 +2685,7 @@
                 instrument_params: Vec::new(),
                 named_params: Vec::new(),
             },
+            None,
             None,
             false,
         ));
@@ -3019,6 +3025,7 @@
                     graph: None,
                     owner_rack: None,
                     trigger_source: None,
+                    before_steps: false,
                 }),
                 document: vec![
                     ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
@@ -3609,6 +3616,27 @@
     /// sixteenth per lookahead call like the live driver, and the generator
     /// errors reported.
     fn generator_triggered_by_track(trigger_source: &'static str) -> (Vec<u64>, Vec<u64>, Vec<String>) {
+        let (steps, hits, _, errors) = generator_triggered_with_driver(trigger_source, None);
+        (steps, hits, errors)
+    }
+
+    /// [`generator_triggered_by_track`] plus an optional ungated `driver`
+    /// generator (its tick source) registered ahead of the gated one; also
+    /// returns track 2's samples.
+    fn generator_triggered_with_driver(
+        trigger_source: &'static str,
+        driver: Option<&'static str>,
+    ) -> (Vec<u64>, Vec<u64>, Vec<u64>, Vec<String>) {
+        generator_triggered_with_driver_in_chunks(trigger_source, driver, 6_000)
+    }
+
+    /// [`generator_triggered_with_driver`], `chunk` samples per lookahead
+    /// call.
+    fn generator_triggered_with_driver_in_chunks(
+        trigger_source: &'static str,
+        driver: Option<&'static str>,
+        chunk: u64,
+    ) -> (Vec<u64>, Vec<u64>, Vec<u64>, Vec<String>) {
         run_with_scheduler_stack(move || {
             let state = Arc::new(SequencerState::new(
                 4,
@@ -3642,6 +3670,7 @@
                     graph: None,
                     owner_rack: None,
                     trigger_source: Some(trigger_source.to_string()),
+                    before_steps: false,
                 }),
                 document: vec![("src".to_string(), literal("0"))],
                 state_fields: Vec::new(),
@@ -3672,6 +3701,17 @@
             scratch
                 .set_sequencer_trigger(published.id, published.trigger_source.as_deref())
                 .expect("trigger");
+            if let Some(driver) = driver {
+                scratch
+                    .register_published_sequencer(
+                        9,
+                        "driver".to_string(),
+                        crate::sequencer::Timebase::Sixteenth,
+                        driver.to_string(),
+                        &[],
+                    )
+                    .expect("register driver");
+            }
             state.transport.playing.store(true, Ordering::Relaxed);
             let mut scheduler = SchedulerLookaheadState::new(48_000);
             scheduler.generator_runtime.sync_definitions(&scratch.sequencer_defs(), 0.0);
@@ -3680,7 +3720,6 @@
             let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
                 std::array::from_fn(|_| LiveMidiFxTrackState::default());
             // 24000 samples per quarter: a sixteenth is 6000, a bar 96000.
-            let chunk = 6_000u64;
             let (mut now, mut until) = (0u64, 0u64);
             let mut observed = Vec::new();
             while now < 2 * 96_000 {
@@ -3718,7 +3757,7 @@
                 samples.sort();
                 samples
             };
-            (on(0), on(1), errors)
+            (on(0), on(1), on(2), errors)
         })
     }
 
@@ -3784,6 +3823,7 @@
                     graph: None,
                     owner_rack: None,
                     trigger_source: None,
+                    before_steps: false,
                 }),
                 document: vec![
                     ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
@@ -3955,6 +3995,7 @@
                 graph: None,
                 owner_rack: None,
                 trigger_source: None,
+                before_steps: false,
             }),
             document: vec![
                 ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
@@ -4489,6 +4530,202 @@
             assert!((mode - 3.0).abs() < 1e-6, "{hits:?}");
         }
     }
+
+    /// A `:before-steps` generator holds `instrument:speed 2` on track 0 for
+    /// the first sixteenth of every beat (`seq-emit :lock`); track 0 steps on
+    /// every eighth with speed p-locked to 0.5, and a plain generator hits
+    /// track 0 at +0.1 and +0.6 beats. Returns (sample, speed, is_step).
+    fn lock_hold_hits(before_steps: bool) -> Vec<(u64, f32, bool)> {
+        let (hits, errors) = lock_hold_hits_and_errors(before_steps);
+        assert!(errors.is_empty(), "{errors:?}");
+        hits
+    }
+
+    fn lock_hold_hits_and_errors(before_steps: bool) -> (Vec<(u64, f32, bool)>, Vec<String>) {
+        lock_hold_run(
+            before_steps,
+            r#"(seq-emit :track 0 :at :now :dur 0.25 :lock true
+                         :params (list "instrument:speed" 2))"#,
+        )
+    }
+
+    /// [`lock_hold_hits_and_errors`] with `locker_tick` as the locker's tick
+    /// body. The errors include the scheduler VM's status message, where a
+    /// native's error lands.
+    fn lock_hold_run(
+        before_steps: bool,
+        locker_tick: &'static str,
+    ) -> (Vec<(u64, f32, bool)>, Vec<String>) {
+        run_with_scheduler_stack(move || {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(16);
+            let sampler_desc = EffectDescriptor::builtin_sampler();
+            let speed_idx = sampler_desc
+                .params
+                .iter()
+                .position(|param| param.name == "speed")
+                .expect("sampler speed param");
+            state.pattern.instrument_slots[0].apply_descriptor(&sampler_desc, 12);
+            for step in (0..16).step_by(2) {
+                state.pattern.patterns[0].set_step_active(step, true);
+                state.pattern.instrument_slots[0].set_plock(step, speed_idx, 0.5);
+            }
+            let effect_descriptors = vec![EffectDescriptor::default_full_chain()];
+            let instrument_descriptors = vec![sampler_desc];
+            state.set_scratch_runtime_descriptors(
+                effect_descriptors.clone(),
+                instrument_descriptors.clone(),
+            );
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                effect_descriptors,
+                instrument_descriptors,
+                0,
+                0,
+            );
+            scratch
+                .eval(&format!(
+                    r#"(__register-sequencer "locker"
+                         :resolution :4
+                         :before-steps {before_steps}
+                         :tick (lambda () {locker_tick}))"#
+                ))
+                .expect("register locker");
+            scratch
+                .eval(
+                    r#"(__register-sequencer "player"
+                         :resolution :4
+                         :tick (lambda ()
+                           (do
+                             (seq-emit :track 0 :at 0.1)
+                             (seq-emit :track 0 :at 0.6))))"#,
+                )
+                .expect("register player");
+
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let defs = scratch.sequencer_defs();
+            scheduler.generator_runtime.sync_definitions(&defs, 0.0);
+            if before_steps {
+                let locker = defs.iter().find(|def| def.name == "locker").expect("locker");
+                scheduler.generator_before_steps.insert(locker.id);
+            }
+            let mut scratch_runtime = Some(scratch);
+            let snapshot = state.publish_scheduler_snapshot();
+            let queue = ScheduledEventQueue::<64>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                48_000,
+                48_000,
+                6_000,
+                24_000.0,
+                0,
+                false,
+                false,
+            );
+            let errors: Vec<_> = state
+                .drain_generator_tick_errors()
+                .into_iter()
+                .map(|notice| notice.error)
+                .chain(scratch_runtime.as_mut().and_then(|runtime| runtime.take_status_message()))
+                .collect();
+
+            let mut hits = Vec::new();
+            while let Some(event) = queue.pop_owned() {
+                match event.kind {
+                    ScheduledEventKind::ResolvedTrigger { sampler_params, .. } => {
+                        hits.push((event.sample_time, sampler_params.playback_speed, true))
+                    }
+                    ScheduledEventKind::NetworkTrigger { sampler_params, .. } => {
+                        hits.push((event.sample_time, sampler_params.playback_speed, false))
+                    }
+                    _ => {}
+                }
+            }
+            hits.sort_by(|a, b| a.0.cmp(&b.0));
+            (hits, errors)
+        })
+    }
+
+    #[test]
+    fn lock_hold_appends_params_to_other_sources_hits_inside_its_window() {
+        let hits = lock_hold_hits(true);
+        // Steps at every eighth (12_000 samples) plus two generator hits a
+        // beat, over two beats; the lock emits no hit of its own.
+        assert_eq!(hits.iter().filter(|hit| hit.2).count(), 4, "{hits:?}");
+        assert_eq!(hits.iter().filter(|hit| !hit.2).count(), 4, "{hits:?}");
+        for (sample, speed, _) in &hits {
+            // The window is the first sixteenth (6_000 samples) of each beat:
+            // the on-beat step and the +0.1 hit; the off-beat step and the
+            // +0.6 hit keep the step's own lock / the base value.
+            if sample % 24_000 < 6_000 {
+                assert!((speed - 2.0).abs() < 1e-6, "{hits:?}");
+            } else {
+                assert!((speed - 2.0).abs() > 1e-6, "{hits:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn lock_hold_skips_the_locking_generators_own_hits() {
+        let (hits, errors) = lock_hold_run(
+            true,
+            r#"(do
+                 (seq-emit :track 0 :at :now :dur 0.25 :lock true
+                           :params (list "instrument:speed" 2))
+                 (seq-emit :track 0 :at 0.05))"#,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        // The locker's own +0.05 hit (1_200 samples into the beat) sits in
+        // its window but keeps the base speed; the player's +0.1 hit locks.
+        let own: Vec<_> = hits.iter().filter(|hit| hit.0 % 24_000 == 1_200).collect();
+        assert_eq!(own.len(), 2, "{hits:?}");
+        assert!(own.iter().all(|hit| (hit.1 - 2.0).abs() > 1e-6), "{hits:?}");
+        assert!(
+            hits.iter()
+                .filter(|hit| hit.0 % 24_000 == 2_400)
+                .all(|hit| (hit.1 - 2.0).abs() < 1e-6),
+            "{hits:?}"
+        );
+    }
+
+    #[test]
+    fn lock_zero_is_false_and_lock_needs_an_explicit_dur() {
+        // eseqlisp's 0 is false: `:lock 0` plays a hit with its own params.
+        let (hits, errors) = lock_hold_run(
+            true,
+            r#"(seq-emit :track 0 :at :now :lock 0 :params (list "instrument:speed" 2))"#,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(hits.iter().filter(|hit| !hit.2).count(), 6, "{hits:?}");
+        // No :dur: a hit's one-beat default is not a lock window, so the
+        // seq-emit fails and nothing locks.
+        let (hits, errors) = lock_hold_run(
+            true,
+            r#"(seq-emit :track 0 :at :now :lock true :params (list "instrument:speed" 2))"#,
+        );
+        assert!(errors.iter().any(|error| error.contains(":dur")), "{errors:?}");
+        assert!(hits.iter().all(|hit| (hit.1 - 2.0).abs() > 1e-6), "{hits:?}");
+    }
+
+    #[test]
+    fn lock_hold_from_an_after_steps_generator_is_a_tick_error() {
+        // Ticking after the step stage, its hold would cover this chunk's
+        // steps only past the chunk edge, so it is refused and nothing locks.
+        let (hits, errors) = lock_hold_hits_and_errors(false);
+        assert!(errors.iter().any(|error| error.contains(":before-steps")), "{errors:?}");
+        assert!(hits.iter().all(|hit| (hit.1 - 2.0).abs() > 1e-6), "{hits:?}");
+    }
+
 
     /// takes spec 10 × defscene: a scene-latched manual launch suspends the
     /// song's scene-level authority, so shipped ticks must resolve scene
@@ -5081,7 +5318,10 @@
                          :resolution :4
                          :tick (lambda () (seq-emit :track 0 :at :now :vel (chan-get "warp" 0.25))))
                        (def drive (defchan drive 0))
-                       (tap drive (lambda (value) (send warp 0.8)))
+                       (def-process drive-warp
+                         :listen ((event (channel drive)))
+                         :on-event (lambda (value) (send warp 0.8)))
+                       (start (drive-warp))
                        (def wave (defchan wave 0))
                        (def-process "wave-driver"
                          :state ((phase 0))
@@ -5188,8 +5428,13 @@
                 !driven.is_empty(),
                 "generator emitted nothing after process write"
             );
+            // The tap runs in the process stage, after the chunk's generator
+            // tick, so the hit on the write's own chunk still reads 0.9 and
+            // every later one the process-driven 0.8.
+            let (first, rest) = driven.split_first().expect("a hit");
+            assert!((first - 0.9).abs() < 1e-6, "{driven:?}");
             assert!(
-                driven.iter().all(|vel| (vel - 0.8).abs() < 1e-6),
+                !rest.is_empty() && rest.iter().all(|vel| (vel - 0.8).abs() < 1e-6),
                 "expected the process-driven channel value, got {driven:?}"
             );
             assert_eq!(
@@ -18496,9 +18741,11 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
         fn step_derived_process_emission_on_velocity_grooved_member_is_grooved_once() {
             let events = render_grooved_process_fixture(
                 r#"
-                (on (track-fires 0)
-                  (lambda (ev)
+                (def-process groove-echo
+                  :listen ((event (track-fires 0)))
+                  :on-event (lambda (ev)
                     (emit :track 0 :after 0.5 :vel (get ev :velocity))))
+                (start (groove-echo))
                 "#,
             );
             assert_velocities(&events, &[0, 12_000], 0.4);
@@ -19742,5 +19989,38 @@ fn prebuilt_chunks_take_their_scenes_live_groove_table() {
     assert!(Arc::ptr_eq(&patched.track_grooves, &verse));
 }
 
+    /// Sixteenths 2 and 10 of every bar, from a generator.
+    const DRIVER_ON_TRACK_2: &str = "(if (= (mod (gen-tick) 8) 2) \
+                                     (seq-emit :track 2 :at :now :note 0 :vel 1 :dur 0.1) nil)";
+    const DRIVER_ON_TRACK_1: &str = "(if (= (mod (gen-tick) 8) 2) \
+                                     (seq-emit :track 1 :at :now :note 0 :vel 1 :dur 0.1) nil)";
 
+    #[test]
+    fn another_generators_hits_on_the_trigger_track_open_the_gate_on_their_own_boundary() {
+        let (_, hits, driven, errors) = generator_triggered_with_driver("2", Some(DRIVER_ON_TRACK_2));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(driven, [12_000, 60_000, 108_000, 156_000], "the driver plays track 2");
+        assert_eq!(hits, driven, "each driver hit gates the generator on its own boundary");
+    }
 
+    #[test]
+    fn a_driver_hit_gates_on_its_own_boundary_whatever_the_buffer_size() {
+        // A quarter per lookahead call holds four sixteenth boundaries: the
+        // driver's hit still opens the gate on the boundary it plays on.
+        let (_, hits, driven, errors) =
+            generator_triggered_with_driver_in_chunks("2", Some(DRIVER_ON_TRACK_2), 24_000);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(driven, [12_000, 60_000, 108_000, 156_000], "the driver plays track 2");
+        assert_eq!(hits, driven);
+    }
+
+    #[test]
+    fn a_generators_own_hits_on_its_trigger_track_do_not_gate_it() {
+        // The gated generator plays track 1 and listens to track 1: only the
+        // driver's hits open it, or it would retrigger itself every sixteenth.
+        let (_, hits, _, errors) = generator_triggered_with_driver("1", Some(DRIVER_ON_TRACK_1));
+        assert!(errors.is_empty(), "{errors:?}");
+        let driver = [12_000, 60_000, 108_000, 156_000];
+        let expected: Vec<u64> = driver.iter().flat_map(|&s| [s, s]).collect();
+        assert_eq!(hits, expected, "driver hit + one gated hit per driver hit");
+    }

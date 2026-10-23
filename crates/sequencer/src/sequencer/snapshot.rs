@@ -10,7 +10,7 @@ use crate::neural::ProjectNeuralNetwork;
 use super::data::{
     BusId, CustomInstrumentRunMode, InstrumentType, ModConnection, StepParam, SwingResolution,
     Timebase, TrackParamsSnapshot, TrackSendBaseline, TrackSendRuntimeTarget, TrackSendSnapshot,
-    BARS_PER_PATTERN, MAX_STEPS, NUM_PARAMS,
+    BARS_PER_PATTERN, MAX_STEPS, MAX_TRACKS, NUM_PARAMS,
 };
 use super::state::{RackTrackSnapshot, SceneSlotStore, SequencerState, TrackPatternData};
 
@@ -22,6 +22,8 @@ pub struct SequencerTransportSnapshot {
     pub pattern_epoch: u64,
     pub topology_epoch: u64,
     pub num_tracks: usize,
+    /// `TransportState::track_launch_generations` at capture.
+    pub track_launch_generations: [u32; MAX_TRACKS],
 }
 
 #[derive(Clone, Debug)]
@@ -227,6 +229,7 @@ impl SequencerSnapshot {
                 pattern_epoch: 0,
                 topology_epoch: 0,
                 num_tracks: 0,
+                track_launch_generations: [0; MAX_TRACKS],
             },
             tracks: Vec::new(),
             mod_connections: Vec::new(),
@@ -252,6 +255,7 @@ impl SequencerSnapshot {
             pattern_epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
             topology_epoch: state.transport.topology_epoch.load(Ordering::Relaxed),
             num_tracks,
+            track_launch_generations: state.track_launch_generations(),
         };
         let mut tracks = Vec::with_capacity(num_tracks);
         // Fetched before the process-chains lock: scene launches lock scenes
@@ -348,6 +352,7 @@ impl SequencerSnapshot {
             pattern_epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
             topology_epoch: state.transport.topology_epoch.load(Ordering::Relaxed),
             num_tracks,
+            track_launch_generations: state.track_launch_generations(),
         };
         let (effect_descriptors_by_track, instrument_descriptors) =
             state.scratch_runtime_descriptors();

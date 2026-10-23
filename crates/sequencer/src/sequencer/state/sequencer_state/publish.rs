@@ -493,6 +493,24 @@ impl SequencerState {
             pattern_epoch: self.transport.pattern_epoch.load(Ordering::Relaxed),
             topology_epoch: self.transport.topology_epoch.load(Ordering::Relaxed),
             num_tracks: self.active_track_count(),
+            track_launch_generations: self.track_launch_generations(),
+        }
+    }
+
+    /// See `TransportState::track_launch_generations`.
+    pub fn track_launch_generations(&self) -> [u32; MAX_TRACKS] {
+        std::array::from_fn(|track| {
+            self.transport.track_launch_generations[track].load(Ordering::Relaxed)
+        })
+    }
+
+    /// Count a latched launch on `tracks` (see
+    /// `TransportState::track_launch_generations`); the caller publishes.
+    pub fn bump_track_launch_generations(&self, tracks: impl IntoIterator<Item = usize>) {
+        for track in tracks {
+            if let Some(generation) = self.transport.track_launch_generations.get(track) {
+                generation.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 

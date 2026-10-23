@@ -59,9 +59,9 @@
                   :gain-max 12
                   :q-min (get resonance-p :min)
                   :q-max (get resonance-p :max)
-                  :background-color (rgba 0.055 0.058 0.06 1.0)
+                  :background-color :curve-editor-bg
                   :corner-radius 6
-                  :grid-color (rgba 0.34 0.34 0.36 0.55)
+                  :grid-color :curve-editor-grid
                   :stroke-color :blue
                   :point-color (rgba 1.0 0.62 0.25 1.0)
                   :on-action |event| (eseq.effects.builtin.filter-core/builtin-fx-handle-filter-curve-action fx cutoff-p resonance-p event))))

@@ -780,9 +780,14 @@ use panel_kinds_seed::*;
                 unique_keys.len(),
                 "{theme_name} theme must not define a theme slot more than once"
             );
-            assert_eq!(
-                unique_keys, registered_keys,
-                "{theme_name} theme must explicitly define the complete registered palette"
+            let mut missing: Vec<_> = registered_keys.difference(&unique_keys).collect();
+            let mut unknown: Vec<_> = unique_keys.difference(&registered_keys).collect();
+            missing.sort();
+            unknown.sort();
+            assert!(
+                missing.is_empty() && unknown.is_empty(),
+                "{theme_name} theme must explicitly define the complete registered palette: \
+                 missing {missing:?}, unknown {unknown:?}"
             );
         }
     }
@@ -3095,7 +3100,7 @@ use panel_kinds_seed::*;
     }
 
     #[test]
-    fn metal_seq_browser_audio_fx_tab_renders_new_effect_button_outside_tree() {
+    fn metal_seq_create_menu_offers_new_effect_beside_the_audio_fx_tab() {
         let mut editor = browser_editor_on_instrument_tab();
         set_browser_view_field(&mut editor, "browser-view", "tab", r#""audio-fx""#);
         editor.runtime_mut().run_reactive_cycle();
@@ -3107,11 +3112,17 @@ use panel_kinds_seed::*;
             .find(|buffer| buffer.name == "*samples*")
             .expect("browser lisp should create the *samples* buffer");
         let tree = browser.widget_tree.as_ref().expect("browser widget tree");
-        assert!(value_contains_string(tree, "+ New Effect"));
         assert!(
             value_contains_string(tree, "No audio effects found."),
-            "test native returns an empty effect tree; the button must not come from tree items"
+            "test native returns an empty effect tree"
         );
+        // New effects start from Create > Create Effect…, not a tab toolbar.
+        let menu = editor
+            .runtime_mut()
+            .eval_str(r#"(import eseq.application-menus) (eseq.application-menus/application-menu-items "Create")"#)
+            .expect("create menu")
+            .expect("create menu items");
+        assert!(value_contains_string(&menu, "Create Effect…"), "{menu:?}");
 
         editor
             .runtime_mut()
@@ -3126,6 +3137,60 @@ use panel_kinds_seed::*;
             }
             other => panic!("expected enter-new-effect-editor host command, got {other:?}"),
         }
+    }
+
+    /// Tree and scroll state (open folders, scroll offset) is keyed by the
+    /// widget's stable id. `refresh-buffer` used to render the browser a
+    /// second way (`render-widget-to-buffer`), which assigned different ids
+    /// than the `effect-buffer` render, so the next reactive render -- a
+    /// right-click opening the package menu -- collapsed the tree and
+    /// scrolled it to the top.
+    #[test]
+    fn metal_seq_browser_refresh_and_package_menu_keep_tree_identity() {
+        let mut editor = browser_editor_on_instrument_tab();
+        let listings = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = listings.clone();
+        editor.runtime_mut().register_native("seq-package-tree", move |_args, _ctx| {
+            counter.set(counter.get() + 1);
+            let empty = std::env::temp_dir().join("eseq-tests-no-such-packages-dir");
+            let tree = crate::host_commands::packages::build_package_tree(
+                &empty,
+                &eseqlisp::package::PackageCatalog::default(),
+                &empty,
+                "",
+                "",
+            );
+            Ok(crate::host_commands::packages::package_tree_to_value(&tree))
+        });
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""packages""#);
+        editor.refresh_runtime_side_effects();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(60, 20);
+        let ids = |editor: &mut eseqlisp::Editor| {
+            let layout = editor.widget_layout().unwrap();
+            let id = |suffix: &str| {
+                find_layout_node_by_stable_key_suffix(&layout, suffix).unwrap().stable_widget_id
+            };
+            (id("/packages-tab-tree"), id("/packages-tab-scroll"))
+        };
+        let shown = ids(&mut editor);
+
+        let before = listings.get();
+        editor.runtime_mut().eval_str("(eseq.browser/refresh-buffer)").unwrap();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(ids(&mut editor), shown, "refresh-buffer re-keyed the tree");
+        assert!(listings.get() > before, "refresh-buffer must list the packages again");
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/open-package-menu
+                     (dict :item (dict :kind "module" :label "skin.lisp" :module "pond.skin"
+                                       :path "/x/pond/skin.lisp")))"#,
+            )
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(ids(&mut editor), shown, "opening the package menu re-keyed the tree");
     }
 
     #[test]
@@ -12549,6 +12614,16 @@ use panel_kinds_seed::*;
 
     fn register_full_grid_test_natives(editor: &mut eseqlisp::Editor) {
         crate::midi_dispatch::register_device_state(editor.runtime_mut());
+        // Gesture timing (the arrangement's follow cooloff, hold-to-select)
+        // reads the host's wall clock.
+        editor.runtime_mut().register_native("now-ms", |_args, _ctx| {
+            Ok(Value::Number(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_secs_f64() * 1000.0)
+                    .unwrap_or(0.0),
+            ))
+        });
         // The shared sequencer keymap's BS/Delete binding asks the host for
         // the step selection; tests that need one re-register this native.
         editor
@@ -17962,7 +18037,7 @@ use panel_kinds_seed::*;
         }
 
         let label =
-            find_layout_node_by_text(track_params_panel, "mute grp").expect("mute group label");
+            find_layout_node_by_text(track_params_panel, "mute group").expect("mute group label");
         assert_finite_nonzero_rect(label, "mute group label");
         let dropdown =
             find_dropdown_by_value(track_params_panel, "Off").expect("mute group dropdown");
@@ -18158,8 +18233,8 @@ use panel_kinds_seed::*;
             );
             assert_eq!(
                 picker.props.get("text-color"),
-                Some(&Value::Keyword("white".to_string())),
-                "{label} should use neutral off-white text"
+                Some(&Value::Keyword("fg".to_string())),
+                "{label} should use the theme's foreground text"
             );
         }
         let retrig = find_layout_node_by_stable_key_suffix(
@@ -21630,20 +21705,13 @@ use panel_kinds_seed::*;
         let strip = find_layout_node_by_debug_name(&push_layout, "transport-scene-strip")
             .expect("scene strip growth container");
         assert_finite_nonzero_rect(strip, "transport-scene-strip");
-        // Which background the strip draws with is styling and is free to
-        // change (7396708d swapped the `transport-scene-strip-bg` SDF widget
-        // for a themed box). What this test owns is the push-interpolation
-        // *state* the strip carries, which is what drives the growth animation.
-        // The amount is bound (`#'scene-push.value`): a drag only repaints.
+        // The strip has no background of its own; each pill carries the
+        // push-interpolation state that drives its shader. The amount is
+        // bound (`#'scene-push.value`): a drag only repaints.
         let bound_push = |props: &HashMap<String, Value>| match props.get("push") {
             Some(Value::ReactiveRef { slot, .. }) => eseqlisp::reactive::read_float_slot(slot),
             other => panic!("push is not bound: {other:?}"),
         };
-        assert!((bound_push(&strip.props) - 0.5).abs() < 1.0e-6);
-        assert!(matches!(
-            strip.props.get("push-target"),
-            Some(Value::Number(value)) if (*value - 1.0).abs() < 1.0e-6
-        ));
         let push_pill =
             find_layout_node_by_stable_key_suffix(&push_layout, "/transport-scene-pill-1")
                 .expect("active scene push pill");
@@ -25877,13 +25945,7 @@ use panel_kinds_seed::*;
             find_layout_node_by_stable_key(&layout, "transport-File-menu-button").expect("file menu button");
         assert_finite_nonzero_rect(save_button, "save button");
 
-        // The panel toggles live in the window titlebar.
-        editor
-            .runtime_mut()
-            .eval_str(r#"(set-titlebar nil) (set-window-buffer "*titlebar*")"#)
-            .expect("switch to titlebar buffer");
-        editor.refresh_runtime_side_effects();
-        let layout = editor.widget_layout().expect("titlebar layout");
+        // The panel toggles lead the transport row (`titlebar-leading`).
         let samples_button =
             find_layout_node_by_stable_key(&layout, "transport-samples-sidebar-button")
                 .expect("samples sidebar button");
@@ -26057,8 +26119,8 @@ use panel_kinds_seed::*;
         );
         assert_eq!(
             expand.props.get("background"),
-            Some(&Value::String("seqv-ellipsis-button".to_string())),
-            "sequencer row expand control should use the SDF ellipsis widget instead of text"
+            Some(&Value::String("seqv-gear-button".to_string())),
+            "sequencer row expand control should use the SDF gear widget instead of text"
         );
     }
 
@@ -26736,15 +26798,19 @@ use panel_kinds_seed::*;
         for index in [1, 2] {
             assert!(find_layout_node_by_stable_key_suffix(&layout, &format!("track-0-send-{index}")).is_some());
         }
-        for index in [1, 2] {
-            let dropdown = find_layout_node_by_stable_key_suffix(&layout, &format!("bus-output-{index}"))
+        // The keyed node may be the `mixer/output-picker` part's frame; the
+        // dropdown is it or inside it.
+        let output_dropdown = |index: usize| {
+            let keyed = find_layout_node_by_stable_key_suffix(&layout, &format!("bus-output-{index}"))
                 .expect("bus or group routing dropdown");
-            assert_eq!(dropdown.widget_type, "dropdown");
+            find_layout_node_by_widget_type(keyed, "dropdown").expect("routing dropdown widget")
+        };
+        for index in [1, 2] {
+            let dropdown = output_dropdown(index);
             assert!(dropdown.rect.width.is_finite() && dropdown.rect.width > 0.0);
             assert!(dropdown.rect.height.is_finite() && dropdown.rect.height > 0.0);
         }
-        let callback = find_layout_node_by_stable_key_suffix(&layout, "bus-output-2")
-            .unwrap().props.get("on-change").unwrap().clone();
+        let callback = output_dropdown(2).props.get("on-change").unwrap().clone();
         editor.runtime_mut().invoke(callback, vec![Value::String("Extra".into())]).unwrap();
         assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
             HostCommand::Custom { name, payload } if name == "set-bus-output"
@@ -33955,13 +34021,13 @@ use panel_kinds_seed::*;
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe space echo ui")
             .expect("space echo ui probe value");
+        // The mode selector is a grid of head-combination buttons.
         assert!(
-            value_contains_string(&ui_probe, "MODE SELECTOR"),
+            value_contains_string(&ui_probe, "1+2R") && value_contains_string(&ui_probe, "rev"),
             "space echo custom UI probe should contain the mode selector: {ui_probe:?}"
         );
         assert!(value_contains_string(&ui_probe, "intensity"));
         assert!(value_contains_string(&ui_probe, "tension"));
-        assert!(value_contains_string(&ui_probe, "8: head 2 + rev"));
         assert!(value_contains_string(&ui_probe, "Tubby"));
         assert!(value_contains_string(&ui_probe, "wide"));
         editor.refresh_runtime_side_effects();
@@ -36925,8 +36991,10 @@ use panel_kinds_seed::*;
             header.rect,
             title.rect
         );
+        // Within a twentieth of a cell: the body's top padding may meet the
+        // header's edge.
         assert!(
-            motion.rect.row >= header.rect.row + header.rect.height,
+            motion.rect.row >= header.rect.row + header.rect.height - 0.05,
             "custom effect body should start below the fixed effect header, header={:?} motion={:?}",
             header.rect,
             motion.rect
@@ -46344,14 +46412,21 @@ use panel_kinds_seed::*;
             block.props.get("background-color"),
             "regular group selection must retain the normal container background"
         );
-        let Some(Value::List(group_bg)) = block.props.get("background-color") else {
-            panic!("regular group background should be an RGBA color");
-        };
+        // The enclosure paints through its surface widget from an opaque fill
+        // (`group-container-part`), so the selected border cannot show
+        // through it.
         assert_eq!(
-            group_bg.last().map(|channel| channel.borrow().clone()),
-            Some(Value::Number(1.0)),
-            "group background must be opaque so the selected border cannot show through it"
+            block.props.get("background"),
+            Some(&Value::String("seqv-group-surface".to_string())),
+            "regular group background should be its textured surface"
         );
+        for channel in ["fill-r", "fill-g", "fill-b"] {
+            assert!(
+                matches!(block.props.get(channel), Some(Value::Number(n)) if n.is_finite()),
+                "{channel}: {:?}",
+                block.props.get(channel)
+            );
+        }
         editor
             .runtime_mut()
             .eval_str("(eseq.sequencer/select-group (first (eseq.kinds/groups)))")
@@ -46676,17 +46751,18 @@ use panel_kinds_seed::*;
             "an active note holds the light up"
         );
 
-        // Track 0 is not a rack member, so its triggers never light anything —
-        // and its latch is left alone for whoever else may want it.
+        // Track 0 is not a rack member, but every track exposes
+        // `track.triggered` like a pad: its hit lights it and consumes its
+        // latch too.
         state.transport.trigger_flash[0].store(255, Ordering::Relaxed);
         assert!(
-            !read_rack_pad_trigger_flags(&app, &state, &idle, &mut triggered_at, now)[0],
-            "a loose track has no pad to light"
+            read_rack_pad_trigger_flags(&app, &state, &idle, &mut triggered_at, now)[0],
+            "a loose track lights like a pad"
         );
         assert_eq!(
             state.transport.trigger_flash[0].load(Ordering::Relaxed),
-            255,
-            "a loose track's latch is not consumed"
+            0,
+            "a loose track's latch is consumed"
         );
     }
 
@@ -46770,7 +46846,11 @@ use panel_kinds_seed::*;
             });
             push_presented_settings(&mut editor);
             editor.refresh_runtime_side_effects();
-            let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 160, 60);
+            let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 160, 60);
+            // Layout rects are tile-local; the pointer is in window cells,
+            // below the titlebar.
+            let tile = frame.tiles.iter().find(|tile| tile.frame.buffer_name == buffer).unwrap();
+            let offset = (tile.rect.col, tile.rect.row);
             let layout = editor.widget_layout().unwrap();
             for key in ["/midi-name-a", "/midi-status-a", "/midi-toggle-a", "/midi-toggle-b",
                 "/midi-device-list", "/midi-refresh", "/midi-error", "/settings-done"]
@@ -46790,8 +46870,8 @@ use panel_kinds_seed::*;
                     inherited_hover: false,
                 }, 0.0, 60);
             let node = find_layout_node_by_stable_key_suffix(&layout, "/midi-toggle-b").unwrap();
-            let col = node.rect.col + node.rect.width * 0.5;
-            let row = node.rect.row + node.rect.height * 0.5;
+            let col = offset.0 + node.rect.col + node.rect.width * 0.5;
+            let row = offset.1 + node.rect.row + node.rect.height * 0.5;
             for kind in [crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
                 crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left)]
             {
@@ -46800,10 +46880,12 @@ use panel_kinds_seed::*;
                     modifiers: crossterm::event::KeyModifiers::NONE,
                 }, col, row, 0);
             }
-            assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
+            let commands = editor.drain_host_commands();
+            assert!(commands.iter().any(|command| matches!(command,
                 HostCommand::Custom { name, payload: Value::Map(map) } if name == "midi-set-enabled"
                     && matches!(&*map.get("id").unwrap().borrow(), Value::String(id) if id == "b")
-                    && matches!(&*map.get("enabled").unwrap().borrow(), Value::Bool(true)))));
+                    && matches!(&*map.get("enabled").unwrap().borrow(), Value::Bool(true)))),
+                "{commands:?}");
             eseqlisp::widget_render::clear_overlay();
             editor.runtime_mut().eval_str("(eseq.settings/close-settings)").unwrap();
             editor.runtime_mut().run_reactive_cycle();

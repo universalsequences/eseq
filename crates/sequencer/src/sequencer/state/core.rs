@@ -167,6 +167,11 @@ pub struct TransportState {
     /// or 0 while none drives the track. Published by the scheduler every
     /// chunk; the step grids underline that step.
     pub track_process_lengths: Vec<AtomicU32>,
+    /// Per-track count of latched launches mirrored during song playback,
+    /// one per manual-latch lane (the latch mask is 64 bits). Copied into
+    /// each snapshot, so the scheduler re-adopts exactly the latched lanes
+    /// a launch switched, in the snapshot that carries the switch.
+    pub track_launch_generations: Vec<AtomicU32>,
     /// Per-track phase within the active step, normalized to 0.0..=1.0.
     pub track_playhead_phases: Vec<AtomicU32>,
     /// Per-track sampler playhead as normalized 0.0–1.0 (f32 bits).
@@ -401,6 +406,10 @@ pub struct PublishedSequencer {
     /// `owner_rack` for a rack-owned generator), or a negative number for
     /// none. Re-read each chunk, like the tick.
     pub trigger_source: Option<String>,
+    /// Tick mode only: `:before-steps`. The scheduler ticks this generator
+    /// before each chunk's step sequencer rather than after, so a lock hold
+    /// it starts on a boundary covers that boundary's steps.
+    pub before_steps: bool,
 }
 
 /// First tick failure of a registered generator, reported once by the

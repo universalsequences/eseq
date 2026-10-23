@@ -741,6 +741,10 @@ pub(super) fn enqueue_scheduled_event_for_callback(
 ) {
     if event.pattern_epoch != current_pattern_epoch
         || !data.state.note_audition.is_current(event.audition_generation) {
+        if crate::scheduled_event::launch_trace_enabled() {
+            crate::scheduled_event::trace_step_trigger("audio-drop-stale-enqueue", &event,
+                format_args!("current_epoch={current_pattern_epoch} block_start={block_start_sample}"));
+        }
         return;
     }
     let seq = data.event_seq;
@@ -807,6 +811,12 @@ pub(super) fn collect_due_countdown_events(
         let stale = !release && (cancelled
             || data.countdown_events[i].pattern_epoch != current_pattern_epoch);
         if stale {
+            if crate::scheduled_event::launch_trace_enabled() {
+                if let CountdownEventKind::Scheduled(event) = &data.countdown_events[i].kind {
+                    crate::scheduled_event::trace_step_trigger("audio-drop-stale-countdown", &event.event,
+                        format_args!("current_epoch={current_pattern_epoch}"));
+                }
+            }
             data.countdown_events.swap_remove(i);
             continue;
         }
@@ -1013,7 +1023,13 @@ pub(super) fn dispatch_block_events_until(
                         Some(_) => false,
                         None => true,
                     };
-                    if dispatch && data.mod_triggers.note_scheduled_trigger(&scheduled) {
+                    let accepted = dispatch && data.mod_triggers.note_scheduled_trigger(&scheduled);
+                    if crate::scheduled_event::launch_trace_enabled() {
+                        crate::scheduled_event::trace_step_trigger("audio-dispatch", &scheduled.event,
+                            format_args!("at={} mute_group_ok={dispatch} accepted={accepted}",
+                                block_start_sample + frame_offset as u64));
+                    }
+                    if accepted {
                         dispatch_scheduled_event(data, &scheduled, frame_offset);
                     }
                 }

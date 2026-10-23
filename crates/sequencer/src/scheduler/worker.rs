@@ -267,6 +267,7 @@ impl SchedulerDriver {
                             self.lookahead_state.neural_runtime.reset_state(0.0);
                             self.lookahead_state.generator_runtime.reset(0.0);
                             self.lookahead_state.process_runtime.reset_transport(0.0);
+                            self.lookahead_state.process_runtime.lock_holds.clear();
                             for graph in &mut self.lookahead_state.graph_runtimes {
                                 graph.reset_transport(0.0);
                             }
@@ -378,6 +379,11 @@ impl SchedulerDriver {
                     .filter(|seq| seq.graph.is_none())
                     .filter_map(|seq| seq.owner_rack.map(|group_id| (seq.id, group_id)))
                     .collect();
+                self.lookahead_state.generator_before_steps = published
+                    .iter()
+                    .filter(|seq| seq.graph.is_none() && seq.before_steps)
+                    .map(|seq| seq.id)
+                    .collect();
                 for seq in &published {
                     if seq.graph.is_some() {
                         continue; // graph-mode entries reconcile below, not as ticks
@@ -410,10 +416,15 @@ impl SchedulerDriver {
                 .map(|runtime| runtime.sequencer_defs())
                 .unwrap_or_default();
             self.lookahead_state.generator_runtime.sync_definitions(&generator_defs, self.lookahead_state.clock.total_beats);
+            self.lookahead_state
+                .process_runtime
+                .lock_holds
+                .retain_generators(|id| generator_defs.iter().any(|def| def.id == id));
             // Edited/republished definitions get a fresh tick attempt
             // (eseq-85a.5): the parked-on-error set is scoped to one
             // runtime build.
             self.lookahead_state.parked_generators.clear();
+            self.lookahead_state.gate_conflicts_reported.clear();
 
             let new_manifests: Vec<crate::graph::GraphManifest> =
                 published.iter().filter_map(|s| s.graph.clone()).collect();
@@ -661,6 +672,7 @@ impl SchedulerDriver {
             self.lookahead_state.neural_runtime.reset_state(0.0);
             self.lookahead_state.generator_runtime.reset(0.0);
             self.lookahead_state.process_runtime.reset_transport(0.0);
+            self.lookahead_state.process_runtime.lock_holds.clear();
             for graph in &mut self.lookahead_state.graph_runtimes {
                 if clear_graph_deltas {
                     graph.reset_transport(0.0);
@@ -771,6 +783,28 @@ impl SchedulerDriver {
             && self.lookahead_state
                 .quantized_launches
                 .observe_pattern_switch(pattern);
+        if crate::scheduled_event::launch_trace_enabled()
+            && (self.last_pattern != pattern
+                || self.last_pattern_epoch != pattern_epoch
+                || self.last_topology_epoch != topology_epoch)
+        {
+            let resync = if !self.last_playing {
+                "play-start"
+            } else if self.last_topology_epoch != topology_epoch {
+                "topology"
+            } else if !song_playback_active && self.last_pattern_epoch != pattern_epoch {
+                "pattern-epoch"
+            } else if !song_playback_active && self.last_pattern != pattern && !pattern_adopted {
+                "pattern-switch"
+            } else {
+                "none"
+            };
+            eprintln!(
+                "[launch] sched-observe pattern {}->{pattern} pattern_epoch {}->{pattern_epoch} topology_epoch {}->{topology_epoch} adopted={pattern_adopted} resync={resync} rendered={rendered} scheduled_until={}",
+                self.last_pattern, self.last_pattern_epoch, self.last_topology_epoch,
+                self.scheduled_until_sample
+            );
+        }
 
         if !self.last_playing {
             queue.clear();

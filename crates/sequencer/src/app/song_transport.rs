@@ -444,11 +444,7 @@ impl App {
             return;
         }
         let scene = self.state.current_scene_index();
-        // Manual-launch preamble (mirrors `apply_manual_pattern_launch`).
-        let _ = self.state.quantized_launches().cancel_all();
-        self.scene_macro_runtime.clear();
-        let mut touched = self.macro_engine.release_all_scene_macros();
-        touched.extend(self.macro_engine.end_scene_push());
+        let touched = self.reset_scene_launch_state();
         self.send_macro_targets(touched);
         // The transport has NOT started yet (the latch-before-start ordering
         // rule), so the record clock still extrapolates from the PREVIOUS

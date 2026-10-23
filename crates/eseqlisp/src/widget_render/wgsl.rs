@@ -2244,14 +2244,20 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var gridT: f32 = fract(uv.x * axisSpan);
     var gridDist: f32 = min(gridT, 1.0 - gridT) / axisSpan;
     var gridAA: f32 = max(fwidth(uv.x), 0.0008);
-    var gridMask: f32 = smoothstep(gridAA * 1.6, 0.0, gridDist) * 0.6;
+    // Crisp 1px ticks: full coverage on the tick's pixel, none beside it.
+    var gridMask: f32 = clamp(1.0 - gridDist / gridAA, 0.0, 1.0) * 0.6;
     col = vec4<f32>((mix(col.rgb, input.color_c.rgb, gridMask * input.color_c.a)), col.a);
 
     var aa: f32 = max(fwidth(uv.x), 0.0008);
+    var aaY: f32 = max(fwidth(uv.y), 0.0008);
     if (mode == 0) {
         // BLEND routes the LFO from common CENTER motion to SPREAD motion,
         // where outer notches fan input opposite directions around the anchor.
-        var yPad: f32 = smoothstep(0.04, 0.14, uv.y) * smoothstep(0.96, 0.86, uv.y);
+        // Notches run between hard insets, antialiased over one pixel.
+        var yPad: f32 = clamp((uv.y - 0.08) / aaY + 0.5, 0.0, 1.0)
+            * clamp((0.92 - uv.y) / aaY + 0.5, 0.0, 1.0);
+        // The sweep ranges shade once as a union, so overlaps don't muddy.
+        var bandUnion: f32 = 0.0;
         for (var i: i32 = 0; i < 12; i = i + 1) {
             if (i >= count) { break; }
             var offset: f32 = f32(i) - (f32(count) - 1.0) * 0.5;
@@ -2262,11 +2268,11 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
                 var linearX: f32 = anchorX + log2(linearFactor) / 10.0;
                 var baseX: f32 = clamp(mix(exponentialX, linearX, blend), 0.0, 1.0);
                 var band: f32 = step(baseX - sweep, uv.x) * step(uv.x, baseX + sweep);
-                col = vec4<f32>((mix(col.rgb, input.color_a.rgb, band * 0.10 * yPad)), col.a);
-                var lineL: f32 = smoothstep(aa * 2.2, aa * 0.4, abs(uv.x - (baseX + sweepL)));
-                var lineR: f32 = smoothstep(aa * 2.2, aa * 0.4, abs(uv.x - (baseX + sweepR)));
-                col = vec4<f32>((mix(col.rgb, input.color_a.rgb, lineL * 0.92 * yPad)), col.a);
-                col = vec4<f32>((mix(col.rgb, input.color_d.rgb, lineR * 0.88 * yPad)), col.a);
+                bandUnion = max(bandUnion, band);
+                var lineL: f32 = clamp(1.25 - abs(uv.x - (baseX + sweepL)) / aa, 0.0, 1.0);
+                var lineR: f32 = clamp(1.25 - abs(uv.x - (baseX + sweepR)) / aa, 0.0, 1.0);
+                col = vec4<f32>((mix(col.rgb, input.color_a.rgb, lineL * yPad)), col.a);
+                col = vec4<f32>((mix(col.rgb, input.color_d.rgb, lineR * yPad)), col.a);
                 continue;
             }
             var spreadL: f32 = clamp(
@@ -2304,19 +2310,21 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
             var bandMin: f32 = min(rangeNeg, rangePos);
             var bandMax: f32 = max(rangeNeg, rangePos);
             var band: f32 = step(bandMin, uv.x) * step(uv.x, bandMax);
-            col = vec4<f32>((mix(col.rgb, input.color_a.rgb, band * 0.10 * yPad)), col.a);
-            var lineL: f32 = smoothstep(aa * 2.2, aa * 0.4, abs(uv.x - lineXL));
-            var lineR: f32 = smoothstep(aa * 2.2, aa * 0.4, abs(uv.x - lineXR));
-            col = vec4<f32>((mix(col.rgb, input.color_a.rgb, lineL * 0.92 * yPad)), col.a);
-            col = vec4<f32>((mix(col.rgb, input.color_d.rgb, lineR * 0.88 * yPad)), col.a);
+            bandUnion = max(bandUnion, band);
+            var lineL: f32 = clamp(1.25 - abs(uv.x - lineXL) / aa, 0.0, 1.0);
+            var lineR: f32 = clamp(1.25 - abs(uv.x - lineXR) / aa, 0.0, 1.0);
+            col = vec4<f32>((mix(col.rgb, input.color_a.rgb, lineL * yPad)), col.a);
+            col = vec4<f32>((mix(col.rgb, input.color_d.rgb, lineR * yPad)), col.a);
         }
+        col = vec4<f32>((mix(col.rgb, input.color_a.rgb, bandUnion * 0.08 * yPad)), col.a);
     } else {
         // Two channel dots on the log-time axis with the sweep range behind.
         var baseX: f32 = anchorX;
         var dotL: vec2<f32> = vec2<f32>(baseX + sweepL, 0.38);
         var dotR: vec2<f32> = vec2<f32>(baseX + sweepR, 0.62);
         var band: f32 = step(baseX - sweep, uv.x) * step(uv.x, baseX + sweep);
-        var yBand: f32 = smoothstep(0.26, 0.36, uv.y) * smoothstep(0.74, 0.64, uv.y);
+        var yBand: f32 = clamp((uv.y - 0.30) / aaY + 0.5, 0.0, 1.0)
+            * clamp((0.70 - uv.y) / aaY + 0.5, 0.0, 1.0);
         col = vec4<f32>((mix(col.rgb, input.color_a.rgb, band * 0.07 * yBand)), col.a);
 
         var dL: f32 = length(vec2<f32>((uv.x - dotL.x) * aspect, uv.y - dotL.y));

@@ -613,6 +613,15 @@ impl EmittedNetworkEventSource {
     }
 }
 
+/// Where a network hit tests `seq-emit :lock` coverage: at its straight
+/// sample, like a step at its straight boundary, and not against the holds
+/// of the generator that played it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct LockQuery {
+    pub(super) straight_sample: u64,
+    pub(super) own_generator: Option<u64>,
+}
+
 pub(super) fn enqueue_emitted_network_event_with_midi_fx(
     queue: &impl ScheduledEventSink,
     snapshot: &SequencerSnapshot,
@@ -627,6 +636,7 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
     source: EmittedNetworkEventSource,
     emitted: lisp_host::EmittedAccumulatorEvent,
     landing: Option<StepLanding>,
+    lock: Option<LockQuery>,
     debug_accum: bool,
 ) -> bool {
     let Some(track_idx) = source.resolve_track(emitted.track) else {
@@ -709,6 +719,28 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
             event.sampler_params = resolve_sampler_defaults(snapshot, track_idx);
         }
     }
+    // `seq-emit :lock` holds on the track fold in over the landing stamp
+    // and under the hit's own params, so its p-locks still win.
+    let mut midi_fx_params = Vec::new();
+    let locked = lock.filter(|lock| {
+        process_runtime
+            .lock_holds
+            .covers(track_idx, lock.straight_sample, lock.own_generator)
+    });
+    let midi_fx = (locked.is_some() || !emitted.named_params.is_empty())
+        .then(|| scratch_runtime.as_ref().map(|runtime| runtime.midi_fx_descriptor_source()))
+        .flatten();
+    if let Some(lock) = locked {
+        apply_lock_holds(
+            snapshot,
+            midi_fx.as_ref(),
+            &process_runtime.lock_holds,
+            lock.straight_sample,
+            lock.own_generator,
+            &mut event,
+            &mut midi_fx_params,
+        );
+    }
     upsert_effect_params(&mut event.effect_params, emitted.effect_params);
     upsert_instrument_params(
         &mut event.instrument_params,
@@ -716,11 +748,7 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
     );
     // `seq-emit :params`, by name against the destination, after the
     // landing stamp so it is the most specific source for this hit.
-    let mut midi_fx_params = Vec::new();
     if !emitted.named_params.is_empty() {
-        let midi_fx = scratch_runtime
-            .as_ref()
-            .map(|runtime| runtime.midi_fx_descriptor_source());
         apply_named_params(
             snapshot,
             midi_fx.as_ref(),
@@ -904,6 +932,8 @@ pub(super) fn enqueue_due_process_emissions(
                     source,
                     event,
                     landing,
+                    // Process hits don't take lock holds.
+                    None,
                     debug_accum,
                 ) {
                     return false;
@@ -1049,6 +1079,7 @@ mod tests {
             0.0,
             EmittedNetworkEventSource::Generator { index: 0 },
             hit(0),
+            None,
             None,
             false,
         ));

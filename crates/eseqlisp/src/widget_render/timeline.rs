@@ -663,7 +663,7 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
                 buf.set(
                     header_row,
                     col,
-                    styled_cell(' ', theme::FG(), Some(theme::STATUS_BG())),
+                    styled_cell(' ', theme::FG(), Some(theme::TIMELINE_RULER_BG())),
                 );
             }
             for (absolute_col, is_major) in view.grid_columns() {
@@ -678,7 +678,7 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
                             } else {
                                 theme::BRIGHT_BLACK()
                             },
-                            Some(theme::STATUS_BG()),
+                            Some(theme::TIMELINE_RULER_BG()),
                         ),
                     );
                 }
@@ -692,7 +692,7 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
                     buf.set(
                         header_row,
                         col,
-                        styled_cell(ch, theme::FG(), Some(theme::STATUS_BG())),
+                        styled_cell(ch, theme::FG(), Some(theme::TIMELINE_RULER_BG())),
                     );
                 }
             }
@@ -738,7 +738,7 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
                 buf.set(
                     rect.row.round() as u16,
                     playhead_col,
-                    styled_cell('|', theme::YELLOW(), Some(theme::STATUS_BG())),
+                    styled_cell('|', theme::YELLOW(), Some(theme::TIMELINE_RULER_BG())),
                 );
             }
             for row_offset in 0..(content.height.round() as u16) {
@@ -1077,7 +1077,7 @@ fn build_primitives(
                 width: rect.width,
                 height: view.header_height,
             },
-            color: theme::STATUS_BG(),
+            color: theme::TIMELINE_RULER_BG(),
         }));
         if let Some((x, y, width, height)) = loop_band {
             primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
@@ -1123,7 +1123,7 @@ fn build_primitives(
                         y: tick_top,
                         width: stroke,
                         height: tick_height,
-                        color: theme::FG_MUTED(),
+                        color: theme::TIMELINE_RULER_FG(),
                     }));
                 } else {
                     primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
@@ -1146,7 +1146,7 @@ fn build_primitives(
                     width: label_width,
                     height: 0.86,
                 },
-                color: theme::STATUS_BG(),
+                color: theme::TIMELINE_RULER_BG(),
             }));
             primitives.push(GpuPrimitive::ProportionalText(
                 GpuProportionalTextPrimitive {
@@ -1157,8 +1157,8 @@ fn build_primitives(
                     text: label,
                     font_size: 10.5,
                     scale: 1.0,
-                    fg: theme::FG_MUTED(),
-                    bg: theme::STATUS_BG(),
+                    fg: theme::TIMELINE_RULER_FG(),
+                    bg: theme::TIMELINE_RULER_BG(),
                     face: crate::ui::glyph_atlas::TextFace::Regular,
                 },
             ));
@@ -1230,8 +1230,8 @@ fn build_primitives(
                         text,
                         font_size: 10.0,
                         scale: 1.0,
-                        fg: theme::FG_MUTED(),
-                        bg: theme::STATUS_BG(),
+                        fg: theme::TIMELINE_RULER_FG(),
+                        bg: theme::TIMELINE_RULER_BG(),
                         face: crate::ui::glyph_atlas::TextFace::Regular,
                     },
                 ));

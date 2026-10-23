@@ -1257,7 +1257,9 @@ pub(crate) fn apply_replayed_scratch_imports(
 
 /// `packages-new-instance {:module :kind [:group-id]}`: "New <kind>" from a
 /// module row's menu, the double-click that creates a module's first
-/// instance, and the rack menu's kind picker. Attaches the module to the
+/// instance, the rack menu's kind picker, and the palette's New Instance
+/// (which may name the kind by `:kind-name` when it was read off an unloaded
+/// module's source). Attaches the module to the
 /// project first when it is not (the attach loads it, which registers the
 /// kind), then creates the instance through `instance-create`, which
 /// syncs the records and opens the new instance's tab.
@@ -1267,14 +1269,14 @@ fn new_instance_from_package(
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) {
-    let result = (|| -> Result<Option<String>, String> {
-        let kind = extract_string_from_payload(payload, "kind")
-            .map(|kind| kind.trim().to_string())
-            .filter(|kind| !kind.is_empty())
-            .ok_or("packages-new-instance needs a :kind")?;
-        let module = extract_string_from_payload(payload, "module")
-            .map(|module| module.trim().to_string())
-            .filter(|module| !module.is_empty());
+    let result = (|| -> Result<(String, Option<String>), String> {
+        let text = |key: &str| {
+            extract_string_from_payload(payload, key)
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+        };
+        let module = text("module");
+        let kind_name = text("kind-name");
         let mut warnings = None;
         if let Some(module) = &module {
             if !import_modules(&app.state.scratch_source()).contains(module) {
@@ -1285,20 +1287,28 @@ fn new_instance_from_package(
                 }
             }
         }
-        if sequencer::lisp_host::registered_kind(&kind).is_none() {
+        // A `:kind-name` (the palette's pick from an unloaded module's
+        // source) only has an id once the attach above has loaded it.
+        let kind = match (text("kind"), &module, &kind_name) {
+            (Some(kind), _, _) => kind,
+            (None, Some(module), Some(name)) => sequencer::lisp_host::kinds_defined_in_module(module)
+                .into_iter()
+                .find(|kind| &kind.name == name)
+                .map(|kind| kind.id)
+                .ok_or_else(|| format!("{module} did not define kind {name}"))?,
+            _ => return Err("packages-new-instance needs a :kind".to_string()),
+        };
+        if !sequencer::lisp_host::kind_is_registered(&kind) {
             return Err(match &module {
                 Some(module) => format!("{module} did not define kind {kind}"),
                 None => format!("Kind {kind} is not loaded; attach its package first"),
             });
         }
-        Ok(warnings)
+        Ok((kind, warnings))
     })();
     match result {
-        Ok(warnings) => {
-            let mut fields = vec![(
-                "kind",
-                Value::String(extract_string_from_payload(payload, "kind").unwrap_or_default().trim().to_string()),
-            )];
+        Ok((kind, warnings)) => {
+            let mut fields = vec![("kind", Value::String(kind))];
             if let Some(group_id) = extract_usize_from_payload(payload, "group-id") {
                 fields.push(("group-id", Value::Number(group_id as f64)));
             }
@@ -2020,6 +2030,10 @@ pub(crate) fn register_package_tree_natives(runtime: &mut Runtime, state: Arc<Se
                 &state.scratch_source(),
                 &init,
             );
+            let app_root = [eseqlisp::ModuleLoadRoot { path: app_paths.factory_root(), module_prefix: None }];
+            hide_app_modules(&mut tree, |module| {
+                sequencer::agent::forms::resolve_module_file(&app_root, module).is_some()
+            });
             let kinds = module_kinds(&catalog, &registered_tree_kinds());
             annotate_package_kinds(&mut tree, &kinds, &instances);
             Ok(package_tree_to_value(&filter_package_tree(&tree, &query.trim().to_lowercase())))
@@ -2034,13 +2048,7 @@ pub(crate) fn register_package_tree_natives(runtime: &mut Runtime, state: Arc<Se
         move |_args, _ctx| {
             let catalog = sequencer::app_paths::app_paths().package_catalog();
             let registered = sequencer::lisp_host::registered_kinds();
-            let mut kinds = module_kinds(&catalog, &registered_tree_kinds());
-            // Project-code kinds (no module) can be instantiated too.
-            for kind in &registered {
-                if kind.module.is_none() && !kinds.iter().any(|known| known.id == kind.id) {
-                    kinds.push(TreeKind { id: kind.id.clone(), name: kind.name.clone(), module: String::new() });
-                }
-            }
+            let kinds = instance_kinds(&catalog, &registered);
             Ok(Value::List(
                 kinds
                     .into_iter()
@@ -2049,10 +2057,7 @@ pub(crate) fn register_package_tree_natives(runtime: &mut Runtime, state: Arc<Se
                         Rc::new(RefCell::new(crate::values::map_value(vec![
                             ("id", Value::String(kind.id)),
                             ("name", Value::String(kind.name)),
-                            (
-                                "module",
-                                if kind.module.is_empty() { Value::Nil } else { Value::String(kind.module) },
-                            ),
+                            ("module", string_or_nil(kind.module)),
                             ("registered?", Value::Bool(registered)),
                         ])))
                     })
@@ -2060,6 +2065,60 @@ pub(crate) fn register_package_tree_natives(runtime: &mut Runtime, state: Arc<Se
             ))
         },
     );
+    runtime.register_native_with_docs(
+        "seq-package-kind-choices",
+        "(seq-package-kind-choices)",
+        "Every kind a New Instance can make, including the `def-kind`s of package modules not yet \
+         attached. Each is a dict with :name :module (nil for project code) and :kind (the kind id, \
+         nil until the module is loaded). Pass one to `packages-new-instance`, which attaches the \
+         module first.",
+        move |_args, _ctx| {
+            let app_paths = sequencer::app_paths::app_paths();
+            let catalog = app_paths.package_catalog();
+            // No imports: the Loaded section stays empty, since every
+            // module it would list is a tier row too.
+            let tree = build_package_tree(
+                &app_paths.local_modules_dir(),
+                &catalog,
+                &app_paths.packages_dir(),
+                "",
+                "",
+            );
+            let kinds = instance_kinds(&catalog, &sequencer::lisp_host::registered_kinds());
+            let choices = package_kind_choices(&tree, &kinds, cached_def_kind_names);
+            Ok(crate::values::list_value(choices.into_iter().map(|choice| {
+                crate::values::map_value(vec![
+                    ("name", Value::String(choice.name)),
+                    ("module", string_or_nil(choice.module)),
+                    ("kind", choice.id.map(Value::String).unwrap_or(Value::Nil)),
+                ])
+            })))
+        },
+    );
+}
+
+/// A kind's module for Lisp: nil for project code (the empty module).
+fn string_or_nil(text: String) -> Value {
+    if text.is_empty() { Value::Nil } else { Value::String(text) }
+}
+
+/// [`module_kinds`] plus the registered kinds project code (no module)
+/// defines, which can be instantiated too.
+fn instance_kinds(
+    catalog: &eseqlisp::package::PackageCatalog,
+    registered: &[sequencer::lisp_host::KindDefinition],
+) -> Vec<TreeKind> {
+    let module_owned: Vec<TreeKind> = registered
+        .iter()
+        .filter_map(|kind| Some(TreeKind { module: kind.module.clone()?, id: kind.id.clone(), name: kind.name.clone() }))
+        .collect();
+    let mut kinds = module_kinds(catalog, &module_owned);
+    for kind in registered {
+        if kind.module.is_none() && !kinds.iter().any(|known| known.id == kind.id) {
+            kinds.push(TreeKind { id: kind.id.clone(), name: kind.name.clone(), module: String::new() });
+        }
+    }
+    kinds
 }
 
 /// Registered kinds that belong to a module, as tree kinds.
@@ -2095,6 +2154,88 @@ pub(crate) fn module_kinds(
         }
     }
     kinds
+}
+
+/// One kind the palette's "New Instance" offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KindChoice {
+    pub name: String,
+    /// Empty for a kind defined in project code.
+    pub module: String,
+    /// Known up front for manifest and registered kinds; `None` for a
+    /// `def-kind` read off an unloaded module's source, whose id only exists
+    /// once the attach has loaded it (`packages-new-instance` then resolves
+    /// it by `:kind-name`).
+    pub id: Option<String>,
+}
+
+/// Every kind an instance can be made of, loaded or not: the known kinds
+/// (manifests + registry), then the `def-kind`s in the source of every
+/// module row no known kind already covers, so a local package nobody has
+/// attached yet is still one palette search away.
+/// `def_kinds` lists the `def-kind` names in a module file
+/// ([`cached_def_kind_names`] in the app).
+pub(crate) fn package_kind_choices(
+    roots: &[PackageTreeNode],
+    kinds: &[TreeKind],
+    def_kinds: impl Fn(&Path) -> Vec<String>,
+) -> Vec<KindChoice> {
+    fn walk(
+        nodes: &[PackageTreeNode],
+        choices: &mut Vec<KindChoice>,
+        def_kinds: &dyn Fn(&Path) -> Vec<String>,
+    ) {
+        for node in nodes {
+            if let (true, Some(module), Some(path)) =
+                (node.kind == "module", node.module.as_ref(), node.path.as_deref())
+            {
+                for name in def_kinds(path) {
+                    if !choices.iter().any(|choice| &choice.module == module && choice.name == name) {
+                        choices.push(KindChoice { name, module: module.clone(), id: None });
+                    }
+                }
+            }
+            walk(&node.children, choices, def_kinds);
+        }
+    }
+    let mut choices: Vec<KindChoice> = kinds
+        .iter()
+        .map(|kind| KindChoice { name: kind.name.clone(), module: kind.module.clone(), id: Some(kind.id.clone()) })
+        .collect();
+    walk(roots, &mut choices, &def_kinds);
+    choices
+}
+
+/// The top-level `def-kind` names in `source`.
+fn def_kind_names(source: &str) -> Vec<String> {
+    sequencer::agent::forms::top_level_forms(source)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|form| form.head == "def-kind")
+        .filter_map(|form| form.name)
+        .collect()
+}
+
+/// [`def_kind_names`] of the module file at `path`, parsed again only when
+/// its size or modification time changed: the palette asks for every
+/// module's kinds each time it opens.
+fn cached_def_kind_names(path: &Path) -> Vec<String> {
+    type Stamp = (Option<std::time::SystemTime>, u64);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (Stamp, Vec<String>)>>> =
+        std::sync::OnceLock::new();
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Vec::new();
+    };
+    let stamp = (metadata.modified().ok(), metadata.len());
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
+    if let Some((cached, names)) = cache.get(path) {
+        if *cached == stamp {
+            return names.clone();
+        }
+    }
+    let names = def_kind_names(&std::fs::read_to_string(path).unwrap_or_default());
+    cache.insert(path.to_path_buf(), (stamp, names.clone()));
+    names
 }
 
 /// Parse `project.instances` (the host kinds' rows, one dict per instance).
@@ -2371,6 +2512,20 @@ fn loaded_section(
         instance_count: 0,
         instance: None,
     }
+}
+
+/// Drop the Loaded rows for the application's own modules (`eseq.kinds`,
+/// `eseq.sequencer`, ...): init.lisp imports them to script the app, but they
+/// are not packages, and listing them beside real ones only confuses. A row
+/// some tier located is a package whatever its name; of the rest, only an
+/// import nothing resolves stays (removing it is the useful action).
+pub(crate) fn hide_app_modules(roots: &mut [PackageTreeNode], is_app_module: impl Fn(&str) -> bool) {
+    let Some(loaded) = roots.iter_mut().find(|root| root.kind == "root" && root.tier == "loaded") else {
+        return;
+    };
+    loaded.children.retain(|row| {
+        row.path.is_some() || !row.module.as_deref().is_some_and(|module| is_app_module(module))
+    });
 }
 
 fn mark_attachments(
@@ -3284,6 +3439,21 @@ mod tests {
             loaded.iter().map(|node| (node.label.as_str(), node.detail.as_deref())).collect::<Vec<_>>(),
             [("alec.drums.kit", None), ("my.euclid", None)]
         );
+        // The app's own modules imported from init.lisp are not packages;
+        // a located package keeps its row whatever the predicate says, and
+        // an import nothing resolves stays so it can be removed.
+        let mut scripted = build_package_tree(
+            &local,
+            &catalog,
+            &installed,
+            "(import my.euclid)\n",
+            "(import eseq.kinds)\n(import eseq.sequencer)\n(import gone.pkg)\n",
+        );
+        hide_app_modules(&mut scripted, |module| module.starts_with("eseq.") || module == "my.euclid");
+        assert_eq!(
+            scripted[0].children.iter().map(|node| node.label.as_str()).collect::<Vec<_>>(),
+            ["gone.pkg", "my.euclid"]
+        );
         assert_eq!(loaded[1].path, Some(local.join("my/euclid.lisp")));
         assert!(loaded[0].read_only && !loaded[1].read_only);
         let tree = &tree[1..];
@@ -3341,6 +3511,41 @@ mod tests {
         assert!(copy_module_to_local(&copied, "alec.drums.kit", &local)
             .unwrap_err()
             .contains("already has"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The palette's New Instance lists a local package's kinds before it
+    /// is attached (read off its `def-kind`s), keeps known kinds with their
+    /// ids, and lists a kind a module both registered and declares once.
+    #[test]
+    fn kind_choices_read_unattached_modules_def_kinds() {
+        let root = temp_root("kind-choices");
+        let local = root.join("local");
+        std::fs::create_dir_all(local.join("plockchain")).unwrap();
+        std::fs::write(
+            local.join("plockchain/view.lisp"),
+            "(module plockchain.view)\n;; (def-kind commented)\n(def-kind plockchain :state ((n 4)))\n",
+        )
+        .unwrap();
+        std::fs::write(local.join("plockchain/core.lisp"), "(module plockchain.core)\n(def tick () 1)\n")
+            .unwrap();
+        std::fs::write(local.join("euclid.lisp"), "(module euclid)\n(def-kind euclid)\n").unwrap();
+        let installed = root.join("packages");
+        std::fs::create_dir_all(&installed).unwrap();
+        let (catalog, _) = eseqlisp::package::PackageCatalog::scan_layered_reporting(&[installed.clone()]);
+        let tree = build_package_tree(&local, &catalog, &installed, "", "");
+        let known = [TreeKind { id: "euclid:euclid".into(), name: "euclid".into(), module: "euclid".into() }];
+
+        let choices = package_kind_choices(&tree, &known, |path| {
+            def_kind_names(&std::fs::read_to_string(path).unwrap_or_default())
+        });
+        assert_eq!(
+            choices,
+            [
+                KindChoice { name: "euclid".into(), module: "euclid".into(), id: Some("euclid:euclid".into()) },
+                KindChoice { name: "plockchain".into(), module: "plockchain.view".into(), id: None },
+            ]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

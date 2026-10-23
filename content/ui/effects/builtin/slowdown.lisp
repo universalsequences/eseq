@@ -83,7 +83,9 @@
 
 (def panel (fx)
   (let ((params (get fx :params)))
-    (box :width 29.3 :padding 0.45
+    ;; 30.3: the knob rows (5 x 5.4 + 4 x 0.35) inside the well's 0.5 padding
+    ;; and this box's own.
+    (box :width 30.3 :padding 0.45
       (v-stack :gap 0.4 :align :center
         (h-stack :gap 0.6
           (clock-switch fx (fc/builtin-fx-param params "sync"))

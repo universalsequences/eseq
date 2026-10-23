@@ -9556,9 +9556,36 @@
             );
 
             // Initial full sync so the fixture group, its bus chain, and the
-            // 14-track topology are all live before the first click.
-            {
-            }
+            // 14-track topology are all live before the first click. The
+            // panels read the host kinds (`project.tracks`, devices, params);
+            // the live loop syncs them every tick, so the update below does
+            // too.
+            let kinds_handles = super::host_kinds::KindsHandles {
+                state: state.clone(),
+                current_track: current_track.clone(),
+                selected_steps: selected_steps.clone(),
+                active_delete_target: active_delete_target.clone(),
+                active_delete_target_version: active_delete_target_version.clone(),
+                record_armed: record_armed.clone(),
+                recording: recording.clone(),
+                master_recording: master_recording.clone(),
+                selected_tracks: selected_tracks.clone(),
+                track_collapsed: track_collapsed.clone(),
+                ui_epoch: ui_epoch.clone(),
+                fx_epoch: fx_epoch.clone(),
+                ui_invalidations: ui_invalidations.clone(),
+                step_print: Default::default(),
+                auto_follow_override_until: auto_follow_override_until.clone(),
+                armed_rack: Arc::new(Mutex::new(None)),
+                bus_state: bus_state.clone(),
+                selected_neural_neurons: selected_neural_neurons.clone(),
+                piano_roll_selection: piano_roll_selection.clone(),
+            };
+            let mut host_kinds = super::host_kinds::HostKinds::default();
+            app.sync_track_sound_bindings();
+            host_kinds.sync_with(&app, editor.runtime_mut(), &kinds_handles, &Default::default());
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
 
             // The real host-command seam, shared with the probe's syncs.
             let shared = SharedHandles {
@@ -9806,6 +9833,7 @@
                 let track_switch_done = Instant::now();
 
                 app.sync_track_sound_bindings();
+                host_kinds.sync_with(app, editor.runtime_mut(), &kinds_handles, &Default::default());
                 if app.sound_binding_epoch != frame.prev_sound_binding_epoch {
                     frame.prev_sound_binding_epoch = app.sound_binding_epoch;
                     fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -9914,12 +9942,13 @@
                     "the production layout must keep every tile visible"
                 );
                 let mut tile_stats = Vec::with_capacity(frame_built.tiles.len());
+                let retained_names: Vec<String> = tiles.iter().map(|entry| entry.buffer_name.clone()).collect();
                 for tile in &frame_built.tiles {
                     let entry = tiles
                         .iter_mut()
                         .find(|entry| entry.buffer_name == tile.frame.buffer_name)
                         .unwrap_or_else(|| {
-                            panic!("retained runs for visible tile {}", tile.frame.buffer_name)
+                            panic!("retained runs for visible tile {}; retained {retained_names:?}", tile.frame.buffer_name)
                         });
                     let layout = tile.frame.widget_layout.as_ref().unwrap_or_else(|| {
                         panic!(
@@ -9986,6 +10015,10 @@
             // tile, located by stable-key suffix, so clicks travel through
             // `handle_tiled_mouse_precise` exactly like the real event loop.
             let locate_seq_target = |editor: &mut Editor, suffix: &str| -> (f32, f32) {
+                // Each located click is its own gesture: the probe clicks
+                // faster than a person, and two on one header within the
+                // double-click window would open its piano roll.
+                editor.active_leaf_mut().last_widget_click = None;
                 let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
                     editor,
                     vp_cols as usize,
@@ -9996,8 +10029,10 @@
                     .iter()
                     .find(|tile| tile.frame.buffer_name == "*sequencer*")
                     .expect("visible sequencer tile");
-                let origin_col = tile.body_rect.col.floor();
-                let origin_row = tile.body_rect.row.floor();
+                // The body origin is fractional (the titlebar's height); the
+                // pointer maps through it unrounded.
+                let origin_col = tile.body_rect.col;
+                let origin_row = tile.body_rect.row;
                 let scroll_top =
                     tile.frame.widget_scroll_top + tile.frame.text_scroll_top as f32;
                 let scroll_left = tile.frame.widget_layout_scroll_left;
@@ -10007,8 +10042,18 @@
                     .widget_layout
                     .as_ref()
                     .expect("sequencer tile layout");
-                let node = find_layout_node_by_stable_key_suffix(layout, suffix)
-                    .unwrap_or_else(|| panic!("sequencer node with key suffix {suffix}"));
+                let node = find_layout_node_by_stable_key_suffix(layout, suffix).unwrap_or_else(|| {
+                    fn keys(node: &eseqlisp::layout::LayoutNode, out: &mut Vec<String>) {
+                        if let Some(key) = node.stable_key.as_deref() {
+                            out.push(key.to_string());
+                        }
+                        for child in &node.children { keys(child, out); }
+                    }
+                    let mut found = Vec::new();
+                    keys(layout, &mut found);
+                    found.truncate(40);
+                    panic!("sequencer node with key suffix {suffix}; first keys: {found:?}")
+                });
                 let center_col = origin_col + node.rect.col + node.rect.width * 0.5 - scroll_left;
                 let center_row = origin_row + node.rect.row + node.rect.height * 0.5 - scroll_top;
                 assert!(

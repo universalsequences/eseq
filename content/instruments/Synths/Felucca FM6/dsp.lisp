@@ -298,7 +298,7 @@
   (def p2 (/ (peek FZ_PENV_TAB l2) 32))
   (def p3 (/ (peek FZ_PENV_TAB l3) 32))
   (def p4 (/ (peek FZ_PENV_TAB l4) 32))
-  (def unit (/ sr_scale (* 21.3 44100)))
+  (def unit (/ 1 (* 21.3 samplerate)))
   (def keyon (gt trig 0.5))
   (def keyoff (* (not keyon) (gt (read-history fz_pheld_h) 0.5) (lte key 0.5)))
   (def ix0 (gswitch keyon 0 (gswitch keyoff 3 (read-history fz_pix_h))))

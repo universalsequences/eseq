@@ -37,6 +37,9 @@ pub(super) fn new_audio_callback_data(
     let initial_num_tracks = initial_scheduler_snapshot.transport.num_tracks;
     let initial_topology_epoch = initial_scheduler_snapshot.transport.topology_epoch;
     let trace_audio = env_flag("TINYSEQ_AUDIO_TRACE", false);
+    // Read the launch-trace flag here, off the audio thread: its first read
+    // takes the environment lock.
+    crate::scheduled_event::launch_trace_enabled();
     crate::instruments::voice_modulator::set_process_stats_enabled(trace_audio);
     if trace_audio {
         eprintln!("audio-trace: enabled");

@@ -7,7 +7,6 @@
 (def vs-accent () (eseq.effects.custom-ui-lego/ui-accent-cyan))
 (def vs-text () :fg)
 (def vs-surf () :instrument-group-bg)
-(def vs-bord () :border-inactive)
 
 (def vs-family-file () "instruments/Drums/VILLAIN Snare/data/family.json")
 
@@ -47,8 +46,13 @@
 (def vs-armed () (vs-state-get :armed "a"))
 (def vs-page () (vs-state-get :page "head"))
 
+;; A flat section panel like the 808 Kick's: one thin padding, so the section
+;; badge sits tight in the top-left corner. Click selects the section.
 (def vs-panel (section width height body)
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section width height (vs-surf) (vs-bord) false body))
+  (box :width width :height height :padding 0.18
+    :background-color (vs-surf)
+    :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
+    body))
 
 ;; A snare slot: its letter arms the map (a click on a dot loads that slot);
 ;; the big box under it is the param itself, showing the snare's name.
@@ -88,7 +92,7 @@
 (def vs-slots-block ()
   (vs-panel 0 (vs-left-w) (vs-dense-h)
     (v-stack :width :fill :height :fill :gap 0.30 :align :start
-      (eseq.effects.custom-ui-lego/ui-lego-header-s 0 "SNARES" 4.0 (vs-accent))
+      (eseq.effects.custom-ui-lego/ui-lego-section-badge-s 0 "SNARES" 4.0 (vs-accent))
       (h-stack :width :fill :gap 0.40 :align :start
         (vs-slot-box "a" "snare_a")
         (vs-slot-box "b" "snare_b")))))
@@ -96,7 +100,7 @@
 (def vs-morph-block ()
   (vs-panel 0 (vs-left-w) (vs-pages-h)
     (v-stack :width :fill :height :fill :gap 0.20 :align :start
-      (eseq.effects.custom-ui-lego/ui-lego-header-s 0 "MORPH" 4.0 (vs-accent))
+      (eseq.effects.custom-ui-lego/ui-lego-section-badge-s 0 "MORPH" 4.0 (vs-accent))
       (h-stack :width :fill :gap 0.30 :align :start
         (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 0 "blend" "blend" 6.4 (vs-accent) 2)
         (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 0 "exaggerate" "exagg" 6.4 (vs-accent) 2)))))
@@ -123,8 +127,12 @@
           :body (vs-effective "body" 1) :ring (vs-effective "ring" 1) :tune (vs-effective "tune" 1)
           :armed (if (= (vs-armed) "b") 1 0)
           :accent (vs-accent)
-          :dot-color :dim
-          :background-color :instrument-control-bg
+          :dot-color :curve-editor-fg
+          :background-color :curve-editor-bg
+          :grid-color :curve-editor-grid
+          :b-color :curve-editor-fg
+          :label-color :curve-editor-fg
+          :line-color :curve-editor-fg
           :x-label "sustain" :y-label "tension"
           :width (- (vs-map-w) 0.4) :height (- (vs-total-h) 0.4)
           :on-pick (lambda (index slot)
@@ -133,9 +141,9 @@
 
 (def vs-family-block ()
   (vs-panel 1 (vs-right-w) (vs-dense-h)
-    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+    (h-stack :width :fill :height :fill :gap 0.30 :align :start
       (v-stack :width 5.0 :gap 0.18 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 1 "FAMILY" 5.0 (vs-accent)))
+        (eseq.effects.custom-ui-lego/ui-lego-section-badge-s 1 "FAMILY" 5.0 (vs-accent)))
       (h-stack :gap 0.10 :align :start
         (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 1 "pc1" "sustain" 5.6 (vs-accent) 2)
         (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 1 "pc2" "tension" 5.6 (vs-accent) 2)

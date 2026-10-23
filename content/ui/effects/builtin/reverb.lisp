@@ -40,8 +40,8 @@
         reverb-network-curve-action)
 
 (def accent () :reverb-curve)
-(def curve-bg () :reverb-curve-bg)
-(def curve-grid () :reverb-curve-grid)
+(def curve-bg () :curve-editor-bg)
+(def curve-grid () :curve-editor-grid)
 (def curve-point () :reverb-curve-point)
 
 (def section-h () 6.3)

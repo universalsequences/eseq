@@ -253,7 +253,7 @@
               (box :width 4.4 :height 1.72))))
         (box :debug-name "instrument-lfo-curve-wrapper"
              :width 12.2 :height 5.7 :padding 0.22
-             :background-color :black
+             :background-color :mod-panel-bg
              :corner-radius 8
           (lfo-shape-curve section shape pulse-width phase 11.7 5.25))))))
 
@@ -295,7 +295,7 @@
     :width 36.4
     :height 9.5
     :padding 1
-    :background-color :black
+    :background-color :mod-panel-bg
     :corner-radius 16
     (h-stack :height 7 :gap 0.25 :align :stretch
       (mod-selector inst)

@@ -29,9 +29,9 @@
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-align :left
-            :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)
-              (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) ink)
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            ;; The bound lock state paints the locked color; ink otherwise.
+            :text-color ink
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)

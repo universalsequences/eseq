@@ -537,12 +537,15 @@
     }
 
     fn test_app_with_track_count(graph: &TestLiveGraph, track_count: usize) -> App {
-        let state = Arc::new(SequencerState::new(
+        test_app_from_state(graph, Arc::new(SequencerState::new(
             track_count,
             (0..track_count)
                 .map(|_| default_empty_effect_chain())
                 .collect(),
-        ));
+        )))
+    }
+
+    fn test_app_from_state(graph: &TestLiveGraph, state: Arc<SequencerState>) -> App {
         let (keyboard_tx, _keyboard_rx) = mpsc::channel();
         App::new(
             state,
@@ -5223,6 +5226,179 @@
             "launching must not mutate scene-bank organization");
         app.state.stop_playback();
         graph.process_block();
+    }
+
+    /// User repro: switching between two scenes whose step patterns are
+    /// identical must keep a steady four-on-the-floor. A flam (two hits
+    /// close together) or a skipped hit at the switch is the regression.
+    #[test]
+    fn scene_switch_between_identical_step_patterns_keeps_the_grid() {
+        use crate::quantized_launch::{LaunchQuantize, PatternLaunchTarget, QuantizedLaunchOwner};
+        use crate::scheduler::scheduled_event::{ScheduledEventKind, ScheduledEventQueue};
+
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Mode { Bar, Sixteenth, BarMirrorRace, Off, Live, SongLive, SongLiveTracks }
+        let mut failures = Vec::new();
+        for mode in [
+            Mode::Bar, Mode::Sixteenth, Mode::BarMirrorRace, Mode::Off, Mode::Live, Mode::SongLive,
+            // A per-track launch leaves the live scene alone: the scheduler
+            // still re-adopts the lane it switched.
+            Mode::SongLiveTracks,
+        ] {
+            let song = matches!(mode, Mode::SongLive | Mode::SongLiveTracks);
+            // Scene 1 plays the same quarter notes as a 4-step pattern, so a
+            // mid-step switch maps the playhead to another step index.
+            for (drain_every, short_scene) in [(1_usize, false), (3, false), (8, false), (1, true), (3, true)] {
+                let graph = TestLiveGraph::new("identical-scene-switch-grid-test");
+                let mut pattern = crate::sequencer::PatternSnapshot::new_default(1, &[]);
+                for step in [0, 4, 8, 12] {
+                    pattern.track_bits[0][0] |= 1 << step;
+                }
+                let mut second = pattern.clone();
+                if short_scene {
+                    second.track_bits[0][0] = 1;
+                    second.track_params[0].num_steps = 4;
+                }
+                let mut app = if song {
+                    // The arrangement transport needs a track lane per track:
+                    // patterns go in before the App exists, as on project load.
+                    let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+                    state.replace_pattern_repository(vec![pattern, second], 0);
+                    let mut app = test_app_from_state(&graph, state);
+                    app.tracks = vec!["Track 1".to_string()];
+                    app.track_registry =
+                        crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+                    app.state.resync_live_grid_to_current_scene();
+                    app
+                } else {
+                    let app = test_app_with_track_count(&graph, 1);
+                    app.state.replace_pattern_repository(vec![pattern, second], 0);
+                    app
+                };
+                app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 })
+                    .expect("load scene 0");
+                if song {
+                    // Play as the app does: the empty arrangement auto-latches
+                    // the selected scene, so every switch is a latched launch.
+                    // Play past the arrangement's end: jam space.
+                    app.arr_replace_rows(vec![crate::app::song_edit::SongRowSpec {
+                        start_beat: 0.0, scene: 0, overrides: Vec::new(),
+                    }], 4.0, false).expect("one-row arrangement");
+                    app.arrangement_cursor_beat = 4.0;
+                    app.song_transport_play(false).expect("play the arrangement");
+                    assert_eq!(app.state.song_manual_latch_mask(), 1, "Play auto-latched the scene");
+                } else {
+                    app.state.start_playback();
+                }
+
+                let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+                let mut driver = crate::scheduler::SchedulerDriver::new(
+                    Arc::clone(&app.state), 48_000, 512, Arc::clone(&queue));
+                let spq = 48_000.0 * 60.0 / app.state.latest_scheduler_snapshot().transport.bpm as f64;
+                let beat_samples = spq.round() as u64;
+                // (sample, epoch at scheduling time)
+                let mut hits: Vec<(u64, u64)> = Vec::new();
+                let mut epochs: Vec<(u64, u64)> = Vec::new();
+                let mut rendered = 0_u64;
+                let mut pass = 0_usize;
+                let mut scene = 0;
+                let end = (spq * 4.0 * 9.0) as u64;
+                let advance = |driver: &mut crate::scheduler::SchedulerDriver, rendered: u64,
+                                   hits: &mut Vec<(u64, u64)>| {
+                    driver.advance(rendered, rendered + 2048, crate::scheduler::SchedulerInput::Offline);
+                    while let Some(event) = queue.pop_owned() {
+                        if let ScheduledEventKind::ResolvedTrigger { .. } = event.kind {
+                            hits.push((event.sample_time, event.pattern_epoch));
+                        }
+                    }
+                };
+                while rendered < end {
+                    epochs.push((rendered, app.state.latest_scheduler_snapshot().transport.pattern_epoch));
+                    advance(&mut driver, rendered, &mut hits);
+                    pass += 1;
+                    if pass % drain_every == 0 {
+                        if mode == Mode::BarMirrorRace {
+                            // The scheduler drains the ack while it still holds
+                            // the snapshot it loaded before the mirror published.
+                            let due = app.state.quantized_launches().drain_valid_due();
+                            for launch in &due {
+                                if launch.scheduler_applied {
+                                    app.state.quantized_launches().acknowledge_mirror(launch.token).unwrap();
+                                }
+                            }
+                            if !due.is_empty() {
+                                rendered += 512;
+                                epochs.push((rendered, app.state.latest_scheduler_snapshot().transport.pattern_epoch));
+                                advance(&mut driver, rendered, &mut hits);
+                            }
+                            for launch in due {
+                                app.apply_pattern_launch_at(&launch.target, Some(launch.deadline_beats),
+                                    launch.scheduler_applied).expect("mirror applies");
+                            }
+                        } else {
+                            for result in app.drain_due_pattern_launches() {
+                                result.expect("launch applies");
+                            }
+                        }
+                    }
+                    // Ask for a switch at beat 2.3 of every bar; the short
+                    // scene's switch lands inside step 9, a hit both scenes
+                    // share under different step indices. A latched switch
+                    // asks just before beat 3, whose hit is already in flight.
+                    let beat = rendered as f64 / spq;
+                    let ask_at = match (short_scene, mode) {
+                        (true, _) => 2.02,
+                        (false, Mode::SongLive | Mode::SongLiveTracks) => 2.97,
+                        (false, _) => 2.3,
+                    };
+                    if (beat % 4.0 - ask_at).abs() < 512.0 / spq / 2.0 {
+                        scene = 1 - scene;
+                        let target = if mode == Mode::SongLiveTracks {
+                            PatternLaunchTarget::SceneTracks { scene, tracks: vec![0] }
+                        } else {
+                            PatternLaunchTarget::Scene { scene }
+                        };
+                        match mode {
+                            Mode::Off => { app.apply_manual_pattern_launch(&target).expect("launch"); }
+                            Mode::Live | Mode::SongLive | Mode::SongLiveTracks => {
+                                let live = app.try_queue_live_pattern_launch(&target).expect("launch");
+                                assert!(live, "a launch during playback goes live");
+                            }
+                            Mode::Sixteenth => { app.state.schedule_quantized_pattern_launch(
+                                target, LaunchQuantize::Sixteenth, QuantizedLaunchOwner::Transport).unwrap(); }
+                            _ => { app.state.schedule_quantized_pattern_launch(
+                                target, LaunchQuantize::Bar, QuantizedLaunchOwner::Transport).unwrap(); }
+                        }
+                    }
+                    rendered += 512;
+                }
+                // The audio callback drops an event whose stamped epoch is not
+                // the epoch current when the event is due.
+                let epoch_at = |sample: u64| epochs.iter().filter(|(at, _)| *at <= sample)
+                    .last().map(|(_, e)| *e).unwrap_or(0);
+                let audible = hits.iter().filter(|(s, e)| *e == epoch_at(*s))
+                    .map(|(s, _)| *s).filter(|s| *s < end - 4096).collect::<Vec<_>>();
+                let expected = (0..).map(|n| n * beat_samples)
+                    .take_while(|s| *s < end - 4096).collect::<Vec<_>>();
+                let ok = audible.len() == expected.len()
+                    && audible.iter().zip(&expected).all(|(a, b)| a.abs_diff(*b) <= 1);
+                if !ok {
+                    let missing = expected.iter().filter(|b| !audible.iter().any(|a| a.abs_diff(**b) <= 1))
+                        .collect::<Vec<_>>();
+                    let extra = audible.iter().filter(|a| !expected.iter().any(|b| a.abs_diff(*b) <= 1))
+                        .collect::<Vec<_>>();
+                    let mut sorted = audible.clone();
+                    sorted.sort();
+                    let dups = sorted.windows(2).filter(|w| w[1].abs_diff(w[0]) <= 1).map(|w| w[0])
+                        .collect::<Vec<_>>();
+                    failures.push(format!("{mode:?} drain_every={drain_every} short={short_scene}: missing={missing:?} \
+                        extra={extra:?} doubled={dups:?}"));
+                }
+                app.state.stop_playback();
+                graph.process_block();
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

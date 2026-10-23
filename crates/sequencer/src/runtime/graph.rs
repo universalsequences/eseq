@@ -1630,6 +1630,11 @@ impl GraphRuntime {
         self.nodes.get(node_index).and_then(|node| node.route)
     }
 
+    /// Whether some node of this graph plays on `track`.
+    pub fn routes_to_track(&self, track: usize) -> bool {
+        self.nodes.iter().any(|node| node.route == Some(track))
+    }
+
     /// The generator node `node_index` gates, if it routes to one.
     pub fn node_gate_target(&self, node_index: usize) -> Option<GateTarget> {
         self.nodes.get(node_index).and_then(|node| node.gate_target)

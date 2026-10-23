@@ -516,7 +516,7 @@ fn smoke_view_file() {
     let path = std::env::var("ESEQ_VIEW").expect("ESEQ_VIEW names the view file");
     let source = std::fs::read_to_string(&path).expect("the view file reads");
     let mut h = Harness::new();
-    h.app.graph_controller().add_blank_sampler_track();
+    h.app.graph_controller().add_blank_sampler_track().expect("add a sampler track");
     h.shared.current_track.store(0, Ordering::Relaxed);
     h.sync();
     h.editor
@@ -654,7 +654,7 @@ fn mini_daw_opens_the_selected_tracks_instrument_panel_in_the_top_tile() {
     let mut h = Harness::new();
     // A third track with an instrument (a new project's tracks have none),
     // selected.
-    h.app.graph_controller().add_blank_sampler_track();
+    h.app.graph_controller().add_blank_sampler_track().expect("add a sampler track");
     h.shared.current_track.store(2, Ordering::Relaxed);
     h.load_mini_daw();
     // The panel lays out from the kinds (eseq.effects.panel-data).

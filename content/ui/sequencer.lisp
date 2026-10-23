@@ -687,33 +687,27 @@
             :light (vec3 -0.35 -1.0 2.8) :shininess 54.0)
           :color :sequencer-volume-handle)))))
 
-(defwidget seqv-ellipsis-button
+(defwidget seqv-gear-button
   :width 2.2 :height 1.2
   :state (expanded)
   :shader
   (sdf/layer
-    (sdf/fill (sdf/rounded-rect width (* 0.99 height) 0.98)
-      :mixer-strip-selected-bg)
-    
-    (sdf/fill (sdf/rounded-rect (* 0.96 width) (* 0.93 height) 0.98)
+    (sdf/fill (sdf/circle 0.98) :mixer-strip-selected-bg)
+    (sdf/fill (sdf/circle 0.92)
       (material
         :lighting (lighting :edge-min -0.25 :edge-max 0.4
           :light (vec3 0.1 -1.2 0.4) :shininess 24.0)
-        :color 
-        (if expanded 
-          (rgba 0.18 0.18 0.20 1.0) 
-          :mixer-strip-bg) 
-        ))
+        :color (if expanded (rgba 0.18 0.18 0.20 1.0) :mixer-strip-bg)))
+    ;; Hub plus eight teeth (a plus and its 45° copy), axle hole cut out.
     (sdf/fill
-      (sdf/translate -0.48 0
-        (sdf/circle 0.12))
-      (material :color :fg))
-    (sdf/fill (sdf/circle 0.12)
-      (material :color :fg))
-    (sdf/fill
-      (sdf/translate 0.48 0
-        (sdf/circle 0.12))
-      (material :color :fg))))
+      (sdf/subtract
+        (sdf/union (sdf/circle 0.38)
+          (sdf/union
+            (sdf/union (sdf/rect 0.1 0.56) (sdf/rect 0.56 0.1))
+            (sdf/rotate 0.7853982
+              (sdf/union (sdf/rect 0.1 0.56) (sdf/rect 0.56 0.1)))))
+        (sdf/circle 0.17))
+      (material :color (if expanded (rgba 1.0 1.0 1.0 1.0) :dim)))))
 
 ;; Module spec §10 hazard (h): the two `:material` props that call this expand
 ;; much later, at shader-compile time, in a throwaway *implicit-module*
@@ -1128,7 +1122,7 @@
             :highlight-color :transparent
             :shadow-color :transparent
             :muted #'t.audible
-            :color (rgba 0.4 0.4 0.4 0.6)
+            :color :track-name-muted-fg
             :muted-color :dim
             :bg :transparent))
         (box :width 0.5)
@@ -1154,7 +1148,7 @@
     (box
       :key (str "expand-" t.index)
       :width 3.5 :height 1.0
-      :background "seqv-ellipsis-button"
+      :background "seqv-gear-button"
       :expanded (if t.expanded 1 0)
       :on-click (lambda (event)
         (track-control-click event t (lambda () (track-menu-click t)))))
@@ -3479,7 +3473,7 @@
             :shadow-color :transparent
             :muted (if b #'b.muted false)
             :color :dim
-            :muted-color (rgba 0.4 0.4 0.4 0.6)
+            :muted-color :track-name-muted-fg
             :bg :transparent))
         (box :width 0.3)
         ;; No PADS/KIT buttons here: selecting the rack puts both the pad grid
@@ -3640,13 +3634,14 @@
     :track-r (nth tinted 0)
     :track-g (nth tinted 1)
     :track-b (nth tinted 2)
+    :wash 1
     :on-click (lambda (event)
       (if event.shift
         (begin-clip-rename rc)
         (launch-rack-clip! rc)))
     :on-right-click (lambda (event) (open-clip-menu event rc))
     (label (+ rc.index 1)
-      :color :clock-fg :active #'rc.active :active-color :white
+      :color :rack-cell-fg :active #'rc.active :active-color :white
       :font-size 8  :bg :transparent :v-align :center :h-align :center)))
 
 ;; The last cell is a number picker showing the lit clip's number (0 while
@@ -3984,13 +3979,16 @@
           :clock-fg
           (rgba 0.5 0.52 0.56 1)))
       (glow (if (= selected 1) 1.15 (if (= occupied 1) 0.74 0.1)))
-      (outer (* base (rgba (* glow 0.5) (* glow 0.5) (* glow 0.5) 1)))
+      ;; The theme's :rack-cell-wash pulls the glass toward its color by its
+      ;; alpha (0 leaves the dark glass); the rgb mask keeps the result opaque.
+      (wash-k (dot :rack-cell-wash (vec4 0 0 0 1)))
+      (outer (+ (* (mix (* base (rgba (* glow 0.5) (* glow 0.5) (* glow 0.5) 1)) :rack-cell-wash wash-k) (vec4 1 1 1 0)) (vec4 0 0 0 1)))
       ;; The focus ring paints only the outermost layer; the glass inside
       ;; keeps its own gradient ends.
       (ring (if (= focused 1) (rgba 0.94 0.96 1.0 1.0) outer))
-      (middle (* base (rgba glow glow glow 1)))
+      (middle (+ (* (mix (* base (rgba glow glow glow 1)) :rack-cell-wash wash-k) (vec4 1 1 1 0)) (vec4 0 0 0 1)))
       (inner-k (if (= selected 1) 0.65 (if (= occupied 1) 0.42 0.17)))
-      (inner (* base (rgba inner-k inner-k inner-k 1.4)))
+      (inner (+ (* (mix (* base (rgba inner-k inner-k inner-k 1.4)) :rack-cell-wash wash-k) (vec4 1 1 1 0)) (vec4 0 0 0 1)))
       ;; How much of color-cell's diagonal sheen survives: unlit glass keeps
       ;; only a hint of it over a flat fill, a sounding pad all of it.
       (sheen (if (= selected 1) 0.2 0.1)))

@@ -380,7 +380,7 @@
               :sustain (pc/fx-param-value-for fx sustain-p)
               :release (pc/fx-param-value-for fx release-p)
               :width :fill :height :fill
-              :background-color :instrument-control-bg
+              :background-color :param-adsr-bg
               :on-change (lambda (env)
                 (if (and fx (not (get fx :rack-fx)) (not (get fx :bus-fx)) (not (get fx :midi-fx)))
                   (host-command

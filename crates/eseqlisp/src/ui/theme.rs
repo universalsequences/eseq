@@ -1,5 +1,8 @@
 //! Dynamic theme palette shared by the TUI and Metal backends.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{OnceLock, RwLock};
 
 use crate::backend::Color;
@@ -398,6 +401,60 @@ pub struct Theme {
     /// Highlight painted on every target a process port can bind to while its
     /// map button is armed (step-param tabs, other lanes, device params).
     pub process_map_arm_bg: Color,
+    /// The sampler's waveform and control well; follows
+    /// `instrument_control_bg` unless a theme sets it.
+    pub sampler_control_bg: Color,
+    /// Ruler, grid and markers drawn on `sampler_control_bg`; follows `dim`
+    /// unless a theme sets it.
+    pub sampler_grid: Color,
+    /// Ink that reads on `instrument_control_bg`: light on a dark theme,
+    /// dark on a light one.
+    pub instrument_control_contrast: Color,
+    /// Chip behind `ui-lego-header-s` titles; transparent leaves the accent
+    /// text bare on the panel.
+    pub lego_header_bg: Color,
+    /// Fill and ring around a modulatable param while the mods tab is open.
+    pub param_mod_bg: Color,
+    pub param_mod_border: Color,
+    /// The mods tab's outer well; follows `black` unless a theme sets it.
+    pub mod_panel_bg: Color,
+    /// Modal surface (command palette); follows `dropdown_menu_bg` unless a
+    /// theme sets it.
+    pub modal_bg: Color,
+    /// Drop shadow under modals and the command palette; transparent draws
+    /// none.
+    pub modal_shadow: Color,
+    /// Filterbank section titles; follows `filterbank_control_on`.
+    pub filterbank_heading: Color,
+    /// Grid on response-curve editors (chorus filters); follows
+    /// `border_inactive`.
+    pub curve_editor_grid: Color,
+    /// Well behind filter / response-curve editors, shared so they read as
+    /// one family; follows `instrument_control_bg`.
+    pub curve_editor_bg: Color,
+    /// Dots, labels and traces drawn on `curve_editor_bg` (the VILLAIN
+    /// family maps); follows `dim`.
+    pub curve_editor_fg: Color,
+    /// Track and group names in the sequencer while muted.
+    pub track_name_muted_fg: Color,
+    /// Time ruler across the top of timelines (piano roll, arrangement);
+    /// follows `status_bg`.
+    pub timeline_ruler_bg: Color,
+    /// Ruler labels and bar ticks; follows `fg_muted`.
+    pub timeline_ruler_fg: Color,
+    /// Labels and readouts on the compressor's display; follows `dim`.
+    pub compressor_text: Color,
+    /// Unlit text on the transport LED (scene numbers, MET/ROLL/WAV);
+    /// follows `dimmer`.
+    pub transport_led_dim: Color,
+    /// Color a rack's pads and clip cells wash toward by its alpha;
+    /// transparent keeps the dark glass.
+    pub rack_cell_wash: Color,
+    /// Rack clip cell numbers; follows `clock_fg`.
+    pub rack_cell_fg: Color,
+    /// The envelope editor on generated param panels; follows
+    /// `instrument_control_bg`.
+    pub param_adsr_bg: Color,
     /// Theme slots that hold a widget instead of a color (see
     /// [`WidgetSlots`]): part of the theme value, so a `current()` snapshot
     /// and `set_current` carry them on every thread.
@@ -1495,7 +1552,83 @@ theme_slots!(
     (list_icon_preset, LIST_ICON_PRESET, Color::from_hex(0xe6, 0xb8, 0x47)),
     (list_icon_lfo, LIST_ICON_LFO, Color::from_hex(0xe0, 0x70, 0xa8)),
     (list_icon_misc, LIST_ICON_MISC, Color::from_hex(0x8c, 0x91, 0x9e)),
+    (sampler_control_bg, SAMPLER_CONTROL_BG, Color::from_hex(0x17, 0x17, 0x18)),
+    (sampler_grid, SAMPLER_GRID, Color::from_hex(0x6c, 0x6c, 0x70)),
+    (instrument_control_contrast, INSTRUMENT_CONTROL_CONTRAST, Color::from_hex(0xe8, 0xe8, 0xea)),
+    (lego_header_bg, LEGO_HEADER_BG, Color::rgba(0.0, 0.0, 0.0, 0.0)),
+    (param_mod_bg, PARAM_MOD_BG, Color::rgba(0.03, 0.20, 0.35, 0.94)),
+    (param_mod_border, PARAM_MOD_BORDER, Color::rgba(0.18, 0.48, 0.95, 0.84)),
+    (mod_panel_bg, MOD_PANEL_BG, Color::from_hex(0x05, 0x05, 0x05)),
+    (modal_bg, MODAL_BG, Color::from_hex(0x16, 0x16, 0x18)),
+    (modal_shadow, MODAL_SHADOW, Color::rgba(0.0, 0.0, 0.0, 0.30)),
+    (filterbank_heading, FILTERBANK_HEADING, Color::rgba(0.98, 0.78, 0.14, 1.0)),
+    (curve_editor_grid, CURVE_EDITOR_GRID, Color::from_hex(0x3a, 0x3a, 0x3a)),
+    (curve_editor_bg, CURVE_EDITOR_BG, Color::from_hex(0x17, 0x17, 0x18)),
+    (curve_editor_fg, CURVE_EDITOR_FG, Color::from_hex(0x6c, 0x6c, 0x70)),
+    (track_name_muted_fg, TRACK_NAME_MUTED_FG, Color::rgba(0.4, 0.4, 0.4, 0.6)),
+    (timeline_ruler_bg, TIMELINE_RULER_BG, Color::from_hex(0x14, 0x14, 0x14)),
+    (timeline_ruler_fg, TIMELINE_RULER_FG, Color::from_hex(0x50, 0x50, 0x50)),
+    (compressor_text, COMPRESSOR_TEXT, Color::from_hex(0x6c, 0x6c, 0x70)),
+    (transport_led_dim, TRANSPORT_LED_DIM, Color::from_hex(0x53, 0x53, 0x55)),
+    (rack_cell_wash, RACK_CELL_WASH, Color::rgba(0.0, 0.0, 0.0, 0.0)),
+    (rack_cell_fg, RACK_CELL_FG, Color::rgba(0.85, 0.85, 0.85, 1.0)),
+    (param_adsr_bg, PARAM_ADSR_BG, Color::from_hex(0x17, 0x17, 0x18)),
 );
+
+/// Slots that follow another slot: a theme map that sets the parent but not
+/// the child gets the parent's color in the child too, so a slot split off
+/// an existing one leaves every theme that predates it looking the same.
+const INHERITED_SLOTS: &[(&str, &str)] = &[
+    ("sampler_control_bg", "instrument_control_bg"),
+    ("sampler_grid", "dim"),
+    ("mod_panel_bg", "black"),
+    ("modal_bg", "dropdown_menu_bg"),
+    ("filterbank_heading", "filterbank_control_on"),
+    ("curve_editor_grid", "border_inactive"),
+    ("curve_editor_bg", "instrument_control_bg"),
+    ("curve_editor_fg", "dim"),
+    ("timeline_ruler_bg", "status_bg"),
+    ("timeline_ruler_fg", "fg_muted"),
+    ("compressor_text", "dim"),
+    ("transport_led_dim", "dimmer"),
+    ("rack_cell_fg", "clock_fg"),
+    ("param_adsr_bg", "instrument_control_bg"),
+];
+
+/// `map`, applied over `base`, with each [`INHERITED_SLOTS`] child the map
+/// leaves unset copied from its parent when the map sets the parent and the
+/// child still follows it in `base` (same color, or never set). A child the
+/// theme gave its own color keeps it through a partial map.
+pub fn with_inherited_slots(map: Value, base: &Theme) -> Value {
+    let Value::Map(mut entries) = map else {
+        return map;
+    };
+    let key_for = |entries: &HashMap<String, Rc<RefCell<Value>>>, field: &str| {
+        entries.keys().find(|key| normalize_name(key) == field).cloned()
+    };
+    let colors = |theme: &Theme| -> HashMap<String, Color> {
+        slot_colors_in(theme)
+            .into_iter()
+            .map(|(name, color)| (name.replace('-', "_"), color))
+            .collect()
+    };
+    let (current, defaults) = (colors(base), colors(&default_theme()));
+    for (child, parent) in INHERITED_SLOTS {
+        if key_for(&entries, child).is_some() {
+            continue;
+        }
+        let follows = current.get(*child) == current.get(*parent)
+            || current.get(*child) == defaults.get(*child);
+        if !follows {
+            continue;
+        }
+        if let Some(parent_key) = key_for(&entries, parent) {
+            let value = entries[&parent_key].borrow().clone();
+            entries.insert(child.replace('_', "-"), Rc::new(RefCell::new(value)));
+        }
+    }
+    Value::Map(entries)
+}
 
 /// Number of `:track-palette-N` slots a theme may set.
 pub const TRACK_PALETTE_SLOTS: usize = 8;
@@ -1856,6 +1989,51 @@ fn normalize_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_off_slots_follow_their_parent_unless_set() {
+        let color = |r: f64| {
+            Value::List(
+                [r, 0.0, 0.0, 1.0]
+                    .into_iter()
+                    .map(|n| Rc::new(RefCell::new(Value::Number(n))))
+                    .collect(),
+            )
+        };
+        let map = Value::Map(HashMap::from([
+            ("instrument-control-bg".to_string(), Rc::new(RefCell::new(color(0.25)))),
+            ("dropdown-menu-bg".to_string(), Rc::new(RefCell::new(color(0.5)))),
+            ("modal-bg".to_string(), Rc::new(RefCell::new(color(0.75)))),
+        ]));
+        let mut theme = default_theme();
+        apply_value_to(&mut theme, &with_inherited_slots(map, &default_theme()));
+        assert_eq!(theme.sampler_control_bg, Color::rgba(0.25, 0.0, 0.0, 1.0));
+        assert_eq!(theme.modal_bg, Color::rgba(0.75, 0.0, 0.0, 1.0));
+        assert_eq!(theme.mod_panel_bg, default_theme().mod_panel_bg, "parent unset");
+
+        // A later partial map that sets only the parent moves the children
+        // that follow it and leaves the one the theme set on its own.
+        let partial = Value::Map(HashMap::from([(
+            "instrument-control-bg".to_string(),
+            Rc::new(RefCell::new(color(0.5))),
+        )]));
+        let base = theme.clone();
+        apply_value_to(&mut theme, &with_inherited_slots(partial, &base));
+        assert_eq!(theme.sampler_control_bg, Color::rgba(0.5, 0.0, 0.0, 1.0), "followed");
+        let own = Value::Map(HashMap::from([
+            ("curve-editor-bg".to_string(), Rc::new(RefCell::new(color(0.125)))),
+        ]));
+        let base = theme.clone();
+        apply_value_to(&mut theme, &with_inherited_slots(own, &base));
+        let partial = Value::Map(HashMap::from([(
+            "instrument-control-bg".to_string(),
+            Rc::new(RefCell::new(color(1.0))),
+        )]));
+        let base = theme.clone();
+        apply_value_to(&mut theme, &with_inherited_slots(partial, &base));
+        assert_eq!(theme.curve_editor_bg, Color::rgba(0.125, 0.0, 0.0, 1.0), "own color kept");
+        assert_eq!(theme.sampler_control_bg, Color::rgba(1.0, 0.0, 0.0, 1.0));
+    }
 
     #[test]
     fn patcher_theme_slots_are_named_colors() {

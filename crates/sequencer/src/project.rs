@@ -4127,8 +4127,6 @@ fn rederive_expr_process_class_names(project: &mut ProjectFile) {
 
 #[cfg(test)]
 mod legacy_process_class_tests {
-    use super::*;
-
     #[test]
     fn renamed_classes_migrate_in_chains_wires_rosters_and_node_patches() {
         let mut chain = crate::process::TrackProcessChain::default();

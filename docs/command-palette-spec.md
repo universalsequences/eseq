@@ -193,6 +193,13 @@ One list, three tiers (`editor/palette.rs`):
   Effect** (`add-midi-effect`) list the Audio FX / MIDI FX tabs' effects,
   searchable, and add one as the tab's Enter does (the selected track, or
   the selected bus) (rev 5).
+- **New Instance** (`eseq.browser/new-package-instance`, searchable) lists
+  every package kind, attached or not: manifest and registered kinds, plus
+  the top-level `def-kind`s read off unloaded modules' source
+  (`seq-package-kind-choices`). Picking one sends `packages-new-instance`,
+  which attaches the module first, resolving a source-read pick by
+  `:kind-name`, then creates the instance and opens its tab — so typing
+  `plockchain` from anywhere replaces Packages tab › attach › New <kind>.
 
 ### 6.3 Apply Sound: the sound pool as a command (rev 4)
 

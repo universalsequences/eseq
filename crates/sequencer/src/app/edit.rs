@@ -2886,10 +2886,7 @@ impl App {
                 .iter()
                 .position(|id| !target_id_set.contains(id))
             {
-                let _ = self.state.quantized_launches().cancel_all();
-                self.scene_macro_runtime.clear();
-                let mut touched = self.macro_engine.release_all_scene_macros();
-                touched.extend(self.macro_engine.end_scene_push());
+                let touched = self.reset_scene_launch_state();
                 self.macro_engine
                     .remap_scene_targets_after_delete(removed, target_ids.len());
                 self.send_macro_targets(touched);

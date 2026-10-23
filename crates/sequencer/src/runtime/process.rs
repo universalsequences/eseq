@@ -2103,6 +2103,11 @@ pub struct ProcessRuntime {
         HashMap<(ProcessInletWriteOwner, ProcessInstanceId, String), Vec<ProcessInletWrite>>,
     resolved_track_history: Vec<ResolvedTrackHistory>,
     resolved_track_snapshot_cache: Option<(u64, Arc<Vec<ProcessTrackReadSnapshot>>)>,
+    /// `seq-emit :lock` holds from generators. They live here, not on the
+    /// generator runtime, because every hit's enqueue path already carries
+    /// this runtime; holds deliberately survive `reset_transport`, which a
+    /// mid-play resync calls without re-ticking the generators that made them.
+    pub lock_holds: crate::generator::LockHolds,
     /// Named aliases are exact. Class aliases are retained only while unique;
     /// ambiguous class reads resolve inertly instead of selecting by visit order.
     step_process_aliases: HashMap<String, Option<u64>>,

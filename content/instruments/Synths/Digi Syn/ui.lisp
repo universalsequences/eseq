@@ -185,9 +185,9 @@
             :gain-max 12
             :q-min 0
             :q-max 1
-            :background-color :instrument-control-bg
+            :background-color :curve-editor-bg
             :corner-radius 5
-            :grid-color :border-inactive
+            :grid-color :curve-editor-grid
             :stroke-color (syn-accent)
             :stroke-width 3
             :point-color (syn-accent)
@@ -243,8 +243,8 @@
 (def syn-env-plot (section prefix)
   (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (adsr-editor :width 33.2 :height 2.4 :debug-name "syn-envelope"
-      :background-color :instrument-control-bg :curve-color (syn-accent)
-      :point-color (syn-accent) :grid-color :border-inactive
+      :background-color (syn-accent) :curve-color (syn-ink)
+      :point-color (syn-ink) :grid-color (syn-ink)
       :attack (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_attack") 4)
       :decay (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_decay") 350)
       :sustain (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_sustain") 0.75)
@@ -257,8 +257,9 @@
             (str prefix "_sustain") (str prefix "_release") env))))))
 (def syn-screen-tab (section title)
   (button title :width 5.2 :height 0.75 :debug-name (str "syn-tab-" section) :font-size 8 :padding 0
-    :color (if (= (syn-section) section) (syn-ink) (syn-accent))
-    :background-color (if (= (syn-section) section) (syn-accent) :instrument-control-bg)
+    :color (if (= (syn-section) section) (syn-accent) (syn-ink))
+    :border-color :transparent
+    :background-color (if (= (syn-section) section) (syn-ink) (syn-accent))
     :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)))
 (def syn-matrix-row (prefix)
   (h-stack :gap 0.5 :align :center
@@ -374,7 +375,7 @@
       :debug-name "syn-detail-display" :part "instrument/screen" :background-color (syn-accent)
       (v-stack :gap 0.12
         (h-stack :gap 0.15
-          (box :width 17.15 :height 0.75 :background-color :instrument-control-bg
+          (box :width 17.15 :height 0.75 :background-color (syn-ink)
             (label (if (= section 2) "DIGI SYN / VOICES" "DIGI SYN / ENVELOPE")
               :height 0.75 :font-size 8 :color (syn-accent) :bg :transparent :v-align :center))
           (syn-screen-tab 0 "ENV 1") (syn-screen-tab 1 "ENV 2") (syn-screen-tab 2 "VOICES"))

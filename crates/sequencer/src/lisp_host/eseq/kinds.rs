@@ -247,6 +247,7 @@ pub fn instance_published_sequencer(
                 .trigger_source
                 .as_ref()
                 .map(|body| instance_generator_tick_source(&kind.id, id, body)),
+            before_steps: template.before_steps,
         });
     }
     let mut manifest = kind.sequencer.clone()?;
@@ -262,6 +263,7 @@ pub fn instance_published_sequencer(
         graph: Some(manifest),
         owner_rack: None,
         trigger_source: None,
+        before_steps: false,
     })
 }
 
