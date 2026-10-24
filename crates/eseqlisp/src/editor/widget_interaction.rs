@@ -2050,7 +2050,10 @@ impl Editor {
             .saturating_add(local_row as usize)
             .min(display_map.len().saturating_sub(1));
         let absolute_row = display_map.buffer_line_for_display_row(display_row)?;
-        let display_col = local_col as usize + scroll_left;
+        // A click in the line-number gutter lands at the start of the
+        // visible text, whatever the horizontal scroll.
+        let gutter_cols = self.line_number_gutter_cols(buffer);
+        let display_col = (local_col as usize).saturating_sub(gutter_cols) + scroll_left;
         let absolute_col = buffer
             .buffer_col_for_display_col(absolute_row, display_col)?
             .min(buffer.lines[absolute_row].chars().count());

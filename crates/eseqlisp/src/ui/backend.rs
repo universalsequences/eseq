@@ -739,6 +739,10 @@ pub struct RenderFrame {
     pub text_cell_width_scale: f32,
     /// Height of one text cell relative to the widget/layout cell.
     pub text_cell_height_scale: f32,
+    /// Leading cells of every line that are the line-number gutter. They
+    /// stay put under horizontal scroll, and scrolled text never draws
+    /// beneath them; `cursor` columns already include them.
+    pub text_gutter_cols: usize,
 }
 
 // ── Tiled rendering ──────────────────────────────────────────────────────────

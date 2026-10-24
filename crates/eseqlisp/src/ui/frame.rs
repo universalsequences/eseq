@@ -407,6 +407,7 @@ fn build_render_frame_with_layout_viewport(
             text_scroll_top: 0,
             text_cell_width_scale: 1.0,
             text_cell_height_scale: 1.0,
+            text_gutter_cols: 0,
         };
     }
 
@@ -444,10 +445,11 @@ fn build_render_frame_with_layout_viewport(
     let highlight_spans =
         editor.active_highlight_spans_for_visible(highlight_start, highlight_count);
     let buf = editor.active_buffer();
+    let gutter_cols = editor.line_number_gutter_cols(buf);
     let lines: Vec<Vec<Cell>> = (scroll_top..visible_display_end)
         .map(|display_row| {
             let Some(DisplayRow::Text { buffer_line: row }) = display_map.row(display_row) else {
-                return Vec::new();
+                return line_number_gutter_cells(None, cursor_row, gutter_cols);
             };
             let content = &buf.lines[row];
             let match_col = match_pos.and_then(|(mr, mc)| if mr == row { Some(mc) } else { None });
@@ -506,7 +508,7 @@ fn build_render_frame_with_layout_viewport(
                 });
             }
             insert_inline_widget_cells(buf, row, &mut cells);
-            cells
+            prepend_line_number_gutter(cells, row, cursor_row, gutter_cols)
         })
         .collect();
 
@@ -519,7 +521,7 @@ fn build_render_frame_with_layout_viewport(
     {
         Some((
             cursor_display_row - scroll_top,
-            buf.display_col_for_buffer_col(cursor_row, cursor_col),
+            gutter_cols + buf.display_col_for_buffer_col(cursor_row, cursor_col),
         ))
     } else {
         None
@@ -533,7 +535,7 @@ fn build_render_frame_with_layout_viewport(
     let completion = build_completion(
         editor,
         cursor_display_row,
-        buf.display_col_for_buffer_col(cursor_row, cursor_col),
+        gutter_cols + buf.display_col_for_buffer_col(cursor_row, cursor_col),
         scroll_top,
         text_cell_width_scale,
         text_cell_height_scale,
@@ -567,6 +569,7 @@ fn build_render_frame_with_layout_viewport(
         text_cell_width_scale.to_bits().hash(&mut hasher);
         text_cell_height_scale.to_bits().hash(&mut hasher);
         scroll_top.hash(&mut hasher);
+        gutter_cols.hash(&mut hasher);
         cursor_row.hash(&mut hasher);
         cursor_col.hash(&mut hasher);
         region_range.hash(&mut hasher);
@@ -632,6 +635,7 @@ fn build_render_frame_with_layout_viewport(
         text_scroll_top: frame_text_scroll_top,
         text_cell_width_scale,
         text_cell_height_scale,
+        text_gutter_cols: gutter_cols,
     }
 }
 
@@ -687,6 +691,48 @@ fn insert_inline_widget_cells(buffer: &Buffer, buffer_line: usize, cells: &mut V
         );
         inserted += insertion.width_cells;
     }
+}
+
+/// The `gutter_cols` gutter cells for one display row: the 1-based number of
+/// `buffer_line` right-aligned before a separating space, or blanks for a row
+/// that is not buffer text. The cursor's line is drawn bright.
+fn line_number_gutter_cells(
+    buffer_line: Option<usize>,
+    cursor_row: usize,
+    gutter_cols: usize,
+) -> Vec<Cell> {
+    if gutter_cols == 0 {
+        return Vec::new();
+    }
+    let current = buffer_line == Some(cursor_row);
+    let style = CellStyle {
+        bg: None,
+        fg: if current { theme::FG() } else { theme::FG_MUTED() },
+        bold: current,
+    };
+    let label = buffer_line
+        .map(|line| format!("{:>width$} ", line + 1, width = gutter_cols - 1))
+        .unwrap_or_default();
+    label
+        .chars()
+        .chain(std::iter::repeat(' '))
+        .take(gutter_cols)
+        .map(|ch| Cell { style, ch })
+        .collect()
+}
+
+fn prepend_line_number_gutter(
+    cells: Vec<Cell>,
+    buffer_line: usize,
+    cursor_row: usize,
+    gutter_cols: usize,
+) -> Vec<Cell> {
+    if gutter_cols == 0 {
+        return cells;
+    }
+    let mut row = line_number_gutter_cells(Some(buffer_line), cursor_row, gutter_cols);
+    row.extend(cells);
+    row
 }
 
 // ── Tiled frame builder ──────────────────────────────────────────────────────
@@ -1583,6 +1629,7 @@ fn build_tiled_render_frame_impl(
                     inner_height,
                     text_cell_width_scale,
                     text_cell_height_scale,
+                    editor.line_number_gutter_cols(&editor.buffers[buffer_idx]),
                     show_status,
                 );
                 // Cache for next frame
@@ -1655,6 +1702,7 @@ fn build_inactive_tile_frame_from_parts(
     viewport_height: usize,
     text_cell_width_scale: f32,
     text_cell_height_scale: f32,
+    gutter_cols: usize,
     show_status: bool,
 ) -> RenderFrame {
     let display_map = buffer.inline_display_row_map();
@@ -1699,6 +1747,7 @@ fn build_inactive_tile_frame_from_parts(
         text_cell_width_scale.to_bits().hash(&mut hasher);
         text_cell_height_scale.to_bits().hash(&mut hasher);
         scroll_top.hash(&mut hasher);
+        gutter_cols.hash(&mut hasher);
         status_signature.hash(&mut hasher);
         hasher.finish()
     };
@@ -1728,6 +1777,7 @@ fn build_inactive_tile_frame_from_parts(
             text_scroll_top: 0,
             text_cell_width_scale: 1.0,
             text_cell_height_scale: 1.0,
+            text_gutter_cols: 0,
         };
     }
 
@@ -1753,7 +1803,7 @@ fn build_inactive_tile_frame_from_parts(
     let lines: Vec<Vec<Cell>> = (scroll_top..visible_end)
         .map(|display_row| {
             let Some(DisplayRow::Text { buffer_line }) = display_map.row(display_row) else {
-                return Vec::new();
+                return line_number_gutter_cells(None, cursor_row, gutter_cols);
             };
             let content = &buffer.lines[buffer_line];
             let row_spans = highlight_by_buffer_line.get(&buffer_line).copied();
@@ -1772,7 +1822,7 @@ fn build_inactive_tile_frame_from_parts(
                 });
             }
             insert_inline_widget_cells(buffer, buffer_line, &mut cells);
-            cells
+            prepend_line_number_gutter(cells, buffer_line, cursor_row, gutter_cols)
         })
         .collect();
 
@@ -1786,7 +1836,7 @@ fn build_inactive_tile_frame_from_parts(
                 .display_row_for_buffer_line(cursor_row)
                 .unwrap_or(cursor_row)
                 - scroll_top,
-            buffer.display_col_for_buffer_col(cursor_row, cursor_col),
+            gutter_cols + buffer.display_col_for_buffer_col(cursor_row, cursor_col),
         ))
     } else {
         None
@@ -1817,6 +1867,7 @@ fn build_inactive_tile_frame_from_parts(
         text_scroll_top: scroll_top,
         text_cell_width_scale,
         text_cell_height_scale,
+        text_gutter_cols: gutter_cols,
     }
 }
 

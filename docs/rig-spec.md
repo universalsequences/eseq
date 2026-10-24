@@ -304,7 +304,11 @@ C").
 - It counts as unused in the bank for §9, so its pad tracks hide from the
   bank's sequencer list and mixer. The kit itself stays listed in the mixer
   as a dimmed, collapsed group strip, so the toggle can be reached to turn it
-  back on (and under "show all tracks").
+  back on (and under "show all tracks"). The way back on must always be
+  visible: clicking the dimmed strip selects the kit and shows its drum rack
+  in the fx panel with the toggle off; the strip's context menu also has
+  "Turn kit on in bank C". A test asserts a parked kit's strip is present in
+  the bank's mixer.
 - A kit parked in every scene is unused project-wide; it is listed for purge
   like unused slots (§4), never deleted automatically.
 

@@ -12,7 +12,6 @@
 (def input_r (in 2 @name Right))
 
 (make-history history1)
-(def add1 (+ (read-history history1) 1))
 (def mod-2 (mod sr))
 (def max-2 (max mod-2 10))
 (def value1 20000)
@@ -20,6 +19,7 @@
 (def div1 (/ value2 max-2))
 (def ceil1 (ceil div1))
 (def generated1 (% (read-history history1) ceil1))
+(def add1 (+ generated1 1))
 (def generated2 (== generated1 0))
 (def latch1 (latch input_l generated2))
 (def latch2 (latch input_r generated2))

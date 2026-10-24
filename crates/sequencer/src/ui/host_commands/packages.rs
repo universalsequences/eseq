@@ -1984,7 +1984,8 @@ pub(crate) struct PackageTreeNode {
 /// One kind a module row offers as `New <kind>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TreeKind {
-    /// `<package>:<kind>`.
+    /// `<package>:<kind>`; empty for a `def-kind` read off an unloaded
+    /// module's source, which `packages-new-instance` resolves by name.
     pub id: String,
     /// The authored kind name.
     pub name: String,
@@ -2035,7 +2036,7 @@ pub(crate) fn register_package_tree_natives(runtime: &mut Runtime, state: Arc<Se
                 sequencer::agent::forms::resolve_module_file(&app_root, module).is_some()
             });
             let kinds = module_kinds(&catalog, &registered_tree_kinds());
-            annotate_package_kinds(&mut tree, &kinds, &instances);
+            annotate_package_kinds(&mut tree, &kinds, &instances, cached_def_kind_names);
             Ok(package_tree_to_value(&filter_package_tree(&tree, &query.trim().to_lowercase())))
         },
     );
@@ -2302,16 +2303,33 @@ fn instance_tree_node(instance: &TreeInstance) -> PackageTreeNode {
 /// row claims (their package is missing, or the kind lives in project code)
 /// are grouped per kind at the end of the Loaded section, so a placeholder
 /// is visible and can still be deleted.
+/// A module row no known kind covers falls back to the `def-kind` names in
+/// its source (`def_kinds`, [`cached_def_kind_names`] in the app), so an
+/// unattached local package still shows which file defines its kind.
 pub(crate) fn annotate_package_kinds(
     roots: &mut [PackageTreeNode],
     kinds: &[TreeKind],
     instances: &[TreeInstance],
+    def_kinds: impl Fn(&Path) -> Vec<String>,
 ) {
-    fn walk(nodes: &mut [PackageTreeNode], kinds: &[TreeKind], instances: &[TreeInstance]) {
+    fn walk(
+        nodes: &mut [PackageTreeNode],
+        kinds: &[TreeKind],
+        instances: &[TreeInstance],
+        def_kinds: &dyn Fn(&Path) -> Vec<String>,
+    ) {
         for node in nodes {
             if let (true, Some(module)) = (node.kind == "module", node.module.as_ref()) {
                 node.kinds =
                     kinds.iter().filter(|kind| &kind.module == module).cloned().collect();
+                if node.kinds.is_empty() {
+                    if let Some(path) = node.path.as_deref() {
+                        node.kinds = def_kinds(path)
+                            .into_iter()
+                            .map(|name| TreeKind { id: String::new(), name, module: module.clone() })
+                            .collect();
+                    }
+                }
                 let rows: Vec<PackageTreeNode> = instances
                     .iter()
                     .filter(|instance| node.kinds.iter().any(|kind| kind.id == instance.kind))
@@ -2322,10 +2340,10 @@ pub(crate) fn annotate_package_kinds(
                 node.children = rows;
                 continue;
             }
-            walk(&mut node.children, kinds, instances);
+            walk(&mut node.children, kinds, instances, def_kinds);
         }
     }
-    walk(roots, kinds, instances);
+    walk(roots, kinds, instances, &def_kinds);
 
     let claimed = |kind_id: &str| kinds.iter().any(|kind| kind.id == kind_id && !kind.module.is_empty());
     let mut orphan_kinds: Vec<&str> = Vec::new();
@@ -2722,7 +2740,7 @@ fn package_nodes_to_value(items: &[PackageTreeNode]) -> Value {
                                 .iter()
                                 .map(|kind| {
                                     Rc::new(RefCell::new(crate::values::map_value(vec![
-                                        ("id", Value::String(kind.id.clone())),
+                                        ("id", string_or_nil(kind.id.clone())),
                                         ("name", Value::String(kind.name.clone())),
                                     ])))
                                 })
@@ -3549,6 +3567,58 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// An unattached local module's `def-kind`s mark its row as a kind
+    /// (instance glyph, `New <kind>` with no id yet); a sibling library file
+    /// keeps the document glyph.
+    #[test]
+    fn unattached_local_kind_module_wears_the_instance_glyph() {
+        let root = temp_root("kind-glyph");
+        let local = root.join("local");
+        std::fs::create_dir_all(local.join("grain")).unwrap();
+        std::fs::write(local.join("grain/view.lisp"), "(module grain.view)\n(def-kind grain)\n").unwrap();
+        std::fs::write(local.join("grain/core.lisp"), "(module grain.core)\n(def tick () 1)\n").unwrap();
+        let installed = root.join("packages");
+        std::fs::create_dir_all(&installed).unwrap();
+        let (catalog, _) = eseqlisp::package::PackageCatalog::scan_layered_reporting(&[installed.clone()]);
+        let mut tree = build_package_tree(&local, &catalog, &installed, "", "");
+        annotate_package_kinds(&mut tree, &[], &[], |path| {
+            def_kind_names(&std::fs::read_to_string(path).unwrap_or_default())
+        });
+
+        fn find<'a>(nodes: &'a [PackageTreeNode], label: &str) -> Option<&'a PackageTreeNode> {
+            nodes.iter().find_map(|node| {
+                if node.label == label { Some(node) } else { find(&node.children, label) }
+            })
+        }
+        let view = find(&tree, "view.lisp").expect("view row");
+        assert_eq!(
+            view.kinds,
+            [TreeKind { id: String::new(), name: "grain".into(), module: "grain.view".into() }]
+        );
+        assert!(find(&tree, "core.lisp").expect("core row").kinds.is_empty());
+
+        let icon_of = |label: &str| -> Option<Value> {
+            fn walk(rows: &[Rc<RefCell<Value>>], label: &str) -> Option<Value> {
+                rows.iter().find_map(|row| {
+                    let Value::Map(map) = &*row.borrow() else { return None };
+                    let field = |key: &str| map.get(key).map(|value| value.borrow().clone());
+                    if field("label") == Some(Value::String(label.into())) {
+                        return field("icon");
+                    }
+                    match field("children") {
+                        Some(Value::List(children)) => walk(&children, label),
+                        _ => None,
+                    }
+                })
+            }
+            let Value::List(rows) = package_tree_to_value(&tree) else { panic!("tree value is a list") };
+            walk(&rows, label)
+        };
+        assert_eq!(icon_of("view.lisp"), Some(Value::Keyword("midi-fx".into())));
+        assert_eq!(icon_of("core.lisp"), Some(Value::Keyword("document".into())));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn module_rows_badge_their_instances_and_expand_to_one_row_per_instance() {
         let root = temp_root("kinds-tree");
@@ -3620,7 +3690,7 @@ mod tests {
                 module: "alez.neural.variable-reset".into(),
             }]
         );
-        annotate_package_kinds(&mut tree, &kinds, &instances);
+        annotate_package_kinds(&mut tree, &kinds, &instances, |_| Vec::new());
 
         // Loaded: the attached module row, then the missing package's
         // placeholder group.
@@ -3677,7 +3747,7 @@ mod tests {
         assert_eq!(get(&second, "owner-rack"), Some(Value::Number(9.0)));
         assert_eq!(get(&second, "name"), Some(Value::String("instance:2".into())));
         // No badge at zero.
-        annotate_package_kinds(&mut tree, &kinds, &[]);
+        annotate_package_kinds(&mut tree, &kinds, &[], |_| Vec::new());
         let Value::List(rows) = package_tree_to_value(&tree) else { panic!() };
         let module_value = rows[1].borrow().clone();
         assert_eq!(get(&module_value, "badge"), None);

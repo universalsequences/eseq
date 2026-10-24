@@ -3293,6 +3293,19 @@ use panel_kinds_seed::*;
         assert!(!sent[0].1.contains("group-id"), "{sent:?}");
         eval(&mut editor, "(eseq.browser/activate-package-item (dict :kind \"module\" :module \"my.euclid\"))");
         assert_eq!(commands(&mut editor)[0].0, "packages-attach");
+        // An unattached local module's kind (read off its source, no id
+        // yet) creates the instance on the first double-click; the host
+        // attaches first and resolves the id by name.
+        eval(
+            &mut editor,
+            "(eseq.browser/activate-package-item
+               (dict :kind \"module\" :module \"grain.view\" :instance-count 0
+                     :kinds (list (dict :id nil :name \"grain\"))))",
+        );
+        let sent = commands(&mut editor);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0].0, "packages-new-instance");
+        assert!(sent[0].1.contains(":kind-name \"grain\"") && !sent[0].1.contains(":kind \""), "{sent:?}");
 
         let menu_labels = |editor: &mut Editor, target: &str| -> Vec<String> {
             editor

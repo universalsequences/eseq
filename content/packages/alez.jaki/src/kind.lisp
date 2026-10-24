@@ -334,7 +334,7 @@
 (def jk-figure-box (self k index figure)
   (box :key (jk-key k (str "jaki-figure-" index))
     :width 13.6 :height jk-row-height :padding 0.3
-    :background-color :bg  :corner-radius 16
+    :background-color :mixer-strip-bg  :corner-radius 16
     (h-stack :gap 0.1 :align :center
       (dropdown
         :key (jk-key k (str "jaki-figure-pick-" index))
@@ -342,14 +342,14 @@
                                (alez.jaki.doc/figure-label figure)))
         :options alez.jaki.doc/figure-option-labels
         :filterable true
-         :bg-color :bg :border-color :transparent
+          :border-color :transparent
         :width 7.8 :height 1.0 :font-size 13
         :on-change (lambda (label) (jk-replace-figure self k index label)))
       (number-picker
         :key (jk-key k (str "jaki-figure-times-" index))
         :value (alez.jaki.doc/figure-times figure) :min 1 :max 16 :step 1 :decimals 0
         :value-labels jk-times-labels
-        :border-color :transparent :background-color :bg
+        :border-color :transparent 
         :width 3.8 :height 1.0 :font-size 11
         :on-change (lambda (v) (jk-set-figure-times self k index v)))
       (jk-x-button (jk-key k (str "jaki-figure-remove-" index))
@@ -607,7 +607,6 @@
       :color :dim :bg :transparent)
     (number-picker
       :key (jk-key k "jaki-row-count")
-      :border-color :dim :background-color :mixer-strip-bg
       :value (get pat :row-count) :min 1 :max jk-max-rows :step 1 :decimals 0
       :width 4 :height jk-row-height :font-size 9
       :on-change (lambda (v) (jk-set-row-count self k v)))

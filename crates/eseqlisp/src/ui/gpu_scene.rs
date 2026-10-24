@@ -133,7 +133,17 @@ pub(crate) fn build_tile_text_quads(
 
     for (row, line) in frame.lines.iter().enumerate() {
         for (col, cell) in line.iter().enumerate() {
-            let text_col = col as f32 - scroll_left;
+            // The line-number gutter is pinned; scrolled text slides
+            // under it and is not drawn there.
+            let gutter = frame.text_gutter_cols as f32;
+            let text_col = if col < frame.text_gutter_cols {
+                col as f32
+            } else {
+                col as f32 - scroll_left
+            };
+            if col >= frame.text_gutter_cols && text_col < gutter {
+                continue;
+            }
             let text_row = row as f32;
             let is_cursor = frame.cursor == Some((row, col));
 

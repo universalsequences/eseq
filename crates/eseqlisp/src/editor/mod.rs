@@ -49,6 +49,13 @@ const SIDE_PANE_MIN_WIDTH: f32 = 34.0;
 const SIDE_PANE_COLLAPSE_THRESHOLD: f32 = 0.25;
 const TEXT_HORIZONTAL_SCROLL_MARGIN: usize = 3;
 
+/// Gutter cells for a buffer of `line_count` lines: a leading space, the
+/// right-aligned number (at least three digits wide, so the text does not
+/// shift while a short buffer grows), and a separating space.
+pub fn line_number_gutter_width(line_count: usize) -> usize {
+    line_count.max(1).to_string().len().max(3) + 2
+}
+
 fn tile_resize_cursor(dir: SplitDir) -> WidgetCursor {
     match dir {
         SplitDir::Vertical => WidgetCursor::EwResize,
@@ -800,6 +807,10 @@ pub struct Editor {
     text_zoom: f32,
     text_cell_width_scale: f32,
     text_cell_height_scale: f32,
+    /// `global-display-line-numbers-mode`: the default for buffers that have
+    /// no per-buffer `display-line-numbers-mode` override.
+    line_numbers_global: bool,
+    line_number_overrides: HashMap<BufferId, bool>,
     last_layout_refresh_timings: Vec<LayoutRefreshTiming>,
     deferred_effect_resume_depth: u8,
     inspect_mode: bool,
@@ -989,6 +1000,8 @@ impl Editor {
             text_zoom: DEFAULT_TEXT_ZOOM,
             text_cell_width_scale: DEFAULT_TEXT_ZOOM,
             text_cell_height_scale: DEFAULT_TEXT_ZOOM,
+            line_numbers_global: true,
+            line_number_overrides: HashMap::new(),
             last_layout_refresh_timings: Vec::new(),
             deferred_effect_resume_depth: 0,
             inspect_mode: false,
@@ -1041,6 +1054,55 @@ impl Editor {
             self.mark_needs_redraw();
         }
         Ok(self.text_zoom)
+    }
+
+    /// Whether `buffer` asks for a line-number gutter: its own
+    /// `display-line-numbers-mode` toggle, else the global default for
+    /// DGenLisp code (instrument and effect DSP). Everything else (UI Lisp,
+    /// *scratch*, help, lists, the agent pane) stays bare unless toggled on.
+    pub fn line_numbers_enabled(&self, buffer: &Buffer) -> bool {
+        self.line_number_overrides.get(&buffer.id).copied().unwrap_or_else(|| {
+            self.line_numbers_global && buffer.mode == BufferMode::DGenLisp
+        })
+    }
+
+    /// Width in text cells of the line-number gutter drawn left of `buffer`'s
+    /// text, 0 when there is none. Widgets are laid out in text columns, so a
+    /// buffer whose text shares the tile with a widget layout or inline code
+    /// widgets gets no gutter rather than misaligned widgets.
+    pub fn line_number_gutter_cols(&self, buffer: &Buffer) -> usize {
+        let widgets_drawn = match buffer.view_mode {
+            ViewMode::UiOnly => return 0,
+            ViewMode::TextOnly => false,
+            ViewMode::Both => buffer.widget_tree.is_some(),
+        };
+        if widgets_drawn
+            || !buffer.inline_code_widgets().is_empty()
+            || !self.line_numbers_enabled(buffer)
+        {
+            return 0;
+        }
+        line_number_gutter_width(buffer.lines.len())
+    }
+
+    /// `display-line-numbers-mode`: toggle the active buffer's gutter.
+    pub fn toggle_active_buffer_line_numbers(&mut self) -> bool {
+        let enabled = !self.line_numbers_enabled(self.active_buffer());
+        let id = self.active_buffer().id;
+        self.line_number_overrides.insert(id, enabled);
+        self.invalidate_text_frame_caches();
+        self.mark_needs_redraw();
+        enabled
+    }
+
+    /// `global-display-line-numbers-mode`: toggle the default and drop
+    /// per-buffer overrides, as Emacs's global mode does.
+    pub fn toggle_global_line_numbers(&mut self) -> bool {
+        self.line_numbers_global = !self.line_numbers_global;
+        self.line_number_overrides.clear();
+        self.invalidate_text_frame_caches();
+        self.mark_needs_redraw();
+        self.line_numbers_global
     }
 
     pub fn set_text_cell_dimensions(
@@ -8361,8 +8423,16 @@ impl Editor {
                         .sum::<usize>()
             })
             .unwrap_or(0);
-        let max_scroll = line_width.saturating_sub(viewport_width as usize) as u16;
+        let text_width = self.text_columns_after_gutter(viewport_width) as usize;
+        let max_scroll = line_width.saturating_sub(text_width) as u16;
         (max_scroll > 0).then_some(max_scroll)
+    }
+
+    /// Text columns left of a `viewport_width`-cell text area once the active
+    /// buffer's line-number gutter is drawn.
+    fn text_columns_after_gutter(&self, viewport_width: u16) -> u16 {
+        let gutter = self.line_number_gutter_cols(self.active_buffer()) as u16;
+        viewport_width.saturating_sub(gutter).max(1)
     }
 
     fn text_viewport_width_for_layout_width(&self, viewport_width: u16) -> u16 {
@@ -8384,7 +8454,7 @@ impl Editor {
             self.active_buffer().cursor.0,
             self.active_buffer().cursor.1,
         );
-        let viewport_width = viewport_width as usize;
+        let viewport_width = self.text_columns_after_gutter(viewport_width) as usize;
         let leaf = self.active_leaf_mut();
         let scroll_left = leaf.widget_scroll_left.floor() as usize;
         let scroll_margin = TEXT_HORIZONTAL_SCROLL_MARGIN.min(viewport_width.saturating_sub(1) / 2);
@@ -10566,6 +10636,23 @@ impl Editor {
 
         if self.runtime.take_pending_cycle_view_mode() {
             self.toggle_active_buffer_view_mode();
+        }
+
+        let (toggle_buffer_lines, toggle_global_lines) =
+            self.runtime.take_pending_toggle_line_numbers();
+        if toggle_global_lines {
+            let on = self.toggle_global_line_numbers();
+            self.show_transient_message(format!(
+                "Global display-line-numbers mode {}",
+                if on { "enabled" } else { "disabled" }
+            ));
+        }
+        if toggle_buffer_lines {
+            let on = self.toggle_active_buffer_line_numbers();
+            self.show_transient_message(format!(
+                "Display-line-numbers mode {} in current buffer",
+                if on { "enabled" } else { "disabled" }
+            ));
         }
 
         if let Some(mode_str) = self.runtime.take_pending_set_view_mode() {

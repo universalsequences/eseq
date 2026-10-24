@@ -1739,11 +1739,14 @@ Previews each preset as you move through the list; Esc puts the loaded one back.
             (status (str label ": no (module ...) header, so it cannot be attached"))
             (status (str label))))))))
 
-(def new-instance-of (item kind-id group-id)
-  (host-command "packages-new-instance"
-    (if (< group-id 0)
-      (dict :module (get item :module) :kind kind-id)
-      (dict :module (get item :module) :kind kind-id :group-id group-id))))
+;; `kind` is one of the row's :kinds. One read off an unattached module's
+;; source has no :id yet; the host resolves it by :kind-name after attaching.
+(def new-instance-of (item kind group-id)
+  (let ((fields (if (= (get kind :id) nil)
+                  (dict :module (get item :module) :kind-name (get kind :name))
+                  (dict :module (get item :module) :kind (get kind :id)))))
+    (host-command "packages-new-instance"
+      (if (< group-id 0) fields (merge fields :group-id group-id)))))
 
 ;; The palette's "New Instance" choices: every kind, attached or not (see
 ;; `seq-package-kind-choices`), each labelled with the module defining it.
@@ -1788,7 +1791,7 @@ then creates the instance and opens its tab."
         (if (> (package-item-instance-count item) 0)
           nil
           (if (= (len (package-item-kinds item)) 1)
-            (new-instance-of item (get (nth (package-item-kinds item) 0) :id) -1)
+            (new-instance-of item (nth (package-item-kinds item) 0) -1)
             (host-command "packages-attach" (dict :module (get item :module)))))
         (if (and (= kind "package") (= (get item :children) nil)
                  (package-item-attachable? item))
@@ -1851,8 +1854,8 @@ then creates the instance and opens its tab."
     (append
       (map (lambda (kind)
              (dict :id :new-instance
-                   :key (str "new-" (get kind :id))
-                   :kind-id (get kind :id)
+                   :key (str "new-" (get kind :name))
+                   :kind kind
                    :label (str "New " (get kind :name))
                    :icon :plus
                    :group :create))
@@ -1951,7 +1954,7 @@ then creates the instance and opens its tab."
 (def select-module-menu-action (item action)
   (let ((id (get action :id)))
     (if (= id :new-instance)
-      (new-instance-of item (get action :kind-id) -1)
+      (new-instance-of item (get action :kind) -1)
       (if (= id :attach)
         (host-command "packages-attach" (dict :module (get item :module)))
         (if (= id :detach)

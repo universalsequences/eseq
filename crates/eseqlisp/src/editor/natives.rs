@@ -2222,6 +2222,26 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "display-line-numbers-mode",
+        "(display-line-numbers-mode)",
+        "Toggle the line-number gutter in the current buffer.",
+        |_args, ctx| {
+            ctx.toggle_line_numbers();
+            Ok(Value::Nil)
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "global-display-line-numbers-mode",
+        "(global-display-line-numbers-mode)",
+        "Toggle line numbers in DGenLisp code buffers (on by default), clearing per-buffer toggles.",
+        |_args, ctx| {
+            ctx.toggle_global_line_numbers();
+            Ok(Value::Nil)
+        },
+    );
+
+    runtime.register_native_with_docs(
         "set-view-mode",
         "(set-view-mode mode)",
         "Set the view mode to \"ui\", \"text\", or \"both\". Returns the requested mode.",

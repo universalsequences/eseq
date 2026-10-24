@@ -1138,6 +1138,8 @@ pub(crate) struct RuntimeBridgeState {
     /// Names of buffers currently presented in a tile, sorted by name.
     pub visible_buffer_names: Vec<String>,
     pub pending_cycle_view_mode: bool,
+    pub pending_toggle_line_numbers: bool,
+    pub pending_toggle_global_line_numbers: bool,
     pub pending_set_view_mode: Option<String>,
     pub current_view_mode: String,
     pub pending_set_text_zoom: Option<f64>,
@@ -1619,6 +1621,14 @@ impl NativeContext {
 
     pub fn cycle_view_mode(&mut self) {
         self.shared.borrow_mut().pending_cycle_view_mode = true;
+    }
+
+    pub fn toggle_line_numbers(&mut self) {
+        self.shared.borrow_mut().pending_toggle_line_numbers = true;
+    }
+
+    pub fn toggle_global_line_numbers(&mut self) {
+        self.shared.borrow_mut().pending_toggle_global_line_numbers = true;
     }
 
     pub fn set_view_mode(&mut self, mode: String) {
@@ -4686,6 +4696,14 @@ impl Runtime {
         let pending = shared.pending_cycle_view_mode;
         shared.pending_cycle_view_mode = false;
         pending
+    }
+
+    pub(crate) fn take_pending_toggle_line_numbers(&mut self) -> (bool, bool) {
+        let mut shared = self.shared.borrow_mut();
+        (
+            std::mem::take(&mut shared.pending_toggle_line_numbers),
+            std::mem::take(&mut shared.pending_toggle_global_line_numbers),
+        )
     }
 
     pub(crate) fn take_pending_set_view_mode(&mut self) -> Option<String> {

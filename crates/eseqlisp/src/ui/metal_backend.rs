@@ -8503,7 +8503,17 @@ fragment float4 live_spectrogram_frag(
 
         for (row, line) in frame.lines.iter().enumerate() {
             for (col, cell) in line.iter().enumerate() {
-                let text_col = col as f32 - scroll_left;
+                // The line-number gutter is pinned; scrolled text slides
+                // under it and is not drawn there.
+                let gutter = frame.text_gutter_cols as f32;
+                let text_col = if col < frame.text_gutter_cols {
+                    col as f32
+                } else {
+                    col as f32 - scroll_left
+                };
+                if col >= frame.text_gutter_cols && text_col < gutter {
+                    continue;
+                }
                 let text_row = row as f32;
                 let is_cursor = frame.cursor == Some((row, col));
 
@@ -11419,7 +11429,7 @@ fragment float4 live_spectrogram_frag(
                     widget_content_cache_key: 1, dirty_widget_ids: vec![],
                     widget_layout: Some(Arc::new(root)), focused_widget_id: None,
                     widget_scroll_top: 0.0, widget_scroll_left: 0.0, widget_layout_scroll_left: 0.0,
-                    text_scroll_top: 0, text_cell_width_scale: 1.0, text_cell_height_scale: 1.0,
+                    text_scroll_top: 0, text_cell_width_scale: 1.0, text_cell_height_scale: 1.0, text_gutter_cols: 0,
                 },
             }] };
             let target = unwrap_backend(backend.create_tiled_capture_target(width, height), "target");
@@ -11505,7 +11515,7 @@ fragment float4 live_spectrogram_frag(
                     widget_content_cache_key: 1, dirty_widget_ids: vec![],
                     widget_layout: Some(std::sync::Arc::new(root)), focused_widget_id: None,
                     widget_scroll_top: 0.0, widget_scroll_left: 0.0, widget_layout_scroll_left: 0.0,
-                    text_scroll_top: 0, text_cell_width_scale: 1.0, text_cell_height_scale: 1.0,
+                    text_scroll_top: 0, text_cell_width_scale: 1.0, text_cell_height_scale: 1.0, text_gutter_cols: 0,
                 },
             }] }
         }
@@ -11555,7 +11565,7 @@ fragment float4 live_spectrogram_frag(
                     widget_content_cache_key: 1, dirty_widget_ids: vec![],
                     widget_layout: Some(std::sync::Arc::new(patcher.clone())), focused_widget_id: None,
                     widget_scroll_top: 0.0, widget_scroll_left: 0.0, widget_layout_scroll_left: 0.0,
-                    text_scroll_top: 0, text_cell_width_scale: 1.0, text_cell_height_scale: 1.0,
+                    text_scroll_top: 0, text_cell_width_scale: 1.0, text_cell_height_scale: 1.0, text_gutter_cols: 0,
                 },
             }] };
             let target = unwrap_backend(backend.create_tiled_capture_target(width, height), "target");

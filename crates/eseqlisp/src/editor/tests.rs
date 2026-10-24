@@ -18982,3 +18982,103 @@ fn describe_key_names_the_next_key_and_its_binding_without_running_it() {
         .iter()
         .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "bank-next-ran")));
 }
+
+fn frame_row_text(frame: &crate::backend::RenderFrame, row: usize) -> String {
+    frame.lines[row].iter().map(|cell| cell.ch).collect()
+}
+
+#[test]
+fn dgenlisp_code_draws_a_line_number_gutter_by_default() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.active_buffer_mut().mode = BufferMode::DGenLisp;
+    editor.active_buffer_mut().set_text("alpha\nbeta");
+    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+    editor.active_buffer_mut().cursor = (1, 2);
+
+    let frame = crate::frame::build_render_frame(&mut editor, 40, 10);
+
+    assert_eq!(frame.text_gutter_cols, 5);
+    assert!(frame_row_text(&frame, 0).starts_with("   1 alpha"));
+    assert!(frame_row_text(&frame, 1).starts_with("   2 beta"));
+    assert_eq!(frame.cursor, Some((1, 7)), "cursor column includes the gutter");
+    assert!(frame.lines[1][3].style.bold, "the cursor's line number is bright");
+    assert!(!frame.lines[0][3].style.bold);
+}
+
+#[test]
+fn display_line_numbers_mode_toggles_the_active_buffer_only() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.active_buffer_mut().mode = BufferMode::DGenLisp;
+    editor.active_buffer_mut().set_text("alpha");
+    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+
+    editor.runtime_mut().eval_str("(display-line-numbers-mode)").unwrap();
+    editor.refresh_runtime_side_effects();
+    let frame = crate::frame::build_render_frame(&mut editor, 40, 10);
+    assert_eq!(frame.text_gutter_cols, 0);
+    assert!(frame_row_text(&frame, 0).starts_with("alpha"));
+
+    // Non-DGenLisp buffers (UI Lisp, *scratch*, files) start bare and can be
+    // opted in.
+    editor.open_scratch_buffer("*notes*", "one");
+    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+    assert_eq!(editor.line_number_gutter_cols(editor.active_buffer()), 0);
+    editor.runtime_mut().eval_str("(display-line-numbers-mode)").unwrap();
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.line_number_gutter_cols(editor.active_buffer()), 5);
+}
+
+#[test]
+fn global_display_line_numbers_mode_turns_the_default_off_and_clears_overrides() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.active_buffer_mut().mode = BufferMode::DGenLisp;
+    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+    editor.open_scratch_buffer("*notes*", "one");
+    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+    editor.toggle_active_buffer_line_numbers();
+
+    editor.runtime_mut().eval_str("(global-display-line-numbers-mode)").unwrap();
+    editor.refresh_runtime_side_effects();
+
+    assert!(editor.buffers.iter().all(|buffer| editor.line_number_gutter_cols(buffer) == 0));
+}
+
+#[test]
+fn line_number_gutter_widens_with_the_line_count() {
+    assert_eq!(super::line_number_gutter_width(1), 5);
+    assert_eq!(super::line_number_gutter_width(999), 5);
+    assert_eq!(super::line_number_gutter_width(1000), 6);
+}
+
+#[test]
+fn mouse_clicks_map_past_the_line_number_gutter() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.active_buffer_mut().mode = BufferMode::DGenLisp;
+    editor.active_buffer_mut().set_text("alpha\nbravo");
+    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+    editor.set_text_zoom(1.0).unwrap();
+
+    // Content origin (1,1); the 5-cell gutter puts "bravo"'s 'a' at col 1+5+2.
+    editor.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 8, 2), 1, 1, 20, 10);
+    assert_eq!(editor.active_buffer().cursor, (1, 2));
+
+    editor.handle_mouse(mouse_event(MouseEventKind::Up(MouseButton::Left), 8, 2), 1, 1, 20, 10);
+    editor.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 1), 1, 1, 20, 10);
+    assert_eq!(editor.active_buffer().cursor, (0, 0), "a gutter click lands at line start");
+}
+
+#[test]
+fn horizontal_scroll_keeps_the_cursor_clear_of_the_line_number_gutter() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.active_buffer_mut().mode = BufferMode::DGenLisp;
+    editor.active_buffer_mut().set_text(&"x".repeat(40));
+    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+    editor.active_buffer_mut().cursor = (0, 14);
+
+    // 20 cells less a 5-cell gutter leaves 15 text columns; col 14 sits in
+    // the right scroll margin only once the gutter is accounted for.
+    editor.sync_text_horizontal_scroll(20);
+
+    assert!(editor.active_leaf().widget_scroll_left > 0.0);
+}
+
