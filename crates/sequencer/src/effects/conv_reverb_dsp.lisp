@@ -13,6 +13,12 @@
 ; rectangular overlapping N-window exposes circular wrap/overlap artifacts, and
 ; adding Hann windows only masks them while adding block-rate coloration.
 
+; Tail sleep is safe: the wet path is a finite FIR (at most 128 partitions),
+; nothing self-generates and nothing free-runs, so once the input is silent
+; for the hold (at least the whole memory span, longer than the IR) even a
+; wet path hidden at mix 0 has drained. IR writes restart the hold.
+(effect-tail-sleep)
+
 (def inL (in 1 @name left))
 (def inR (in 2 @name right))
 

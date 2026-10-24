@@ -446,10 +446,7 @@ unsafe extern "C" fn eq8_process(
             runtime.coeffs = BiquadCoefficients::IDENTITY;
             runtime.clear_history();
         }
-        for i in 0..nf {
-            *out_l.add(i) = *in_l.add(i);
-            *out_r.add(i) = *in_r.add(i);
-        }
+        crate::effects::silence::passthrough(inp, out, 2, nframes);
         for (band, runtime) in runtimes.into_iter().enumerate() {
             write_runtime(s, band, runtime);
         }

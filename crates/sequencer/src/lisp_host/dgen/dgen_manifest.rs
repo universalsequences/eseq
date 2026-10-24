@@ -33,6 +33,8 @@ pub struct EffectGraphNodeIds {
 pub struct DGenManifest {
     /// Host-resolved, immutable algorithmic delay at this artifact's sample rate.
     pub effect_latency_samples: Option<u32>,
+    /// The source opted into tail sleep with `(effect-tail-sleep)`.
+    pub tail_sleep: bool,
     pub dylib_path: PathBuf,
     pub asset_base: Option<PathBuf>,
     pub version: u32,
@@ -615,6 +617,7 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
 
     Ok(DGenManifest {
         effect_latency_samples: super::effect_latency::parse_manifest(&v)?,
+        tail_sleep: super::effect_latency::parse_tail_sleep(&v)?,
         dylib_path,
         asset_base: None,
         version,
@@ -1135,7 +1138,12 @@ pub(in crate::lisp_host) fn build_init_message(
     manifest: &DGenManifest,
     process_fn: Option<DGenProcessFn>,
 ) -> Vec<f32> {
-    encode_init_message(slot_id, manifest, process_fn, &init_state_entries(manifest))
+    let mut entries = init_state_entries(manifest);
+    if manifest.tail_sleep {
+        // The opt-in lives in the host's trailer after the redzone.
+        entries.push((dgen_tail_slot(manifest.total_memory_slots, DGEN_TAIL_OPT_IN), 1.0));
+    }
+    encode_init_message(slot_id, manifest, process_fn, &entries)
 }
 
 /// [`build_init_message`] over caller-assembled `entries`.

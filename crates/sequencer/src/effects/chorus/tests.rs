@@ -288,3 +288,58 @@ fn migration_preserves_tail_and_rate_changes_preserve_controls() {
         vec![[0.0; 2]; 512]
     );
 }
+
+#[test]
+fn tail_sleep_skips_a_drained_ring_and_wakes_like_a_never_sleeping_chorus() {
+    use super::super::tail_sleep::test_support::{burst, sleep_and_wake, Instance};
+    let mut a = Harness::new(48000);
+    let mut b = Harness::new(48000);
+    for h in [&mut a, &mut b] {
+        h.state().params[MIX] = 0.6;
+        h.state().params[DEPTH] = 8.0;
+    }
+    let hold = a.state().capacity as f32;
+    let sleeper = Instance { state: a.ptr(), quiet: &mut a.state().quiet };
+    let reference = Instance { state: b.ptr(), quiet: &mut b.state().quiet };
+    let report = unsafe {
+        sleep_and_wake(process, &sleeper, &reference, 2 + SLOTS, &burst(4800, 0.5, 7), 512, 60, hold,
+            &burst(512, 0.5, 9))
+    };
+    assert!(report.slept_blocks >= 40, "{report:?}");
+    assert!(report.slept_output_exact_zero, "{report:?}");
+    assert!(report.reference_peak_while_asleep <= 1e-6, "{report:?}");
+    // The LFO and write head advance while asleep, so the wake block matches
+    // the never-sleeping chorus to within the decayed residue it skipped.
+    assert!(report.wake_reference_peak > 0.1, "{report:?}");
+    assert!(report.wake_max_diff <= 1e-6, "{report:?}");
+    assert_eq!(report.quiet_after_wake, 0.0);
+}
+
+#[test]
+fn settled_bypass_skips_the_dsp_and_passes_audio_through_unchanged() {
+    let mut h = Harness::new(48000);
+    let sr = 48000.0;
+    h.run(&signal(4800, sr), 256, [0.0; SLOTS]);
+    h.state().enabled = 0.0;
+    // Let the wet slew settle to exactly 0 and the gain to unity.
+    h.run(&signal(48000, sr), 512, [0.0; SLOTS]);
+    assert!(h.state().wet == 0.0 && h.state().gain == 1.0);
+    let (phase, write) = (h.state().phase, h.state().write);
+    let mut input = signal(1024, sr);
+    input[3] = [f32::NAN, f32::INFINITY];
+    let output = h.run(&input, 512, [0.0; SLOTS]);
+    assert_eq!(output[3], [0.0, 0.0], "non-finite dry is sanitized as before");
+    for (frame, (y, x)) in output.iter().zip(&input).enumerate() {
+        if frame != 3 {
+            assert_eq!(y[0].to_bits(), x[0].to_bits());
+            assert_eq!(y[1].to_bits(), x[1].to_bits());
+        }
+    }
+    assert_eq!((h.state().phase, h.state().write), (phase, write), "bypass ran the DSP");
+    assert!(h.state().bypass_idle);
+    // Re-enabling starts from a cleared ring: the wet fades back in cleanly.
+    h.state().enabled = 1.0;
+    let back = h.run(&signal(4800, sr), 256, [0.0; SLOTS]);
+    assert!(back.iter().flatten().all(|v| v.is_finite() && v.abs() < 1.0));
+    assert!(!h.state().bypass_idle);
+}

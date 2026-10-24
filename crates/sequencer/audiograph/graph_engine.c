@@ -322,6 +322,13 @@ uint32_t ap_current_node_io_generation(void) {
   return g_current_processing_node ? g_current_processing_node->io_generation : 0;
 }
 
+/* Changes whenever a param or bulk state write lands in the running node's
+ * state, so a kernel that caches a fact about its state (a tail-sleep quiet
+ * run) can tell the host touched it. Zero outside a kernel. */
+uint32_t ap_current_node_state_writes(void) {
+  return g_current_processing_node ? g_current_processing_node->state_writes : 0;
+}
+
 /* ===================== Silence propagation =====================
  * A kernel whose inputs are all declared silent may skip its DSP and declare
  * its own outputs silent (after making sure they hold zeros), so idle buses,
@@ -351,6 +358,17 @@ int ap_inputs_silent(void) {
       return 0;
   }
   return 1;
+}
+
+/* True when input `port` reads silence this block: unconnected, or fed by a
+ * source that declared it silent. False outside a kernel. */
+int ap_input_silent(int port) {
+  RTNode *node = g_current_processing_node;
+  LiveGraph *lg = g_current_processing_graph;
+  if (!node || !lg || port < 0 || port >= node->nInputs)
+    return 0;
+  LiveEdge *edge = current_edge(lg, node->inEdgeId, node->nInputs, port);
+  return !edge || edge->silent_pass == lg->render_pass;
 }
 
 /* Declare output `port` all zeros for this block. The caller must have made
@@ -399,6 +417,10 @@ int ap_current_node_ninputs(void) {
     return g_current_processing_node->nInputs;
   }
   return 0; // fallback
+}
+
+int ap_current_node_noutputs(void) {
+  return g_current_processing_node ? g_current_processing_node->nOutputs : 0;
 }
 
 void initialize_engine(int block_Size, int sample_rate) {
@@ -457,19 +479,9 @@ void initialize_engine(int block_Size, int sample_rate) {
 
 // ===================== Parameter Application =====================
 
-#define DGEN_HEADER_SLOTS 5
-#define DGEN_CANARY_INDEX 2
-#define DGEN_HEADER_CANARY_BITS 0x4cd35a1dU
-#define DGEN_STATE_REDZONE_SLOTS 256
-
-static inline bool has_dgen_header_canary(const float *memory) {
-  union {
-    float f;
-    uint32_t u;
-  } bits = {.f = memory[DGEN_CANARY_INDEX]};
-  return bits.u == DGEN_HEADER_CANARY_BITS;
-}
-
+/* Params land at their state index only. (A legacy DGen mirror that copied
+ * writes past the redzone, a leftover of the split read/write span, is gone:
+ * the host keeps runtime cells there, see dgen_ffi.rs.) */
 void apply_params(LiveGraph *g) {
   if (!g || !g->params)
     return;
@@ -510,19 +522,8 @@ void apply_params(LiveGraph *g) {
           continue;
         }
         memory[m.idx] = m.fvalue;
+        node->state_writes++;
         applied++;
-        if (m.idx >= DGEN_HEADER_SLOTS && has_dgen_header_canary(memory)) {
-          int total_slots = (int)memory[1];
-          if (total_slots > 0) {
-            int write_base = DGEN_HEADER_SLOTS + total_slots + DGEN_STATE_REDZONE_SLOTS;
-            int dgen_idx = (int)(m.idx - DGEN_HEADER_SLOTS);
-            int mirrored_idx = write_base + dgen_idx;
-            if (dgen_idx >= 0 && dgen_idx < total_slots &&
-                mirrored_idx >= 0 && mirrored_idx < state_slots) {
-              memory[mirrored_idx] = m.fvalue;
-            }
-          }
-        }
       }
     }
   }

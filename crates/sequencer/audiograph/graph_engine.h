@@ -69,6 +69,9 @@ typedef struct RTNode {
   float *null_out;
   int null_out_capacity;
   uint32_t io_generation;  // Bumped per IO rebuild; see ap_current_node_io_generation
+  // Bumped whenever a param or bulk state write lands in this node's state
+  // (apply_params, apply_write_node_state); see ap_current_node_state_writes.
+  uint32_t state_writes;
 
   // Output meter: 0 = unmetered, otherwise (slot index + 1) into
   // LiveGraph.node_meters. Zeroed with the node, so a reused node id starts

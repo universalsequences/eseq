@@ -432,6 +432,94 @@ wrong.
 
 Rerun to check each step; the probe and its command are in the file header.
 
+#### After stages 1 and 2 (2026-10-24, eseq-ka5t.11)
+
+**What changed.** The graph already had a silence flag on every edge
+(`effects/silence.rs`, `ap_set_output_silent` in `graph_engine.c`): a kernel
+that declares its outputs silent lets downstream kernels skip. No new
+mechanism was needed. The small additions were `ap_input_silent(port)`,
+`ap_current_node_noutputs()` and a per-node state-write count
+(`ap_current_node_state_writes()`, bumped by every param or bulk state write).
+
+- **Declares silence now:**
+  - idle or disabled sampler voices (`sampler_idle_block`),
+  - disabled DGen instrument voices (the gap noted above),
+  - every builtin bypass. `silence::passthrough` emits a silent input as
+    silent and copies anything else.
+  - the DGen effect wrapper, on bypass and, for opted-in effects, while
+    asleep.
+- **Tail-sleep** (`effects::tail_sleep`). An effect sleeps when its input is
+  silent and its internal signal has stayed below -120 dB for the hold. While
+  asleep it skips its DSP and emits declared silence. The first non-silent
+  block wakes it, with its state untouched.
+
+  | Effect | Hold | Notes |
+  |---|---|---|
+  | DGen effects | max(1 s, memory span in frames) | **Opt-in only**, with a top-level `(effect-tail-sleep)` in the source (stripped before compiling, carried as `eseqEffect.tailSleep` in the manifest, like `effect-latency`). The wrapper judges quiet by its output, which cannot see a wet path hidden at mix 0, self-generated sound or free-running modulation, so only an author can promise there is none. Flagged: Convolution Reverb and Filter Table (both engines); each is a finite FIR behind control-rate smoothers. Not flagged: ES Compressor, whose release (up to 2 s) is hidden gain state the output does not show, and every `content/effects` patch (not audited). A node with no inputs never sleeps, and any param or tensor write restarts the hold. The trailer cells after the redzone replace a dead legacy param mirror in `apply_params` that would have overwritten them. |
+  | Multiverb | 1 s | like Reverb: not while host mods move it, not mid mode-switch |
+  | Chorus | ring length (~85 ms) | the LFO phase and write head keep advancing while asleep |
+  | Slowdown | whole history ring (2^20 frames at 48 kHz, 21.8 s) | |
+  | DJ Mixer | whole buffer (10 s) | only while recording; a held loop never counts toward the hold |
+  | Space Echo | tape length (2.7 s) | only at age 0. Age > 0 feeds hiss and splice thumps into the loop forever, and that is sound, so an aged machine never sleeps. |
+- **Settled bypass skips the DSP.** Chorus once its wet has faded to exactly
+  0. Slowdown and DJ Mixer the same way, except that they keep recording
+  their history (two stores per frame) so a re-enable plays current audio.
+  DJ Mixer's closing gate now snaps to 0 once it goes subnormal; AArch64
+  otherwise stalls it near 1e-43. DJ Mixer forgets its last sync cycle on
+  bypass and sleep, so a re-enable mid-cycle does not relocate the loop.
+
+**Audio.** The probe A/B (`ESEQ_PARK_DUMP_DIR`, `ESEQ_PARK_FORCE_AWAKE`) was
+run from one binary.
+- The bypass skips are bit-identical on every gotham variant (same hashes).
+- Tail sleep changes only near-silence: `all_silent` max 1.4e-6 (-117 dBFS);
+  `full` and `kit_off` are bit-identical to the pre-change build.
+
+**Numbers.** These are render-thread ms per s of audio, release, M1 Max.
+- Gotham rows: the minimum of 4 rounds (2 runs of 2, interleaved with a
+  pre-change build), re-measured after the review fixes (DGen opt-in).
+- Synthetic rows: the minimum of 3 rounds, before the review fixes; none of
+  them uses a DGen effect.
+
+Load average was 8-15 from concurrent agents, so both columns read about
+10-20% above the P0 table; treat differences under about 10 ms/s as noise.
+
+| Variant | Before | After |
+|---|---|---|
+| gotham `all_silent` | 206 | **187** |
+| gotham `full` | 341 | 336 (noise) |
+| gotham `kit_off` | 305 | 313 (noise) |
+| gotham `loose_silent` | 270 | 250 |
+| sampler track, silent, no FX (each) | 3.7 | 3.3 |
+| Chorus silent / bypassed (per instance) | 3.9 / 3.8 | **0.7 / 0.2** |
+| Multiverb silent | 4.0 | **0.5** |
+| Reverb / Str8 Delay silent | 0.4 / 0.7 | 0.1 / 0.3 |
+| Space Echo silent (default age 0.3) | 8.4 | 8.4 (hiss: never sleeps) |
+| Slowdown / DJ Mixer silent | 1.5 / 0.9 | unchanged; the 8 s synthetic render is shorter than their 22 s / 10 s hold |
+| Slowdown bypassed | 1.5 | 0.6 |
+
+**Why silent gotham only fell about 10%.** `sample` profiles of
+`all_silent`, before and after (before the DGen opt-in), show where the rest
+goes:
+- **Space Echo is 59% of the render.** It sits on a loose track with age 0.3,
+  and its Grampian spring alone is 37%. Its hiss is real output
+  (`all_silent` peaks at 0.004), so it keeps its own track, the Slowdown and
+  Compressor after it, and the master chain (including the largest master
+  DGen effect, 14%) awake.
+- **The per-voice control nodes are about 28%** and do not depend on
+  silence:
+  - `gatepitch` (17%) renders its clock ramp every block for every voice,
+  - `voice_modulator` (11%).
+- The never-sleeping bus effects (Filterbank, OTT, Tape) are about 10%.
+
+**Stage 3 (kit group-bus parking) is not worth building now.** Kit 1 still
+costs about 25-35 ms/s (`full` - `kit_off`, the same as before). That cost is
+its voices' control nodes, plus the hiss-driven master chain it shares.
+Parking its bus chain would save only the bus effects, an estimated few
+ms/s that was not measured. The bigger levers are, in order:
+1. Decide whether Space Echo's hiss may gate off. That is a sound change and
+   needs approval, which is why it was not built.
+2. An idle fast path for `gatepitch` and `voice_modulator`.
+
 ## 6. Kits on/off per bank
 
 **Control.** The drum rack component in the fx panel gets a power toggle in
@@ -466,6 +554,24 @@ C").
   the bank's mixer.
 - A kit parked in every scene is unused project-wide; it is listed for purge
   like unused slots (§4), never deleted automatically.
+
+**As built (eseq-ka5t.13).** `Scene.parked_kits` (`sequencer/state/kit_parking.rs`),
+inherited through `SceneSwapState`, captured by scene-structure undo, cleared
+for a deleted kit in `sync_rack_members`, saved as `scene_parked_kits` (v19).
+Parking is a gate, not a rewrite: the scene still installs the kit's clip in
+the live grid (so its lanes stay editable and save back into the right clip),
+and every scheduler snapshot applies the parked set of the scene it plays
+(`SequencerSnapshot::park_kits`: the live capture the playing scene's, a
+boundary launch its target's, a per-track launch the playing scene's, a song
+row its row scene's). A parked kit's member tracks are `scene_silenced` (no
+pattern triggers) and its rack-owned graphs and generators skip their ticks
+(no fires, no state advance; they resume where they stood). A rack clip launch
+on a kit the playing scene parks is refused with "Kit is off in bank C"
+rather than repointing a scene that would stay silent. Commands:
+`set-kit-parked` (`set-kit-parked!` in `eseq.kinds`); group host fields
+`parked`, `parked-banks`, `mixed-banks`, `unused`; `kit-bank-state` reads
+`:on` / `:off` / `:mixed`. There is no tooltip primitive, so the drum rack
+header prints the hint ("Kit on in bank C") next to the kit's name.
 
 **Rig view (later).** An elevated view can collect parked kits on a shelf
 (a strip of chips: name, pad count, banks where it plays; double-click or
@@ -564,6 +670,30 @@ indices; nothing in the engine renumbers.
 **A track's device line** shows the slot enabled in the current scene (if
 several are, the first and a count); clicking it opens the slot list for
 recall (§4).
+
+**As built (eseq-ka5t.10).** The viewed bank is Lisp state, so the host
+publishes per-bank lists instead of one boolean: `track.used-banks` and
+`group.used-banks` (`ProjectScenes::bank_usage`, one pass over the scenes
+with a per-track bank bitmask, `ui/host_kinds/bank_usage.rs`), recomputed
+only when the scenes revision, the track/group/bank instances or the group
+topology move. A scene uses a track when it gives it a pattern cell, steps or
+none (a graph-driven track plays an empty pattern); a kit's pad when the scene
+points at one of the kit's clips and does not park it (a legacy kit: the pad's
+cell, unparked); a kit where it plays; a plain group where a member or child
+kit is used. Lisp (`eseq.scene-banks`): `used-in-viewed-bank?`,
+`track-used-in-bank?`, `group-used-in-bank?`, `kit-bank-view` (`:shown`,
+`:off`, `:hidden`) and the `show-all-tracks` defcustom (View > Show All
+Tracks, and the bank selector's right-click menu). A track or kit no bank
+uses shows in every bank, like an unused clip-grid cell, so a fresh track is
+never stranded. Hidden: sequencer rows (and UP/DOWN, shift ranges), mixer
+strips and LEFT/RIGHT, the lane track-inlet menu, project-owned graph route
+menus (graph demos, neural variable-reset) and jaki's project routes; a
+rack-owned sequencer's pad routes stay whole. A menu keeps the track its
+control names now. A selected track the bank hides hands the selection to the
+nearest shown one. A kit the bank parks keeps its sequencer header and its
+dimmed mixer strip (also under show-all). The device line is on Instrument
+Rack tracks' sequencer rows (first enabled slot "+N"; a click shows the slot
+list in *fx*). The arrangement view still shows every track: it spans banks.
 
 ## 10. Project-owned sequencer membership (later)
 

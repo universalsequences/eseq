@@ -570,6 +570,7 @@ bool apply_write_node_state(LiveGraph *lg, int node_id, size_t dest_offset,
     return false; // out of bounds
   }
   memcpy((float *)node->state + dest_offset, source_data, count * sizeof(float));
+  node->state_writes++;
   return true;
 }
 

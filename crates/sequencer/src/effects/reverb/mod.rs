@@ -86,9 +86,6 @@ const ST_MOD_MIX_DEPTH_1: usize = 50;
 /// (`effects::tail_sleep`). Runtime only, never a param.
 const ST_QUIET_FRAMES: usize = 54;
 const _: () = assert!(ST_MOD_MIX_DEPTH_1 + 4 <= ST_QUIET_FRAMES && ST_QUIET_FRAMES < GALAXY_RT);
-/// Quiet time before the reverb sleeps: past the 250 ms predelay ceiling plus
-/// the longest tank loop, so nothing audible can still be in flight.
-const TAIL_SLEEP_HOLD_SECONDS: f32 = 1.0;
 
 const GALAXY_RT: usize = 56;
 const PLATE_RT: usize = GALAXY_RT + galaxy::RUNTIME_SLOTS;
@@ -340,8 +337,7 @@ unsafe extern "C" fn reverb_process(
     let out_r = *out.add(1);
 
     if *s.add(ST_ENABLED) <= 0.5 {
-        std::ptr::copy_nonoverlapping(in_l as *const f32, out_l, nf);
-        std::ptr::copy_nonoverlapping(in_r as *const f32, out_r, nf);
+        crate::effects::silence::passthrough(inp, out, 2, nframes);
         return;
     }
 
@@ -436,19 +432,18 @@ unsafe extern "C" fn reverb_process(
     }
 
     // ── Tail sleep: silent input and a decayed tank skip the whole block ──
-    let input_silent = crate::effects::tail_sleep::inputs_silent(&[in_l, in_r], nf);
     let sleep_allowed = !decay_modulated
         && !size_modulated
         && !depth_modulated
         && !mix_modulated
         && desired_mode == active_mode
         && fade >= 1.0;
-    if sleep_allowed
-        && crate::effects::tail_sleep::asleep(s.add(ST_QUIET_FRAMES), input_silent, fs * TAIL_SLEEP_HOLD_SECONDS)
-    {
-        crate::effects::silence::emit(out, 2, nframes);
+    let hold = fs * crate::effects::tail_sleep::DEFAULT_HOLD_SECONDS;
+    let Some(counts_quiet) = crate::effects::tail_sleep::sleep_or_count(
+        s.add(ST_QUIET_FRAMES), inp, 2, out, 2, nframes, hold, sleep_allowed,
+    ) else {
         return;
-    }
+    };
     let mut sm_predelay = *s.add(ST_SM_PREDELAY);
     let mut sm_scale = *s.add(ST_SM_SCALE);
     if sm_scale <= 0.0 {
@@ -735,7 +730,7 @@ unsafe extern "C" fn reverb_process(
     // ── Store shared state ──
     crate::effects::tail_sleep::note_block(
         s.add(ST_QUIET_FRAMES),
-        input_silent && sleep_allowed,
+        counts_quiet,
         tank_peak,
         nf,
     );
@@ -1027,7 +1022,7 @@ mod tests {
         state[ST_MIX] = 0.5;
         state[ST_DECAY] = 0.2;
         let _ = impulse_render(&mut state, 4.0, fs);
-        assert!(state[ST_QUIET_FRAMES] >= fs as f32 * TAIL_SLEEP_HOLD_SECONDS);
+        assert!(state[ST_QUIET_FRAMES] >= fs as f32 * crate::effects::tail_sleep::DEFAULT_HOLD_SECONDS);
 
         let before = state.clone();
         let (ol, or) = process(&mut state, &mut vec![0.0; 256], &mut vec![0.0; 256]);

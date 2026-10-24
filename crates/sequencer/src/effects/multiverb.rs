@@ -247,7 +247,10 @@ const fn buf_offsets() -> [usize; NBUFS] {
     offsets
 }
 
-const ST_BUFS: usize = ST_WRITE_IDX + NBUFS;
+/// Frames the input has been silent and the tank below -120 dB
+/// (`effects::tail_sleep`). Runtime only, never a param.
+const ST_QUIET_FRAMES: usize = ST_WRITE_IDX + NBUFS;
+const ST_BUFS: usize = ST_QUIET_FRAMES + 1;
 
 const fn total_buf_floats() -> usize {
     let mut total = 0;
@@ -484,8 +487,7 @@ unsafe extern "C" fn multiverb_process(
     let out_r = *out.add(1);
 
     if *s.add(ST_ENABLED) <= 0.5 {
-        std::ptr::copy_nonoverlapping(in_l as *const f32, out_l, nf);
-        std::ptr::copy_nonoverlapping(in_r as *const f32, out_r, nf);
+        crate::effects::silence::passthrough(inp, out, 2, nframes);
         return;
     }
 
@@ -537,6 +539,23 @@ unsafe extern "C" fn multiverb_process(
     ];
 
     let desired_mode = mode;
+
+    // ── Tail sleep: silent input and a decayed tank skip the whole block ──
+    // Not while host modulation moves the tank or mix, nor mid mode switch.
+    let any_mod = |depths: &[f32; 4]| depths.iter().any(|d| *d != 0.0);
+    let sleep_allowed = !any_mod(&mod_decay_depths)
+        && !any_mod(&mod_size_depths)
+        && !any_mod(&mod_depth_depths)
+        && !any_mod(&mod_mix_depths)
+        && (*s.add(ST_ACTIVE_MODE) as i32 == desired_mode || *s.add(ST_ACTIVE_MODE) < 0.0)
+        && *s.add(ST_FADE) >= 1.0;
+    let hold = fs * super::tail_sleep::DEFAULT_HOLD_SECONDS;
+    let Some(counts_quiet) = super::tail_sleep::sleep_or_count(
+        s.add(ST_QUIET_FRAMES), inp, 2, out, 2, nframes, hold, sleep_allowed,
+    ) else {
+        return;
+    };
+    let mut tank_peak = 0.0f32;
 
     // ── Derived (per block) ──
     let target_predelay = (predelay_ms * 0.001 * fs).max(1.0);
@@ -1147,6 +1166,8 @@ unsafe extern "C" fn multiverb_process(
             (y_l * 0.6, y_r * 0.6)
         };
 
+        // The pure tank output, before the mix can hide it.
+        tank_peak = tank_peak.max(wet_l.abs()).max(wet_r.abs());
         // Width via M/S, then the mode-switch fade on the wet path only.
         let mid = (wet_l + wet_r) * 0.5;
         let side = (wet_l - wet_r) * 0.5 * side_g;
@@ -1156,6 +1177,12 @@ unsafe extern "C" fn multiverb_process(
         *out_r.add(i) = (dry_r * dry_g + (mid - side) * fg).clamp(-4.0, 4.0);
     }
 
+    super::tail_sleep::note_block(
+        s.add(ST_QUIET_FRAMES),
+        counts_quiet,
+        tank_peak,
+        nf,
+    );
     // ── Store mutable state (flushing denormals in the recursive paths) ──
     *s.add(ST_SM_SCALE) = sm_scale;
     *s.add(ST_SM_PREDELAY) = sm_predelay;
@@ -1639,5 +1666,37 @@ mod tests {
             );
         }
         assert!((250.0 * 0.001 * fs) < (PREDELAY_CAP - 2) as f32);
+    }
+
+    #[test]
+    fn tail_sleep_skips_a_decayed_tank_and_wakes_like_a_never_sleeping_one() {
+        use crate::effects::tail_sleep::test_support::{burst, sleep_and_wake, Instance};
+        let fs = 48_000;
+        for mode in [MODE_PLATE, MODE_HALL, MODE_QUAD, MODE_MOD] {
+            let mut a = init_state(fs);
+            let mut b = init_state(fs);
+            for state in [&mut a, &mut b] {
+                state[ST_MODE] = mode;
+                state[ST_DECAY] = 0.3;
+                state[ST_MIX] = 0.5;
+                // Unmodulated and clean: the tank is then time-invariant, so
+                // skipping its decayed residue must not change the wake.
+                state[ST_MOD_DEPTH] = 0.0;
+                state[ST_ERA] = 0.0;
+            }
+            let hold = fs as f32 * crate::effects::tail_sleep::DEFAULT_HOLD_SECONDS;
+            let sleeper = Instance { state: a.as_mut_ptr().cast(), quiet: &mut a[ST_QUIET_FRAMES] };
+            let reference = Instance { state: b.as_mut_ptr().cast(), quiet: &mut b[ST_QUIET_FRAMES] };
+            let report = unsafe {
+                sleep_and_wake(multiverb_process, &sleeper, &reference, 6, &burst(2400, 0.5, 17), 512,
+                    600, hold, &burst(512, 0.5, 19))
+            };
+            assert!(report.slept_blocks > 50, "mode {mode}: {report:?}");
+            assert!(report.slept_output_exact_zero, "mode {mode}: {report:?}");
+            assert!(report.reference_peak_while_asleep <= 1e-6, "mode {mode}: {report:?}");
+            assert!(report.wake_reference_peak > 0.1, "mode {mode}: {report:?}");
+            assert!(report.wake_max_diff <= 1e-5, "mode {mode}: {report:?}");
+            assert_eq!(report.quiet_after_wake, 0.0);
+        }
     }
 }

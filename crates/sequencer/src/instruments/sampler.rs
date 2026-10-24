@@ -966,7 +966,6 @@ unsafe fn sampler_process_segment(
     let s = state as *mut f32;
     let buffer_id = (*s.add(STATE_BUFFER_ID)) as usize;
     let mut playhead = *s.add(STATE_PLAYHEAD);
-    let playing = *s.add(STATE_PLAYING);
     let gain = *s.add(STATE_GAIN);
     let velocity = *s.add(STATE_VELOCITY);
     let speed = (*s.add(STATE_SPEED)).clamp(SPEED_MIN, SPEED_MAX);
@@ -994,7 +993,6 @@ unsafe fn sampler_process_segment(
     let mut retrigger_fade_remaining = *s.add(STATE_RETRIGGER_FADE_REMAINING);
     let base_start_point = (*s.add(STATE_START_POINT)).clamp(0.0, 1.0);
     let base_end_point = (*s.add(STATE_END_POINT)).clamp(0.0, 1.0);
-    let enabled = *s.add(STATE_ENABLED);
     let reverse_param = *s.add(STATE_REVERSE) > 0.5;
     let loop_mode_param = (*s.add(STATE_LOOP_MODE)).round().clamp(0.0, 3.0) as i32;
     let loop_xfade_samples = (*s.add(STATE_LOOP_XFADE_SAMPLES)).max(0.0);
@@ -1044,14 +1042,10 @@ unsafe fn sampler_process_segment(
     let nf = nframes as usize;
     let channel_count = desc.channel_count.max(1) as usize;
 
-    if enabled <= 0.5 {
-        for i in 0..nf {
-            *out0.add(i) = 0.0;
-            *out1.add(i) = 0.0;
-        }
-        *s.add(STATE_LAST_ENV_AMP) = 0.0;
-        *s.add(STATE_LAST_READ_HEAD) = 0.0;
-        *s.add(STATE_RETRIGGER_FADE_REMAINING) = 0.0;
+    if sampler_idle_block(s, buffers) {
+        // A segment is part of a block, so it zeroes rather than declares.
+        std::ptr::write_bytes(out0, 0, nf);
+        std::ptr::write_bytes(out1, 0, nf);
         return;
     }
 
@@ -1071,19 +1065,6 @@ unsafe fn sampler_process_segment(
     // region of at least one frame.
     let start_sample = start_sample.min(sample_len.saturating_sub(1));
     let end_sample = end_sample.clamp(start_sample + 1, sample_len.max(1));
-
-    if playing <= 0.0 || sample_data.is_null() || sample_len == 0 {
-        for i in 0..nf {
-            *out0.add(i) = 0.0;
-            *out1.add(i) = 0.0;
-        }
-        *s.add(STATE_LAST_OUT_L) = 0.0;
-        *s.add(STATE_LAST_OUT_R) = 0.0;
-        *s.add(STATE_LAST_ENV_AMP) = 0.0;
-        *s.add(STATE_LAST_READ_HEAD) = 0.0;
-        *s.add(STATE_RETRIGGER_FADE_REMAINING) = 0.0;
-        return;
-    }
 
     let region_len = (end_sample.saturating_sub(start_sample)).max(1) as f32;
     // Beats runs off the uniform beat grid (bpm + anchor); the onset table is
@@ -1669,6 +1650,30 @@ unsafe fn sampler_process_segment_at(
     );
 }
 
+/// A block with no timeline events in which the voice renders nothing: the
+/// same disabled / not-playing / no-sample early returns as
+/// `sampler_process_segment`, with the same state writes, but without
+/// touching the outputs. Returns false (and writes nothing) otherwise.
+unsafe fn sampler_idle_block(s: *mut f32, buffers: *mut c_void) -> bool {
+    if *s.add(STATE_ENABLED) <= 0.5 {
+        *s.add(STATE_LAST_ENV_AMP) = 0.0;
+        *s.add(STATE_LAST_READ_HEAD) = 0.0;
+        *s.add(STATE_RETRIGGER_FADE_REMAINING) = 0.0;
+        return true;
+    }
+    let buffer_id = (*s.add(STATE_BUFFER_ID)) as usize;
+    let desc = &*(buffers as *const BufferDesc).add(buffer_id);
+    if *s.add(STATE_PLAYING) <= 0.0 || desc.buffer.is_null() || desc.size == 0 {
+        *s.add(STATE_LAST_OUT_L) = 0.0;
+        *s.add(STATE_LAST_OUT_R) = 0.0;
+        *s.add(STATE_LAST_ENV_AMP) = 0.0;
+        *s.add(STATE_LAST_READ_HEAD) = 0.0;
+        *s.add(STATE_RETRIGGER_FADE_REMAINING) = 0.0;
+        return true;
+    }
+    false
+}
+
 unsafe extern "C" fn sampler_process(
     inp: *const *mut f32,
     out: *const *mut f32,
@@ -1685,6 +1690,12 @@ unsafe extern "C" fn sampler_process(
         .max(0.0)
         .min(SAMPLER_TIMELINE_CAPACITY as f32) as usize;
     if event_count == 0 {
+        if sampler_idle_block(s, buffers) {
+            // An idle voice is silent for the whole block: zero once and
+            // declare it, so the voice sum and strip can skip downstream.
+            crate::effects::silence::emit(out, 2, nframes);
+            return;
+        }
         sampler_process_segment(inp, out, nframes, state, buffers);
         return;
     }

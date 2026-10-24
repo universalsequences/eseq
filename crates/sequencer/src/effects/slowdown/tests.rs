@@ -722,3 +722,47 @@ fn slice_steps_crossfade_with_a_raised_cosine_and_latch_with_the_cycle() {
     assert_eq!(h.state().slice, 0);
     assert!(!h.state().fade_cosine);
 }
+
+#[test]
+fn tail_sleep_waits_for_the_whole_history_then_skips_and_wakes() {
+    use super::super::tail_sleep::test_support::{burst, sleep_and_wake, Instance};
+    let sr = 16_000;
+    let mut a = Harness::new(sr);
+    let mut b = Harness::new(sr);
+    for h in [&mut a, &mut b] {
+        h.state().params[MIX] = 0.5;
+    }
+    let hold = a.state().capacity as f32;
+    let block = 2048;
+    let silent_blocks = (hold as usize).div_ceil(block) + 40;
+    let sleeper = Instance { state: a.ptr(), quiet: &mut a.state().quiet };
+    let reference = Instance { state: b.ptr(), quiet: &mut b.state().quiet };
+    let report = unsafe {
+        sleep_and_wake(process, &sleeper, &reference, 2 + MOD_SLOTS, &burst(8000, 0.5, 3), block,
+            silent_blocks, hold, &burst(block, 0.5, 5))
+    };
+    // Nothing sleeps before every reachable sample of history is silence.
+    assert!(report.slept_blocks >= 10 && report.slept_blocks <= 41, "{report:?}");
+    assert!(report.slept_output_exact_zero, "{report:?}");
+    assert!(report.reference_peak_while_asleep <= 1e-6, "{report:?}");
+    assert!(report.wake_reference_peak > 0.1, "{report:?}");
+    assert_eq!(report.quiet_after_wake, 0.0);
+}
+
+#[test]
+fn settled_bypass_records_history_but_skips_the_heads() {
+    let sr = 48_000.0;
+    let mut h = Harness::new(48_000);
+    h.run(&sine(4800, sr, 220.0), 256);
+    h.state().params[ENABLED] = 0.0;
+    h.run(&sine(24_000, sr, 220.0), 512);
+    assert_eq!(h.state().wet, 0.0);
+    let (age, delay, write) = (h.state().age, h.state().delay, h.state().write);
+    let input = sine(1024, sr, 330.0);
+    assert_eq!(h.run(&input, 512), input, "bypass must pass audio through unchanged");
+    assert_eq!((h.state().age, h.state().delay), (age, delay), "bypass ran the heads");
+    let capacity = h.state().capacity;
+    assert_eq!(h.state().write, (write + 1024) & (capacity - 1), "bypass stopped recording");
+    let last = unsafe { *ring(h.ptr()).add((h.state().write + capacity - 1) & (capacity - 1)) };
+    assert_eq!(last, input[1023][0]);
+}

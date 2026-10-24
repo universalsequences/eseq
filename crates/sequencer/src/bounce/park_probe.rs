@@ -22,6 +22,11 @@
 //! default all), `ESEQ_PARK_KIT` (group id of the kit to park, default 1),
 //! `ESEQ_PARK_LOOSE` (loose track indices, default every non-kit track),
 //! `ESEQ_PARK_TRACKS` and `ESEQ_PARK_EFFECTS` (synthetic probe).
+//! `ESEQ_PARK_DUMP_DIR` writes each render's interleaved f32 output there as
+//! `<variant>.r<round>.f32`; `ESEQ_PARK_FORCE_AWAKE=3` renders as if no effect
+//! ever tail-sleeps or skips a settled bypass (`effects::tail_sleep::ForceAwake`
+//! bits: 1 = no bypass skip, 2 = no sleep), the A/B reference for what they
+//! change.
 //!
 //! The project's scratch must not import UI-only packages (gotham's
 //! `proto-rig.rig` fails in the headless scheduler; strip it in the fixture).
@@ -289,6 +294,15 @@ fn time_render(path: &Path, end_beat: f64, bypass: BypassSel, kit: u64) -> Value
     let mut thread_start = thread_cpu_seconds();
     let mut wall_start = Instant::now();
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let dump_dir = std::env::var_os("ESEQ_PARK_DUMP_DIR").map(PathBuf::from);
+    let mut dump = Vec::<f32>::with_capacity(if dump_dir.is_some() { source.end as usize * 2 } else { 0 });
+    let force_awake = match std::env::var("ESEQ_PARK_FORCE_AWAKE") {
+        Err(_) => 0,
+        Ok(value) => value.trim().parse::<u32>().ok().filter(|bits| *bits <= 3).unwrap_or_else(|| {
+            panic!("ESEQ_PARK_FORCE_AWAKE must be a bit mask 0-3 (1 = no bypass skip, 2 = no sleep), got {value:?}")
+        }),
+    };
+    let _force_awake = crate::effects::tail_sleep::ForceAwake::set(force_awake);
     let mut start = 0_u64;
     let mut index = 0_u64;
     while start < source.end {
@@ -318,6 +332,7 @@ fn time_render(path: &Path, end_beat: f64, bypass: BypassSel, kit: u64) -> Value
         if index >= warmup {
             times.push(t0.elapsed().as_secs_f64() * 1e6);
             sched.push((t_controls - t0).as_secs_f64() * 1e6);
+            if dump_dir.is_some() { dump.extend_from_slice(&output); }
             for sample in &output {
                 hash = (hash ^ sample.to_bits() as u64).wrapping_mul(0x100_0000_01b3);
                 peak = peak.max(sample.abs());
@@ -330,6 +345,13 @@ fn time_render(path: &Path, end_beat: f64, bypass: BypassSel, kit: u64) -> Value
     let cpu = cpu_seconds() - cpu_start;
     let thread_cpu = thread_cpu_seconds() - thread_start;
     let wall = wall_start.elapsed().as_secs_f64();
+    if let Some(dir) = &dump_dir {
+        static RENDERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let round = RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stem = path.file_stem().unwrap().to_string_lossy().replace(".edited", "").replace(".project", "");
+        let bytes: Vec<u8> = dump.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(dir.join(format!("{stem}.r{round}.f32")), bytes).unwrap();
+    }
     let audio_seconds = times.len() as f64 * block as f64 / 48_000.0;
     let mut sorted = times.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());

@@ -217,10 +217,7 @@ unsafe extern "C" fn filter_process(
         *s.add(STATE_IC2EQ2_L) = 0.0;
         *s.add(STATE_IC1EQ2_R) = 0.0;
         *s.add(STATE_IC2EQ2_R) = 0.0;
-        for i in 0..nf {
-            *out0.add(i) = *in0.add(i);
-            *out1.add(i) = *in1.add(i);
-        }
+        crate::effects::silence::passthrough(inp, out, 2, nframes);
         return;
     }
 

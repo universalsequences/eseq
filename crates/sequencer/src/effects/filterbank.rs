@@ -825,8 +825,7 @@ unsafe extern "C" fn filterbank_process(
         for i in RUNTIME2_START..FILTERBANK_STATE_SIZE {
             *s.add(i) = 0.0; // second runtime block, past the depth params
         }
-        std::ptr::copy_nonoverlapping(in0 as *const f32, out0, nf);
-        std::ptr::copy_nonoverlapping(in1 as *const f32, out1, nf);
+        crate::effects::silence::passthrough(inp, out, 2, nframes);
         return;
     }
 

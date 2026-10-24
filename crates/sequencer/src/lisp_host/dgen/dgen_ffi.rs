@@ -171,7 +171,11 @@ pub const MAX_BUS_FX_CHAINS: usize = 64;
 // state[5] = host sample rate
 // state[6..10] = immutable process function pointer (four numeric u16 chunks)
 // state[10..10+N] = DGenLisp memory span (generated code's `float *memory`)
-// state[10+N..]   = redzone
+// state[10+N..10+N+256] = redzone
+// state[10+N+256..+3] = host tail-sleep trailer (`DGEN_TAIL_SLOTS`): quiet
+//            frames, the `(effect-tail-sleep)` opt-in, and the node's last seen
+//            state-write count. Never params; audiograph's dead legacy param
+//            mirror over this range was removed with it.
 
 pub const DGEN_ENABLED_PARAM_IDX: usize = 4;
 pub const DGEN_HOST_SAMPLE_RATE_IDX: usize = 5;
@@ -191,8 +195,29 @@ pub(in crate::lisp_host) fn ensure_enabled_param(params: &mut Vec<crate::effects
     params.push(EffectDescriptor::enabled_param(params.len() as u32, 1.0));
 }
 
+/// Host-runtime slots after the redzone (the tail-sleep trailer).
+pub const DGEN_TAIL_SLOTS: usize = 3;
+/// Trailer cell: frames of silent input with output below -120 dB.
+pub(in crate::lisp_host) const DGEN_TAIL_QUIET: usize = 0;
+/// Trailer cell: 1 when the source opted in with `(effect-tail-sleep)`.
+pub(in crate::lisp_host) const DGEN_TAIL_OPT_IN: usize = 1;
+/// Trailer cell: the node's state-write count (bits) when last processed.
+pub(in crate::lisp_host) const DGEN_TAIL_WRITES: usize = 2;
+
 pub fn dgen_total_state_slots(total_memory_slots: usize) -> usize {
-    HEADER_SLOTS + total_memory_slots + DGEN_STATE_REDZONE_SLOTS
+    HEADER_SLOTS + total_memory_slots + DGEN_STATE_REDZONE_SLOTS + DGEN_TAIL_SLOTS
+}
+
+/// Memory-span index (as init entries address it) of trailer cell `cell`.
+pub(in crate::lisp_host) fn dgen_tail_slot(total_memory_slots: usize, cell: usize) -> usize {
+    total_memory_slots + DGEN_STATE_REDZONE_SLOTS + cell
+}
+
+/// Trailer cell `cell` of a node state. `state[1]` holds the memory span the
+/// node was sized for (`dgen_total_state_slots`).
+unsafe fn dgen_tail_cell(state: *mut f32, cell: usize) -> *mut f32 {
+    let total_memory_slots = (*state.add(1)).max(0.0) as usize;
+    dgen_memory_ptr(state).add(dgen_tail_slot(total_memory_slots, cell))
 }
 
 pub(in crate::lisp_host) unsafe fn dgen_memory_ptr(state: *mut f32) -> *mut f32 {
@@ -225,6 +250,36 @@ pub(in crate::lisp_host) unsafe fn dgen_process_fn_from_state(state: *mut f32) -
     (pointer != 0).then(|| std::mem::transmute::<usize, DGenProcessFn>(pointer as usize))
 }
 
+/// Tail sleep for an opted-in DGen effect inside a graph. Returns `None`
+/// when the block was skipped (silence already emitted), else whether the
+/// block counts toward the quiet run. Any param or tensor write to the node
+/// restarts the run: the kernel's output may change with its state.
+unsafe fn dgen_sleep_or_count(state: *mut f32, inp: *const *mut f32, out: *const *mut f32, nframes: c_int) -> Option<bool> {
+    let (n_inputs, n_outputs) = crate::effects::silence::node_ports();
+    // Outside a graph the port counts are unknown; a zero-input effect is a
+    // generator, never a tail. (The graph hands a zero-input node a null
+    // input array, which the wrapper already never runs, so this guard is
+    // defensive.)
+    if n_inputs == 0 || n_outputs == 0 || *dgen_tail_cell(state, DGEN_TAIL_OPT_IN) <= 0.5 {
+        return Some(false);
+    }
+    let writes = f32::from_bits(crate::effects::silence::node_state_writes());
+    let seen = dgen_tail_cell(state, DGEN_TAIL_WRITES);
+    if (*seen).to_bits() != writes.to_bits() {
+        *seen = writes;
+        *dgen_tail_cell(state, DGEN_TAIL_QUIET) = 0.0;
+    }
+    let hold = (dgen_host_sample_rate(state) * crate::effects::tail_sleep::DEFAULT_HOLD_SECONDS)
+        .max((*state.add(1)).max(0.0));
+    let quiet = dgen_tail_cell(state, DGEN_TAIL_QUIET);
+    let input_silent = crate::effects::tail_sleep::ports_silent(inp, n_inputs, nframes.max(0) as usize);
+    if crate::effects::tail_sleep::asleep(quiet, input_silent, hold) {
+        crate::effects::silence::emit_node_outputs(out, nframes);
+        return None;
+    }
+    Some(input_silent)
+}
+
 pub(in crate::lisp_host) unsafe extern "C" fn dgenlisp_wrapper_process(
     inp: *const *mut f32,
     out: *const *mut f32,
@@ -243,15 +298,8 @@ pub(in crate::lisp_host) unsafe extern "C" fn dgenlisp_wrapper_process(
         if inp.is_null() || out.is_null() {
             return;
         }
-        let nf = nframes as usize;
         let input_count = (*s.add(3)).max(1.0) as usize;
-        for ch in 0..input_count.min(2) {
-            let in_ch = *inp.add(ch);
-            let out_ch = *out.add(ch);
-            if !in_ch.is_null() && !out_ch.is_null() {
-                std::ptr::copy_nonoverlapping(in_ch as *const f32, out_ch, nf);
-            }
-        }
+        crate::effects::silence::passthrough(inp, out, input_count.min(2), nframes);
         return;
     }
     if let Some(process_fn) = dgen_process_fn_from_state(s) {
@@ -259,6 +307,9 @@ pub(in crate::lisp_host) unsafe extern "C" fn dgenlisp_wrapper_process(
         if inp.is_null() || out.is_null() {
             return;
         }
+        let Some(counts_quiet) = dgen_sleep_or_count(s, inp, out, nframes) else {
+            return;
+        };
         let context = dgen_process_context_v1(dgen_host_sample_rate(s));
         process_fn(
             inp as *const *const f32,
@@ -271,6 +322,18 @@ pub(in crate::lisp_host) unsafe extern "C" fn dgenlisp_wrapper_process(
         // A negative `state[0]` is a probe code (see `probe_capture`); an
         // effect without probes skips capture on this plain state read.
         super::probe_capture::record_dgen_effect_probes(*s, process_fn as usize, out, nframes);
+        if counts_quiet {
+            // Only a silent-input block can extend the run, so only then is
+            // the output peak worth reading.
+            let nf = nframes.max(0) as usize;
+            let (_, n_outputs) = crate::effects::silence::node_ports();
+            let peak = (0..n_outputs)
+                .map(|port| crate::effects::tail_sleep::peak(&[*out.add(port) as *const f32], nf))
+                .fold(0.0, f32::max);
+            crate::effects::tail_sleep::note_block(dgen_tail_cell(s, DGEN_TAIL_QUIET), true, peak, nf);
+        } else if *dgen_tail_cell(s, DGEN_TAIL_OPT_IN) > 0.5 {
+            *dgen_tail_cell(s, DGEN_TAIL_QUIET) = 0.0;
+        }
     } else {
         // Passthrough: copy input to output
         let nf = nframes as usize;
@@ -359,5 +422,197 @@ pub(in crate::lisp_host) fn dgenlisp_vtable() -> NodeVTable {
         reset: None,
         migrate: None,
         ..NodeVTable::default()
+    }
+}
+
+#[cfg(test)]
+mod tail_sleep_tests {
+    use super::*;
+    use crate::audiograph as graph;
+    use std::sync::atomic::AtomicU32;
+
+    /// Kernel calls, so a test can tell a skipped block from a computed one.
+    static KERNEL_CALLS: AtomicU32 = AtomicU32::new(0);
+    /// 0 = declared silence, 1 = 1.0 at frame 0 (undeclared).
+    static FEED_MODE: AtomicU32 = AtomicU32::new(0);
+
+    /// A one-pole feedback "tail": y = x + 0.999 y, kept in memory cell 0.
+    unsafe extern "C" fn one_pole_process(
+        inp: *const *const f32,
+        out: *const *mut f32,
+        nframes: u32,
+        state: *mut c_void,
+        _context: *const DGenProcessContextV1,
+        _host: *const DGenHostServicesV1,
+    ) {
+        KERNEL_CALLS.fetch_add(1, Ordering::Relaxed);
+        let memory = state as *mut f32;
+        for frame in 0..nframes as usize {
+            *memory = *(*inp).add(frame) + 0.999 * *memory;
+            *(*out).add(frame) = *memory;
+        }
+    }
+
+    unsafe extern "C" fn feed_process(
+        _inp: *const *mut f32,
+        out: *const *mut f32,
+        nframes: c_int,
+        _state: *mut c_void,
+        _buffers: *mut c_void,
+    ) {
+        let lane = std::slice::from_raw_parts_mut(*out, nframes as usize);
+        if FEED_MODE.load(Ordering::Relaxed) == 0 {
+            crate::effects::silence::emit_port(0, lane);
+        } else {
+            lane.fill(0.0);
+            lane[0] = 1.0;
+        }
+    }
+
+    const TOTAL_MEMORY_SLOTS: usize = 2;
+    /// 1 s hold at 48 kHz in 64-frame blocks.
+    const HOLD_BLOCKS: usize = 750;
+
+    struct Rig {
+        lg: *mut graph::LiveGraph,
+        node: i32,
+    }
+
+    impl Rig {
+        fn new(label: &str, kernel: DGenProcessFn, inputs: i32, opted_in: bool) -> Self {
+            graph::initialize_engine_for_test(64, 48_000);
+            let label = CString::new(label).unwrap();
+            let lg = unsafe { graph::create_live_graph(32, 64, label.as_ptr(), 1) };
+            let mut init = vec![0.0f32; 10];
+            init[1] = TOTAL_MEMORY_SLOTS as f32;
+            init[2] = HEADER_CANARY;
+            init[3] = inputs as f32;
+            init[4] = 1.0;
+            init[5..9].copy_from_slice(&process_fn_pointer_chunks(kernel));
+            if opted_in {
+                init[9] = 1.0;
+                init.extend([dgen_tail_slot(TOTAL_MEMORY_SLOTS, DGEN_TAIL_OPT_IN) as f32, 1.0]);
+            }
+            let name = CString::new("dgen-node").unwrap();
+            let feed_name = CString::new("feed").unwrap();
+            let node = unsafe {
+                let node = graph::add_node(
+                    lg, dgenlisp_vtable(),
+                    dgen_total_state_slots(TOTAL_MEMORY_SLOTS) * std::mem::size_of::<f32>(),
+                    name.as_ptr(), inputs, 1, init.as_ptr().cast(), init.len() * std::mem::size_of::<f32>(),
+                );
+                assert!(node > 0);
+                if inputs > 0 {
+                    let feed = graph::add_node(
+                        lg,
+                        graph::NodeVTable { process: Some(feed_process), ..graph::NodeVTable::default() },
+                        4, feed_name.as_ptr(), 0, 1, std::ptr::null(), 0,
+                    );
+                    assert!(feed > 0 && graph::graph_connect(lg, feed, 0, node, 0));
+                }
+                assert!(graph::graph_connect(lg, node, 0, 0, 0));
+                node
+            };
+            Rig { lg, node }
+        }
+
+        /// One block; returns the output and whether the kernel ran.
+        fn render(&self, mode: u32) -> (Vec<f32>, bool) {
+            FEED_MODE.store(mode, Ordering::Relaxed);
+            let before = KERNEL_CALLS.load(Ordering::Relaxed);
+            let mut output = vec![f32::NAN; 64];
+            unsafe { graph::process_next_block(self.lg, output.as_mut_ptr(), 64) };
+            (output, KERNEL_CALLS.load(Ordering::Relaxed) != before)
+        }
+
+        fn write_param(&self, memory_cell: usize, value: f32) {
+            unsafe {
+                assert!(graph::params_push_wrapper(self.lg, graph::ParamMsg {
+                    idx: (HEADER_SLOTS + memory_cell) as u64, logical_id: self.node as u64, fvalue: value,
+                }));
+            }
+        }
+
+        /// Silent blocks until the kernel stops running; `None` if it never does.
+        fn blocks_until_sleep(&self, limit: usize) -> Option<usize> {
+            (0..limit).find(|_| {
+                let (output, ran) = self.render(0);
+                if !ran {
+                    assert!(output.iter().all(|v| *v == 0.0), "a sleeping effect outputs exact zeros");
+                }
+                !ran
+            })
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            unsafe { graph::destroy_live_graph(self.lg) };
+        }
+    }
+
+    #[test]
+    fn opted_in_dgen_effect_sleeps_after_its_tail_and_wakes_on_input() {
+        let rig = Rig::new("dgen-tail-sleep", one_pole_process, 1, true);
+        // An impulse rings out as 0.999^n; the kernel keeps rendering that
+        // tail until it has sat below -120 dB for the 1 s hold.
+        let (output, ran) = rig.render(1);
+        assert!(ran && output[0] == 1.0);
+        let mut expected = output[63];
+        let mut blocks = None;
+        for block in 0..2000 {
+            let (output, ran) = rig.render(0);
+            if !ran {
+                assert!(output.iter().all(|v| *v == 0.0), "a sleeping effect outputs exact zeros");
+                blocks = Some(block);
+                break;
+            }
+            for v in output {
+                expected *= 0.999;
+                assert!((v - expected).abs() <= 1e-6, "awake tail must render unchanged");
+            }
+        }
+        let blocks = blocks.expect("the decayed tail never slept");
+        // 0.999^n reaches 1e-6 after ~13.8k frames, then the 48k-frame hold.
+        assert!(blocks * 64 >= 13_000 + 48_000, "slept after only {blocks} blocks");
+        // Input wakes it in the same block with its state untouched.
+        let (output, ran) = rig.render(1);
+        assert!(ran && (output[0] - 1.0).abs() <= 1e-6, "wake block: {}", output[0]);
+        assert!(rig.render(0).1, "the fresh tail must render");
+    }
+
+    #[test]
+    fn a_param_write_wakes_a_sleeping_dgen_effect_and_restarts_its_hold() {
+        let rig = Rig::new("dgen-param-wake", one_pole_process, 1, true);
+        assert!(rig.render(1).1);
+        assert!(rig.blocks_until_sleep(2000).is_some());
+        assert!(!rig.render(0).1);
+        // Memory cell 1 is unused by the kernel, but the host cannot know
+        // that: any write may change what the kernel renders.
+        rig.write_param(1, 0.5);
+        assert!(rig.render(0).1, "a param write must wake the effect");
+        let again = rig.blocks_until_sleep(2000).expect("it sleeps again");
+        assert!(again + 1 >= HOLD_BLOCKS, "the hold restarted: slept after {again} blocks");
+    }
+
+    #[test]
+    fn dgen_effects_that_did_not_opt_in_never_sleep() {
+        let rig = Rig::new("dgen-no-opt-in", one_pole_process, 1, false);
+        assert!(rig.render(1).1);
+        assert_eq!(rig.blocks_until_sleep(3 * HOLD_BLOCKS), None);
+    }
+
+    #[test]
+    fn dgen_bypass_passes_declared_silence_without_running_the_kernel() {
+        let rig = Rig::new("dgen-bypass", one_pole_process, 1, false);
+        unsafe {
+            assert!(graph::params_push_wrapper(rig.lg, graph::ParamMsg {
+                idx: DGEN_ENABLED_PARAM_IDX as u64, logical_id: rig.node as u64, fvalue: 0.0,
+            }));
+        }
+        let (output, ran) = rig.render(1);
+        assert!(!ran && output[0] == 1.0 && output[1..].iter().all(|v| *v == 0.0));
+        let (output, ran) = rig.render(0);
+        assert!(!ran && output.iter().all(|v| *v == 0.0));
     }
 }

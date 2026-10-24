@@ -56,71 +56,126 @@ fn validate_samples(value: u64) -> Result<u32, String> {
     Ok(value as u32)
 }
 
-/// Remove exactly one optional top-level declaration without changing source
-/// positions of the remaining program (including UTF-8 byte offsets/newlines).
-/// Nested declarations are errors, not silently ignored metadata.
-pub(crate) fn prepare(source: &str, rate: u32, is_effect: bool) -> Result<(String, Option<u32>), String> {
-    if !source.contains(FORM) {
+/// Find exactly one optional top-level `(form …)` declaration of an audio
+/// effect and blank it out of the compiler's copy without changing source
+/// positions of the remaining program (including UTF-8 byte offsets and
+/// newlines). Nested or repeated declarations are errors, not silently
+/// ignored metadata. Returns the compiler source and the declaration's
+/// arguments, if there was one.
+fn take_declaration(source: &str, form: &str, is_effect: bool) -> Result<(String, Option<Vec<Expr>>), String> {
+    let error = |message: &str| format!("{form}: {message}");
+    if !source.contains(form) {
         return Ok((source.to_string(), None));
     }
     let tokens = Parser::new(source.to_string()).parse_spanned()
-        .map_err(|e| error(format!("cannot parse source: {e:?}")))?;
+        .map_err(|e| error(&format!("cannot parse source: {e:?}")))?;
     let forms = SpannedASTParser::new(tokens).parse()
-        .map_err(|e| error(format!("cannot parse source: {e:?}")))?;
+        .map_err(|e| error(&format!("cannot parse source: {e:?}")))?;
     let mut declaration = None;
     let mut pending: Vec<_> = forms.iter().map(|form| (form, true)).collect();
-    while let Some((form, top_level)) = pending.pop() {
-        if let ExprKind::List(items) = &form.kind {
-            if matches!(items.first(), Some(Expr { kind: ExprKind::Symbol(name), .. }) if name == FORM) {
+    while let Some((expr, top_level)) = pending.pop() {
+        if let ExprKind::List(items) = &expr.kind {
+            if matches!(items.first(), Some(Expr { kind: ExprKind::Symbol(name), .. }) if name == form) {
                 if !is_effect || !top_level {
                     return Err(error("declaration must be at the top level of an audio effect"));
                 }
-                if declaration.is_some() || items.len() != 2 {
-                    return Err(error("expected exactly one declaration with one expression"));
+                if declaration.is_some() {
+                    return Err(error("expected exactly one declaration"));
                 }
-                if rate == 0 {
-                    return Err(error("sample rate must be positive"));
-                }
-                let value = eval(&items[1], rate, 0)?;
-                if value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64 {
-                    return Err(error("result must be a nonnegative integer sample count; use an explicit rounding operation"));
-                }
-                declaration = Some((form.origin.primary_span.clone(), validate_samples(value as u64)?));
+                declaration = Some((expr.origin.primary_span.clone(), items[1..].to_vec()));
             } else {
                 pending.extend(items.iter().map(|item| (item, false)));
             }
         }
     }
-    let Some((span, samples)) = declaration else {
+    let Some((span, args)) = declaration else {
         return Ok((source.to_string(), None));
     };
     let mut compiler_source = source.as_bytes().to_vec();
     for byte in &mut compiler_source[span.start_byte..span.end_byte] {
         if *byte != b'\n' && *byte != b'\r' { *byte = b' '; }
     }
-    Ok((String::from_utf8(compiler_source).expect("replacement preserves UTF-8"), Some(samples)))
+    Ok((String::from_utf8(compiler_source).expect("replacement preserves UTF-8"), Some(args)))
 }
 
-pub(super) fn annotate_manifest(json: &str, samples: Option<u32>) -> Result<String, String> {
-    let Some(samples) = samples else { return Ok(json.to_string()); };
+/// Resolve and strip `(effect-latency <expr>)`.
+pub(crate) fn prepare(source: &str, rate: u32, is_effect: bool) -> Result<(String, Option<u32>), String> {
+    let (compiler_source, args) = take_declaration(source, FORM, is_effect)?;
+    let Some(args) = args else {
+        return Ok((compiler_source, None));
+    };
+    if args.len() != 1 {
+        return Err(error("expected exactly one declaration with one expression"));
+    }
+    if rate == 0 {
+        return Err(error("sample rate must be positive"));
+    }
+    let value = eval(&args[0], rate, 0)?;
+    if value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64 {
+        return Err(error("result must be a nonnegative integer sample count; use an explicit rounding operation"));
+    }
+    Ok((compiler_source, Some(validate_samples(value as u64)?)))
+}
+
+const TAIL_SLEEP_FORM: &str = "effect-tail-sleep";
+
+/// Resolve and strip `(effect-tail-sleep)`: the author's promise that the
+/// effect may stop running once its input is silent and its output has
+/// stayed below -120 dB for the hold (`effects::tail_sleep`). Only true for
+/// an effect with no wet state that persists hidden at mix 0, no
+/// self-generated sound, and no free-running modulation, since none of that
+/// shows in the output it is judged by.
+pub(crate) fn prepare_tail_sleep(source: &str, is_effect: bool) -> Result<(String, bool), String> {
+    let (compiler_source, args) = take_declaration(source, TAIL_SLEEP_FORM, is_effect)?;
+    match args {
+        None => Ok((compiler_source, false)),
+        Some(args) if args.is_empty() => Ok((compiler_source, true)),
+        Some(_) => Err(format!("{TAIL_SLEEP_FORM}: takes no arguments")),
+    }
+}
+
+pub(super) fn annotate_manifest(json: &str, samples: Option<u32>, tail_sleep: bool) -> Result<String, String> {
+    if samples.is_none() && !tail_sleep { return Ok(json.to_string()); }
     let mut manifest: serde_json::Value = serde_json::from_str(json)
         .map_err(|e| error(format!("invalid compiler manifest: {e}")))?;
     let object = manifest.as_object_mut().ok_or_else(|| error("manifest must be an object"))?;
     if object.contains_key("eseqEffect") {
         return Err(error("compiler manifest uses reserved host metadata namespace eseqEffect"));
     }
-    object.insert("eseqEffect".into(), serde_json::json!({"version": 1, "latencySamples": samples}));
+    let mut metadata = serde_json::json!({"version": 1});
+    if let Some(samples) = samples { metadata["latencySamples"] = samples.into(); }
+    if tail_sleep { metadata["tailSleep"] = true.into(); }
+    object.insert("eseqEffect".into(), metadata);
     serde_json::to_string(&manifest).map_err(|e| error(e))
 }
 
-pub(super) fn parse_manifest(value: &serde_json::Value) -> Result<Option<u32>, String> {
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Metadata {
+    version: u32,
+    #[serde(default)]
+    latency_samples: Option<u64>,
+    #[serde(default)]
+    tail_sleep: bool,
+}
+
+fn parse_metadata(value: &serde_json::Value) -> Result<Option<Metadata>, String> {
     let Some(metadata) = value.get("eseqEffect") else { return Ok(None); };
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields, rename_all = "camelCase")]
-    struct Metadata { version: u32, latency_samples: u64 }
     let metadata: Metadata = serde_json::from_value(metadata.clone()).map_err(|e| error(e))?;
     if metadata.version != 1 { return Err(error("unsupported host metadata version")); }
-    validate_samples(metadata.latency_samples).map(Some)
+    Ok(Some(metadata))
+}
+
+pub(super) fn parse_manifest(value: &serde_json::Value) -> Result<Option<u32>, String> {
+    match parse_metadata(value)?.and_then(|metadata| metadata.latency_samples) {
+        Some(samples) => validate_samples(samples).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Whether the manifest carries the `(effect-tail-sleep)` opt-in.
+pub(super) fn parse_tail_sleep(value: &serde_json::Value) -> Result<bool, String> {
+    Ok(parse_metadata(value)?.is_some_and(|metadata| metadata.tail_sleep))
 }
 
 #[cfg(test)]
@@ -136,7 +191,7 @@ mod tests {
             assert_eq!(prepared.len(), source.len());
             assert_eq!(prepared.find("(out"), source.find("(out"));
             assert!(prepared.starts_with("; é metadata\n"));
-            let json = annotate_manifest("{}", latency).unwrap();
+            let json = annotate_manifest("{}", latency, false).unwrap();
             assert_eq!(parse_manifest(&serde_json::from_str(&json).unwrap()).unwrap(), latency);
         }
         assert_eq!(prepare("(effect-latency 0)", 48000, true).unwrap().1, Some(0));
@@ -192,6 +247,46 @@ mod tests {
             serde_json::json!({"version":1,"latencySamples":1.5}),
             serde_json::json!({"version":1,"latencySamples":16384})] {
             assert!(parse_manifest(&serde_json::json!({"eseqEffect":metadata})).is_err());
+        }
+    }
+
+    #[test]
+    fn tail_sleep_opt_in_is_stripped_and_carried_in_the_manifest() {
+        let source = "; opt in\n(effect-tail-sleep)\n(out (in 1) 1)";
+        let (prepared, tail_sleep) = prepare_tail_sleep(source, true).unwrap();
+        assert!(tail_sleep);
+        assert_eq!(prepared.len(), source.len());
+        assert!(!prepared.contains("effect-tail-sleep"));
+        assert_eq!(prepared.find("(out"), source.find("(out"));
+        assert!(!prepare_tail_sleep("(out (in 1) 1)", true).unwrap().1);
+        for bad in ["(effect-tail-sleep 1)", "(effect-tail-sleep) (effect-tail-sleep)",
+            "(defmacro m () (effect-tail-sleep))"] {
+            assert!(prepare_tail_sleep(bad, true).is_err(), "{bad}");
+        }
+        assert!(prepare_tail_sleep("(effect-tail-sleep)", false).is_err());
+        for (latency, tail_sleep) in [(None, true), (Some(7), true), (Some(7), false)] {
+            let json: serde_json::Value =
+                serde_json::from_str(&annotate_manifest("{}", latency, tail_sleep).unwrap()).unwrap();
+            assert_eq!(parse_manifest(&json).unwrap(), latency);
+            assert_eq!(parse_tail_sleep(&json).unwrap(), tail_sleep);
+        }
+        assert!(!parse_tail_sleep(&serde_json::json!({})).unwrap());
+    }
+
+    #[test]
+    fn compiled_tail_sleep_opt_in_reaches_the_node_init_message() {
+        use crate::lisp_host::{DGenCompileKind, DGenSourceOrigin, dylib_cache::DylibCacheManager};
+        let dir = tempfile::tempdir().unwrap();
+        for (source, expected) in [("(effect-tail-sleep)\n(out (in 1) 1)", true), ("(out (in 1) 1)", false)] {
+            let manager = DylibCacheManager::new(dir.path().to_path_buf());
+            let result = manager.acquire(DGenCompileKind::Effect, DGenSourceOrigin::Custom,
+                source, 48000, None).unwrap();
+            assert_eq!(result.manifest.tail_sleep, expected, "{source}");
+            let init = super::super::dgen_manifest::build_init_message(0, &result.manifest, None);
+            let opt_in = super::super::dgen_ffi::dgen_tail_slot(
+                result.manifest.total_memory_slots, super::super::dgen_ffi::DGEN_TAIL_OPT_IN) as f32;
+            let has_entry = init[10..].chunks(2).any(|pair| pair == [opt_in, 1.0]);
+            assert_eq!(has_entry, expected, "{source}");
         }
     }
 }

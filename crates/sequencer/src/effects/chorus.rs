@@ -247,6 +247,12 @@ struct State {
     gain: f64,
     first: bool,
     filters: [Filter; 4],
+    /// Frames the input has been silent and the delay ring and wet taps
+    /// below -120 dB (`effects::tail_sleep`). Runtime only, never a param.
+    quiet: f32,
+    /// A settled bypass skipped the DSP and cleared the ring, so re-enabling
+    /// starts from silence rather than from audio recorded before bypass.
+    bypass_idle: bool,
 }
 
 fn capacity(sample_rate: f32) -> usize {
@@ -304,6 +310,8 @@ unsafe extern "C" fn init(state: *mut c_void, sample_rate: c_int, _: c_int, _: *
             gain: 1.0,
             first: true,
             filters: [Filter::default(); 4],
+            quiet: 0.0,
+            bypass_idle: false,
         },
     );
     reset(state);
@@ -314,6 +322,7 @@ unsafe extern "C" fn reset(state: *mut c_void) {
     s.phase = 0.0;
     s.first = true;
     s.filters = [Filter::default(); 4];
+    s.quiet = 0.0;
     std::ptr::write_bytes(ring(state), 0, s.capacity);
 }
 unsafe extern "C" fn migrate(new: *mut c_void, old: *const c_void) {
@@ -347,7 +356,35 @@ unsafe extern "C" fn process(
     let sr = s.sample_rate as f64;
     let alpha = 1.0 - (-1.0 / (0.01 * sr)).exp();
     let enabled = bounded(s.enabled, 0.0, 1.0, 1.0) >= 0.5;
-    for frame in 0..frames as usize {
+    let nf = frames as usize;
+    // A settled bypass (wet faded out, unity gain) outputs exactly the
+    // sanitized dry signal, so skip the DSP. The ring is cleared once on the
+    // way in so a later re-enable never fades in audio from before bypass.
+    if !enabled && !s.first && s.wet == 0.0 && s.gain == 1.0 && !super::tail_sleep::force_awake(super::tail_sleep::FORCE_NO_BYPASS_SKIP) {
+        if !s.bypass_idle {
+            s.filters = [Filter::default(); 4];
+            std::ptr::write_bytes(buffer, 0, s.capacity);
+            // A cleared ring has nothing left to drain.
+            s.quiet = s.capacity as f32;
+            s.bypass_idle = true;
+        }
+        super::silence::passthrough_sanitized(inp, out, 2, frames);
+        return;
+    }
+    s.bypass_idle = false;
+    // Tail sleep: silent input and a ring that has held only decayed
+    // residue for a whole ring length. The LFO phase and write head still
+    // advance, so a wake matches a never-sleeping chorus to within that
+    // residue.
+    let Some(counts_quiet) =
+        super::tail_sleep::sleep_or_count(&s.quiet, inp, 2, out, 2, frames, s.capacity as f32, true)
+    else {
+        s.phase = (s.phase + s.smooth[RATE] / sr * nf as f64).fract();
+        s.write = (s.write + nf) & (s.capacity - 1);
+        return;
+    };
+    let mut internal_peak = 0.0f32;
+    for frame in 0..nf {
         let dry = [*(*inp).add(frame), *(*inp.add(1)).add(frame)];
         let dry = dry.map(|x| if x.is_finite() { x } else { 0.0 });
         let sources = std::array::from_fn(|slot| *(*inp.add(2 + slot)).add(frame));
@@ -379,7 +416,9 @@ unsafe extern "C" fn process(
         let coefficient = |hz: f64| (std::f64::consts::PI * hz.min(sr * 0.45) / sr).tan();
         let mono = 0.5 * (dry[0] as f64 + dry[1] as f64);
         let high = s.filters[0].tick(mono, coefficient(s.smooth[HP]), true);
-        *buffer.add(s.write) = s.filters[1].tick(high, coefficient(s.smooth[LP]), false) as f32;
+        let written = s.filters[1].tick(high, coefficient(s.smooth[LP]), false) as f32;
+        *buffer.add(s.write) = written;
+        internal_peak = internal_peak.max(written.abs());
         let wet_g = coefficient(s.smooth[WET_LP]);
         for ch in 0..2 {
             let offset = (s.smooth[PHASE] / 360.0).fract();
@@ -387,6 +426,7 @@ unsafe extern "C" fn process(
             let delay = (s.smooth[BASE] + s.smooth[DEPTH] * triangle(phase)) * 0.001 * sr;
             let tap = s.read(buffer, delay);
             let wet = s.filters[2 + ch].tick(tap, wet_g, false);
+            internal_peak = internal_peak.max((wet as f32).abs());
             *(*out.add(ch)).add(frame) = if s.wet == 0.0 && s.gain == 1.0 {
                 dry[ch]
             } else {
@@ -396,6 +436,7 @@ unsafe extern "C" fn process(
         s.phase = (s.phase + s.smooth[RATE] / sr).fract();
         s.write = (s.write + 1) & (s.capacity - 1);
     }
+    super::tail_sleep::note_block(&mut s.quiet, counts_quiet, internal_peak, nf);
 }
 
 pub fn vtable() -> NodeVTable {
