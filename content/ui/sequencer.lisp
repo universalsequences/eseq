@@ -26,6 +26,8 @@
 
 ;; Drum rack v2: the pad grid's note geometry (docs/drum-rack-v2-spec.md).
 (import eseq.drum-rack-v2)
+;; Bank-scoped display (docs/rig-spec.md §9).
+(import eseq.scene-banks :refer (scene-viewed-bank track-used-in-bank? used-in-viewed-bank?))
 
 (import eseq.seq-panels)
 ;; Expr cards' edit buffers (the node bay's edit button, the error dot).
@@ -412,6 +414,18 @@
                     (set! t.expanded expanded))
                   (put-editor-state t (track-param-mode t) (track-cursor t))))
       (tracks))
+    nil))
+
+;; Bank-scoped display (docs/rig-spec.md §9): when the viewed bank hides the
+;; selected track (a bank switch, "Show all tracks" off, an edit that left
+;; the bank without it), the nearest track it uses takes the selection, so
+;; nothing edits a row the user cannot see. Inert while the selection shows.
+(effect-buffer "*bank-selection-sync*"
+  (let ((t selection.track))
+    (when (and t (not (used-in-viewed-bank? t)))
+      (let ((next (eseq.drum-rack-v2/nearest-shown-track t)))
+        (when (and next (not (= next t)))
+          (select-track-for-edit next))))
     nil))
 
 (def set-track-param-mode (t mode)
@@ -1861,13 +1875,21 @@
       :on-change (lambda (value) (set-inlet! i value :all (edit-all? p)))
       :width 4.6 :height 1.0)))
 
-;; Track-typed inlets (grab's `source`) pick from the track list by name.
+;; Track-typed inlets (grab's `source`) pick from the track list by name:
+;; the tracks the viewed bank uses (docs/rig-spec.md §9), plus the one the
+;; inlet names now so the menu can show it. The pick maps back by label over
+;; every track, so hidden tracks keep their indices.
 (def lane-track-option (index)
   (let ((t (track-at index)))
     (str (+ index 1) " " (if t t.name ""))))
 
 (def lane-track-options ()
   (map (lambda (t) (lane-track-option t.index)) (tracks)))
+
+(def lane-track-menu (current)
+  (let ((viewed (scene-viewed-bank)))
+    (map (lambda (t) (lane-track-option t.index))
+      (filter (lambda (t) (or (= t.index current) (track-used-in-bank? t viewed))) (tracks)))))
 
 (def lane-strip-track-inlet-row (p i)
   (h-stack :width :fill :gap 0.3 :align :center
@@ -1879,7 +1901,7 @@
       :bg-color :mixer-strip-bg
       :badge-color :mixer-strip-selected-bg
       :border-color :mixer-strip-selected-bg
-      :options (lane-track-options)
+      :options (lane-track-menu (floor i.value))
       :on-change (lambda (label)
         (set-inlet! i (max 0 (index-of (lane-track-options) label)) :all (edit-all? p)))
       :width 7.5 :height 1.1 :font-size 8.5)))
@@ -3309,7 +3331,43 @@
               (track-header t bare))
             (track-grid t)
             (box :flex 1 :width :fill :height 0.1 :bg :transparent)
+            (track-device-line t)
             (track-actions t))))))
+
+;; ── Device line (docs/rig-spec.md §9) ──
+;; An Instrument Rack track's slots the playing scene enables (slot `enabled`
+;; is the playing scene's, §3.2): the first one's name, "+N" for the others,
+;; "No slot on" for none; nil for any other track, whose name badge already
+;; says what it plays. A click selects the track and shows its slot list in
+;; *fx*, the Instrument Rack panel (§4 recall).
+(def device-line-text (t)
+  (when (= t.instrument-type "rack")
+    (let ((rack (first t.devices))
+          (on (if rack (filter (lambda (d) d.enabled) rack.devices) (list)))
+          (n (len on)))
+      (if (= n 0)
+        "No slot on"
+        (let ((d (first on)))
+          (str (clip-label d.display-name 10) (if (> n 1) (str " +" (- n 1)) "")))))))
+
+(def track-device-line (t)
+  (if (= t.instrument-type "rack")
+    (subtree :key (str "seqv-device-line-" t.tid)
+      (let ((text (device-line-text t)))
+        (box :key (str "track-device-line-" t.tid)
+          :debug-name "track-device-line"
+          :width 7 :height 1.2 :padding 0
+          :background-color :transparent
+          :on-click (lambda (event)
+            (track-control-click event t
+              (lambda ()
+                (select-track-for-edit t)
+                (eseq.seq-panels/seq-show-fx-lower-panel))))
+          (label text
+            :key (str "track-device-line-label-" t.tid)
+            :width 7 :height 1.2 :font-size 9 :h-align :right :v-align :center
+            :color :dim :bg :transparent))))
+    (nothing)))
 
 ;; ── Track groups ────────────────────────────────────────────────────────
 ;; Regular groups and drum racks share one nested block: a header row owns the
@@ -3748,7 +3806,7 @@
             (each (eseq.drum-rack-v2/shown-members g) |m|
               (subtree :key (str "sequencer-track-" m.tid)
                 (group-member-row g m)))
-            (each g.racks |child|
+            (each (eseq.drum-rack-v2/bank-racks g) |child|
               (subtree :key (str "sequencer-rack-" child.gid)
                 (group-block child)))))))))
 

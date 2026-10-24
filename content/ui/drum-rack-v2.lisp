@@ -17,13 +17,17 @@
 
 (import eseq.kinds :refer (tracks groups project set-kit-parked! kit-bank-state))
 (import eseq.view-kit :refer (index-of listed?))
-(import eseq.scene-banks :refer (scene-viewed-bank scene-viewed-bank-label))
+(import eseq.scene-banks :refer (scene-viewed-bank scene-viewed-bank-label
+                                 track-used-in-bank? group-used-in-bank?))
 
 (export rack-of-bus
         selected-bus-rack
         rack-of-track
         render-items
         shown-members
+        bank-members
+        bank-racks
+        nearest-shown-track
         visible-track-order
         mixer-visible-track-order
         track-relative
@@ -91,9 +95,17 @@
 ;; The top-level rows in order: `(dict :kind "track" :track t)` for a loose
 ;; track, `(dict :kind "group" :group g)` for a top-level group. The grid
 ;; leaves collapsed loose tracks out; the mixer (`collapsed-tracks` true)
-;; draws them as narrow badges.
+;; draws them as narrow badges. Both leave out what the viewed bank does not
+;; use (docs/rig-spec.md §9; eseq.scene-banks).
 (def render-items (collapsed-tracks)
-  (let ((top (filter (lambda (g) (not g.parent)) (groups)))
+  (render-items-in collapsed-tracks (scene-viewed-bank) true))
+
+;; render-items over bank `viewed`; `scoped` false keeps the tracks and
+;; groups the bank hides (the structural order).
+(def render-items-in (collapsed-tracks viewed scoped)
+  (let ((top (filter (lambda (g) (and (not g.parent)
+                                      (or (not scoped) (group-used-in-bank? g viewed))))
+                     (groups)))
         (anchored (map (lambda (g) (dict :group g :anchor (group-anchor g))) top))
         (group-item (lambda (ga) (dict :kind "group" :group (get ga :group)))))
     (append
@@ -101,35 +113,49 @@
         (let ((hit (first (filter (lambda (ga) (= (get ga :anchor) t.index)) anchored))))
           (if hit
             (append acc (list (group-item hit)))
-            (if (or t.group (and t.collapsed (not collapsed-tracks)))
+            (if (or t.group (and t.collapsed (not collapsed-tracks))
+                    (and scoped (not (track-used-in-bank? t viewed))))
               acc
               (append acc (list (dict :kind "track" :track t))))))
         (list)
         (tracks))
       (map group-item (filter (lambda (ga) (< (get ga :anchor) 0)) anchored)))))
 
+;; Group g's member tracks the viewed bank uses, and its child racks it
+;; shows (the mixer's group container).
+(def bank-members (g)
+  (let ((viewed (scene-viewed-bank)))
+    (filter (lambda (m) (track-used-in-bank? m viewed)) g.tracks)))
+
+(def bank-racks (g)
+  (let ((viewed (scene-viewed-bank)))
+    (filter (lambda (r) (group-used-in-bank? r viewed)) g.racks)))
+
 ;; Group g's member tracks the grid shows: collapsed ones hide exactly as
-;; loose ones do.
+;; loose ones do, and so do those the viewed bank does not use.
 (def shown-members (g)
-  (filter (lambda (m) (not m.collapsed)) g.tracks))
+  (filter (lambda (m) (not m.collapsed)) (bank-members g)))
 
 ;; Group g's track rows in the order its block draws them: its members, then
 ;; each rack drawn inside it. `respect-collapse`: none while g is collapsed;
-;; `hide-collapsed`: collapsed members left out. With neither, the structural
-;; order, hidden rows included (where a hidden selection sits).
-(def group-track-order (g respect-collapse hide-collapsed)
+;; `hide-collapsed`: collapsed members left out; `scoped`: what the viewed
+;; bank does not use left out. With none, the structural order, hidden rows
+;; included (where a hidden selection sits).
+(def group-track-order (g respect-collapse hide-collapsed scoped)
   (if (and respect-collapse g.collapsed)
     (list)
     (reduce |acc child|
-      (append acc (group-track-order child respect-collapse hide-collapsed))
-      (if hide-collapsed (shown-members g) g.tracks)
-      g.racks)))
+      (append acc (group-track-order child respect-collapse hide-collapsed scoped))
+      (if hide-collapsed
+        (shown-members g)
+        (if scoped (bank-members g) g.tracks))
+      (if scoped (bank-racks g) g.racks))))
 
-(def flatten-track-order (items respect-collapse hide-collapsed)
+(def flatten-track-order (items respect-collapse hide-collapsed scoped)
   (reduce |acc item|
     (append acc
       (if (= (get item :kind) "group")
-        (group-track-order (get item :group) respect-collapse hide-collapsed)
+        (group-track-order (get item :group) respect-collapse hide-collapsed scoped)
         (list (get item :track))))
     (list)
     items))
@@ -138,12 +164,17 @@
 ;; range, the UP / DOWN keys). Group headers and buses are deliberately
 ;; absent: they retain their click-only selection path.
 (def visible-track-order ()
-  (flatten-track-order (render-items false) true true))
+  (flatten-track-order (render-items false) true true true))
 
 ;; The mixer's: individually collapsed tracks still draw (as narrow badges);
 ;; only a collapsed group removes tracks from its visible order.
 (def mixer-visible-track-order ()
-  (flatten-track-order (render-items true) true false))
+  (flatten-track-order (render-items true) true false true))
+
+;; Every track row in structural order, collapsed and bank-hidden ones
+;; included.
+(def structural-track-order ()
+  (flatten-track-order (render-items-in true nil false) false false false))
 
 ;; The visible track `delta` rows from track t, wrapping, or nil when no row
 ;; is visible. When t is hidden, walk from its position in the structural row
@@ -157,7 +188,7 @@
       (let ((at (index-of visible t)))
         (if (>= at 0)
           (nth visible (mod (+ at delta shown) shown))
-          (let ((structural (flatten-track-order (render-items true) false false))
+          (let ((structural (structural-track-order))
                 (size (len structural))
                 (from (index-of structural t)))
             (if (< from 0)
@@ -168,6 +199,30 @@
                       (when (listed? candidate visible) candidate)))
                 nil
                 (range 1 (+ size 1))))))))))
+
+;; The track nearest t in structural order that the viewed bank uses (the
+;; next one first on a tie; collapsed rows count), t itself when the bank
+;; uses it, nil when it uses none: where the selection goes when the viewed
+;; bank hides t.
+(def nearest-shown-track (t)
+  (let ((visible (flatten-track-order (render-items true) false false true)))
+    (if (listed? t visible)
+      t
+      (let ((structural (structural-track-order))
+            (size (len structural))
+            (from (index-of structural t)))
+        (if (< from 0)
+          (first visible)
+          (reduce |found distance|
+            (or found
+                (let ((after (+ from distance))
+                      (before (- from distance)))
+                  (or (when (< after size)
+                        (let ((c (nth structural after))) (when (listed? c visible) c)))
+                      (when (>= before 0)
+                        (let ((c (nth structural before))) (when (listed? c visible) c))))))
+            nil
+            (range 1 (+ size 1))))))))
 
 ;; ── Rack clips (docs/rack-clips-and-break-kits-spec.md §2-§4, §6) ────────
 ;; Whether rack g plays something in scene s: a clip of its bank names the

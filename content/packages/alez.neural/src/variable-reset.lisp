@@ -47,7 +47,7 @@
                            set-process-enabled! set-inlet! add-process! remove-process! bind-port!
                            clear-port! graph-quantize-options graph-max-poly-selection-options))
 (import eseq.view-kit :refer (rgb-part index-of nothing named))
-(import eseq.graph-kit :refer (route-tracks route-track route-label node-route-label set-route-label!
+(import eseq.graph-kit :refer (route-tracks route-menu-tracks route-track route-label node-route-label set-route-label!
                                weight-rows set-weight! column res-options set-param-on-nodes!))
 
 (export gvr-panel gvr-init-ring-defaults gvr-expand-node gvr-map-arm gvr-jakis gvr-route-menu
@@ -93,7 +93,7 @@
 
 ;; The tracks graph g's nodes route to, as route menu labels.
 (def gvr-route-tracks-labels (g)
-  (map (lambda (t) (route-label g t)) (route-tracks g)))
+  (map (lambda (t) (route-label g t)) (route-menu-tracks g)))
 
 ;; The jakis graph g's nodes can gate, as (dict :id :label): the generators
 ;; of g's owner whose instance is a jaki.

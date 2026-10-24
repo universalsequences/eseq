@@ -53,6 +53,8 @@ mod slot_enable;
 pub use slot_enable::*;
 mod kit_parking;
 pub use kit_parking::*;
+mod bank_usage;
+pub use bank_usage::*;
 mod track_registry;
 pub use track_registry::*;
 mod rack_macro;

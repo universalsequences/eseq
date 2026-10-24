@@ -1154,6 +1154,7 @@
          ;; The arrangement.
          (clips     (list-of clip) :doc "The clips on the track's arrangement lane, in time order")
          (cells     (list-of cell) :doc "The track's patterns (the mixer's clip grid), by pattern id")
+         (used-banks (list-of bank) :doc "The banks with a scene that uses the track: one that gives it a pattern cell (steps or none), or for a kit's pad one that points at one of the kit's clips and does not switch the kit off; empty when no scene does. Bank-scoped views hide a track the viewed bank does not use (docs/rig-spec.md §9, eseq.scene-banks/used-in-viewed-bank?)")
          (governed  :int    :doc "take-none, take-governed (a take plays on the lane: steps dimmed and locked) or take-latched (a take lane the performer latched away)")
          (latched   :bool   :set set-track-latched
                     :doc "Latched away from the song by a manual launch; set false to hand the lane back to the song")
@@ -1378,7 +1379,8 @@
          (parked    :bool   :doc "A drum rack the playing scene switches off: its pads get no triggers and its sequencers do not run")
          (parked-banks (list-of bank) :doc "The banks whose every scene switches this drum rack off")
          (mixed-banks (list-of bank) :doc "The banks where some scenes switch this drum rack off and others do not")
-         (unused    :bool   :doc "A drum rack every scene switches off (listed for purge, never deleted for you)")))
+         (unused    :bool   :doc "A drum rack every scene switches off (listed for purge, never deleted for you)")
+         (used-banks (list-of bank) :doc "The banks with a scene that uses the group: a drum rack where it plays (a scene points at one of its clips and does not switch it off), a plain group where any member or child rack is used (docs/rig-spec.md §9)")))
 
 ;; A drum rack pad: (nth g.pads 0). Keyed by its member track, so moving the
 ;; pad to another note (a swap included) or reordering keeps the instance.

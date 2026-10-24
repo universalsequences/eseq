@@ -35,6 +35,7 @@
 (import alez.jaki.chords)
 (import eseq.view-kit :refer (color-rgba))
 (import eseq.kinds :refer (tracks groups generator-of generator-mark-named generator-mark-of))
+(import eseq.scene-banks :refer (scene-viewed-bank track-used-in-bank?))
 
 (export jk-panel)
 
@@ -212,6 +213,25 @@
       (if (and (number? route) (>= route 0) (< route n))
         (+ route 1)
         0))))
+
+;; The routes row `row`'s menu lists: on a rack its pads all (they follow
+;; the kit's on/off together); on the project the tracks the viewed bank
+;; uses, plus the one the row plays now (docs/rig-spec.md §9). A pick maps
+;; back by label over every route (jk-route-of-label), so hidden tracks keep
+;; their indices.
+(def jk-menu-routes (self routes row)
+  (if (number? self.owner)
+    routes
+    (let ((viewed (scene-viewed-bank))
+          (current (get row :route)))
+      (filter (lambda (t) (or (= t.index current) (track-used-in-bank? t viewed))) routes))))
+
+;; Row `row`'s option in the menu over `menu` (jk-menu-routes of `routes`).
+(def jk-menu-index (routes menu row)
+  (if (jk-chords-row? row)
+    (+ 1 (len menu))
+    (let ((at (jk-route-index row (len routes))))
+      (if (= at 0) 0 (+ 1 (max -1 (jk-index-of menu (nth routes (- at 1)))))))))
 
 ;; a dropdown label back to a route: Off -1, a track its index, Chords -2
 (def jk-route-of-label (self label)
@@ -474,8 +494,9 @@
           :h-align :center :color (if live :foreground :dim) :bg :transparent)
         (dropdown
           :key (jk-key k (str "jaki-route-" index))
-          :value-index (jk-route-index row (len routes))
-          :options (jk-route-options routes)
+          :value-index (let ((menu (jk-menu-routes self routes row)))
+                         (jk-menu-index routes menu row))
+          :options (jk-route-options (jk-menu-routes self routes row))
            :bg-color :mixer-strip-bg
           :width 8 :height jk-row-height :font-size 9
           :on-change (lambda (label)

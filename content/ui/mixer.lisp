@@ -31,7 +31,8 @@
 (import eseq.effects.param-controls :as pc)
 ;; Shared scene-bank view state: the clip grid below shows only the bank the
 ;; transport strip is viewing (scene-banks spec 10.1).
-(import eseq.scene-banks :refer (scene-viewed-bank scene-viewed-bank-label clip-in-viewed-bank?))
+(import eseq.scene-banks :refer (scene-viewed-bank scene-viewed-bank-label clip-in-viewed-bank?
+                                 track-used-in-bank?))
 (import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of prop-if
                               rgb-part color-rgba track-color-part))
 (import eseq.kinds :refer (track tracks buses groups routes graphs selection master project
@@ -1494,9 +1495,11 @@
   (let ((all (buses)))
     (append (filter (lambda (b) (not (main-bus? b))) all) (filter main-bus? all))))
 
-;; The tracks, then the buses, as LEFT / RIGHT walk them.
+;; The tracks the viewed bank uses, then the buses, as LEFT / RIGHT walk
+;; them.
 (def channels ()
-  (append (tracks) (display-buses)))
+  (let ((viewed (scene-viewed-bank)))
+    (append (filter (lambda (t) (track-used-in-bank? t viewed)) (tracks)) (display-buses))))
 
 (def current-channel ()
   (let ((bi eseq.seq-core-state/selected-bus)
@@ -1861,13 +1864,14 @@
           (v-stack :gap 0.0
             (box :width :fill :height 0.85 :bg :transparent)
             (h-stack :gap 0.1
-              (each g.tracks |t|
+              ;; Only what the viewed bank uses (docs/rig-spec.md §9).
+              (each (eseq.drum-rack-v2/bank-members g) |t|
                 (subtree :key (str "mixer-v2-track-" t.index)
                   (track-strip-of t)))
               ;; Child racks draw as their own container inside this block —
               ;; collapsed, that is a single header strip; expanded, the rack
               ;; header plus its members (docs/drum-rack-v2-spec.md).
-              (each g.racks |child|
+              (each (eseq.drum-rack-v2/bank-racks g) |child|
                 (subtree :key (str "mixer-v2-group-" child.gid)
                   (group-container child))))))))))
 

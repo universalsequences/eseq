@@ -560,6 +560,7 @@ mod generator;
 mod graph;
 mod graph_demos_view;
 mod kit_parking_view;
+mod bank_scoped_view;
 mod lanes;
 mod mixer;
 mod mixer_view;

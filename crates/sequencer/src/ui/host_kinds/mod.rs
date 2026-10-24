@@ -106,6 +106,7 @@ mod devices;
 mod events;
 mod generators;
 mod kit_parking;
+mod bank_usage;
 mod graphs;
 mod lanes;
 mod live;
@@ -343,6 +344,8 @@ pub(crate) mod f {
     pub(crate) const TRACK_SETTING_LOCKS: FieldKey = (TRACK, "setting-locks");
     pub(crate) const TRACK_CLIPS: FieldKey = (TRACK, "clips");
     pub(crate) const TRACK_CELLS: FieldKey = (TRACK, "cells");
+    /// The banks with a scene that uses the track (docs/rig-spec.md §9).
+    pub(crate) const TRACK_USED_BANKS: FieldKey = (TRACK, "used-banks");
     pub(crate) const TRACK_GOVERNED: FieldKey = (TRACK, "governed");
     pub(crate) const TRACK_LATCHED: FieldKey = (TRACK, "latched");
     pub(crate) const TRACK_PAD: FieldKey = (TRACK, "pad");
@@ -1022,6 +1025,8 @@ pub(crate) mod f {
     pub(crate) const GROUP_PARKED_BANKS: FieldKey = (GROUP, "parked-banks");
     pub(crate) const GROUP_MIXED_BANKS: FieldKey = (GROUP, "mixed-banks");
     pub(crate) const GROUP_UNUSED: FieldKey = (GROUP, "unused");
+    /// The banks with a scene that uses the group (docs/rig-spec.md §9).
+    pub(crate) const GROUP_USED_BANKS: FieldKey = (GROUP, "used-banks");
 
     pub(crate) const DEVICE_TRACK: FieldKey = (DEVICE, "track");
     pub(crate) const DEVICE_BUS: FieldKey = (DEVICE, "bus");
@@ -1390,6 +1395,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     // shared latch mask.
     (f::TRACK_CLIPS, "(list-of clip)", Model),
     (f::TRACK_CELLS, "(list-of cell)", Model),
+    // Bank-scoped display (`bank_usage`), when the scenes moved.
+    (f::TRACK_USED_BANKS, "(list-of bank)", Model),
     (f::TRACK_GOVERNED, ":int", Model),
     (f::TRACK_LATCHED, ":bool", Live),
     // Drum racks (`racks`): the pads, grooves and pool at the rack sync
@@ -1863,6 +1870,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::GROUP_PARKED_BANKS, "(list-of bank)", Model),
     (f::GROUP_MIXED_BANKS, "(list-of bank)", Model),
     (f::GROUP_UNUSED, ":bool", Model),
+    (f::GROUP_USED_BANKS, "(list-of bank)", Model),
     (f::TRANSPORT_PLAYING, ":bool", Live),
     (f::TRANSPORT_RECORDING, ":bool", Live),
     (f::TRANSPORT_SCENE, "scene", Model),
@@ -2807,6 +2815,9 @@ pub(crate) struct HostKinds {
     racks: RackState,
     /// The kits' on/off per bank feed (`kit_parking`).
     kit_parking_key: Option<kit_parking::KitParkingKey>,
+    /// The bank-scoped display feed (`bank_usage`) and its recompute count.
+    bank_usage_key: Option<bank_usage::BankUsageKey>,
+    bank_usage_passes: u64,
     /// Devices beyond the track chain: MIDI effects, bus effects, drum rack
     /// slots and their effects.
     pub(crate) devices: DeviceState,
@@ -3035,6 +3046,7 @@ impl HostKinds {
         sync_phase("sync-cell-model", || self.sync_cell_model(&mut pusher, app));
         sync_phase("sync-rack-clips", || self.sync_rack_clips(&mut pusher, app));
         sync_phase("sync-kit-parking", || self.sync_kit_parking(&mut pusher, app));
+        sync_phase("sync-bank-usage", || self.sync_bank_usage(&mut pusher, app));
         sync_phase("sync-rack-model", || self.sync_rack_model(&mut pusher, app));
         sync_phase("sync-groove-library", || self.sync_groove_library(&mut pusher, app));
         sync_phase("sync-song-model", || self.sync_song_model(&mut pusher, app));
@@ -3179,6 +3191,7 @@ impl HostKinds {
         self.scene_ids.clear();
         self.bank_ids.clear();
         self.kit_parking_key = None;
+        self.bank_usage_key = None;
         self.track_generation = Some(generation);
     }
 
