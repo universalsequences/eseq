@@ -26,7 +26,9 @@
 //! `<variant>.r<round>.f32`; `ESEQ_PARK_FORCE_AWAKE=3` renders as if no effect
 //! ever tail-sleeps or skips a settled bypass (`effects::tail_sleep::ForceAwake`
 //! bits: 1 = no bypass skip, 2 = no sleep), the A/B reference for what they
-//! change.
+//! change. Bit 4 renders gatepitch and idle voice modulators the reference
+//! way (per-frame clock ramp, no declared lane shapes), the A/B for the idle
+//! voice control fast path (eseq-ka5t.16).
 //!
 //! The project's scratch must not import UI-only packages (gotham's
 //! `proto-rig.rig` fails in the headless scheduler; strip it in the fixture).
@@ -298,8 +300,8 @@ fn time_render(path: &Path, end_beat: f64, bypass: BypassSel, kit: u64) -> Value
     let mut dump = Vec::<f32>::with_capacity(if dump_dir.is_some() { source.end as usize * 2 } else { 0 });
     let force_awake = match std::env::var("ESEQ_PARK_FORCE_AWAKE") {
         Err(_) => 0,
-        Ok(value) => value.trim().parse::<u32>().ok().filter(|bits| *bits <= 3).unwrap_or_else(|| {
-            panic!("ESEQ_PARK_FORCE_AWAKE must be a bit mask 0-3 (1 = no bypass skip, 2 = no sleep), got {value:?}")
+        Ok(value) => value.trim().parse::<u32>().ok().filter(|bits| *bits <= 7).unwrap_or_else(|| {
+            panic!("ESEQ_PARK_FORCE_AWAKE must be a bit mask 0-7 (1 = no bypass skip, 2 = no sleep, 4 = reference voice control), got {value:?}")
         }),
     };
     let _force_awake = crate::effects::tail_sleep::ForceAwake::set(force_awake);

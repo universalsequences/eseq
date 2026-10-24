@@ -412,6 +412,45 @@ void ap_emit_silence(float *const *out, int n) {
   }
 }
 
+/* ===================== Declared lane shapes =====================
+ * A source may tell its consumers, for one render pass, that an output
+ * buffer has a shape they can summarize without reading every frame. The
+ * buffer itself is always fully written; a shape is only a promise about it,
+ * so a consumer that ignores shapes reads the same values.
+ *
+ * AP_SHAPE_CONSTANT:   every frame of the pass holds the value at frame 0.
+ * AP_SHAPE_PHASE_RAMP: every value is in [0, 1); consecutive frames rise by
+ *                      less than 0.5 except at most one wrap, which falls by
+ *                      more than 0.5; and the pass's total rise is under 0.5,
+ *                      so the last frame is below the first iff it wrapped.
+ *
+ * Used by gatepitch for its control lanes and bar clock so an idle voice
+ * modulator need not scan them (eseq-ka5t.16). */
+void ap_set_output_shape(int port, int shape) {
+  RTNode *node = g_current_processing_node;
+  LiveGraph *lg = g_current_processing_graph;
+  LiveEdge *edge = current_edge(lg, node ? node->outEdgeId : NULL, node ? node->nOutputs : 0, port);
+  if (!edge)
+    return;
+  edge->shape_pass = lg->render_pass;
+  edge->shape = shape;
+}
+
+/* The shape input `port` was declared with this pass: AP_SHAPE_CONSTANT for
+ * an unconnected port (the shared zero buffer) or a declared-silent one,
+ * else the source's declaration, else AP_SHAPE_NONE (also outside a
+ * kernel). */
+int ap_input_shape(int port) {
+  RTNode *node = g_current_processing_node;
+  LiveGraph *lg = g_current_processing_graph;
+  if (!node || !lg || port < 0 || port >= node->nInputs)
+    return AP_SHAPE_NONE;
+  LiveEdge *edge = current_edge(lg, node->inEdgeId, node->nInputs, port);
+  if (!edge || edge->silent_pass == lg->render_pass)
+    return AP_SHAPE_CONSTANT;
+  return edge->shape_pass == lg->render_pass ? edge->shape : AP_SHAPE_NONE;
+}
+
 int ap_current_node_ninputs(void) {
   if (g_current_processing_node) {
     return g_current_processing_node->nInputs;

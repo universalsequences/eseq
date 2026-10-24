@@ -15,6 +15,48 @@ extern "C" {
     fn ap_set_output_silent(port: c_int);
     fn ap_output_was_silent(port: c_int) -> c_int;
     fn ap_emit_silence(out: *const *mut f32, nframes: c_int);
+    fn ap_set_output_shape(port: c_int, shape: c_int);
+    fn ap_input_shape(port: c_int) -> c_int;
+}
+
+/// A lane promise for one render pass (`ap_set_output_shape` in
+/// graph_engine.c). The buffer is still fully written; a shape only lets a
+/// consumer summarize it without reading every frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaneShape {
+    /// Nothing declared: read the frames.
+    Unknown,
+    /// Every frame holds the value at frame 0.
+    Constant,
+    /// Values in [0, 1); consecutive frames rise by less than 0.5 except at
+    /// most one wrap, which falls by more than 0.5; the whole pass rises by
+    /// less than 0.5, so the last frame is below the first iff it wrapped.
+    PhaseRamp,
+}
+
+// Must match AP_SHAPE_* in audiograph/graph_nodes.h.
+const SHAPE_CONSTANT: c_int = 1;
+const SHAPE_PHASE_RAMP: c_int = 2;
+
+/// Declare output `port`'s shape for this pass, after writing all of it.
+/// Nothing outside a graph kernel.
+pub fn declare_shape(port: usize, shape: LaneShape) {
+    let shape = match shape {
+        LaneShape::Unknown => return,
+        LaneShape::Constant => SHAPE_CONSTANT,
+        LaneShape::PhaseRamp => SHAPE_PHASE_RAMP,
+    };
+    unsafe { ap_set_output_shape(port as c_int, shape) }
+}
+
+/// The shape input `port` reads this pass. Unconnected and declared-silent
+/// ports are `Constant`; `Unknown` outside a graph kernel.
+pub fn input_shape(port: usize) -> LaneShape {
+    match unsafe { ap_input_shape(port as c_int) } {
+        SHAPE_CONSTANT => LaneShape::Constant,
+        SHAPE_PHASE_RAMP => LaneShape::PhaseRamp,
+        _ => LaneShape::Unknown,
+    }
 }
 
 /// Every input of the running kernel reads silence this block.

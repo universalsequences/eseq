@@ -30,6 +30,10 @@ typedef struct {
   // not vouch for the frames a longer one reads.
   uint64_t silent_pass;
   int silent_frames;
+  // Declared lane shape (ap_set_output_shape): valid only in the render pass
+  // equal to shape_pass, like silent_pass.
+  uint64_t shape_pass;
+  int shape;
 } LiveEdge;
 
 typedef struct RTNode {

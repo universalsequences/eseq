@@ -64,6 +64,12 @@ int ap_current_node_noutputs(void);
 void ap_set_output_silent(int port);
 int ap_output_was_silent(int port);
 void ap_emit_silence(float *const *out, int n);
+/* Declared lane shapes for the running kernel; see graph_engine.c. */
+#define AP_SHAPE_NONE 0
+#define AP_SHAPE_CONSTANT 1
+#define AP_SHAPE_PHASE_RAMP 2
+void ap_set_output_shape(int port, int shape);
+int ap_input_shape(int port);
 
 // ===================== Node VTables =====================
 

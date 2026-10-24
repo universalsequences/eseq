@@ -520,6 +520,73 @@ ms/s that was not measured. The bigger levers are, in order:
    needs approval, which is why it was not built.
 2. An idle fast path for `gatepitch` and `voice_modulator`.
 
+#### After idle voice control fast path (2026-10-24, eseq-ka5t.16)
+
+**Consumers.** Gatepitch feeds only two kinds of node: its voice modulator
+(gate, pitch, velocity, trigger, bar clock, clock increment) and, for a DGen
+engine, the synth's named host inputs (any lane, `clock` included). The
+sampler gets its notes as events, not from these lanes. The host pushes each
+voice's clock phase and increment every block. Idle voice modulators take an
+early return (disabled DGen voice, inactive sampler voice with no gate in the
+block, every slot Off), but each of those still scanned the gate and trigger
+lanes and walked the clock frame by frame to count bar wraps (the multi-bar
+LFO count, which must stay on the grid while a voice is silent). An idle DGen
+synth reads none of its inputs.
+
+**Invariant.** Every lane is still fully written with the same bits, so any
+consumer that reads frames sees what it saw before. Idle modulators keep
+their bar count, previous bar phase, previous gate and every slot state
+bit-identical; their outputs stay declared silent as before.
+
+**As built.**
+- **Gatepitch's clock ramp, exact and vectorized.** Inside one binade a phase
+  plus a fixed increment always rounds by the same whole number of ulps, so a
+  run is `p0 + k*d` ulps, written as integer offsets of p0's bits.
+  Binade crossings, the wrap, zero, ties and odd inputs take the reference
+  step. The output is bit-for-bit the per-frame loop, for playing voices too.
+- **Declared lane shapes**, a per-pass promise on an edge beside the silence
+  flag (`ap_set_output_shape` / `ap_input_shape` in `graph_engine.c`,
+  `silence::LaneShape`). `Constant` means every frame equals frame 0.
+  `PhaseRamp` means values in [0, 1), at most one wrap, and less than 0.5 of
+  rise in the pass. Gatepitch declares the increment constant on every call,
+  the clock a ramp when the phase starts in [0, 1) and `inc * frames` < 0.25,
+  and gate and trigger constant when the call has no event.
+- **Idle modulator, O(1).** The gate check reads frame 0 when both lanes are
+  declared constant. `BarTracker::skip_block` counts wraps from the
+  endpoints when the clock is a declared ramp: the frame-0 wrap against the
+  stored phase, plus one if the last frame is below the first.
+- A/B switch: `tail_sleep::FORCE_REFERENCE_VOICE_CONTROL` (bit 4 of
+  `ESEQ_PARK_FORCE_AWAKE`) restores the per-frame ramp and drops every shape.
+
+**Tests.** `effects::gatepitch::tests::fast_clock_ramp_matches_reference_bit_for_bit`
+covers 20k random and adversarial phase/increment pairs plus 400k frames of
+a real bar clock. `instruments::voice_modulator::idle_fast_path_tests` runs a
+live graph (gatepitch, a sampler voice modulator and a DGen voice modulator)
+through idle, trigger, release and idle. The scenario includes retrigs at frame 0 and
+the last frame, a gate in a not-yet-active block, a param-held gate, bar
+wraps while idle and a mod reset while idle. Every frame and the modulator
+state are bit-identical to the reference.
+
+**Audio.** One binary, `ESEQ_PARK_FORCE_AWAKE=4` against 0: `full`,
+`kit_off` and `all_silent` are bit-identical (8 renders per variant, one hash
+each).
+
+**Numbers.** Render-thread ms per s of audio, release, M1 Max. Each is the
+minimum of 4 rounds (2 runs of 2, reference and fast interleaved). The load
+average fell from about 18 to 8 during the runs.
+Outputs are in `.local/benchmarks/park-probe-2026-10-24-voice-control/`.
+
+| Variant | Reference | Fast path |
+|---|---|---|
+| gotham `all_silent` | 181 | **154** (-15%) |
+| gotham `kit_off` | 313 | **281** (-10%) |
+| gotham `full` | 337 | **315** (-7%) |
+
+Playing variants gain too, because the exact ramp also serves sounding voices.
+What is left per idle voice is about a dozen lane-cache checks, the ramp's
+vector stores and four shape declarations. The host still pushes two clock
+params per voice per block.
+
 ## 6. Kits on/off per bank
 
 **Control.** The drum rack component in the fx panel gets a power toggle in

@@ -107,6 +107,9 @@ pub unsafe fn sleep_or_count(
 pub const FORCE_NO_BYPASS_SKIP: u32 = 1;
 /// `FORCE_AWAKE` bit: nothing tail-sleeps.
 pub const FORCE_NO_SLEEP: u32 = 2;
+/// `FORCE_AWAKE` bit: gatepitch renders its clock frame by frame and declares
+/// no lane shapes, so idle voice modulators scan every frame (eseq-ka5t.16).
+pub const FORCE_REFERENCE_VOICE_CONTROL: u32 = 4;
 
 /// Whether the test-only A/B switch has `bit` set. Always false in
 /// production builds.

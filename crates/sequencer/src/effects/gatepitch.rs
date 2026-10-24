@@ -131,6 +131,108 @@ unsafe extern "C" fn gatepitch_schedule_event(
     true
 }
 
+/// One frame of the bar clock: what `clock_ramp_reference` does per frame.
+#[inline(always)]
+fn clock_step(phase: f32, inc: f32) -> f32 {
+    let mut phase = phase + inc;
+    if phase >= 1.0 {
+        phase -= phase.floor();
+    }
+    phase
+}
+
+/// Per-frame bar clock: write `phase` to each frame of `out`, then step it.
+/// Returns the phase after the last frame.
+fn clock_ramp_reference(out: &mut [f32], mut phase: f32, inc: f32) -> f32 {
+    for value in out {
+        *value = phase;
+        phase = clock_step(phase, inc);
+    }
+    phase
+}
+
+const MANTISSA_MASK: u32 = (1 << 23) - 1;
+const IMPLICIT_BIT: u32 = 1 << 23;
+
+/// While a phase `p` (normal, in (0, 1)) and every sum `p + inc` stay inside
+/// p's binade [2^e, 2^(e+1)), the f32 sum rounds to the grid of that binade's
+/// ulp `u`, and since `p` is on that grid the rounding only depends on
+/// `inc / u`: each step adds the same whole number of ulps. This returns that
+/// number, or `None` when `inc / u` is an exact half (round-half-even then
+/// alternates with the parity of `p`) or `inc` is too large for any step to
+/// stay in the binade.
+fn binade_step_ulps(p_bits: u32, inc_bits: u32) -> Option<u32> {
+    let (e, ei) = (p_bits >> 23, inc_bits >> 23);
+    if ei > e {
+        return None;
+    }
+    let mantissa = (inc_bits & MANTISSA_MASK) | IMPLICIT_BIT;
+    let shift = e - ei;
+    if shift == 0 {
+        return Some(mantissa);
+    }
+    if shift > 24 {
+        // inc < u / 2: every sum rounds back to p, as the reference does.
+        return Some(0);
+    }
+    let (whole, rest, half) = (mantissa >> shift, mantissa & ((1 << shift) - 1), 1 << (shift - 1));
+    match rest.cmp(&half) {
+        std::cmp::Ordering::Less => Some(whole),
+        std::cmp::Ordering::Greater => Some(whole + 1),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+/// `clock_ramp_reference`, bit for bit, without its serial add chain: inside
+/// one binade the reference phase is `p0 + k * d` ulps exactly
+/// (`binade_step_ulps`), so whole runs are written as integer offsets of p0's
+/// bits, which vectorizes. Binade crossings, the wrap at 1.0, zero, ties and
+/// any phase or increment outside the normal positive range take the
+/// reference's own per-frame step. Pinned by
+/// `fast_clock_ramp_matches_reference_bit_for_bit`.
+fn clock_ramp(out: &mut [f32], mut phase: f32, inc: f32) -> f32 {
+    let inc_bits = inc.to_bits();
+    // Sign clear, normal and finite.
+    let inc_normal = (1..0xff).contains(&(inc_bits >> 23));
+    let mut i = 0;
+    while i < out.len() {
+        let bits = phase.to_bits();
+        // Sign clear, normal, below 1.0 (biased exponent 127).
+        if inc_normal && (1..127).contains(&(bits >> 23)) {
+            if let Some(step) = binade_step_ulps(bits, inc_bits) {
+                // m + run * step <= 2^24 - 2, so every exact sum in the run is
+                // below 2^24: it stays inside the binade and rounds on its grid.
+                let mantissa = (bits & MANTISSA_MASK) | IMPLICIT_BIT;
+                let room = ((1u32 << 24) - 2).saturating_sub(mantissa);
+                let remaining = out.len() - i;
+                let run = if step == 0 { remaining } else { remaining.min((room / step) as usize) };
+                if run > 0 {
+                    for (k, value) in out[i..i + run].iter_mut().enumerate() {
+                        *value = f32::from_bits(bits + k as u32 * step);
+                    }
+                    phase = f32::from_bits(bits + run as u32 * step);
+                    i += run;
+                    continue;
+                }
+            }
+        }
+        out[i] = phase;
+        phase = clock_step(phase, inc);
+        i += 1;
+        #[cfg(test)]
+        tests::SERIAL_CLOCK_STEPS.with(|steps| steps.set(steps.get() + 1));
+    }
+    phase
+}
+
+/// Whether the clock this call renders from `phase` by `inc` over `frames`
+/// keeps the `LaneShape::PhaseRamp` promise: starts in [0, 1) and rises by
+/// well under 0.5 in total (so at most one wrap, and each frame's rise is
+/// tiny next to the wrap's fall).
+fn clock_is_phase_ramp(phase: f32, inc: f32, frames: usize) -> bool {
+    (0.0..1.0).contains(&phase) && inc >= 0.0 && (inc as f64) * (frames as f64) < 0.25
+}
+
 unsafe extern "C" fn gatepitch_process(
     _inp: *const *mut f32,
     out: *const *mut f32,
@@ -161,6 +263,10 @@ unsafe extern "C" fn gatepitch_process(
     let event_frame =
         |index: usize| (*s.add(PARAM_TIMELINE_BASE + index * TIMELINE_EVENT_WIDTH + TIMELINE_FRAME)).max(0.0) as usize;
     let cache = super::output_lanes::OutputLanes::begin(s.add(OUTPUT_LANE_CACHE));
+    let reference = super::tail_sleep::force_awake(super::tail_sleep::FORCE_REFERENCE_VOICE_CONTROL);
+    let ramp: fn(&mut [f32], f32, f32) -> f32 = if reference { clock_ramp_reference } else { clock_ramp };
+    let clock_is_ramp = !reference && clock_is_phase_ramp(clock_phase, clock_inc, nf);
+    let mut one_segment = false;
 
     // Every lane but the clock only changes on event frames, so render one
     // constant segment per event run instead of eleven stores per frame.
@@ -222,6 +328,7 @@ unsafe extern "C" fn gatepitch_process(
             for (index, (lane, value)) in lanes.into_iter().zip(values).enumerate() {
                 cache.fill(index, lane, value);
             }
+            one_segment = true;
         } else {
             gate_out[i..end].fill(gate);
             pitch_out[i..end].fill(pitch);
@@ -241,14 +348,22 @@ unsafe extern "C" fn gatepitch_process(
                 cache.written(index);
             }
         }
-        for value in &mut clock_out[i..end] {
-            *value = clock_phase;
-            clock_phase += clock_inc;
-            if clock_phase >= 1.0 {
-                clock_phase -= clock_phase.floor();
-            }
-        }
+        clock_phase = ramp(&mut clock_out[i..end], clock_phase, clock_inc);
         i = end;
+    }
+    // Shapes an idle voice modulator reads instead of scanning these lanes
+    // (`voice_modulator::BarTracker::skip_block`, `gate_timeline_has_activity`).
+    // The clock increment never changes within a call.
+    if !reference {
+        use super::silence::{declare_shape, LaneShape};
+        declare_shape(PARAM_CLOCK_INC as usize, LaneShape::Constant);
+        if clock_is_ramp {
+            declare_shape(PARAM_CLOCK_PHASE as usize, LaneShape::PhaseRamp);
+        }
+        if one_segment {
+            declare_shape(PARAM_GATE as usize, LaneShape::Constant);
+            declare_shape(PARAM_TRIGGER as usize, LaneShape::Constant);
+        }
     }
     *s.add(PARAM_PRESSURE as usize) = pressure;
     *s.add(PARAM_PITCH_BEND as usize) = pitch_bend;
@@ -373,6 +488,11 @@ mod tests {
     use super::*;
     use crate::audiograph::{GBE_AUX_CAP, GBE_GATE_OFF, GBE_NOTE_ON, GBE_PRESSURE, GBE_EXPRESSION};
 
+    thread_local! {
+        /// Frames `clock_ramp` rendered with the per-frame step.
+        pub(super) static SERIAL_CLOCK_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     fn event(frame_offset: u32, kind: u32, aux: &[f32]) -> GraphBlockEvent {
         let mut event = GraphBlockEvent {
             logical_id: 1,
@@ -384,6 +504,65 @@ mod tests {
         };
         event.aux[..aux.len()].copy_from_slice(aux);
         event
+    }
+
+    #[test]
+    fn fast_clock_ramp_matches_reference_bit_for_bit() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        // Real bar clocks (bar of 20-400 bpm at 44.1-96 kHz), then raw bit
+        // patterns: ties, subnormals, zero, negatives, >= 1, NaN, huge steps.
+        let special = [
+            0.0, -0.0, 1.0, 1.5, -0.25, f32::NAN, f32::INFINITY, f32::MIN_POSITIVE,
+            f32::MIN_POSITIVE / 4.0, 0.5, f32::from_bits(0.5f32.to_bits() - 1), 0.25, 0.75,
+        ];
+        let check = |phase: f32, inc: f32, frames: usize| {
+            let mut fast = vec![f32::NAN; frames];
+            let mut reference = vec![f32::NAN; frames];
+            let fast_end = clock_ramp(&mut fast, phase, inc);
+            let reference_end = clock_ramp_reference(&mut reference, phase, inc);
+            for i in 0..frames {
+                assert_eq!(fast[i].to_bits(), reference[i].to_bits(),
+                    "phase {phase:e} inc {inc:e} frame {i}");
+            }
+            assert_eq!(fast_end.to_bits(), reference_end.to_bits(), "phase {phase:e} inc {inc:e} end");
+        };
+        for trial in 0..20_000 {
+            let frames = 1 + (next() % 1024) as usize;
+            let unit = |bits: u64| (bits >> 40) as f32 / (1u64 << 24) as f32;
+            let phase = match trial % 5 {
+                0 => special[(next() % special.len() as u64) as usize],
+                // Just below a binade boundary or the wrap.
+                1 => f32::from_bits([1.0f32, 0.5, 0.25, 0.125][(next() % 4) as usize].to_bits() - (next() % 64) as u32),
+                2 => f32::from_bits(next() as u32),
+                _ => unit(next()),
+            };
+            let inc = match trial % 7 {
+                0 => special[(next() % special.len() as u64) as usize],
+                1 => f32::from_bits(next() as u32),
+                // An exact half ulp of some binade: a tie on every step.
+                2 => f32::from_bits(((100 + next() % 26) as u32) << 23),
+                3 => unit(next()) / 64.0,
+                _ => {
+                    let bpm = 20.0 + (next() % 380) as f64;
+                    let rate = [44_100.0, 48_000.0, 88_200.0, 96_000.0][(next() % 4) as usize];
+                    (bpm / 240.0 / rate) as f32
+                }
+            };
+            check(phase, inc, frames);
+        }
+        // Whole bars at a realistic increment, so every binade and many
+        // wraps go through the fast path, which must cover nearly all of it.
+        SERIAL_CLOCK_STEPS.with(|steps| steps.set(0));
+        check(0.0, (169.0f64 / 240.0 / 48_000.0) as f32, 400_000);
+        let serial = SERIAL_CLOCK_STEPS.with(|steps| steps.get());
+        assert!(serial < 400, "{serial} of 400000 frames took the per-frame step");
+        check(0.999, 0.01, 4096);
     }
 
     #[test]
