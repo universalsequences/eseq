@@ -34,7 +34,7 @@
 ;; transport strip is viewing (scene-banks spec 10.1).
 (import eseq.scene-banks :refer (scene-viewed-bank scene-viewed-bank-id scene-viewed-bank-label clip-in-viewed-bank?
                                  bank-tracks))
-(import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of prop-if
+(import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of prop-if bare-text
                               rgb-part color-rgba track-color-part find))
 (import eseq.kinds :refer (track tracks buses groups routes graphs selection master project
                            mod-in-level mod-out-signal launch-cell! stop-track-cell! launch-rack-clip! silence-rack! save-rack-clip-as!
@@ -1478,11 +1478,6 @@
 
 ;; The track's name badge over its color; it lights white as the delete
 ;; target and dims while the track is silent.
-;; The props of text drawn straight on its parent: no fill, border or
-;; shading of its own.
-(def bare-text
-  (list :background-color :transparent :border-color :transparent
-        :highlight-color :transparent :shadow-color :transparent :bg :transparent))
 
 (def track-badge (t text key &key (width 3.65) (font-size 9) (h-align :center)
                   (v-align nil))

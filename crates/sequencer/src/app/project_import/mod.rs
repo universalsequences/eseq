@@ -46,7 +46,8 @@ use std::collections::{BTreeSet, HashMap};
 pub(crate) use assets::ImportSampleCache;
 pub use links::Lines;
 pub use source::{
-    ImportSource, PeekBank, PeekGroup, PeekKit, PeekScene, PeekSequencer, PeekTrack, ProjectPeek,
+    DeviceKind, ImportSource, PeekBank, PeekDevice, PeekGroup, PeekKit, PeekScene, PeekSequencer, PeekTrack,
+    ProjectPeek,
 };
 
 use super::App;
@@ -557,8 +558,9 @@ impl App {
         ids: &mut IdMap,
         summary: &mut ImportSummary,
     ) -> Result<PlacedKit, String> {
-        let extracted = extract::extract_kit(source, source_group)?;
-        let name = extracted.preset.metadata.name.clone();
+        let mut extracted = extract::extract_kit(source, source_group)?;
+        let name = self.unique_group_name(&extracted.preset.metadata.name, &source.name, None);
+        extracted.preset.metadata.name = name.clone();
         summary.notes.extend(extracted.warnings.iter().map(|w| format!("{name}: {w}")));
         let pad_notes: Vec<i32> = extracted.preset.pads.iter().map(|pad| pad.pad_note).collect();
         let clip_count = extracted.preset.clips.len();
@@ -716,8 +718,9 @@ impl App {
             .find(|candidate| candidate.bus_id == bus.0)
             .map(|candidate| (candidate.id, candidate.name.clone(), candidate.color))
             .ok_or_else(|| format!("Group '{}' did not form", group.name))?;
-        if name != group.name {
-            self.rename_group_recorded(group_id, group.name.clone())?;
+        let wanted = self.unique_group_name(&group.name, &source.name, Some(group_id));
+        if name != wanted {
+            self.rename_group_recorded(group_id, wanted)?;
         }
         if color != group.color {
             self.set_group_color_recorded(
@@ -781,6 +784,19 @@ impl App {
             app.save_current_bus_pattern();
             Ok(())
         })
+    }
+
+    /// `name`, or when another group here (not `except`, the group being
+    /// named) already has it, `name (project)`, then `name (project) 2`,
+    /// ...: two kits imported from different projects never share a name.
+    fn unique_group_name(&self, name: &str, project: &str, except: Option<u64>) -> String {
+        let taken = |candidate: &str| {
+            self.groups.iter().any(|group| Some(group.id) != except && group.name == candidate)
+        };
+        if !taken(name) {
+            return name.to_string();
+        }
+        super::first_free_name(&format!("{name} ({project})"), taken)
     }
 
     /// `A`, `B`, ... for `bank` by its position.

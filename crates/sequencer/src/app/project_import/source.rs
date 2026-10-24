@@ -43,14 +43,87 @@ pub struct PeekKit {
     pub group_id: u64,
     pub name: String,
     pub pads: usize,
-    /// One device line per pad, in pad order: `"<pad name>: <device>"`.
-    pub devices: Vec<String>,
+    /// One entry per pad, in pad order.
+    pub devices: Vec<PeekDevice>,
     /// The rack-owned sequencers (instance labels, plain script names).
     pub sequencers: Vec<String>,
     pub clips: usize,
     /// Labels of the banks where the kit plays (a scene points at one of its
     /// clips and does not park it).
     pub banks: Vec<String>,
+}
+
+/// What a pad or track plays, for the peek's device lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceKind {
+    Sample,
+    Synth,
+    Modulator,
+    Empty,
+}
+
+impl DeviceKind {
+    /// As a track's `instrument-type` names it (the UI's icon key,
+    /// `eseq.track-collapse/instrument-icon`).
+    pub fn name(self) -> &'static str {
+        match self {
+            DeviceKind::Sample => "sampler",
+            DeviceKind::Synth => "custom",
+            DeviceKind::Modulator => "modulator",
+            DeviceKind::Empty => "empty",
+        }
+    }
+}
+
+/// One pad (or track) of the peek: its name, what plays on it (the first
+/// slot of a rack) and how many rack slots it has (0 for none).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeekDevice {
+    pub pad: String,
+    pub kind: DeviceKind,
+    /// "" when it would only repeat `pad`, or the sample has no name.
+    pub label: String,
+    pub slots: usize,
+}
+
+/// An instrument id's display name without its tier either:
+/// `user:unison-warp` → `unison-warp`, `factory:drums/808 Kick@2` →
+/// `808 Kick`.
+fn instrument_leaf(name: &str) -> String {
+    let name = crate::app::graph::instrument_display_name(name);
+    match name.split_once(':') {
+        Some((_, leaf)) if !leaf.is_empty() => leaf.to_string(),
+        _ => name,
+    }
+}
+
+use crate::sample_db::is_content_hash as looks_like_hash;
+
+/// Sample titles for one peek: the sample library is opened read-only, once,
+/// and only when a sample is stored under a content hash (titles are keyed
+/// by that hash; any other stem is its own title).
+#[derive(Default)]
+pub struct SampleTitles {
+    db: std::cell::OnceCell<Option<crate::sample_db::SampleDb>>,
+}
+
+impl SampleTitles {
+    /// The library's title for a hash-named sample at `path`, else its file
+    /// stem; "" for a hash the library does not know.
+    fn title(&self, path: &str) -> String {
+        let stem = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or(path);
+        if !looks_like_hash(stem) {
+            return stem.to_string();
+        }
+        let db = self.db.get_or_init(|| {
+            let path = crate::app_paths::app_paths().sample_db_path();
+            path.is_file().then(|| crate::sample_db::SampleDb::open_read_only(&path).ok()).flatten()
+        });
+        db.as_ref()
+            .and_then(|db| db.title_for_hash(stem).ok().flatten())
+            .filter(|title| !looks_like_hash(title))
+            .unwrap_or_default()
+    }
 }
 
 /// A plain group of the source with its member tracks.
@@ -246,49 +319,53 @@ impl ImportSource {
     }
 
     /// A one-line device label for `track`: its instrument (a rack's first
-    /// slot, with a count of the others).
-    pub fn device_label(&self, track: usize) -> String {
-        let Some(project_track) = self.file.tracks.get(track) else {
-            return String::new();
-        };
-        let short = |name: &str| name.rsplit('/').next().unwrap_or(name).to_string();
-        let stem = |path: &str| {
-            Path::new(path)
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or(path)
-                .to_string()
-        };
-        match &project_track.kind {
-            ProjectTrackKind::Empty => "Empty".to_string(),
-            ProjectTrackKind::Modulator => "Modulator".to_string(),
-            ProjectTrackKind::Custom { instrument_name } => short(instrument_name),
-            ProjectTrackKind::Sampler { sample_path } => sample_path
-                .as_deref()
-                .map(stem)
-                .unwrap_or_else(|| "Sampler".to_string()),
-            ProjectTrackKind::Rack { slots, .. } => {
-                let names: Vec<String> = slots
-                    .iter()
-                    .map(|slot| {
-                        if let Some(name) = &slot.instrument_name {
-                            short(name)
-                        } else if let Some(name) = &slot.sample_name {
-                            name.clone()
-                        } else if let Some(path) = &slot.sample_path {
-                            stem(path)
-                        } else {
-                            "Sampler".to_string()
-                        }
-                    })
-                    .collect();
-                match names.as_slice() {
-                    [] => "Instrument Rack".to_string(),
-                    [one] => one.clone(),
-                    [first, rest @ ..] => format!("{first} +{}", rest.len()),
-                }
-            }
+    /// slot, with a count of the others), "" for an unnamed sample.
+    pub fn device_label(&self, track: usize, titles: &SampleTitles) -> String {
+        let device = self.device(track, titles);
+        match device.slots {
+            0 | 1 => device.label,
+            slots if device.label.is_empty() => format!("{slots} slots"),
+            slots => format!("{} +{}", device.label, slots - 1),
         }
+    }
+
+    /// What plays on `track`: its kind, a readable name (an instrument's
+    /// leaf name without its namespace or version, a sample's title; "" for
+    /// a sample stored under a content hash) and how many rack slots.
+    pub fn device(&self, track: usize, titles: &SampleTitles) -> PeekDevice {
+        let pad = self.track_name(track);
+        let Some(project_track) = self.file.tracks.get(track) else {
+            return PeekDevice { pad, kind: DeviceKind::Empty, label: String::new(), slots: 0 };
+        };
+        let (kind, label, slots) = match &project_track.kind {
+            ProjectTrackKind::Empty => (DeviceKind::Empty, String::new(), 0),
+            ProjectTrackKind::Modulator => (DeviceKind::Modulator, String::new(), 0),
+            ProjectTrackKind::Custom { instrument_name } => {
+                (DeviceKind::Synth, instrument_leaf(instrument_name), 1)
+            }
+            ProjectTrackKind::Sampler { sample_path } => {
+                (DeviceKind::Sample, sample_path.as_deref().map(|path| titles.title(path)).unwrap_or_default(), 1)
+            }
+            ProjectTrackKind::Rack { slots, .. } => {
+                let first = slots.first().map(|slot| match &slot.instrument_name {
+                    Some(name) => (DeviceKind::Synth, instrument_leaf(name)),
+                    None => {
+                        let title = slot
+                            .sample_name
+                            .clone()
+                            .filter(|name| !looks_like_hash(name))
+                            .or_else(|| slot.sample_path.as_deref().map(|path| titles.title(path)))
+                            .unwrap_or_default();
+                        (DeviceKind::Sample, title)
+                    }
+                });
+                let (kind, label) = first.unwrap_or((DeviceKind::Synth, String::new()));
+                (kind, label, slots.len())
+            }
+        };
+        // A label the pad's own name already says is noise.
+        let label = if pad.to_lowercase().contains(&label.to_lowercase()) { String::new() } else { label };
+        PeekDevice { pad, kind, label, slots }
     }
 
     /// Mod cables of scene `scene`, as `(source track, destination)`.
@@ -316,6 +393,7 @@ impl ImportSource {
 
     /// The browser's tree of this project.
     pub fn peek(&self) -> ProjectPeek {
+        let titles = SampleTitles::default();
         let banks = self.banks();
         let label_set = |scenes: &mut dyn Iterator<Item = usize>| {
             let mut labels: Vec<String> = Vec::new();
@@ -350,10 +428,7 @@ impl ImportSource {
                 let devices = rack
                     .pads
                     .iter()
-                    .filter_map(|pad| {
-                        let track = *group.members.get(pad.member)?;
-                        Some(format!("{}: {}", self.track_name(track), self.device_label(track)))
-                    })
+                    .filter_map(|pad| Some(self.device(*group.members.get(pad.member)?, &titles)))
                     .collect();
                 let mut sequencers: Vec<String> = self
                     .file
@@ -395,7 +470,7 @@ impl ImportSource {
             .map(|track| PeekTrack {
                 index: track,
                 name: self.track_name(track),
-                device: self.device_label(track),
+                device: self.device_label(track, &titles),
                 group: self.plain_group_of_track(track),
                 banks: label_set(
                     &mut (0..self.scene_count()).filter(|scene| self.cell_present(*scene, track)),

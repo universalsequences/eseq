@@ -68,9 +68,12 @@ impl App {
 
     /// Switch kit `group_id` off (`parked`) or on in every scene of `bank`
     /// (the viewed bank; `None`: the playing scene's), as ONE scene-structure
-    /// undo step. Clip pointers are never touched, so off-then-on restores
-    /// every scene exactly; other banks are untouched. Returns whether
-    /// anything changed (a bank already all off/on records nothing).
+    /// undo step. Off never touches clip pointers, so off-then-on restores
+    /// every scene exactly; on in a bank where no scene points at one of the
+    /// kit's clips (an import left it on only in another bank) also points
+    /// every scene at one (`kit_clip_to_fill`), so the kit plays and shows
+    /// there. Other banks are untouched. Returns whether anything changed (a
+    /// bank already all off/on records nothing).
     pub fn set_kit_parked_in_bank_recorded(
         &mut self,
         group_id: u64,
@@ -78,6 +81,29 @@ impl App {
         bank: Option<SceneBankId>,
     ) -> Result<bool, String> {
         self.kit_group(group_id)?;
+        if !parked {
+            let (_, range) = self.bank_scene_range(bank)?;
+            // Only when this switches it on: a kit already on stays as it is.
+            let fill = self.state.with_project_scenes(|scenes| {
+                scenes
+                    .parked_would_change(ParkedSet::Kits, group_id, false, range.clone())
+                    .then(|| scenes.kit_clip_to_fill(group_id, range.clone()))
+                    .flatten()
+            });
+            if let Some(clip) = fill {
+                self.apply_recorded_scene_structure_mutation("Turn kit on in bank", |app| {
+                    app.state.with_scenes_mut(|scenes| {
+                        scenes.set_parked_in_scenes(ParkedSet::Kits, group_id, false, range.clone());
+                        for scene in range.clone() {
+                            scenes.set_scene_rack_clip(scene, group_id, Some(clip));
+                        }
+                    });
+                    Ok(())
+                })?;
+                self.state.publish_scheduler_snapshot();
+                return Ok(true);
+            }
+        }
         self.set_parked_in_bank_recorded(
             ParkedSet::Kits,
             group_id,

@@ -22,6 +22,7 @@
         scene-viewed-bank-label
         view-scene-bank!
         view-new-scene-bank!
+        view-scene-bank-at!
         clip-in-viewed-bank?
         show-all-tracks
         toggle-show-all-tracks!
@@ -61,6 +62,11 @@
 ;; Show the bank create-scene-bank is about to append.
 (def view-new-scene-bank! ()
   (set! scene-bank-view.pending (len (banks))))
+
+;; Show the bank at position i once the host lists it (an import that made
+;; a bank calls this after it succeeded).
+(def view-scene-bank-at! (i)
+  (set! scene-bank-view.pending i))
 
 (def playing-bank (all)
   (if transport.scene transport.scene.bank (first all)))

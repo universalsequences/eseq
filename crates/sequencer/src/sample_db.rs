@@ -1268,6 +1268,11 @@ fn sql_json_error(error: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
 
+/// A content-store file name: a SHA-256 digest in hex (64 digits).
+pub fn is_content_hash(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 pub fn display_title_for_sample_path(path: &Path) -> Option<String> {
     let hash = path.file_stem()?.to_str()?.trim();
     if hash.is_empty() {

@@ -204,6 +204,8 @@ impl Harness {
             shared: &self.shared,
         };
         crate::host_commands::notes::flush_note_drag(&mut self.app, &mut self.editor, &mut ctx);
+        // As the event loop: a queued project import runs a turn later.
+        crate::project_import_ui::run_pending_import(&mut self.app, &mut self.editor, &mut ctx);
     }
 
     /// One host-kinds sync; returns whether anything changed.

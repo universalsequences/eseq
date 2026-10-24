@@ -8,11 +8,11 @@ pub(super) const COMMANDS: &[&str] = &["import-from-project"];
 pub(super) fn handle(
     name: &str,
     payload: Value,
-    app: &mut app::App,
+    _app: &mut app::App,
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) {
     if name == "import-from-project" {
-        crate::project_import_ui::handle_import_from_project(payload, app, editor, ctx);
+        crate::project_import_ui::handle_import_from_project(payload, editor, ctx);
     }
 }

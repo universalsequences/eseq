@@ -301,6 +301,48 @@ fn a_kit_imported_into_bank_b_plays_only_there_and_undoes_in_one_step() {
     assert_eq!(resolved(app, tracks_before, &[]), before, "undo restores every scene");
 }
 
+/// A kit imported as a new bank is off in every existing bank; turning it on
+/// in one of them points that bank's scenes at the clip it plays in the new
+/// bank, so it plays (and shows) there, as one undo step.
+#[test]
+fn turning_an_imported_kit_on_in_another_bank_points_it_at_a_clip() {
+    let (source, kit) = source_project(false);
+    let mut rig = Rig::new();
+    let app = rig.app();
+    let (bank_a, _bank_b) = target(app);
+    let summary = app
+        .import_from_project(
+            &source,
+            &ImportRequest { kits: vec![kit], target: ImportTarget::NewBank, ..Default::default() },
+        )
+        .expect("import");
+    let group = new_group(&summary, kit);
+    let new_scene = app.state.scene_count() - 1;
+    let clip = app.state.with_project_scenes(|s| s.scene_rack_clip(new_scene, group)).expect("the new bank's clip");
+    for scene in 0..2 {
+        assert!(!kit_sounds_in(app, group, scene), "off in bank A, scene {scene}");
+    }
+    let undo_before = app.history.undo_len();
+
+    assert!(app.set_kit_parked_in_bank_recorded(group, false, Some(bank_a)).expect("on"));
+    assert_eq!(app.history.undo_len(), undo_before + 1, "one undo step");
+    for scene in 0..2 {
+        assert_eq!(app.state.with_project_scenes(|s| s.scene_rack_clip(scene, group)), Some(clip));
+        assert!(kit_sounds_in(app, group, scene), "on in bank A, scene {scene}");
+    }
+    for scene in 2..4 {
+        assert!(!kit_sounds_in(app, group, scene), "bank B untouched, scene {scene}");
+    }
+
+    let crate::app::history::HistoryReplay::Applied(_) = crate::app::edit::undo(app) else {
+        panic!("undo");
+    };
+    for scene in 0..2 {
+        assert_eq!(app.state.with_project_scenes(|s| s.scene_rack_clip(scene, group)), None);
+        assert!(app.state.with_project_scenes(|s| s.kit_parked_in_scene(scene, group)), "scene {scene}");
+    }
+}
+
 /// "Importing a bank brings its scenes as a new bank, with the scenes'
 /// cells remapped to the new track indices"; the existing banks stay.
 #[test]
@@ -1077,3 +1119,68 @@ fn imported_kit_scenes_point_at_the_clip_ids_the_loader_assigned() {
     assert_eq!(Some(ids.len()), source_clips, "every source clip arrives: {ids:?}");
     assert_eq!(pointed, vec![Some("third".to_string()); 2], "bank B plays the source's playing clip");
 }
+
+
+/// A kit whose name is taken here arrives as `name (project)`, then
+/// `name (project) 2`: two imports never share a name.
+#[test]
+fn an_imported_kit_never_takes_a_name_already_here() {
+    let (source, kit) = source_project(false);
+    let mut rig = Rig::new();
+    let app = rig.app();
+    target(app);
+    let mut names = Vec::new();
+    for _ in 0..3 {
+        let summary = app
+            .import_from_project(&source, &ImportRequest { kits: vec![kit], ..Default::default() })
+            .expect("import");
+        let group = new_group(&summary, kit);
+        names.push(app.groups.iter().find(|g| g.id == group).unwrap().name.clone());
+    }
+    assert_eq!(names, vec!["Src Kit", "Src Kit (source)", "Src Kit (source) 2"]);
+}
+
+
+/// A kit's clip lanes name the source's kit bus as their output; in a
+/// project whose own kit holds that bus id, they must not land there: every
+/// imported pad lane outputs to the imported kit's own bus.
+#[test]
+fn an_imported_kits_lanes_output_to_its_own_bus_not_one_with_the_source_id() {
+    let (source, kit) = source_project(false);
+    let source_bus = source.group(kit).unwrap().bus_id;
+    let mut rig = Rig::new();
+    let app = rig.app();
+    target(app);
+    // A kit here first, so the source kit's bus id is taken by it.
+    let (own, own_bus) = app.create_drum_rack_recorded(Some("Own Kit".into())).expect("own kit");
+    assert_eq!(own_bus.0, source_bus, "the setup collides the bus ids");
+    let summary = app
+        .import_from_project(&source, &ImportRequest { kits: vec![kit], ..Default::default() })
+        .expect("import");
+    let group = new_group(&summary, kit);
+    assert_ne!(group, own);
+    let (members, bus) = app
+        .groups
+        .iter()
+        .find(|g| g.id == group)
+        .map(|g| (g.members.clone(), g.bus_id))
+        .unwrap();
+    let outputs: Vec<(usize, TrackOutput)> = app.state.with_project_scenes(|s| {
+        members
+            .iter()
+            .flat_map(|track| {
+                let pool = &s.track_pools[*track];
+                pool.patterns
+                    .keys()
+                    .filter_map(|id| pool.get(*id))
+                    .map(|lane| (*track, lane.track_params.output))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    });
+    assert!(!outputs.is_empty());
+    for (track, output) in outputs {
+        assert_eq!(output, TrackOutput::Bus(BusId(bus)), "pad {track}");
+    }
+}
+

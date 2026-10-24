@@ -124,7 +124,10 @@ different devices. That is the point of the change.
   `parked_kits`. The clip pointer stays what it is today, the musical choice
   (including "silent in this scene" as no entry); `parked_kits` is the
   resource choice. Parking never touches clip pointers, so turning a kit back
-  on restores every scene exactly, intentional silences included.
+  on restores every scene exactly, intentional silences included. The one
+  exception is a bank where no scene points at any of the kit's clips (a kit
+  an import left on only in another bank): turning it on there also points
+  every scene of the bank at a clip (§6).
 - **Resolution.** Where the snapshot for a scene is composed, the scene's
   `slot_enable` overrides each slot's `enabled`. Everything downstream (no
   triggers, FX bypass, zero voices) is unchanged.
@@ -599,8 +602,13 @@ C").
 
 - **Off**: add the kit to `parked_kits` in every scene of the viewed bank.
 - **On**: remove it from `parked_kits` in every scene of the viewed bank.
-- Clip pointers are never touched, so off-then-on restores every scene's clip
+- Off never touches clip pointers, so off-then-on restores every scene's clip
   and every intentional silence.
+- **On where it has no clip**: when no scene of the bank points at one of the
+  kit's clips (an import as a new bank, or a picked bank, leaves it parked
+  everywhere else with no pointer), on also points every scene of the bank at
+  the clip another scene plays, else its first clip. Without it the kit would
+  be on but silent, and the bank view (§9) would hide it.
 - One undo step each. Other banks are untouched.
 - **Mixed bank** (some scenes parked, some not, e.g. after copying scenes
   between banks): the toggle shows on with a small dot; clicking it sets the
@@ -702,7 +710,11 @@ out of scope for the first cut. Pick any mix of kits, groups, tracks, or a bank.
   (imported kits in `parked_kits`, imported tracks with no cells), so no
   finished bank changes.
 - **Importing a bank** brings its scenes as a new bank, with the scenes' cells
-  remapped to the new track indices.
+  remapped to the new track indices. Picking a bank makes every pick land
+  there, so the peek then offers only "Import as new bank".
+- **The view follows.** An import that makes a bank switches the viewed bank
+  to it: what came in is on there and reads off (dimmed strips) everywhere
+  else.
 - **Sequencers travel with their owner.** A kit's rack-owned instances come
   with it. A project-owned sequencer comes only if picked, and then only
   active in the target bank (§10). Links between picked things are kept and

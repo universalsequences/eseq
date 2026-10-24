@@ -89,6 +89,18 @@ pub use edit::try_apply_command;
 const BAR_HEIGHT: usize = 8;
 const COL_WIDTH: u16 = 3;
 
+/// `base` when `taken` refuses it, else `base 2`, `base 3`, ...: the first
+/// free name (copies, imports).
+pub(crate) fn first_free_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+    (2..)
+        .map(|n| format!("{base} {n}"))
+        .find(|candidate| !taken(candidate))
+        .expect("an unbounded range always finds a free name")
+}
+
 fn param_unit(param: &crate::effects::ParamDescriptor) -> Option<String> {
     match &param.kind {
         ParamKind::Continuous { unit } => unit.clone(),

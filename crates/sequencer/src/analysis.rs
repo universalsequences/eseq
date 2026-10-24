@@ -209,7 +209,7 @@ pub fn edits_for_sample_path<'a>(
 /// serves (spec §2.7: *loading a different sample discards the edits*).
 pub fn sample_path_hash(path: &str) -> Option<String> {
     let stem = std::path::Path::new(path).file_stem()?.to_str()?;
-    if stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if crate::sample_db::is_content_hash(stem) {
         return Some(stem.to_ascii_lowercase());
     }
     if path.is_empty() {
