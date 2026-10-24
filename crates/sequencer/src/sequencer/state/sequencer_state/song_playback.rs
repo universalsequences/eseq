@@ -350,6 +350,13 @@ fn stage_runtime_song_rows(song: &ProjectSong, scenes: &ProjectScenes) -> Result
                     }
                 }
             }
+            // The row's scene owns which rack slots play (docs/rig-spec.md
+            // §3.2). An unscened row keeps the playing scene, as its
+            // transport does, so its slots are the playing scene's.
+            let slot_scene = row.scene.unwrap_or(scenes.current_scene);
+            for (track, data) in track_data.iter_mut().enumerate() {
+                scenes.resolve_scene_track_pattern(slot_scene, track, data);
+            }
             staged.push(RowStaging {
                 id: row.id,
                 start_beat: sub_start,

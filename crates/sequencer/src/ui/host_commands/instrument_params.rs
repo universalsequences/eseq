@@ -909,6 +909,7 @@ mod tests {
             TRACK,
             sequencer::sequencer::RackTrackSnapshot::new(
                 vec![sequencer::sequencer::RackSlotSnapshot {
+                    id: 0,
                     instrument_type: sequencer::sequencer::InstrumentType::Sampler,
                     instrument_run_mode:
                         sequencer::sequencer::CustomInstrumentRunMode::Instrument,

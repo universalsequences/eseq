@@ -261,7 +261,10 @@ impl SequencerSnapshot {
         // Fetched before the process-chains lock: scene launches lock scenes
         // before restoring per-track chains, so keep the opposite nesting out
         // of this path.
-        let project_process_chain = state.project_process_chain();
+        // The playing scene owns which rack slots play (docs/rig-spec.md
+        // §3.2); the live mirror keeps the patterns' stored flags. Read with
+        // the process chain, under one scenes lock, before the rack lock.
+        let (project_process_chain, slot_enables) = state.capture_scene_track_inputs();
         let live_rack_tracks = state.pattern.rack_tracks.lock().unwrap();
         let live_process_chains = state.pattern.process_chains.lock().unwrap();
         let live_project_lane_overrides =
@@ -274,7 +277,11 @@ impl SequencerSnapshot {
                 state,
                 track_idx,
                 &project_process_chain,
-                live_rack_tracks.get(track_idx).cloned().unwrap_or(None),
+                resolved_live_rack(
+                    &live_rack_tracks,
+                    track_idx,
+                    slot_enables.get(track_idx).and_then(Option::as_ref),
+                ),
                 live_process_chains.get(track_idx),
                 live_project_lane_overrides.get(track_idx),
                 effect_descriptors_by_track.get(track_idx).cloned(),
@@ -315,6 +322,7 @@ impl SequencerSnapshot {
             return None;
         }
         let project_process_chain = state.project_process_chain();
+        let slot_enable = state.current_scene_slot_enable(track);
         let live_rack_tracks = state.pattern.rack_tracks.lock().unwrap();
         let live_process_chains = state.pattern.process_chains.lock().unwrap();
         let live_project_lane_overrides =
@@ -325,7 +333,7 @@ impl SequencerSnapshot {
             state,
             track,
             &project_process_chain,
-            live_rack_tracks.get(track).cloned().unwrap_or(None),
+            resolved_live_rack(&live_rack_tracks, track, slot_enable.as_ref()),
             live_process_chains.get(track),
             live_project_lane_overrides.get(track),
             effect_descriptors_by_track.get(track).cloned(),
@@ -421,6 +429,18 @@ impl SequencerSnapshot {
             engine_instrument_descriptors: state.engine_instrument_descriptors(),
         }
     }
+}
+
+/// Live rack `track` with its slots' `enabled` resolved through the playing
+/// scene's `slot_enable` entry for it.
+fn resolved_live_rack(
+    live_rack_tracks: &[Option<RackTrackSnapshot>],
+    track: usize,
+    slot_enable: Option<&super::state::SlotEnable>,
+) -> Option<RackTrackSnapshot> {
+    let mut rack = live_rack_tracks.get(track).cloned().flatten()?;
+    super::state::resolve_rack_slot_enable(&mut rack, slot_enable);
+    Some(rack)
 }
 
 fn capture_live_track(

@@ -109,6 +109,8 @@ fn preserve_rack_slot_configuration(
     mut replacement: RackSlotSnapshot,
     existing: &RackSlotSnapshot,
 ) -> RackSlotSnapshot {
+    // The row keeps its identity: scene state names it by id.
+    replacement.id = existing.id;
     replacement.choke_group = existing.choke_group;
     replacement.instrument_base_note_offset = existing.instrument_base_note_offset;
     replacement.gain = existing.gain;

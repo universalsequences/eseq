@@ -794,6 +794,7 @@ mod tests {
         let state = state_with_sampler_and_filter();
         let filter = EffectDescriptor::builtin_filter();
         let slot = |instrument_type, desc: &EffectDescriptor| RackSlotSnapshot {
+            id: 0,
             instrument_type,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: 0.0,

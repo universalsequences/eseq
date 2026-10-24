@@ -242,6 +242,10 @@ pub struct RackSlotPatternStateSnapshot {
     pub slot_index: usize,
     pub live: RackSlotSnapshot,
     pub patterns: Vec<(PatternId, RackSlotSnapshot)>,
+    /// Per scene that owns the track's device set (`Scene::slot_enable`,
+    /// rig spec §3.2): whether it enabled this slot. Replay restores it, so
+    /// redoing a slot add plays it exactly where it played.
+    pub scenes_enabled: Vec<(SceneId, bool)>,
 }
 
 #[derive(Clone, Debug)]

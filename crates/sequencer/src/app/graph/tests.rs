@@ -17,6 +17,7 @@
         engine_id: Option<usize>,
     ) -> RackSlotSnapshot {
         RackSlotSnapshot {
+            id: 0,
             instrument_type,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: 0.0,
@@ -5014,6 +5015,7 @@
             let source = app.state.current_scene_index();
             let new_scene = app.state.clone_pattern_in_scene_bank(
                 SceneBankId(4),
+                crate::sequencer::SceneSwapInheritance::Source(app.state.playing_scene()),
                 app.tracks.len(),
                 &app.graph.track_buffer_ids,
                 &app.graph.track_sample_rates,
@@ -5130,6 +5132,7 @@
             let old_scene_count = app.state.scene_count();
             let inserted = app.state.clone_pattern_in_scene_bank(
                 SceneBankId(4),
+                crate::sequencer::SceneSwapInheritance::Source(app.state.playing_scene()),
                 app.tracks.len(),
                 &app.graph.track_buffer_ids,
                 &app.graph.track_sample_rates,
@@ -5906,6 +5909,7 @@
                 macros: crate::project::default_project_rack_macros(),
                 routing: crate::project::ProjectRackRouting::Broadcast,
                 slots: vec![crate::project::ProjectRackSlotPattern {
+                    id: 0,
                     instrument_type: crate::project::ProjectInstrumentType::Sampler,
                     instrument_run_mode: crate::project::ProjectCustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
@@ -6039,6 +6043,7 @@
                 macros: crate::project::default_project_rack_macros(),
                 routing: crate::project::ProjectRackRouting::Broadcast,
                 slots: (0..2).map(|slot| crate::project::ProjectRackSlotPattern {
+                    id: 0,
                     instrument_type: crate::project::ProjectInstrumentType::Sampler,
                     instrument_run_mode: crate::project::ProjectCustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
@@ -6158,6 +6163,7 @@
                 macros: crate::project::default_project_rack_macros(),
                 routing: crate::project::ProjectRackRouting::Broadcast,
                 slots: vec![crate::project::ProjectRackSlotPattern {
+                    id: 0,
                     instrument_type: crate::project::ProjectInstrumentType::Sampler,
                     instrument_run_mode:
                         crate::project::ProjectCustomInstrumentRunMode::Instrument,

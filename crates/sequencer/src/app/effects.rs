@@ -4527,15 +4527,11 @@ impl App {
         track: usize,
         rack_slot: usize,
     ) -> Result<crate::sequencer::RackSlotSnapshot, String> {
+        // `enabled` is the playing scene's (docs/rig-spec.md §3.2), so a
+        // default push on load, recompile or undo replay keeps a parked
+        // slot's FX bypassed and a playing slot's running.
         self.state
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(track)
-            .and_then(Option::as_ref)
-            .and_then(|rack| rack.slots.get(rack_slot))
-            .cloned()
+            .resolved_live_rack_slot(track, rack_slot)
             .ok_or_else(|| format!("Track {} rack slot {} not found", track + 1, rack_slot + 1))
     }
 

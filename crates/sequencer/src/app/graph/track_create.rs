@@ -1063,6 +1063,7 @@ impl GraphController<'_> {
                         sampler.sample_rate,
                     ));
                     rack_slot_snapshots.push(RackSlotSnapshot {
+                        id: 0,
                         instrument_type: InstrumentType::Sampler,
                         instrument_run_mode: CustomInstrumentRunMode::Instrument,
                         instrument_base_note_offset: slot.instrument_base_note_offset,
@@ -1148,6 +1149,7 @@ impl GraphController<'_> {
                     let mut sound_state = slot.track_sound_state.unwrap_or_default();
                     sound_state.engine_id = Some(custom.engine_id);
                     rack_slot_snapshots.push(RackSlotSnapshot {
+                        id: 0,
                         instrument_type: InstrumentType::Custom,
                         instrument_run_mode: custom.run_mode,
                         instrument_base_note_offset: slot.instrument_base_note_offset,

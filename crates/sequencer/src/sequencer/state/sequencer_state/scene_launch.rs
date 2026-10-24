@@ -298,7 +298,12 @@ impl SequencerState {
             let snapshot_source = launched
                 .into_iter()
                 .collect::<Option<Vec<_>>>()
-                .map(|tracks| {
+                .map(|mut tracks| {
+                    // The launched scene owns which rack slots play
+                    // (docs/rig-spec.md §3.2); the mirror keeps stored flags.
+                    for (track, data) in tracks.iter_mut().enumerate() {
+                        scenes.resolve_scene_track_pattern(scene_idx, track, data);
+                    }
                     (
                         tracks,
                         metadata.0,
@@ -562,6 +567,11 @@ impl SequencerState {
                             silenced.push(true);
                             continue;
                         };
+                        // Which rack slots play follows the scene (rig spec
+                        // §3.2); a per-track launch keeps the playing one's.
+                        let mut data = data;
+                        let owner = if mask.is_some() { scenes.current_scene } else { scene_idx };
+                        scenes.resolve_scene_track_pattern(owner, track, &mut data);
                         track_data.push(data);
                         silenced.push(false);
                     }
@@ -1368,9 +1378,14 @@ impl SequencerState {
         .expect("the append clone path always has room by creating a bank")
     }
 
+    /// A new scene at the end of `bank`, cloned from the current one; its
+    /// swap state (rack slot enables) is taken as `inheritance` says
+    /// (docs/rig-spec.md §3.3): a blank `+` scene sounds like its bank.
+    #[allow(clippy::too_many_arguments)]
     pub fn clone_pattern_in_scene_bank(
         &self,
         bank: SceneBankId,
+        inheritance: SceneSwapInheritance,
         num_tracks: usize,
         buffer_ids: &[i32],
         sample_rates: &[u32],
@@ -1378,7 +1393,7 @@ impl SequencerState {
         instrument_types: &[InstrumentType],
     ) -> Result<usize, String> {
         self.clone_pattern_impl(
-            Some(bank),
+            Some((bank, inheritance)),
             num_tracks,
             buffer_ids,
             sample_rates,
@@ -1387,9 +1402,10 @@ impl SequencerState {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn clone_pattern_impl(
         &self,
-        bank: Option<SceneBankId>,
+        bank: Option<(SceneBankId, SceneSwapInheritance)>,
         num_tracks: usize,
         buffer_ids: &[i32],
         sample_rates: &[u32],
@@ -1416,7 +1432,7 @@ impl SequencerState {
             scenes.save_scene_snapshot_masked(cur, current_snapshot, save_masks.0, save_masks.1, save_masks.2);
             let old_scene_count = scenes.scene_count();
             let new_idx = match bank {
-                Some(bank) => scenes.new_scene_in_bank(bank)?,
+                Some((bank, inheritance)) => scenes.new_scene_in_bank(bank, inheritance)?,
                 None => scenes.new_scene(),
             };
             if new_idx != old_scene_count {
@@ -1499,6 +1515,11 @@ impl SequencerState {
 
     pub fn scene_banks(&self) -> Vec<SceneBank> {
         self.pattern.scenes.lock().unwrap().scene_banks().to_vec()
+    }
+
+    /// The scene indices bank `bank` spans.
+    pub fn scene_bank_range(&self, bank: SceneBankId) -> Option<std::ops::Range<usize>> {
+        self.pattern.scenes.lock().unwrap().scene_bank_range(bank)
     }
 
     pub fn scene_bank_containing(&self, scene: usize) -> Option<SceneBankId> {

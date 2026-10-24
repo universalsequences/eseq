@@ -10288,6 +10288,7 @@ use panel_kinds_seed::*;
             0,
             sequencer::sequencer::RackTrackSnapshot::new(
                 vec![sequencer::sequencer::RackSlotSnapshot {
+                    id: 0,
                     instrument_type: sequencer::sequencer::InstrumentType::Sampler,
                     instrument_run_mode: sequencer::sequencer::CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 12.0,

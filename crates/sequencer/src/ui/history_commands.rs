@@ -1213,15 +1213,8 @@ pub(super) fn rack_slot_snapshot_for_host(
     track: usize,
     slot_idx: usize,
 ) -> Option<sequencer::sequencer::RackSlotSnapshot> {
-    state
-        .pattern
-        .rack_tracks
-        .lock()
-        .unwrap()
-        .get(track)
-        .and_then(|rack| rack.as_ref())
-        .and_then(|rack| rack.slots.get(slot_idx))
-        .cloned()
+    // `enabled` is what the playing scene plays (docs/rig-spec.md §3.2).
+    state.resolved_live_rack_slot(track, slot_idx)
 }
 
 pub(super) fn rack_slot_effect_param_needs_panel_rebuild(

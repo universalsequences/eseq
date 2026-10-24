@@ -57,7 +57,7 @@ use std::hash::{Hash, Hasher};
 pub(crate) struct DeviceState {
     midi_key: Option<FamilyKey<(usize, usize, u64, u64, u64)>>,
     rack_key: Option<FamilyKey<u64>>,
-    rack_revision: Option<u64>,
+    rack_revision: Option<(u64, u64)>,
     bus_key: Option<FamilyKey<(usize, usize, u64)>>,
     /// Each family's device instances, for the live loop.
     midi_ids: Vec<InstanceId>,
@@ -494,13 +494,18 @@ fn effect_model<'a>(
 /// descriptors, their effects and those effects' switches), so a value
 /// edit (a knob drag) leaves it alone. Allocates nothing but the slot
 /// names.
-fn rack_layout(app: &app::App, rack: &sequencer::sequencer::RackTrackSnapshot) -> u64 {
+fn rack_layout(
+    app: &app::App,
+    rack: &sequencer::sequencer::RackTrackSnapshot,
+    slot_enable: Option<&sequencer::sequencer::SlotEnable>,
+) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     rack.slots.len().hash(&mut hasher);
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
         instrument_type_label(slot.instrument_type).hash(&mut hasher);
         rack_slot_raw_name(app, slot_idx, slot).hash(&mut hasher);
-        (slot.enabled, slot.max_polyphony).hash(&mut hasher);
+        let enabled = sequencer::sequencer::resolve_slot_enabled(slot, slot_enable);
+        (enabled, slot.max_polyphony).hash(&mut hasher);
         let descriptor = app.rack_slot_descriptor(slot);
         descriptor
             .map(|desc| (desc.params.as_ptr() as usize, desc.params.len()))
@@ -565,7 +570,13 @@ impl HostKinds {
             &self.track_ids,
             &self.device_ids,
         );
-        let rack_revision = app.state.pattern.rack_tracks.revision();
+        // A slot's `enabled` is scene state (docs/rig-spec.md §3.2): a bank
+        // toggle or a scene change moves the scenes, not the live racks, so
+        // both revisions gate the pass (unchanged racks still skip by layout).
+        let rack_revision = (
+            app.state.pattern.rack_tracks.revision(),
+            app.state.scenes_revision(),
+        );
         if all_racks || devices.rack_revision != Some(rack_revision) {
             devices.rack_revision = Some(rack_revision);
             outcome.merge(devices.sync_racks(pusher, app, &self.track_ids, all_racks));
@@ -656,6 +667,9 @@ impl DeviceState {
         track_ids: &[Option<InstanceId>],
         all: bool,
     ) -> PassOutcome {
+        // A slot's `enabled` is the playing scene's (docs/rig-spec.md §3.2).
+        // Read before the rack lock: scene launches lock scenes then racks.
+        let slot_enables = app.state.with_project_scenes(|scenes| scenes.current_scene_slot_enables());
         let racks = app.state.pattern.rack_tracks.lock().unwrap();
         let mut outcome = PassOutcome::default();
         self.racks
@@ -673,7 +687,8 @@ impl DeviceState {
                 continue;
             };
             let rack = racks.get(track).and_then(Option::as_ref);
-            let layout = rack.map(|rack| rack_layout(app, rack));
+            let slot_enable = slot_enables.get(track).and_then(Option::as_ref);
+            let layout = rack.map(|rack| rack_layout(app, rack, slot_enable));
             let cached = &mut self.racks[track];
             if !all && cached.layout == layout {
                 continue;
@@ -699,7 +714,7 @@ impl DeviceState {
                     did: device.did(app, track),
                     kind: instrument_type_label(slot.instrument_type).to_string(),
                     name: rack_slot_raw_name(app, slot_idx, slot),
-                    enabled: slot.enabled,
+                    enabled: sequencer::sequencer::resolve_slot_enabled(slot, slot_enable),
                     desc: app.rack_slot_descriptor(slot),
                     sampler: slot.instrument_type == sequencer::sequencer::InstrumentType::Sampler,
                     container: instrument,

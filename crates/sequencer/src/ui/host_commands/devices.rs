@@ -513,14 +513,28 @@ fn strip_edit(
             _ => format!("a {} has no {}", device.role(), control.field()),
         });
     };
-    let current = with_rack_slot(&app.state, owner, slot_idx, |_, slot| control.read(slot))
+    // `enabled` reads what the playing scene plays (docs/rig-spec.md §3.2).
+    let current = app
+        .state
+        .resolved_live_rack_slot(owner, slot_idx)
+        .map(|slot| control.read(&slot))
         .ok_or("the device is gone")?;
     if current.is(value.value()) {
         return Ok(());
     }
     let wanted = control.parse(value)?;
+    let Some(command) = control.command(owner, slot_idx, wanted) else {
+        // A slot's on/off is scene state, one undo step over a bank. A
+        // script's `set!` has no viewed bank (that is panel state the host
+        // never sees), so it writes the playing scene's bank; the panel's
+        // own toggle passes its viewed bank (`set-rack-slot-enabled`).
+        if app.set_rack_slot_enabled_in_bank_recorded(owner, slot_idx, wanted.number() > 0.5, None)? {
+            rack_slot_strip_applied(ctx, control);
+        }
+        return Ok(());
+    };
     let script = ScriptEdit::begin(app, ctx, control.drags());
-    let changed = script.apply(app, control.command(owner, slot_idx, wanted));
+    let changed = script.apply(app, command);
     if changed {
         rack_slot_strip_applied(ctx, control);
     }

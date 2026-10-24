@@ -881,14 +881,6 @@ pub enum AppCommand {
         value: bool,
     },
 
-    /// Enable or disable a rack layer (eseq-bw9v). A disabled layer gets no
-    /// triggers, bypasses its FX chain and holds no idle engine voice.
-    SetRackSlotEnabled {
-        track: usize,
-        slot_idx: usize,
-        value: bool,
-    },
-
     /// Set a rack layer's solo flag; also refreshes all layer solo mutes.
     SetRackSlotSolo {
         track: usize,
@@ -1167,7 +1159,6 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::StampInstrumentKeyLockVariant { .. }
         | AppCommand::ClearInstrumentKeyLockVariantsForNotes { .. }
         | AppCommand::SetRackSlotMute { .. }
-        | AppCommand::SetRackSlotEnabled { .. }
         | AppCommand::SetRackSlotSolo { .. }
         | AppCommand::SetRackSlotChokeGroup { .. } => HistoryPolicy::Record,
 
@@ -1811,6 +1802,7 @@ mod tests {
             0,
             RackTrackSnapshot::new(
                 vec![RackSlotSnapshot {
+                    id: 0,
                     instrument_type: InstrumentType::Sampler,
                     instrument_run_mode: CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
@@ -4169,14 +4161,6 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
             value,
         } => {
             app.set_rack_slot_solo(track, slot_idx, value);
-        }
-
-        AppCommand::SetRackSlotEnabled {
-            track,
-            slot_idx,
-            value,
-        } => {
-            app.set_rack_slot_enabled(track, slot_idx, value);
         }
 
         AppCommand::SetRackSlotMaxPolyphony {

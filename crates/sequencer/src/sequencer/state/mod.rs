@@ -49,6 +49,8 @@ mod ids;
 pub use ids::*;
 mod rack_clips;
 pub use rack_clips::*;
+mod slot_enable;
+pub use slot_enable::*;
 mod track_registry;
 pub use track_registry::*;
 mod rack_macro;

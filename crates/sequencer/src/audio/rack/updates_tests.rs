@@ -408,6 +408,108 @@ fn disabled_rack_slot_takes_no_voice_and_bypasses_its_effects() {
     unsafe { engine.destroy(); }
 }
 
+/// eseq-ka5t.12: which slots play is scene state, so a scene launch, a song
+/// row or a bank-toggle undo changes the published enabled set with no
+/// trigger in between. The audio thread derives the FX gates and the solo
+/// mutes from that change: launching into a bank where a parked slot is on
+/// brings its FX back, and its solo starts muting the others.
+#[test]
+fn launching_into_a_bank_where_a_slot_plays_restores_its_fx_and_solo() {
+    use crate::audiograph as graph;
+    use crate::effects::{filter, stereo_panner as pan};
+    let engine = engine::init_headless_engine(48_000, 2).unwrap();
+    let lg = engine.lg_ptr.0;
+    let (_tx, rx) = std::sync::mpsc::channel();
+    let mut data = new_audio_callback_data(
+        lg, Arc::clone(&engine.state), 48_000, 2, 512,
+        Arc::clone(&engine.master_recorder), rx,
+        Arc::clone(&engine.buses.bus_effect_runtime),
+        Arc::new(ScheduledEventQueue::new()), Arc::new(AtomicU64::new(0)),
+    );
+    let mut slot = off_step_solo_tests::slot();
+    slot.effect_slots[0] = EffectSlotSnapshot::new_default(&EffectDescriptor::builtin_filter(), 47);
+    slot.effect_descriptors[0] = EffectDescriptor::builtin_filter();
+    let mut rack = RackTrackSnapshot::new(vec![slot.clone(), slot], default_rack_macros());
+    rack.slots[1].solo = true;
+    let mut filters = Vec::new();
+    let mut pans = Vec::new();
+    for (slot_idx, slot) in rack.slots.iter_mut().enumerate() {
+        let add = |vtable, cells, inputs, outputs| unsafe {
+            graph::add_node(lg, vtable, cells * 4, c"rack-scene-gate-test".as_ptr(),
+                inputs, outputs, std::ptr::null(), 0) as u32
+        };
+        let filter_id = add(filter::filter_vtable(), filter::FILTER_STATE_SIZE, 6, 2);
+        let pan_id = add(pan::stereo_panner_vtable(), pan::STEREO_PANNER_STATE_SIZE, 2, 2);
+        unsafe {
+            for channel in 0..2 {
+                assert!(graph::graph_connect(lg, filter_id as i32, channel, pan_id as i32, channel));
+                assert!(graph::graph_connect(lg, pan_id as i32, channel, 0, channel));
+            }
+            assert!(graph::add_node_to_watchlist(lg, filter_id as i32));
+            assert!(graph::add_node_to_watchlist(lg, pan_id as i32));
+        }
+        data.state.runtime.rack_slot_pan_lids[0][slot_idx].store(pan_id as u64, Ordering::Release);
+        slot.effect_slots[0].sync_to_descriptor(&EffectDescriptor::builtin_filter(), filter_id);
+        filters.push(filter_id as i32);
+        pans.push(pan_id as i32);
+    }
+    let render = || {
+        let mut output = vec![0.0; 1024];
+        for _ in 0..4 {
+            unsafe { graph::process_next_block(lg, output.as_mut_ptr(), 512); }
+        }
+    };
+    let state_value = |node: i32, size: usize, idx: u64| {
+        let mut values = vec![0.0_f32; size];
+        let mut written = 0;
+        unsafe { assert!(graph::get_node_state_into(lg, node,
+            values.as_mut_ptr().cast(), values.len() * 4, &mut written)); }
+        values[idx as usize]
+    };
+    let publish = |data: &mut AudioCallbackData, rack: &RackTrackSnapshot| {
+        let snapshot = Arc::make_mut(&mut data.scheduler_snapshot);
+        Arc::make_mut(&mut snapshot.tracks[0]).rack_track = Some(rack.clone());
+    };
+    data.state.transport.num_tracks.store(1, Ordering::Release);
+    data.state.publish_scheduler_snapshot();
+    data.scheduler_snapshot = data.state.latest_scheduler_snapshot();
+    // A built chain starts running: the graph build pushes the stored value.
+    for &filter_id in &filters {
+        unsafe {
+            graph::params_push_wrapper(lg, graph::ParamMsg {
+                idx: filter::FILTER_PARAM_ENABLED,
+                logical_id: filter_id as u64,
+                fvalue: 1.0,
+            });
+        }
+    }
+
+    // Bank A parks slot 1: its FX bypass, and its solo mutes nobody.
+    rack.slots[1].enabled = false;
+    publish(&mut data, &rack);
+    release_newly_disabled_rack_slots(&mut data, 0);
+    render();
+    assert_eq!(state_value(filters[1], filter::FILTER_STATE_SIZE, filter::FILTER_PARAM_ENABLED as u64), 0.0);
+    assert_eq!(state_value(filters[0], filter::FILTER_STATE_SIZE, filter::FILTER_PARAM_ENABLED as u64), 1.0);
+    let muted = pan::STEREO_PANNER_PARAM_MUTED_BY_SOLO;
+    assert_eq!(state_value(pans[0], pan::STEREO_PANNER_STATE_SIZE, muted), 0.0);
+
+    // Launch into bank B, where slot 1 plays: no trigger needed.
+    rack.slots[1].enabled = true;
+    publish(&mut data, &rack);
+    release_newly_disabled_rack_slots(&mut data, 0);
+    render();
+    assert_eq!(
+        state_value(filters[1], filter::FILTER_STATE_SIZE, filter::FILTER_PARAM_ENABLED as u64),
+        1.0,
+        "the slot's FX run again"
+    );
+    assert_eq!(state_value(pans[0], pan::STEREO_PANNER_STATE_SIZE, muted), 1.0, "its solo mutes slot 0");
+    assert_eq!(state_value(pans[1], pan::STEREO_PANNER_STATE_SIZE, muted), 0.0);
+    drop(data);
+    unsafe { engine.destroy(); }
+}
+
 /// eseq-bw9v: a parked slot never sounds, so its solo must not mute the
 /// enabled slots beside it.
 #[test]

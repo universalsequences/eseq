@@ -56,9 +56,10 @@ impl Harness {
     }
 
     fn rack_slot_at(&self, slot: usize) -> sequencer::sequencer::RackSlotSnapshot {
+        // `enabled` as the playing scene resolves it (docs/rig-spec.md §3.2).
         self.shared
             .state
-            .live_rack_track_snapshot(2)
+            .resolved_live_rack_track(2)
             .expect("rack")
             .slots[slot]
             .clone()
@@ -1138,6 +1139,24 @@ fn rack_slot_strip_controls_read_their_base_display_and_lock_state() {
         h.rack_slot().param_plocks.get(2, RackSlotParam::Gain),
         Some(0.5)
     );
+}
+
+/// eseq-ka5t.12: a bank toggle writes scene state only (the live racks are
+/// untouched), and the device kind's `enabled` still follows it.
+#[test]
+fn a_scene_only_slot_toggle_reaches_the_device_enabled_field() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.eval_all("(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))");
+    assert_eq!(h.eval_all("rs.enabled"), Value::Bool(true));
+    let state = std::sync::Arc::clone(&h.shared.state);
+    let slot_id = state.live_rack_slot_id(2, 0).expect("a slot id");
+    let racks_before = state.pattern.rack_tracks.revision();
+    assert!(state.set_rack_slot_enabled_in_scenes(2, slot_id, false, 0..state.scene_count()));
+    assert_eq!(state.pattern.rack_tracks.revision(), racks_before, "scene state only");
+    h.sync();
+    assert_eq!(h.eval_all("rs.enabled"), Value::Bool(false));
 }
 
 #[test]

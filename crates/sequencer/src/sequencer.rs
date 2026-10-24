@@ -72,4 +72,5 @@ pub use state::{
     TrackPatternLaneState, MAX_SCENES_PER_BANK,
     NeuralInstrumentOverrideState, TrackEffectBindingStateSnapshot,
     RACK_MACRO_COUNT, RACK_SLOT_PARAM_COUNT,
+    resolve_slot_enabled, SceneSwapInheritance, SlotEnable,
 };

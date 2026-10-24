@@ -5,6 +5,7 @@ use crate::sequencer::{default_rack_macros, RackSlotParamPlocks, TrackSoundState
 
 fn slot(instrument_type: InstrumentType) -> RackSlotSnapshot {
     RackSlotSnapshot {
+        id: 0,
         instrument_type,
         instrument_run_mode: CustomInstrumentRunMode::Instrument,
         instrument_base_note_offset: 12.0,
@@ -177,4 +178,125 @@ fn rack_retrig_schedules_every_layer_and_chord_voice_with_resolved_gates() {
     fire_rack_resolved(&mut data, 17, 0, 0, None, 6000.0, resolved, chord,
         &mono_rack, [None; crate::sequencer::RACK_MACRO_COUNT], &ScheduledRackSlotParams::new());
     assert_eq!(data.countdown_events.iter().filter(|event| matches!(event.kind, CountdownEventKind::Retrig(_))).count(), 2);
+}
+
+/// eseq-lv9q: fit-to-scale fits the step's note once, and each rack slot's
+/// base note is a tuning correction added after the fit. Two slots on the same
+/// step with base notes 0 and -3 therefore sound exactly 3 semitones apart
+/// whatever the scale; fitting `note + base` instead would put them 4 apart
+/// on C minor's C (C fits to C, A to Ab).
+#[test]
+fn fit_to_scale_never_quantizes_rack_slot_base_note_offsets() {
+    let engine = engine::init_headless_engine(48_000, 2).unwrap();
+    let lg = engine.lg_ptr.0;
+    let (_tx, rx) = std::sync::mpsc::channel();
+    let mut data = new_audio_callback_data(
+        lg, Arc::clone(&engine.state), 48_000, 2, 512,
+        Arc::clone(&engine.master_recorder), rx,
+        Arc::clone(&engine.buses.bus_effect_runtime),
+        Arc::new(ScheduledEventQueue::new()), Arc::new(AtomicU64::new(0)),
+    );
+    data.state.transport.num_tracks.store(1, Ordering::Release);
+    data.state.runtime.instrument_type_flags[0].store(InstrumentType::Rack.runtime_flag(), Ordering::Release);
+    if !data.state.pattern.track_params[0].is_gate_on() {
+        data.state.pattern.track_params[0].toggle_gate();
+    }
+    // Two synth slots on one engine (base 0 and -3) and a sampler at -3.
+    let mut synth_at_c = slot(InstrumentType::Custom);
+    synth_at_c.instrument_base_note_offset = 0.0;
+    synth_at_c.track_sound_state.engine_id = Some(0);
+    let mut synth_at_a = synth_at_c.clone();
+    synth_at_a.instrument_base_note_offset = -3.0;
+    let mut sampler_at_a = slot(InstrumentType::Sampler);
+    sampler_at_a.instrument_base_note_offset = -3.0;
+    let pool_id = rack_slot_pool_index(0, 2).unwrap();
+    for voice_idx in 0..4 {
+        let id = unsafe {
+            graph::add_node(lg, gp::gatepitch_vtable(), gp::GATEPITCH_STATE_SIZE * 4,
+                c"fts-base-note-custom".as_ptr(), 0, gp::OUTPUT_COUNT as i32, std::ptr::null(), 0)
+        };
+        assert!(id > 0);
+        data.custom_engine_pools[0].add_voice(id as u64);
+        data.state.runtime.engine_synth_node_ids[0][voice_idx].store(id as u32, Ordering::Release);
+        data.state.runtime.engine_modulator_node_ids[0][voice_idx].store(id as u32, Ordering::Release);
+    }
+    for _ in 0..2 {
+        let id = unsafe {
+            graph::add_node(lg, crate::instruments::sampler::sampler_vtable(),
+                crate::instruments::sampler::SAMPLER_STATE_SIZE * 4,
+                c"fts-base-note-sampler".as_ptr(), 0, 2, std::ptr::null(), 0)
+        };
+        assert!(id > 0);
+        data.voice_pools[pool_id].add_voice(id as u64, id);
+        data.state.runtime.sampler_lids[pool_id].store(id as u64, Ordering::Release);
+    }
+    let mut output = vec![0.0; 1024];
+    unsafe { graph::process_next_block(lg, output.as_mut_ptr(), 512); }
+    let rack = RackTrackSnapshot::new(vec![synth_at_c, synth_at_a, sampler_at_a], default_rack_macros());
+    let minor = crate::scale::SCALES.iter().position(|scale| scale.name == "Minor").unwrap();
+    let no_chord = crate::scheduled_event::ScheduledChordData {
+        live_origins: [None; MAX_VOICES], count: 0, notes: [0.0; MAX_VOICES],
+        durations: [0.0; MAX_VOICES], delays: [0.0; MAX_VOICES], step_transpose: 0.0,
+    };
+
+    // The pitch each slot sounds for one step with `transpose`, through the
+    // scheduler's own fit-to-scale and the rack fire path. A one-repeat retrig
+    // captures every slot's resolved note in slot order.
+    let sound = |data: &mut AudioCallbackData, transpose: f32| -> (f32, f32, f32) {
+        let snapshot = data.state.publish_scheduler_snapshot();
+        let resolved = crate::accumulator::ResolvedStep {
+            duration: 1.0, velocity: 0.7, speed: 1.0, aux_a: 0.0, aux_b: 0.0,
+            transpose, pan: 0.0, chop: 0.0, retrig: 1.0, retrig_rate: 8.0,
+        };
+        let (resolved, chord) =
+            crate::scheduler::fit_mod_trigger_to_scale(&snapshot, 0, resolved, no_chord);
+        for slot_idx in 0..rack.slots.len() {
+            collect_rack_slot_active_voice_releases(
+                &mut data.voice_pools, &mut data.custom_engine_pools,
+                &mut data.countdown_events, &mut data.block_events,
+                0, slot_idx, &rack.slots[slot_idx], 0,
+            );
+        }
+        data.countdown_events.clear();
+        data.block_events.clear();
+        fire_rack_resolved(data, 0, 0, 0, None, 6000.0, resolved, chord,
+            &rack, [None; crate::sequencer::RACK_MACRO_COUNT], &ScheduledRackSlotParams::new());
+        let hits: Vec<_> = data.countdown_events.iter().filter_map(|event| match event.kind {
+            CountdownEventKind::Retrig(hit) => Some(hit.target),
+            _ => None,
+        }).collect();
+        let [RetrigTarget::Custom { voices: c, .. }, RetrigTarget::Custom { voices: a, .. },
+            RetrigTarget::RackSampler(sampler)] = hits.as_slice()
+        else {
+            panic!("expected synth, synth, sampler hits; got {hits:?}");
+        };
+        (c[0].pitch_hz, a[0].pitch_hz, sampler.transpose)
+    };
+    let semitones = |hz: f32| 12.0 * (hz / custom_pitch_hz(0.0, 0.0)).log2();
+
+    for scale in [crate::scale::SCALE_OFF, minor] {
+        data.state.pattern.track_params[0].set_fts_scale(scale);
+        for step_note in -12..=12 {
+            let step_note = step_note as f32;
+            let fitted = if scale == minor {
+                crate::scale::quantize_transpose(step_note, minor)
+            } else {
+                step_note
+            };
+            let (synth_c, synth_a, sampler_a) = sound(&mut data, step_note);
+            let (synth_c, synth_a) = (semitones(synth_c), semitones(synth_a));
+            assert!((synth_c - fitted).abs() < 1e-3,
+                "scale {scale} note {step_note}: base 0 slot plays {synth_c}, want {fitted}");
+            assert!((synth_c - synth_a - 3.0).abs() < 1e-3,
+                "scale {scale} note {step_note}: base 0 and -3 slots are {} apart", synth_c - synth_a);
+            assert_eq!(sampler_a, fitted - 3.0,
+                "scale {scale} note {step_note}: sampler at base -3");
+        }
+    }
+    // The case that would expose fitting `note + base`: C in C minor.
+    data.state.pattern.track_params[0].set_fts_scale(minor);
+    assert_eq!(crate::scale::quantize_transpose(-3.0, minor), -4.0);
+    let (_, synth_a, sampler_a) = sound(&mut data, 0.0);
+    assert!((semitones(synth_a) + 3.0).abs() < 1e-3);
+    assert_eq!(sampler_a, -3.0);
 }

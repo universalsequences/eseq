@@ -363,6 +363,7 @@ fn rack_effect_plock_resolution_requires_matching_parameter_identity() {
 
 fn rack_routing_test_slot() -> RackSlotSnapshot {
     RackSlotSnapshot {
+        id: 0,
         instrument_type: InstrumentType::Sampler,
         instrument_run_mode: CustomInstrumentRunMode::Instrument,
         instrument_base_note_offset: 0.0,

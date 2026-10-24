@@ -4389,6 +4389,9 @@ impl App {
         self.restore_track_instrument_state(appended, &patch.instrument)?;
         self.restore_track_effect_chain_state(appended, &empty_effects, &patch.effects)?;
         self.restore_track_midi_fx_chain_state(appended, &patch.midi_fx)?;
+        // Rebuilding a rack resets its scene state; put the lane's back.
+        self.state
+            .restore_track_slot_enable(appended, &patch.patterns.scene_slot_enable);
         self.track_colors[appended] = patch.color.unwrap_or(self.track_colors[appended]);
         self.track_collapsed[appended] = patch.collapsed;
         self.rack_selected_slots[appended] = patch.rack_selected_slot;
@@ -5902,7 +5905,6 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
         AppCommand::SetRackSlotGain { track, slot_idx, .. }
         | AppCommand::SetRackSlotPan { track, slot_idx, .. }
         | AppCommand::SetRackSlotMute { track, slot_idx, .. }
-        | AppCommand::SetRackSlotEnabled { track, slot_idx, .. }
         | AppCommand::SetRackSlotSolo { track, slot_idx, .. }
         | AppCommand::SetRackSlotMaxPolyphony { track, slot_idx, .. }
         | AppCommand::SetRackSlotChokeGroup { track, slot_idx, .. }
@@ -6144,7 +6146,6 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         AppCommand::SetRackSlotGain { track, slot_idx, .. }
         | AppCommand::SetRackSlotPan { track, slot_idx, .. }
         | AppCommand::SetRackSlotMute { track, slot_idx, .. }
-        | AppCommand::SetRackSlotEnabled { track, slot_idx, .. }
         | AppCommand::SetRackSlotSolo { track, slot_idx, .. }
         | AppCommand::SetRackSlotMaxPolyphony { track, slot_idx, .. }
         | AppCommand::SetRackSlotChokeGroup { track, slot_idx, .. }
@@ -7081,7 +7082,6 @@ fn device_value_command_track(cmd: &AppCommand) -> Option<usize> {
         | AppCommand::SetRackSlotGain { track, .. }
         | AppCommand::SetRackSlotPan { track, .. }
         | AppCommand::SetRackSlotMute { track, .. }
-        | AppCommand::SetRackSlotEnabled { track, .. }
         | AppCommand::SetRackSlotSolo { track, .. }
         | AppCommand::SetRackSlotMaxPolyphony { track, .. }
         | AppCommand::SetRackSlotChokeGroup { track, .. }
@@ -7139,7 +7139,6 @@ impl DeviceScope {
             AppCommand::SetRackSlotGain { slot_idx, .. }
             | AppCommand::SetRackSlotPan { slot_idx, .. }
             | AppCommand::SetRackSlotMute { slot_idx, .. }
-            | AppCommand::SetRackSlotEnabled { slot_idx, .. }
             | AppCommand::SetRackSlotSolo { slot_idx, .. }
             | AppCommand::SetRackSlotMaxPolyphony { slot_idx, .. }
             | AppCommand::SetRackSlotChokeGroup { slot_idx, .. }
@@ -7616,7 +7615,6 @@ fn resolve_device_value_target(
         AppCommand::SetRackSlotGain { slot_idx, .. }
         | AppCommand::SetRackSlotPan { slot_idx, .. }
         | AppCommand::SetRackSlotMute { slot_idx, .. }
-        | AppCommand::SetRackSlotEnabled { slot_idx, .. }
         | AppCommand::SetRackSlotSolo { slot_idx, .. }
         | AppCommand::SetRackSlotMaxPolyphony { slot_idx, .. }
         | AppCommand::SetRackSlotChokeGroup { slot_idx, .. }
@@ -7661,7 +7659,6 @@ fn device_value_label(cmd: &AppCommand) -> &'static str {
         AppCommand::SetRackSlotGain { .. } => "Set rack slot gain",
         AppCommand::SetRackSlotPan { .. } => "Set rack slot pan",
         AppCommand::SetRackSlotMute { .. } => "Set rack slot mute",
-        AppCommand::SetRackSlotEnabled { .. } => "Set rack slot enabled",
         AppCommand::SetRackSlotSolo { .. } => "Set rack slot solo",
         AppCommand::SetRackSlotMaxPolyphony { .. } => "Set rack slot max polyphony",
         AppCommand::SetRackSlotChokeGroup { .. } => "Set rack slot choke group",
@@ -13562,6 +13559,7 @@ mod tests {
             0,
             crate::sequencer::RackTrackSnapshot::new(
                 vec![crate::sequencer::RackSlotSnapshot {
+                    id: 0,
                     instrument_type: InstrumentType::Sampler,
                     instrument_run_mode:
                         crate::sequencer::CustomInstrumentRunMode::Instrument,
@@ -13654,6 +13652,7 @@ mod tests {
             0,
             crate::sequencer::RackTrackSnapshot::new(
                 vec![crate::sequencer::RackSlotSnapshot {
+                    id: 0,
                     instrument_type: InstrumentType::Sampler,
                     instrument_run_mode: crate::sequencer::CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,

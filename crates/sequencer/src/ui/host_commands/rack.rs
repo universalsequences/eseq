@@ -206,7 +206,9 @@ impl StripControl {
     }
 
     /// The control's value as `slot` stores it (unclamped, so a stored value
-    /// out of the value rule's range reads back as it is).
+    /// out of the value rule's range reads back as it is). `enabled` is what
+    /// the slot says: pass a slot resolved through the playing scene
+    /// (`SequencerState::resolved_live_rack_slot`, docs/rig-spec.md §3.2).
     pub(crate) fn read(self, slot: &sequencer::sequencer::RackSlotSnapshot) -> StripValue {
         match self {
             Self::Gain => StripValue::Number(slot.gain),
@@ -221,15 +223,16 @@ impl StripControl {
     }
 
     /// The legacy history command setting rack slot `slot_idx` of `track`
-    /// to `value`.
+    /// to `value`; `None` for `enabled`, which is scene state written by
+    /// `App::set_rack_slot_enabled_in_bank_recorded` (eseq-ka5t.12).
     pub(super) fn command(
         self,
         track: usize,
         slot_idx: usize,
         value: StripValue,
-    ) -> app::AppCommand {
+    ) -> Option<app::AppCommand> {
         let flag = value.number() > 0.5;
-        match self {
+        Some(match self {
             Self::Gain => app::AppCommand::SetRackSlotGain {
                 track,
                 slot_idx,
@@ -250,11 +253,7 @@ impl StripControl {
                 slot_idx,
                 value: flag,
             },
-            Self::Enabled => app::AppCommand::SetRackSlotEnabled {
-                track,
-                slot_idx,
-                value: flag,
-            },
+            Self::Enabled => return None,
             Self::Choke => app::AppCommand::SetRackSlotChokeGroup {
                 track,
                 slot_idx,
@@ -270,7 +269,7 @@ impl StripControl {
                 slot_idx,
                 value: value.number() as usize,
             },
-        }
+        })
     }
 }
 
@@ -1268,20 +1267,21 @@ pub(super) fn handle(
             }
         }
         "set-rack-slot-enabled" => {
+            // Scene state for every scene of the viewed bank (`:bank-id`,
+            // else the playing scene's), one undo step (docs/rig-spec.md
+            // §3.2, §4).
             if let Value::Map(ref map) = payload {
                 if let (Some(track), Some(slot_idx)) =
                     (map_usize(map, "track"), map_usize(map, "slot"))
                 {
                     let value = map_bool(map, "value");
-                    app::apply_command(
-                        &mut app,
-                        app::AppCommand::SetRackSlotEnabled {
-                            track,
-                            slot_idx,
-                            value,
-                        },
-                    );
-                    rack_slot_strip_applied(ctx, StripControl::Enabled);
+                    let bank = super::scene_banks::scene_bank_id(&payload);
+                    match app.set_rack_slot_enabled_in_bank_recorded(track, slot_idx, value, bank) {
+                        Ok(_) => rack_slot_strip_applied(ctx, StripControl::Enabled),
+                        Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                            "Could not switch the rack slot: {error}"
+                        ))),
+                    }
                 }
             }
         }
@@ -2272,6 +2272,7 @@ mod tests {
                 TRACK,
                 sequencer::sequencer::RackTrackSnapshot::new(
                     vec![sequencer::sequencer::RackSlotSnapshot {
+                        id: 0,
                         instrument_type: sequencer::sequencer::InstrumentType::Sampler,
                         instrument_run_mode:
                             sequencer::sequencer::CustomInstrumentRunMode::Instrument,

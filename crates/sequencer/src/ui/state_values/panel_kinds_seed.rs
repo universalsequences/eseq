@@ -1485,7 +1485,8 @@ pub(super) fn seed_app_panels(editor: &mut Editor, app: &app::App, track: usize)
     let mut chain = Vec::new();
     let instrument_type = app.graph.track_instrument_types.get(track).copied();
     if instrument_type == Some(InstrumentType::Rack) {
-        let rack = state.pattern.rack_tracks.lock().unwrap()[track].clone().expect("a rack");
+        // Slot `enabled` resolved through the playing scene (rig spec §3.2).
+        let rack = state.resolved_live_rack_track(track).expect("a rack");
         let display = instrument_panel_display_name(app, track);
         let empty = sequencer::effects::EffectDescriptor::empty_custom_slot();
         let rack_id = device(

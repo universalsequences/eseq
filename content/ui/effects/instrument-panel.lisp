@@ -5,6 +5,7 @@
 (import eseq.effects.devices :as dv)
 (import eseq.effects.panel-data :as pd)
 (import eseq.view-kit :refer (listed?))
+(import eseq.scene-banks :refer (scene-viewed-bank))
 (import eseq.effects.state :as st :refer (effect-mods instrument-view))
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.drag-drop :as dd)
@@ -342,11 +343,17 @@
 (def rack-slot-set-mute (slot v)
   (rack-slot-set-param-or-plock slot "mute" "set-rack-slot-mute" v))
 
+;; A slot's on/off belongs to the scenes, not the pattern (docs/rig-spec.md
+;; §3.2): the toggle switches it for every scene of the viewed bank and
+;; leaves the other banks as they are (§4, bank scope).
+;; Before the host publishes any bank there is no viewed bank: the host then
+;; uses the playing scene's.
 (def rack-slot-set-enabled (slot v)
-  (host-command "set-rack-slot-enabled"
-    (dict :track (get slot :track)
-          :slot (get slot :idx)
-          :value v)))
+  (let ((b (scene-viewed-bank)))
+    (host-command "set-rack-slot-enabled"
+      (if b
+        (dict :track (get slot :track) :slot (get slot :idx) :value v :bank-id b.bid)
+        (dict :track (get slot :track) :slot (get slot :idx) :value v)))))
 
 (def rack-slot-set-solo (slot v)
   (rack-slot-set-param-or-plock slot "solo" "set-rack-slot-solo" v))

@@ -418,6 +418,10 @@ impl App {
             if !prepared.tracks.contains(&track) {
                 data.clear_step_content();
             }
+            // The playing scene owns which rack slots play (rig spec §3.2).
+            prepared
+                .scenes
+                .resolve_scene_track_pattern(prepared.scenes.current_scene, track, &mut data);
             tracks.push(data);
         }
         let current = self.state.latest_scheduler_snapshot();

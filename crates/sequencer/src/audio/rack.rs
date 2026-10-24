@@ -647,6 +647,46 @@ pub(super) unsafe fn push_rack_slot_effects_gate(
     }
 }
 
+/// A rack's playing slot set changed under the audio thread (eseq-ka5t.12:
+/// a scene launch, a song row, a bank toggle or its undo all repoint which
+/// slots the scene enables, docs/rig-spec.md §3.2). Bring every changed
+/// slot's FX gate in line with the snapshot — bypassed when parked, the
+/// effect's own stored value when it plays again — and repush every slot's
+/// solo mute, since a parked solo must not mute the slots around it. Only
+/// param pushes: no allocation, no lock.
+pub(in crate::audio) fn push_rack_slot_enable_changes(
+    data: &AudioCallbackData,
+    track_idx: usize,
+    rack: &RackTrackSnapshot,
+    changed: u32,
+) {
+    let update = RackParams::live(rack, [None; crate::sequencer::RACK_MACRO_COUNT]);
+    let has_solo = rack_has_enabled_solo(&update);
+    for (slot_idx, slot) in rack.slots.iter().enumerate().take(MAX_RACK_SLOTS.min(u32::BITS as usize)) {
+        if changed & (1 << slot_idx) != 0 {
+            unsafe { push_rack_slot_effects_gate(data.lg.0, slot, slot.enabled) };
+        }
+        let Some(pan_lids) = data.state.runtime.rack_slot_pan_lids.get(track_idx) else {
+            continue;
+        };
+        let slot_pan_lid = pan_lids[slot_idx].load(Ordering::Acquire);
+        if slot_pan_lid == 0 {
+            continue;
+        }
+        let muted_by_solo = has_solo && !update.slot_params(slot_idx).solo;
+        unsafe {
+            params_push_wrapper(
+                data.lg.0,
+                ParamMsg {
+                    idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO,
+                    logical_id: slot_pan_lid,
+                    fvalue: if muted_by_solo { 1.0 } else { 0.0 },
+                },
+            );
+        }
+    }
+}
+
 /// Whether any slot that can sound is soloed. A parked (disabled) slot never
 /// triggers, so its solo must not mute the enabled slots around it.
 pub(super) fn rack_has_enabled_solo(update: &RackParams<'_>) -> bool {
@@ -1960,6 +2000,7 @@ mod off_step_solo_tests {
 
     pub(super) fn slot() -> RackSlotSnapshot {
         RackSlotSnapshot {
+            id: 0,
             instrument_type: InstrumentType::Sampler,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: 0.0,

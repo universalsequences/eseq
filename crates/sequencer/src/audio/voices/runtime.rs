@@ -1306,6 +1306,9 @@ pub(in crate::audio) fn release_rack_slot_active_voices(
 /// snapshot newly disabled (eseq-bw9v). A disabled slot gets no new triggers,
 /// but a held key, long gate or one-shot started before the toggle would keep
 /// ringing — dry, since the slot's FX chain is bypassed at the same moment.
+/// Any change of a rack's enabled set (either way) also repushes its FX gates
+/// and solo mutes from the snapshot (eseq-ka5t.12), so the playing scene
+/// alone decides them whatever changed it.
 pub(in crate::audio) fn release_newly_disabled_rack_slots(
     data: &mut AudioCallbackData,
     release_sample: u64,
@@ -1324,8 +1327,12 @@ pub(in crate::audio) fn release_newly_disabled_rack_slots(
                 .filter(|(_, slot)| !slot.enabled)
                 .fold(0u32, |mask, (slot_idx, _)| mask | (1 << slot_idx))
         });
+        let changed = mask ^ data.rack_slot_disabled_masks[track_idx];
         let newly_disabled = mask & !data.rack_slot_disabled_masks[track_idx];
         data.rack_slot_disabled_masks[track_idx] = mask;
+        if let Some(rack) = rack.filter(|_| changed != 0) {
+            crate::audio::rack::push_rack_slot_enable_changes(data, track_idx, rack, changed);
+        }
         let Some(rack) = rack.filter(|_| newly_disabled != 0) else {
             continue;
         };

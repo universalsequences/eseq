@@ -1013,6 +1013,7 @@ pub(super) fn handle(
         }
         "clone-pattern" => {
             // `:idx`: clone that scene (into its bank) instead of the current one.
+            let explicit_source = extract_usize_from_payload(&payload, "idx").is_some();
             if make_payload_scene_current(&payload, app, editor, ctx).is_err() {
                 return;
             }
@@ -1064,8 +1065,19 @@ pub(super) fn handle(
                         None => app.state.create_scene_bank()?,
                     };
                     let old_scene_count = app.state.scene_count();
+                    // Swap state (docs/rig-spec.md §3.3): a clone or a copy
+                    // to a new bank takes its source's; the transport's `+`
+                    // (a bank, no source scene) takes the bank's own.
+                    let inheritance = if requested_bank.is_some() && !explicit_source && !into_new_bank {
+                        sequencer::sequencer::SceneSwapInheritance::BankNeighbour
+                    } else {
+                        sequencer::sequencer::SceneSwapInheritance::Source(
+                            app.state.playing_scene(),
+                        )
+                    };
                     let new_idx = app.state.clone_pattern_in_scene_bank(
                         target_bank,
+                        inheritance,
                         num_tracks,
                         &app.graph.track_buffer_ids,
                         &app.graph.track_sample_rates,

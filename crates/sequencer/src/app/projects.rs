@@ -1628,6 +1628,7 @@ impl App {
                     instrument_name: None,
                 };
                 let slot = crate::project::ProjectRackSlotPattern {
+                    id: 0,
                     instrument_type: crate::project::ProjectInstrumentType::Sampler,
                     instrument_run_mode: crate::project::ProjectCustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: pattern
@@ -1677,6 +1678,7 @@ impl App {
                     instrument_name: Some(instrument_name.clone()),
                 };
                 let slot = crate::project::ProjectRackSlotPattern {
+                    id: 0,
                     instrument_type: crate::project::ProjectInstrumentType::Custom,
                     instrument_run_mode: pattern
                         .instrument_run_modes
@@ -3242,6 +3244,8 @@ impl ProjectCapture {
         // onto the file.
         let (mut rack_clip_banks, scene_rack_clips) =
             self.capture_rack_clips(scenes_for_takes, num_tracks)?;
+        // Scene-owned swap state (docs/rig-spec.md 3.2), outer index scene.
+        let scene_slot_enable = scenes_for_takes.slot_enable_to_wire(num_tracks);
         // The arrangement always exists (empty-arrangement spec 7): every
         // save writes one, the empty arrangement included. Serialization maps
         // live pattern-pool ids into the deterministic ids the loader rebuilds
@@ -3290,6 +3294,7 @@ impl ProjectCapture {
             record_armed: self.record_armed,
             scene_cell_presence,
             scene_rack_clips,
+            scene_slot_enable,
             instances: self.instances,
             grooves: self.grooves,
             take_pools,
@@ -4705,6 +4710,7 @@ impl App {
             record_armed,
             scene_cell_presence,
             scene_rack_clips,
+            scene_slot_enable,
             take_pools,
             track_sounds,
             track_lane_rosters,
@@ -4970,6 +4976,15 @@ impl App {
             pending.sample_assets = assets;
             pending.fallback_samples += fallback;
             result?;
+        }
+        // Scene-owned swap state (docs/rig-spec.md 3). Every pool pattern
+        // and rack clip cell is installed by now; the live mirror is
+        // restored from the current scene below, so it picks up the ids.
+        if file_version < crate::project::SCENE_SLOT_ENABLE_VERSION {
+            self.state.migrate_legacy_rack_slot_scene_state();
+        } else {
+            self.state.install_scene_slot_enable(&scene_slot_enable);
+            self.state.normalize_rack_slot_ids();
         }
         self.state
             .set_committed_arrangement(Some(arrangement))
@@ -6881,6 +6896,7 @@ mod tests {
     ) -> ProjectFile {
         ProjectFile {
             scene_rack_clips: Vec::new(),
+            scene_slot_enable: Vec::new(),
             instances: crate::project::ProjectInstances::default(),
             grooves: Vec::new(),
             version: project::project_file_version(),
@@ -7685,5 +7701,353 @@ mod tests {
                 .map(|param| param.node_param_idx)
                 .collect::<Vec<_>>()
         );
+    }
+}
+
+/// Scene-owned swap state through the App (docs/rig-spec.md §3, eseq-ka5t.12):
+/// the bank-scoped slot toggle and its undo, track delete/undo, and the
+/// project file — v18 round trip and the legacy migration.
+#[cfg(test)]
+mod scene_slot_enable_tests {
+    use super::*;
+    use crate::sequencer::{SceneBankId, SlotEnable};
+
+    const PLATE: &str = "../../content/impulses/lexicon-300-rich-plate.wav";
+    const PIANO: &str = "../../content/impulses/prepared/yamaha-g5.wav";
+
+    struct Rig {
+        engine: Option<crate::audio::engine::HeadlessEngine>,
+        app: Option<App>,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+            let app = App::new(
+                Arc::clone(&engine.state),
+                engine.lg_ptr,
+                engine.sample_rate,
+                engine.buses.clone(),
+                Arc::clone(&engine.master_recorder),
+                engine.keyboard_tx.clone(),
+            );
+            Self { engine: Some(engine), app: Some(app) }
+        }
+
+        fn app(&mut self) -> &mut App {
+            self.app.as_mut().unwrap()
+        }
+
+        fn render(&self) {
+            let lg = self.engine.as_ref().unwrap().lg_ptr;
+            unsafe { crate::audiograph::prepare_graph_for_render(lg.0) };
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            drop(self.app.take());
+            if let Some(engine) = self.engine.take() {
+                unsafe { engine.destroy() };
+            }
+        }
+    }
+
+    /// A rack track (index `rack`) with a sampler slot per `samples`.
+    fn rack_with_samplers(app: &mut App, samples: &[&str]) -> usize {
+        app.graph_controller().add_track(Path::new(PLATE)).expect("a first track");
+        let rack = app.graph_controller().add_empty_layer_rack_track().unwrap();
+        for sample in samples {
+            app.graph_controller()
+                .add_sampler_slot_to_rack(rack, Path::new(sample))
+                .expect("a sampler slot");
+        }
+        rack
+    }
+
+    fn sample_name(app: &App, track: usize, slot: usize) -> String {
+        app.state.live_rack_track_snapshot(track).unwrap().slots[slot]
+            .sample_id.as_ref().map(|(_, name, _)| name.clone()).unwrap()
+    }
+
+    fn new_scene(app: &mut App) -> usize {
+        let names = app.tracks.clone();
+        app.state.clone_pattern(
+            names.len(),
+            &app.graph.track_buffer_ids.clone(),
+            &app.graph.track_sample_rates.clone(),
+            &names,
+            &app.graph.track_instrument_types.clone(),
+        )
+    }
+
+    fn launch(app: &mut App, scene: usize) {
+        let names = app.tracks.clone();
+        app.state
+            .launch_scene(
+                scene,
+                names.len(),
+                &app.graph.track_buffer_ids.clone(),
+                &app.graph.track_sample_rates.clone(),
+                &names,
+                &app.graph.track_instrument_types.clone(),
+            )
+            .expect("scene launches");
+    }
+
+    /// The sample name of every slot scene `scene` plays on `track`, as the
+    /// published scheduler snapshot (what triggers reach) has it.
+    fn playing(app: &mut App, scene: usize, track: usize) -> Vec<String> {
+        launch(app, scene);
+        let snapshot = app.state.latest_scheduler_snapshot();
+        let mut names: Vec<String> = snapshot.tracks[track]
+            .rack_track
+            .as_ref()
+            .expect("a rack")
+            .slots
+            .iter()
+            .filter(|slot| slot.enabled)
+            .map(|slot| slot.sample_id.as_ref().map(|(_, name, _)| name.clone()).unwrap_or_default())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn every_scene_plays(app: &mut App, track: usize) -> Vec<Vec<String>> {
+        (0..app.state.scene_count()).map(|scene| playing(app, scene, track)).collect()
+    }
+
+    fn reload(rig: &mut Rig, name: &str, project: ProjectFile) {
+        let encoded = serde_json::to_value(&project).unwrap();
+        let restored: ProjectFile = serde_json::from_value(encoded).unwrap();
+        rig.app().queue_loaded_project(name, restored).unwrap();
+        for _ in 0..200 {
+            if !rig.app().has_pending_project_load() {
+                break;
+            }
+            rig.app().advance_pending_project_load().unwrap();
+            rig.render();
+        }
+        assert!(!rig.app().has_pending_project_load(), "the project finished loading");
+    }
+
+    #[test]
+    fn the_slot_toggle_writes_only_the_viewed_bank_as_one_undo_step() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let rack = rack_with_samplers(app, &[PLATE, PIANO]);
+        for _ in 0..3 {
+            new_scene(app);
+        }
+        let bank_b = app.state.create_scene_bank().unwrap();
+        for _ in 0..2 {
+            app.state.move_scene_to_scene_bank(2, bank_b).unwrap();
+        }
+        let bank_a = app.state.scene_banks()[0].id;
+        let slot_id = app.state.live_rack_slot_id(rack, 1).unwrap();
+        let undo_before = app.history.undo_len();
+
+        assert!(app.set_rack_slot_enabled_in_bank_recorded(rack, 1, false, Some(bank_b)).unwrap());
+        assert_eq!(app.history.undo_len(), undo_before + 1, "one undo step");
+        assert_eq!(app.state.scenes_enabling_rack_slot(rack, slot_id), vec![0, 1]);
+        assert_eq!(app.state.banks_enabling_rack_slot(rack, slot_id), vec![bank_a]);
+        assert!(
+            !app.set_rack_slot_enabled_in_bank_recorded(rack, 1, false, Some(bank_b)).unwrap(),
+            "the same write again is a no-op"
+        );
+        assert_eq!(app.history.undo_len(), undo_before + 1);
+        let (plate, piano) = (sample_name(app, rack, 0), sample_name(app, rack, 1));
+        let mut both = vec![plate.clone(), piano.clone()];
+        both.sort();
+        assert_eq!(playing(app, 0, rack), both, "bank A keeps both slots");
+        assert_eq!(playing(app, 3, rack), vec![plate.clone()], "bank B parked the piano");
+
+        assert!(matches!(crate::app::edit::undo(app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scenes_enabling_rack_slot(rack, slot_id), vec![0, 1, 2, 3]);
+        assert!(matches!(crate::app::edit::redo(app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scenes_enabling_rack_slot(rack, slot_id), vec![0, 1]);
+        let _ = SceneBankId(0);
+    }
+
+    #[test]
+    fn deleting_and_restoring_a_track_carries_its_scene_slot_state() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let rack = rack_with_samplers(app, &[PLATE, PIANO]);
+        new_scene(app);
+        let bank = app.state.scene_bank_containing(0).unwrap();
+        // Scene state only on the rack track, which sits after track 0.
+        assert!(app.set_rack_slot_enabled_in_bank_recorded(rack, 0, false, Some(bank)).unwrap());
+        let parked = app.state.with_project_scenes(|scenes| scenes.scene_slot_enable(1, rack).cloned());
+        assert!(parked.is_some());
+
+        app.delete_track_recorded(0).expect("delete the track before the rack");
+        let shifted = rack - 1;
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(scenes.scene_slot_enable(1, shifted).cloned(), parked, "the entry moved down");
+            assert!(scenes.scene_slot_enable(1, rack).is_none());
+        });
+        assert!(matches!(crate::app::edit::undo(app), crate::app::history::HistoryReplay::Applied(_)));
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(scenes.scene_slot_enable(1, rack).cloned(), parked, "undo moves it back");
+        });
+
+        // Deleting the rack track itself drops its entries; undo restores them.
+        app.delete_track_recorded(rack).expect("delete the rack");
+        app.state.with_project_scenes(|scenes| {
+            assert!(scenes.scenes.iter().all(|scene| scene.slot_enable.get(&rack).is_none()));
+        });
+        assert!(matches!(crate::app::edit::undo(app), crate::app::history::HistoryReplay::Applied(_)));
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(scenes.scene_slot_enable(1, rack).cloned(), parked);
+        });
+    }
+
+    #[test]
+    fn slot_ids_and_scene_slot_state_round_trip_through_a_project_file() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let rack = rack_with_samplers(app, &[PLATE, PIANO]);
+        new_scene(app);
+        let bank = app.state.scene_bank_containing(0).unwrap();
+        // Scene 1 alone parks the plate.
+        assert!(app.set_rack_slot_enabled_in_bank_recorded(rack, 0, false, Some(bank)).unwrap());
+        app.state.with_scenes_mut(|scenes| {
+            scenes.scenes[0].slot_enable.insert(rack, SlotEnable::from([1, 2]));
+        });
+        let before = every_scene_plays(app, rack);
+        let ids_before: Vec<u64> = app.state.live_rack_track_snapshot(rack).unwrap().slots.iter().map(|s| s.id).collect();
+        let saved = app.capture_project("slot-enable-roundtrip").unwrap();
+        assert_eq!(saved.version, crate::project::project_file_version());
+        assert_eq!(saved.scene_slot_enable[0], vec![(rack, vec![1, 2])]);
+        assert_eq!(saved.scene_slot_enable[1], vec![(rack, vec![2])]);
+        let slots = &saved.patterns[0].rack_tracks[rack].as_ref().unwrap().slots;
+        assert_eq!(slots.iter().map(|slot| slot.id).collect::<Vec<_>>(), ids_before);
+
+        reload(&mut rig, "slot-enable-roundtrip", saved);
+        let app = rig.app();
+        let ids_after: Vec<u64> = app.state.live_rack_track_snapshot(rack).unwrap().slots.iter().map(|s| s.id).collect();
+        assert_eq!(ids_after, ids_before);
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(scenes.scene_slot_enable(0, rack), Some(&SlotEnable::from([1, 2])));
+            assert_eq!(scenes.scene_slot_enable(1, rack), Some(&SlotEnable::from([2])));
+        });
+        assert_eq!(every_scene_plays(app, rack), before);
+    }
+
+    #[test]
+    fn a_legacy_project_loads_with_every_scene_playing_what_it_played() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let rack = rack_with_samplers(app, &[PLATE, PLATE]);
+        // Scene 1: a per-pattern replace leaves the piano wav in row 1 (one
+        // sampler, two samples), and row 2 parked in that pattern only.
+        new_scene(app);
+        app.graph_controller()
+            .replace_rack_slot_with_sampler(rack, 0, Path::new(PIANO))
+            .expect("replace in the current pattern only");
+        new_scene(app);
+        let mut saved = app.capture_project("legacy-slots").unwrap();
+        // Make it a v17 file: no slot ids, no scene state, the device set in
+        // the patterns' stored flags.
+        saved.version = 17;
+        saved.scene_slot_enable.clear();
+        let strip = |pattern: &mut crate::project::ProjectPattern| {
+            for rack in pattern.rack_tracks.iter_mut().flatten() {
+                for slot in &mut rack.slots {
+                    slot.id = 0;
+                }
+            }
+        };
+        for pattern in &mut saved.patterns {
+            strip(pattern);
+        }
+        for pattern in saved.carrier_patterns_mut() {
+            strip(pattern);
+        }
+        saved.patterns[1].rack_tracks[rack].as_mut().unwrap().slots[1].enabled = false;
+        let plate = saved.patterns[0].rack_tracks[rack].as_ref().unwrap().slots[0]
+            .sample_name.clone().unwrap();
+        let piano = saved.patterns[1].rack_tracks[rack].as_ref().unwrap().slots[0]
+            .sample_name.clone().unwrap();
+        assert_ne!(plate, piano, "the row held two samples");
+        // Scene 3 was cloned from scene 2: piano in row 1, row 2 still on.
+        let mut plate_and_piano = vec![plate.clone(), piano.clone()];
+        plate_and_piano.sort();
+        let expected = vec![vec![plate.clone(), plate.clone()], vec![piano.clone()], plate_and_piano];
+
+        reload(&mut rig, "legacy-slots", saved);
+        let app = rig.app();
+        let rack_after = app.state.live_rack_track_snapshot(rack).unwrap();
+        // A sample is pattern content: the row with two wavs stays one slot.
+        assert_eq!(rack_after.slots.len(), 2, "no split");
+        let ids: Vec<u64> = rack_after.slots.iter().map(|slot| slot.id).collect();
+        assert_eq!(ids, vec![1, 2], "ids by position");
+        assert_eq!(every_scene_plays(app, rack), expected, "every scene plays what it played");
+
+        // Saved again (v18) and reopened: still the same.
+        let resaved = app.capture_project("legacy-slots").unwrap();
+        assert_eq!(resaved.scene_slot_enable.len(), 3);
+        reload(&mut rig, "legacy-slots", resaved);
+        let app = rig.app();
+        assert_eq!(app.state.live_rack_track_snapshot(rack).unwrap().slots.len(), 2);
+        assert_eq!(every_scene_plays(app, rack), expected);
+    }
+
+    /// eseq-ka5t.12 manual check on a real project: it loads through the
+    /// App path, and every scene plays the same rack slots as the file's
+    /// stored per-scene flags say (what HEAD plays). Read-only.
+    ///
+    /// ```sh
+    /// ESEQ_RIG_PROJECT=/abs/project.json cargo nextest run -p sequencer --lib \
+    ///   -E 'test(=app::projects::scene_slot_enable_tests::a_real_project_loads_with_every_scene_on_the_same_slots)' \
+    ///   --run-ignored only --no-capture
+    /// ```
+    /// Default: `.local/benchmarks/park-probe-2026-10-23/gotham/fixture.json`.
+    #[test]
+    #[ignore = "needs a real project and its instruments/samples"]
+    fn a_real_project_loads_with_every_scene_on_the_same_slots() {
+        let path = std::env::var_os("ESEQ_RIG_PROJECT").map(PathBuf::from).unwrap_or_else(|| {
+            PathBuf::from("../../.local/benchmarks/park-probe-2026-10-23/gotham/fixture.json")
+        });
+        let project = crate::project::load_project_from_path(&path).expect("read the project");
+        assert!(project.version < crate::project::SCENE_SLOT_ENABLE_VERSION, "a legacy file");
+        // HEAD: each scene's composed pattern carries its slots' stored flags.
+        let stored: Vec<Vec<Option<Vec<bool>>>> = project
+            .patterns
+            .iter()
+            .map(|pattern| {
+                pattern
+                    .rack_tracks
+                    .iter()
+                    .map(|rack| rack.as_ref().map(|rack| rack.slots.iter().map(|slot| slot.enabled).collect()))
+                    .collect()
+            })
+            .collect();
+        let mut rig = Rig::new();
+        rig.app().sample_analysis = crate::analysis::AnalysisService::synchronous();
+        let name = project.name.clone();
+        rig.app().queue_bounce_project(&name, project).unwrap();
+        while rig.app().has_pending_project_load() {
+            rig.app().advance_pending_project_load().expect("the project loads");
+            rig.render();
+        }
+        let app = rig.app();
+        let mut checked = 0;
+        for (scene, tracks) in stored.iter().enumerate() {
+            launch(app, scene);
+            let snapshot = app.state.latest_scheduler_snapshot();
+            for (track, stored) in tracks.iter().enumerate() {
+                let Some(stored) = stored else { continue };
+                let Some(rack) = snapshot.tracks.get(track).and_then(|t| t.rack_track.as_ref()) else {
+                    continue;
+                };
+                let playing: Vec<bool> = rack.slots.iter().map(|slot| slot.enabled).collect();
+                assert_eq!(&playing, stored, "scene {} track {}", scene + 1, track + 1);
+                checked += 1;
+            }
+        }
+        eprintln!("checked {checked} (scene, rack track) pairs");
+        assert!(checked > 0);
     }
 }

@@ -1017,6 +1017,7 @@
     fn sample_rack_track_snapshot() -> RackTrackSnapshot {
         RackTrackSnapshot::new(
             vec![RackSlotSnapshot {
+                id: 0,
                 instrument_type: InstrumentType::Custom,
                 instrument_run_mode: CustomInstrumentRunMode::Instrument,
                 instrument_base_note_offset: 7.0,
@@ -1136,6 +1137,7 @@
         instrument_slot_id: usize,
     ) -> RackSlotSnapshot {
         RackSlotSnapshot {
+            id: 0,
             instrument_type: InstrumentType::Sampler,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: -12.0,
@@ -2120,12 +2122,20 @@
         assert!(live.slots[1].enabled);
 
         let repository = state.export_pattern_repository();
-        let current = repository[0].rack_tracks[0].as_ref().unwrap();
         let other = repository[1].rack_tracks[0].as_ref().unwrap();
         assert_eq!(other.slots.len(), 2, "slot lists stay aligned");
-        assert!(current.slots[1].enabled);
-        assert!(!other.slots[1].enabled);
-        assert!(other.slots[0].enabled, "only the new slot is parked");
+        // eseq-ka5t.12: the park is scene state now (docs/rig-spec.md §3.2),
+        // so another scene sharing the pattern would not hear it either.
+        let (old_id, new_id) = (live.slots[0].id, live.slots[1].id);
+        assert_ne!(old_id, new_id);
+        state.with_project_scenes(|scenes| {
+            let current = scenes.scene_slot_enable(0, 0).expect("current scene entry");
+            let other = scenes.scene_slot_enable(1, 0).expect("other scene entry");
+            assert!(current.contains(&new_id));
+            assert!(!other.contains(&new_id));
+            assert!(other.contains(&old_id), "only the new slot is parked");
+        });
+        assert_eq!(state.live_rack_slot_enabled(0, 1), Some(true));
     }
 
     #[test]
@@ -2149,6 +2159,7 @@
         state.set_rack_track_for_all_pattern_snapshots(0, initial);
 
         let replacement = RackSlotSnapshot {
+            id: 0,
             instrument_type: InstrumentType::Sampler,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: -12.0,
@@ -5636,6 +5647,7 @@
         let inserted = state
             .clone_pattern_in_scene_bank(
                 SceneBankId(4),
+                SceneSwapInheritance::Source(state.playing_scene()),
                 1,
                 &[-1],
                 &[44_100],
@@ -5842,7 +5854,7 @@
         let mut scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
         let next_scene_id = scenes.next_scene_id;
 
-        assert!(scenes.new_scene_in_bank(SceneBankId(1)).unwrap_err().contains("24 scenes"));
+        assert!(scenes.new_scene_in_bank(SceneBankId(1), SceneSwapInheritance::Source(scenes.current_scene)).unwrap_err().contains("24 scenes"));
         assert_eq!(scenes.scenes.len(), MAX_SCENES_PER_BANK);
         assert_eq!(scenes.banks[0].len, MAX_SCENES_PER_BANK);
         assert_eq!(scenes.next_scene_id, next_scene_id);
@@ -5862,7 +5874,7 @@
         ]);
         let old_second = scenes.scenes[1].id;
 
-        let inserted = scenes.new_scene_in_bank(SceneBankId(8)).unwrap();
+        let inserted = scenes.new_scene_in_bank(SceneBankId(8), SceneSwapInheritance::Source(scenes.current_scene)).unwrap();
         assert_eq!(inserted, 1);
         assert_eq!(scenes.scenes[2].id, old_second);
         assert_eq!(scenes.banks.iter().map(|bank| bank.len).collect::<Vec<_>>(), vec![1, 1, 1]);

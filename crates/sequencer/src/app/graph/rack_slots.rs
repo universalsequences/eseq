@@ -85,6 +85,7 @@ impl GraphController<'_> {
             first_graph_node_identity(&voices.modulator_ids),
         );
         let rack_slot = RackSlotSnapshot {
+            id: 0,
             instrument_type: InstrumentType::Sampler,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: 0.0,
@@ -256,6 +257,7 @@ impl GraphController<'_> {
         instrument_slot.sync_to_descriptor_with_modulator(&desc, node_id, modulator_node_id);
 
         let rack_slot = RackSlotSnapshot {
+            id: 0,
             instrument_type: InstrumentType::Custom,
             instrument_run_mode: run_mode,
             instrument_base_note_offset: 0.0,
@@ -409,6 +411,7 @@ impl GraphController<'_> {
             return Err("Current track is not a rack".to_string());
         }
         let replacement = RackSlotSnapshot {
+            id: 0,
             instrument_type: InstrumentType::Sampler,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: 0.0,
@@ -441,6 +444,7 @@ impl GraphController<'_> {
     ) -> Result<(), String> {
         let descriptor = lisp_host::instrument_descriptor_from_manifest(instrument_name, manifest);
         let replacement = RackSlotSnapshot {
+            id: 0,
             instrument_type: InstrumentType::Custom,
             instrument_run_mode: run_mode,
             instrument_base_note_offset: 0.0,
