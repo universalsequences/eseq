@@ -220,7 +220,10 @@ fn bounded(x: f32, lo: f32, hi: f32, default: f32) -> f32 {
     }
 }
 fn slew(x: f64, target: f64, alpha: f64) -> f64 {
-    let y = x + alpha * (target - x);
+    snap(x + alpha * (target - x), target)
+}
+/// `y`, or `target` once within 1e-10 of it, so a smoother settles exactly.
+fn snap(y: f64, target: f64) -> f64 {
     if (y - target).abs() < 1e-10 {
         target
     } else {
@@ -277,6 +280,43 @@ impl State {
             }
             value.clamp(c.min, c.max) as f64
         })
+    }
+    /// Advance the smoothers and LFO phase over `nf` skipped frames in
+    /// closed form, as the per-frame loop would have, without the ring.
+    /// Targets are held at the block's last frame of modulation (the loop
+    /// reads them per frame; a sleeping block's sources are assumed steady).
+    /// One-pole `y += alpha (t - y)` after `n` frames leaves `(1-alpha)^n` of
+    /// the error, and the loop adds each frame's updated rate to the phase,
+    /// so the phase gains `t n + e0 r (1 - r^n) / (1 - r)` with `r = 1-alpha`.
+    /// `wet` and `gain` chase their (themselves smoothed) targets with the
+    /// same decay, toward the targets' end values; they only scale output,
+    /// which a sleeping chorus does not produce, so this approximation of a
+    /// cascade settles within the 10 ms smoothing time after a wake.
+    unsafe fn advance_asleep(&mut self, inp: *const *mut f32, nf: usize, alpha: f64, enabled: bool) {
+        let sr = self.sample_rate as f64;
+        let sources = std::array::from_fn(|slot| *(*inp.add(2 + slot)).add(nf - 1));
+        let targets = self.effective(sources);
+        let r = 1.0 - alpha;
+        let decay = r.powi(nf.min(i32::MAX as usize) as i32);
+        let settle = |x: f64, target: f64| snap(target + (x - target) * decay, target);
+        let rate_error = self.smooth[RATE] - targets[RATE];
+        let rate_sum = targets[RATE] * nf as f64 + rate_error * r * (1.0 - decay) / alpha;
+        self.phase = (self.phase + rate_sum / sr).fract();
+        for i in 0..COUNT {
+            self.smooth[i] = settle(self.smooth[i], targets[i]);
+        }
+        let (wet, gain) = self.wet_gain_targets(enabled);
+        self.wet = settle(self.wet, wet);
+        self.gain = settle(self.gain, gain);
+    }
+    /// What `wet` and `gain` chase from the smoothed controls: mix and
+    /// output gain, or a dry unity passthrough when bypassed.
+    fn wet_gain_targets(&self, enabled: bool) -> (f64, f64) {
+        if enabled {
+            (self.smooth[MIX], 10.0_f64.powf(self.smooth[OUTPUT] / 20.0))
+        } else {
+            (0.0, 1.0)
+        }
     }
     /// Four-point cubic interpolation; the minimum two-sample read ensures
     /// all four neighbors are already written. No extra dry-path latency.
@@ -373,13 +413,13 @@ unsafe extern "C" fn process(
     }
     s.bypass_idle = false;
     // Tail sleep: silent input and a ring that has held only decayed
-    // residue for a whole ring length. The LFO phase and write head still
-    // advance, so a wake matches a never-sleeping chorus to within that
-    // residue.
+    // residue for a whole ring length. The smoothers, LFO phase and write
+    // head still advance, so a wake matches a never-sleeping chorus to
+    // within that residue.
     let Some(counts_quiet) =
         super::tail_sleep::sleep_or_count(&s.quiet, inp, 2, out, 2, frames, s.capacity as f32, true)
     else {
-        s.phase = (s.phase + s.smooth[RATE] / sr * nf as f64).fract();
+        s.advance_asleep(inp, nf, alpha, enabled);
         s.write = (s.write + nf) & (s.capacity - 1);
         return;
     };
@@ -396,12 +436,7 @@ unsafe extern "C" fn process(
                 slew(s.smooth[i], targets[i], alpha)
             };
         }
-        let wet = if enabled { s.smooth[MIX] } else { 0.0 };
-        let gain = if enabled {
-            10.0_f64.powf(s.smooth[OUTPUT] / 20.0)
-        } else {
-            1.0
-        };
+        let (wet, gain) = s.wet_gain_targets(enabled);
         s.wet = if s.first {
             wet
         } else {

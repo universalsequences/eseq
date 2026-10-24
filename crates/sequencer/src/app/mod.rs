@@ -457,7 +457,7 @@ mod engine_registry_tests {
 
     fn manifest() -> DGenManifest {
         DGenManifest {
-            effect_latency_samples: None, tail_sleep: false,
+            effect_latency_samples: None, tail_sleep: None,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 2,
@@ -2634,11 +2634,11 @@ impl App {
     }
 
     pub fn submit_sample_analysis(&self, loaded: &crate::instruments::sampler::LoadedSample) {
-        self.sample_analysis.submit(AnalysisJob {
-            buffer_id: loaded.buffer_id,
-            samples: Arc::new(loaded.mono_samples.clone()),
-            sample_rate: loaded.sample_rate,
-        });
+        self.sample_analysis.submit(AnalysisJob::new(
+            loaded.buffer_id,
+            Arc::new(loaded.mono_samples.clone()),
+            loaded.sample_rate,
+        ));
     }
 
     pub fn reset_sampler_bpm_for_analysis(&self, track: usize) {

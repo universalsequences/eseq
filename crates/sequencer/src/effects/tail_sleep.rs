@@ -14,8 +14,9 @@
 pub const INPUT_SILENCE: f32 = 1.0e-7;
 /// Internal signal at or below this counts as decayed (-120 dBFS).
 pub const QUIET_LEVEL: f32 = 1.0e-6;
-/// Quiet frame counts saturate here, exactly representable in `f32`.
-const QUIET_FRAMES_CAP: f32 = 16_777_216.0;
+/// Quiet frame counts saturate here, exactly representable in `f32`. A hold
+/// longer than this is never reached, so callers clamp holds to it.
+pub(crate) const QUIET_FRAMES_CAP: f32 = 16_777_216.0;
 
 /// Largest magnitude in `nf` samples of each non-null channel.
 ///

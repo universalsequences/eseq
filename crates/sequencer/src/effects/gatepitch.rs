@@ -23,10 +23,20 @@ const OUTPUT_LANE_CACHE: usize =
     PARAM_TIMELINE_BASE + GATEPITCH_TIMELINE_CAPACITY * TIMELINE_EVENT_WIDTH;
 /// Every output except the clock ramp is constant between events.
 const CACHED_LANES: [usize; 11] = [
-    0, 1, 2, 3, 5, OUTPUT_NOTE_ON, OUTPUT_LEGATO, OUTPUT_PRESSURE, OUTPUT_PITCH_BEND, OUTPUT_MOD_WHEEL, OUTPUT_SLIDE,
+    OUTPUT_GATE, OUTPUT_PITCH, OUTPUT_VELOCITY, OUTPUT_TRIGGER, OUTPUT_CLOCK_INC, OUTPUT_NOTE_ON,
+    OUTPUT_LEGATO, OUTPUT_PRESSURE, OUTPUT_PITCH_BEND, OUTPUT_MOD_WHEEL, OUTPUT_SLIDE,
 ];
 pub const GATEPITCH_STATE_SIZE: usize =
     OUTPUT_LANE_CACHE + super::output_lanes::state_cells(CACHED_LANES.len());
+// Output ports. The first six share their index with the matching `PARAM_*`
+// state slot by coincidence of layout, not by contract: address ports with
+// these, state with `PARAM_*`.
+pub const OUTPUT_GATE: usize = 0;
+pub const OUTPUT_PITCH: usize = 1;
+pub const OUTPUT_VELOCITY: usize = 2;
+pub const OUTPUT_TRIGGER: usize = 3;
+pub const OUTPUT_CLOCK_PHASE: usize = 4;
+pub const OUTPUT_CLOCK_INC: usize = 5;
 pub const OUTPUT_NOTE_ON: usize = 6;
 pub const OUTPUT_LEGATO: usize = 7;
 pub const OUTPUT_PRESSURE: usize = 8;
@@ -255,8 +265,10 @@ unsafe extern "C" fn gatepitch_process(
     let mut event_index = 0usize;
     let nf = nframes as usize;
     let lane = |output: usize| std::slice::from_raw_parts_mut(*out.add(output), nf);
-    let (gate_out, pitch_out, velocity_out, trigger_out, clock_out, clock_inc_out) =
-        (lane(0), lane(1), lane(2), lane(3), lane(4), lane(5));
+    let (gate_out, pitch_out, velocity_out, trigger_out, clock_out, clock_inc_out) = (
+        lane(OUTPUT_GATE), lane(OUTPUT_PITCH), lane(OUTPUT_VELOCITY),
+        lane(OUTPUT_TRIGGER), lane(OUTPUT_CLOCK_PHASE), lane(OUTPUT_CLOCK_INC),
+    );
     let (note_on_out, legato_out) = (lane(OUTPUT_NOTE_ON), lane(OUTPUT_LEGATO));
     let (pressure_out, pitch_bend_out, mod_wheel_out, slide_out) =
         (lane(OUTPUT_PRESSURE), lane(OUTPUT_PITCH_BEND), lane(OUTPUT_MOD_WHEEL), lane(OUTPUT_SLIDE));
@@ -356,13 +368,13 @@ unsafe extern "C" fn gatepitch_process(
     // The clock increment never changes within a call.
     if !reference {
         use super::silence::{declare_shape, LaneShape};
-        declare_shape(PARAM_CLOCK_INC as usize, LaneShape::Constant);
+        declare_shape(OUTPUT_CLOCK_INC, LaneShape::Constant);
         if clock_is_ramp {
-            declare_shape(PARAM_CLOCK_PHASE as usize, LaneShape::PhaseRamp);
+            declare_shape(OUTPUT_CLOCK_PHASE, LaneShape::PhaseRamp);
         }
         if one_segment {
-            declare_shape(PARAM_GATE as usize, LaneShape::Constant);
-            declare_shape(PARAM_TRIGGER as usize, LaneShape::Constant);
+            declare_shape(OUTPUT_GATE, LaneShape::Constant);
+            declare_shape(OUTPUT_TRIGGER, LaneShape::Constant);
         }
     }
     *s.add(PARAM_PRESSURE as usize) = pressure;
@@ -400,12 +412,12 @@ unsafe extern "C" fn gatepitch_process_reference(
     let event_count = event_count.min(GATEPITCH_TIMELINE_CAPACITY);
     let mut event_index = 0usize;
     let nf = nframes as usize;
-    let out0 = *out.add(0); // gate output
-    let out1 = *out.add(1); // pitch output
-    let out2 = *out.add(2); // velocity output
-    let out3 = *out.add(3); // trigger output
-    let out4 = *out.add(4); // clock output
-    let out5 = *out.add(5); // per-sample clock increment
+    let out0 = *out.add(OUTPUT_GATE);
+    let out1 = *out.add(OUTPUT_PITCH);
+    let out2 = *out.add(OUTPUT_VELOCITY);
+    let out3 = *out.add(OUTPUT_TRIGGER);
+    let out4 = *out.add(OUTPUT_CLOCK_PHASE);
+    let out5 = *out.add(OUTPUT_CLOCK_INC);
     for i in 0..nf {
         let mut trigger = 0.0;
         let mut note_on = 0.0;
@@ -698,7 +710,7 @@ mod tests {
         assert_eq!(outputs[OUTPUT_PITCH_BEND], [-0.5, -0.5, -0.5, -0.5, 0.25, 0.25, 0.0, 0.0]);
         assert_eq!(outputs[OUTPUT_MOD_WHEEL], [0.8, 0.8, 0.8, 0.8, 0.6, 0.6, 0.0, 0.0]);
         assert_eq!(outputs[OUTPUT_SLIDE], [0.3, 0.3, 0.3, 0.3, 0.9, 0.9, 0.0, 0.0]);
-        assert_eq!(outputs[PARAM_TRIGGER as usize], [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(outputs[OUTPUT_TRIGGER], [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
     }
 
     #[test]
@@ -724,14 +736,14 @@ mod tests {
                 state.as_mut_ptr().cast(), std::ptr::null_mut());
         }
         assert_eq!(outputs[OUTPUT_PRESSURE], [0.25, 0.25, 0.75, 0.75, 0.75, 0.0, 0.0, 1.0]);
-        assert_eq!(outputs[PARAM_TRIGGER as usize], [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(outputs[OUTPUT_TRIGGER], [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
         unsafe {
             gatepitch_begin_event_slice(state.as_mut_ptr().cast(), 2, 0, 8);
             gatepitch_process(std::ptr::null(), pointers.as_ptr(), 8,
                 state.as_mut_ptr().cast(), std::ptr::null_mut());
         }
         assert_eq!(outputs[OUTPUT_PRESSURE], [1.0; 8]);
-        assert_eq!(outputs[PARAM_TRIGGER as usize], [0.0; 8]);
+        assert_eq!(outputs[OUTPUT_TRIGGER], [0.0; 8]);
     }
 
     #[test]
@@ -757,12 +769,12 @@ mod tests {
                 state.as_mut_ptr().cast(), std::ptr::null_mut(),
             );
         }
-        assert_eq!(outputs[PARAM_GATE as usize], [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0]);
-        assert_eq!(outputs[PARAM_TRIGGER as usize], [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
+        assert_eq!(outputs[OUTPUT_GATE], [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0]);
+        assert_eq!(outputs[OUTPUT_TRIGGER], [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
         assert_eq!(outputs[OUTPUT_NOTE_ON], [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
         assert_eq!(outputs[OUTPUT_LEGATO], [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
-        assert_eq!(outputs[PARAM_PITCH as usize], [220.0, 220.0, 330.0, 330.0, 440.0, 440.0, 550.0, 550.0]);
-        assert_eq!(outputs[PARAM_VELOCITY as usize][2], 0.75);
+        assert_eq!(outputs[OUTPUT_PITCH], [220.0, 220.0, 330.0, 330.0, 440.0, 440.0, 550.0, 550.0]);
+        assert_eq!(outputs[OUTPUT_VELOCITY][2], 0.75);
     }
 
     #[test]

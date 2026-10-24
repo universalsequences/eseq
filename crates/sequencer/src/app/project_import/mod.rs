@@ -190,6 +190,16 @@ pub(super) struct Plan {
     notes: Vec<String>,
 }
 
+impl Plan {
+    fn is_empty(&self) -> bool {
+        self.kits.is_empty()
+            && self.groups.is_empty()
+            && self.tracks.is_empty()
+            && self.banks.is_empty()
+            && self.sequencers.is_empty()
+    }
+}
+
 /// The name a pick shows in the peek (see `ImportRequest::expected_names`).
 fn pick_name(source: &ImportSource, kind: PickKind, id: u64) -> Option<String> {
     match kind {
@@ -362,6 +372,9 @@ fn source_notes(source: &ImportSource, plan: &Plan) -> Vec<String> {
     notes
 }
 
+/// The refusal of an import that would change nothing.
+const NOTHING_IMPORTED: &str = "The import changed nothing";
+
 impl App {
     /// Import the picks of `request` from `source` (rig spec §8) as ONE undo
     /// step. On error nothing stays behind.
@@ -391,13 +404,25 @@ impl App {
         self.begin_import_sample_sharing();
         let result = self.import_from_project_inner(source, request);
         self.end_import_sample_sharing();
+        // Nothing recorded means nothing to undo: refuse BEFORE the host's
+        // `finish` (rack scripts, package attaches) leaves effects that no
+        // undo entry would carry.
+        let result = result.and_then(|summary| {
+            if self.history.undo_len() > history_len {
+                Ok(summary)
+            } else {
+                Err(NOTHING_IMPORTED.to_string())
+            }
+        });
         match result {
             Ok(mut summary) => {
                 let notes = finish(self, &summary);
                 summary.notes.extend(notes);
                 let label = format!("Import from {}", source.name);
                 match self.history.undo_len().saturating_sub(history_len) {
-                    0 => return Err("The import changed nothing".to_string()),
+                    // Refused above as NOTHING_IMPORTED; relabelling here
+                    // would rename an unrelated earlier undo entry.
+                    0 => debug_assert!(false, "an import that recorded nothing reached finish"),
                     1 => self.history.relabel_last(label),
                     _ => {
                         super::edit::squash_history_since(self, history_len, label);
@@ -419,6 +444,14 @@ impl App {
         request: &ImportRequest,
     ) -> Result<ImportSummary, String> {
         let plan = plan(source, request)?;
+        if plan.is_empty() {
+            // Every pick was skipped (an empty track, a kit's own
+            // sequencer): stop before the placement records an empty step.
+            return Err(std::iter::once(NOTHING_IMPORTED.to_string())
+                .chain(plan.notes.iter().cloned())
+                .collect::<Vec<_>>()
+                .join("; "));
+        }
         let mut summary = ImportSummary { project: source.name.clone(), ..Default::default() };
         summary.notes.extend(source.notes.iter().cloned());
         summary.notes.extend(plan.notes.iter().cloned());
@@ -563,7 +596,17 @@ impl App {
         }
         summary.instances.sort_unstable();
         summary.groups.push((source_group, group_id));
-        let clip_id = |index: usize| (index < clip_count).then_some(index as u64 + 1);
+        // The ids the loader gave the kit's clips: its bank holds one clip
+        // per kit clip, in kit order. A kit whose clips failed to install
+        // has no bank, so nothing points at a clip it lacks.
+        let installed: Vec<u64> = self.state.with_scenes(|scenes| {
+            scenes
+                .rack_bank(group_id)
+                .filter(|bank| bank.clips.len() == clip_count)
+                .map(|bank| bank.clips.iter().map(|clip| clip.id).collect())
+                .unwrap_or_default()
+        });
+        let clip_id = |index: usize| installed.get(index).copied();
         // Clips that play their own groove keep it (a copy enters the pool).
         if !extracted.clip_grooves.is_empty() {
             let grooves = extracted.clip_grooves;

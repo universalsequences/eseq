@@ -5519,7 +5519,7 @@ mod tests {
 
     fn test_instrument_manifest() -> lisp_host::DGenManifest {
         lisp_host::DGenManifest {
-            effect_latency_samples: None, tail_sleep: false,
+            effect_latency_samples: None, tail_sleep: None,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 1,

@@ -560,8 +560,16 @@ void apply_params(LiveGraph *g) {
           }
           continue;
         }
-        memory[m.idx] = m.fvalue;
-        node->state_writes++;
+        // Count only value-changing writes: a host re-pushing an unchanged
+        // value (defaults, per-step p-lock restores) must not restart a
+        // tail-sleeping node's quiet run. Bits, so -0.0 vs 0.0 still counts.
+        uint32_t old_bits, new_bits;
+        memcpy(&old_bits, &memory[m.idx], sizeof old_bits);
+        memcpy(&new_bits, &m.fvalue, sizeof new_bits);
+        if (old_bits != new_bits) {
+          memory[m.idx] = m.fvalue;
+          node->state_writes++;
+        }
         applied++;
       }
     }

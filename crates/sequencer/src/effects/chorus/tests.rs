@@ -316,6 +316,56 @@ fn tail_sleep_skips_a_drained_ring_and_wakes_like_a_never_sleeping_chorus() {
 }
 
 #[test]
+fn a_param_change_while_asleep_wakes_like_a_never_sleeping_chorus() {
+    use super::super::tail_sleep::test_support::burst;
+    let mut a = Harness::new(48000);
+    let mut b = Harness::new(48000);
+    for h in [&mut a, &mut b] {
+        h.state().params[MIX] = 0.6;
+        h.state().params[DEPTH] = 8.0;
+    }
+    let hold = a.state().capacity as f32;
+    let silence = vec![[0.0f32; 2]; 512];
+    // Render both, keeping `b` awake by zeroing its quiet run each block.
+    let both = |a: &mut Harness, b: &mut Harness, input: &[[f32; 2]]| {
+        let mut outputs = (Vec::new(), Vec::new());
+        for chunk in input.chunks(512) {
+            b.state().quiet = 0.0;
+            outputs.0.extend(a.run(chunk, 512, [0.0; SLOTS]));
+            outputs.1.extend(b.run(chunk, 512, [0.0; SLOTS]));
+        }
+        outputs
+    };
+    both(&mut a, &mut b, &burst(4800, 0.5, 7));
+    for _ in 0..40 {
+        both(&mut a, &mut b, &silence);
+    }
+    assert!(a.state().quiet >= hold, "the sleeper never fell asleep");
+    // The rate, delay and mix move while the sleeper sleeps: its smoothers
+    // and LFO must track them as the never-sleeping twin's do.
+    for h in [&mut a, &mut b] {
+        h.state().params[RATE] = 7.0;
+        h.state().params[DEPTH] = 2.0;
+        h.state().params[BASE] = 12.0;
+        h.state().params[MIX] = 0.9;
+    }
+    for _ in 0..20 {
+        let (x, _) = both(&mut a, &mut b, &silence);
+        assert!(x.iter().flatten().all(|v| v.to_bits() == 0), "the sleeper must stay asleep");
+    }
+    for i in 0..COUNT {
+        let (x, y) = (a.state().smooth[i], b.state().smooth[i]);
+        assert!((x - y).abs() <= 1e-9 * y.abs().max(1.0), "smoother {i}: {x} vs {y}");
+    }
+    let phase_diff = (a.state().phase - b.state().phase).abs();
+    assert!(phase_diff.min(1.0 - phase_diff) <= 1e-9, "LFO phase drifted by {phase_diff}");
+    let (x, y) = both(&mut a, &mut b, &burst(2048, 0.5, 9));
+    let peak = y.iter().flatten().fold(0.0f32, |m, v| m.max(v.abs()));
+    let diff = x.iter().flatten().zip(y.iter().flatten()).fold(0.0f32, |m, (p, q)| m.max((p - q).abs()));
+    assert!(peak > 0.1 && diff <= 1e-5, "wake diff {diff} against peak {peak}");
+}
+
+#[test]
 fn settled_bypass_skips_the_dsp_and_passes_audio_through_unchanged() {
     let mut h = Harness::new(48000);
     let sr = 48000.0;

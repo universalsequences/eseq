@@ -3801,12 +3801,13 @@ mod idle_fast_path_tests {
         assert!(gp_id > 0 && mods.iter().all(|id| *id > 0) && observer > 0);
         for (index, &mod_id) in mods.iter().enumerate() {
             unsafe {
-                for port in 0..4 {
+                for port in gp::OUTPUT_GATE..=gp::OUTPUT_TRIGGER {
+                    let port = port as c_int;
                     assert!(graph::graph_connect(lg, gp_id, port, mod_id, port));
                 }
-                assert!(graph::graph_connect(lg, gp_id, gp::PARAM_CLOCK_PHASE as c_int,
+                assert!(graph::graph_connect(lg, gp_id, gp::OUTPUT_CLOCK_PHASE as c_int,
                     mod_id, INPUT_TRANSPORT_BAR_PHASE as c_int));
-                assert!(graph::graph_connect(lg, gp_id, gp::PARAM_CLOCK_INC as c_int,
+                assert!(graph::graph_connect(lg, gp_id, gp::OUTPUT_CLOCK_INC as c_int,
                     mod_id, INPUT_TRANSPORT_BAR_PHASE_INC as c_int));
                 for port in 0..NUM_OUTPUTS {
                     assert!(graph::graph_connect(lg, mod_id, port as c_int, observer,
@@ -3814,7 +3815,7 @@ mod idle_fast_path_tests {
                 }
             }
         }
-        for (port, lane) in [(gp::PARAM_GATE, 0), (gp::PARAM_TRIGGER, 1), (gp::PARAM_CLOCK_PHASE, 2)] {
+        for (port, lane) in [(gp::OUTPUT_GATE, 0), (gp::OUTPUT_TRIGGER, 1), (gp::OUTPUT_CLOCK_PHASE, 2)] {
             assert!(unsafe { graph::graph_connect(lg, gp_id, port as c_int, observer,
                 (2 * NUM_OUTPUTS + lane) as c_int) });
         }

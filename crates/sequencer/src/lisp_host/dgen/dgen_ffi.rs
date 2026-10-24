@@ -173,8 +173,8 @@ pub const MAX_BUS_FX_CHAINS: usize = 64;
 // state[10..10+N] = DGenLisp memory span (generated code's `float *memory`)
 // state[10+N..10+N+256] = redzone
 // state[10+N+256..+3] = host tail-sleep trailer (`DGEN_TAIL_SLOTS`): quiet
-//            frames, the `(effect-tail-sleep)` opt-in, and the node's last seen
-//            state-write count. Never params; audiograph's dead legacy param
+//            frames, the `(effect-tail-sleep [seconds])` opt-in and hold, and
+//            the node's last seen state-write count. Never params; audiograph's dead legacy param
 //            mirror over this range was removed with it.
 
 pub const DGEN_ENABLED_PARAM_IDX: usize = 4;
@@ -199,8 +199,16 @@ pub(in crate::lisp_host) fn ensure_enabled_param(params: &mut Vec<crate::effects
 pub const DGEN_TAIL_SLOTS: usize = 3;
 /// Trailer cell: frames of silent input with output below -120 dB.
 pub(in crate::lisp_host) const DGEN_TAIL_QUIET: usize = 0;
-/// Trailer cell: 1 when the source opted in with `(effect-tail-sleep)`.
+/// Trailer cell: the `(effect-tail-sleep [seconds])` opt-in. 0 = not opted
+/// in; a positive value is the author-declared hold in seconds;
+/// [`DGEN_TAIL_HOLD_FALLBACK`] = opted in without a hold (see
+/// [`dgen_tail_hold_frames`]).
 pub(in crate::lisp_host) const DGEN_TAIL_OPT_IN: usize = 1;
+/// `DGEN_TAIL_OPT_IN` value for a bare `(effect-tail-sleep)`.
+pub(in crate::lisp_host) const DGEN_TAIL_HOLD_FALLBACK: f32 = -1.0;
+/// Floor and cap, in seconds, of the undeclared-hold fallback.
+const DGEN_TAIL_FALLBACK_MIN_SECONDS: f32 = crate::effects::tail_sleep::DEFAULT_HOLD_SECONDS;
+const DGEN_TAIL_FALLBACK_MAX_SECONDS: f32 = 10.0;
 /// Trailer cell: the node's state-write count (bits) when last processed.
 pub(in crate::lisp_host) const DGEN_TAIL_WRITES: usize = 2;
 
@@ -250,27 +258,60 @@ pub(in crate::lisp_host) unsafe fn dgen_process_fn_from_state(state: *mut f32) -
     (pointer != 0).then(|| std::mem::transmute::<usize, DGenProcessFn>(pointer as usize))
 }
 
+/// Quiet frames an opted-in node must see before it sleeps, or `None` when
+/// it did not opt in.
+///
+/// A declared `(effect-tail-sleep <seconds>)` is used as given (the author
+/// knows the longest delay their kernel holds), clamped to the quiet-run
+/// saturation `tail_sleep::QUIET_FRAMES_CAP` so a long hold at a high rate
+/// (60 s at 384 kHz) still sleeps instead of never being reached. Without one the host cannot
+/// see the kernel's delay lengths, only its memory span (`state[1]`, every
+/// float cell including tensors and FFT buffers). A delay line holding `d`
+/// frames needs at least `d` cells, so the span is a conservative upper bound
+/// on in-flight frames, not an estimate: tensor-heavy kernels overshoot it by
+/// far. It is floored at the 1 s reverb hold and capped at 10 s so such
+/// kernels still sleep (and so the hold stays under the quiet-run saturation
+/// in `tail_sleep::note_block`); an effect with longer delays should declare
+/// its hold.
+unsafe fn dgen_tail_hold_frames(state: *mut f32) -> Option<f32> {
+    let opt_in = *dgen_tail_cell(state, DGEN_TAIL_OPT_IN);
+    let sample_rate = dgen_host_sample_rate(state);
+    if opt_in > 0.0 {
+        Some((opt_in * sample_rate).min(crate::effects::tail_sleep::QUIET_FRAMES_CAP))
+    } else if opt_in < 0.0 {
+        let span_frames = (*state.add(1)).max(0.0);
+        Some(span_frames.clamp(
+            DGEN_TAIL_FALLBACK_MIN_SECONDS * sample_rate,
+            DGEN_TAIL_FALLBACK_MAX_SECONDS * sample_rate,
+        ))
+    } else {
+        None // 0 or NaN: not opted in.
+    }
+}
+
 /// Tail sleep for an opted-in DGen effect inside a graph. Returns `None`
 /// when the block was skipped (silence already emitted), else whether the
-/// block counts toward the quiet run. Any param or tensor write to the node
-/// restarts the run: the kernel's output may change with its state.
+/// block counts toward the quiet run. Any param or tensor write that changes
+/// the node's state restarts the run (audiograph counts only value-changing
+/// writes): the kernel's output may change with its state.
 unsafe fn dgen_sleep_or_count(state: *mut f32, inp: *const *mut f32, out: *const *mut f32, nframes: c_int) -> Option<bool> {
     let (n_inputs, n_outputs) = crate::effects::silence::node_ports();
     // Outside a graph the port counts are unknown; a zero-input effect is a
     // generator, never a tail. (The graph hands a zero-input node a null
     // input array, which the wrapper already never runs, so this guard is
     // defensive.)
-    if n_inputs == 0 || n_outputs == 0 || *dgen_tail_cell(state, DGEN_TAIL_OPT_IN) <= 0.5 {
+    if n_inputs == 0 || n_outputs == 0 {
         return Some(false);
     }
+    let Some(hold) = dgen_tail_hold_frames(state) else {
+        return Some(false);
+    };
     let writes = f32::from_bits(crate::effects::silence::node_state_writes());
     let seen = dgen_tail_cell(state, DGEN_TAIL_WRITES);
     if (*seen).to_bits() != writes.to_bits() {
         *seen = writes;
         *dgen_tail_cell(state, DGEN_TAIL_QUIET) = 0.0;
     }
-    let hold = (dgen_host_sample_rate(state) * crate::effects::tail_sleep::DEFAULT_HOLD_SECONDS)
-        .max((*state.add(1)).max(0.0));
     let quiet = dgen_tail_cell(state, DGEN_TAIL_QUIET);
     let input_silent = crate::effects::tail_sleep::ports_silent(inp, n_inputs, nframes.max(0) as usize);
     if crate::effects::tail_sleep::asleep(quiet, input_silent, hold) {
@@ -331,7 +372,7 @@ pub(in crate::lisp_host) unsafe extern "C" fn dgenlisp_wrapper_process(
                 .map(|port| crate::effects::tail_sleep::peak(&[*out.add(port) as *const f32], nf))
                 .fold(0.0, f32::max);
             crate::effects::tail_sleep::note_block(dgen_tail_cell(s, DGEN_TAIL_QUIET), true, peak, nf);
-        } else if *dgen_tail_cell(s, DGEN_TAIL_OPT_IN) > 0.5 {
+        } else if dgen_tail_hold_frames(s).is_some() {
             *dgen_tail_cell(s, DGEN_TAIL_QUIET) = 0.0;
         }
     } else {
@@ -479,7 +520,8 @@ mod tail_sleep_tests {
     }
 
     impl Rig {
-        fn new(label: &str, kernel: DGenProcessFn, inputs: i32, opted_in: bool) -> Self {
+        /// `opt_in` is the `DGEN_TAIL_OPT_IN` cell (0 = not opted in).
+        fn new(label: &str, kernel: DGenProcessFn, inputs: i32, opt_in: f32) -> Self {
             graph::initialize_engine_for_test(64, 48_000);
             let label = CString::new(label).unwrap();
             let lg = unsafe { graph::create_live_graph(32, 64, label.as_ptr(), 1) };
@@ -489,9 +531,9 @@ mod tail_sleep_tests {
             init[3] = inputs as f32;
             init[4] = 1.0;
             init[5..9].copy_from_slice(&process_fn_pointer_chunks(kernel));
-            if opted_in {
+            if opt_in != 0.0 {
                 init[9] = 1.0;
-                init.extend([dgen_tail_slot(TOTAL_MEMORY_SLOTS, DGEN_TAIL_OPT_IN) as f32, 1.0]);
+                init.extend([dgen_tail_slot(TOTAL_MEMORY_SLOTS, DGEN_TAIL_OPT_IN) as f32, opt_in]);
             }
             let name = CString::new("dgen-node").unwrap();
             let feed_name = CString::new("feed").unwrap();
@@ -553,9 +595,10 @@ mod tail_sleep_tests {
 
     #[test]
     fn opted_in_dgen_effect_sleeps_after_its_tail_and_wakes_on_input() {
-        let rig = Rig::new("dgen-tail-sleep", one_pole_process, 1, true);
+        let rig = Rig::new("dgen-tail-sleep", one_pole_process, 1, DGEN_TAIL_HOLD_FALLBACK);
         // An impulse rings out as 0.999^n; the kernel keeps rendering that
-        // tail until it has sat below -120 dB for the 1 s hold.
+        // tail until it has sat below -120 dB for the hold (a 2-cell span
+        // falls back to the 1 s floor).
         let (output, ran) = rig.render(1);
         assert!(ran && output[0] == 1.0);
         let mut expected = output[63];
@@ -583,7 +626,7 @@ mod tail_sleep_tests {
 
     #[test]
     fn a_param_write_wakes_a_sleeping_dgen_effect_and_restarts_its_hold() {
-        let rig = Rig::new("dgen-param-wake", one_pole_process, 1, true);
+        let rig = Rig::new("dgen-param-wake", one_pole_process, 1, DGEN_TAIL_HOLD_FALLBACK);
         assert!(rig.render(1).1);
         assert!(rig.blocks_until_sleep(2000).is_some());
         assert!(!rig.render(0).1);
@@ -596,15 +639,76 @@ mod tail_sleep_tests {
     }
 
     #[test]
+    fn unchanged_param_and_tensor_writes_leave_a_sleeping_dgen_effect_asleep() {
+        let rig = Rig::new("dgen-unchanged-write", one_pole_process, 1, DGEN_TAIL_HOLD_FALLBACK);
+        assert!(rig.render(1).1);
+        assert!(rig.blocks_until_sleep(2000).is_some());
+        // A host re-pushing the value a cell already holds changes nothing
+        // the kernel could render, so it must not restart the hold.
+        rig.write_param(1, 0.0);
+        assert!(!rig.render(0).1, "an unchanged param write woke the effect");
+        unsafe { assert!(queue_tensor_write(rig.lg, rig.node, 1, &[0.0])) };
+        assert!(!rig.render(0).1, "an unchanged tensor write woke the effect");
+        unsafe { assert!(queue_tensor_write(rig.lg, rig.node, 1, &[0.25])) };
+        assert!(rig.render(0).1, "a changed tensor write must wake the effect");
+    }
+
+    #[test]
+    fn a_declared_hold_replaces_the_memory_span_fallback() {
+        // `(effect-tail-sleep 0.25)`: a quarter-second hold after the decay.
+        let rig = Rig::new("dgen-declared-hold", one_pole_process, 1, 0.25);
+        assert!(rig.render(1).1);
+        let blocks = rig.blocks_until_sleep(2000).expect("it sleeps");
+        // ~13.8k frames of decay, then 12k frames of hold.
+        assert!(blocks * 64 >= 13_000 + 12_000 && blocks * 64 < 13_000 + 48_000, "slept after {blocks} blocks");
+    }
+
+    #[test]
+    fn the_undeclared_hold_is_the_memory_span_floored_at_1s_and_capped_at_10s() {
+        for (span, expected_seconds) in [(2usize, 1.0f32), (96_000, 2.0), (4_000_000, 10.0)] {
+            let mut state = vec![0.0f32; dgen_total_state_slots(span)];
+            state[1] = span as f32;
+            state[DGEN_HOST_SAMPLE_RATE_IDX] = 48_000.0;
+            let state = state.as_mut_ptr();
+            unsafe {
+                assert_eq!(dgen_tail_hold_frames(state), None);
+                *dgen_tail_cell(state, DGEN_TAIL_OPT_IN) = DGEN_TAIL_HOLD_FALLBACK;
+                assert_eq!(dgen_tail_hold_frames(state), Some(expected_seconds * 48_000.0), "span {span}");
+                *dgen_tail_cell(state, DGEN_TAIL_OPT_IN) = 3.0;
+                assert_eq!(dgen_tail_hold_frames(state), Some(3.0 * 48_000.0));
+            }
+        }
+    }
+
+    #[test]
+    fn a_declared_hold_is_clamped_to_the_quiet_run_saturation() {
+        use crate::effects::tail_sleep::{asleep, note_block, QUIET_FRAMES_CAP};
+        let span = 2usize;
+        let mut state = vec![0.0f32; dgen_total_state_slots(span)];
+        state[1] = span as f32;
+        state[DGEN_HOST_SAMPLE_RATE_IDX] = 384_000.0;
+        let state = state.as_mut_ptr();
+        unsafe {
+            *dgen_tail_cell(state, DGEN_TAIL_OPT_IN) = super::super::effect_latency::MAX_TAIL_SLEEP_SECONDS as f32;
+            let hold = dgen_tail_hold_frames(state).unwrap();
+            assert_eq!(hold, QUIET_FRAMES_CAP, "60 s at 384 kHz is past the cap");
+            // A quiet run that saturates reaches the clamped hold.
+            let mut quiet = QUIET_FRAMES_CAP - 64.0;
+            note_block(&mut quiet, true, 0.0, 4096);
+            assert!(asleep(&quiet, true, hold));
+        }
+    }
+
+    #[test]
     fn dgen_effects_that_did_not_opt_in_never_sleep() {
-        let rig = Rig::new("dgen-no-opt-in", one_pole_process, 1, false);
+        let rig = Rig::new("dgen-no-opt-in", one_pole_process, 1, 0.0);
         assert!(rig.render(1).1);
         assert_eq!(rig.blocks_until_sleep(3 * HOLD_BLOCKS), None);
     }
 
     #[test]
     fn dgen_bypass_passes_declared_silence_without_running_the_kernel() {
-        let rig = Rig::new("dgen-bypass", one_pole_process, 1, false);
+        let rig = Rig::new("dgen-bypass", one_pole_process, 1, 0.0);
         unsafe {
             assert!(graph::params_push_wrapper(rig.lg, graph::ParamMsg {
                 idx: DGEN_ENABLED_PARAM_IDX as u64, logical_id: rig.node as u64, fvalue: 0.0,

@@ -14,7 +14,7 @@ use crate::sequencer::{CustomInstrumentRunMode, SceneId, SlotEnable};
 
 fn test_manifest() -> lisp_host::DGenManifest {
     lisp_host::DGenManifest {
-        effect_latency_samples: None, tail_sleep: false,
+        effect_latency_samples: None, tail_sleep: None,
         dylib_path: std::path::PathBuf::new(),
         asset_base: None,
         version: 1,
@@ -952,4 +952,34 @@ fn deleting_a_middle_slot_keeps_later_bindings_and_macros_on_their_device() {
         "the engaged macro follows"
     );
     assert!(!overrides.contains_key(&rack_gain_key(rack, 2)));
+}
+
+#[test]
+fn a_sample_swap_that_cannot_resolve_its_bank_decodes_and_queues_nothing() {
+    let mut rig = Rig::new();
+    let app = rig.app();
+    let rack = rack_with_samplers(app, &[PLATE]);
+    let synth = fake_instrument(app, "not-a-sampler");
+    app.swap_rack_slot_recorded(rack, 0, synth, SwapScope::AllBanks)
+        .unwrap();
+    let silent = |app: &App| crate::instruments::sampler::create_silent_buffer(app.graph.lg.0).unwrap();
+    let analysed_between = |app: &App, from: i32, to: i32| {
+        (from + 1..to)
+            .filter(|id| app.sample_analysis.cache().get(*id).is_some())
+            .count()
+    };
+
+    let before = silent(app);
+    let missing_bank = SceneBankId(u64::MAX);
+    assert!(app
+        .swap_rack_slot_to_sample(rack, 0, Path::new(PIANO), SwapScope::Bank(Some(missing_bank)))
+        .is_err());
+    let after = silent(app);
+    assert_eq!(after, before + 1, "no buffer was decoded for the failed swap");
+
+    // A swap that succeeds queues the analysis of the buffer it decoded.
+    app.swap_rack_slot_to_sample(rack, 0, Path::new(PIANO), SwapScope::Bank(None))
+        .unwrap();
+    let end = silent(app);
+    assert_eq!(analysed_between(app, after, end), 1);
 }

@@ -2493,7 +2493,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn dgen_init_message_honors_param_span() {
         let manifest = super::DGenManifest {
-            effect_latency_samples: None, tail_sleep: false,
+            effect_latency_samples: None, tail_sleep: None,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 2,
@@ -2563,7 +2563,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn voice_init_message_round_trips_through_dgenlisp_init() {
         let total_memory_slots = 16;
         let manifest = super::DGenManifest {
-            effect_latency_samples: None, tail_sleep: false,
+            effect_latency_samples: None, tail_sleep: None,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 2,

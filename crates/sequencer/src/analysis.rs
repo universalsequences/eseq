@@ -12,6 +12,12 @@ pub struct AnalysisJob {
     pub sample_rate: u32,
 }
 
+impl AnalysisJob {
+    pub fn new(buffer_id: i32, samples: Arc<Vec<f32>>, sample_rate: u32) -> Self {
+        Self { buffer_id, samples, sample_rate }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AnalysisResult {
     pub buffer_id: i32,

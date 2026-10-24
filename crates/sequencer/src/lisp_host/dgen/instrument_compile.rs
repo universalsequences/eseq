@@ -565,14 +565,14 @@ pub fn render_loaded_instrument_samples_for_test(
                 .ok_or_else(|| format!("Manifest input channel {channel} exceeds {n_inputs} inputs"))?;
             use crate::effects::gatepitch as gp;
             match output {
-                output if output == gp::PARAM_GATE as usize => {
+                output if output == gp::OUTPUT_GATE => {
                     for (frame, value) in buffer.iter_mut().enumerate() {
                         *value = if frames_done + frame < options.gate_frames { 1.0 } else { 0.0 };
                     }
                 }
-                output if output == gp::PARAM_PITCH as usize => buffer.fill(pitch_hz),
-                output if output == gp::PARAM_VELOCITY as usize => buffer.fill(options.velocity),
-                output if output == gp::PARAM_TRIGGER as usize || output == gp::OUTPUT_NOTE_ON => {
+                output if output == gp::OUTPUT_PITCH => buffer.fill(pitch_hz),
+                output if output == gp::OUTPUT_VELOCITY => buffer.fill(options.velocity),
+                output if output == gp::OUTPUT_TRIGGER || output == gp::OUTPUT_NOTE_ON => {
                     buffer[0] = trigger_value;
                 }
                 // A single isolated note has no legato/pressure/transport

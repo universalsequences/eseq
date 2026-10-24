@@ -88,14 +88,19 @@ impl SwapOutcome {
 }
 
 /// A sample decoded into a graph buffer for a rack slot, not yet
-/// registered: registration (the path the project saves) waits until the
-/// slot edit succeeded.
+/// registered: registration (the path the project saves) and the onset
+/// analysis wait until the slot edit succeeded, so a failed swap queues no
+/// work for a buffer nothing plays. (Graph sample buffers are never freed,
+/// `project_import/assets.rs`; a swap checks what it can before decoding.)
 #[derive(Clone)]
 pub(crate) struct RackSample {
     pub buffer_id: i32,
     pub sample_rate: u32,
     pub name: String,
     pub path: Option<PathBuf>,
+    /// The decoded mono samples to analyse on registration (a silent
+    /// sampler has none).
+    pub mono_samples: Option<std::sync::Arc<Vec<f32>>>,
 }
 
 /// A device a drop puts in a slot.
@@ -132,24 +137,31 @@ impl App {
             .with_project_scenes(|scenes| scenes.resolve_bank_range(bank))
     }
 
-    /// Decode the sample at `path` into a graph buffer, queue its analysis
-    /// and name it: the shared first half of every sample-to-rack-slot load
-    /// (add, per-pattern replace, bank swap).
+    /// Decode the sample at `path` into a graph buffer and name it: the
+    /// shared first half of every sample-to-rack-slot load (add, per-pattern
+    /// replace, bank swap).
     pub(crate) fn load_rack_sample(&mut self, path: &Path) -> Result<RackSample, String> {
         let loaded = crate::instruments::sampler::load_wav_buffer(self.graph.lg.0, path)?;
-        self.submit_sample_analysis(&loaded);
         let name = crate::sample_db::display_title_for_sample_path(path).unwrap_or(loaded.name);
         Ok(RackSample {
             buffer_id: loaded.buffer_id,
             sample_rate: loaded.sample_rate,
             name,
             path: Some(path.to_path_buf()),
+            mono_samples: Some(std::sync::Arc::new(loaded.mono_samples)),
         })
     }
 
-    /// The second half, once the slot holds it: remember the file the
-    /// buffer came from (a silent sampler has none).
+    /// The second half, once the slot holds it: queue the buffer's
+    /// analysis and remember the file it came from.
     pub(crate) fn register_rack_sample(&mut self, sample: &RackSample) {
+        if let Some(samples) = &sample.mono_samples {
+            self.sample_analysis.submit(crate::analysis::AnalysisJob::new(
+                sample.buffer_id,
+                std::sync::Arc::clone(samples),
+                sample.sample_rate,
+            ));
+        }
         if let Some(path) = &sample.path {
             self.register_loaded_sample_path(&sample.name, sample.buffer_id, path.clone());
         }
@@ -257,6 +269,11 @@ impl App {
                 },
             )?;
             return Ok(SwapOutcome::content(slot, old_name));
+        }
+        // What can fail before the swap touches anything fails before the
+        // decode (a decoded buffer is never freed).
+        if let SwapScope::Bank(bank) = scope {
+            self.bank_scene_range(bank)?;
         }
         let device = SlotDevice::Sampler(self.load_rack_sample(path)?);
         self.swap_rack_slot_recorded(track, slot, device, scope)
@@ -571,6 +588,7 @@ impl App {
             sample_rate: self.graph.sample_rate,
             name: format!("Sampler {}", track + 1),
             path: None,
+            mono_samples: None,
         });
         match rack_slot {
             Some(slot) => self
@@ -800,11 +818,6 @@ impl App {
                 .clone()
                 .unwrap_or_default(),
         };
-        let (name, _) = crate::app_paths::ContentTier::split_release(&raw);
-        Path::new(name)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(name)
-            .to_string()
+        super::graph::instrument_display_name(&raw)
     }
 }

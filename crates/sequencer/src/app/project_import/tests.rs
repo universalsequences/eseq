@@ -992,3 +992,88 @@ fn a_new_bank_import_parks_the_masters_conductors_and_re_keys_process_owners() {
     assert!(!owners.is_empty(), "the owned slot came along");
     assert!(owners.iter().all(|owner| *owner == Some(new)), "re-keyed to the new id: {owners:?} (new {new})");
 }
+
+/// Review (PR #77): picks that all get skipped (here, a kit's own
+/// sequencer, which only travels with its kit) import nothing: the import
+/// refuses before recording anything and never runs the host's `finish`,
+/// whose rack scripts and package attaches no undo entry would carry.
+#[test]
+fn a_no_op_import_refuses_without_running_finish_or_recording() {
+    let (source, kit) = source_project(true);
+    let kit_sequencer = source
+        .file
+        .instances
+        .list
+        .iter()
+        .find(|instance| instance.owner == ProjectInstanceOwner::Rack(kit))
+        .expect("the source kit owns a neural")
+        .id;
+    let mut rig = Rig::new();
+    let app = rig.app();
+    let _runtime = neural_runtime(app);
+    let (_, bank_b) = target(app);
+    let tracks = app.tracks.len();
+    let before = resolved(app, tracks, &[]);
+    let undo = app.history.undo_len();
+    let revision = app.history.current_revision();
+    let mut finished = false;
+    let error = app
+        .import_from_project_then(
+            &source,
+            &ImportRequest {
+                sequencers: vec![kit_sequencer],
+                target: ImportTarget::Bank(Some(bank_b)),
+                ..Default::default()
+            },
+            |_, _| {
+                finished = true;
+                Vec::new()
+            },
+        )
+        .expect_err("nothing to import");
+    assert!(error.contains("changed nothing"), "{error}");
+    assert!(error.contains("travels with it"), "the skip reason is named: {error}");
+    assert!(!finished, "the host's finish never ran");
+    assert_eq!(app.history.undo_len(), undo, "nothing recorded");
+    assert_eq!(app.history.current_revision(), revision, "no entry committed and dropped");
+    assert_eq!(app.tracks.len(), tracks);
+    assert!(app.instances.list.is_empty(), "no instance created");
+    assert_eq!(resolved(app, tracks, &[]), before, "every scene resolves as before");
+}
+
+/// Review (PR #77): the imported kit's scenes point at the ids its clips
+/// were actually given. The source kit's clips are 1 and 3 (2 deleted) and
+/// it plays clip 3, so the import's bank must point at that clip's copy.
+#[test]
+fn imported_kit_scenes_point_at_the_clip_ids_the_loader_assigned() {
+    let (source, kit) = source_project_with(false, |app, kit, _| {
+        let second = app.save_rack_clip_as_recorded(kit, "second").expect("clip 2");
+        let third = app.save_rack_clip_as_recorded(kit, "third").expect("clip 3");
+        app.delete_rack_clip_recorded(kit, second).expect("drop clip 2");
+        app.set_current_rack_clip_recorded(kit, Some(third)).expect("play clip 3");
+    });
+    let mut rig = Rig::new();
+    let app = rig.app();
+    let (_, bank_b) = target(app);
+    let summary = app
+        .import_from_project(
+            &source,
+            &ImportRequest { kits: vec![kit], target: ImportTarget::Bank(Some(bank_b)), ..Default::default() },
+        )
+        .expect("import");
+    let group = new_group(&summary, kit);
+    let (ids, pointed) = app.state.with_project_scenes(|s| {
+        let bank = s.rack_bank(group).expect("a clip bank");
+        let ids: Vec<u64> = bank.clips.iter().map(|clip| clip.id).collect();
+        let pointed: Vec<Option<String>> = (2..4)
+            .map(|scene| {
+                let id = s.scene_rack_clip(scene, group)?;
+                bank.clips.iter().find(|clip| clip.id == id).map(|clip| clip.name.clone())
+            })
+            .collect();
+        (ids, pointed)
+    });
+    let source_clips = source.group(kit).and_then(|group| group.rack.as_ref()).map(|rack| rack.clips.len());
+    assert_eq!(Some(ids.len()), source_clips, "every source clip arrives: {ids:?}");
+    assert_eq!(pointed, vec![Some("third".to_string()); 2], "bank B plays the source's playing clip");
+}

@@ -1406,10 +1406,24 @@ pub fn rekey_reserved_instance_ids(project: &mut crate::project::ProjectFile) ->
         return notes;
     }
     instances.next_id = next;
+    // Process slots an instance owns (`TrackProcessSlot::owner_instance`,
+    // rig spec §10) follow it, so its parking still gates them.
+    let rekey_chain = |chain: &mut crate::process::TrackProcessChain| {
+        for slot in &mut chain.slots {
+            if let Some(id) = slot.owner_instance.and_then(|owner| remap.get(&owner)) {
+                slot.owner_instance = Some(*id);
+            }
+        }
+    };
     let rekey_overrides = |overrides: &mut Vec<ProjectGraphOverrides>| {
         for entry in overrides {
             if let Some(id) = remap.get(&entry.sequencer_id) {
                 entry.sequencer_id = *id;
+            }
+            for node in &mut entry.node_intrinsics {
+                if let Some(chain) = node.process_chain.as_mut() {
+                    rekey_chain(chain);
+                }
             }
         }
     };
@@ -1434,6 +1448,8 @@ pub fn rekey_reserved_instance_ids(project: &mut crate::project::ProjectFile) ->
     let rekey_pattern = |pattern: &mut crate::project::ProjectPattern| {
         rekey_overrides(&mut pattern.graph_overrides);
         rekey_slots(&mut pattern.scene_slots);
+        pattern.process_chains.iter_mut().for_each(rekey_chain);
+        rekey_chain(&mut pattern.project_process_chain);
     };
     project.patterns.iter_mut().for_each(rekey_pattern);
     project.carrier_patterns_mut().for_each(rekey_pattern);
@@ -1441,6 +1457,15 @@ pub fn rekey_reserved_instance_ids(project: &mut crate::project::ProjectFile) ->
         for clip in &mut rack.clips {
             rekey_overrides(&mut clip.graph_overrides);
             rekey_slots(&mut clip.scene_slots);
+        }
+    }
+    // Per-scene parking (`Scene::parked_instances`, rig spec §10) names the
+    // instance by id; without this a parked keyed instance plays everywhere.
+    for parked in &mut project.scene_parked_instances {
+        for id in parked.iter_mut() {
+            if let Some(new_id) = remap.get(id) {
+                *id = *new_id;
+            }
         }
     }
     notes
@@ -2324,6 +2349,43 @@ mod tests {
             app.create_instance_recorded(KIND, ProjectInstanceOwner::Project, None).unwrap();
         assert!(![rack_id, project_id].contains(&fresh_id));
         assert_eq!(app.instances.get(fresh_id).unwrap().label, "tst 3");
+    }
+
+    /// Re-keying a reserved id carries the instance's per-scene parking and
+    /// the process slots it owns along, so it stays parked in the scenes
+    /// it was parked in (rig spec §10) after load.
+    #[test]
+    fn rekey_carries_scene_parking_and_owned_process_slots() {
+        let mut rig = crate::app::test_rig::Rig::new();
+        let mut project = rig.app().capture_project("rekey-parking").expect("capture");
+        let keyed = eseqlisp::vm::KEYED_INSTANCE_ID_BASE + 5;
+        project.instances = serde_json::from_value(serde_json::json!({
+            "list": [
+                {"id": 1, "kind": KIND, "owner": "project", "label": "tst 1"},
+                {"id": keyed, "kind": KIND, "owner": "project", "label": "tst 2"}
+            ],
+            "next_id": 2
+        }))
+        .unwrap();
+        project.scene_parked_instances = vec![vec![1, keyed], vec![]];
+        let owned = |owner| {
+            let mut slot = crate::process::TrackProcessSlot::new(
+                crate::process::ProcessInstanceId(9_001),
+                "lane-count".to_string(),
+            );
+            slot.owner_instance = Some(owner);
+            crate::process::TrackProcessChain { slots: vec![slot] }
+        };
+        let pattern = &mut project.patterns[0];
+        pattern.process_chains = vec![owned(keyed)];
+        pattern.project_process_chain = owned(1);
+
+        let notes = rekey_reserved_instance_ids(&mut project);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(project.scene_parked_instances, vec![vec![1, 2], vec![]]);
+        let pattern = &project.patterns[0];
+        assert_eq!(pattern.process_chains[0].slots[0].owner_instance, Some(2));
+        assert_eq!(pattern.project_process_chain.slots[0].owner_instance, Some(1), "other owners untouched");
     }
 
     #[test]
