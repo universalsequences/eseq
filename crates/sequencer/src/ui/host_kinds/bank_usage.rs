@@ -1,80 +1,109 @@
 //! Bank-scoped display (docs/rig-spec.md §9, eseq-ka5t.10): `track.used-banks`
-//! and `group.used-banks`, the banks with a scene that uses the track (a
-//! pattern cell; a kit's pad: a scene that points at one of the kit's clips
-//! and does not park it) or the group (a kit: where it plays; a plain group:
-//! where any member or child kit is used). See
-//! `sequencer::sequencer::ProjectScenes::bank_usage` for the rule.
+//! and `group.used-banks` (drum racks only), the banks with a scene that uses
+//! the track (a pattern cell; a kit's pad follows its kit) or the kit (a
+//! scene points at one of its clips and does not park it). See
+//! `sequencer::sequencer::ProjectScenes::bank_usage` for the rule. A plain
+//! group's list stays empty: Lisp shows it where any member shows
+//! (`eseq.scene-banks/group-used-in-bank?`), which includes members no bank
+//! uses, a rule a bank list cannot carry.
 //!
 //! The viewed bank is UI state the host never sees, so Lisp tests membership
 //! (`eseq.scene-banks/used-in-viewed-bank?`). Recomputed only when the
-//! scenes revision (every cell, clip pointer, park, scene and bank edit
-//! moves it), the track, group or bank instances or the group topology
-//! moved: one pass over the scenes, never per frame.
+//! [`TopologyKey`] or the track instances moved: one pass over the scenes,
+//! never per frame. Only rows whose banks changed are pushed.
 
 use super::*;
-use sequencer::sequencer::KitMembers;
+use sequencer::sequencer::{BankMask, BankUsage, KitMembers};
 
-pub(super) struct BankUsageKey {
-    scenes_revision: u64,
-    track_ids: Vec<Option<InstanceId>>,
-    group_ids: Vec<Option<InstanceId>>,
-    bank_ids: Vec<Option<InstanceId>>,
-    groups: Vec<(u64, bool, Vec<usize>, Vec<u64>)>,
+/// A group as the bank feeds key on it.
+#[derive(PartialEq)]
+struct GroupShape {
+    id: u64,
+    rack: bool,
+    members: Vec<usize>,
+    rack_members: Vec<u64>,
 }
 
-impl BankUsageKey {
+impl GroupShape {
+    fn matches(&self, group: &sequencer::project::ProjectTrackGroup) -> bool {
+        self.id == group.id
+            && self.rack == group.is_rack()
+            && self.members == group.members
+            && self.rack_members == group.rack_members
+    }
+}
+
+/// What the per-bank group feeds (kit parking, bank usage) recompute on:
+/// the scenes revision (every cell, clip pointer, park, scene and bank edit
+/// moves it), the group and bank instances and the group topology.
+pub(super) struct TopologyKey {
+    scenes_revision: u64,
+    group_ids: Vec<Option<InstanceId>>,
+    bank_ids: Vec<Option<InstanceId>>,
+    groups: Vec<GroupShape>,
+}
+
+impl TopologyKey {
     /// Compared in place, without allocating.
-    fn matches(&self, app: &app::App, kinds: &HostKinds) -> bool {
+    pub(super) fn matches(&self, app: &app::App, kinds: &HostKinds) -> bool {
         self.scenes_revision == app.state.project_scenes_revision()
-            && self.track_ids == kinds.track_ids
-            && self.group_ids == kinds.group_ids
-            && self.bank_ids == kinds.bank_ids
+            && self.same_instances(kinds)
             && self.groups.len() == app.groups.len()
-            && self.groups.iter().zip(&app.groups).all(|((id, rack, members, racks), group)| {
-                *id == group.id
-                    && *rack == group.is_rack()
-                    && *members == group.members
-                    && *racks == group.rack_members
-            })
+            && self.groups.iter().zip(&app.groups).all(|(shape, group)| shape.matches(group))
     }
 
-    fn read(app: &app::App, kinds: &HostKinds) -> Self {
+    pub(super) fn read(app: &app::App, kinds: &HostKinds) -> Self {
         Self {
             scenes_revision: app.state.project_scenes_revision(),
-            track_ids: kinds.track_ids.clone(),
             group_ids: kinds.group_ids.clone(),
             bank_ids: kinds.bank_ids.clone(),
             groups: app
                 .groups
                 .iter()
-                .map(|g| (g.id, g.is_rack(), g.members.clone(), g.rack_members.clone()))
+                .map(|g| GroupShape {
+                    id: g.id,
+                    rack: g.is_rack(),
+                    members: g.members.clone(),
+                    rack_members: g.rack_members.clone(),
+                })
                 .collect(),
         }
     }
+
+    /// Whether the group and bank instances are the ones the feed last
+    /// pushed with.
+    fn same_instances(&self, kinds: &HostKinds) -> bool {
+        self.group_ids == kinds.group_ids && self.bank_ids == kinds.bank_ids
+    }
 }
 
-/// The bank instances a bank bitmask names.
-fn banks_of(mask: u128, bank_ids: &[Option<InstanceId>]) -> Value {
-    instance_list(
-        bank_ids
-            .iter()
-            .enumerate()
-            .take(128)
-            .filter(|(index, _)| mask & (1_u128 << index) != 0)
-            .filter_map(|(_, id)| *id),
-    )
+pub(super) struct BankUsageKey {
+    topology: TopologyKey,
+    track_ids: Vec<Option<InstanceId>>,
+    /// What the last pass pushed, by position (kits in `app.groups` rack
+    /// order).
+    usage: BankUsage,
+}
+
+/// The bank instances a bank set names (positions past the bank list are
+/// dropped).
+pub(super) fn bank_list(mask: &BankMask, bank_ids: &[Option<InstanceId>]) -> Value {
+    instance_list(mask.banks().filter_map(|bank| bank_ids.get(bank).copied().flatten()))
 }
 
 impl HostKinds {
     pub(super) fn sync_bank_usage(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
-        if self
-            .bank_usage_key
-            .as_ref()
-            .is_some_and(|key| key.matches(app, self))
-        {
-            return;
+        let previous = self.bank_usage_key.take();
+        if let Some(key) = &previous {
+            if key.track_ids == self.track_ids && key.topology.matches(app, self) {
+                self.bank_usage_key = previous;
+                return;
+            }
         }
-        self.bank_usage_passes += 1;
+        #[cfg(test)]
+        {
+            self.bank_usage_passes += 1;
+        }
         let kits: Vec<KitMembers<'_>> = app
             .groups
             .iter()
@@ -84,39 +113,40 @@ impl HostKinds {
         let usage = app
             .state
             .with_project_scenes(|scenes| scenes.bank_usage(self.track_ids.len(), &kits));
+        // The same instances (and the same kits): push only the rows whose
+        // banks changed.
+        let racks: Vec<u64> = kits.iter().map(|kit| kit.group_id).collect();
+        let last = previous
+            .filter(|key| {
+                key.track_ids == self.track_ids
+                    && key.topology.same_instances(self)
+                    && key.topology.groups.iter().filter(|g| g.rack).map(|g| g.id).eq(racks.iter().copied())
+            })
+            .map(|key| key.usage);
+        let changed = |last: Option<&BankMask>, mask: &BankMask| last != Some(mask);
         for (track, id) in self.track_ids.iter().enumerate() {
-            if let Some(id) = *id {
-                pusher.push(id, f::TRACK_USED_BANKS, banks_of(usage.tracks[track], &self.bank_ids));
+            let mask = &usage.tracks[track];
+            let before = last.as_ref().and_then(|last| last.tracks.get(track));
+            if let (Some(id), true) = (*id, changed(before, mask)) {
+                pusher.push(id, f::TRACK_USED_BANKS, bank_list(mask, &self.bank_ids));
             }
         }
-        let kit_mask = |group_id: u64| {
-            kits.iter()
-                .position(|kit| kit.group_id == group_id)
-                .map(|kit| usage.kits[kit])
-        };
-        for group in &app.groups {
-            let Some(id) = self.groups.get(&group.id).copied() else {
-                continue;
-            };
-            let mask = kit_mask(group.id).unwrap_or_else(|| {
-                let members = group
-                    .members
-                    .iter()
-                    .filter_map(|track| usage.tracks.get(*track))
-                    .fold(0, |mask, used| mask | used);
-                group
-                    .rack_members
-                    .iter()
-                    .filter_map(|rack| kit_mask(*rack))
-                    .fold(members, |mask, used| mask | used)
-            });
-            pusher.push(id, f::GROUP_USED_BANKS, banks_of(mask, &self.bank_ids));
+        for (kit, group_id) in racks.iter().enumerate() {
+            let mask = &usage.kits[kit];
+            let before = last.as_ref().and_then(|last| last.kits.get(kit));
+            if let (Some(id), true) = (self.groups.get(group_id).copied(), changed(before, mask)) {
+                pusher.push(id, f::GROUP_USED_BANKS, bank_list(mask, &self.bank_ids));
+            }
         }
-        self.bank_usage_key = Some(BankUsageKey::read(app, self));
+        self.bank_usage_key = Some(BankUsageKey {
+            topology: TopologyKey::read(app, self),
+            track_ids: self.track_ids.clone(),
+            usage,
+        });
     }
 
-    /// How many times the bank usage has been recomputed (tests: a sync
-    /// with nothing changed must not recompute).
+    /// How many times the bank usage has been recomputed (a sync with
+    /// nothing changed must not recompute).
     #[cfg(test)]
     pub(crate) fn bank_usage_passes(&self) -> u64 {
         self.bank_usage_passes

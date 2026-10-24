@@ -3002,8 +3002,49 @@ pub(in crate::lisp_host) fn process_chain_slot_from_handle(
         fanout: Default::default(),
         unbound_ports: Default::default(),
         expr_source: None,
+        owner_instance: None,
         bindings,
     })
+}
+
+/// Split `:owner id` off a `processes` instance list, wherever it sits
+/// among the instances (docs/rig-spec.md §10): the kind instance the chain's
+/// slots belong to, so they go quiet in scenes that switch it off. `id` is an
+/// instance id, an instance (`self`) or a `project.instances` row (a dict
+/// with `:id`); nil means no owner. Any other keyword is an error.
+fn split_process_owner(args: &[EValue]) -> Result<(Option<u64>, Vec<EValue>), String> {
+    let mut owner = None;
+    let mut seen_owner = false;
+    let mut instances = Vec::with_capacity(args.len());
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let (EValue::Keyword(key) | EValue::Symbol(key)) = arg else {
+            instances.push(arg.clone());
+            continue;
+        };
+        let key = key.trim_start_matches(':');
+        if key != "owner" {
+            return Err(format!(
+                "processes takes process instances and an optional :owner id, not :{key}"
+            ));
+        }
+        if seen_owner {
+            return Err("processes :owner given twice".to_string());
+        }
+        seen_owner = true;
+        owner = match rest.next() {
+            Some(EValue::Number(id)) if *id >= 0.0 && id.fract() == 0.0 => Some(*id as u64),
+            Some(EValue::Instance(id)) => Some(*id),
+            Some(EValue::Map(map)) => match map.get("id").map(|value| value.borrow().clone()) {
+                Some(EValue::Number(id)) if id >= 0.0 && id.fract() == 0.0 => Some(id as u64),
+                _ => return Err("processes :owner expects an instance id, an instance or a row with :id".to_string()),
+            },
+            Some(EValue::Nil) => None,
+            None => return Err("processes :owner needs an instance id after it".to_string()),
+            Some(_) => return Err("processes :owner expects an instance id, an instance or a row with :id".to_string()),
+        };
+    }
+    Ok((owner, instances))
 }
 
 pub(in crate::lisp_host) fn validate_process_port_bindings(
@@ -3180,8 +3221,8 @@ pub(in crate::lisp_host) fn register_process_chain_natives(
     let publish_for_processes = publish.clone();
     runtime.register_native_with_docs(
         "processes",
-        "(processes :track tracks instance...) | (processes :project instance...) | (processes :observe tracks :play tracks instance)",
-        "Declare a track/project step chain or one conductor instance observing and playing track sets.",
+        "(processes :track tracks [:owner id] instance...) | (processes :project [:owner id] instance...) | (processes :observe tracks :play tracks instance)",
+        "Declare a track/project step chain or one conductor instance observing and playing track sets. :owner names the kind instance (an id or self) the chain belongs to: in a scene that switches that project-owned instance off, its slots do not apply.",
         move |args, _ctx| {
             let (EValue::Keyword(key) | EValue::Symbol(key)) = args
                 .first()
@@ -3268,6 +3309,8 @@ pub(in crate::lisp_host) fn register_process_chain_natives(
                 }
             };
             let project_layer = tracks.is_none();
+            let (owner_instance, instance_args) = split_process_owner(instance_args)?;
+            let instance_args = instance_args.as_slice();
             let mut slots = Vec::new();
             let mut handles = Vec::new();
             let defs = {
@@ -3294,6 +3337,7 @@ pub(in crate::lisp_host) fn register_process_chain_natives(
                     }
                     let mut slot = process_chain_slot_from_handle(&registry, *id)?;
                     slot.project_layer = project_layer;
+                    slot.owner_instance = owner_instance;
                     slots.push(slot);
                     handles.push(arg.clone());
                 }

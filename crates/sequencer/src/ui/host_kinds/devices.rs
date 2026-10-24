@@ -52,6 +52,8 @@ use crate::host_commands::StripControl;
 use sequencer::effects::EffectDescriptor;
 use std::hash::{Hash, Hasher};
 use std::collections::BTreeMap;
+use super::bank_usage::bank_list;
+use sequencer::sequencer::BankMask;
 
 /// The device sync's state (in [`HostKinds`]).
 #[derive(Default)]
@@ -499,7 +501,7 @@ fn rack_layout(
     app: &app::App,
     rack: &sequencer::sequencer::RackTrackSnapshot,
     slot_enable: Option<&sequencer::sequencer::SlotEnable>,
-    banks: &BTreeMap<u64, u128>,
+    banks: &BTreeMap<u64, BankMask>,
     bank_ids: &[Option<InstanceId>],
 ) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -689,7 +691,7 @@ impl DeviceState {
                 scenes.rack_slot_bank_masks(&rack_tracks),
             )
         });
-        let mut slot_banks: Vec<BTreeMap<u64, u128>> = vec![BTreeMap::new(); track_ids.len()];
+        let mut slot_banks: Vec<BTreeMap<u64, BankMask>> = vec![BTreeMap::new(); track_ids.len()];
         for (track, mask) in rack_tracks.into_iter().zip(masks) {
             slot_banks[track] = mask;
         }
@@ -727,14 +729,14 @@ impl DeviceState {
             // container is the slot's instance, known after reconciling).
             let mut models = Vec::new();
             let mut holders: Vec<Option<usize>> = Vec::new();
-            let mut slot_masks: HashMap<usize, u128> = HashMap::new();
+            let mut slot_masks: HashMap<usize, BankMask> = HashMap::new();
             for (slot_idx, slot) in rack
                 .into_iter()
                 .flat_map(|rack| rack.slots.iter().enumerate())
             {
                 let device = DeviceSlot::RackSlot(slot_idx);
                 let holder = models.len();
-                slot_masks.insert(holder, banks.get(&slot.id).copied().unwrap_or(0));
+                slot_masks.insert(holder, banks.get(&slot.id).cloned().unwrap_or_default());
                 models.push(DeviceModel {
                     device,
                     did: device.did(app, track),
@@ -780,14 +782,8 @@ impl DeviceState {
             for (at, slot_id) in &slot_ids {
                 let effects = children.remove(at).unwrap_or_default();
                 pusher.push(*slot_id, f::DEVICE_DEVICES, instance_list(effects));
-                let mask = slot_masks.remove(at).unwrap_or(0);
-                let banks = bank_ids
-                    .iter()
-                    .enumerate()
-                    .take(128)
-                    .filter(|(index, _)| mask & (1_u128 << index) != 0)
-                    .filter_map(|(_, id)| *id);
-                pusher.push(*slot_id, f::DEVICE_BANKS, instance_list(banks));
+                let mask = slot_masks.remove(at).unwrap_or_default();
+                pusher.push(*slot_id, f::DEVICE_BANKS, bank_list(&mask, bank_ids));
             }
             let slot_ids = slot_ids.into_iter().map(|(_, id)| id);
             if let Some(instrument) = instrument {

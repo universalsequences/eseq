@@ -138,6 +138,11 @@ pub struct InstanceStructureState {
     /// (other attaches, evaluated code) survive undo/redo. `None` leaves the
     /// scratch alone.
     pub scratch_import: Option<ScratchImportState>,
+    /// Every scene's parked project-owned instances (docs/rig-spec.md §10),
+    /// by scene id, scenes parking none left out: a create parks its new
+    /// instance outside the bank it was made in, a delete forgets it, a
+    /// duplicate copies its source's, and one undo restores exactly that.
+    pub parked_instances: Vec<(SceneId, Vec<u64>)>,
 }
 
 /// Where one list of graph overrides lives in the scene bank: a scene's own
@@ -161,6 +166,10 @@ pub struct InstanceOverridesState {
     /// per scene: slot name -> stored value. Replay drops every document
     /// slot of `ids` and writes these back.
     pub documents: Vec<(GraphOverrideSite, Vec<(String, crate::process::ProcessLiteral)>)>,
+    /// The process slots `ids` own (`TrackProcessSlot::owner_instance`,
+    /// docs/rig-spec.md §10), as (slot id, owner): a delete clears them and
+    /// replay makes the ownership by `ids` exactly this again.
+    pub owned_processes: Vec<(crate::process::ProcessInstanceId, u64)>,
 }
 
 impl InstanceOverridesState {
@@ -335,6 +344,11 @@ impl InstanceStructurePatch {
             }).sum::<usize>()
                 + state.overrides.as_ref().map(InstanceOverridesState::retained_bytes).unwrap_or(0)
                 + state.scratch_import.as_ref().map(|import| import.module.capacity()).unwrap_or(0)
+                + state
+                    .parked_instances
+                    .iter()
+                    .map(|(_, ids)| std::mem::size_of::<SceneId>() + ids.capacity() * 8)
+                    .sum::<usize>()
         }
         std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
     }
@@ -1290,6 +1304,14 @@ impl<P> UndoManager<P> {
 
     pub fn redo_len(&self) -> usize {
         self.redo.len()
+    }
+
+    /// Rename the newest undo entry (a one-entry composite edit keeps the
+    /// label its caller names, e.g. controlled import's "Import from X").
+    pub fn relabel_last(&mut self, label: impl Into<String>) {
+        if let Some(entry) = self.undo.back_mut() {
+            entry.label = label.into();
+        }
     }
 
     pub fn next_undo_patch(&self) -> Option<&P> {

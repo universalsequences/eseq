@@ -339,6 +339,11 @@ pub struct Scene {
     /// (docs/rig-spec.md §3.2, §6). Independent of `rack_clips`: a kit plays
     /// when the scene points at one of its clips and does not park it.
     pub parked_kits: ParkedKits,
+    /// The project-owned kind instances (density, jaki, graph kinds…)
+    /// switched off in this scene (docs/rig-spec.md §10,
+    /// `super::instance_parking`): they do not tick or fire here, and the
+    /// processes they own do not apply.
+    pub parked_instances: ParkedInstances,
     /// Pattern-scoped portable values declared through `defscene`.
     pub scene_slots: SceneSlotStore,
     /// Project-level default process chain: composed ahead of every track's
@@ -426,6 +431,7 @@ impl ProjectScenes {
                 rack_clips: Vec::new(),
                 slot_enable: Default::default(),
                 parked_kits: Default::default(),
+                parked_instances: Default::default(),
                 scene_slots: snapshot.scene_slots.clone(),
                 project_process_chain: {
                     let mut chain = snapshot.project_process_chain.clone();
@@ -455,6 +461,7 @@ impl ProjectScenes {
                 rack_clips: Vec::new(),
                 slot_enable: Default::default(),
                 parked_kits: Default::default(),
+                parked_instances: Default::default(),
                 scene_slots: SceneSlotStore::default(),
                 project_process_chain: crate::process::default_project_layer(),
             });
@@ -1674,6 +1681,7 @@ impl ProjectScenes {
             rack_clips,
             slot_enable: Default::default(),
             parked_kits: Default::default(),
+            parked_instances: Default::default(),
             scene_slots,
             project_process_chain,
         };

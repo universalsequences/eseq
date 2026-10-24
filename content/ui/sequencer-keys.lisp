@@ -16,7 +16,7 @@
 (module eseq.sequencer-keys)
 
 (import eseq.kinds :refer (tracks selection scenes banks transport launch!))
-(import eseq.scene-banks :refer (view-scene-bank! scene-viewed-bank track-used-in-bank?))
+(import eseq.scene-banks :refer (view-scene-bank! scene-viewed-bank bank-tracks))
 (import eseq.view-kit :refer (index-of))
 
 (export mode-name
@@ -62,8 +62,7 @@
 ;; viewed bank uses (docs/rig-spec.md §9), staying put when it uses none.
 (def track-relative (current delta)
   (or (eseq.drum-rack-v2/track-relative current delta)
-      (let ((viewed (scene-viewed-bank))
-            (all (filter (lambda (t) (track-used-in-bank? t viewed)) (tracks)))
+      (let ((all (bank-tracks (scene-viewed-bank) (list)))
             (n (len all))
             (at (index-of all current)))
         (if (= n 0)

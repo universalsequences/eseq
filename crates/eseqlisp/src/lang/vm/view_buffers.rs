@@ -59,6 +59,13 @@ struct BoundViewBuffer {
 pub(crate) struct ViewBufferStore {
     by_node: HashMap<NodeId, BoundViewBuffer>,
     by_target: HashMap<String, NodeId>,
+    /// The function every instance view renders through, as `(frame view
+    /// self)`: the UI's chrome around a kind's view (a bank-scoped power
+    /// toggle), registered from Lisp with `(set-instance-view-frame! f)`.
+    /// `None` renders `(view self)` as before.
+    instance_frame: Option<Value>,
+    /// A failing frame was reported once; later failures fall back quietly.
+    instance_frame_failed: bool,
 }
 
 impl ViewBufferStore {
@@ -80,6 +87,8 @@ impl ViewBufferStore {
                 })
                 .collect(),
             by_target: self.by_target.clone(),
+            instance_frame: self.instance_frame.as_ref().map(clone_value_for_snapshot),
+            instance_frame_failed: self.instance_frame_failed,
         }
     }
 }
@@ -90,6 +99,26 @@ pub(crate) fn scoped_key(scope: &str, key: &str) -> String {
 }
 
 impl VM {
+    /// Render every instance view through `frame` (`(frame view self)`), or
+    /// directly again with `None` (`set-instance-view-frame!`). Every
+    /// (re-)registration re-renders every bound instance view, so a
+    /// reloaded frame takes effect at once.
+    pub fn set_instance_view_frame(&mut self, frame: Option<Value>) {
+        self.view_buffers.instance_frame = frame;
+        self.view_buffers.instance_frame_failed = false;
+        let nodes: Vec<NodeId> = self
+            .view_buffers
+            .by_node
+            .iter()
+            .filter(|(_, bound)| matches!(bound.view, BoundView::Instance(_)))
+            .map(|(node_id, _)| *node_id)
+            .collect();
+        for node_id in nodes {
+            self.dag.mark_dirty(node_id);
+        }
+    }
+
+
     /// Bind the buffer `target` to `view` and schedule its first render
     /// (the host's next reactive cycle runs it, unless the buffer is hidden,
     /// in which case it renders once shown). Rebinding a bound target
@@ -257,7 +286,23 @@ impl VM {
             BoundView::Instance(id) => {
                 let id = *id;
                 match self.instance_view_callable(id)? {
-                    Some(view) => (view, vec![Value::Instance(id)]),
+                    Some(view) => match self.view_buffers.instance_frame.clone() {
+                        Some(frame) => {
+                            match self.invoke(frame, vec![view.clone(), Value::Instance(id)]) {
+                                Ok(tree) => return Ok(tree.unwrap_or(Value::Nil)),
+                                // A broken frame never takes a view down:
+                                // report once, render the view bare.
+                                Err(error) => {
+                                    if !self.view_buffers.instance_frame_failed {
+                                        self.view_buffers.instance_frame_failed = true;
+                                        eprintln!("eseqlisp: instance view frame failed, rendering views bare: {error:?}");
+                                    }
+                                    (view, vec![Value::Instance(id)])
+                                }
+                            }
+                        }
+                        None => (view, vec![Value::Instance(id)]),
+                    },
                     None => return Ok(Value::Nil),
                 }
             }
@@ -409,6 +454,55 @@ mod tests {
         let trees = drain_full_trees(&mut vm);
         assert_eq!(targets(&trees), vec!["*probe · B*"]);
         assert!(widths(&trees[0].1).contains(&Value::Number(5.0)));
+    }
+
+    #[test]
+    fn a_registered_frame_wraps_instance_views_and_re_registering_re_renders() {
+        let mut vm = view_vm(VIEW);
+        vm.create_instance(1, KIND).expect("create");
+        vm.bind_view_buffer("*framed*", BoundView::Instance(1), Some("instance:1".into()));
+        vm.process_dirty_reactive().expect("render bare");
+        let trees = drain_full_trees(&mut vm);
+        assert!(!stable_keys(&trees[0].1).iter().any(|key| key.ends_with("::frame")));
+        eval(
+            &mut vm,
+            r#"(def probe-frame (view s) (v-stack (box :key "frame" :width 1 :height 1) (view s)))
+               (set-instance-view-frame! probe-frame)"#,
+        );
+        vm.process_dirty_reactive().expect("render framed");
+        let keys = stable_keys(&drain_full_trees(&mut vm)[0].1);
+        assert!(keys.contains(&"instance:1::frame".to_string()), "{keys:?}");
+        assert!(keys.contains(&"instance:1::weight-matrix".to_string()), "the view inside: {keys:?}");
+        // Re-registering (a reloaded frame) re-renders through the new one.
+        eval(
+            &mut vm,
+            r#"(def probe-frame-2 (view s) (v-stack (box :key "frame-2" :width 1 :height 1) (view s)))
+               (set-instance-view-frame! probe-frame-2)"#,
+        );
+        vm.process_dirty_reactive().expect("render re-framed");
+        let keys = stable_keys(&drain_full_trees(&mut vm)[0].1);
+        assert!(keys.contains(&"instance:1::frame-2".to_string()), "{keys:?}");
+        // nil unregisters it.
+        eval(&mut vm, "(set-instance-view-frame! nil)");
+        vm.process_dirty_reactive().expect("render bare again");
+        let keys = stable_keys(&drain_full_trees(&mut vm)[0].1);
+        assert!(!keys.iter().any(|key| key.contains("frame")), "{keys:?}");
+    }
+
+    #[test]
+    fn a_throwing_frame_falls_back_to_the_bare_view() {
+        let mut vm = view_vm(VIEW);
+        vm.create_instance(1, KIND).expect("create");
+        vm.bind_view_buffer("*framed*", BoundView::Instance(1), Some("instance:1".into()));
+        eval(
+            &mut vm,
+            r#"(def broken-frame (view s) (view))
+               (set-instance-view-frame! broken-frame)"#,
+        );
+        vm.process_dirty_reactive().expect("a broken frame does not fail the render");
+        let trees = drain_full_trees(&mut vm);
+        let keys = stable_keys(&trees[0].1);
+        assert!(keys.contains(&"instance:1::weight-matrix".to_string()), "the bare view: {keys:?}");
     }
 
     #[test]

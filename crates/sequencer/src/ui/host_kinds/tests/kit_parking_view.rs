@@ -7,7 +7,7 @@ use super::views::{distro, widget_keyed, widgets_with_prop};
 use super::*;
 use sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE;
 
-const REFER_KITS: &str = "(import eseq.kinds :refer (groups banks set-kit-parked! kit-bank-state))";
+const REFER_KITS: &str = "(import eseq.kinds :refer (groups banks set-kit-parked!)) (import eseq.bank-power :refer (kit-bank-state))";
 
 impl Harness {
     fn kit_eval(&mut self, code: &str) -> Value {
@@ -104,7 +104,7 @@ fn a_parked_kit_reads_off_in_its_bank_and_keeps_a_dimmed_strip_in_the_mixer() {
 
     // Clicking it selects the kit: *fx* shows its drum rack, toggle off.
     h.fire_and_show(&strips[0], "on-click", Value::Nil);
-    let power = h.kit_widgets("*fx*", "rack-kit-power");
+    let power = h.kit_widgets("*fx*", "bank-power");
     assert_eq!(power.len(), 1, "the drum rack panel is showing");
     let (fx, _) = h.buffer_tree("*fx*");
     let dot = widget_keyed(&fx, &format!("rack-kit-power-{group_id}")).expect("the power dot");

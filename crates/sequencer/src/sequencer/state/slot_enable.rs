@@ -44,6 +44,9 @@ pub(crate) struct SceneSwapState {
     pub slot_enable: BTreeMap<usize, SlotEnable>,
     /// The kits switched off (eseq-ka5t.13, `super::kit_parking`).
     pub parked_kits: super::ParkedKits,
+    /// The project-owned instances switched off (docs/rig-spec.md §10,
+    /// `super::instance_parking`).
+    pub parked_instances: super::ParkedInstances,
 }
 
 impl SceneSwapState {
@@ -51,12 +54,14 @@ impl SceneSwapState {
         Self {
             slot_enable: scene.slot_enable.clone(),
             parked_kits: scene.parked_kits.clone(),
+            parked_instances: scene.parked_instances.clone(),
         }
     }
 
     pub fn apply_to(self, scene: &mut Scene) {
         scene.slot_enable = self.slot_enable;
         scene.parked_kits = self.parked_kits;
+        scene.parked_instances = self.parked_instances;
     }
 }
 
@@ -637,12 +642,12 @@ impl SequencerState {
     /// lock scenes then racks).
     pub(crate) fn capture_scene_track_inputs(
         &self,
-    ) -> (crate::process::TrackProcessChain, Vec<Option<SlotEnable>>, Vec<u64>) {
+    ) -> (crate::process::TrackProcessChain, Vec<Option<SlotEnable>>, super::SceneParking) {
         let scenes = self.pattern.scenes.lock().unwrap();
         (
             scenes.current_project_process_chain(),
             scenes.current_scene_slot_enables(),
-            scenes.current_parked_kits(),
+            scenes.current_scene_parking(),
         )
     }
 

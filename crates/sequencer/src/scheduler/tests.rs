@@ -5518,6 +5518,7 @@
                         fanout: Default::default(),
                         unbound_ports: Default::default(),
                         expr_source: None,
+                        owner_instance: None,
                         bindings: std::collections::BTreeMap::new(),
                     }],
                 },
@@ -6309,6 +6310,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: Default::default(),
             });
             edit(&mut chain);
@@ -8957,6 +8959,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: Default::default(),
             };
             let intrinsic = |instance: usize,
@@ -9177,6 +9180,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: Default::default(),
             };
             let intrinsic = |instance: usize,
@@ -9395,6 +9399,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: Default::default(),
             };
             let intrinsic = |instance: usize,
@@ -9704,6 +9709,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: Default::default(),
             };
             let intrinsic = |instance: usize,
@@ -10098,6 +10104,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: Default::default(),
             };
             harmony.inlets.insert("source".into(), crate::process::ProcessLiteral::Number(-2.0));
@@ -10305,6 +10312,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: Default::default(),
             };
             harmony.inlets.insert("source".into(), crate::process::ProcessLiteral::Number(2.0));
@@ -10515,6 +10523,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: Default::default(),
             };
             harmony.inlets.insert("source".into(), crate::process::ProcessLiteral::Number(2.0));
@@ -10692,6 +10701,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: Default::default(),
             };
             let mut rand = slot(9101, "lane-rand");

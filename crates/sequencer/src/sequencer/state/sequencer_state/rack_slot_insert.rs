@@ -105,16 +105,15 @@ impl ProjectScenes {
         self.composed_scene_cell(scene, track).is_some()
     }
 
-    /// For each of `tracks`, every slot id its racks hold mapped to a bitmask
-    /// of the banks (bit = bank position) with a scene that enables it: what
-    /// a slot row's bank letters show (rig spec §4 recall); 0 means no scene
-    /// does (unused). One pass over the scenes. Banks past the 128th do not
-    /// show.
+    /// For each of `tracks`, every slot id its racks hold mapped to the banks
+    /// (by position) with a scene that enables it: what a slot row's bank
+    /// letters show (rig spec §4 recall); empty means no scene does
+    /// (unused). One pass over the scenes.
     pub fn rack_slot_bank_masks(
         &self,
         tracks: &[usize],
-    ) -> Vec<std::collections::BTreeMap<u64, u128>> {
-        let mut masks: Vec<std::collections::BTreeMap<u64, u128>> = tracks
+    ) -> Vec<std::collections::BTreeMap<u64, BankMask>> {
+        let mut masks: Vec<std::collections::BTreeMap<u64, BankMask>> = tracks
             .iter()
             .map(|track| {
                 self.track_pools
@@ -124,21 +123,20 @@ impl ProjectScenes {
                             .patches
                             .values()
                             .filter_map(|patch| patch.rack_track.as_ref())
-                            .flat_map(|rack| rack.slots.iter().map(|slot| (slot.id, 0)))
+                            .flat_map(|rack| rack.slots.iter().map(|slot| (slot.id, BankMask::default())))
                             .collect()
                     })
                     .unwrap_or_default()
             })
             .collect();
-        for (bank_index, (_, range)) in self.scene_bank_ranges().enumerate().take(128) {
-            let bit = 1_u128 << bank_index;
+        for (bank_index, (_, range)) in self.scene_bank_ranges().enumerate() {
             for scene in range {
                 for (track, slots) in tracks.iter().zip(&mut masks) {
                     match self.scene_slot_enable(scene, *track) {
                         Some(set) => {
                             for id in set {
                                 if let Some(mask) = slots.get_mut(id) {
-                                    *mask |= bit;
+                                    mask.insert(bank_index);
                                 }
                             }
                         }
@@ -146,7 +144,7 @@ impl ProjectScenes {
                         None => {
                             for (id, mask) in slots.iter_mut() {
                                 if self.slot_enabled_in_scene(scene, *track, *id) == Some(true) {
-                                    *mask |= bit;
+                                    mask.insert(bank_index);
                                 }
                             }
                         }

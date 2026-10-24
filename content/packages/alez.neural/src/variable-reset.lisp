@@ -47,6 +47,7 @@
                            set-process-enabled! set-inlet! add-process! remove-process! bind-port!
                            clear-port! graph-quantize-options graph-max-poly-selection-options))
 (import eseq.view-kit :refer (rgb-part index-of nothing named))
+(import eseq.glance)
 (import eseq.graph-kit :refer (route-tracks route-menu-tracks route-track route-label node-route-label set-route-label!
                                weight-rows set-weight! column res-options set-param-on-nodes!))
 
@@ -406,8 +407,11 @@
 (def gvr-neuron-labels (g)
   (map (lambda (k) (str "nrn " k)) (range 0 (len g.nodes))))
 
-(def gvr-track-inlet-options (g)
-  (append (gvr-route-tracks-labels g) (gvr-neuron-labels g)))
+;; `keep`: the track the inlet names now (a list, empty for a neuron), kept
+;; in the menu even where the viewed bank hides it (docs/rig-spec.md §9).
+(def gvr-track-inlet-options (g &key (keep (list)))
+  (append (map (lambda (t) (route-label g t)) (route-menu-tracks g :keep keep))
+          (gvr-neuron-labels g)))
 
 ;; Inlet value `v` as its option: a neuron, or the track at that index.
 (def gvr-track-inlet-label (g v)
@@ -492,7 +496,11 @@
                    :on-change (lambda (v) (set-inlet! i (index-of i.options v))))
           "track" (dropdown
                     :key key
-                    :value (gvr-track-inlet-label g (floor i.value)) :options (gvr-track-inlet-options g)
+                    :value (gvr-track-inlet-label g (floor i.value))
+                    :options (gvr-track-inlet-options g
+                               :keep (let ((v (floor i.value))
+                                           (t (when (>= v 0) (nth (tracks) v))))
+                                       (if t (list t) (list))))
                     :badge-color :transparent :bg-color :bg :border-color :mixer-strip-selected-bg
                     :width gvr-proc-control-width :height gvr-row-height :font-size 6
                     :on-change (lambda (label)
@@ -1055,3 +1063,57 @@
   :icon "gvr-tab-icon"
   :keymap eseq.sequencer-keys/sequencer-keys
   :on-create gvr-init-ring-defaults)
+
+;; The kind's glance (docs/rig-spec.md §7, eseq.glance): the instance's
+;; firing history as a heatmap (one row per node, 16 beats across,
+;; brightness by velocity) over each node's trigger and energy strips, read
+;; from its graph's live playback fields. Each live read is its own subtree,
+;; so a fire repaints the strip it lit and nothing else. `hint` is
+;; eseq.glance's: :height rows in all, :color the tint (a kit's colour) or
+;; nil for the theme accent, :key the caller's key prefix. Under 4 rows
+;; the energy strip gives its room to the heatmap.
+(def gvr-glance (self hint)
+  (let ((gr (graph-of self)))
+    (if gr
+      (let ((n (max 1 (len gr.nodes)))
+            (k (str (get hint :key) "-gvr-" self.id))
+            (rgb (get hint :color))
+            (full (>= (get hint :height) 4))
+            (heat (max 1.0 (- (get hint :height) (if (>= (get hint :height) 4) 2.4 1.2)))))
+        (v-stack :key (str k "-glance") :debug-name "neural-glance" :gap 0.2 :width :fill
+          (subtree :key (str k "-events")
+            (box :width :fill :height heat :padding 0.15 :corner-radius 6
+              :background-color :bg
+              (event-view
+                :key (str k "-ev")
+                :events gr.events
+                :current-beat #'gr.beat
+                :renderer :heatmap
+                :x :beat-phase :x-min 0 :x-max 16
+                :y :node :y-min 0 :y-max (max 1 (- n 1))
+                :phase-beats 16 :window-beats 16
+                :brightness :velocity
+                :color-by :velocity :color-min 0 :color-max 1
+                :color-low (if rgb (rgba (rgb-part rgb 0) (rgb-part rgb 1) (rgb-part rgb 2) 0.35)
+                             (rgba 0.15 0.62 1.0 0.35))
+                :color-high (if rgb (rgba (rgb-part rgb 0) (rgb-part rgb 1) (rgb-part rgb 2) 1.0)
+                              :accent)
+                :x-bins 64 :y-bins (max 2 n)
+                :background :transparent
+                :width :fill :height :fill)))
+          (subtree :key (str k "-triggers")
+            (matrix :key (str k "-tr")
+              :rows 1 :cols n :width :fill :height 1.0
+              :min 0 :max 1
+              :value (list gr.triggers)))
+          (if full
+            (subtree :key (str k "-energy")
+              (matrix :key (str k "-en")
+                :rows 1 :cols n :width :fill :height 1.0
+                :min 0 :max 4
+                :value (list gr.energy)))
+            nil)))
+      nil)))
+
+;; A trampoline, so re-evaluating this file restyles every glance at once.
+(eseq.glance/def-glance "alez/neural:neural" (lambda (self hint) (gvr-glance self hint)))

@@ -125,8 +125,14 @@ pub struct SequencerSnapshot {
     /// The kits (rack group ids) the scene this snapshot plays switches off
     /// (docs/rig-spec.md §6): their member tracks are `scene_silenced` and
     /// their rack-owned graphs and generators do not run. Set by
-    /// [`Self::park_kits`] (`sequencer/state/kit_parking.rs`).
+    /// [`Self::apply_scene_parking`] (`sequencer/state/parking.rs`).
     pub parked_racks: Vec<u64>,
+    /// The project-owned instances the scene this snapshot plays switches
+    /// off (docs/rig-spec.md §10): their graphs and generators do not run and
+    /// the process slots they own are disabled. Set by
+    /// [`Self::apply_scene_parking`] (`sequencer/state/parking.rs`);
+    /// sorted, so a gate is a binary search.
+    pub parked_instances: Vec<u64>,
     /// Pre-resolved rack groove per track, indexed like `tracks` (entries
     /// past its end, and `None`, mean no groove: today's timing bit for bit).
     /// Built when rack config or membership changes, so the hot path never
@@ -242,6 +248,7 @@ impl SequencerSnapshot {
             graph_overrides: Vec::new(),
             rack_memberships: Vec::new(),
             parked_racks: Vec::new(),
+            parked_instances: Vec::new(),
             track_grooves: Arc::new(Vec::new()),
             scene_track_grooves: Arc::new(Vec::new()),
             scene_slots: SceneSlotStore::default(),
@@ -270,7 +277,7 @@ impl SequencerSnapshot {
         // The playing scene owns which rack slots play (docs/rig-spec.md
         // §3.2); the live mirror keeps the patterns' stored flags. Read with
         // the process chain, under one scenes lock, before the rack lock.
-        let (project_process_chain, slot_enables, parked_kits) = state.capture_scene_track_inputs();
+        let (project_process_chain, slot_enables, parking) = state.capture_scene_track_inputs();
         let live_rack_tracks = state.pattern.rack_tracks.lock().unwrap();
         let live_process_chains = state.pattern.process_chains.lock().unwrap();
         let live_project_lane_overrides =
@@ -309,6 +316,7 @@ impl SequencerSnapshot {
             graph_overrides,
             rack_memberships: state.rack_memberships(),
             parked_racks: Vec::new(),
+            parked_instances: Vec::new(),
             track_grooves: state.track_grooves(),
             scene_track_grooves: Arc::new(state.scene_track_grooves()),
             scene_slots,
@@ -316,8 +324,9 @@ impl SequencerSnapshot {
             process_trace: state.process_trace_enabled(),
             engine_instrument_descriptors: state.engine_instrument_descriptors(),
         };
-        // The playing scene's switched-off kits (docs/rig-spec.md §6).
-        snapshot.park_kits(parked_kits);
+        // The playing scene's switched-off kits and project-owned
+        // instances (docs/rig-spec.md §6, §10).
+        snapshot.apply_scene_parking(parking);
         snapshot
     }
 
@@ -361,9 +370,10 @@ impl SequencerSnapshot {
         graph_overrides: Vec<ProjectGraphOverrides>,
         scene_slots: SceneSlotStore,
         project_process_chain: crate::process::TrackProcessChain,
-        // The kits the scene this snapshot plays switches off
-        // (docs/rig-spec.md §6): required, so no builder can forget them.
-        parked_kits: Vec<u64>,
+        // The kits and project-owned instances the scene this snapshot
+        // plays switches off (docs/rig-spec.md §6, §10): required, so no
+        // builder can forget them.
+        parking: crate::sequencer::SceneParking,
     ) -> Self {
         let num_tracks = tracks.len();
         let transport = SequencerTransportSnapshot {
@@ -432,6 +442,7 @@ impl SequencerSnapshot {
             graph_overrides,
             rack_memberships: state.rack_memberships(),
             parked_racks: Vec::new(),
+            parked_instances: Vec::new(),
             track_grooves: state.track_grooves(),
             scene_track_grooves: Arc::new(state.scene_track_grooves()),
             scene_slots,
@@ -442,7 +453,7 @@ impl SequencerSnapshot {
             process_trace: state.process_trace_enabled(),
             engine_instrument_descriptors: state.engine_instrument_descriptors(),
         };
-        snapshot.park_kits(parked_kits);
+        snapshot.apply_scene_parking(parking);
         snapshot
     }
 }

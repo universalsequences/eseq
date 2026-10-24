@@ -744,10 +744,13 @@ publishes per-bank lists instead of one boolean: `track.used-banks` and
 with a per-track bank bitmask, `ui/host_kinds/bank_usage.rs`), recomputed
 only when the scenes revision, the track/group/bank instances or the group
 topology move. A scene uses a track when it gives it a pattern cell, steps or
-none (a graph-driven track plays an empty pattern); a kit's pad when the scene
-points at one of the kit's clips and does not park it (a legacy kit: the pad's
-cell, unparked); a kit where it plays; a plain group where a member or child
-kit is used. Lisp (`eseq.scene-banks`): `used-in-viewed-bank?`,
+none (a graph-driven track plays an empty pattern); a kit when a scene does
+not park it and points at one of its clips (a legacy kit: gives any pad a
+cell); a kit's pads follow the kit, all or none. `group.used-banks` is
+published for kits only: a plain group shows where any member shows. Bank
+sets have no size cap (`BankMask`, shared with the slot bank letters). A kit
+parked in every scene hides its pads in every bank and keeps only its dimmed
+strip. Lisp (`eseq.scene-banks`): `used-in-viewed-bank?`,
 `track-used-in-bank?`, `group-used-in-bank?`, `kit-bank-view` (`:shown`,
 `:off`, `:hidden`) and the `show-all-tracks` defcustom (View > Show All
 Tracks, and the bank selector's right-click menu). A track or kit no bank
@@ -757,7 +760,8 @@ strips and LEFT/RIGHT, the lane track-inlet menu, project-owned graph route
 menus (graph demos, neural variable-reset) and jaki's project routes; a
 rack-owned sequencer's pad routes stay whole. A menu keeps the track its
 control names now. A selected track the bank hides hands the selection to the
-nearest shown one. A kit the bank parks keeps its sequencer header and its
+nearest shown one, and hidden tracks leave a multi-selection, only when the
+viewed bank or "Show all tracks" changes and no bus is selected. A kit the bank parks keeps its sequencer header and its
 dimmed mixer strip (also under show-all). The device line is on Instrument
 Rack tracks' sequencer rows (first enabled slot "+N"; a click shows the slot
 list in *fx*). The arrangement view still shows every track: it spans banks.
@@ -778,6 +782,82 @@ project, so bank C inherits bank A's conductors. To fix it:
 
 This is the same rule as §3 for a different thing: who plays is scene state.
 
+**As built (eseq-ka5t.1, .5, .6).** Membership is a `Scene` field next to
+`parked_kits`, not a scene-slot key: `Scene.parked_instances` (the ids of
+the project-owned instances the scene switches off,
+`sequencer/state/instance_parking.rs`), inherited through `SceneSwapState`
+(clone, copy-to-new-bank, `+`), captured by scene-structure undo and by
+every instance edit's history state, saved as `scene_parked_instances`
+(project file v20; older files load with nothing parked, every instance on
+everywhere). `default_active` is a rule at creation, not a stored flag: a
+project-owned instance created later is parked in every scene outside the
+bank it was made in (the viewed bank, `instance-create :bank-id`), in the
+create's undo step; a one-bank project parks nothing. A move back to the
+project applies the same rule (a dissolved kit's sequencers instead keep
+playing where the kit played), a move into a kit forgets the entries. A
+duplicate copies its source's parked set; a delete (and the purge) forgets
+its entries; a rack-owned instance follows its kit and is never gated, even
+by a stale entry (`ProjectScenes::instance_racks` filters the parked set).
+One implementation serves kits and instances (`sequencer/state/parking.rs`,
+`ParkedSet::{Kits, Instances}`, `BankState`, `BankParkingRow`, one recorded
+bank toggle in `app/kit_parking.rs`).
+
+The gate sits beside the kit gate in every scheduler snapshot
+(`SequencerSnapshot::apply_scene_parking`, the same four builders): a
+parked instance's graph and generator do not run (no fires, no state
+advance, no graph replay), and every process slot it owns is disabled in
+that snapshot only. Ownership is explicit: `(processes :track t :owner id
+…)` (or `:project`) tags the chain's slots with `TrackProcessSlot::
+owner_instance` (saved with the pattern); a slot without an owner, i.e.
+every slot the user adds, is never gated. Owner ids are instance ids for
+good: the allocator never reissues one a slot still names, a delete clears
+the slots it owned (its undo restores them), a duplicate's copied node
+processes are owned by the copy, and a kit load or project import re-keys
+the copied chains' owners to the fresh ids (an owner that did not come
+along is dropped). Track process chains are per
+pattern, so the gate is per scene rather than a rewrite: a pattern banks A
+and C share keeps one chain, and bank C's snapshot disables the slots of a
+conductor bank C parks. Conductor attachments (`processes :observe … :play`)
+carry no owner yet and are not gated.
+
+Density (`~/.eseq.d/packages/local/density`, outside the repo, not edited)
+stops clobbering other banks once `sync-density` declares
+`(processes :track idx :owner <instance id> (density-trigs …))`; today it
+merges every instance's groups into one untagged process per track. Two
+further changes are the package's: a track two instances claim needs one
+tagged slot per instance (one chain), so the instance active in a bank
+applies there; and the process should read its instance's document at run
+time rather than bake the values in, because a scene switch to a bank with
+other document values otherwise rewrites the shared pattern's chain.
+
+Commands: `set-instance-parked {:id :value [:bank-id]}`, `instance-activate
+{:id [:bank-id] :from-scene | :from-bank-id}` (on in the bank with that
+scene's settings: an instance's settings are per scene, its `:document`
+slots and graph overrides, so recall copies exactly those into every scene
+of the bank, one undo step), `instance-purge-unused` (asks first naming
+them; the ordinary instance delete, one undo step). `project.instances` rows
+gain `:parked`, `:parked-banks`, `:mixed-banks` (bank instances, the shape a
+kit's group fields have) and `:unused`, and `project.instances-by-id` keys the
+rows by id for `instance-row`. `eseq.kinds`: `instance-row`,
+`set-instance-parked!`, `unused-instances`, `activate-instance-from-scene!`,
+`activate-instance-like-bank!`, `purge-unused-instances!`; every create and
+give-back passes the viewed bank's `:bank-id`. `eseq.bank-power` is the one
+toggle for kits and instances: the dots, `bank-power-toggle`, `bank-state`
+(from `parked` / `parked-banks` / `mixed-banks`), `kit-bank-state`,
+`instance-bank-state` and `bank-power-hint` ("Kit on in bank C", "On in bank
+C"). UI: `eseq.instance-frame` registers `(set-instance-view-frame!
+instance-view-frame)`, so every instance view renders as the frame's power
+strip (in its own subtree, zero size for a rack-owned instance or a one-bank
+project that parks it nowhere) above the view; a frame that throws is
+reported once and the view renders bare. The
+Packages tab's instance menu has "Turn off/on in bank C", "Turn on in bank C
+like bank A" and "Purge unused sequencers…", and an instance row's detail
+says "Off in bank C". Import (§8) parks a picked project-owned sequencer
+outside the target bank (its nodes there stay routed nowhere, so turning it
+on later never points it at a master track by index), and a new bank made
+by an import parks this project's own project-owned sequencers in its
+scenes.
+
 ## 11. Trigger lines (later)
 
 Autechre's cascade sequencer sends to named trigger lines (`drumtrig 1`,
@@ -786,6 +866,8 @@ indices, or pad indices inside a kit. Named trigger lines, with per-scene
 listeners on tracks, would let a sequencer keep its routing while the bank
 changes what listens. eseq already has the value half (`defchan`, `send`,
 `chan-get`). Separate spec.
+
+Spec: `docs/trigger-lines-spec.md` (rev 1).
 
 ## 12. Order
 

@@ -549,7 +549,7 @@ impl SequencerState {
         next.transport = self.capture_transport_snapshot();
         // The recaptured track starts unparked: parking changes publish in
         // full, so the cloned snapshot's parked set is the playing scene's.
-        next.park_track(track);
+        next.apply_track_parking(track);
         self.publish_scheduler_snapshot_arc(Arc::new(next))
     }
 
@@ -616,8 +616,9 @@ impl SequencerState {
             graph_overrides,
             scene_slots,
             project_process_chain,
-            // The live scene's switched-off kits (docs/rig-spec.md §6).
-            self.current_parked_kits(),
+            // The live scene's switched-off kits and project-owned
+            // instances (docs/rig-spec.md §6, §10).
+            self.current_scene_parking(),
         );
         self.publish_scheduler_snapshot_arc(Arc::new(snapshot))
     }

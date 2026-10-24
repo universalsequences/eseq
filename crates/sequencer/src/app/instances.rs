@@ -79,8 +79,30 @@ pub(super) fn for_each_slot_store(
     }
 }
 
+/// Make one store's document slots `owned` (read with
+/// [`owned_document_slots`]) be `wanted` instead. Returns whether they
+/// differed.
+pub(super) fn replace_document_slots(
+    store: &mut crate::sequencer::SceneSlotStore,
+    owned: Vec<(String, crate::process::ProcessLiteral)>,
+    wanted: Vec<(String, crate::process::ProcessLiteral)>,
+) -> bool {
+    if wanted == owned {
+        return false;
+    }
+    for (name, _) in &owned {
+        let _ = store.set_override(name.clone(), None);
+    }
+    for (name, value) in wanted {
+        if let Err(error) = store.set_override(name.clone(), Some(value)) {
+            eprintln!("metal_seq: instance document slot {name}: {error}");
+        }
+    }
+    true
+}
+
 /// The `:document` slots of instances `ids` in one store.
-fn owned_document_slots(
+pub(super) fn owned_document_slots(
     store: &crate::sequencer::SceneSlotStore,
     ids: &[u64],
 ) -> Vec<(String, crate::process::ProcessLiteral)> {
@@ -130,6 +152,8 @@ impl App {
                 );
             });
         });
+        // Nor one a process slot still names as its owner (§10 `:owner`).
+        taken.extend(self.state.process_slot_owner_ids());
         let mut id = self.instances.next_id.max(1);
         while self.instances.contains(id) || taken.contains(&id) {
             id += 1;
@@ -246,6 +270,9 @@ impl App {
                 module: module.to_string(),
                 present: import_modules(&self.state.scratch_source()).contains(module),
             }),
+            parked_instances: self
+                .state
+                .with_project_scenes(|scenes| scenes.capture_parked_instances()),
         }
     }
 
@@ -273,7 +300,8 @@ impl App {
                 }
             });
         });
-        InstanceOverridesState { ids, sites, documents }
+        let owned_processes = self.state.owned_process_slots(&ids);
+        InstanceOverridesState { ids, sites, documents, owned_processes }
     }
 
     /// Rewrite the `:document` slots of `ids` wherever they live (every
@@ -293,18 +321,7 @@ impl App {
             for_each_slot_store(scenes, |site, store| {
                 let owned = owned_document_slots(store, ids);
                 let wanted = edit(site, owned.clone());
-                if wanted == owned {
-                    return;
-                }
-                for (name, _) in &owned {
-                    let _ = store.set_override(name.clone(), None);
-                }
-                for (name, value) in wanted {
-                    if let Err(error) = store.set_override(name.clone(), Some(value)) {
-                        eprintln!("metal_seq: instance document slot {name}: {error}");
-                    }
-                }
-                changed = true;
+                changed |= replace_document_slots(store, owned, wanted);
             });
         });
         if changed {
@@ -314,6 +331,7 @@ impl App {
     }
 
     fn restore_instance_overrides(&self, state: &InstanceOverridesState) {
+        self.state.set_process_slot_owners(&state.ids, &state.owned_processes);
         self.edit_instance_documents(&state.ids, |site, _| {
             state
                 .documents
@@ -373,6 +391,12 @@ impl App {
         }
         if let Some(import) = &target.scratch_import {
             self.set_evaluated_scratch_import(import);
+        }
+        if self
+            .state
+            .with_scenes_mut(|scenes| scenes.restore_parked_instances(&target.parked_instances))
+        {
+            self.state.publish_scheduler_snapshot();
         }
         for instance in &self.instances.list {
             if !target.instances.contains(instance.id) {
@@ -459,12 +483,30 @@ impl App {
     }
 
     /// Create an instance of a registered kind. `label` defaults to
-    /// `<kind> <n>`. Returns the new instance id.
+    /// `<kind> <n>`. Returns the new instance id. A project-owned one plays
+    /// only in the playing scene's bank
+    /// ([`Self::create_instance_in_bank_recorded`]).
     pub fn create_instance_recorded(
         &mut self,
         kind: &str,
         owner: ProjectInstanceOwner,
         label: Option<String>,
+    ) -> Result<u64, String> {
+        self.create_instance_in_bank_recorded(kind, owner, label, None)
+    }
+
+    /// [`Self::create_instance_recorded`] made in bank `bank` (the viewed
+    /// bank; `None`: the playing scene's): a project-owned instance is
+    /// active only in that bank's scenes and parked in every other scene
+    /// (docs/rig-spec.md §10 `default_active`), in the same undo step. A
+    /// project with one bank parks nothing; a rack-owned instance follows its
+    /// kit instead.
+    pub fn create_instance_in_bank_recorded(
+        &mut self,
+        kind: &str,
+        owner: ProjectInstanceOwner,
+        label: Option<String>,
+        bank: Option<crate::sequencer::SceneBankId>,
     ) -> Result<u64, String> {
         let definition = crate::lisp_host::registered_kind(kind).ok_or_else(|| {
             format!("Kind '{kind}' is not registered; attach its package first")
@@ -482,6 +524,9 @@ impl App {
                 owner,
                 label,
             });
+            if owner.rack().is_none() {
+                app.park_new_instance_outside_bank(id, bank)?;
+            }
             Ok(id)
         })
     }
@@ -503,6 +548,8 @@ impl App {
             let removed = app.instances.list.remove(position);
             app.drop_instance_overrides(&[id]);
             app.edit_instance_documents(&[id], |_, _| Vec::new());
+            app.forget_parked_instances(&[id]);
+            app.state.set_process_slot_owners(&[id], &[]);
             Ok(removed)
         })
     }
@@ -540,6 +587,8 @@ impl App {
             });
             app.drop_instance_overrides(&ids);
             app.edit_instance_documents(&ids, |_, _| Vec::new());
+            app.forget_parked_instances(&ids);
+            app.state.set_process_slot_owners(&ids, &[]);
             if let Some(module) = detach_import {
                 app.set_evaluated_scratch_import(&ScratchImportState {
                     module: module.to_string(),
@@ -599,6 +648,17 @@ impl App {
                         graph.sequencer_id = new_id;
                         graph.sequencer_name = name.clone();
                         reminter.remint(new_id, &mut graph);
+                        // Node processes the source owns are the copy's.
+                        for slot in graph
+                            .node_intrinsics
+                            .iter_mut()
+                            .filter_map(|node| node.process_chain.as_mut())
+                            .flat_map(|chain| chain.slots.iter_mut())
+                        {
+                            if slot.owner_instance == Some(source.id) {
+                                slot.owner_instance = Some(new_id);
+                            }
+                        }
                         graph
                     })
                     .collect();
@@ -642,6 +702,9 @@ impl App {
                     label,
                 },
             );
+            // It plays where its source plays (docs/rig-spec.md §10).
+            app.state
+                .with_scenes_mut(|scenes| scenes.copy_instance_parking(source.id, new_id));
             Ok(new_id)
         })
     }
@@ -672,6 +735,29 @@ impl App {
         &mut self,
         id: u64,
         owner: ProjectInstanceOwner,
+    ) -> Result<(), String> {
+        self.move_instance_owner_parked(id, owner, MoveParking::Bank(None))
+    }
+
+    /// [`Self::move_instance_owner_recorded`] with the project-owned
+    /// instance it gives back made in bank `bank` (the viewed bank; `None`:
+    /// the playing scene's): docs/rig-spec.md §10's default-active rule
+    /// parks it in every scene outside that bank. Into a rack, its parked
+    /// entries go: a kit's instance follows the kit.
+    pub fn move_instance_owner_in_bank_recorded(
+        &mut self,
+        id: u64,
+        owner: ProjectInstanceOwner,
+        bank: Option<crate::sequencer::SceneBankId>,
+    ) -> Result<(), String> {
+        self.move_instance_owner_parked(id, owner, MoveParking::Bank(bank))
+    }
+
+    fn move_instance_owner_parked(
+        &mut self,
+        id: u64,
+        owner: ProjectInstanceOwner,
+        parking: MoveParking,
     ) -> Result<(), String> {
         let current = self
             .instances
@@ -875,6 +961,23 @@ impl App {
                 .get_mut(id)
                 .ok_or_else(|| format!("Instance {id} does not exist"))?
                 .owner = owner;
+            // Who plays it (docs/rig-spec.md §10), in this same undo step.
+            match (owner.rack(), parking) {
+                (Some(_), _) => app.forget_parked_instances(&[id]),
+                (None, MoveParking::Bank(bank)) => app.park_new_instance_outside_bank(id, bank)?,
+                (None, MoveParking::LikeKit(group_id)) => {
+                    app.state.with_scenes_mut(|scenes| {
+                        for scene in &mut scenes.scenes {
+                            if scene.parked_kits.contains(&group_id) {
+                                scene.parked_instances.insert(id);
+                            } else {
+                                scene.parked_instances.remove(&id);
+                            }
+                        }
+                    });
+                    app.state.publish_scheduler_snapshot();
+                }
+            }
             Ok(())
         })
     }
@@ -920,7 +1023,11 @@ impl App {
         let checkpoint_len = self.history.undo_len();
         let result = (|| {
             for id in &owned {
-                self.move_instance_owner_recorded(*id, ProjectInstanceOwner::Project)?;
+                // A dissolved kit's sequencers keep playing where the kit
+                // did (docs/rig-spec.md §10).
+                let group_id = self.instances.get(*id).and_then(|instance| instance.owner.rack());
+                let parking = group_id.map_or(MoveParking::Bank(None), MoveParking::LikeKit);
+                self.move_instance_owner_parked(*id, ProjectInstanceOwner::Project, parking)?;
             }
             edit(self)
         })();
@@ -962,6 +1069,17 @@ impl App {
             Ok(())
         })
     }
+}
+
+/// Where an instance a move gives back to the project plays
+/// (docs/rig-spec.md §10).
+#[derive(Clone, Copy)]
+enum MoveParking {
+    /// The default-active rule: only in this bank (`None`: the playing
+    /// scene's).
+    Bank(Option<crate::sequencer::SceneBankId>),
+    /// Wherever kit `group_id` plays (a dissolved kit's sequencers).
+    LikeKit(u64),
 }
 
 /// Project files below this version predate instances: their project-owned

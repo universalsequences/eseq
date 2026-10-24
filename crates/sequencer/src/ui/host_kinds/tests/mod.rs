@@ -407,6 +407,7 @@ pub(crate) fn one_slot_chain(
             fanout: Default::default(),
             unbound_ports: Default::default(),
             expr_source: None,
+            owner_instance: None,
             bindings: std::collections::BTreeMap::from([("out".to_string(), Some(target))]),
         }],
     }
@@ -557,8 +558,10 @@ mod browser_view;
 mod devices;
 mod focus_steps;
 mod generator;
+mod glance_view;
 mod graph;
 mod graph_demos_view;
+mod instance_parking_view;
 mod kit_parking_view;
 mod bank_scoped_view;
 mod lanes;
@@ -576,6 +579,7 @@ mod params;
 mod pending;
 mod piano_roll;
 mod piano_roll_view;
+mod project_peek_view;
 mod rack_view;
 mod racks;
 mod scenes;

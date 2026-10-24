@@ -430,7 +430,7 @@ impl App {
             current.scene_slots.clone(), Default::default(),
             // A kit the playing scene switches off stays silent in the
             // audition too (docs/rig-spec.md §6).
-            prepared.scenes.current_parked_kits());
+            prepared.scenes.current_scene_parking());
         snapshot.transport.bpm = prepared.bpm;
         self.state.note_audition.start(crate::scheduler::audition::AuditionLoop {
             snapshot, steps: prepared.steps, span: (start, end),

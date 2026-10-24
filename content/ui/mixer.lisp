@@ -31,8 +31,8 @@
 (import eseq.effects.param-controls :as pc)
 ;; Shared scene-bank view state: the clip grid below shows only the bank the
 ;; transport strip is viewing (scene-banks spec 10.1).
-(import eseq.scene-banks :refer (scene-viewed-bank scene-viewed-bank-label clip-in-viewed-bank?
-                                 track-used-in-bank?))
+(import eseq.scene-banks :refer (scene-viewed-bank scene-viewed-bank-id scene-viewed-bank-label clip-in-viewed-bank?
+                                 bank-tracks))
 (import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of prop-if
                               rgb-part color-rgba track-color-part))
 (import eseq.kinds :refer (track tracks buses groups routes graphs selection master project
@@ -1344,7 +1344,8 @@
       :export-kit (eseq.browser/enter-kit-save g)
       :new-rack-instance
       (host-command "packages-new-instance"
-        (dict :module (get action :module) :kind (get action :kind-id) :group-id g.gid))
+        (dict :module (get action :module) :kind (get action :kind-id) :group-id g.gid
+              :bank-id (scene-viewed-bank-id)))
       :move-sequencer-into-rack
       (host-command "move-sequencer-into-rack"
         (dict :group-id g.gid
@@ -1498,15 +1499,15 @@
 ;; The tracks the viewed bank uses, then the buses, as LEFT / RIGHT walk
 ;; them.
 (def channels ()
-  (let ((viewed (scene-viewed-bank)))
-    (append (filter (lambda (t) (track-used-in-bank? t viewed)) (tracks)) (display-buses))))
+  (append (bank-tracks (scene-viewed-bank) (list)) (display-buses)))
 
 (def current-channel ()
   (let ((bi eseq.seq-core-state/selected-bus)
         (all (buses)))
     (if (and (>= bi 0) (< bi (len all)))
       (nth all bi)
-      (or (first (filter (lambda (t) t.in-selection) (tracks))) (first (tracks))))))
+      (let ((shown (bank-tracks (scene-viewed-bank) (list))))
+        (or (first (filter (lambda (t) t.in-selection) shown)) (first shown))))))
 
 (def select-channel (delta)
   (let ((all (channels))
@@ -1834,12 +1835,12 @@
         :color :dim
         bare-text))))
 
-(def group-container (g)
+(def group-container (g viewed)
   (if (eseq.drum-rack-v2/kit-off-in-viewed-bank? g)
     (parked-kit-strip g)
-    (live-group-container g)))
+    (live-group-container g viewed)))
 
-(def live-group-container (g)
+(def live-group-container (g viewed)
   (let ((c g.color))
     (box
       :corner-radius (eseq.seq-core-state/radius 16)
@@ -1865,22 +1866,22 @@
             (box :width :fill :height 0.85 :bg :transparent)
             (h-stack :gap 0.1
               ;; Only what the viewed bank uses (docs/rig-spec.md §9).
-              (each (eseq.drum-rack-v2/bank-members g) |t|
+              (each (eseq.drum-rack-v2/bank-members g viewed) |t|
                 (subtree :key (str "mixer-v2-track-" t.index)
                   (track-strip-of t)))
               ;; Child racks draw as their own container inside this block —
               ;; collapsed, that is a single header strip; expanded, the rack
               ;; header plus its members (docs/drum-rack-v2-spec.md).
-              (each (eseq.drum-rack-v2/bank-racks g) |child|
+              (each (eseq.drum-rack-v2/bank-racks g viewed) |child|
                 (subtree :key (str "mixer-v2-group-" child.gid)
-                  (group-container child))))))))))
+                  (group-container child viewed))))))))))
 
 (def render-item (item)
   (let ((g (get item :group))
         (t (get item :track)))
     (if g
       (subtree :key (str "mixer-v2-group-" g.gid)
-        (group-container g))
+        (group-container g (get item :viewed)))
       (subtree :key (str "mixer-v2-track-" t.index)
         (track-strip-of t)))))
 

@@ -503,7 +503,7 @@ fn frozen_rack_macro_rows_preserve_automation_and_follow_only_explicit_live_edit
         data.rack_track = Some(rack);
         crate::sequencer::SequencerSnapshot::capture_from_track_pattern_data(
             &state, &[data], Vec::new(), Vec::new(), Vec::new(), Default::default(), Default::default(),
-            Vec::new(),
+            Default::default(),
         )
     };
     let first = capture(0.2, 0.3);

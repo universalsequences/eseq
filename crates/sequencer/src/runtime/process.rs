@@ -872,6 +872,14 @@ pub struct TrackProcessSlot {
     /// `None` on every other slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expr_source: Option<String>,
+    /// The kind instance that declared this slot (`(processes … :owner id
+    /// …)`, docs/rig-spec.md §10): while a scene switches that project-owned
+    /// instance off, the slot is disabled in that scene's scheduler snapshot
+    /// (`SequencerSnapshot::apply_scene_parking`), so a parked conductor's
+    /// processes do not apply even in a pattern another bank shares. `None`
+    /// (every slot the user adds, and every older file) is never gated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_instance: Option<u64>,
 }
 
 impl TrackProcessSlot {
@@ -890,6 +898,7 @@ impl TrackProcessSlot {
             fanout: BTreeMap::new(),
             unbound_ports: BTreeSet::new(),
             expr_source: None,
+            owner_instance: None,
         }
     }
 
@@ -4480,6 +4489,7 @@ mod tests {
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: BTreeMap::from([
                     ("unique".to_string(), Some(ParamTarget::InstrumentParam {
                         param: "cutoff".to_string(), param_id: None,
@@ -4710,6 +4720,7 @@ mod tests {
             fanout: Default::default(),
             unbound_ports: Default::default(),
             expr_source: None,
+            owner_instance: None,
             bindings: BTreeMap::new(),
         };
         let first = TrackProcessChain {
@@ -4920,6 +4931,7 @@ mod tests {
             fanout: Default::default(),
             unbound_ports: Default::default(),
             expr_source: None,
+            owner_instance: None,
             bindings: Default::default(),
         };
         let chain_a = TrackProcessChain {
@@ -5255,6 +5267,7 @@ mod tests {
             fanout: Default::default(),
             unbound_ports: Default::default(),
             expr_source: None,
+            owner_instance: None,
             bindings: BTreeMap::new(),
         };
 
@@ -5504,6 +5517,7 @@ fn default_lane_slot(spec: &DefaultLaneSpec) -> TrackProcessSlot {
         fanout,
         unbound_ports: Default::default(),
         expr_source: None,
+        owner_instance: None,
         bindings,
     }
 }
@@ -5683,6 +5697,7 @@ pub fn track_roster_chain_slot(entry: &TrackLaneRosterSlot) -> TrackProcessSlot 
         fanout: BTreeMap::new(),
         unbound_ports: BTreeSet::new(),
         expr_source: None,
+        owner_instance: None,
     }
 }
 
@@ -5862,6 +5877,7 @@ mod default_lane_tests {
                 fanout: BTreeMap::new(),
                 unbound_ports: BTreeSet::new(),
                 expr_source: None,
+                owner_instance: None,
             }],
         };
         assert!(reconcile_track_lane_roster(&mut chain, &roster));
@@ -5938,6 +5954,7 @@ mod default_lane_tests {
             fanout: BTreeMap::new(),
             unbound_ports: BTreeSet::new(),
             expr_source: None,
+            owner_instance: None,
         };
         // Roster says grab 3 runs before grab 2; the chain was saved the
         // other way round, with a script slot wedged between them.

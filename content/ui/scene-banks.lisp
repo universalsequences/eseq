@@ -11,7 +11,8 @@
 ;; render root is safe.
 
 (module eseq.scene-banks)
-(import eseq.kinds :refer (banks transport kit-bank-state))
+(import eseq.kinds :refer (banks tracks transport))
+(import eseq.bank-power :refer (kit-bank-state))
 (import eseq.view-kit :as kit)
 
 (export scene-bank-view
@@ -27,7 +28,9 @@
         kit-bank-view
         track-used-in-bank?
         group-used-in-bank?
-        used-in-viewed-bank?)
+        used-in-viewed-bank?
+        in-banks?
+        bank-tracks)
 
 ;; The bank the strip shows (a bank instance), the index it last had, and
 ;; another bank listed beside it. A shown bank no longer listed falls back
@@ -103,29 +106,33 @@
   (let ((b (scene-viewed-bank)))
     (if b b.label "")))
 
+;; Whether bank `viewed` is in bank list `in`, an empty list counting as
+;; every bank: a cell or track no scene uses yet stays visible in every bank,
+;; so it is never stranded behind a bank the user cannot guess.
+(def in-banks? (in viewed)
+  (or (= (len in) 0) (kit/listed? viewed in)))
+
 ;; Clip-grid membership (spec §10.1): cell c (a track's pattern) belongs to
 ;; the viewed bank `viewed` (a bank instance, (scene-viewed-bank), read once
-;; per render) when a scene of that bank uses it. A cell no scene uses yet
+;; per render) when a scene of that bank uses it, or no scene does
 ;; (`c.banks` empty: a freshly cloned clip, a clip whose only scene was
-;; deleted) stays visible in every bank so it is never stranded behind a bank
-;; the user cannot guess.
+;; deleted).
 (def clip-in-viewed-bank? (c viewed)
-  (let ((in c.banks))
-    (or (= (len in) 0) (kit/listed? viewed in))))
+  (in-banks? c.banks viewed))
 
 ;; ── Bank-scoped display (docs/rig-spec.md §9, eseq-ka5t.10) ─────────────
 ;; The sequencer track list, the mixer and the sequencers' route menus show
 ;; only what the viewed bank uses: the host publishes the banks using each
-;; track and group (`t.used-banks`, `g.used-banks`, recomputed when the
-;; scenes change), so a membership test here is a list lookup. Hidden tracks
-;; keep their indices. Pass the viewed bank (scene-viewed-bank, read once
-;; per render) to the `-in-bank?` forms inside loops.
+;; track and kit (`t.used-banks`, `g.used-banks`, recomputed when the scenes
+;; change), so a membership test here is a list lookup. Hidden tracks keep
+;; their indices. Pass the viewed bank (scene-viewed-bank, read once per
+;; render) to the `-in-bank?` forms inside loops; a nil bank (none
+;; published yet) shows everything.
 ;;
 ;; A track no scene of any bank uses (a fresh track, every cell cleared)
-;; shows in every bank, like a cell no scene uses (clip-in-viewed-bank?), so
-;; it is never stranded behind a bank the user cannot guess. "Show all
-;; tracks" shows everything; a kit the bank switches off still draws as its
-;; dimmed mixer strip there (docs/rig-spec.md §6).
+;; shows in every bank (in-banks?). "Show all tracks" shows everything; a
+;; kit the bank switches off still draws as its dimmed mixer strip there
+;; (docs/rig-spec.md §6).
 (defcustom show-all-tracks false
   :type :bool
   :doc "Show every track in the sequencer, the mixer and the sequencers' route menus, not only the tracks the viewed scene bank uses.")
@@ -135,7 +142,10 @@
 
 ;; Kit (drum rack) g in bank `viewed`: :shown when the bank plays it, :off
 ;; when every scene of the bank switches it off (its header and dimmed strip
-;; stay, its pads hide), else :hidden. A kit no bank plays shows.
+;; stay, its pads hide), else :hidden. A kit no bank plays shows, with one
+;; exception: a kit parked in every scene reads :off in every bank (its
+;; `used-banks` is empty because it is parked, not because it is new), so
+;; its pads hide everywhere and only its dimmed strip offers the way back.
 (def kit-bank-view (g viewed)
   (let ((in g.used-banks))
     (if (or show-all-tracks (not viewed) (kit/listed? viewed in))
@@ -144,17 +154,17 @@
         :off
         (if (= (len in) 0) :shown :hidden)))))
 
-;; Whether track t shows in bank `viewed` (nil: no bank published yet, all
-;; show). A kit's pad shows while its kit plays there.
+;; Whether track t shows in bank `viewed`. A kit's pads follow the kit, all
+;; or none (the host publishes the kit's banks on each pad as well).
 (def track-used-in-bank? (t viewed)
   (let ((g t.group))
     (if (and g g.rack)
       (= (kit-bank-view g viewed) :shown)
-      (let ((in t.used-banks))
-        (or show-all-tracks (not viewed) (= (len in) 0) (kit/listed? viewed in))))))
+      (or show-all-tracks (not viewed) (in-banks? t.used-banks viewed)))))
 
-;; Whether group g shows in bank `viewed`: a kit unless :hidden, a plain
-;; group while a member or child kit shows (an empty group always).
+;; Whether group g shows in bank `viewed`: a kit unless :hidden; a plain
+;; group (no used-banks of its own) while a member or child kit shows,
+;; members no bank uses included (an empty group always).
 (def group-used-in-bank? (g viewed)
   (if g.rack
     (not (= (kit-bank-view g viewed) :hidden))
@@ -166,3 +176,9 @@
 ;; Whether track t shows in the viewed bank.
 (def used-in-viewed-bank? (t)
   (track-used-in-bank? t (scene-viewed-bank)))
+
+;; The tracks bank `viewed` shows, in track order, plus those of `keep` (a
+;; list) wherever they sit: the route menus keep the tracks their controls
+;; name now, so the menu can show them.
+(def bank-tracks (viewed keep)
+  (filter (lambda (t) (or (kit/listed? t keep) (track-used-in-bank? t viewed))) (tracks)))

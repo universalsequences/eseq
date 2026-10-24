@@ -342,6 +342,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: std::collections::BTreeMap::from([
                     (
                         "survives".to_string(),
@@ -3446,6 +3447,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: std::collections::BTreeMap::new(),
             }],
         }
@@ -3469,6 +3471,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: std::collections::BTreeMap::from([(
                     port.to_string(),
                     Some(crate::process::ParamTarget::EffectParam {

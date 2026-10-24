@@ -13796,6 +13796,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             fanout: Default::default(),
             unbound_ports: Default::default(),
             expr_source: None,
+            owner_instance: None,
             bindings: std::collections::BTreeMap::new(),
         };
         let mut bypassed = slot(3, "third");

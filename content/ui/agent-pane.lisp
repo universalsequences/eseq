@@ -291,7 +291,8 @@
       :variant (if added :secondary :primary) :icon (if added :check nil)
       :height 1.0 :font-size 10
       :on-click |x y r| (host-command "packages-new-instance"
-                          (dict :module (get decl :module) :kind (get decl :id))))))
+                          (dict :module (get decl :module) :kind (get decl :id)
+                                :bank-id (eseq.scene-banks/scene-viewed-bank-id))))))
 
 (def artifact-card (artifact i)
   (let ((key (str "agent-artifact-" i)) (package (get artifact :package)))

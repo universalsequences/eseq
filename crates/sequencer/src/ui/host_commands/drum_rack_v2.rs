@@ -196,7 +196,7 @@ pub(super) fn handle(
             // move, with nothing to re-run (instance-kinds spec §5).
             if app.instances.contains(sequencer_id) {
                 let owner = sequencer::project::ProjectInstanceOwner::Project;
-                match super::instances::move_instance_status(app, sequencer_id, owner) {
+                match super::instances::move_instance_status(app, sequencer_id, owner, super::scene_banks::scene_bank_id(&payload)) {
                     Ok(status) => {
                         super::instances::sync_instances_to_editor(app, editor);
                         sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
@@ -242,7 +242,7 @@ pub(super) fn handle(
             };
             if app.instances.contains(sequencer_id) {
                 let owner = sequencer::project::ProjectInstanceOwner::Rack(group_id);
-                match super::instances::move_instance_status(app, sequencer_id, owner) {
+                match super::instances::move_instance_status(app, sequencer_id, owner, super::scene_banks::scene_bank_id(&payload)) {
                     Ok(status) => {
                         super::instances::sync_instances_to_editor(app, editor);
                         sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
@@ -423,13 +423,8 @@ pub(super) fn handle(
                         // topology BEFORE running its scripts: a rack-owned
                         // script reads its rack's group (its tab wears the
                         // rack's name) and must see the members it now has.
-                        sync_after_rack_structure_change(app, editor, ctx, None);
-                        let mut failures = attach_rack_instance_packages(editor, app, group_id);
-                        failures.extend(evaluate_rack_sequencers(editor, app, group_id));
-                        refresh_after_rack_scripts(editor);
-                        // The attach above edited the import record; re-list
-                        // the Packages surfaces the way an explicit attach does.
-                        super::packages::refresh_package_listings(editor, ctx);
+                        let ids = rack_instance_ids(app, group_id);
+                        let failures = finish_imported_racks(app, editor, ctx, &[group_id], &ids, None);
                         let mut status = format!("Auditioned kit '{name}'");
                         if !failures.is_empty() {
                             status = format!("{status} ({})", failures.join("; "));
@@ -457,13 +452,8 @@ pub(super) fn handle(
                         // runtime has not heard of yet fails that eval, which
                         // rolls the script's panel and tab back while the
                         // def-sequencer it already published stays behind.
-                        sync_after_rack_structure_change(app, editor, ctx, focus);
-                        failures.extend(attach_rack_instance_packages(editor, app, group_id));
-                        failures.extend(evaluate_rack_sequencers(editor, app, group_id));
-                        refresh_after_rack_scripts(editor);
-                        // The attach above edited the import record; re-list
-                        // the Packages surfaces the way an explicit attach does.
-                        super::packages::refresh_package_listings(editor, ctx);
+                        let ids = rack_instance_ids(app, group_id);
+                        failures.extend(finish_imported_racks(app, editor, ctx, &[group_id], &ids, focus));
                         let status = if failures.is_empty() {
                             format!("Loaded kit '{name}'")
                         } else {
@@ -632,15 +622,14 @@ fn evaluate_rack_sequencers(
 /// stays a placeholder and publishes once the package is installed and
 /// attached. The instances are then published and mirrored into the UI
 /// (records, view buffers, tabs) right away.
-fn attach_rack_instance_packages(
+fn attach_instance_packages(
     editor: &mut Editor,
     app: &mut app::App,
-    group_id: u64,
+    instances: &[sequencer::project::ProjectInstance],
 ) -> Vec<String> {
     let mut notes = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let instances = app.rack_instances(group_id);
-    for instance in &instances {
+    for instance in instances {
         if !seen.insert(instance.kind.clone()) {
             continue;
         }
@@ -677,6 +666,45 @@ fn attach_rack_instance_packages(
 fn refresh_after_rack_scripts(editor: &mut Editor) {
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
+}
+
+/// The host half of loading kits (a `.kit` file, or a controlled import,
+/// docs/rig-spec.md §8): republish the topology first (a rack-owned script
+/// reads its rack's group), then attach the packages `instances` need (a
+/// kind no installed package declares is reported: its instance waits as a
+/// placeholder), evaluate each kit's recorded scripts and settle the UI.
+/// Returns what failed.
+pub(crate) fn finish_imported_racks(
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+    groups: &[u64],
+    instances: &[u64],
+    focus: Option<usize>,
+) -> Vec<String> {
+    sync_after_rack_structure_change(app, editor, ctx, focus);
+    let records: Vec<sequencer::project::ProjectInstance> = app
+        .instances
+        .list
+        .iter()
+        .filter(|instance| instances.contains(&instance.id))
+        .cloned()
+        .collect();
+    let mut failures = attach_instance_packages(editor, app, &records);
+    for group_id in groups {
+        if app.groups.iter().any(|group| group.id == *group_id && group.is_rack()) {
+            failures.extend(evaluate_rack_sequencers(editor, app, *group_id));
+        }
+    }
+    refresh_after_rack_scripts(editor);
+    // The attaches above edited the import record; re-list the Packages
+    // surfaces the way an explicit attach does.
+    super::packages::refresh_package_listings(editor, ctx);
+    failures
+}
+
+fn rack_instance_ids(app: &app::App, group_id: u64) -> Vec<u64> {
+    app.rack_instances(group_id).iter().map(|instance| instance.id).collect()
 }
 
 pub(super) fn group_name(app: &app::App, group_id: u64) -> Option<String> {

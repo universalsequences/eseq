@@ -121,7 +121,15 @@ pub use crate::groove::{
 //       (`ProjectFile::scene_parked_kits`). Older files have none and load
 //       with every kit on, which is what they played. Older builds would
 //       drop the field and play parked kits, so they must refuse the file.
-const PROJECT_FILE_VERSION: u32 = 19;
+//  20 - project-owned sequencers on/off per bank (docs/rig-spec.md 10,
+//       eseq-ka5t.1): each scene records the project-owned kind instances it
+//       switches off (`ProjectFile::scene_parked_instances`), and process
+//       slots may name the instance that owns them
+//       (`TrackProcessSlot::owner_instance`). Older files have neither and
+//       load with every instance on everywhere, which is what they played.
+//       Older builds would drop both and run parked conductors, so they must
+//       refuse the file.
+const PROJECT_FILE_VERSION: u32 = 20;
 
 /// The first file version whose rack slots and scenes carry the scene-owned
 /// swap state (version history entry 18).
@@ -454,6 +462,12 @@ pub struct ProjectFile {
     /// no scene parks a kit, and absent in files below v19 (nothing parked).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scene_parked_kits: Vec<Vec<u64>>,
+    /// Per scene, `Scene::parked_instances` (docs/rig-spec.md 10): the ids
+    /// of the project-owned kind instances switched off there. Outer index =
+    /// scene; empty when no scene parks one, and absent in files below v20
+    /// (nothing parked).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scene_parked_instances: Vec<Vec<u64>>,
     /// Host-owned instances of package kinds (instance-kinds spec §5).
     /// Absent in older files, which load with none.
     #[serde(default, skip_serializing_if = "ProjectInstances::is_unused")]
@@ -658,6 +672,8 @@ struct ProjectFileWire {
     #[serde(default)]
     scene_parked_kits: Vec<Vec<u64>>,
     #[serde(default)]
+    scene_parked_instances: Vec<Vec<u64>>,
+    #[serde(default)]
     instances: ProjectInstances,
     #[serde(default)]
     grooves: Vec<ProjectGroove>,
@@ -735,6 +751,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             scene_rack_clips: wire.scene_rack_clips,
             scene_slot_enable: wire.scene_slot_enable,
             scene_parked_kits: wire.scene_parked_kits,
+            scene_parked_instances: wire.scene_parked_instances,
             instances: wire.instances,
             grooves: wire.grooves,
         };
@@ -2688,6 +2705,89 @@ impl ProjectPattern {
         self.widen(lane_to_track, num_tracks).0
     }
 
+    /// [`Self::expand_lanes`] from a borrowed pattern: only the lanes
+    /// `lane_to_track` places are cloned (controlled import reads a few
+    /// tracks out of a wide source pattern, docs/rig-spec.md §8).
+    pub fn lanes_to(&self, lane_to_track: &[Option<usize>], num_tracks: usize) -> Self {
+        let Self {
+            track_bits,
+            neural_reset_bits,
+            step_data,
+            track_params,
+            effect_slots,
+            midi_fx_slots,
+            instrument_slots,
+            instrument_base_note_offsets,
+            track_sound_states,
+            chord_snapshots,
+            chord_duration_snapshots,
+            chord_delay_snapshots,
+            timebase_plock_snapshots,
+            bar_transpose_snapshots,
+            swing_plock_snapshots,
+            swing_resolution_plock_snapshots,
+            track_send_plock_snapshots,
+            bus_patterns: _,
+            mod_connections: _,
+            neural_networks: _,
+            graph_overrides: _,
+            scene_slots: _,
+            instrument_types,
+            instrument_run_modes,
+            sample_paths,
+            sample_names,
+            rack_tracks,
+            process_chains,
+            project_process_lane_overrides,
+            project_process_chain: _,
+            plock_variant_registries,
+            key_lock_variant_registries,
+            lane_tracks: _,
+        } = self;
+        let mut full = Self::default_width(num_tracks);
+        macro_rules! place {
+            ($($field:ident),* $(,)?) => {$(
+                for (lane, track) in lane_to_track.iter().enumerate() {
+                    let (Some(track), Some(value)) = (track, $field.get(lane)) else {
+                        continue;
+                    };
+                    if let Some(slot) = full.$field.get_mut(*track) {
+                        *slot = value.clone();
+                    }
+                }
+            )*};
+        }
+        place!(
+            track_bits,
+            neural_reset_bits,
+            step_data,
+            track_params,
+            effect_slots,
+            midi_fx_slots,
+            instrument_slots,
+            instrument_base_note_offsets,
+            track_sound_states,
+            chord_snapshots,
+            chord_duration_snapshots,
+            chord_delay_snapshots,
+            timebase_plock_snapshots,
+            bar_transpose_snapshots,
+            swing_plock_snapshots,
+            swing_resolution_plock_snapshots,
+            track_send_plock_snapshots,
+            instrument_types,
+            instrument_run_modes,
+            sample_paths,
+            sample_names,
+            rack_tracks,
+            process_chains,
+            project_process_lane_overrides,
+            plock_variant_registries,
+            key_lock_variant_registries,
+        );
+        full
+    }
+
     /// Widen a pattern written with [`Self::lane_tracks`] to `num_tracks`,
     /// keeping its pattern-wide fields; a full-width pattern is unchanged.
     pub fn expand_compact(&mut self, num_tracks: usize) {
@@ -3644,9 +3744,13 @@ pub fn save_project(name: &str, project: &ProjectFile) -> std::io::Result<PathBu
     written.map(|()| path)
 }
 
+/// Where the saved project `name` lives (the user projects directory).
+pub fn project_file_path(name: &str) -> PathBuf {
+    projects_dir().join(format!("{}.json", sanitize_project_name(name)))
+}
+
 pub fn load_project(name: &str) -> std::io::Result<ProjectFile> {
-    let path = projects_dir().join(format!("{}.json", sanitize_project_name(name)));
-    load_project_from_path(&path)
+    load_project_from_path(&project_file_path(name))
 }
 
 pub fn load_project_from_path(path: &Path) -> std::io::Result<ProjectFile> {
@@ -4182,6 +4286,7 @@ mod legacy_process_class_tests {
             fanout: Default::default(),
             unbound_ports: Default::default(),
             expr_source: None,
+            owner_instance: None,
             bindings: Default::default(),
         };
         slot.bindings.insert(
@@ -4975,6 +5080,7 @@ mod tests {
             scene_rack_clips: Vec::new(),
             scene_slot_enable: Vec::new(),
             scene_parked_kits: Vec::new(),
+            scene_parked_instances: Vec::new(),
             grooves: Vec::new(),
             instances: ProjectInstances::default(),
             version: project_file_version(),
@@ -5266,6 +5372,7 @@ mod tests {
                             fanout: Default::default(),
                             unbound_ports: Default::default(),
                             expr_source: None,
+                            owner_instance: None,
                             bindings: std::collections::BTreeMap::from([(
                                 "shape".to_string(),
                                 Some(crate::process::ParamTarget::InstrumentParam {
@@ -5295,6 +5402,7 @@ mod tests {
                         fanout: Default::default(),
                         unbound_ports: Default::default(),
                         expr_source: None,
+                        owner_instance: None,
                         bindings: std::collections::BTreeMap::new(),
                     }],
                 },

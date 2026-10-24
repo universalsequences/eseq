@@ -82,3 +82,5 @@ mod tests;
 mod expr_tests;
 #[cfg(test)]
 mod kit_parking_tests;
+#[cfg(test)]
+mod instance_parking_tests;

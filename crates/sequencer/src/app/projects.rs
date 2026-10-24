@@ -714,6 +714,165 @@ fn migrate_legacy_dgen_param_node_indices(project: &mut ProjectFile) {
     }
 }
 
+/// The file-level half of a project load: every migration that rewrites the
+/// parsed `ProjectFile` before any of it reaches the App (compact carriers
+/// widened, legacy effect names and DGen param indices, qualified instrument
+/// ids, device instance records, legacy kind sources, reserved instance ids).
+/// Shared by the loader and by controlled import (docs/rig-spec.md §8), which
+/// reads another project through the same migrations without loading it.
+/// Returns the instance migration notes.
+pub(crate) fn prepare_project_file_for_load(
+    project: &mut ProjectFile,
+) -> Result<Vec<String>, String> {
+    if project.version > project::project_file_version() {
+        return Err(format!("Unsupported project version {}", project.version));
+    }
+    // In-memory captures (bounce) arrive compact; parsed files already
+    // expanded during deserialization.
+    project.expand_compact_patterns();
+    migrate_dgen_builtin_effect_names(project);
+    if project.version < 2 {
+        migrate_legacy_dgen_param_node_indices(project);
+    }
+    project
+        .map_instrument_ids(|name| {
+            crate::lisp_host::qualify_instrument_id(name).map_err(|error| error.to_string())
+        })
+        .map_err(|error| format!("Could not resolve project instrument id: {error}"))?;
+    project.normalize_device_instances()?;
+    let mut migration_notes = super::instances::migrate_legacy_kind_sources(
+        project.version,
+        &mut project.groups,
+        &mut project.scratch,
+        &mut project.instances,
+        crate::lisp_host::declared_kinds_for_module,
+    );
+    migration_notes.extend(super::instances::rekey_reserved_instance_ids(project));
+    Ok(migration_notes)
+}
+
+/// One track of `project` as a Sound (the container preset the Sounds
+/// browser saves and a kit pad carries), with `pattern` as the scene state
+/// it is read from. A pure read of the file, so controlled import
+/// (docs/rig-spec.md §8) builds pads and tracks from a project it never
+/// loads.
+pub(crate) fn sound_preset_from_project(
+    project: &ProjectFile,
+    track: usize,
+    pattern: &ProjectPattern,
+    name: &str,
+    tags: Vec<String>,
+    author: String,
+) -> Result<crate::project::ProjectSoundPreset, String> {
+    let source_track = project
+        .tracks
+        .get(track)
+        .cloned()
+        .ok_or_else(|| format!("Invalid track index {}", track + 1))?;
+    let ProjectTrack {
+        id,
+        name: track_name,
+        name_user_authored,
+        color,
+        collapsed,
+        kind,
+    } = source_track;
+    let (track_payload, rack_payload) = match kind {
+        ProjectTrackKind::Rack { .. } => {
+            let rack = pattern
+                .rack_tracks
+                .get(track)
+                .cloned()
+                .flatten()
+                .ok_or_else(|| "Rack pattern data is missing".to_string())?;
+            (project.tracks[track].clone(), rack)
+        }
+        // A plain sampler or instrument track is a one-slot rack Sound.
+        ProjectTrackKind::Sampler { .. } | ProjectTrackKind::Custom { .. } => {
+            use crate::project::ProjectInstrumentType as Type;
+            let (instrument_type, sample_path, sample_name, instrument_name, run_mode) = match kind {
+                ProjectTrackKind::Sampler { sample_path } => (
+                    Type::Sampler,
+                    sample_path,
+                    pattern.sample_names.get(track).cloned(),
+                    None,
+                    crate::project::ProjectCustomInstrumentRunMode::Instrument,
+                ),
+                ProjectTrackKind::Custom { instrument_name } => (
+                    Type::Custom,
+                    None,
+                    None,
+                    Some(instrument_name),
+                    pattern.instrument_run_modes.get(track).copied().unwrap_or_default(),
+                ),
+                _ => unreachable!("matched above"),
+            };
+            let slot_source = crate::project::ProjectRackTrackSlot {
+                instrument_type,
+                sample_path: sample_path.clone(),
+                sample_name: sample_name.clone(),
+                instrument_name,
+            };
+            let slot = crate::project::ProjectRackSlotPattern {
+                id: 0,
+                instrument_type,
+                instrument_run_mode: run_mode,
+                instrument_base_note_offset: pattern
+                    .instrument_base_note_offsets
+                    .get(track)
+                    .copied()
+                    .unwrap_or(0.0),
+                choke_group: None,
+                gain: 1.0,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+                enabled: true,
+                max_polyphony: crate::audio::DEFAULT_RACK_SLOT_MAX_POLYPHONY,
+                param_plocks: Vec::new(),
+                instrument_slot: pattern.instrument_slots.get(track).cloned().unwrap_or_default(),
+                effect_slots: pattern.effect_slots.get(track).cloned().unwrap_or_default(),
+                custom_effects: project.custom_effects.get(track).cloned().unwrap_or_default(),
+                track_sound_state: pattern.track_sound_states.get(track).cloned().unwrap_or_default(),
+                sample_path,
+                sample_name,
+            };
+            (
+                ProjectTrack {
+                    id,
+                    name: track_name,
+                    name_user_authored,
+                    color,
+                    collapsed,
+                    kind: ProjectTrackKind::Rack {
+                        routing: crate::project::ProjectRackRouting::Broadcast,
+                        slots: vec![slot_source],
+                    },
+                },
+                crate::project::ProjectRackTrackPattern {
+                    routing: crate::project::ProjectRackRouting::Broadcast,
+                    slots: vec![slot],
+                    macros: crate::project::default_project_rack_macros(),
+                },
+            )
+        }
+        ProjectTrackKind::Empty | ProjectTrackKind::Modulator => {
+            return Err("Empty and modulator tracks cannot be saved as Sounds".to_string())
+        }
+    };
+    let sound = crate::project::ProjectSoundPreset {
+        version: crate::project::project_file_version(),
+        metadata: crate::project::ProjectSoundMetadata {
+            name: name.trim().to_string(),
+            tags,
+            author,
+        },
+        track: track_payload,
+        rack: rack_payload,
+    };
+    Ok(sound)
+}
+
 fn resolve_project_current_track(
     saved_current_track: Option<usize>,
     track_count: usize,
@@ -1146,6 +1305,8 @@ impl App {
     }
 
     pub fn start_new_project(&mut self) {
+        // Import-shared samples belong to the project being replaced.
+        self.import_samples.clear();
         self.editor.pending_project_load = None;
         self.groups.clear();
         self.grooves.clear();
@@ -1444,30 +1605,7 @@ impl App {
             project.patterns.len(),
             project.custom_effects.len()
         );
-        if project.version > project::project_file_version() {
-            return Err(format!("Unsupported project version {}", project.version));
-        }
-        // In-memory captures (bounce) arrive compact; parsed files already
-        // expanded during deserialization.
-        project.expand_compact_patterns();
-        migrate_dgen_builtin_effect_names(&mut project);
-        if project.version < 2 {
-            migrate_legacy_dgen_param_node_indices(&mut project);
-        }
-        project
-            .map_instrument_ids(|name| {
-                crate::lisp_host::qualify_instrument_id(name).map_err(|error| error.to_string())
-            })
-            .map_err(|error| format!("Could not resolve project instrument id: {error}"))?;
-        project.normalize_device_instances()?;
-        let mut migration_notes = super::instances::migrate_legacy_kind_sources(
-            project.version,
-            &mut project.groups,
-            &mut project.scratch,
-            &mut project.instances,
-            crate::lisp_host::declared_kinds_for_module,
-        );
-        migration_notes.extend(super::instances::rekey_reserved_instance_ids(&mut project));
+        let migration_notes = prepare_project_file_for_load(&mut project)?;
         for note in &migration_notes {
             eprintln!("project-load: instance migration: {note}");
         }
@@ -1596,150 +1734,13 @@ impl App {
             return Err(format!("Invalid track index {}", track + 1));
         }
         let project = self.capture_project(name)?;
-        let source_track = project.tracks[track].clone();
         let pattern = project
             .patterns
             .get(project.current_pattern)
             .ok_or_else(|| "Current pattern is missing while saving Sound".to_string())?;
-        let ProjectTrack {
-            id,
-            name: track_name,
-            name_user_authored,
-            color,
-            collapsed,
-            kind,
-        } = source_track;
-        let (track_payload, rack_payload) = match kind {
-            ProjectTrackKind::Rack { .. } => {
-                let rack = pattern
-                    .rack_tracks
-                    .get(track)
-                    .cloned()
-                    .flatten()
-                    .ok_or_else(|| "Rack pattern data is missing".to_string())?;
-                (project.tracks[track].clone(), rack)
-            }
-            ProjectTrackKind::Sampler { sample_path } => {
-                let sample_name = pattern.sample_names.get(track).cloned();
-                let slot_source = crate::project::ProjectRackTrackSlot {
-                    instrument_type: crate::project::ProjectInstrumentType::Sampler,
-                    sample_path: sample_path.clone(),
-                    sample_name: sample_name.clone(),
-                    instrument_name: None,
-                };
-                let slot = crate::project::ProjectRackSlotPattern {
-                    id: 0,
-                    instrument_type: crate::project::ProjectInstrumentType::Sampler,
-                    instrument_run_mode: crate::project::ProjectCustomInstrumentRunMode::Instrument,
-                    instrument_base_note_offset: pattern
-                        .instrument_base_note_offsets
-                        .get(track)
-                        .copied()
-                        .unwrap_or(0.0),
-                    choke_group: None,
-                    gain: 1.0,
-                    pan: 0.0,
-                    mute: false,
-                    solo: false,
-                    enabled: true,
-                    max_polyphony: crate::audio::DEFAULT_RACK_SLOT_MAX_POLYPHONY,
-                    param_plocks: Vec::new(),
-                    instrument_slot: pattern.instrument_slots[track].clone(),
-                    effect_slots: pattern.effect_slots[track].clone(),
-                    custom_effects: project.custom_effects[track].clone(),
-                    track_sound_state: pattern.track_sound_states[track].clone(),
-                    sample_path,
-                    sample_name,
-                };
-                (
-                    ProjectTrack {
-                        id,
-                        name: track_name,
-                        name_user_authored,
-                        color,
-                        collapsed,
-                        kind: ProjectTrackKind::Rack {
-                            routing: crate::project::ProjectRackRouting::Broadcast,
-                            slots: vec![slot_source],
-                        },
-                    },
-                    crate::project::ProjectRackTrackPattern {
-                        routing: crate::project::ProjectRackRouting::Broadcast,
-                        slots: vec![slot],
-                        macros: crate::project::default_project_rack_macros(),
-                    },
-                )
-            }
-            ProjectTrackKind::Custom { instrument_name } => {
-                let slot_source = crate::project::ProjectRackTrackSlot {
-                    instrument_type: crate::project::ProjectInstrumentType::Custom,
-                    sample_path: None,
-                    sample_name: None,
-                    instrument_name: Some(instrument_name.clone()),
-                };
-                let slot = crate::project::ProjectRackSlotPattern {
-                    id: 0,
-                    instrument_type: crate::project::ProjectInstrumentType::Custom,
-                    instrument_run_mode: pattern
-                        .instrument_run_modes
-                        .get(track)
-                        .copied()
-                        .unwrap_or_default(),
-                    instrument_base_note_offset: pattern
-                        .instrument_base_note_offsets
-                        .get(track)
-                        .copied()
-                        .unwrap_or(0.0),
-                    choke_group: None,
-                    gain: 1.0,
-                    pan: 0.0,
-                    mute: false,
-                    solo: false,
-                    enabled: true,
-                    max_polyphony: crate::audio::DEFAULT_RACK_SLOT_MAX_POLYPHONY,
-                    param_plocks: Vec::new(),
-                    instrument_slot: pattern.instrument_slots[track].clone(),
-                    effect_slots: pattern.effect_slots[track].clone(),
-                    custom_effects: project.custom_effects[track].clone(),
-                    track_sound_state: pattern.track_sound_states[track].clone(),
-                    sample_path: None,
-                    sample_name: None,
-                };
-                (
-                    ProjectTrack {
-                        id,
-                        name: track_name,
-                        name_user_authored,
-                        color,
-                        collapsed,
-                        kind: ProjectTrackKind::Rack {
-                            routing: crate::project::ProjectRackRouting::Broadcast,
-                            slots: vec![slot_source],
-                        },
-                    },
-                    crate::project::ProjectRackTrackPattern {
-                        routing: crate::project::ProjectRackRouting::Broadcast,
-                        slots: vec![slot],
-                        macros: crate::project::default_project_rack_macros(),
-                    },
-                )
-            }
-            ProjectTrackKind::Empty | ProjectTrackKind::Modulator => {
-                return Err("Empty and modulator tracks cannot be saved as Sounds".to_string())
-            }
-        };
-        let sound = crate::project::ProjectSoundPreset {
-            version: crate::project::project_file_version(),
-            metadata: crate::project::ProjectSoundMetadata {
-                name: name.trim().to_string(),
-                tags,
-                author,
-            },
-            track: track_payload,
-            rack: rack_payload,
-        };
-        Ok(sound)
+        sound_preset_from_project(&project, track, pattern, name, tags, author)
     }
+
 
     pub fn load_sound_onto_track(&mut self, track: usize, path: &Path) -> Result<(), String> {
         let sound = crate::project::load_sound_preset(path).map_err(|error| error.to_string())?;
@@ -1818,18 +1819,12 @@ impl App {
             match source.instrument_type {
                 crate::project::ProjectInstrumentType::Sampler => {
                     let asset = if let Some(sample_path) = source.sample_path.as_deref() {
-                        let loaded = crate::instruments::sampler::load_wav_buffer(
-                            self.graph.lg.0, Path::new(sample_path),
-                        ).map_err(|error| format!(
+                        // Shared with earlier imports while one runs
+                        // (docs/rig-spec.md §8, `project_import::assets`).
+                        self.load_sound_sample_asset(Path::new(sample_path)).map_err(|error| format!(
                             "Failed to load Sound sample '{}' for slot {}: {error}",
                             sample_path, slot_idx + 1,
-                        ))?;
-                        self.submit_sample_analysis(&loaded);
-                        ProjectSampleAsset {
-                            buffer_id: loaded.buffer_id,
-                            sample_rate: loaded.sample_rate,
-                            decoded_name: loaded.name,
-                        }
+                        ))?
                     } else {
                         self.create_blank_project_sample()?
                     };
@@ -2133,7 +2128,7 @@ impl App {
     /// chain order, with its live parameter snapshot. Mirrors how
     /// `capture_project` reads a bus (`custom_effect_names` up to the first
     /// empty slot, `effect_slots` alongside).
-    fn capture_kit_bus_chain(
+    pub(super) fn capture_kit_bus_chain(
         &self,
         bus_id: u64,
     ) -> Result<crate::project::ProjectKitBusChain, String> {
@@ -2171,7 +2166,7 @@ impl App {
     /// The restore mirrors project load: load each effect into its slot, put
     /// the saved parameters back under the live node ids, push defaults, then
     /// re-point host-managed refs (Convolution Reverb IR, Filter Table).
-    fn restore_kit_bus_chain(
+    pub(super) fn restore_kit_bus_chain(
         &mut self,
         bus_id: u64,
         chain: &crate::project::ProjectKitBusChain,
@@ -2271,23 +2266,37 @@ impl App {
     /// hidden `expr#<hash>` classes exist only in the session that saved it,
     /// and the scheduler skips a slot whose class is unknown. Cheap when
     /// every body is already registered.
-    fn sync_expr_process_classes_after_import(&self) {
+    pub(super) fn sync_expr_process_classes_after_import(&self) {
         for (source, error) in crate::lisp_host::sync_expr_process_classes(&self.state) {
             eprintln!("[expr] imported body does not compile ({error}): {source}");
         }
     }
 
     fn load_kit_as_rack_inner(&mut self, path: &Path) -> Result<(u64, Vec<String>), String> {
-        let mut kit = crate::project::load_kit_preset(path).map_err(|error| error.to_string())?;
+        let kit = crate::project::load_kit_preset(path).map_err(|error| error.to_string())?;
+        let fallback_name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Kit");
+        self.load_kit_preset_as_rack(kit, fallback_name)
+            .map(|(group_id, failures, _)| (group_id, failures))
+    }
+
+    /// [`App::load_kit_as_rack`] for a kit already in hand (one read from a
+    /// `.kit` file, or extracted from another project by controlled import,
+    /// docs/rig-spec.md §8). Unsquashed: the caller owns the undo entry.
+    /// Also returns where each kit-local sequencer id landed (kit id -> the
+    /// new instance or rack-script id).
+    pub(crate) fn load_kit_preset_as_rack(
+        &mut self,
+        mut kit: crate::project::ProjectKitPreset,
+        fallback_name: &str,
+    ) -> Result<(u64, Vec<String>, std::collections::HashMap<u64, u64>), String> {
         let migration_notes = super::break_kits::migrate_kit_sequencers(
             &mut kit,
             crate::lisp_host::declared_kinds_for_module,
         );
         super::break_kits::lift_plain_pad_clip_lanes(&mut kit);
-        let fallback_name = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("Kit");
         let kit_name = if kit.metadata.name.trim().is_empty() {
             fallback_name.to_string()
         } else {
@@ -2361,6 +2370,7 @@ impl App {
                 failures.push(format!("clips: {error}"));
             }
         }
+        self.remap_kit_process_owners(group_id, &id_map);
         // The rack's internal cables (§7.5), once every member exists.
         if let Err(error) = self.install_kit_mod_connections(group_id, &kit.mod_connections, &kit_pad_notes) {
             failures.push(format!("modulation cables: {error}"));
@@ -2372,7 +2382,26 @@ impl App {
                 failures.push(format!("groove: {error}"));
             }
         }
-        Ok((group_id, failures))
+        let ids = id_map.into_iter().map(|(old, rekey)| (old, rekey.id)).collect();
+        Ok((group_id, failures, ids))
+    }
+
+    /// A loaded kit's pad chains name the kit file's instance ids as owners
+    /// (`TrackProcessSlot::owner_instance`, docs/rig-spec.md §10): re-key
+    /// them to the fresh ids `id_map` gave, dropping any it does not name.
+    fn remap_kit_process_owners(
+        &self,
+        group_id: u64,
+        id_map: &std::collections::HashMap<u64, super::break_kits::KitSequencerRekey>,
+    ) {
+        let members = self
+            .groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .map(|group| group.members.clone())
+            .unwrap_or_default();
+        let map: std::collections::HashMap<u64, u64> = id_map.iter().map(|(old, rekey)| (*old, rekey.id)).collect();
+        self.state.remap_process_slot_owners(&members, &map);
     }
 
     /// Build the member track for one kit pad: a track from the pad's Sound,
@@ -2401,7 +2430,7 @@ impl App {
     /// instrument slot, through the same per-parameter command the panel
     /// uses, so the values reach the engine and the current scene alike.
     /// The live slot's own parameter count wins over the saved one.
-    fn apply_kit_modulator_settings(
+    pub(super) fn apply_kit_modulator_settings(
         &mut self,
         track: usize,
         slot: &crate::project::ProjectEffectSlot,
@@ -2658,6 +2687,7 @@ impl App {
                     notes.push(format!("clips: {error}"));
                 }
             }
+            self.remap_kit_process_owners(group_id, &id_map);
             if let Err(error) = self.install_kit_mod_connections(group_id, &kit.mod_connections, &kit_pad_notes) {
                 notes.push(format!("modulation cables: {error}"));
             }
@@ -3248,6 +3278,8 @@ impl ProjectCapture {
         let scene_slot_enable = scenes_for_takes.slot_enable_to_wire(num_tracks);
         // Kits on/off per scene (docs/rig-spec.md 6), outer index scene.
         let scene_parked_kits = scenes_for_takes.parked_kits_to_wire();
+        // Project-owned sequencers on/off per scene (docs/rig-spec.md 10).
+        let scene_parked_instances = scenes_for_takes.parked_to_wire(crate::sequencer::ParkedSet::Instances);
         // The arrangement always exists (empty-arrangement spec 7): every
         // save writes one, the empty arrangement included. Serialization maps
         // live pattern-pool ids into the deterministic ids the loader rebuilds
@@ -3298,6 +3330,7 @@ impl ProjectCapture {
             scene_rack_clips,
             scene_slot_enable,
             scene_parked_kits,
+            scene_parked_instances,
             instances: self.instances,
             grooves: self.grooves,
             take_pools,
@@ -4025,6 +4058,8 @@ impl App {
                     self.tracks.len()
                 );
                 self.clear_project_arrangement_state();
+                // Import-shared samples belong to the project being replaced.
+                self.import_samples.clear();
                 {
                     let mut graph = self.graph_controller();
                     graph.clear_all_tracks();
@@ -4715,6 +4750,7 @@ impl App {
             scene_rack_clips,
             scene_slot_enable,
             scene_parked_kits,
+            scene_parked_instances,
             take_pools,
             track_sounds,
             track_lane_rosters,
@@ -4992,7 +5028,10 @@ impl App {
         }
         // Kits on/off (docs/rig-spec.md 6): files below v19 carry none and
         // load with every kit on.
-        self.state.install_scene_parked_kits(&scene_parked_kits);
+        self.state.install_scene_parked(crate::sequencer::ParkedSet::Kits, &scene_parked_kits);
+        // Project-owned sequencers on/off (docs/rig-spec.md 10): files below
+        // v20 carry none and load with every instance on everywhere.
+        self.state.install_scene_parked(crate::sequencer::ParkedSet::Instances, &scene_parked_instances);
         self.state
             .set_committed_arrangement(Some(arrangement))
             .map_err(|error| format!("Project arrangement failed to load: {error}"))?;
@@ -6905,6 +6944,7 @@ mod tests {
             scene_rack_clips: Vec::new(),
             scene_slot_enable: Vec::new(),
             scene_parked_kits: Vec::new(),
+            scene_parked_instances: Vec::new(),
             instances: crate::project::ProjectInstances::default(),
             grooves: Vec::new(),
             version: project::project_file_version(),
@@ -7976,7 +8016,7 @@ mod scene_slot_enable_tests {
 mod kit_parking_tests {
     use super::*;
     use crate::app::test_rig::{launch, Rig};
-    use crate::sequencer::{KitBankState, RackClipId, SceneBankId, SceneSwapInheritance};
+    use crate::sequencer::{BankState, RackClipId, SceneBankId, SceneSwapInheritance};
 
     const KICK: &str = "../../content/impulses/lexicon-300-rich-plate.wav";
 
@@ -8063,8 +8103,8 @@ mod kit_parking_tests {
         assert!(!app.set_kit_parked_in_bank_recorded(group_id, true, Some(bank_b)).unwrap(), "no-op");
         assert_eq!(app.history.undo_len(), undo_before + 1);
         assert_eq!(pointers(app, group_id), before, "parking never touches a clip pointer");
-        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), KitBankState::Off);
-        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_a)).unwrap(), KitBankState::On);
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), BankState::Off);
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_a)).unwrap(), BankState::On);
         assert_eq!(sounding(app, group_id, pad), vec![true, true, false, false]);
         launch(app, 2);
         assert!(app.state.latest_scheduler_snapshot().rack_parked(group_id));
@@ -8082,11 +8122,11 @@ mod kit_parking_tests {
 
         // Undo the unpark, then the park: one step each.
         assert!(matches!(crate::app::edit::undo(app), crate::app::history::HistoryReplay::Applied(_)));
-        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), KitBankState::Off);
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), BankState::Off);
         assert!(matches!(crate::app::edit::undo(app), crate::app::history::HistoryReplay::Applied(_)));
-        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), KitBankState::On);
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), BankState::On);
         assert!(matches!(crate::app::edit::redo(app), crate::app::history::HistoryReplay::Applied(_)));
-        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), KitBankState::Off);
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), BankState::Off);
         assert_eq!(pointers(app, group_id), before);
     }
 
@@ -8096,9 +8136,9 @@ mod kit_parking_tests {
         let app = rig.app();
         let (group_id, _, _, bank_b) = kit_rig(app);
         app.state.with_scenes_mut(|scenes| scenes.set_kit_parked_in_scenes(group_id, true, 2..3));
-        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), KitBankState::Mixed);
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), BankState::Mixed);
         assert!(app.set_kit_parked_in_bank_recorded(group_id, true, Some(bank_b)).unwrap());
-        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), KitBankState::Off);
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), BankState::Off);
     }
 
     #[test]
@@ -8126,7 +8166,7 @@ mod kit_parking_tests {
         let source = app.state.scene_bank_range(bank_b).unwrap().start;
         let copy = new_scene_in(app, bank_c, SceneSwapInheritance::Source(source));
         assert!(parked(app, copy), "copy to a new bank takes its source's");
-        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_c)).unwrap(), KitBankState::Off);
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_c)).unwrap(), BankState::Off);
     }
 
     #[test]
@@ -8162,7 +8202,7 @@ mod kit_parking_tests {
         let before = sounding(app, group_id, pad);
         let saved = app.capture_project("kit-parking-roundtrip").unwrap();
         assert_eq!(saved.version, crate::project::project_file_version());
-        assert_eq!(saved.version, 19);
+        assert!(saved.version >= 19, "parked kits arrived in v19");
         assert_eq!(
             saved.scene_parked_kits,
             vec![vec![], vec![], vec![group_id], vec![group_id]]
@@ -8170,7 +8210,7 @@ mod kit_parking_tests {
         let mut legacy = saved.clone();
         rig.reload("kit-parking-roundtrip", saved);
         let app = rig.app();
-        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), KitBankState::Off);
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), BankState::Off);
         assert_eq!(sounding(app, group_id, pad), before);
 
         // A v18 file has no field: every kit is on.

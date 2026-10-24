@@ -56,6 +56,8 @@ pub use project_save::ProjectSaveOutcome;
 mod break_kits;
 mod rack_clips;
 mod kit_parking;
+mod instance_parking;
+pub mod project_import;
 #[cfg(test)]
 mod launch_benchmark;
 pub mod rack_grooves;
@@ -1109,6 +1111,9 @@ pub struct App {
     pub sample_path_registry: HashMap<String, PathBuf>,
     pub sample_buffer_path_registry: HashMap<i32, PathBuf>,
     blank_sample_buffers: HashSet<i32>,
+    /// Samples controlled imports decoded, shared by content
+    /// (docs/rig-spec.md §8, `project_import::assets`).
+    pub(crate) import_samples: project_import::ImportSampleCache,
     pub current_project_name: Option<String>,
     project_saves: project_save::ProjectSaves,
     pub ui: UiState,
@@ -3020,6 +3025,7 @@ impl App {
             sample_path_registry: HashMap::new(),
             sample_buffer_path_registry: HashMap::new(),
             blank_sample_buffers: HashSet::new(),
+            import_samples: Default::default(),
             current_project_name: None,
             project_saves: Default::default(),
             ui: UiState {

@@ -173,9 +173,20 @@ fn the_viewed_bank_hides_a_track_it_does_not_use_until_show_all() {
     assert!(menu.iter().all(|label| !label.starts_with(&format!("{} ", only_b + 1))), "{menu:?}");
     assert_eq!(menu.len(), only_b, "every other track");
     let routes = h.bank_eval(&format!(
-        "(let ((g (dict :owner nil))) (eseq.view-kit/listed? (track {only_b}) (eseq.graph-kit/route-menu-tracks g)))"
+        "(let ((g (dict :owner nil :nodes (list)))) (eseq.view-kit/listed? (track {only_b}) (eseq.graph-kit/route-menu-tracks g)))"
     ));
     assert_eq!(routes, Value::Bool(false));
+    // A graph menu keeps the track a node routes to, and one it is told to.
+    let routed = h.bank_eval(&format!(
+        "(let ((n (dict :route (track {only_b}))) (g (dict :owner nil :nodes (list n))))
+           (eseq.view-kit/listed? (track {only_b}) (eseq.graph-kit/route-menu-tracks g)))"
+    ));
+    assert_eq!(routed, Value::Bool(true), "a node's route stays listed");
+    let kept = h.bank_eval(&format!(
+        "(let ((g (dict :owner nil :nodes (list))))
+           (eseq.view-kit/listed? (track {only_b}) (eseq.graph-kit/route-menu-tracks g :keep (list (track {only_b})))))"
+    ));
+    assert_eq!(kept, Value::Bool(true));
     // A menu still shows the track an inlet names now.
     let named = strings(&h.bank_eval(&format!("(eseq.sequencer/lane-track-menu {only_b})")));
     assert_eq!(named.len(), only_b + 1);
@@ -209,4 +220,85 @@ fn a_selected_track_the_viewed_bank_hides_hands_the_selection_to_the_nearest() {
         "the nearest track bank A uses"
     );
     assert_eq!(h.bank_eval("(used-in-viewed-bank? selection.track)"), Value::Bool(true));
+}
+
+fn selected(h: &mut Harness) -> f64 {
+    match h.bank_eval("(let ((t selection.track)) t.index)") {
+        Value::Number(n) => n,
+        other => panic!("no selection: {other:?}"),
+    }
+}
+
+#[test]
+fn a_selection_is_rehomed_only_when_the_view_changes_and_never_off_a_bus() {
+    let (mut h, only_b) = two_bank_harness();
+    // Viewing bank A, a view showing every track selects the B-only track:
+    // it stays selected (nothing about the view changed).
+    h.bank_eval("(view-scene-bank! bank-a)");
+    h.bank_settle();
+    h.bank_eval(&format!("(eseq.sequencer/select-track-for-edit (track {only_b}))"));
+    h.bank_settle();
+    assert_eq!(selected(&mut h), only_b as f64, "not yanked back");
+
+    // A selected bus keeps its selection through a bank switch.
+    h.bank_eval("(view-scene-bank! bank-b)");
+    h.bank_settle();
+    h.bank_eval("(set! eseq.seq-core-state/selected-bus 0)");
+    h.bank_eval("(view-scene-bank! bank-a)");
+    h.bank_settle();
+    assert_eq!(h.bank_eval("eseq.seq-core-state/selected-bus"), Value::Number(0.0));
+    assert_eq!(selected(&mut h), only_b as f64);
+
+    // Toggling show-all off (a view change) rehomes it, and leaves no
+    // hidden track in the multi-selection or the range anchor.
+    h.bank_eval("(set! eseq.seq-core-state/selected-bus -1)");
+    h.bank_eval("(eseq.scene-banks/toggle-show-all-tracks!)");
+    h.bank_settle();
+    h.bank_eval(&format!("(eseq.sequencer/select-track-for-edit (track {only_b}))"));
+    h.bank_eval(&format!("(seq-select-tracks (list 0 {only_b}) {only_b})"));
+    h.bank_settle();
+    let anchor = h.bank_eval("(let ((g eseq.sequencer/grid-select) (a g.anchor)) a.index)");
+    assert_eq!(anchor, Value::Number(only_b as f64), "the anchor sits on the hidden track");
+    h.bank_eval("(eseq.scene-banks/toggle-show-all-tracks!)");
+    h.bank_settle();
+    assert_eq!(selected(&mut h), 0.0, "the nearest track bank A uses");
+    let in_selection = h.bank_eval("(len (filter (lambda (t) t.in-selection) (tracks)))");
+    assert_eq!(in_selection, Value::Number(1.0), "the hidden track left the multi-selection");
+    let anchor = h.bank_eval("(let ((g eseq.sequencer/grid-select) (a g.anchor)) a.index)");
+    assert_eq!(anchor, Value::Number(0.0));
+}
+
+#[test]
+fn an_instrument_rack_tracks_device_line_names_its_enabled_slot() {
+    let (mut h, _) = two_bank_harness();
+    h.rack_track();
+    h.sync();
+    h.show_all();
+    h.bank_eval("(view-scene-bank! bank-b)");
+    h.show_all();
+    let tid = h.bank_eval("(let ((t (track 2))) t.tid)");
+    let Value::Number(tid) = tid else { panic!("tid") };
+    let (tree, _) = h.buffer_tree("*sequencer*");
+    assert!(
+        widget_keyed(&tree, &format!("track-device-line-label-{}", tid as u64)).is_some(),
+        "the rack track's row has a device line"
+    );
+    let names_first = "(let ((t (track 2)) (rk (first t.devices)) (d (first rk.devices)))
+                         (= (eseq.sequencer/device-line-text t)
+                            (str (eseq.sequencer/clip-label d.display-name 10) SUFFIX)))";
+    assert_eq!(h.bank_eval(&names_first.replace("SUFFIX", "\"\"")), Value::Bool(true));
+    // A second enabled slot adds a count.
+    let buffer = sequencer::instruments::sampler::create_silent_buffer(h.app.graph.lg.0).expect("buffer");
+    h.app
+        .apply_recorded_rack_slot_add(2, "Add rack sample", |app| {
+            app.graph_controller().add_sampler_slot_to_rack_buffer(2, buffer, 44_100, "Second")
+        })
+        .expect("second slot");
+    h.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+    h.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+    h.sync();
+    h.show_all();
+    assert_eq!(h.bank_eval(&names_first.replace("SUFFIX", "\" +1\"")), Value::Bool(true));
+    // A plain track has none.
+    assert!(!h.has_widget("*sequencer*", "track-device-line-label-0"));
 }

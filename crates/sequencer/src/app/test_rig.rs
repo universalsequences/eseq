@@ -115,3 +115,51 @@ pub(crate) fn rack_with_samplers(app: &mut App, samples: &[&str]) -> usize {
     }
     rack
 }
+
+/// A new scene in bank `bank`, inheriting its swap state per `inheritance`;
+/// its index.
+pub(crate) fn new_scene_in(
+    app: &mut App,
+    bank: crate::sequencer::SceneBankId,
+    inheritance: crate::sequencer::SceneSwapInheritance,
+) -> usize {
+    let names = app.tracks.clone();
+    app.state
+        .clone_pattern_in_scene_bank(
+            bank,
+            inheritance,
+            names.len(),
+            &app.graph.track_buffer_ids.clone(),
+            &app.graph.track_sample_rates.clone(),
+            &names,
+            &app.graph.track_instrument_types.clone(),
+        )
+        .expect("a new scene")
+}
+
+/// One plain track and four scenes: bank A = {0, 1}, bank B = {2, 3}.
+/// Returns (bank A, bank B).
+pub(crate) fn two_banks(
+    app: &mut App,
+) -> (crate::sequencer::SceneBankId, crate::sequencer::SceneBankId) {
+    app.graph_controller()
+        .add_track(Path::new(PLATE))
+        .expect("a track");
+    for _ in 0..3 {
+        let bank = app
+            .state
+            .scene_bank_containing(app.state.current_scene_index())
+            .unwrap();
+        new_scene_in(
+            app,
+            bank,
+            crate::sequencer::SceneSwapInheritance::Source(app.state.playing_scene()),
+        );
+    }
+    let bank_b = app.state.create_scene_bank().unwrap();
+    for _ in 0..2 {
+        app.state.move_scene_to_scene_bank(2, bank_b).unwrap();
+    }
+    launch(app, 0);
+    (app.state.scene_banks()[0].id, bank_b)
+}

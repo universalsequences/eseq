@@ -232,15 +232,17 @@ impl HostKinds {
             // unobserved makes the first observing tick push.
             if pusher
                 .rt
-                .host_fields_observed(project, &[f::PROJECT_INSTANCES.1])
+                .host_fields_observed(project, &[f::PROJECT_INSTANCES.1, f::PROJECT_INSTANCES_BY_ID.1])
                 == 0
             {
                 state.instances = None;
-            } else if let Some(rows) = crate::host_commands::instances::instances_value_if_changed(
+            } else if let Some((rows, by_id)) = crate::host_commands::instances::instances_value_if_changed(
                 app,
+                &self.bank_ids,
                 &mut state.instances,
             ) {
                 pusher.push(project, f::PROJECT_INSTANCES, rows);
+                pusher.push(project, f::PROJECT_INSTANCES_BY_ID, by_id);
             }
         }
     }

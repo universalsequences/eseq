@@ -35,7 +35,8 @@
 (import alez.jaki.chords)
 (import eseq.view-kit :refer (color-rgba))
 (import eseq.kinds :refer (tracks groups generator-of generator-mark-named generator-mark-of))
-(import eseq.scene-banks :refer (scene-viewed-bank track-used-in-bank?))
+(import eseq.scene-banks :refer (scene-viewed-bank bank-tracks))
+(import eseq.glance)
 
 (export jk-panel)
 
@@ -216,15 +217,14 @@
 
 ;; The routes row `row`'s menu lists: on a rack its pads all (they follow
 ;; the kit's on/off together); on the project the tracks the viewed bank
-;; uses, plus the one the row plays now (docs/rig-spec.md §9). A pick maps
-;; back by label over every route (jk-route-of-label), so hidden tracks keep
-;; their indices.
-(def jk-menu-routes (self routes row)
+;; `viewed` uses, plus the one the row plays now (docs/rig-spec.md §9). A
+;; pick maps back by label over every route (jk-route-of-label), so hidden
+;; tracks keep their indices.
+(def jk-menu-routes (self routes row viewed)
   (if (number? self.owner)
     routes
-    (let ((viewed (scene-viewed-bank))
-          (current (get row :route)))
-      (filter (lambda (t) (or (= t.index current) (track-used-in-bank? t viewed))) routes))))
+    (let ((current (jk-row-track routes row)))
+      (bank-tracks viewed (if current (list current) (list))))))
 
 ;; Row `row`'s option in the menu over `menu` (jk-menu-routes of `routes`).
 (def jk-menu-index (routes menu row)
@@ -432,28 +432,30 @@
         (and (= (get e :cycle) (nth ph 0))
              (<= u0 u) (< u (+ u0 (get cell :units))))))))
 
-(def jk-symbol-cell (key cell w playing?)
+(def jk-symbol-cell (key cell w playing? &key (height 1.0) (accent :process-lane-accent))
   (let ((width (+ (* w (get cell :units)) (* 0.08 (- (get cell :units) 1)))))
-    (box :key key :width width :height 1.0 :padding 0 :corner-radius 6
-      :background-color (if playing? :process-lane-accent :mixer-strip-bg)
+    (box :key key :width width :height height :padding 0 :corner-radius 6
+      :background-color (if playing? accent :mixer-strip-bg)
       (label (if (= (get (get cell :e) :sym) :dash) "-" ".")
-        :width width :height 1.0 :font-size 11 :h-align :center
+        :width width :height height :font-size 11 :h-align :center :v-align :center
         :color (if playing? :bg :dim) :bg :transparent))))
 
-(def jk-preview-strip (self k figures)
+(def jk-preview-strip (self k figures &key (width jk-preview-width) (prefix "")
+                                           (height 1.0) (accent :process-lane-accent))
   (let ((body (alez.jaki.doc/figures-body figures)))
     (let ((ph (jk-playhead self (alez.jaki.core/from-list body))))
       (let ((base (if (= ph nil) 0 (- (nth ph 0) (mod (nth ph 0) jk-preview-cycles)))))
         (let ((cells (jk-symbol-cells (alez.jaki.core/preview body base jk-preview-cycles))))
           (let ((units (reduce (lambda (acc c) (+ acc (get c :units))) 0 cells))
                 (gaps (reduce (lambda (acc c) (+ acc (get c :gap))) 0 cells)))
-            (let ((w (min 1.1 (/ (- jk-preview-width gaps) (max 1 units)))))
+            (let ((w (min 1.1 (/ (- width gaps) (max 1 units)))))
               (h-stack :gap 0.08 :align :center
                 (each (range 0 (len cells)) |i|
                   (let ((c (nth cells i)))
                     (h-stack :gap 0 :align :center
                       (box :width (get c :gap) :height 1.0 :padding 0 :background-color :transparent)
-                      (jk-symbol-cell (jk-key k (str "jaki-hit-" i)) c w (jk-cell-playing? c ph)))))))))))))
+                      (jk-symbol-cell (str prefix (jk-key k (str "jaki-hit-" i))) c w (jk-cell-playing? c ph)
+                        :height height :accent accent))))))))))))
 
 (def jk-preview (self k figures)
   (h-stack :gap 0.4 :align :center
@@ -479,9 +481,10 @@
           0 (range 0 k)))
 
 ;; `sounding`: the row is routed and its pattern plays, so its route has marks
-(def jk-row (self k index row route-slot sounding)
+(def jk-row (self k index row route-slot sounding viewed)
   (let ((live (alez.jaki.doc/row-live? row))
         (routes (jk-route-tracks self))
+        (menu (jk-menu-routes self routes row viewed))
         (t (jk-row-track routes row))
         (g (generator-of self))
         (reason (jk-row-reason self k index)))
@@ -494,9 +497,8 @@
           :h-align :center :color (if live :foreground :dim) :bg :transparent)
         (dropdown
           :key (jk-key k (str "jaki-route-" index))
-          :value-index (let ((menu (jk-menu-routes self routes row)))
-                         (jk-menu-index routes menu row))
-          :options (jk-route-options (jk-menu-routes self routes row))
+          :value-index (jk-menu-index routes menu row)
+          :options (jk-route-options menu)
            :bg-color :mixer-strip-bg
           :width 8 :height jk-row-height :font-size 9
           :on-change (lambda (label)
@@ -640,7 +642,8 @@
     (let ((figures (get pat :figures))
         (rows (get pat :rows))
         (sounds (alez.jaki.doc/pattern-sounds? pat))
-        (base (jk-route-base pats k)))
+        (base (jk-route-base pats k))
+        (viewed (scene-viewed-bank)))
       (box :padding 1  
         (v-stack :gap 0.6
           (jk-pattern-header self k pat (len pats))
@@ -651,7 +654,7 @@
               (let ((row (alez.jaki.doc/row-at rows i))
                   (slot (+ base (jk-live-rows-before rows i))))
                 (v-stack :gap 0.25
-                  (jk-row self k i row slot (and sounds (alez.jaki.doc/row-live? row)))
+                  (jk-row self k i row slot (and sounds (alez.jaki.doc/row-live? row)) viewed)
                   (if (jk-rules-open? self k i)
                     (jk-rules self k i row slot)
                     nil)))))))))
@@ -704,3 +707,29 @@
   ;; view only: the row whose rules box is open ("k:index")
   :state ((rules-open ""))
   :view jk-panel)
+
+;; The kind's glance (docs/rig-spec.md §7, eseq.glance): the first
+;; pattern's hits strip, two cycles of its figures with the playing hit
+;; lit, narrowed to fit a small view. `hint` is eseq.glance's: :height the
+;; rows it fills (its cells grow with it, up to 2.2), :color the playing
+;; hit's and the backdrop's tint (the theme accent when nil), :key the
+;; caller's key prefix.
+(def jk-glance-width 12)
+
+(def jk-glance (self hint)
+  (let ((figures self.figures)
+        (prefix (str (get hint :key) "-jk-" self.id "-"))
+        (h (max 1.3 (get hint :height)))
+        (rgb (get hint :color))
+        (cell (min 2.2 (max 1.0 (- h 0.4)))))
+    (box :key (str prefix "glance") :debug-name "jaki-glance"
+      :width :fill :height h :padding 0.15 :corner-radius 6 :v-align :center
+      :background-color (if rgb (color-rgba rgb 0.12) :bg)
+      (if (empty? figures)
+        (label "no figures" :font-size 9 :height 1.0 :color :dim :bg :transparent)
+        (subtree :key (str prefix "hits")
+          (jk-preview-strip self 0 figures :width jk-glance-width :prefix prefix
+            :height cell :accent (if rgb (color-rgba rgb 1.0) :process-lane-accent)))))))
+
+;; A trampoline, so re-evaluating this file restyles every glance at once.
+(eseq.glance/def-glance "alez/jaki:jaki" (lambda (self hint) (jk-glance self hint)))

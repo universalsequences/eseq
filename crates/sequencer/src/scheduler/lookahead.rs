@@ -565,6 +565,10 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 !owner.is_some_and(|group_id| base_snapshot.rack_parked(group_id))
             });
         }
+        // Nor does a project-owned instance switched off since (§10).
+        if !base_snapshot.parked_instances.is_empty() {
+            graph_replay.retain(|entry| !base_snapshot.instance_parked(entry.graph_id));
+        }
         replay_retained_graph_emissions(
             graph_replay,
             generation,
@@ -2606,6 +2610,14 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             {
                 continue;
             }
+            // Nor do the graphs of project-owned instances this scene
+            // switches off (docs/rig-spec.md §10).
+            if graph_manifests
+                .get(graph_index)
+                .is_some_and(|manifest| snapshot.instance_parked(manifest.id))
+            {
+                continue;
+            }
             // Graphs earlier in the order, and everything the trigger loop
             // enqueued, are what this graph's `:output` reads can see.
             feed_track_output_reads(
@@ -3211,6 +3223,11 @@ fn run_generator_stage_range<const QUEUE_CAP: usize>(
                         .get(&generator_id)
                         .is_some_and(|group_id| snapshot.rack_parked(*group_id))
                 {
+                    return empty;
+                }
+                // A project-owned instance the scene switches off does not
+                // tick either (docs/rig-spec.md §10).
+                if snapshot.instance_parked(generator_id) {
                     return empty;
                 }
                 let tick_beat = input.beat;

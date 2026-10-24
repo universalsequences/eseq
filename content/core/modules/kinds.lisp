@@ -52,7 +52,9 @@
         launch-cell! select-region! clear-region! take-none take-governed take-latched
         pad-role-options groove-scale-options set-clip-groove!
         trigger-pad! launch-rack-clip! silence-rack! save-rack-clip-as! delete-rack-clip!
-        set-kit-parked! kit-bank-state unused-kits
+        set-kit-parked! unused-kits
+        instance-row set-instance-parked! unused-instances
+        activate-instance-from-scene! activate-instance-like-bank! purge-unused-instances!
         convert-rack-to-clips! use-library-groove! apply-groove-to-all-clips! extract-groove!
         duplicate-groove! delete-groove! save-groove-to-library!
         process-library set-process-enabled! set-inlet! set-fanout! set-lane-steps! move-process!
@@ -1154,7 +1156,7 @@
          ;; The arrangement.
          (clips     (list-of clip) :doc "The clips on the track's arrangement lane, in time order")
          (cells     (list-of cell) :doc "The track's patterns (the mixer's clip grid), by pattern id")
-         (used-banks (list-of bank) :doc "The banks with a scene that uses the track: one that gives it a pattern cell (steps or none), or for a kit's pad one that points at one of the kit's clips and does not switch the kit off; empty when no scene does. Bank-scoped views hide a track the viewed bank does not use (docs/rig-spec.md §9, eseq.scene-banks/used-in-viewed-bank?)")
+         (used-banks (list-of bank) :doc "The banks with a scene that uses the track: one that gives it a pattern cell (steps or none); a kit's pad follows its kit (the kit's used-banks); empty when no scene does. Bank-scoped views hide a track the viewed bank does not use (docs/rig-spec.md §9, eseq.scene-banks/used-in-viewed-bank?)")
          (governed  :int    :doc "take-none, take-governed (a take plays on the lane: steps dimmed and locked) or take-latched (a take lane the performer latched away)")
          (latched   :bool   :set set-track-latched
                     :doc "Latched away from the song by a manual launch; set false to hand the lane back to the song")
@@ -1374,13 +1376,13 @@
                     :doc "While an arrangement capture runs: the rack-lane clips it would write, in time order, as arr-clips less :cid, :end and :cycle (each ends at the next one's start or song.pending-head; a nil :rack-clip only ends the one before); empty otherwise")
          ;; Kits on/off per bank (docs/rig-spec.md §6): a kit plays in a
          ;; scene when the scene points at one of its clips and does not
-         ;; switch it off. Read a bank's state with kit-bank-state; switch
-         ;; it with set-kit-parked!.
+         ;; switch it off. Read a bank's state with
+         ;; eseq.bank-power/kit-bank-state; switch it with set-kit-parked!.
          (parked    :bool   :doc "A drum rack the playing scene switches off: its pads get no triggers and its sequencers do not run")
          (parked-banks (list-of bank) :doc "The banks whose every scene switches this drum rack off")
          (mixed-banks (list-of bank) :doc "The banks where some scenes switch this drum rack off and others do not")
          (unused    :bool   :doc "A drum rack every scene switches off (listed for purge, never deleted for you)")
-         (used-banks (list-of bank) :doc "The banks with a scene that uses the group: a drum rack where it plays (a scene points at one of its clips and does not switch it off), a plain group where any member or child rack is used (docs/rig-spec.md §9)")))
+         (used-banks (list-of bank) :doc "A drum rack's banks: those with a scene that does not switch it off and points at one of its clips (a legacy rack: gives any pad a cell). Empty on a plain group, which shows where any member shows (eseq.scene-banks/group-used-in-bank?, docs/rig-spec.md §9)")))
 
 ;; A drum rack pad: (nth g.pads 0). Keyed by its member track, so moving the
 ;; pad to another note (a swap included) or reordering keeps the instance.
@@ -1903,7 +1905,9 @@
          (networks (list-of network) :doc "The current scene's native neural networks, in order")
          (generators (list-of generator) :doc "The tick-mode sequencers (generators), in publish order")
          (instances (list-of :any)
-                    :doc "The project's package instances, as seq-package-tree takes them: dicts :id :kind :label :owner-label :owner-rack (a rack's group id, nil for the project) :registered? (false: its kind is not loaded)")))
+                    :doc "The project's package instances, as seq-package-tree takes them: dicts :id :kind :label :owner-label :owner-rack (a rack's group id, nil for the project) :registered? (false: its kind is not loaded); per bank on/off of a project-owned one (docs/rig-spec.md §10): :parked (off in the playing scene), :parked-banks / :mixed-banks (the banks whose every / some scenes switch it off, bank instances as a group's), :unused (off in every scene); read with eseq.bank-power/instance-bank-state")
+         (instances-by-id :any
+                    :doc "The rows of instances keyed by instance id as a string: (get project.instances-by-id (str id)); instance-row reads it")))
 
 ;; ── Collections and actions ──
 
@@ -2203,18 +2207,59 @@
       (dict :group-id g.gid :bank-id b.bid :value parked)
       (dict :group-id g.gid :value parked))))
 
-;; Kit g over the scenes of bank b: :on, :off (every scene switches it off)
-;; or :mixed (some do).
-;; eseq.kinds is core and does not import eseq.view-kit, so no listed?.
-(def kit-bank-in? (b bs) (reduce |found x| (or found (= x b)) false bs))
-(def kit-bank-state (g b)
-  (if (kit-bank-in? b g.parked-banks)
-    :off
-    (if (kit-bank-in? b g.mixed-banks) :mixed :on)))
+;; Kit g over the scenes of bank b: eseq.bank-power/kit-bank-state.
 
 ;; The drum racks every scene switches off (unused project-wide).
 (def unused-kits ()
   (filter (lambda (g) g.unused) (groups)))
+
+;; ── Project-owned sequencers on/off per bank (docs/rig-spec.md §10) ──
+;; A project-owned kind instance (density, jaki, a graph kind…) plays in a
+;; scene unless the scene switches it off: it does not tick or fire there,
+;; and the processes it declared with `:owner` do not apply. A rack-owned
+;; instance follows its kit instead. `id` is the instance id (self.id, or a
+;; project.instances row's :id); b is a bank, nil for the playing scene's.
+
+;; The project.instances row of instance id, or nil (a keyed lookup in
+;; project.instances-by-id).
+(def instance-row (id)
+  (get project.instances-by-id (str id)))
+
+;; Switch instance id off (`parked` true) or on in every scene of bank b,
+;; one undo step.
+(def set-instance-parked! (id b parked)
+  (host-command "set-instance-parked"
+    (if b
+      (dict :id id :bank-id b.bid :value parked)
+      (dict :id id :value parked))))
+
+;; Instance id over the scenes of bank b: eseq.bank-power/instance-bank-state.
+
+;; The project-owned instances every scene switches off (unused project
+;; wide): project.instances rows.
+(def unused-instances ()
+  (filter (lambda (r) (get r :unused)) project.instances))
+
+;; Switch instance id on in bank b with the settings (its document and graph
+;; overrides) it has in scene `scene` (a scene instance, s.index), one undo
+;; step (rev-1 R3 "recall a scene's settings").
+(def activate-instance-from-scene! (id b scene)
+  (host-command "instance-activate"
+    (if b
+      (dict :id id :bank-id b.bid :from-scene scene.index)
+      (dict :id id :from-scene scene.index))))
+
+;; The same with the settings of the first scene of bank `from` that plays
+;; it ("Turn on in bank C like bank A").
+(def activate-instance-like-bank! (id b from)
+  (host-command "instance-activate"
+    (if b
+      (dict :id id :bank-id b.bid :from-bank-id from.bid)
+      (dict :id id :from-bank-id from.bid))))
+
+;; Delete every unused instance after a confirm naming them, one undo step.
+(def purge-unused-instances! ()
+  (host-command "instance-purge-unused" (dict)))
 
 ;; Silence rack g in the current scene.
 (def silence-rack! (g)

@@ -106,6 +106,7 @@ mod devices;
 mod events;
 mod generators;
 mod kit_parking;
+pub(crate) use kit_parking::bank_position_list;
 mod bank_usage;
 mod graphs;
 mod lanes;
@@ -1311,6 +1312,7 @@ pub(crate) mod f {
     pub(crate) const PROJECT_NETWORKS: FieldKey = (PROJECT, "networks");
     pub(crate) const PROJECT_GENERATORS: FieldKey = (PROJECT, "generators");
     pub(crate) const PROJECT_INSTANCES: FieldKey = (PROJECT, "instances");
+    pub(crate) const PROJECT_INSTANCES_BY_ID: FieldKey = (PROJECT, "instances-by-id");
 }
 
 /// Every kind and `:host` field the host publishes, with its type as
@@ -2043,6 +2045,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     // The package instances (the Packages tab's rows), compared every tick
     // by fingerprint like the legacy `SEQ.instances`.
     (f::PROJECT_INSTANCES, "(list-of :any)", Model),
+    (f::PROJECT_INSTANCES_BY_ID, ":any", Model),
     // The browser, the sound palette, the editor and the app's views
     // (`presented`): pushed from what the legacy publishers record
     // (`ui::presented`), each area when its generation moved; the sample
@@ -2817,6 +2820,7 @@ pub(crate) struct HostKinds {
     kit_parking_key: Option<kit_parking::KitParkingKey>,
     /// The bank-scoped display feed (`bank_usage`) and its recompute count.
     bank_usage_key: Option<bank_usage::BankUsageKey>,
+    #[cfg(test)]
     bank_usage_passes: u64,
     /// Devices beyond the track chain: MIDI effects, bus effects, drum rack
     /// slots and their effects.

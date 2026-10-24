@@ -29,6 +29,8 @@ pub(crate) mod packages;
 mod panel;
 mod process_edit;
 mod project;
+mod project_import;
+pub(crate) use drum_rack_v2::finish_imported_racks;
 pub(crate) use project::{report_finished_project_saves, wait_and_report_project_saves};
 mod rack;
 pub(crate) mod rack_kinds;
