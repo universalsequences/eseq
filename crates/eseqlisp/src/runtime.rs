@@ -1057,6 +1057,9 @@ pub(crate) struct PendingModeDefinition {
     /// Handler that saves a buffer in this mode instead of writing a file
     /// (`define-mode … :on-save "fn"`).
     pub on_save: Option<String>,
+    /// Function of a buffer's name saying what it shows, for the agent
+    /// (`define-mode … :describe "fn"`).
+    pub describe: Option<String>,
 }
 
 /// Buffer metadata mirrored into the runtime for `buffer-info-list`.
@@ -1321,6 +1324,7 @@ impl NativeContext {
         on_key: Option<String>,
         inherit: Option<String>,
         on_save: Option<String>,
+        describe: Option<String>,
     ) {
         // Registry auto-qualification (spec §5): a declared module's mode
         // name AND its late-bound handler strings capture the module
@@ -1329,6 +1333,7 @@ impl NativeContext {
         let on_enter = on_enter.map(|h| self.qualify_registration_name(&h));
         let on_key = on_key.map(|h| self.qualify_registration_name(&h));
         let on_save = on_save.map(|h| self.qualify_registration_name(&h));
+        let describe = describe.map(|h| self.qualify_registration_name(&h));
         // The parent reference resolves like a mode-bind-key target: module
         // first, flat fallback in the editor (resolve_mode_name), lazily at
         // lookup time so a parent declared later still links.
@@ -1344,6 +1349,7 @@ impl NativeContext {
                 on_key,
                 inherit,
                 on_save,
+                describe,
             });
     }
 

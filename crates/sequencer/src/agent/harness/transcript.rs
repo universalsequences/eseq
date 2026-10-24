@@ -28,6 +28,31 @@ fn split_notes(sent: &str) -> (Option<&str>, &str) {
         .map_or((None, sent), |(notes, text)| (Some(notes), text))
 }
 
+const CONTEXT_START: &str = "<app-context>\n";
+const CONTEXT_END: &str = "\n</app-context>\n\n";
+
+/// What the user typed, prefixed with what their window showed when they
+/// sent it (the pane's app context, whose first line sums it up).
+pub fn with_context(context: Option<&str>, text: &str) -> String {
+    match context {
+        Some(context) => format!("{CONTEXT_START}{context}{CONTEXT_END}{text}"),
+        None => text.to_string(),
+    }
+}
+
+/// `with_context` undone: the context, if any, and what the user typed.
+fn split_context(sent: &str) -> (Option<&str>, &str) {
+    sent.strip_prefix(CONTEXT_START)
+        .and_then(|rest| rest.split_once(CONTEXT_END))
+        .map_or((None, sent), |(context, text)| (Some(context), text))
+}
+
+/// The notice the pane shows under a message sent with `context`: its
+/// first line.
+pub fn context_notice(context: &str) -> String {
+    context.lines().next().unwrap_or_default().to_string()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     Running,
@@ -132,9 +157,11 @@ impl Transcript {
                     Some("text") if assistant => transcript.entries.push(Entry::Assistant(text("text"))),
                     Some("text") => {
                         let sent = text("text");
-                        let (notes, typed) = split_notes(&sent);
+                        let (notes, sent) = split_notes(&sent);
+                        let (context, typed) = split_context(sent);
                         transcript.entries.extend(notes.map(|notes| Entry::Notice(notes.to_string())));
                         transcript.entries.push(Entry::User { text: typed.to_string(), images: Vec::new() });
+                        transcript.entries.extend(context.map(|context| Entry::Notice(context_notice(context))));
                     }
                     Some("thinking") => transcript.entries.push(Entry::Thinking(text("thinking"))),
                     Some("tool_use") => transcript.entries.push(Entry::Tool {
@@ -334,6 +361,7 @@ mod tests {
                 { "type": "tool_use", "id": "t3", "name": "eval", "input": {} },
             ] }),
             json!({ "role": "user", "content": with_notes(&["You loaded markov.".into()], "thanks") }),
+            json!({ "role": "user", "content": with_notes(&[], &with_context(Some("Looking at *code*.\nmore"), "why?")) }),
         ];
         let tool = |id: &str, input: &str, status, output: &str| Entry::Tool {
             id: id.into(),
@@ -354,6 +382,8 @@ mod tests {
                 tool("t3", "{}", ToolStatus::Failed, "No result was saved."),
                 Entry::Notice("You loaded markov.".into()),
                 user("thanks"),
+                user("why?"),
+                Entry::Notice("Looking at *code*.".into()),
             ]
         );
     }

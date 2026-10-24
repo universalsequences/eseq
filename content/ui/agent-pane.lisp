@@ -15,7 +15,7 @@
 (import eseq.view-kit :refer (nothing open-menu! menu-of find))
 (import eseq.customize :refer (knob-editor short-name set-knob customize-dirty customize-save))
 
-(export agent-pane-open agent-pane-close agent-pane-send)
+(export agent-pane-open agent-pane-close agent-pane-send agent-pane-ask)
 
 (def buffer-name "*agent-pane*")
 
@@ -29,11 +29,20 @@
   :group "View"
   (show-in-side-pane buffer-name))
 
+;; Ask the agent about what you are in: the pane opens with the caret in
+;; the composer, and the message carries this tile, its cursor and selection.
+(def agent-pane-ask ()
+  :doc "Ask the agent about what is under the cursor: opens the agent pane, which sends this tile, its cursor and selection with your question."
+  :command "Ask Agent About This"
+  :group "View"
+  (host-command "agent-pane-ask" (dict)))
+
 ;; Close the agent pane (the conversation stays).
 (def agent-pane-close ()
   (close-window-for buffer-name))
 
-;; Send the composer's text, and the images attached to it, to the agent.
+;; Send the composer's text, and the images attached to it, to the agent,
+;; with what the window shows (the host reads it as the message goes).
 (def agent-pane-send ()
   (if (and (= draft "") (empty? (agent-pane/attachments)))
     nil
@@ -41,7 +50,7 @@
       (status "The agent is still working; stop it or wait.")
       (let ((text draft))
         (set! draft "")
-        (agent-pane/send text)))))
+        (host-command "agent-pane-send" (dict :text text))))))
 
 ;; Secondary text: tool rows, the counters.
 (def dim-text (text size wrap)
@@ -410,7 +419,7 @@
 
 (def empty-state ()
   (v-stack :key "agent-pane-empty" :width :fill :flex 1 :gap 0.6 :padding 1.0
-    (dim-text "Ask for a sequencer, a panel or an extension, or for a change to how eseq looks. The agent writes new work as a Local package and shows tweaks live in the app, for you to keep or revert. Drop images on the window to show it what you mean."
+    (dim-text "Ask about what is on your screen (what does line 111 do? why is this track quiet?): the agent sees the tile you were last in, its cursor and what each view shows. Or ask for a sequencer, a panel or an extension, or a change to how eseq looks: new work becomes a Local package, tweaks show live for you to keep or revert. Drop images on the window to show it what you mean."
       11 true)))
 
 ;; The last row: the only one that changes as text streams, so the only
@@ -572,4 +581,6 @@
 (mode-bind-key "eseq.agent-pane/agent-pane-mode" "C-c C-c" "eseq.agent-pane/agent-pane-send")
 (mode-bind-key "eseq.agent-pane/agent-pane-mode" "q" "eseq.agent-pane/agent-pane-close")
 (set-buffer-mode-for "*agent-pane*" "eseq.agent-pane/agent-pane-mode")
+(bind-key "s-i" "eseq.agent-pane/agent-pane-ask")
+(bind-key "SPC a" "eseq.agent-pane/agent-pane-ask")
 (bind-key "C-x C-a" "agent-pane-open")

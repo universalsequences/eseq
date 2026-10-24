@@ -44,6 +44,9 @@ ESEQ_CONFIG_DIR=/tmp/eseq-mcp-cfg python3 crates/sequencer/tools/mcp_session.py 
 | `new_instance` | Create an instance of a kind; returns its buffer |
 | `simulate` | Run an instance's tick for N bars headlessly; list its hits or the tick that threw |
 | `capture` | Render a buffer (or a keyed subtree) to PNG, with a layout report; `click` a keyed widget and type `keys` first to operate the panel |
+| `dgen_docs` | DGenLisp operators, special forms, @attributes and example patches from the compiler's API catalog (`apropos`/`describe` only know eseqlisp) |
+| `dgen_values` | What DGenLisp defs in a dsp.lisp come to at given param values: constant arithmetic, `gswitch`, `iota` and math, vectors element-wise; defs reading a signal are reported as varying |
+| `view_state` | The reactive state a drawn buffer reads: kind fields grouped across instances (`track.in-selection across 4 track instances: false, except track[1] true`) and other fields, with values and docs |
 
 Rules the tools hold:
 

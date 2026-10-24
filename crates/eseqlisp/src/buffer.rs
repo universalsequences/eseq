@@ -1693,6 +1693,31 @@ impl CommittedBufferUiSnapshot {
     /// The subtree roots whose render read `field`, in tree order. Computed
     /// on demand: an eager field index cost every full-tree commit one entry
     /// per (root, field) pair, which inherited lists made huge.
+    /// Every reactive field some node of the tree read when it was built,
+    /// each once, in tree order.
+    pub fn reactive_fields(&self) -> Vec<&ReactiveFieldKey> {
+        fn walk<'a>(node: &'a CommittedSubtreeSnapshot, seen: &mut HashSet<&'a ReactiveFieldKey>, out: &mut Vec<&'a ReactiveFieldKey>) {
+            for field in node.reactive_dependencies.iter() {
+                if seen.insert(field) {
+                    out.push(field);
+                }
+            }
+            for child in &node.children {
+                walk(child, seen, out);
+            }
+        }
+        let (mut seen, mut out) = (HashSet::new(), Vec::new());
+        walk(&self.root, &mut seen, &mut out);
+        for fields in self.subtree_root_dependencies.values() {
+            for field in fields.iter() {
+                if seen.insert(field) {
+                    out.push(field);
+                }
+            }
+        }
+        out
+    }
+
     pub fn subtree_roots_for_field(&self, field: &ReactiveFieldKey) -> Vec<u64> {
         fn walk(node: &CommittedSubtreeSnapshot, field: &ReactiveFieldKey, out: &mut Vec<u64>) {
             if is_subtree_boundary(node.subtree_root_id, node.parent_subtree_root_id)

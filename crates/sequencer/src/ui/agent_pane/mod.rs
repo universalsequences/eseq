@@ -7,6 +7,9 @@
 
 #[cfg(target_os = "macos")]
 pub(crate) mod bench;
+mod context;
+mod dsp_edit;
+pub(crate) use context::{dgen_values, view_state, HostView};
 #[cfg(target_os = "macos")]
 mod live_view;
 mod tried;
@@ -358,6 +361,8 @@ fn register_choice_natives(runtime: &mut Runtime) {
 /// The agent pane's buffer.
 const PANE_BUFFER: &str = "*agent-pane*";
 
+const SEND_COMMAND: &str = "agent-pane-send";
+const ASK_COMMAND: &str = "agent-pane-ask";
 const KEEP_COMMAND: &str = "agent-pane-keep-tried";
 const REVERT_COMMAND: &str = "agent-pane-revert-tried";
 const VIEW_COMMAND: &str = "agent-pane-view-tried";
@@ -371,11 +376,73 @@ pub(crate) fn tried_source() -> String {
     tried::tried()
 }
 
-pub(crate) const COMMANDS: &[&str] = &[KEEP_COMMAND, REVERT_COMMAND, VIEW_COMMAND];
+pub(crate) const COMMANDS: &[&str] = &[SEND_COMMAND, ASK_COMMAND, KEEP_COMMAND, REVERT_COMMAND, VIEW_COMMAND];
 
-pub(crate) fn handle_command(name: &str, payload: &Value, editor: &mut Editor) {
-    let Ok(session) = session() else { return };
+/// The composer's text box, which Ask focuses.
+const INPUT_KEY: &str = "agent-pane-input";
+/// Frames Ask keeps trying to focus the composer while the pane lays out.
+const FOCUS_FRAMES: u8 = 30;
+
+thread_local! {
+    /// Frames left to focus the composer after Ask (0: none pending).
+    static FOCUS_PENDING: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// Ask: open the pane on what the user is in now and put the caret in the
+/// composer. The message's context names that tile, cursor and selection.
+fn ask(editor: &mut Editor) -> Result<(), String> {
+    context::remember_focus(editor);
+    if !editor.buffer_named_is_showing(PANE_BUFFER) {
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.agent-pane/agent-pane-open)")
+            .map_err(|error| format!("The agent pane did not open: {error:?}"))?;
+        editor.refresh_runtime_side_effects();
+    }
+    editor.switch_active_tile_to_buffer_named(PANE_BUFFER);
+    FOCUS_PENDING.with(|pending| pending.set(FOCUS_FRAMES));
+    focus_composer(editor);
+    Ok(())
+}
+
+/// Focus the composer if Ask is waiting for it and it is laid out.
+fn focus_composer(editor: &mut Editor) {
+    let left = FOCUS_PENDING.with(std::cell::Cell::get);
+    if left == 0 {
+        return;
+    }
+    let focused = editor.focus_widget_by_stable_key(INPUT_KEY, Some("textbox"));
+    FOCUS_PENDING.with(|pending| pending.set(if focused { 0 } else { left - 1 }));
+    if focused {
+        editor.mark_needs_redraw();
+    }
+}
+
+/// `host_views` are the views the host owns that the window may show (the
+/// open instrument or effect editor), for a message's context.
+pub(crate) fn handle_command(name: &str, payload: &Value, editor: &mut Editor, host_views: &[HostView]) {
+    if name == ASK_COMMAND {
+        if let Err(why) = ask(editor) {
+            editor.show_transient_message(why);
+        }
+        return;
+    }
+    let session = match session() {
+        Ok(session) => session,
+        Err(why) => return editor.show_transient_message(format!("The agent pane is unavailable: {why}")),
+    };
     let result = match name {
+        SEND_COMMAND => {
+            // What the window shows now, as the user sends.
+            let text = match payload {
+                Value::Map(map) => crate::history_commands::map_string(map, "text"),
+                _ => None,
+            };
+            if let Err(why) = session.send_with_context(&text.unwrap_or_default(), context::header(editor, host_views)) {
+                editor.show_transient_message(why);
+            }
+            return;
+        }
         KEEP_COMMAND => tried::keep_in_init(editor),
         REVERT_COMMAND => tried::revert_tried(editor),
         VIEW_COMMAND => {
@@ -435,10 +502,18 @@ pub(crate) fn refresh() {
 /// `backend`, when there is a window, answers the agent's looks at it.
 #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
 pub(crate) fn publish(editor: &mut Editor, mut backend: Option<&mut crate::AppBackend>, seen: &mut u64) {
+    // Before the pane is first used too: it may open on the tile meant.
+    context::remember_focus(editor);
+    focus_composer(editor);
     let Some(Ok(session)) = SESSION.get() else { return };
     let requests = session.take_live_requests();
     let served = !requests.is_empty();
     for request in requests.into_iter().filter(|request| !request.abandoned()) {
+        if let sequencer::agent::harness::LiveAction::EditDsp { buffer, form, after } = &request.action {
+            let (buffer, form, after) = (buffer.clone(), form.clone(), after.clone());
+            dsp_edit::start(editor, request, &buffer, &form, after.as_deref());
+            continue;
+        }
         #[cfg(target_os = "macos")]
         if let Some(result) =
             backend.as_deref_mut().and_then(|backend| live_view::serve(editor, backend, &request.action))
@@ -449,7 +524,8 @@ pub(crate) fn publish(editor: &mut Editor, mut backend: Option<&mut crate::AppBa
         let result = tried::serve(editor, &request.action);
         request.reply(result);
     }
-    if served || tried::forget_closed_views(editor) {
+    let answered = dsp_edit::watch();
+    if served || answered || tried::forget_closed_views(editor) {
         session.touch();
     }
     let (generation, shape) = session.with_transcript(|transcript| (transcript.generation, transcript.shape));
@@ -467,6 +543,16 @@ pub(crate) fn publish(editor: &mut Editor, mut backend: Option<&mut crate::AppBa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ask_keeps_trying_to_focus_the_composer_until_it_is_laid_out() {
+        let mut editor = Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        FOCUS_PENDING.with(|pending| pending.set(2));
+        focus_composer(&mut editor);
+        assert_eq!(FOCUS_PENDING.with(std::cell::Cell::get), 1, "no composer yet: try again next frame");
+        focus_composer(&mut editor);
+        assert_eq!(FOCUS_PENDING.with(std::cell::Cell::get), 0, "gives up after its frames");
+    }
 
     #[test]
     fn transcript_entries_become_lisp_dicts_the_pane_reads() {

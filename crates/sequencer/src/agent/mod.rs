@@ -2,6 +2,7 @@ pub mod actions;
 pub mod agentic_bubble;
 pub mod audition;
 pub mod catalog;
+pub mod dgen_eval;
 pub mod dsp_validate;
 pub mod forms;
 pub mod harness;

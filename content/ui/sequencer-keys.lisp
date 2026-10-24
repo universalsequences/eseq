@@ -110,7 +110,24 @@
 ;; types into code buffers and focused text fields.
 (def open-command-palette () (do (command-palette) true))
 
-(define-mode "eseq.sequencer-keys/sequencer-keys" :read-only true :live-keys true)
+;; SPC /: the command palette from a code buffer in Vim normal mode, where a
+;; bare / is not free (a key that would type text never opens a chord, so
+;; this costs typing nothing).
+(bind-key "SPC /" "eseq.sequencer-keys/open-command-palette")
+
+;; What a sequencer view shows, for the agent pane's context: the current
+;; track and selection, the scene and the transport. Every view inheriting
+;; this mode says this much; one with more to say declares its own :describe.
+(def describe-view (buffer)
+  (let ((current selection.track)
+        (steps (len selection.steps))
+        (scene transport.scene))
+    (dict :about (str "current track: " (if current (str (+ current.index 1) " " current.name) "none")
+                      (if (> steps 0) (str ", " steps " of its steps selected") "")
+                      "; scene: " (if scene (str scene.number " " scene.name " of bank " scene.bank.label) "none")
+                      "; " (if transport.playing "playing" "stopped") " at " transport.bpm " bpm"))))
+
+(define-mode "eseq.sequencer-keys/sequencer-keys" :read-only true :live-keys true :describe "describe-view")
 (mode-bind-key mode-name "LEFT" "cursor-left")
 (mode-bind-key mode-name "RIGHT" "cursor-right")
 (mode-bind-key mode-name "S-LEFT" "cursor-select-left")

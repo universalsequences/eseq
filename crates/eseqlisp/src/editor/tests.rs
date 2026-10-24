@@ -2843,6 +2843,37 @@ fn vim_mode_starts_in_normal_and_does_not_insert_plain_keys() {
 }
 
 #[test]
+fn space_is_a_leader_in_vim_normal_mode_and_still_types_in_insert_mode() {
+    let mut editor = Editor::new(
+        Runtime::new(),
+        EditorConfig {
+            vim_mode: true,
+            ..EditorConfig::default()
+        },
+    );
+    editor
+        .runtime_mut()
+        .eval_str("(def leader-hits 0) (def leader () (set! leader-hits (+ leader-hits 1))) (bind-key \"SPC /\" \"leader\")")
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.open_scratch_buffer("*test*", "abc");
+    let hits = |editor: &mut Editor| editor.runtime_mut().eval_str("leader-hits").unwrap();
+
+    // Normal mode: SPC then / runs the binding and types nothing.
+    editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert_eq!(hits(&mut editor), Some(Value::Number(1.0)));
+    assert_eq!(editor.active_buffer().text(), "abc");
+
+    // Insert mode: a space and a slash are text, and no chord opens.
+    editor.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert_eq!(editor.active_buffer().text(), " /abc");
+    assert_eq!(hits(&mut editor), Some(Value::Number(1.0)));
+}
+
+#[test]
 fn vim_insert_mode_accepts_text_and_escape_returns_to_normal() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(

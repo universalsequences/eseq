@@ -210,6 +210,12 @@ pub(super) fn serve(editor: &mut Editor, action: &LiveAction) -> Result<String, 
         LiveAction::Look { .. } | LiveAction::WhatDraws { .. } => {
             Err("There is no window to look at here.".to_string())
         }
+        LiveAction::ReadBuffer { buffer, from, to } => super::context::read_buffer(editor, buffer, *from, *to),
+        LiveAction::ViewState { buffer } => super::context::view_state(editor, buffer),
+        LiveAction::EditDsp { .. } => Err("edit_dsp is served by the pane".to_string()),
+        LiveAction::DgenValues { buffer, names, track, inputs } => {
+            super::context::dgen_values_live(editor, buffer, names, *track, inputs)
+        }
     }
 }
 

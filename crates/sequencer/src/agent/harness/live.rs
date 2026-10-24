@@ -16,10 +16,15 @@ pub const TRY_TOOL: &str = "try";
 pub const KEEP_TOOL: &str = "keep_tried";
 pub const LOOK_TOOL: &str = "look";
 pub const WHAT_DRAWS_LIVE_TOOL: &str = "what_draws_live";
+pub const READ_BUFFER_TOOL: &str = "read_buffer";
+pub const VIEW_STATE_LIVE_TOOL: &str = "view_state_live";
+pub const DGEN_VALUES_LIVE_TOOL: &str = "dgen_values_live";
+pub const EDIT_DSP_TOOL: &str = "edit_dsp";
 
 /// Whether `name` is one of these tools.
 pub fn is_live_tool(name: &str) -> bool {
-    [TRY_TOOL, KEEP_TOOL, LOOK_TOOL, WHAT_DRAWS_LIVE_TOOL].contains(&name)
+    [TRY_TOOL, KEEP_TOOL, LOOK_TOOL, WHAT_DRAWS_LIVE_TOOL, READ_BUFFER_TOOL, VIEW_STATE_LIVE_TOOL, DGEN_VALUES_LIVE_TOOL, EDIT_DSP_TOOL]
+        .contains(&name)
 }
 
 /// What a live call asks the app to do.
@@ -32,6 +37,19 @@ pub enum LiveAction {
     Look { buffer: Option<String> },
     /// The hooks at pixel (x, y) of `look`'s image of `buffer`.
     WhatDraws { buffer: String, x: f32, y: f32 },
+    /// The text of the user's open buffer `buffer`, lines `from..=to`
+    /// (1-based; None reads from the start or to the end).
+    ReadBuffer { buffer: String, from: Option<usize>, to: Option<usize> },
+    /// The reactive state the user's drawn view of `buffer` reads.
+    ViewState { buffer: String },
+    /// What DGenLisp defs `names` in `buffer` come to with the knobs of the
+    /// instrument on `track` (1-based; the current track when None).
+    /// `inputs` gives host inputs (`pitch`, `gate`) and any other name a value.
+    DgenValues { buffer: String, names: Vec<String>, track: Option<usize>, inputs: Vec<(String, f64)> },
+    /// Put DGenLisp `form` in place of the form defining its name in the
+    /// user's code buffer `buffer` (a new name after `after`, else before the
+    /// outputs), then compile it as the editor's Eval does.
+    EditDsp { buffer: String, form: String, after: Option<String> },
 }
 
 /// How long a live call waits for the app before giving up: the UI thread
@@ -102,7 +120,93 @@ impl LiveRequest {
 
 /// The live tools' Messages API definitions.
 pub fn tools() -> Vec<Value> {
-    vec![try_tool(), keep_tool(), look_tool(), what_draws_live_tool()]
+    vec![try_tool(), keep_tool(), look_tool(), what_draws_live_tool(), read_buffer_tool(), view_state_live_tool(), dgen_values_live_tool(), edit_dsp_tool()]
+}
+
+fn edit_dsp_tool() -> Value {
+    json!({
+        "name": EDIT_DSP_TOOL,
+        "description": "Change an instrument's or effect's DGenLisp in the user's open code editor (its \
+            Code surface): `form` is one `def`, `param` or `defmacro`, which takes the place of the \
+            form defining the same name; a new name goes after the form defining `after`, or else \
+            just before the outputs. The edit lands in their buffer as one step they can undo \
+            (Cmd+Z), unsaved, and is compiled and swapped in as the editor's Eval does; the result \
+            says whether it compiled, with the errors if not. Saving stays theirs. Use it only when \
+            they ask for a change; read the code first (read_buffer) and keep their names and \
+            comments.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "buffer": {"type": "string", "description": "The code buffer, e.g. `*instrument-code:user:modalys-pluck*`"},
+                "form": {"type": "string", "description": "One top-level def, param or defmacro (the comments above the old form stay)"},
+                "after": {"type": "string", "description": "For a new name: the def it should follow"}
+            },
+            "required": ["buffer", "form"]
+        }
+    })
+}
+
+fn dgen_values_live_tool() -> Value {
+    json!({
+        "name": DGEN_VALUES_LIVE_TOOL,
+        "description": "Work out what DGenLisp defs come to with the knobs as the user has them now: \
+            reads the instrument or effect code open in their window (unsaved edits included) and \
+            the current values of the instrument's params on a track, then evaluates the named \
+            top-level defs. Arithmetic, comparisons, gswitch, iota and math are evaluated \
+            (vectors element-wise); a def that reads a signal (in, histories, oscillators, macros) \
+            is reported as varying per sample. Use it to explain code with real numbers (\"at \
+            brass B is 4.1e-4, so mode 80 sits 1.6% sharp\"). It changes nothing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "buffer": {"type": "string", "description": "The code buffer, e.g. `*instrument-code:user:modalys-pluck*`"},
+                "names": {"type": "array", "items": {"type": "string"}, "description": "Top-level defs or params to work out"},
+                "track": {"type": "integer", "description": "The track (from 1) whose instrument's knobs to use; the current track when left out"},
+                "inputs": {"type": "object", "description": "Values for host inputs and other names, e.g. {\"pitch\": 261.63, \"gate\": 1}: a def reading an input varies until it has one"}
+            },
+            "required": ["buffer", "names"]
+        }
+    })
+}
+
+fn view_state_live_tool() -> Value {
+    json!({
+        "name": VIEW_STATE_LIVE_TOOL,
+        "description": "The state a view in the user's window is showing now: every reactive field its \
+            drawn widgets read (defstates, kind fields, host-published values like SEQ.*), with its \
+            value. Use it to learn what the user sees (which track is selected, which editor is \
+            open) without a screenshot; follow a field's module with form_source to see the code \
+            behind it. Fields that differ only by a number fold into one row. A hidden tab is not \
+            drawn and reads nothing. `view_state` does the same on the headless copy. It changes \
+            nothing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "buffer": {"type": "string", "description": "A buffer (or tab) the <app-context> block names, e.g. `*sequencer*`"}
+            },
+            "required": ["buffer"]
+        }
+    })
+}
+
+fn read_buffer_tool() -> Value {
+    json!({
+        "name": READ_BUFFER_TOOL,
+        "description": "Read the text of a buffer open in the user's window, as it is on their screen: \
+            unsaved edits included, which files on disk and the headless copy do not have. Lines \
+            come numbered as the user's status line counts them. Use it for code the user asks \
+            about (an instrument's dsp.lisp, a module they have open); the <app-context> block \
+            names the buffers. It changes nothing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "buffer": {"type": "string", "description": "The buffer's name, e.g. `*instrument-code:user:modalys-pluck*`"},
+                "from": {"type": "integer", "description": "First line to read (1-based); the start when left out"},
+                "to": {"type": "integer", "description": "Last line to read; the end (up to a limit) when left out"}
+            },
+            "required": ["buffer"]
+        }
+    })
 }
 
 fn look_tool() -> Value {
@@ -185,6 +289,36 @@ pub(super) fn call(queue: &Mutex<Vec<LiveRequest>>, cancel: &AtomicBool, name: &
         WHAT_DRAWS_LIVE_TOOL => match (text("buffer"), input["x"].as_f64(), input["y"].as_f64()) {
             (Some(buffer), Some(x), Some(y)) => LiveAction::WhatDraws { buffer, x: x as f32, y: y as f32 },
             _ => return ToolResult::error("`buffer`, `x` and `y` are required"),
+        },
+        READ_BUFFER_TOOL => match text("buffer") {
+            Some(buffer) => {
+                let line = |key: &str| input[key].as_u64().map(|line| line as usize);
+                LiveAction::ReadBuffer { buffer, from: line("from"), to: line("to") }
+            }
+            None => return ToolResult::error("`buffer` is required"),
+        },
+        EDIT_DSP_TOOL => match (text("buffer"), text("form")) {
+            (Some(buffer), Some(form)) => LiveAction::EditDsp { buffer, form, after: text("after") },
+            _ => return ToolResult::error("`buffer` and `form` are required"),
+        },
+        DGEN_VALUES_LIVE_TOOL => match text("buffer") {
+            Some(buffer) => {
+                let names = input["names"]
+                    .as_array()
+                    .map(|names| names.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .unwrap_or_default();
+                let track = input["track"].as_u64().map(|track| track as usize);
+                let inputs = input["inputs"]
+                    .as_object()
+                    .map(|inputs| inputs.iter().filter_map(|(name, value)| Some((name.clone(), value.as_f64()?))).collect())
+                    .unwrap_or_default();
+                LiveAction::DgenValues { buffer, names, track, inputs }
+            }
+            None => return ToolResult::error("`buffer` is required"),
+        },
+        VIEW_STATE_LIVE_TOOL => match text("buffer") {
+            Some(buffer) => LiveAction::ViewState { buffer },
+            None => return ToolResult::error("`buffer` is required"),
         },
         TRY_TOOL => match text("code") {
             Some(code) => LiveAction::Try(code),

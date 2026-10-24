@@ -555,6 +555,9 @@ pub struct MajorMode {
     /// Saves a buffer in this mode instead of writing a file
     /// (`define-mode … :on-save`); see `Editor::save_active_buffer_command`.
     pub on_save: Option<String>,
+    /// Says what a buffer in this mode shows, for the agent pane
+    /// (`define-mode … :describe`); see [`Editor::describe_buffer`].
+    pub describe: Option<String>,
     /// Extra completion candidates for buffers in this mode (and modes that
     /// inherit it), from `(mode-add-completions …)`.
     pub completions: Vec<CompletionItem>,
@@ -4266,6 +4269,14 @@ impl Editor {
         Some(normalize_region(mark.cursor, self.active_buffer().cursor))
     }
 
+    /// The selected text of buffer `buffer_id` (mark to cursor), whether or
+    /// not its tile is active; None when it has no mark or nothing between.
+    pub fn region_range_in_buffer(&self, buffer_id: BufferId) -> Option<((usize, usize), (usize, usize))> {
+        let mark = self.mark.as_ref().filter(|mark| mark.buffer_id == buffer_id)?;
+        let buffer = self.buffers.iter().find(|buffer| buffer.id == buffer_id)?;
+        (mark.cursor != buffer.cursor).then(|| normalize_region(mark.cursor, buffer.cursor))
+    }
+
     pub fn active_buffer(&self) -> &Buffer {
         let idx = self.active_leaf().buffer_idx;
         &self.buffers[idx]
@@ -5145,6 +5156,18 @@ impl Editor {
                 }
             })
             .collect()
+    }
+
+    /// The layout a tile showing the buffer named `name` last drew, if one
+    /// shows it (the active tile's lives with the runtime).
+    pub fn layout_for_buffer_named(&self, name: &str) -> Option<Arc<crate::layout::LayoutNode>> {
+        let idx = self.buffer_idx_named(name)?;
+        let leaf = self.tile_root.find_leaf_by_buffer_idx(idx)?;
+        if leaf.id == self.active_tile {
+            self.runtime.current_layout.clone()
+        } else {
+            leaf.cached_layout.clone()
+        }
     }
 
     /// Query actual mounted widget sources, including user-authored buffers.
@@ -6811,6 +6834,20 @@ impl Editor {
         chain
     }
 
+    /// What the buffer named `buffer_name` shows, from the nearest mode in
+    /// its chain that declares `:describe`: the describer's result, called
+    /// with the buffer's name. None when no mode describes it.
+    pub fn describe_buffer(&mut self, buffer_name: &str) -> Option<Result<Value, String>> {
+        let buffer = self.buffers.iter().find(|buffer| buffer.name == buffer_name)?;
+        let BufferMode::Named(mode_name) = &buffer.mode else { return None };
+        let handler = self.mode_chain(mode_name).into_iter().find_map(|mode| mode.describe.clone())?;
+        let handler = self.runtime.resolve_handler_name(&handler).to_string();
+        Some(match self.runtime.invoke_global(&handler, vec![Value::String(buffer_name.to_string())]) {
+            Ok(value) => Ok(value.unwrap_or(Value::Nil)),
+            Err(error) => Err(format!("{error:?}")),
+        })
+    }
+
     fn active_mode_chain(&self) -> Vec<&MajorMode> {
         match &self.active_buffer().mode {
             BufferMode::Named(mode_name) => self.mode_chain(mode_name),
@@ -7077,7 +7114,9 @@ impl Editor {
         if !vim_insert_literal && self.run_direct_lisp_binding(&ks) {
             return;
         }
-        if self.binding_has_prefix(&ks) {
+        // A key that would type text never opens a chord: "SPC /" is a
+        // leader in Vim normal mode, and a space everywhere text is typed.
+        if !self.key_starts_text_insert(key) && self.binding_has_prefix(&ks) {
             self.pending_key = Some(key);
             return;
         }
@@ -7699,6 +7738,35 @@ impl Editor {
             self.undo_stack.remove(0);
         }
         self.redo_stack.clear();
+    }
+
+    /// Replace the whole text of the buffer named `name` as one edit Undo
+    /// takes back (the buffer need not be active), marking it modified and
+    /// keeping the cursor on its line where the text still has it. False
+    /// when no buffer has that name.
+    pub fn replace_buffer_text_undoable(&mut self, name: &str, text: &str) -> bool {
+        let Some(buffer) = self.buffers.iter_mut().find(|buffer| buffer.name == name) else {
+            return false;
+        };
+        let snapshot = TextUndoSnapshot {
+            buffer_id: buffer.id,
+            lines: buffer.lines.clone(),
+            cursor: buffer.cursor,
+            dirty: buffer.dirty,
+        };
+        let (row, col) = buffer.cursor;
+        let scroll_top = buffer.scroll_top;
+        buffer.set_text(text);
+        buffer.scroll_top = scroll_top;
+        let row = row.min(buffer.lines.len().saturating_sub(1));
+        buffer.cursor = (row, col.min(buffer.lines[row].chars().count()));
+        buffer.dirty = true;
+        self.undo_stack.push(snapshot);
+        self.redo_stack.clear();
+        self.finish_typing_undo_group();
+        self.sync_runtime_context();
+        self.mark_needs_redraw();
+        true
     }
 
     fn record_typing_undo_snapshot(&mut self) {
@@ -9634,6 +9702,7 @@ impl Editor {
                     on_key: definition.on_key,
                     inherit: definition.inherit,
                     on_save: definition.on_save,
+                    describe: definition.describe,
                     completions,
                 },
             );

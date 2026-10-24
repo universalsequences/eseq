@@ -151,6 +151,103 @@ pub fn define_form(source: &str, form: &str) -> Result<(String, Defined), String
     }
 }
 
+/// The heads that name what a DGenLisp form defines: `(def x …)`,
+/// `(param x …)`, `(defmacro x …)`.
+const DGEN_DEFINING: &[&str] = &["def", "param", "defmacro"];
+
+/// One top-level DGenLisp form: its head, the name it defines (for `def`,
+/// `param` and `defmacro`), its byte span and 1-based first line.
+struct DgenForm {
+    head: String,
+    name: Option<String>,
+    start_byte: usize,
+    end_byte: usize,
+    line: usize,
+}
+
+fn dgen_forms(source: &str) -> Result<Vec<DgenForm>, String> {
+    let exprs = parse(source)?;
+    let line_starts = line_starts(source);
+    Ok(exprs
+        .iter()
+        .map(|expr| {
+            let span = &expr.origin.primary_span;
+            let items = match &expr.kind {
+                ExprKind::List(items) => items.as_slice(),
+                _ => &[],
+            };
+            let head = items.first().and_then(symbol).unwrap_or_default().to_string();
+            let name = DGEN_DEFINING.contains(&head.as_str()).then(|| items.get(1).and_then(symbol).map(str::to_string)).flatten();
+            DgenForm { head, name, start_byte: span.start_byte, end_byte: span.end_byte, line: line_of(&line_starts, span.start_byte) }
+        })
+        .collect())
+}
+
+/// `source` (DGenLisp) with `form`, one `def`, `param` or `defmacro`, in
+/// place of the form defining the same name. A new name goes after the form
+/// defining `after` when given, else before the first `(out …)` (the DSP
+/// reads top to bottom, and outputs come last), else at the end.
+pub fn define_dgen_form(source: &str, form: &str, after: Option<&str>) -> Result<(String, Defined), String> {
+    let new_forms = dgen_forms(form).map_err(|error| format!("the new form: {error}"))?;
+    let new = match new_forms.as_slice() {
+        [one] => one,
+        [] => return Err("the source holds no form".to_string()),
+        many => return Err(format!("pass exactly one top-level form, got {}; change them one at a time", many.len())),
+    };
+    let Some(name) = &new.name else {
+        return Err(format!(
+            "`({} …)` defines no name; pass a def, param or defmacro (to change an `out`, change the def it outputs)",
+            new.head
+        ));
+    };
+    let text = &form[new.start_byte..new.end_byte];
+    let existing = dgen_forms(source).map_err(|error| format!("the code: {error}"))?;
+    let matches: Vec<&DgenForm> = existing.iter().filter(|old| old.name.as_ref() == Some(name)).collect();
+    match matches.as_slice() {
+        [old] => {
+            let out = format!("{}{}{}", &source[..old.start_byte], text, &source[old.end_byte..]);
+            Ok((out, Defined::Replaced { line: old.line }))
+        }
+        [] => {
+            let at = match after {
+                Some(after) => {
+                    let Some(anchor) = existing.iter().find(|old| old.name.as_deref() == Some(after)) else {
+                        return Err(format!("no form defines `{after}` to put `{name}` after"));
+                    };
+                    Some(anchor.end_byte)
+                }
+                None => existing.iter().find(|old| old.head == "out").map(|out| out.start_byte),
+            };
+            Ok(match at {
+                Some(at) => {
+                    // After an anchor the form starts a new line; before an
+                    // `out` it takes the out's place and the out moves down.
+                    let (before, rest) = source.split_at(at);
+                    let (inserted, line) = if after.is_some() {
+                        (format!("{before}\n{text}{rest}"), before.lines().count() + 1)
+                    } else {
+                        (format!("{before}{text}\n{rest}"), before.lines().count() + 1)
+                    };
+                    (inserted, Defined::Appended { line })
+                }
+                None => {
+                    let mut out = source.trim_end().to_string();
+                    out.push_str("\n");
+                    let line = out.lines().count() + 1;
+                    out.push_str(text);
+                    out.push('\n');
+                    (out, Defined::Appended { line })
+                }
+            })
+        }
+        many => Err(format!(
+            "{} forms define `{name}` (lines {}); remove the extra ones first",
+            many.len(),
+            many.iter().map(|old| old.line.to_string()).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
 /// The name in the source's first form when that form is `(module NAME)`.
 pub fn declared_module(source: &str) -> Option<String> {
     let exprs = parse(source).ok()?;
@@ -354,6 +451,32 @@ fn line_of(line_starts: &[usize], byte: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DSP: &str = "(def gate (in 1 @name gate))
+(param radius @default 0.1 @min 0.001 @max 0.3 @unit m)
+(defmacro onset-of (trigger) (make-history previous) trigger)
+(def young 2.08e11)
+(def air-loss (* young 1e-7))
+(out (* air-loss gate) 1)
+";
+
+    #[test]
+    fn dgen_forms_replace_by_name_and_new_defs_land_before_the_outputs() {
+        let (out, defined) = define_dgen_form(DSP, "(param radius @default 0.2 @min 0.001 @max 0.5 @unit m)", None).unwrap();
+        assert_eq!(defined, Defined::Replaced { line: 2 });
+        assert!(out.contains("(param radius @default 0.2 @min 0.001 @max 0.5 @unit m)\n(defmacro"), "{out}");
+
+        let (out, defined) = define_dgen_form(DSP, "(def wet (* air-loss 0.5))", None).unwrap();
+        assert_eq!(defined, Defined::Appended { line: 6 });
+        assert!(out.contains("(def air-loss (* young 1e-7))\n(def wet (* air-loss 0.5))\n(out "), "{out}");
+
+        let (out, _) = define_dgen_form(DSP, "(def dry 1)", Some("gate")).unwrap();
+        assert!(out.starts_with("(def gate (in 1 @name gate))\n(def dry 1)\n(param"), "{out}");
+
+        assert!(define_dgen_form(DSP, "(out 0 1)", None).unwrap_err().contains("defines no name"));
+        assert!(define_dgen_form(DSP, "(def a 1) (def b 2)", None).unwrap_err().contains("exactly one"));
+        assert!(define_dgen_form(DSP, "(def a 1)", Some("nope")).unwrap_err().contains("no form defines `nope`"));
+    }
 
     #[test]
     fn a_search_names_the_form_around_each_matching_line() {

@@ -81,9 +81,11 @@ const HOST_TOOLS: &[HostTool] = &[
         description: "Read an authoring guide. Topics: `sequencer` (sequencer kinds and their \
             panels: def-kind slots, tick natives, routing, packaging), `eseqlisp` (the language: \
             syntax, reactive state, widgets, modules, gotchas), `customize` (changing how the app \
-            itself looks or behaves: overrides, init.lisp, packages), `instrument`, `effect`. \
-            Read the one for your task before writing code.",
-        params: &[("topic", "string", "sequencer, eseqlisp, customize, instrument or effect", true)],
+            itself looks or behaves: overrides, init.lisp, packages), `instrument`, `effect`, \
+            `patcher` (the patch editor: how boxes and cables map to an instrument's or effect's \
+            DGenLisp, its layout sidecar, reading a patch to the user). Read the one for your task \
+            before writing code.",
+        params: &[("topic", "string", "sequencer, eseqlisp, customize, instrument, effect or patcher", true)],
     },
     HostTool {
         name: "apropos",
@@ -236,6 +238,40 @@ const HOST_TOOLS: &[HostTool] = &[
             ("height", "integer", "The capture's height (default 900)", false),
         ],
     },
+    HostTool {
+        name: "dgen_docs",
+        description: "Look up DGenLisp, the language instruments and effects are written in \
+            (dsp.lisp): operators (`gswitch`, `iota`, `phasor`, `history`), special forms, \
+            @attributes and example patches using them, from the compiler's own API catalog. \
+            Use it before explaining or writing DSP code: DGenLisp is not eseqlisp, so \
+            `apropos` and `describe` do not know it.",
+        params: &[
+            ("query", "string", "Operator names or words, comma-separated, e.g. `gswitch, iota` or `delay`", true),
+            ("limit", "integer", "Results per kind for each query (default 4)", false),
+        ],
+    },
+    HostTool {
+        name: "dgen_values",
+        description: "Work out what DGenLisp defs in a dsp.lisp come to at given param values \
+            (each param missing from `knobs` takes its @default): arithmetic, comparisons, \
+            gswitch, iota and math, vectors element-wise; a def reading a signal (in, \
+            histories, oscillators, macros) is reported as varying per sample. For the knobs the \
+            user has now, use `dgen_values_live`.",
+        params: &[
+            ("path", "string", "The dsp.lisp file", true),
+            ("names", "string", "Defs to work out, comma-separated, e.g. `B, freqs`", true),
+            ("knobs", "object", "Param values by name, e.g. {\"material\": 2}", false),
+        ],
+    },
+    HostTool {
+        name: "view_state",
+        description: "The state a buffer's drawn view reads, as it was last drawn here: every \
+            reactive field its widgets read (defstates, kind fields, host values like SEQ.*) \
+            with its value now. Fields differing only by a number fold into one row. `capture` \
+            the buffer first if it has not been drawn. For the user's own window use \
+            `view_state_live`.",
+        params: &[("buffer", "string", "Buffer name, as for `capture`", true)],
+    },
 ];
 
 /// Import the Lisp registry (and so every tool module it loads). A failure is
@@ -328,6 +364,23 @@ pub(super) fn call(session: &mut HeadlessSession, name: &str, args: &Json) -> To
                 };
                 what_draws(session, &need("buffer")?, capture_size(args), (x as f32, y as f32))
             }
+            "dgen_docs" => {
+                let limit = args.get("limit").and_then(Json::as_u64).unwrap_or(4).clamp(1, 20) as usize;
+                dgen_docs(&need("query")?, limit)?
+            }
+            "dgen_values" => {
+                let path = need("path")?;
+                let source = std::fs::read_to_string(&path).map_err(|why| format!("cannot read {path}: {why}"))?;
+                let names: Vec<String> = need("names")?.split(',').map(str::trim).filter(|name| !name.is_empty()).map(str::to_string).collect();
+                let knobs: std::collections::HashMap<String, f64> = args
+                    .get("knobs")
+                    .and_then(Json::as_object)
+                    .map(|knobs| knobs.iter().filter_map(|(name, value)| Some((name.clone(), value.as_f64()?))).collect())
+                    .unwrap_or_default();
+                let origin = if knobs.is_empty() { "every param at its default".to_string() } else { "the knobs given".to_string() };
+                ToolOutput::text(crate::agent_pane::dgen_values(&source, &knobs, &origin, &names)?)
+            }
+            "view_state" => ToolOutput::text(crate::agent_pane::view_state(&session.editor, &need("buffer")?)?),
             _ => call_lisp_tool(session, name, args),
         })
     }));
@@ -364,7 +417,7 @@ pub(super) fn call(session: &mut HeadlessSession, name: &str, args: &Json) -> To
 fn guide(topic: &str) -> ToolOutput {
     let paths = sequencer::app_paths::app_paths();
     let candidates: Vec<PathBuf> = match topic {
-        "sequencer" | "customize" | "instrument" | "effect" => {
+        "sequencer" | "customize" | "instrument" | "effect" | "patcher" => {
             vec![paths.authoring_dir().join(format!("{topic}-reference.md"))]
         }
         // The bundle carries the language guide beside the authoring
@@ -373,7 +426,7 @@ fn guide(topic: &str) -> ToolOutput {
             paths.authoring_dir().join("eseqlisp-guide.md"),
             paths.factory_root().join("../docs/eseqlisp/GUIDE.md"),
         ],
-        _ => return ToolOutput::error(format!("no guide `{topic}`; topics: sequencer, eseqlisp, customize, instrument, effect")),
+        _ => return ToolOutput::error(format!("no guide `{topic}`; topics: sequencer, eseqlisp, customize, instrument, effect, patcher")),
     };
     match candidates.iter().find_map(|path| std::fs::read_to_string(path).ok()) {
         Some(text) => ToolOutput::text(text),
@@ -1178,6 +1231,20 @@ fn with_log(text: String, log: &str) -> String {
 /// Descriptions are written wrapped in source; send them as one paragraph.
 fn squash(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+
+/// `dgen_docs`: the DGen API catalog's entries for each query.
+fn dgen_docs(query: &str, limit: usize) -> Result<ToolOutput, String> {
+    thread_local! {
+        static REGISTRY: Result<sequencer::agent::tools::AgentToolRegistry, String> =
+            sequencer::agent::tools::AgentToolRegistry::load_default();
+    }
+    let queries: Vec<String> = query.split(',').map(str::trim).filter(|query| !query.is_empty()).map(str::to_string).collect();
+    REGISTRY.with(|registry| {
+        let registry = registry.as_ref().map_err(|why| format!("The DGen API catalog did not load: {why}"))?;
+        Ok(ToolOutput::text(registry.lookup_dgen_docs(&queries, limit).content))
+    })
 }
 
 #[cfg(test)]

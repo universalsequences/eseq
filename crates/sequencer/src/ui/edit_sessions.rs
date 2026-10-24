@@ -1925,3 +1925,141 @@ mod jev_debounce_tests {
         assert!(queued.is_empty());
     }
 }
+
+/// A compiled shape as the inspector spells it, `kind|dims|lanes`
+/// (`signal-tensor|[8]|8 lanes`), as words: `signal-tensor [8], 8 lanes`.
+fn readable_shape(shape: &str) -> String {
+    let mut parts = shape.split('|').map(str::trim).filter(|part| !part.is_empty());
+    let head: Vec<&str> = parts.by_ref().take(2).collect();
+    let lanes: Vec<&str> = parts.collect();
+    match lanes.as_slice() {
+        [] => head.join(" "),
+        _ => format!("{}, {}", head.join(" "), lanes.join(", ")),
+    }
+}
+
+/// The open instrument or effect editor as the agent pane's context names
+/// it: its buffer, what that shows and how it stands, and the guide for it.
+pub(crate) fn agent_pane_view(sessions: &EditSessionState) -> Option<crate::agent_pane::HostView> {
+    let shown = crate::presented::presented(|p| p.editor.get().clone());
+    let (kind, name, path, surface, valid, dirty, playing, guide, session_buffer) =
+        if let Some(session) = &sessions.instrument_edit_session {
+            let run = match session.run_mode {
+                CustomInstrumentRunMode::Instrument => "played by its notes",
+                CustomInstrumentRunMode::FreePatch => "running free",
+            };
+            let playing = format!("on track {}, {run}", session.track + 1);
+            let draft = matches!(session.mode, InstrumentEditMode::CreateDraft { .. });
+            let kind = if draft { "new instrument" } else { "instrument" };
+            (kind, &session.name, &session.path, session.surface, session.visible_revision_valid,
+                session.is_dirty(), playing, "instrument", &session.buffer_name)
+        } else {
+            let session = sessions.effect_edit_session.as_ref()?;
+            let playing = match session.target {
+                EffectEditTarget::Track { track, slot } => format!("in slot {} of track {}", slot + 1, track + 1),
+                EffectEditTarget::Bus { bus, slot } => format!("in slot {} of bus {}", slot + 1, bus + 1),
+            };
+            let draft = matches!(session.mode, EffectEditMode::CreateDraft { .. });
+            let kind = if draft { "new effect" } else { "effect" };
+            (kind, &session.name, &session.path, session.surface, session.visible_revision_valid,
+                session.is_dirty(), playing, "effect", &session.buffer_name)
+        };
+    let what = match surface {
+        EditorSurface::Code => "the DGenLisp code",
+        EditorSurface::Patch => "the patch (boxes and cables over the same DGenLisp)",
+    };
+    let mut about = vec![format!("{what} of {kind} {name} ({}), {playing}", path.display())];
+    about.push(if !shown.error.is_empty() {
+        format!("the last compile failed, so what plays is the last good one: {}", sequencer::agent::harness::clip(&shown.error, 600))
+    } else if valid {
+        "compiled: what plays is what is on screen".to_string()
+    } else {
+        "edited since its last good compile, which is what plays".to_string()
+    });
+    if dirty {
+        about.push("not saved".to_string());
+    }
+    let selected: Vec<String> = shown
+        .selected_node_ids
+        .iter()
+        .zip(&shown.selected_node_texts)
+        .zip(shown.selected_node_shapes.iter().map(Some).chain(std::iter::repeat(None)))
+        .take(12)
+        .map(|((id, text), shape)| match shape.map(|shape| readable_shape(shape)).filter(|shape| !shape.is_empty()) {
+            Some(shape) => format!("box {id} `{text}` ({shape})"),
+            None => format!("box {id} `{text}`"),
+        })
+        .collect();
+    if !selected.is_empty() {
+        about.push(format!("selected: {}", selected.join("; ")));
+    }
+    if let [shape, from, to] = shown.selected_cable.as_slice() {
+        about.push(format!("selected cable: {from} -> {to} ({})", readable_shape(shape)));
+    }
+    if surface == EditorSurface::Patch {
+        about.push(
+            "the patcher buffer draws boxes and has no text: read the generated code in *patcher-emitted:…* if open, \
+             else the file (the last save); edit_dsp needs the Code surface"
+                .to_string(),
+        );
+    }
+    let guide = if surface == EditorSurface::Patch { "patcher" } else { guide };
+    // The presented buffer follows a Code/Patch switch.
+    let buffer = if shown.buffer.is_empty() { session_buffer.clone() } else { shown.buffer.clone() };
+    Some(crate::agent_pane::HostView { buffer, about, guide: guide.to_string() })
+}
+
+#[cfg(test)]
+mod agent_pane_view_tests {
+    use super::*;
+
+    #[test]
+    fn the_open_instrument_editor_says_what_it_shows_where_it_plays_and_how_it_compiled() {
+        let mut sessions = EditSessionState::default();
+        assert!(agent_pane_view(&sessions).is_none());
+        let mut session = InstrumentEditSession::begin_edit_existing(
+            "user:pluck".to_string(),
+            PathBuf::from("/tmp/pluck/dsp.lisp"),
+            instrument_code_buffer_name("user:pluck"),
+            0,
+            2,
+            "(out (in 1) 1)".to_string(),
+            CustomInstrumentRunMode::Instrument,
+            EditorSurface::Code,
+        );
+        session.visible_revision_valid = false;
+        sessions.instrument_edit_session = Some(session);
+        crate::presented::present_editor(&mut eseqlisp::Runtime::new(), |e| {
+            e.buffer = String::new();
+            e.error = "unknown symbol `rnd`".to_string();
+        });
+        let view = agent_pane_view(&sessions).unwrap();
+        crate::presented::present_editor(&mut eseqlisp::Runtime::new(), |e| e.error.clear());
+        assert_eq!(view.buffer, "*instrument-code:user:pluck*");
+        assert_eq!(view.guide, "instrument");
+        assert_eq!(
+            view.about,
+            [
+                "the DGenLisp code of instrument user:pluck (/tmp/pluck/dsp.lisp), on track 3, played by its notes",
+                "the last compile failed, so what plays is the last good one: unknown symbol `rnd`",
+            ]
+        );
+
+        // On the Patch surface: the patcher guide, the selection with its
+        // shape in words, and where the code is.
+        sessions.instrument_edit_session.as_mut().unwrap().surface = EditorSurface::Patch;
+        sessions.instrument_edit_session.as_mut().unwrap().visible_revision_valid = true;
+        crate::presented::present_editor(&mut eseqlisp::Runtime::new(), |e| {
+            e.selected_node_ids = vec!["lfo".into()];
+            e.selected_node_texts = vec!["phasor rate".into()];
+            e.selected_node_shapes = vec!["signal-tensor|[8]|8 lanes".into()];
+            e.selected_cable = vec!["signal|scalar|".into(), "phasor · outlet 1".into(), "* · inlet 2".into()];
+        });
+        let view = agent_pane_view(&sessions).unwrap();
+        crate::presented::present_editor(&mut eseqlisp::Runtime::new(), |e| *e = Default::default());
+        assert_eq!(view.guide, "patcher");
+        assert!(view.about.contains(&"selected: box lfo `phasor rate` (signal-tensor [8], 8 lanes)".to_string()), "{:?}", view.about);
+        assert!(view.about.contains(&"selected cable: phasor · outlet 1 -> * · inlet 2 (signal scalar)".to_string()), "{:?}", view.about);
+        assert!(view.about.iter().any(|fact| fact.contains("edit_dsp needs the Code surface")), "{:?}", view.about);
+    }
+}

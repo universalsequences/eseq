@@ -915,8 +915,8 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
 
     runtime.register_native_with_docs(
         "define-mode",
-        "(define-mode name :read-only bool :live-keys bool :on-enter fn-name :on-key fn-name :inherit parent-mode :on-save fn-name)",
-        "Register a named major mode. :live-keys opts the mode into host live-keyboard shortcuts; :inherit names a parent mode whose keymap, on-key handler, on-save handler and live-keys opt-in apply after this mode's own. :on-save makes save-buffer call the handler (no arguments, the buffer active) instead of writing a file: a truthy result marks the buffer saved, false/nil leaves it modified.",
+        "(define-mode name :read-only bool :live-keys bool :on-enter fn-name :on-key fn-name :inherit parent-mode :on-save fn-name :describe fn-name)",
+        "Register a named major mode. :live-keys opts the mode into host live-keyboard shortcuts; :inherit names a parent mode whose keymap, on-key handler, on-save handler, describer and live-keys opt-in apply after this mode's own. :on-save makes save-buffer call the handler (no arguments, the buffer active) instead of writing a file: a truthy result marks the buffer saved, false/nil leaves it modified. :describe names a function of the buffer's name that says what the buffer shows right now, for the agent pane: a string, or (dict :about \"one line\" :guide \"topic\"), or nil for nothing to add.",
         |args, ctx| {
             let Some(Value::String(name)) = args.first() else {
                 return Err("define-mode expects a name string".to_string());
@@ -927,6 +927,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
             let mut on_key: Option<String> = None;
             let mut inherit: Option<String> = None;
             let mut on_save: Option<String> = None;
+            let mut describe: Option<String> = None;
             let mut i = 1;
             while i < args.len() {
                 match args.get(i) {
@@ -956,6 +957,12 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                         }
                         i += 2;
                     }
+                    Some(Value::Keyword(k)) if k == "describe" => {
+                        if let Some(Value::String(fn_name)) = args.get(i + 1) {
+                            describe = Some(fn_name.clone());
+                        }
+                        i += 2;
+                    }
                     Some(Value::Keyword(k)) if k == "inherit" => {
                         if let Some(Value::String(parent)) = args.get(i + 1) {
                             inherit = Some(parent.clone());
@@ -965,7 +972,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                     _ => i += 1,
                 }
             }
-            ctx.define_mode(name.clone(), read_only, live_keys, on_enter, on_key, inherit, on_save);
+            ctx.define_mode(name.clone(), read_only, live_keys, on_enter, on_key, inherit, on_save, describe);
             Ok(Value::Bool(true))
         },
     );

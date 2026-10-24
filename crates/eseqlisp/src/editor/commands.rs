@@ -409,6 +409,8 @@ pub(crate) fn key_str(key: KeyEvent) -> String {
     }
 
     let key_name = match key.code {
+        // Spelled as bindings spell it: `(bind-key "SPC /" …)`.
+        KeyCode::Char(' ') => "SPC".to_string(),
         KeyCode::Char(c) => c.to_ascii_lowercase().to_string(),
         KeyCode::Enter => "RET".to_string(),
         KeyCode::Backspace => "BS".to_string(),
