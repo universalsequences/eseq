@@ -2337,6 +2337,7 @@ mod tests {
                 let mut harness = Harness::with_track_count(2);
                 let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
                 let mut slot = RackSlotSnapshot {
+                    id: 0,
                     instrument_type: InstrumentType::Sampler,
                     instrument_run_mode: CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0, choke_group: None,

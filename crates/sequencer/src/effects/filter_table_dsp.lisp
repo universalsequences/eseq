@@ -15,6 +15,13 @@
 ;   half-spectrum magnitudes. User audio is transformed into this representation
 ;   offline; phase is deliberately discarded so frame interpolation cannot
 ;   cancel harmonics.
+
+; Tail sleep is safe for both engines: each is a finite FIR (2048-point STFT
+; or a 256-tap minimum-phase kernel) after control-rate smoothers only, with
+; no self-generated sound and no free-running modulation; a param write
+; restarts the hold.
+(effect-tail-sleep)
+
 (def N 2048)
 (def HOP 512)
 (def NBINS 1025)

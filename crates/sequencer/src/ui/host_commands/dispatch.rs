@@ -62,6 +62,7 @@ pub(crate) fn dispatch_custom_host_command(
             crate::agent_pane::handle_command(name, &payload, editor, &host_views)
         }
         n if super::project::COMMANDS.contains(&n) => super::project::handle(name, payload, app, editor, ctx),
+        n if super::project_import::COMMANDS.contains(&n) => super::project_import::handle(name, payload, app, editor, ctx),
         n if super::content_reload::COMMANDS.contains(&n) => super::content_reload::handle(name, payload, app, editor, ctx),
         n if super::instrument_authoring::COMMANDS.contains(&n) => super::instrument_authoring::handle(name, payload, app, editor, ctx),
         n if super::misc::COMMANDS.contains(&n) => super::misc::handle(name, payload, app, editor, ctx),

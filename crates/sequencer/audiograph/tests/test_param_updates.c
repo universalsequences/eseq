@@ -220,6 +220,7 @@ void test_dgen_scalar_param_update_does_not_touch_adjacent_slots() {
   mem[read_idx + 1] = 11.0f;
   mem[read_idx + 2] = 12.0f;
   mem[read_idx + 3] = 13.0f;
+  mem[mirrored_idx] = 20.0f;
   mem[mirrored_idx + 1] = 21.0f;
   mem[mirrored_idx + 2] = 22.0f;
   mem[mirrored_idx + 3] = 23.0f;
@@ -233,7 +234,8 @@ void test_dgen_scalar_param_update_does_not_touch_adjacent_slots() {
   process_next_block(lg, output_buffer, block_size);
 
   assert(mem[read_idx] == 7200.0f);
-  assert(mem[mirrored_idx] == 7200.0f);
+  // Host runtime cells past the redzone are never a param mirror.
+  assert(mem[mirrored_idx] == 20.0f);
   assert(mem[read_idx + 1] == 11.0f);
   assert(mem[read_idx + 2] == 12.0f);
   assert(mem[read_idx + 3] == 13.0f);
@@ -242,7 +244,7 @@ void test_dgen_scalar_param_update_does_not_touch_adjacent_slots() {
   assert(mem[mirrored_idx + 3] == 23.0f);
 
   destroy_live_graph(lg);
-  printf("✓ Scalar DGen param update preserved adjacent read/write slots\n");
+  printf("✓ Scalar DGen param update touched only its own slot\n");
   printf("=== DGen Scalar Parameter Update Slot Isolation Completed Successfully ===\n\n");
 }
 

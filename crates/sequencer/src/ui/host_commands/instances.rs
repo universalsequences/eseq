@@ -10,12 +10,28 @@ use crate::*;
 /// - `instance-duplicate` `{:id n}`
 /// - `instance-rename` `{:id n :label s}` (also what `(set! self.label v)`
 ///   queues)
-/// - `instance-move` `{:id n [:group-id gid]}`: "Move to rack" with a
+/// - `instance-move` `{:id n [:group-id gid] [:bank-id b]}`: "Move to rack" with a
 ///   `:group-id`, "Give back to project" without one
 /// - `instance-open` `{:id n}`: show the instance's view tab (reopening it
 ///   if its × closed it); not an edit
 ///
-/// Create and duplicate also open the new instance's tab.
+/// Project-owned sequencers on/off per bank (docs/rig-spec.md §10):
+///
+/// - `set-instance-parked` `{:id n :value parked [:bank-id b]}`: switch a
+///   project-owned instance off (`:value` true) or on in every scene of the
+///   bank (the playing scene's without one), one undo step
+/// - `instance-activate` `{:id n :from-scene s [:bank-id b]}`: switch it on
+///   in the bank with the settings (document, graph overrides) it has in
+///   scene `s` (0-based), one undo step; `:from-bank-id` in place of
+///   `:from-scene` takes the first scene of that bank that plays it
+/// - `instance-purge-unused` `{[:confirmed true]}`: delete every
+///   project-owned instance every scene switches off, after a confirm that
+///   names them, one undo step
+///
+/// Create and duplicate also open the new instance's tab. A create (and a
+/// move giving an instance back to the project) takes the viewed bank's
+/// `:bank-id`: a project-owned instance plays only there (the playing
+/// scene's bank without one).
 pub(super) const COMMANDS: &[&str] = &[
     "instance-create",
     "instance-delete",
@@ -23,6 +39,9 @@ pub(super) const COMMANDS: &[&str] = &[
     "instance-rename",
     "instance-move",
     "instance-open",
+    "set-instance-parked",
+    "instance-activate",
+    "instance-purge-unused",
 ];
 
 pub(super) fn handle(
@@ -48,6 +67,10 @@ pub(crate) fn apply_on_editor(name: &str, payload: Value, app: &mut app::App, ed
         if let Err(error) = result {
             editor.handle_host_event(HostEvent::Status(error));
         }
+        return;
+    }
+    if name == "instance-purge-unused" && !extract_bool_from_payload(&payload, "confirmed") {
+        ask_to_purge_unused(app, editor);
         return;
     }
     let before = instance_ids(app);
@@ -122,7 +145,8 @@ pub(crate) fn apply_instance_command(
                 None => sequencer::project::ProjectInstanceOwner::Project,
             };
             let label = extract_string_from_payload(payload, "label");
-            let id = app.create_instance_recorded(&kind, owner, label)?;
+            let bank = super::scene_banks::scene_bank_id(payload);
+            let id = app.create_instance_in_bank_recorded(&kind, owner, label, bank)?;
             Ok(format!("Created {}", instance_label(app, id)))
         }
         "instance-delete" => {
@@ -155,7 +179,54 @@ pub(crate) fn apply_instance_command(
                 Some(group_id) => sequencer::project::ProjectInstanceOwner::Rack(group_id as u64),
                 None => sequencer::project::ProjectInstanceOwner::Project,
             };
-            move_instance_status(app, id, owner)
+            let bank = super::scene_banks::scene_bank_id(payload);
+            move_instance_status(app, id, owner, bank)
+        }
+        "set-instance-parked" => {
+            let id = payload_id(payload, name)?;
+            let parked = extract_bool_from_payload(payload, "value");
+            let bank = super::scene_banks::scene_bank_id(payload);
+            let changed = app.set_instance_parked_in_bank_recorded(id, parked, bank)?;
+            if !changed {
+                return Ok(String::new());
+            }
+            Ok(format!(
+                "{} {} in bank {}",
+                instance_label(app, id),
+                if parked { "off" } else { "on" },
+                bank_label(app, bank)
+            ))
+        }
+        "instance-activate" => {
+            let id = payload_id(payload, name)?;
+            // `:from-bank-id`: the first scene of that bank that plays it.
+            let from = match extract_usize_from_payload(payload, "from-scene") {
+                Some(scene) => scene,
+                None => {
+                    let from_bank = extract_usize_from_payload(payload, "from-bank-id")
+                        .ok_or("instance-activate needs a :from-scene or :from-bank-id")?;
+                    app.instance_settings_scene_in_bank(
+                        id,
+                        sequencer::sequencer::SceneBankId(from_bank as u64),
+                    )?
+                }
+            };
+            let bank = super::scene_banks::scene_bank_id(payload);
+            app.activate_instance_in_bank_from_scene_recorded(id, bank, from)?;
+            Ok(format!(
+                "{} on in bank {} with scene {}'s settings",
+                instance_label(app, id),
+                bank_label(app, bank),
+                from + 1
+            ))
+        }
+        "instance-purge-unused" => {
+            let removed = app.purge_unused_instances_recorded()?;
+            Ok(match removed.len() {
+                0 => "No unused sequencers".to_string(),
+                1 => format!("Deleted {}", removed[0].label),
+                count => format!("Deleted {count} unused sequencers"),
+            })
         }
         _ => Err(format!("Unknown instance command {name}")),
     }
@@ -168,9 +239,10 @@ pub(crate) fn move_instance_status(
     app: &mut app::App,
     id: u64,
     owner: sequencer::project::ProjectInstanceOwner,
+    bank: Option<sequencer::sequencer::SceneBankId>,
 ) -> Result<String, String> {
     let unchanged = app.instances.get(id).is_some_and(|instance| instance.owner == owner);
-    app.move_instance_owner_recorded(id, owner)?;
+    app.move_instance_owner_in_bank_recorded(id, owner, bank)?;
     if unchanged {
         return Ok(String::new());
     }
@@ -189,6 +261,13 @@ pub(crate) fn move_instance_status(
 /// for a project-owned instance; `:owner-label` is "project" or the rack's
 /// name; `:registered?` is false for a placeholder whose kind has not
 /// registered (package missing or not attached yet, spec §5).
+///
+/// Per bank on/off of a project-owned instance (docs/rig-spec.md §10), in
+/// the shape a kit's group fields have (`ParkedSet` rows,
+/// `host_kinds::bank_position_list`): `:parked` (off in the playing scene),
+/// `:parked-banks` / `:mixed-banks` (the banks whose every / some scenes
+/// switch it off) and `:unused` (off in every scene: listed for purge). A
+/// rack-owned instance follows its kit and reads on everywhere.
 struct InstanceRow {
     id: u64,
     kind: String,
@@ -196,13 +275,26 @@ struct InstanceRow {
     owner_rack: Option<u64>,
     owner_label: String,
     registered: bool,
+    parking: sequencer::sequencer::BankParkingRow,
 }
 
 fn instance_rows(app: &app::App) -> Vec<InstanceRow> {
+    let parking: Vec<sequencer::sequencer::BankParkingRow> = app.state.with_project_scenes(|scenes| {
+        let ranges = scenes.bank_ranges();
+        app.instances
+            .list
+            .iter()
+            .map(|instance| match instance.owner.rack() {
+                Some(_) => Default::default(),
+                None => scenes.bank_parking_row(sequencer::sequencer::ParkedSet::Instances, instance.id, &ranges),
+            })
+            .collect()
+    });
     app.instances
         .list
         .iter()
-        .map(|instance| {
+        .zip(parking)
+        .map(|(instance, parking)| {
             let owner_rack = instance.owner.rack();
             InstanceRow {
                 id: instance.id,
@@ -215,41 +307,67 @@ fn instance_rows(app: &app::App) -> Vec<InstanceRow> {
                     None => "project".to_string(),
                 },
                 registered: sequencer::lisp_host::kind_is_registered(&instance.kind),
+                parking,
             }
         })
         .collect()
 }
 
-fn instances_value(rows: &[InstanceRow]) -> Value {
-    Value::List(
-        rows.iter()
-            .map(|row| {
-                std::rc::Rc::new(std::cell::RefCell::new(crate::values::map_value(vec![
-                    ("id", Value::Number(row.id as f64)),
-                    ("kind", Value::String(row.kind.clone())),
-                    ("label", Value::String(row.label.clone())),
-                    (
-                        "owner-rack",
-                        row.owner_rack.map(|gid| Value::Number(gid as f64)).unwrap_or(Value::Nil),
-                    ),
-                    ("owner-label", Value::String(row.owner_label.clone())),
-                    ("registered?", Value::Bool(row.registered)),
-                ])))
-            })
-            .collect(),
-    )
+fn instance_row_value(row: &InstanceRow, bank_ids: &[Option<eseqlisp::vm::InstanceId>]) -> Value {
+    crate::values::map_value(vec![
+        ("id", Value::Number(row.id as f64)),
+        ("kind", Value::String(row.kind.clone())),
+        ("label", Value::String(row.label.clone())),
+        (
+            "owner-rack",
+            row.owner_rack.map(|gid| Value::Number(gid as f64)).unwrap_or(Value::Nil),
+        ),
+        ("owner-label", Value::String(row.owner_label.clone())),
+        ("registered?", Value::Bool(row.registered)),
+        ("parked", Value::Bool(row.parking.parked)),
+        ("parked-banks", crate::host_kinds::bank_position_list(bank_ids, &row.parking.off_banks)),
+        ("mixed-banks", crate::host_kinds::bank_position_list(bank_ids, &row.parking.mixed_banks)),
+        ("unused", Value::Bool(row.parking.unused)),
+    ])
 }
 
-/// The `project.instances` value when it differs from the one `last`
-/// fingerprints (updating `last`; `None` always differs), else `None`. Runs every host kinds
-/// sync it is observed, so the fingerprint borrows instead of building rows: each instance's
-/// fields, its owner rack's name, and ONE registry version read (which moves
-/// whenever any kind's registration does) stand in for `:registered?`.
-/// Rows are only built on a change.
-pub(crate) fn instances_value_if_changed(app: &app::App, last: &mut Option<u64>) -> Option<Value> {
+/// `project.instances` (rows in list order) and `project.instances-by-id`
+/// (the same rows keyed by their id as a string, for `instance-row`).
+fn instances_values(rows: &[InstanceRow], bank_ids: &[Option<eseqlisp::vm::InstanceId>]) -> (Value, Value) {
+    let rows: Vec<(u64, std::rc::Rc<std::cell::RefCell<Value>>)> = rows
+        .iter()
+        .map(|row| (row.id, std::rc::Rc::new(std::cell::RefCell::new(instance_row_value(row, bank_ids)))))
+        .collect();
+    let by_id = Value::Map(rows.iter().map(|(id, row)| (id.to_string(), row.clone())).collect());
+    (Value::List(rows.into_iter().map(|(_, row)| row).collect()), by_id)
+}
+
+/// `project.instances` and `project.instances-by-id` when they differ from
+/// the ones `last` fingerprints (updating `last`; `None` always differs),
+/// else `None`. Runs every host kinds sync they are observed, so the
+/// fingerprint borrows instead of building rows: each instance's fields, its
+/// owner rack's name, ONE registry version read (which moves whenever any
+/// kind's registration does) for `:registered?`, and a parking digest (every
+/// scene's parked instances, the bank spans, the playing scene and the bank
+/// instances) for the per-bank fields. Rows are only built on a change.
+pub(crate) fn instances_value_if_changed(
+    app: &app::App,
+    bank_ids: &[Option<eseqlisp::vm::InstanceId>],
+    last: &mut Option<u64>,
+) -> Option<(Value, Value)> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     sequencer::lisp_host::kind_registry_version().hash(&mut hasher);
+    app.state.with_project_scenes(|scenes| {
+        scenes.current_scene.hash(&mut hasher);
+        for scene in &scenes.scenes {
+            scene.parked_instances.hash(&mut hasher);
+        }
+        for bank in scenes.scene_banks() {
+            bank.len.hash(&mut hasher);
+        }
+    });
+    bank_ids.hash(&mut hasher);
     for instance in &app.instances.list {
         let owner_rack = instance.owner.rack();
         let owner_name = owner_rack.and_then(|group_id| {
@@ -263,7 +381,57 @@ pub(crate) fn instances_value_if_changed(app: &app::App, last: &mut Option<u64>)
         return None;
     }
     *last = Some(fingerprint);
-    Some(instances_value(&instance_rows(app)))
+    Some(instances_values(&instance_rows(app), bank_ids))
+}
+
+/// A bank's label for a status line: its auto label (A, B, …), the playing
+/// scene's bank for `None`.
+fn bank_label(app: &app::App, bank: Option<sequencer::sequencer::SceneBankId>) -> String {
+    app.state.with_project_scenes(|scenes| {
+        let bank = bank.or_else(|| scenes.scene_bank_containing(scenes.current_scene));
+        scenes
+            .scene_banks()
+            .iter()
+            .position(|b| Some(b.id) == bank)
+            .map(sequencer::sequencer::scene_bank_auto_label)
+            .unwrap_or_default()
+    })
+}
+
+/// "Delete 2 unused sequencers (density 1, jaki 2)?" (`instance-purge-unused`).
+pub(crate) fn purge_confirm_message(labels: &[String]) -> String {
+    match labels {
+        [one] => format!("Delete the unused sequencer {one}? It is off in every scene."),
+        _ => format!(
+            "Delete {} unused sequencers ({})? They are off in every scene.",
+            labels.len(),
+            labels.join(", ")
+        ),
+    }
+}
+
+/// Ask before purging: the confirm names every instance it would delete
+/// (§10 "explicit purge"); its OK re-sends the command confirmed.
+fn ask_to_purge_unused(app: &app::App, editor: &mut Editor) {
+    let labels: Vec<String> = app
+        .unused_instances()
+        .into_iter()
+        .map(|id| instance_label(app, id))
+        .collect();
+    if labels.is_empty() {
+        editor.handle_host_event(HostEvent::Status("No unused sequencers".to_string()));
+        return;
+    }
+    super::file_menu::activate_dialog_tile(editor);
+    let form = format!(
+        "(eseq.file-dialogs/open-confirm {} (lambda () (host-command \"instance-purge-unused\" (dict :confirmed true))))",
+        super::file_menu::lisp_string(&purge_confirm_message(&labels)),
+    );
+    if let Err(error) = editor.runtime_mut().eval_str(&form) {
+        editor.show_transient_message(format!("Could not ask to purge: {error:?}"));
+    }
+    editor.refresh_runtime_side_effects();
+    editor.mark_needs_redraw();
 }
 
 fn instance_label(app: &app::App, id: u64) -> String {

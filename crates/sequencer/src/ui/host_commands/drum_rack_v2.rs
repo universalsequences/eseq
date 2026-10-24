@@ -19,11 +19,54 @@ pub(super) const COMMANDS: &[&str] = &[
     "save-rack-clip-as",
     "delete-rack-clip",
     "rename-rack-clips-in-order",
+    // Kits on/off per bank (docs/rig-spec.md §6).
+    "set-kit-parked",
 ];
 
 /// How long a pad-grid hit sounds before its note-off. The pad grid is a
 /// performance view, not a latch: a click is a hit, exactly as a key press is.
 const PAD_HIT_DURATION: Duration = Duration::from_millis(180);
+
+/// `convert-rack-to-clips {:group-id}`'s model edit (recorded), with the
+/// status it reports.
+fn convert_rack_to_clips(payload: &Value, app: &mut app::App) -> Result<String, String> {
+    let group_id = extract_usize_from_payload(payload, "group-id")
+        .map(|id| id as u64)
+        .ok_or("convert-rack-to-clips needs a group id")?;
+    let created = app.convert_rack_to_clips_recorded(group_id)?;
+    Ok(format!(
+        "{} now has {created} clip(s)",
+        group_name(app, group_id).unwrap_or_else(|| "Rack".to_string())
+    ))
+}
+
+/// `set-kit-parked {:group-id :value :bank}`'s model edit (recorded); no
+/// `:bank` means the bank of the playing scene.
+fn set_kit_parked(payload: &Value, app: &mut app::App) -> Result<(), String> {
+    let group_id = extract_usize_from_payload(payload, "group-id")
+        .map(|id| id as u64)
+        .ok_or("set-kit-parked needs a group id")?;
+    let parked = extract_bool_from_payload(payload, "value");
+    let bank = super::scene_banks::scene_bank_id(payload);
+    app.set_kit_parked_in_bank_recorded(group_id, parked, bank)
+        .map(|_| ())
+        .map_err(|error| format!("Could not switch the kit: {error}"))
+}
+
+/// The model edit of kit command `name` (`set-kit-parked`,
+/// `convert-rack-to-clips`), without the live handler's UI follow-up: the
+/// capture harness's route. `None` for any other command.
+pub(crate) fn apply_kit_command(
+    name: &str,
+    payload: &Value,
+    app: &mut app::App,
+) -> Option<Result<(), String>> {
+    match name {
+        "convert-rack-to-clips" => Some(convert_rack_to_clips(payload, app).map(|_| ())),
+        "set-kit-parked" => Some(set_kit_parked(payload, app)),
+        _ => None,
+    }
+}
 
 pub(super) fn handle(
     name: &str,
@@ -194,7 +237,7 @@ pub(super) fn handle(
             // move, with nothing to re-run (instance-kinds spec §5).
             if app.instances.contains(sequencer_id) {
                 let owner = sequencer::project::ProjectInstanceOwner::Project;
-                match super::instances::move_instance_status(app, sequencer_id, owner) {
+                match super::instances::move_instance_status(app, sequencer_id, owner, super::scene_banks::scene_bank_id(&payload)) {
                     Ok(status) => {
                         super::instances::sync_instances_to_editor(app, editor);
                         sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
@@ -240,7 +283,7 @@ pub(super) fn handle(
             };
             if app.instances.contains(sequencer_id) {
                 let owner = sequencer::project::ProjectInstanceOwner::Rack(group_id);
-                match super::instances::move_instance_status(app, sequencer_id, owner) {
+                match super::instances::move_instance_status(app, sequencer_id, owner, super::scene_banks::scene_bank_id(&payload)) {
                     Ok(status) => {
                         super::instances::sync_instances_to_editor(app, editor);
                         sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
@@ -281,25 +324,13 @@ pub(super) fn handle(
         }
         // Legacy rack -> clips, once (§4.3). One undoable patch, no audible
         // change: every scene keeps playing exactly what it played.
-        "convert-rack-to-clips" => {
-            let Some(group_id) = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64)
-            else {
-                editor.handle_host_event(HostEvent::Status(
-                    "convert-rack-to-clips needs a group id".to_string(),
-                ));
-                return;
-            };
-            match app.convert_rack_to_clips_recorded(group_id) {
-                Ok(created) => {
-                    sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
-                    editor.handle_host_event(HostEvent::Status(format!(
-                        "{} now has {created} clip(s)",
-                        group_name(app, group_id).unwrap_or_else(|| "Rack".to_string())
-                    )));
-                }
-                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+        "convert-rack-to-clips" => match convert_rack_to_clips(&payload, app) {
+            Ok(status) => {
+                sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+                editor.handle_host_event(HostEvent::Status(status));
             }
-        }
+            Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+        },
         // Clip launch (§4.4): set the pointer in the current scene, then
         // relaunch the current scene through the ordinary scene-launch path,
         // so it rides quantized launch with no new boundary code.
@@ -332,6 +363,16 @@ pub(super) fn handle(
             );
             super::scenes::handle("switch-pattern", relaunch, app, editor, ctx);
         }
+        // Switch a kit off (`:value` true) or on in every scene of the
+        // viewed bank (`:bank-id`, else the playing scene's), one undo step.
+        "set-kit-parked" => match set_kit_parked(&payload, app) {
+            Ok(()) => {
+                let rt = editor.runtime_mut();
+                rt.run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+            }
+            Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+        },
         "save-rack-clip-as" => {
             let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
             let name = extract_string_from_payload(&payload, "name").unwrap_or_default();
@@ -398,13 +439,8 @@ pub(super) fn handle(
                         // topology BEFORE running its scripts: a rack-owned
                         // script reads its rack's group (its tab wears the
                         // rack's name) and must see the members it now has.
-                        sync_after_rack_structure_change(app, editor, ctx, None);
-                        let mut failures = attach_rack_instance_packages(editor, app, group_id);
-                        failures.extend(evaluate_rack_sequencers(editor, app, group_id));
-                        refresh_after_rack_scripts(editor);
-                        // The attach above edited the import record; re-list
-                        // the Packages surfaces the way an explicit attach does.
-                        super::packages::refresh_package_listings(editor, ctx);
+                        let ids = rack_instance_ids(app, group_id);
+                        let failures = finish_imported_racks(app, editor, ctx, &[group_id], &ids, None);
                         let mut status = format!("Auditioned kit '{name}'");
                         if !failures.is_empty() {
                             status = format!("{status} ({})", failures.join("; "));
@@ -432,13 +468,8 @@ pub(super) fn handle(
                         // runtime has not heard of yet fails that eval, which
                         // rolls the script's panel and tab back while the
                         // def-sequencer it already published stays behind.
-                        sync_after_rack_structure_change(app, editor, ctx, focus);
-                        failures.extend(attach_rack_instance_packages(editor, app, group_id));
-                        failures.extend(evaluate_rack_sequencers(editor, app, group_id));
-                        refresh_after_rack_scripts(editor);
-                        // The attach above edited the import record; re-list
-                        // the Packages surfaces the way an explicit attach does.
-                        super::packages::refresh_package_listings(editor, ctx);
+                        let ids = rack_instance_ids(app, group_id);
+                        failures.extend(finish_imported_racks(app, editor, ctx, &[group_id], &ids, focus));
                         let status = if failures.is_empty() {
                             format!("Loaded kit '{name}'")
                         } else {
@@ -607,15 +638,14 @@ fn evaluate_rack_sequencers(
 /// stays a placeholder and publishes once the package is installed and
 /// attached. The instances are then published and mirrored into the UI
 /// (records, view buffers, tabs) right away.
-fn attach_rack_instance_packages(
+fn attach_instance_packages(
     editor: &mut Editor,
     app: &mut app::App,
-    group_id: u64,
+    instances: &[sequencer::project::ProjectInstance],
 ) -> Vec<String> {
     let mut notes = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let instances = app.rack_instances(group_id);
-    for instance in &instances {
+    for instance in instances {
         if !seen.insert(instance.kind.clone()) {
             continue;
         }
@@ -652,6 +682,45 @@ fn attach_rack_instance_packages(
 fn refresh_after_rack_scripts(editor: &mut Editor) {
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
+}
+
+/// The host half of loading kits (a `.kit` file, or a controlled import,
+/// docs/rig-spec.md §8): republish the topology first (a rack-owned script
+/// reads its rack's group), then attach the packages `instances` need (a
+/// kind no installed package declares is reported: its instance waits as a
+/// placeholder), evaluate each kit's recorded scripts and settle the UI.
+/// Returns what failed.
+pub(crate) fn finish_imported_racks(
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+    groups: &[u64],
+    instances: &[u64],
+    focus: Option<usize>,
+) -> Vec<String> {
+    sync_after_rack_structure_change(app, editor, ctx, focus);
+    let records: Vec<sequencer::project::ProjectInstance> = app
+        .instances
+        .list
+        .iter()
+        .filter(|instance| instances.contains(&instance.id))
+        .cloned()
+        .collect();
+    let mut failures = attach_instance_packages(editor, app, &records);
+    for group_id in groups {
+        if app.groups.iter().any(|group| group.id == *group_id && group.is_rack()) {
+            failures.extend(evaluate_rack_sequencers(editor, app, *group_id));
+        }
+    }
+    refresh_after_rack_scripts(editor);
+    // The attaches above edited the import record; re-list the Packages
+    // surfaces the way an explicit attach does.
+    super::packages::refresh_package_listings(editor, ctx);
+    failures
+}
+
+fn rack_instance_ids(app: &app::App, group_id: u64) -> Vec<u64> {
+    app.rack_instances(group_id).iter().map(|instance| instance.id).collect()
 }
 
 pub(super) fn group_name(app: &app::App, group_id: u64) -> Option<String> {
@@ -709,7 +778,7 @@ pub(super) fn sync_after_rack_structure_change(
     ctx.meters.cached_track_peak_levels =
         read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);
     ctx.meters.cached_bus_peak_levels =
-        read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+        read_bus_peak_levels(app.graph.lg, app);
     (ctx.meters.cached_modulator_phases, ctx.meters.cached_modulator_levels) =
         read_modulator_display_values(app.graph.lg, app);
     ctx.meters.last_meter_poll_at = Instant::now();

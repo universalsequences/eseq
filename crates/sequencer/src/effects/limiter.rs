@@ -70,8 +70,7 @@ unsafe extern "C" fn limiter_process(
     let out1 = *out.add(1);
 
     if *s.add(STATE_ENABLED) <= 0.5 {
-        std::ptr::copy_nonoverlapping(in0 as *const f32, out0, nf);
-        std::ptr::copy_nonoverlapping(in1 as *const f32, out1, nf);
+        crate::effects::silence::passthrough(inp, out, 2, nframes);
         *s.add(STATE_GAIN_DB) = 0.0;
         return;
     }

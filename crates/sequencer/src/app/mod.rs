@@ -55,10 +55,17 @@ mod project_save;
 pub use project_save::ProjectSaveOutcome;
 mod break_kits;
 mod rack_clips;
+mod kit_parking;
+mod instance_parking;
+pub mod project_import;
 #[cfg(test)]
 mod launch_benchmark;
 pub mod rack_grooves;
 mod rack_sequencers;
+mod rack_swap;
+#[cfg(test)]
+pub(crate) mod test_rig;
+pub use rack_swap::{SwapKind, SwapOutcome, SwapScope};
 mod bus_outputs;
 pub mod pending_capture;
 pub mod retrospective;
@@ -81,6 +88,18 @@ pub use edit::try_apply_command;
 
 const BAR_HEIGHT: usize = 8;
 const COL_WIDTH: u16 = 3;
+
+/// `base` when `taken` refuses it, else `base 2`, `base 3`, ...: the first
+/// free name (copies, imports).
+pub(crate) fn first_free_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+    (2..)
+        .map(|n| format!("{base} {n}"))
+        .find(|candidate| !taken(candidate))
+        .expect("an unbounded range always finds a free name")
+}
 
 fn param_unit(param: &crate::effects::ParamDescriptor) -> Option<String> {
     match &param.kind {
@@ -450,7 +469,7 @@ mod engine_registry_tests {
 
     fn manifest() -> DGenManifest {
         DGenManifest {
-            effect_latency_samples: None,
+            effect_latency_samples: None, tail_sleep: None,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 2,
@@ -1104,6 +1123,9 @@ pub struct App {
     pub sample_path_registry: HashMap<String, PathBuf>,
     pub sample_buffer_path_registry: HashMap<i32, PathBuf>,
     blank_sample_buffers: HashSet<i32>,
+    /// Samples controlled imports decoded, shared by content
+    /// (docs/rig-spec.md §8, `project_import::assets`).
+    pub(crate) import_samples: project_import::ImportSampleCache,
     pub current_project_name: Option<String>,
     project_saves: project_save::ProjectSaves,
     pub ui: UiState,
@@ -1872,29 +1894,51 @@ impl DeviceIdentityRegistry {
         }
     }
 
-    /// Forget `track`'s rack slot `slot` (a deleted slot) and its effects'
-    /// identities; the slots after it keep theirs, each one position down,
-    /// so no identity passes to another slot.
-    pub fn remove_rack_slot(&mut self, track: crate::sequencer::TrackId, slot: usize) {
+    /// Re-key `track`'s rack slot identities by a positional edit: each
+    /// keeps its identity at its new position, so no identity passes to
+    /// another slot. Returns the identity of a deleted slot.
+    fn shift_rack_slots(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        shift: crate::process::RackSlotShift,
+    ) -> Option<crate::sequencer::RackSlotId> {
         self.generation += 1;
-        let shifted = self
+        let bound = self
             .rack_slots
             .iter()
-            .filter(|((owner, at), _)| *owner == track && *at >= slot)
+            .filter(|((owner, _), _)| *owner == track)
             .map(|((_, at), id)| (*at, *id))
             .collect::<Vec<_>>();
-        for (at, id) in &shifted {
+        for (at, id) in &bound {
             self.rack_slots.remove(&(track, *at));
             self.rack_slot_locations.remove(id);
         }
-        for (at, id) in shifted {
-            if at == slot {
-                self.forget_rack_slot_effects(id);
-                continue;
+        let mut removed = None;
+        for (at, id) in bound {
+            match shift.apply(at) {
+                Some(moved) => {
+                    self.rack_slots.insert((track, moved), id);
+                    self.rack_slot_locations.insert(id, (track, moved));
+                }
+                None => removed = Some(id),
             }
-            self.rack_slots.insert((track, at - 1), id);
-            self.rack_slot_locations.insert(id, (track, at - 1));
         }
+        removed
+    }
+
+    /// Forget `track`'s rack slot `slot` (a deleted slot) and its effects'
+    /// identities; the slots after it keep theirs, each one position down.
+    pub fn remove_rack_slot(&mut self, track: crate::sequencer::TrackId, slot: usize) {
+        if let Some(id) = self.shift_rack_slots(track, crate::process::RackSlotShift::Removed(slot)) {
+            self.forget_rack_slot_effects(id);
+        }
+    }
+
+    /// A slot was inserted at `slot` on `track` (eseq-ka5t.9): the slots at
+    /// and after it keep their identities one position down, and `slot`
+    /// itself has none until first asked for.
+    pub fn insert_rack_slot(&mut self, track: crate::sequencer::TrackId, slot: usize) {
+        self.shift_rack_slots(track, crate::process::RackSlotShift::Inserted(slot));
     }
 
     pub(crate) fn clear_track(&mut self, track: crate::sequencer::TrackId) {
@@ -2083,9 +2127,11 @@ impl App {
         let scene = match target {
             PatternLaunchTarget::Scene { scene }
             | PatternLaunchTarget::SceneTracks { scene, .. } => Some(*scene),
-            // Override launches carry no scene: they launch a pool pattern
-            // into the lane without touching the cell assignments.
-            PatternLaunchTarget::TrackPattern { .. } => None,
+            // Override launches and stops carry no scene: they launch a pool
+            // pattern into (or silence) the lane without touching the cells.
+            PatternLaunchTarget::TrackPattern { .. } | PatternLaunchTarget::TrackStop { .. } => {
+                None
+            }
         };
         if let Some(scene) = scene {
             if scene >= self.state.scene_count() {
@@ -2188,6 +2234,26 @@ impl App {
                 }
                 self.state.effective_pattern_sample_ids(num_tracks)
             }
+            PatternLaunchTarget::TrackStop { track } => {
+                if *track >= num_tracks {
+                    return Err(PatternLaunchError::TrackOutOfRange { track: *track });
+                }
+                // The mirror of a scheduler-applied stop skips the epoch
+                // bump, as the SceneTracks mirror does.
+                let stopped = self.state.stop_track_lane(
+                    *track,
+                    num_tracks,
+                    &self.graph.track_buffer_ids,
+                    &self.graph.track_sample_rates,
+                    &self.tracks,
+                    &self.graph.track_instrument_types,
+                    !mirror,
+                );
+                if !stopped {
+                    return Err(PatternLaunchError::TrackOutOfRange { track: *track });
+                }
+                self.state.effective_pattern_sample_ids(num_tracks)
+            }
         };
 
         self.graph_controller().apply_sample_ids(&sample_ids);
@@ -2248,6 +2314,12 @@ impl App {
                 PatternLaunchTarget::TrackPattern { track, .. } => {
                     // `launch_track_pattern` already pinned the lane's
                     // override to the launched pattern id.
+                    self.state.latch_song_manual_override([*track]);
+                }
+                PatternLaunchTarget::TrackStop { track } => {
+                    // A stop is the performer's too. Its override is empty,
+                    // so the masked save-backs skip the blanked lane as
+                    // stale rather than writing silence into a cell.
                     self.state.latch_song_manual_override([*track]);
                 }
             }
@@ -2362,7 +2434,8 @@ impl App {
                     PatternLaunchTarget::SceneTracks { tracks, .. } => {
                         self.state.bump_track_launch_generations(tracks.iter().copied())
                     }
-                    PatternLaunchTarget::TrackPattern { track, .. } => {
+                    PatternLaunchTarget::TrackPattern { track, .. }
+                    | PatternLaunchTarget::TrackStop { track } => {
                         self.state.bump_track_launch_generations([*track])
                     }
                 }
@@ -2602,11 +2675,11 @@ impl App {
     }
 
     pub fn submit_sample_analysis(&self, loaded: &crate::instruments::sampler::LoadedSample) {
-        self.sample_analysis.submit(AnalysisJob {
-            buffer_id: loaded.buffer_id,
-            samples: Arc::new(loaded.mono_samples.clone()),
-            sample_rate: loaded.sample_rate,
-        });
+        self.sample_analysis.submit(AnalysisJob::new(
+            loaded.buffer_id,
+            Arc::new(loaded.mono_samples.clone()),
+            loaded.sample_rate,
+        ));
     }
 
     pub fn reset_sampler_bpm_for_analysis(&self, track: usize) {
@@ -2993,6 +3066,7 @@ impl App {
             sample_path_registry: HashMap::new(),
             sample_buffer_path_registry: HashMap::new(),
             blank_sample_buffers: HashSet::new(),
+            import_samples: Default::default(),
             current_project_name: None,
             project_saves: Default::default(),
             ui: UiState {

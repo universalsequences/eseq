@@ -363,6 +363,7 @@ fn rack_effect_plock_resolution_requires_matching_parameter_identity() {
 
 fn rack_routing_test_slot() -> RackSlotSnapshot {
     RackSlotSnapshot {
+        id: 0,
         instrument_type: InstrumentType::Sampler,
         instrument_run_mode: CustomInstrumentRunMode::Instrument,
         instrument_base_note_offset: 0.0,
@@ -502,6 +503,7 @@ fn frozen_rack_macro_rows_preserve_automation_and_follow_only_explicit_live_edit
         data.rack_track = Some(rack);
         crate::sequencer::SequencerSnapshot::capture_from_track_pattern_data(
             &state, &[data], Vec::new(), Vec::new(), Vec::new(), Default::default(), Default::default(),
+            Default::default(),
         )
     };
     let first = capture(0.2, 0.3);

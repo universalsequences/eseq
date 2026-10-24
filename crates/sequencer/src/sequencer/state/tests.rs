@@ -342,6 +342,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: std::collections::BTreeMap::from([
                     (
                         "survives".to_string(),
@@ -1017,6 +1018,7 @@
     fn sample_rack_track_snapshot() -> RackTrackSnapshot {
         RackTrackSnapshot::new(
             vec![RackSlotSnapshot {
+                id: 0,
                 instrument_type: InstrumentType::Custom,
                 instrument_run_mode: CustomInstrumentRunMode::Instrument,
                 instrument_base_note_offset: 7.0,
@@ -1136,6 +1138,7 @@
         instrument_slot_id: usize,
     ) -> RackSlotSnapshot {
         RackSlotSnapshot {
+            id: 0,
             instrument_type: InstrumentType::Sampler,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: -12.0,
@@ -2094,8 +2097,12 @@
         assert!(other.slots[0].sample_id.is_none());
     }
 
+    /// eseq-ka5t.9 replaces `:only-here`'s pattern park: the insert
+    /// primitive behind "replace for this bank" puts one new slot id at a
+    /// position in every pattern, plays nowhere until enabled, and shifts
+    /// the rack macro targets after it with their device.
     #[test]
-    fn parked_rack_slot_plays_only_in_the_current_pattern() {
+    fn inserted_rack_slot_is_one_id_in_every_pattern_and_plays_nowhere() {
         let state = make_state_with_tracks(1);
         state.replace_pattern_repository(
             vec![
@@ -2105,27 +2112,58 @@
             0,
         );
         state.restore_current_pattern_from_repository().unwrap();
-        state.set_rack_track_for_all_pattern_snapshots(0, sample_rack_track_snapshot());
-
-        state.append_rack_slot_for_all_pattern_snapshots(
-            0,
-            sample_sampler_rack_slot(123, "swap-in", 48_000, 88),
-        );
-        assert!(state.park_rack_slot_outside_current_pattern(0, 1));
-
-        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+        let mut rack = sample_rack_track_snapshot();
+        rack.slots.push(sample_sampler_rack_slot(123, "second", 48_000, 88));
+        rack.slots[0].gain = 0.4;
+        rack.macros[0].mappings.push(RackMacroMapping {
+            target: RackMacroTarget::SlotParam { slot: 1, param: "gain".to_string() },
+            range_min: 0.0,
+            range_max: 1.0,
+            curve: RackMacroCurve::Linear,
+        });
+        state.set_rack_track_for_all_pattern_snapshots(0, rack);
+        let before: Vec<u64> = state.pattern.rack_tracks.lock().unwrap()[0]
             .as_ref()
             .unwrap()
-            .clone();
-        assert!(live.slots[1].enabled);
+            .slots
+            .iter()
+            .map(|slot| slot.id)
+            .collect();
 
-        let repository = state.export_pattern_repository();
-        let current = repository[0].rack_tracks[0].as_ref().unwrap();
-        let other = repository[1].rack_tracks[0].as_ref().unwrap();
-        assert_eq!(other.slots.len(), 2, "slot lists stay aligned");
-        assert!(current.slots[1].enabled);
-        assert!(!other.slots[1].enabled);
-        assert!(other.slots[0].enabled, "only the new slot is parked");
+        let id = state
+            .insert_rack_slot_for_all_pattern_snapshots(
+                0,
+                1,
+                sample_sampler_rack_slot(124, "inserted", 48_000, 89),
+                Some(0),
+            )
+            .expect("inserts");
+
+        assert!(!before.contains(&id), "a fresh id");
+        let live = state.pattern.rack_tracks.lock().unwrap()[0].as_ref().unwrap().clone();
+        assert_eq!(
+            live.slots.iter().map(|slot| slot.id).collect::<Vec<_>>(),
+            vec![before[0], id, before[1]]
+        );
+        assert_eq!(live.slots[1].gain, 0.4, "the replaced slot's controls carry over");
+        assert_eq!(
+            live.macros[0].mappings[0].target,
+            RackMacroTarget::SlotParam { slot: 2, param: "gain".to_string() },
+            "the macro still drives the device it drove"
+        );
+        for snapshot in state.export_pattern_repository() {
+            let rack = snapshot.rack_tracks[0].as_ref().unwrap();
+            assert_eq!(rack.slots.iter().map(|slot| slot.id).collect::<Vec<_>>(), vec![before[0], id, before[1]]);
+            assert_eq!(rack.macros[0].mappings[0].target, live.macros[0].mappings[0].target);
+        }
+        state.with_project_scenes(|scenes| {
+            for scene in 0..scenes.scenes.len() {
+                let entry = scenes.scene_slot_enable(scene, 0).expect("materialized entry");
+                assert!(!entry.contains(&id), "scene {scene} does not play the new slot yet");
+                assert!(entry.contains(&before[0]));
+            }
+        });
+        assert_eq!(state.live_rack_slot_enabled(0, 1), Some(false));
     }
 
     #[test]
@@ -2149,6 +2187,7 @@
         state.set_rack_track_for_all_pattern_snapshots(0, initial);
 
         let replacement = RackSlotSnapshot {
+            id: 0,
             instrument_type: InstrumentType::Sampler,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: -12.0,
@@ -3408,6 +3447,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: std::collections::BTreeMap::new(),
             }],
         }
@@ -3431,6 +3471,7 @@
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: std::collections::BTreeMap::from([(
                     port.to_string(),
                     Some(crate::process::ParamTarget::EffectParam {
@@ -5636,6 +5677,7 @@
         let inserted = state
             .clone_pattern_in_scene_bank(
                 SceneBankId(4),
+                SceneSwapInheritance::Source(state.playing_scene()),
                 1,
                 &[-1],
                 &[44_100],
@@ -5842,7 +5884,7 @@
         let mut scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
         let next_scene_id = scenes.next_scene_id;
 
-        assert!(scenes.new_scene_in_bank(SceneBankId(1)).unwrap_err().contains("24 scenes"));
+        assert!(scenes.new_scene_in_bank(SceneBankId(1), SceneSwapInheritance::Source(scenes.current_scene)).unwrap_err().contains("24 scenes"));
         assert_eq!(scenes.scenes.len(), MAX_SCENES_PER_BANK);
         assert_eq!(scenes.banks[0].len, MAX_SCENES_PER_BANK);
         assert_eq!(scenes.next_scene_id, next_scene_id);
@@ -5862,7 +5904,7 @@
         ]);
         let old_second = scenes.scenes[1].id;
 
-        let inserted = scenes.new_scene_in_bank(SceneBankId(8)).unwrap();
+        let inserted = scenes.new_scene_in_bank(SceneBankId(8), SceneSwapInheritance::Source(scenes.current_scene)).unwrap();
         assert_eq!(inserted, 1);
         assert_eq!(scenes.scenes[2].id, old_second);
         assert_eq!(scenes.banks.iter().map(|bank| bank.len).collect::<Vec<_>>(), vec![1, 1, 1]);

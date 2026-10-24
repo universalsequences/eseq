@@ -5829,6 +5829,7 @@ pub(crate) fn init_runtime(
     );
 
     register_song_natives(&mut runtime);
+    crate::project_import_ui::register_project_import_natives(&mut runtime);
 
     // `(set! self.label v)` on a kind instance is a rename: an undoable
     // project edit the host applies, then pushes back into the record

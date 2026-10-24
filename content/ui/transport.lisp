@@ -55,7 +55,8 @@
 ;; Shared scene-bank view state (see that module's header). A state/accessor
 ;; hub with no effect-buffer, and ui/main.lisp reaches it through this import
 ;; before the transport body runs.
-(import eseq.scene-banks :refer (scene-viewed-bank view-scene-bank! view-new-scene-bank!))
+(import eseq.scene-banks :refer (scene-viewed-bank view-scene-bank! view-new-scene-bank!
+                                 show-all-tracks toggle-show-all-tracks!))
 (import eseq.view-kit :refer (open-menu! menu-of nothing listed?))
 (import eseq.kinds :refer (transport master engine song project scenes banks launch!
                            delete-scene! launch-quantize-options record-quantize-options))
@@ -766,7 +767,14 @@
     (menu-item "Delete bank"
       :key "scene-bank-delete-action"
       :disabled (not (scene-viewed-bank-deletable?))
-      :on-select (lambda (event) (delete-viewed-scene-bank)))))
+      :on-select (lambda (event) (delete-viewed-scene-bank)))
+    ;; Bank-scoped display (docs/rig-spec.md §9).
+    (menu-item "Show all tracks"
+      :key "scene-bank-show-all-tracks"
+      :checked show-all-tracks
+      :on-select (lambda (event)
+        (set! bank-ops-menu.open false)
+        (toggle-show-all-tracks!)))))
 
 (def scene-bank-selector (b)
   (box :key "scene-bank-selector"

@@ -490,17 +490,8 @@ pub(crate) fn song_take_lane_states(app: &app::App) -> Vec<u8> {
     states
 }
 
-pub(crate) fn scene_bank_auto_label(mut index: usize) -> String {
-    let mut reversed = Vec::new();
-    loop {
-        reversed.push(b'A' + (index % 26) as u8);
-        if index < 26 {
-            break;
-        }
-        index = index / 26 - 1;
-    }
-    reversed.reverse();
-    String::from_utf8(reversed).expect("scene bank labels contain only ASCII letters")
+pub(crate) fn scene_bank_auto_label(index: usize) -> String {
+    sequencer::sequencer::scene_bank_auto_label(index)
 }
 
 /// A scene bank's display label: its auto label (`A`, `B`, …), with its
@@ -523,7 +514,9 @@ pub(crate) fn queued_transport_scene(state: &SequencerState) -> Option<usize> {
         .and_then(|target| match target {
             PatternLaunchTarget::Scene { scene }
             | PatternLaunchTarget::SceneTracks { scene, .. } => Some(scene),
-            PatternLaunchTarget::TrackPattern { .. } => None,
+            PatternLaunchTarget::TrackPattern { .. } | PatternLaunchTarget::TrackStop { .. } => {
+                None
+            }
         })
 }
 
@@ -541,7 +534,7 @@ pub(crate) fn queued_track_clip(state: &SequencerState, track: usize) -> Option<
             state.scene_track_pattern_id(scene, track).map(|id| id.0)
         }
         PatternLaunchTarget::TrackPattern { pattern, .. } => Some(pattern),
-        PatternLaunchTarget::Scene { .. } => None,
+        PatternLaunchTarget::Scene { .. } | PatternLaunchTarget::TrackStop { .. } => None,
     }
 }
 

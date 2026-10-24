@@ -258,8 +258,7 @@ unsafe extern "C" fn compressor_process(
     let out1 = *out.add(1);
 
     if *s.add(STATE_ENABLED) <= 0.5 {
-        std::ptr::copy_nonoverlapping(in0 as *const f32, out0, nf);
-        std::ptr::copy_nonoverlapping(in1 as *const f32, out1, nf);
+        crate::effects::silence::passthrough(inp, out, 2, nframes);
         *s.add(STATE_ENV) = 0.0;
         *s.add(STATE_GAIN_FAST_DB) = 0.0;
         *s.add(STATE_GAIN_SLOW_DB) = 0.0;

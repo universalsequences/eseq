@@ -536,6 +536,8 @@ impl HostKinds {
             }
             let list = instance_list(all[first..].iter().copied());
             pusher.push(track_id, f::TRACK_CELLS, list);
+            let playing = cells.iter().any(|cell| cell.active_effective);
+            pusher.push(track_id, f::TRACK_CLIP_PLAYING, Value::Bool(playing));
         }
         if all != self.song.cells {
             self.song.cell_observed.reset();

@@ -547,6 +547,9 @@ impl SequencerState {
         };
         next.tracks[track] = Arc::new(next_track);
         next.transport = self.capture_transport_snapshot();
+        // The recaptured track starts unparked: parking changes publish in
+        // full, so the cloned snapshot's parked set is the playing scene's.
+        next.apply_track_parking(track);
         self.publish_scheduler_snapshot_arc(Arc::new(next))
     }
 
@@ -605,17 +608,19 @@ impl SequencerState {
             self.pending_coalesced_publish.store(true, Ordering::Release);
             return self.latest_scheduler_snapshot();
         }
-        self.publish_scheduler_snapshot_arc(Arc::new(
-            SequencerSnapshot::capture_from_track_pattern_data(
-                self,
-                tracks,
-                mod_connections,
-                neural_networks,
-                graph_overrides,
-                scene_slots,
-                project_process_chain,
-            ),
-        ))
+        let snapshot = SequencerSnapshot::capture_from_track_pattern_data(
+            self,
+            tracks,
+            mod_connections,
+            neural_networks,
+            graph_overrides,
+            scene_slots,
+            project_process_chain,
+            // The live scene's switched-off kits and project-owned
+            // instances (docs/rig-spec.md §6, §10).
+            self.current_scene_parking(),
+        );
+        self.publish_scheduler_snapshot_arc(Arc::new(snapshot))
     }
 
     pub fn current_neural_networks(&self) -> Vec<ProjectNeuralNetwork> {

@@ -11,8 +11,9 @@
 (import eseq.kinds :refer (tracks groups graph-param-named graph-edge-to graph-quantize-options
                            set-graph-params!))
 (import eseq.view-kit :refer (index-of))
+(import eseq.scene-banks :refer (scene-viewed-bank bank-tracks))
 
-(export route-tracks route-track route-label route-options node-route-label set-route-label!
+(export route-tracks route-track route-label route-options route-menu-tracks node-route-label set-route-label!
         weight-rows set-weight! column cycle-text cycle-labels rack-name
         res-options factor-options set-param-on-nodes! scale-delays! shift-timebases!)
 
@@ -27,8 +28,20 @@
 (def route-label (g t)
   (if g.owner (str (+ t.index 1) " " t.name) (str "Track " (+ t.index 1))))
 
+;; The tracks a route menu lists: a rack-owned graph's members all (they
+;; follow their kit's on/off together), else the tracks the viewed bank uses
+;; (docs/rig-spec.md §9) plus every track a node of g routes to now and the
+;; tracks of `keep` (a list), so each control's menu shows its value. Picks
+;; map back by label over every route track (route-track), so a hidden track
+;; keeps its index.
+(def route-menu-tracks (g &key (keep (list)))
+  (if g.owner
+    (route-tracks g)
+    (bank-tracks (scene-viewed-bank)
+      (append keep (filter (lambda (t) t) (map (lambda (n) n.route) g.nodes))))))
+
 (def route-options (g)
-  (append (map (lambda (t) (route-label g t)) (route-tracks g)) (list "Off")))
+  (append (map (lambda (t) (route-label g t)) (route-menu-tracks g)) (list "Off")))
 
 (def node-route-label (n)
   (let ((t n.route)) (if t (route-label n.graph t) "Off")))

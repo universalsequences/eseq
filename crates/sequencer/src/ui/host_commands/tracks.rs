@@ -100,7 +100,7 @@ fn sync_after_track_topology_delete(
     ctx.meters.cached_track_peak_levels =
         read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);
     ctx.meters.cached_bus_peak_levels =
-        read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+        read_bus_peak_levels(app.graph.lg, app);
     (ctx.meters.cached_modulator_phases, ctx.meters.cached_modulator_levels) =
         read_modulator_display_values(app.graph.lg, app);
     ctx.meters.last_meter_poll_at = Instant::now();
@@ -459,6 +459,46 @@ pub(super) fn handle(
                 extract_bool_from_payload(&payload, "preserve-track-selection");
             match (track, instrument.as_deref()) {
                 (Some(track), Some("sampler")) => {
+                    // The viewed bank only, when another bank plays the
+                    // track (docs/rig-spec.md §4), as every other swap.
+                    let bank = super::scene_banks::scene_bank_id(&payload);
+                    match app.swap_track_to_builtin_sampler_for_bank(track, bank) {
+                        Ok(None) => {}
+                        Ok(Some(outcome)) => {
+                            sync_after_instrument_track_apply_with_selection(
+                                &mut app,
+                                &mut editor,
+                                &state,
+                                track,
+                                &current_track,
+                                &mut *ctx.track_names,
+                                &track_pan_ids,
+                                &record_armed,
+                                &accumulator_names,
+                                &ui_epoch,
+                                lg_raw,
+                                preserve_track_selection,
+                            );
+                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            show_browser_tab(editor, "samples");
+                            editor.handle_host_event(HostEvent::Status(
+                                if outcome.kind == app::SwapKind::Content {
+                                    "Sampler already active".to_string()
+                                } else {
+                                    "Replaced the instrument for this bank with a sampler"
+                                        .to_string()
+                                },
+                            ));
+                            super::rack::show_kept_banks_notice(&app, &mut editor, &outcome);
+                            return;
+                        }
+                        Err(error) => {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Cannot convert track to sampler for this bank: {error}"
+                            )));
+                            return;
+                        }
+                    }
                     match load_or_convert_sampler_track(
                         &mut app,
                         &mut editor,
@@ -609,6 +649,68 @@ pub(super) fn handle(
                             &current_track,
                             &ui_epoch,
                         );
+                        return;
+                    }
+                }
+            }
+            // A drop on a track another bank plays changes the viewed bank
+            // only (docs/rig-spec.md §4): a plain track becomes an
+            // Instrument Rack first, a rack track swaps its playing slot.
+            if name == "swap-track-instrument" {
+                if let (Some(track), Some(instrument_name)) = (
+                    extract_usize_from_payload(&payload, "track"),
+                    extract_string_from_payload(&payload, "name")
+                        .map(|name| sequencer::lisp_host::pin_instrument_for_new_track(&name)),
+                ) {
+                    let bank = super::scene_banks::scene_bank_id(&payload);
+                    let preserve_track_selection =
+                        extract_bool_from_payload(&payload, "preserve-track-selection");
+                    let swapped = app
+                        .swap_track_to_saved_instrument_for_bank(track, &instrument_name, bank)
+                        .transpose();
+                    if let Some(swapped) = swapped {
+                        show_loading(editor, "");
+                        match swapped {
+                            Ok(outcome) => {
+                                let preset_error = preset.as_deref().and_then(|preset| {
+                                    crate::state_values::load_instrument_preset_into_rack_slot(
+                                        &mut app,
+                                        track,
+                                        outcome.slot,
+                                        &instrument_name,
+                                        preset,
+                                    )
+                                    .err()
+                                });
+                                sync_after_instrument_track_apply_with_selection(
+                                    &mut app,
+                                    &mut editor,
+                                    &state,
+                                    track,
+                                    &current_track,
+                                    &mut *ctx.track_names,
+                                    &track_pan_ids,
+                                    &record_armed,
+                                    &accumulator_names,
+                                    &ui_epoch,
+                                    lg_raw,
+                                    preserve_track_selection,
+                                );
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.handle_host_event(HostEvent::Status(match preset_error {
+                                    Some(error) => format!("Error loading preset: {error}"),
+                                    None => format!(
+                                        "Replaced {} for this bank with {}",
+                                        if outcome.converted { "the instrument" } else { "the rack layer" },
+                                        instrument_display_name(&instrument_name)
+                                    ),
+                                }));
+                                super::rack::show_kept_banks_notice(&app, &mut editor, &outcome);
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                "Error swapping instrument for this bank: {error}"
+                            ))),
+                        }
                         return;
                     }
                 }

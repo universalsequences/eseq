@@ -229,10 +229,19 @@ impl SequencerState {
         track: usize,
         rack_track: RackTrackSnapshot,
     ) {
+        // A whole new rack: its slots get ids (fresh past the largest it
+        // holds), and scene state naming the old rack's slots is replaced
+        // by entries written from the new rack's own flags (below).
+        let mut rack_track = rack_track;
+        let mut next = rack_track.max_slot_id();
+        crate::sequencer::state::slot_enable::assign_slot_ids(&mut rack_track.slots, &[], &mut next);
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        for scene in &mut scenes.scenes {
+            scene.slot_enable.remove(&track);
+        }
         if let Some(live_rack_track) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
             *live_rack_track = Some(rack_track.clone());
         }
-        let mut scenes = self.pattern.scenes.lock().unwrap();
         let Some(pool) = scenes.track_pools.get_mut(track) else {
             return;
         };
@@ -249,6 +258,9 @@ impl SequencerState {
             prepare_patch_for_rack(patch);
             patch.rack_track = Some(rack_config.clone());
         }
+        // Every scene owns the new rack's device set from the start; the
+        // stored flags are only its creation default (rig spec §3.2).
+        scenes.materialize_track_slot_enable(track);
     }
 
     pub fn replace_instrument_container_with_rack(
@@ -341,6 +353,8 @@ impl SequencerState {
             let mut track_sound_state = data.track_sound_state.clone();
             track_sound_state.engine_id = engine_id;
             let mut slot = RackSlotSnapshot {
+                // The track's only slot, the same device in every pattern.
+                id: 1,
                 instrument_type,
                 instrument_run_mode,
                 instrument_base_note_offset: data.instrument_base_note_offset,
@@ -431,6 +445,7 @@ impl SequencerState {
         track: usize,
         slot: RackSlotSnapshot,
     ) -> bool {
+        let slot = self.with_fresh_rack_slot_id(track, slot);
         if self
             .pattern
             .rack_tracks
@@ -501,6 +516,7 @@ impl SequencerState {
         track: usize,
         slot: RackSlotSnapshot,
     ) {
+        let slot = self.with_fresh_rack_slot_id(track, slot);
         if let Some(live_rack_track) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
             match live_rack_track {
                 Some(rack_track) => rack_track.slots.push(slot.clone()),
@@ -532,38 +548,36 @@ impl SequencerState {
                 }
             }
         }
+        // An appended slot plays wherever its stored flag says, in every
+        // scene (rig spec §2 "add": enabled everywhere): scenes that own the
+        // track's device set gain it, and every other scene gets an entry.
+        if slot.enabled {
+            for scene in &mut scenes.scenes {
+                if let Some(set) = scene.slot_enable.get_mut(&track) {
+                    set.insert(slot.id);
+                }
+            }
+        }
+        scenes.materialize_track_slot_enable(track);
     }
 
-    /// Switch rack slot `slot_idx` off in every Patch except the one the
-    /// track's effective pattern plays, leaving the live slot as it is. A
-    /// slot added this way sounds only where it was added (docs/rig-spec.md
-    /// §4); patterns that share the current Patch share the slot's state.
-    /// Returns false when the track has no effective pattern (nothing changes).
-    pub fn park_rack_slot_outside_current_pattern(&self, track: usize, slot_idx: usize) -> bool {
-        let mut scenes = self.pattern.scenes.lock().unwrap();
-        let Some(id) = scenes.effective_pattern_id(track) else {
-            return false;
-        };
-        let Some(pool) = scenes.track_pools.get_mut(track) else {
-            return false;
-        };
-        let Some(current) = pool.refs(id).map(|sound| sound.patch) else {
-            return false;
-        };
-        for (patch_id, patch) in pool.sounds.patches.iter_mut() {
-            if *patch_id == current {
-                continue;
-            }
-            let Some(slot) = Arc::make_mut(patch)
-                .rack_track
-                .as_mut()
-                .and_then(|rack| rack.slots.get_mut(slot_idx))
-            else {
-                continue;
-            };
-            slot.enabled = false;
+    /// `slot` with a stable id: its own when it has one, else one past the
+    /// largest id the track uses anywhere (pools and live mirror).
+    fn with_fresh_rack_slot_id(&self, track: usize, mut slot: RackSlotSnapshot) -> RackSlotSnapshot {
+        if slot.id != 0 {
+            return slot;
         }
-        true
+        let pooled = self.pattern.scenes.lock().unwrap().max_rack_slot_id(track);
+        let live = self
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .map_or(0, RackTrackSnapshot::max_slot_id);
+        slot.id = pooled.max(live) + 1;
+        slot
     }
 
     pub fn remove_rack_slot_from_all_pattern_snapshots(
@@ -571,26 +585,28 @@ impl SequencerState {
         track: usize,
         slot_idx: usize,
     ) -> bool {
-        let mut removed = false;
+        let mut removed = None;
         if let Some(Some(live_rack_track)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track)
         {
             if slot_idx < live_rack_track.slots.len() {
-                live_rack_track.slots.remove(slot_idx);
-                remove_rack_macro_slot_targets(&mut live_rack_track.macros, slot_idx);
-                removed = true;
+                removed = Some(live_rack_track.slots.remove(slot_idx).id);
+                remap_rack_macro_slot_targets(&mut live_rack_track.macros, crate::process::RackSlotShift::Removed(slot_idx));
             }
         }
-        if !removed {
+        let Some(removed_id) = removed else {
             return false;
-        }
+        };
 
         let mut scenes = self.pattern.scenes.lock().unwrap();
+        if removed_id != 0 {
+            scenes.forget_rack_slot_id(track, removed_id);
+        }
         if let Some(pool) = scenes.track_pools.get_mut(track) {
             for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
                 if let Some(rack_track) = patch.rack_track.as_mut() {
                     if slot_idx < rack_track.slots.len() {
                         rack_track.slots.remove(slot_idx);
-                        remove_rack_macro_slot_targets(&mut rack_track.macros, slot_idx);
+                        remap_rack_macro_slot_targets(&mut rack_track.macros, crate::process::RackSlotShift::Removed(slot_idx));
                     }
                 }
             }
@@ -628,7 +644,7 @@ impl SequencerState {
         if let Some(Some(live_rack_track)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track)
         {
             live_rack_track.slots.remove(slot_idx);
-            remove_rack_macro_slot_targets(&mut live_rack_track.macros, slot_idx);
+            remap_rack_macro_slot_targets(&mut live_rack_track.macros, crate::process::RackSlotShift::Removed(slot_idx));
         }
 
         let mut scenes = self.pattern.scenes.lock().unwrap();
@@ -645,7 +661,7 @@ impl SequencerState {
             .as_mut()
             .expect("validated current rack track before rack slot removal");
         rack_track.slots.remove(slot_idx);
-        remove_rack_macro_slot_targets(&mut rack_track.macros, slot_idx);
+        remap_rack_macro_slot_targets(&mut rack_track.macros, crate::process::RackSlotShift::Removed(slot_idx));
         true
     }
 
@@ -1239,10 +1255,19 @@ impl SequencerState {
                 })?;
             patterns.push((*pattern_id, slot));
         }
+        let scenes_enabled = scenes
+            .scenes
+            .iter()
+            .filter_map(|scene| {
+                let set = scene.slot_enable.get(&track)?;
+                Some((scene.id, set.contains(&live.id)))
+            })
+            .collect();
         Ok(RackSlotPatternStateSnapshot {
             slot_index,
             live,
             patterns,
+            scenes_enabled,
         })
     }
 
@@ -1366,6 +1391,15 @@ impl SequencerState {
                 .and_then(|rack| rack.slots.get_mut(snapshot.slot_index))
                 .expect("rack pattern topology was validated");
             sync_slot(slot, saved);
+        }
+        if snapshot.live.id != 0 {
+            scenes.set_rack_slot_enabled_where(track, snapshot.live.id, |_, id| {
+                snapshot
+                    .scenes_enabled
+                    .iter()
+                    .find(|(scene, _)| *scene == id)
+                    .map(|(_, enabled)| *enabled)
+            });
         }
         drop(scenes);
         let mut racks = self.pattern.rack_tracks.lock().unwrap();

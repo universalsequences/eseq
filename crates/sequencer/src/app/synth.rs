@@ -792,11 +792,17 @@ impl App {
 
     pub fn push_rack_slot_solo_mutes(&self, track: usize) {
         let solos = {
-            let racks = self.state.pattern.rack_tracks.lock().unwrap();
-            let Some(rack) = racks.get(track).and_then(Option::as_ref) else { return };
             // A parked slot never sounds, so its solo must not mute the
-            // enabled slots around it (eseq-bw9v).
-            rack.slots.iter().map(|slot| slot.enabled && slot.solo).collect::<Vec<_>>()
+            // enabled slots around it (eseq-bw9v). Parked = disabled in the
+            // playing scene (docs/rig-spec.md §3.2).
+            let solos = self.state.with_resolved_live_rack(track, |rack, entry| {
+                rack.slots
+                    .iter()
+                    .map(|slot| crate::sequencer::resolve_slot_enabled(slot, entry) && slot.solo)
+                    .collect::<Vec<_>>()
+            });
+            let Some(solos) = solos else { return };
+            solos
         };
         let has_solo = solos.iter().any(|solo| *solo);
         let Some(track_nodes) = self.graph.track_node_ids.get(track) else {
@@ -864,36 +870,50 @@ impl App {
         updated
     }
 
-    /// eseq-bw9v: flip a slot's live-set gate. The audio thread stops
-    /// triggering the slot on the next scheduler snapshot; the FX bypass is
-    /// pushed here too so a slot disabled while the track is silent does not
-    /// keep running its chain until the next trigger repushes it.
-    pub fn set_rack_slot_enabled(&mut self, track: usize, slot_idx: usize, value: bool) -> bool {
-        let updated = self
+    /// eseq-ka5t.12: switch rack slot `slot_idx` of `track` on or off in
+    /// every scene of `bank` (the viewed bank; `None`: the bank holding the
+    /// playing scene), as ONE scene-structure undo step. Scene state, not the
+    /// pattern: other banks keep playing what they played (docs/rig-spec.md
+    /// §3.2, §4 "a drop changes only the viewed bank"). The audio thread
+    /// derives the slot's FX gate and the rack's solo mutes from the
+    /// published snapshot. Returns whether anything changed.
+    pub fn set_rack_slot_enabled_in_bank_recorded(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        value: bool,
+        bank: Option<crate::sequencer::SceneBankId>,
+    ) -> Result<bool, String> {
+        let slot_id = self
             .state
-            .update_live_rack_slot(track, slot_idx, |slot| slot.enabled = value);
-        if !updated {
-            return false;
+            .live_rack_slot_id(track, slot_idx)
+            .ok_or_else(|| format!("Track {} has no rack slot {}", track + 1, slot_idx + 1))?;
+        let (_, range) = self.bank_scene_range(bank)?;
+        let changes = self.state.with_project_scenes(|scenes| {
+            scenes.rack_slot_enable_would_change(track, slot_id, value, range.clone())
+        });
+        if !changes {
+            return Ok(false);
         }
-        self.push_rack_slot_fx_gate(track, slot_idx);
-        self.push_rack_slot_solo_mutes(track);
+        let changed = self.apply_recorded_scene_structure_mutation(
+            if value { "Enable rack slot in bank" } else { "Disable rack slot in bank" },
+            |app| Ok(app.state.set_rack_slot_enabled_in_scenes(track, slot_id, value, range)),
+        )?;
         self.state.publish_scheduler_snapshot();
-        true
+        Ok(changed)
     }
 
     /// Push each slot effect's `enabled` node param for the live slot's
-    /// enable state: 0 while the slot is parked, the effect's own stored value
-    /// once it plays again (eseq-bw9v).
+    /// enable state in the playing scene: 0 while the slot is parked, the
+    /// effect's own stored value once it plays (eseq-bw9v). For paths that
+    /// rebuild a slot's chain (load); scene changes are handled audio-side.
     pub fn push_rack_slot_fx_gate(&self, track: usize, slot_idx: usize) {
-        let slot = {
-            let racks = self.state.pattern.rack_tracks.lock().unwrap();
-            racks
-                .get(track)
-                .and_then(Option::as_ref)
-                .and_then(|rack| rack.slots.get(slot_idx))
-                .cloned()
-        };
-        if let Some(slot) = slot {
+        let lg = self.graph.lg.0;
+        self.state.with_resolved_live_rack(track, |rack, entry| {
+            let Some(slot) = rack.slots.get(slot_idx) else {
+                return;
+            };
+            let enabled = crate::sequencer::resolve_slot_enabled(slot, entry);
             for (effect, descriptor) in slot.effect_slots.iter().zip(&slot.effect_descriptors) {
                 let Some(param_idx) = descriptor.enabled_param_idx() else {
                     continue;
@@ -908,10 +928,10 @@ impl App {
                     continue;
                 }
                 let stored = effect.defaults.get(param_idx).copied().unwrap_or(1.0);
-                let fvalue = if slot.enabled { stored } else { 0.0 };
+                let fvalue = if enabled { stored } else { 0.0 };
                 unsafe {
                     crate::audiograph::params_push_wrapper(
-                        self.graph.lg.0,
+                        lg,
                         crate::audiograph::ParamMsg {
                             idx: idx as u64,
                             logical_id: effect.node_id as u64,
@@ -920,7 +940,7 @@ impl App {
                     );
                 }
             }
-        }
+        });
     }
 
     pub fn set_rack_slot_solo(&mut self, track: usize, slot_idx: usize, value: bool) -> bool {

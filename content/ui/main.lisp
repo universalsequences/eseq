@@ -41,6 +41,9 @@
 (import eseq.manual)
 (import eseq.theme-editor)
 (import eseq.agent-pane)
+;; The chrome around every kind instance's view: a project-owned
+;; sequencer's bank-scoped power toggle (docs/rig-spec.md §10).
+(import eseq.instance-frame)
 
 ;; Deliberately command-only for now: Patch Learn has no button in the patch
 ;; editor. Invoke this while the instrument patcher buffer is active.

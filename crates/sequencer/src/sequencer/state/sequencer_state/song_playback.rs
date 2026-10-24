@@ -19,6 +19,10 @@ struct RowStaging {
     lane_offsets: Vec<f64>,
     track_data: Vec<TrackPatternData>,
     silenced: Vec<bool>,
+    /// The kits and project-owned instances the row's scene switches off
+    /// (docs/rig-spec.md §6, §10; an
+    /// unscened row: the playing scene's, as for its slot enables).
+    parking: crate::sequencer::SceneParking,
     mod_connections: Vec<ModConnection>,
     neural_networks: Vec<crate::neural::ProjectNeuralNetwork>,
     graph_overrides: Vec<crate::graph::ProjectGraphOverrides>,
@@ -350,6 +354,13 @@ fn stage_runtime_song_rows(song: &ProjectSong, scenes: &ProjectScenes) -> Result
                     }
                 }
             }
+            // The row's scene owns which rack slots play (docs/rig-spec.md
+            // §3.2). An unscened row keeps the playing scene, as its
+            // transport does, so its slots are the playing scene's.
+            let slot_scene = row.scene.unwrap_or(scenes.current_scene);
+            for (track, data) in track_data.iter_mut().enumerate() {
+                scenes.resolve_scene_track_pattern(slot_scene, track, data);
+            }
             staged.push(RowStaging {
                 id: row.id,
                 start_beat: sub_start,
@@ -360,6 +371,7 @@ fn stage_runtime_song_rows(song: &ProjectSong, scenes: &ProjectScenes) -> Result
                 lane_offsets,
                 track_data,
                 silenced,
+                parking: scenes.scene_parking(slot_scene),
                 mod_connections: scene
                     .map(|scene| scene.mod_connections.clone())
                     .unwrap_or_default(),
@@ -422,6 +434,7 @@ impl SequencerState {
                 staging.graph_overrides,
                 staging.scene_slots,
                 staging.project_process_chain,
+                staging.parking,
             );
             // Row snapshots are only ever scheduled while the song transport
             // is playing; stamp them so the deterministic clock treats them

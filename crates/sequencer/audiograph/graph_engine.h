@@ -30,6 +30,10 @@ typedef struct {
   // not vouch for the frames a longer one reads.
   uint64_t silent_pass;
   int silent_frames;
+  // Declared lane shape (ap_set_output_shape): valid only in the render pass
+  // equal to shape_pass, like silent_pass.
+  uint64_t shape_pass;
+  int shape;
 } LiveEdge;
 
 typedef struct RTNode {
@@ -69,6 +73,10 @@ typedef struct RTNode {
   float *null_out;
   int null_out_capacity;
   uint32_t io_generation;  // Bumped per IO rebuild; see ap_current_node_io_generation
+  // Bumped whenever a param or bulk state write changes this node's state
+  // (apply_params, apply_write_node_state); a write of identical bits does
+  // not count. See ap_current_node_state_writes.
+  uint32_t state_writes;
 
   // Output meter: 0 = unmetered, otherwise (slot index + 1) into
   // LiveGraph.node_meters. Zeroed with the node, so a reused node id starts

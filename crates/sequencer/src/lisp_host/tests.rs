@@ -2493,7 +2493,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn dgen_init_message_honors_param_span() {
         let manifest = super::DGenManifest {
-            effect_latency_samples: None,
+            effect_latency_samples: None, tail_sleep: None,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 2,
@@ -2563,7 +2563,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn voice_init_message_round_trips_through_dgenlisp_init() {
         let total_memory_slots = 16;
         let manifest = super::DGenManifest {
-            effect_latency_samples: None,
+            effect_latency_samples: None, tail_sleep: None,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 2,
@@ -2699,10 +2699,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
     #[test]
     fn dgen_total_state_slots_is_header_plus_single_span_plus_redzone() {
-        // ABI v1: one memory span (the old split read/write pair is gone).
+        // ABI v1: one memory span (the old split read/write pair is gone),
+        // then the host's runtime tail (the tail-sleep counter).
         assert_eq!(
             super::dgen_total_state_slots(16),
-            super::HEADER_SLOTS + 16 + super::DGEN_STATE_REDZONE_SLOTS
+            super::HEADER_SLOTS + 16 + super::DGEN_STATE_REDZONE_SLOTS + super::DGEN_TAIL_SLOTS
         );
     }
 
@@ -13795,6 +13796,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             fanout: Default::default(),
             unbound_ports: Default::default(),
             expr_source: None,
+            owner_instance: None,
             bindings: std::collections::BTreeMap::new(),
         };
         let mut bypassed = slot(3, "third");

@@ -673,6 +673,125 @@ pub struct ProcessEffectiveSend {
 /// the slot's output range (its `lo`/`hi` inlets, else 0..1) into `lo..hi`
 /// and *set* on the target. Lets one generator drive several parameters
 /// with their own ranges ("rand → velocity 0.1..1 and → retrig 4..8").
+/// A positional edit of a track's Instrument Rack slots: everything that
+/// names a slot by position follows its device (eseq-ka5t.9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RackSlotShift {
+    /// A slot was inserted at this position: slots at or after it move down.
+    Inserted(usize),
+    /// The slot at this position was deleted: slots after it move up.
+    Removed(usize),
+}
+
+impl RackSlotShift {
+    /// Where a slot at `slot` is after the edit (`None`: it was deleted).
+    pub fn apply(self, slot: usize) -> Option<usize> {
+        match self {
+            Self::Inserted(at) if slot >= at => Some(slot + 1),
+            Self::Removed(at) if slot == at => None,
+            Self::Removed(at) if slot > at => Some(slot - 1),
+            _ => Some(slot),
+        }
+    }
+}
+
+/// What a [`RackSlotShift`] does to one target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RackSlotRemap {
+    /// Not a rack slot target, or one the edit leaves where it is.
+    Unchanged,
+    /// The target's slot moved here.
+    Moved(usize),
+    /// The target's slot was deleted.
+    Removed,
+}
+
+impl ParamTarget {
+    /// The rack slot position a slot target names.
+    pub fn rack_slot(&self) -> Option<usize> {
+        match self {
+            Self::RackSlotParam { slot, .. } | Self::RackSlotInstrumentParam { slot, .. } => {
+                Some(*slot)
+            }
+            _ => None,
+        }
+    }
+
+    /// What `shift` does to this target, without changing it.
+    pub fn rack_slot_remap(&self, shift: RackSlotShift) -> RackSlotRemap {
+        match self.rack_slot() {
+            None => RackSlotRemap::Unchanged,
+            Some(slot) => match shift.apply(slot) {
+                None => RackSlotRemap::Removed,
+                Some(moved) if moved == slot => RackSlotRemap::Unchanged,
+                Some(moved) => RackSlotRemap::Moved(moved),
+            },
+        }
+    }
+
+    /// Apply `shift`: a moved target takes its new position; a removed one
+    /// is left for the caller to drop (the remap says so).
+    pub fn shift_rack_slot(&mut self, shift: RackSlotShift) -> RackSlotRemap {
+        let remap = self.rack_slot_remap(shift);
+        if let (
+            RackSlotRemap::Moved(moved),
+            Self::RackSlotParam { slot, .. } | Self::RackSlotInstrumentParam { slot, .. },
+        ) = (remap, &mut *self)
+        {
+            *slot = moved;
+        }
+        remap
+    }
+}
+
+/// Whether `shift` changes any rack slot target of one process port set
+/// (a slot's or a per-track override's `bindings` and `fanout`).
+pub fn port_rack_slots_shift(
+    bindings: &BTreeMap<String, Option<ParamTarget>>,
+    fanout: &BTreeMap<String, Vec<ProcessPortFanout>>,
+    shift: RackSlotShift,
+) -> bool {
+    let changes = |target: &ParamTarget| target.rack_slot_remap(shift) != RackSlotRemap::Unchanged;
+    bindings.values().flatten().any(changes)
+        || fanout.values().flatten().any(|entry| changes(&entry.target))
+}
+
+/// Apply `shift` to one process port set: moved targets follow their slot;
+/// a binding to a deleted slot falls back to its port's default (`None`, as a
+/// deleted effect's does) and a fan-out row to one is dropped. Returns
+/// whether anything changed.
+pub fn shift_port_rack_slots(
+    bindings: &mut BTreeMap<String, Option<ParamTarget>>,
+    fanout: &mut BTreeMap<String, Vec<ProcessPortFanout>>,
+    shift: RackSlotShift,
+) -> bool {
+    let mut changed = false;
+    for binding in bindings.values_mut() {
+        match binding.as_mut().map(|target| target.shift_rack_slot(shift)) {
+            Some(RackSlotRemap::Moved(_)) => changed = true,
+            Some(RackSlotRemap::Removed) => {
+                *binding = None;
+                changed = true;
+            }
+            _ => {}
+        }
+    }
+    for rows in fanout.values_mut() {
+        rows.retain_mut(|entry| match entry.target.shift_rack_slot(shift) {
+            RackSlotRemap::Unchanged => true,
+            RackSlotRemap::Moved(_) => {
+                changed = true;
+                true
+            }
+            RackSlotRemap::Removed => {
+                changed = true;
+                false
+            }
+        });
+    }
+    changed
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProcessPortFanout {
     pub target: ParamTarget,
@@ -753,6 +872,14 @@ pub struct TrackProcessSlot {
     /// `None` on every other slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expr_source: Option<String>,
+    /// The kind instance that declared this slot (`(processes … :owner id
+    /// …)`, docs/rig-spec.md §10): while a scene switches that project-owned
+    /// instance off, the slot is disabled in that scene's scheduler snapshot
+    /// (`SequencerSnapshot::apply_scene_parking`), so a parked conductor's
+    /// processes do not apply even in a pattern another bank shares. `None`
+    /// (every slot the user adds, and every older file) is never gated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_instance: Option<u64>,
 }
 
 impl TrackProcessSlot {
@@ -771,6 +898,7 @@ impl TrackProcessSlot {
             fanout: BTreeMap::new(),
             unbound_ports: BTreeSet::new(),
             expr_source: None,
+            owner_instance: None,
         }
     }
 
@@ -4361,6 +4489,7 @@ mod tests {
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
                 bindings: BTreeMap::from([
                     ("unique".to_string(), Some(ParamTarget::InstrumentParam {
                         param: "cutoff".to_string(), param_id: None,
@@ -4591,6 +4720,7 @@ mod tests {
             fanout: Default::default(),
             unbound_ports: Default::default(),
             expr_source: None,
+            owner_instance: None,
             bindings: BTreeMap::new(),
         };
         let first = TrackProcessChain {
@@ -4801,6 +4931,7 @@ mod tests {
             fanout: Default::default(),
             unbound_ports: Default::default(),
             expr_source: None,
+            owner_instance: None,
             bindings: Default::default(),
         };
         let chain_a = TrackProcessChain {
@@ -5136,6 +5267,7 @@ mod tests {
             fanout: Default::default(),
             unbound_ports: Default::default(),
             expr_source: None,
+            owner_instance: None,
             bindings: BTreeMap::new(),
         };
 
@@ -5385,6 +5517,7 @@ fn default_lane_slot(spec: &DefaultLaneSpec) -> TrackProcessSlot {
         fanout,
         unbound_ports: Default::default(),
         expr_source: None,
+        owner_instance: None,
         bindings,
     }
 }
@@ -5564,6 +5697,7 @@ pub fn track_roster_chain_slot(entry: &TrackLaneRosterSlot) -> TrackProcessSlot 
         fanout: BTreeMap::new(),
         unbound_ports: BTreeSet::new(),
         expr_source: None,
+        owner_instance: None,
     }
 }
 
@@ -5743,6 +5877,7 @@ mod default_lane_tests {
                 fanout: BTreeMap::new(),
                 unbound_ports: BTreeSet::new(),
                 expr_source: None,
+                owner_instance: None,
             }],
         };
         assert!(reconcile_track_lane_roster(&mut chain, &roster));
@@ -5819,6 +5954,7 @@ mod default_lane_tests {
             fanout: BTreeMap::new(),
             unbound_ports: BTreeSet::new(),
             expr_source: None,
+            owner_instance: None,
         };
         // Roster says grab 3 runs before grab 2; the chain was saved the
         // other way round, with a script slot wedged between them.

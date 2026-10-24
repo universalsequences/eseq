@@ -85,7 +85,7 @@ pub(super) fn handle(
     }
 }
 
-fn scene_bank_id(payload: &Value) -> Option<sequencer::sequencer::SceneBankId> {
+pub(super) fn scene_bank_id(payload: &Value) -> Option<sequencer::sequencer::SceneBankId> {
     ["bank-id", "bank_id", "target-bank-id", "target_bank_id"]
         .iter()
         .find_map(|key| payload_usize(payload, key))

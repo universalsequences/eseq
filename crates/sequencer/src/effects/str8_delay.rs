@@ -295,8 +295,7 @@ unsafe extern "C" fn str8_delay_process(
     let out1 = *out.add(1);
 
     if *s.add(STATE_ENABLED) <= 0.5 {
-        std::ptr::copy_nonoverlapping(in0 as *const f32, out0, nf);
-        std::ptr::copy_nonoverlapping(in1 as *const f32, out1, nf);
+        crate::effects::silence::passthrough(inp, out, 2, nframes);
         *s.add(STATE_HP_Z1_L) = 0.0;
         *s.add(STATE_HP_Z2_L) = 0.0;
         *s.add(STATE_LP_Z1_L) = 0.0;
@@ -311,11 +310,11 @@ unsafe extern "C" fn str8_delay_process(
     // Once the input is silent and nothing audible has been written for a
     // whole buffer length, the line holds only decayed residue: every read,
     // whatever the delay time, wet or modulation, is inaudible. Sleep.
-    let input_silent = super::tail_sleep::inputs_silent(&[in0, in1], nf);
-    if super::tail_sleep::asleep(s.add(STATE_QUIET_FRAMES), input_silent, MAX_DELAY_SAMPLES as f32) {
-        super::silence::emit(out, 2, nframes);
+    let Some(counts_quiet) = super::tail_sleep::sleep_or_count(
+        s.add(STATE_QUIET_FRAMES), inp, 2, out, 2, nframes, MAX_DELAY_SAMPLES as f32, true,
+    ) else {
         return;
-    }
+    };
     let mut write_peak = 0.0f32;
 
     let sr = super::safe_sample_rate(*s.add(STATE_SAMPLE_RATE));
@@ -476,7 +475,7 @@ unsafe extern "C" fn str8_delay_process(
         write_pos_r = (write_pos_r + 1) % MAX_DELAY_SAMPLES;
     }
 
-    super::tail_sleep::note_block(s.add(STATE_QUIET_FRAMES), input_silent, write_peak, nf);
+    super::tail_sleep::note_block(s.add(STATE_QUIET_FRAMES), counts_quiet, write_peak, nf);
     *s.add(STATE_SMOOTH_WET) = smooth_wet;
     *s.add(STATE_SMOOTH_FEEDBACK) = smooth_feedback;
     *s.add(STATE_SMOOTH_LEFT_SAMPLES) = smooth_left;

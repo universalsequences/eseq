@@ -67,6 +67,18 @@ impl App {
         clip: Option<RackClipId>,
     ) -> Result<(), String> {
         self.rack_members(group_id)?;
+        // A kit the playing scene switches off plays no clip: launching one
+        // would repoint the scene and stay silent, so it is refused with the
+        // way back on named. Silencing (`None`) is a plain pointer edit and
+        // stays allowed (docs/rig-spec.md §6).
+        if clip.is_some() {
+            if let Some(bank) = self.kit_parked_bank_index(group_id) {
+                return Err(format!(
+                    "Kit is off in bank {}",
+                    crate::sequencer::scene_bank_auto_label(bank)
+                ));
+            }
+        }
         super::edit::finish_active_gesture(self);
         let scene = self.state.current_scene_id()
             .ok_or_else(|| "The current scene no longer exists".to_string())?;

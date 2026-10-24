@@ -201,6 +201,8 @@ impl ProjectScenes {
                 .retain(|(group_id, _)| live.contains(group_id));
         }
         self.live_rack_clips.retain(|(group_id, _)| live.contains(group_id));
+        // A deleted kit is parked nowhere (docs/rig-spec.md §6).
+        self.retain_parked_kits(&live);
         self.repair_rack_clips();
     }
 
@@ -346,6 +348,21 @@ impl ProjectScenes {
 
     pub fn current_rack_clip(&self, group_id: u64) -> Option<RackClipId> {
         self.scene_rack_clip(self.current_scene, group_id)
+    }
+
+    /// The clip kit `group_id` plays once switched on in `scenes` when none
+    /// of them points at one of its clips (a kit an import left on only in
+    /// another bank): the clip some other scene plays, else its first clip.
+    /// `None` when a scene of `scenes` already points at one, or the kit has
+    /// no clips.
+    pub fn kit_clip_to_fill(&self, group_id: u64, scenes: std::ops::Range<usize>) -> Option<RackClipId> {
+        let bank = self.rack_bank(group_id)?;
+        if scenes.clone().any(|scene| self.scene_rack_clip(scene, group_id).is_some()) {
+            return None;
+        }
+        (0..self.scenes.len())
+            .find_map(|scene| self.scene_rack_clip(scene, group_id))
+            .or_else(|| bank.clips.first().map(|clip| clip.id))
     }
 
     /// Point scene `scene_idx` at `clip` for rack `group_id`; `None` silences

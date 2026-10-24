@@ -385,6 +385,7 @@ fn same_but_lane_values(a: &TrackProcessSlot, b: &TrackProcessSlot) -> bool {
         fanout,
         unbound_ports,
         expr_source,
+        owner_instance,
     } = a;
     *instance_id == b.instance_id
         && *instance_name == b.instance_name
@@ -397,6 +398,7 @@ fn same_but_lane_values(a: &TrackProcessSlot, b: &TrackProcessSlot) -> bool {
         && *fanout == b.fanout
         && *unbound_ports == b.unbound_ports
         && *expr_source == b.expr_source
+        && *owner_instance == b.owner_instance
 }
 
 /// Whether two override sets fork the same lanes (`lane.forked`).

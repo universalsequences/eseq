@@ -704,6 +704,28 @@ impl BlockTransportClock {
         };
         (phase, advancing)
     }
+
+    /// `(first phase, last phase, advancing)` when the input clock's source
+    /// declared the phase lane a `PhaseRamp` and the increment lane constant
+    /// for this pass (gatepitch does), so a skipped block can count its bar
+    /// wraps without reading every frame.
+    unsafe fn declared_ramp(&self, nf: usize) -> Option<(f32, f32, bool)> {
+        use crate::effects::silence::{input_shape, LaneShape};
+        if nf == 0
+            || self.phase_in.is_null()
+            || self.phase_inc_in.is_null()
+            || crate::effects::tail_sleep::force_awake(
+                crate::effects::tail_sleep::FORCE_REFERENCE_VOICE_CONTROL,
+            )
+            || input_shape(INPUT_TRANSPORT_BAR_PHASE) != LaneShape::PhaseRamp
+            || input_shape(INPUT_TRANSPORT_BAR_PHASE_INC) != LaneShape::Constant
+        {
+            return None;
+        }
+        let (first, advancing) = self.frame(0);
+        let (last, _) = self.frame(nf - 1);
+        Some((first, last, advancing))
+    }
 }
 
 /// Running bar counter behind `IDX_PREV_BAR_PHASE` / `IDX_BAR_COUNT`.
@@ -746,6 +768,23 @@ impl BarTracker {
 
     /// Count the wraps of a block this node does not render.
     unsafe fn skip_block(&mut self, clock: &BlockTransportClock, nf: usize) {
+        if let Some((first, last, advancing)) = clock.declared_ramp(nf) {
+            // What the per-frame loop below counts, read off the endpoints:
+            // the declared ramp's frames rise except at most one wrap, and
+            // the last frame is below the first iff that wrap is in here.
+            if advancing {
+                if first < self.prev_bar_phase - 0.5 {
+                    self.bar_count += 1.0;
+                }
+                if last < first {
+                    self.bar_count += 1.0;
+                }
+            }
+            self.prev_bar_phase = last;
+            #[cfg(test)]
+            idle_fast_path_tests::DECLARED_RAMP_SKIPS.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         for i in 0..nf {
             let (phase, advancing) = clock.frame(i);
             self.note_frame(phase, advancing);
@@ -1280,12 +1319,26 @@ unsafe fn gate_timeline_has_activity(
     if gate_in.is_null() || trigger_in.is_null() {
         return false;
     }
+    if nf > 0 && gate_and_trigger_declared_constant() {
+        #[cfg(test)]
+        idle_fast_path_tests::DECLARED_GATE_CHECKS.fetch_add(1, Ordering::Relaxed);
+        return (*gate_in).clamp(0.0, 1.0) > 0.5 || (*trigger_in).max(0.0) > 0.5;
+    }
     for i in 0..nf {
         if (*gate_in.add(i)).clamp(0.0, 1.0) > 0.5 || (*trigger_in.add(i)).max(0.0) > 0.5 {
             return true;
         }
     }
     false
+}
+
+/// Gatepitch declared this pass's gate and trigger lanes constant (no event
+/// in the block), so frame 0 stands for every frame.
+fn gate_and_trigger_declared_constant() -> bool {
+    use crate::effects::silence::{input_shape, LaneShape};
+    !crate::effects::tail_sleep::force_awake(crate::effects::tail_sleep::FORCE_REFERENCE_VOICE_CONTROL)
+        && input_shape(INPUT_GATE) == LaneShape::Constant
+        && input_shape(INPUT_TRIGGER) == LaneShape::Constant
 }
 
 /// The `modN_source` value selecting ext input `ext` (1-4).
@@ -3676,5 +3729,216 @@ mod retrigger_tests {
         );
         assert!((trace[bar_line] - 0.5).abs() < 0.02, "half way at bar 2, got {}", trace[bar_line]);
         assert!(trace[1279] > 0.95, "end of the 2-bar cycle, got {}", trace[1279]);
+    }
+}
+
+/// The idle fast path (eseq-ka5t.16) against the reference, through a live
+/// graph: gatepitch feeding a sampler voice modulator and a custom engine
+/// voice modulator, across idle -> trigger -> release -> idle, with retrigs
+/// at block boundaries, bar wraps while idle and a mod reset while idle.
+#[cfg(test)]
+mod idle_fast_path_tests {
+    use super::*;
+    use crate::audiograph as graph;
+    use crate::effects::gatepitch as gp;
+    use std::sync::atomic::AtomicU64;
+
+    pub(super) static DECLARED_RAMP_SKIPS: AtomicU64 = AtomicU64::new(0);
+    pub(super) static DECLARED_GATE_CHECKS: AtomicU64 = AtomicU64::new(0);
+
+    const BLOCK: usize = 128;
+    /// Observed lanes: 4 outputs per modulator, then gatepitch gate, trigger, clock.
+    const LANES: usize = 2 * NUM_OUTPUTS + 3;
+    const TRACK: usize = 5;
+    const ENGINE: usize = 7;
+
+    unsafe extern "C" fn observer_process(
+        inp: *const *mut f32,
+        _out: *const *mut f32,
+        nframes: c_int,
+        state: *mut c_void,
+        _buffers: *mut c_void,
+    ) {
+        let s = state as *mut f32;
+        for lane in 0..LANES {
+            for frame in 0..(nframes as usize).min(BLOCK) {
+                *s.add(lane * BLOCK + frame) = *(*inp.add(lane)).add(frame);
+            }
+        }
+    }
+
+    struct Run {
+        frames: Vec<[f32; LANES * BLOCK]>,
+        states: Vec<[[f32; STATE_SIZE]; 2]>,
+    }
+
+    fn run(reference: bool) -> Run {
+        let _force = crate::effects::tail_sleep::ForceAwake::set(if reference {
+            crate::effects::tail_sleep::FORCE_REFERENCE_VOICE_CONTROL
+        } else {
+            0
+        });
+        graph::initialize_engine_for_test(BLOCK as c_int, 48_000);
+        let lg = unsafe { graph::create_live_graph(32, BLOCK as c_int, c"idle-voice-control".as_ptr(), 1) };
+        assert!(!lg.is_null());
+        let gp_id = unsafe {
+            graph::add_node(lg, gp::gatepitch_vtable(), gp::GATEPITCH_STATE_SIZE * 4,
+                c"gp".as_ptr(), 0, gp::OUTPUT_COUNT as c_int, std::ptr::null(), 0)
+        };
+        let sampler_init = sampler_voice_initial_state(TRACK, 0);
+        let custom_init = custom_engine_initial_state(ENGINE, 0);
+        let mods = [sampler_init, custom_init].map(|init| unsafe {
+            graph::add_node(lg, voice_modulator_vtable(), STATE_SIZE * 4, c"mod".as_ptr(),
+                INPUT_COUNT as c_int, NUM_OUTPUTS as c_int,
+                (&init as *const VoiceModulatorInitialState).cast(),
+                std::mem::size_of::<VoiceModulatorInitialState>())
+        });
+        let observer = unsafe {
+            graph::add_node(lg,
+                graph::NodeVTable { process: Some(observer_process), ..graph::NodeVTable::default() },
+                LANES * BLOCK * 4, c"observer".as_ptr(), LANES as c_int, 0, std::ptr::null(), 0)
+        };
+        assert!(gp_id > 0 && mods.iter().all(|id| *id > 0) && observer > 0);
+        for (index, &mod_id) in mods.iter().enumerate() {
+            unsafe {
+                for port in gp::OUTPUT_GATE..=gp::OUTPUT_TRIGGER {
+                    let port = port as c_int;
+                    assert!(graph::graph_connect(lg, gp_id, port, mod_id, port));
+                }
+                assert!(graph::graph_connect(lg, gp_id, gp::OUTPUT_CLOCK_PHASE as c_int,
+                    mod_id, INPUT_TRANSPORT_BAR_PHASE as c_int));
+                assert!(graph::graph_connect(lg, gp_id, gp::OUTPUT_CLOCK_INC as c_int,
+                    mod_id, INPUT_TRANSPORT_BAR_PHASE_INC as c_int));
+                for port in 0..NUM_OUTPUTS {
+                    assert!(graph::graph_connect(lg, mod_id, port as c_int, observer,
+                        (index * NUM_OUTPUTS + port) as c_int));
+                }
+            }
+        }
+        for (port, lane) in [(gp::OUTPUT_GATE, 0), (gp::OUTPUT_TRIGGER, 1), (gp::OUTPUT_CLOCK_PHASE, 2)] {
+            assert!(unsafe { graph::graph_connect(lg, gp_id, port as c_int, observer,
+                (2 * NUM_OUTPUTS + lane) as c_int) });
+        }
+        let param = |logical_id: c_int, idx: usize, fvalue: f32| unsafe {
+            assert!(graph::params_push_wrapper(lg, graph::ParamMsg {
+                idx: idx as u64, logical_id: logical_id as u64, fvalue,
+            }));
+        };
+        for &mod_id in &mods {
+            // Slot 0: a 4-bar synced saw, which reads the bar count.
+            param(mod_id, slot_param_idx(0, PARAM_LFO_SYNC), 1.0);
+            param(mod_id, slot_param_idx(0, PARAM_LFO_DIV), sync_division_index(SyncDivision::FourBars));
+            param(mod_id, slot_param_idx(0, PARAM_LFO_SHAPE), SHAPE_SAW as f32);
+            param(mod_id, slot_param_idx(1, PARAM_ENV_RELEASE_MS), 30.0);
+        }
+        let event = |frame_offset: u32, kind: u32, aux: &[f32]| {
+            let mut event = graph::GraphBlockEvent {
+                logical_id: gp_id as u64, frame_offset, sequence: frame_offset, kind,
+                aux_count: aux.len() as u32, aux: [0.0; graph::GBE_AUX_CAP],
+            };
+            event.aux[..aux.len()].copy_from_slice(aux);
+            assert!(unsafe { graph::push_block_event(lg, event) });
+        };
+        unsafe {
+            assert!(graph::add_node_to_watchlist(lg, observer));
+            for &mod_id in &mods {
+                assert!(graph::add_node_to_watchlist(lg, mod_id));
+            }
+        }
+        // A bar every 11.5 blocks, so wraps land mid-block, idle and playing.
+        let inc = 1.0 / (BLOCK as f64 * 11.5);
+        let mut out = Run { frames: Vec::new(), states: Vec::new() };
+        let mut output = vec![0.0f32; BLOCK];
+        for block in 0..140usize {
+            let phase = ((block * BLOCK) as f64 * inc).fract() as f32;
+            param(gp_id, gp::PARAM_CLOCK_PHASE as usize, phase);
+            param(gp_id, gp::PARAM_CLOCK_INC as usize, inc as f32);
+            // (sampler active, custom voice runs): the pools' view of the voice.
+            let playing = matches!(block, 20..=29 | 45..=59 | 71..=79 | 100..=104);
+            set_sampler_active_mask(TRACK, playing as u64);
+            crate::lisp_host::set_dgen_engine_enabled_voices(ENGINE, playing as usize);
+            match block {
+                20 | 45 => event(0, graph::GBE_NOTE_ON, &[220.0, 0.8]),
+                26 => event(37, graph::GBE_GATE_OFF, &[]),
+                // Retrig exactly on the block boundary, then on its last frame.
+                50 => {
+                    event(0, graph::GBE_GATE_OFF, &[]);
+                    event(0, graph::GBE_NOTE_ON, &[330.0, 0.6]);
+                }
+                52 => event(BLOCK as u32 - 1, graph::GBE_NOTE_ON, &[440.0, 1.0]),
+                55 => event(64, graph::GBE_GATE_OFF, &[]),
+                // A gate in a block whose voice is not marked active yet.
+                70 => event(BLOCK as u32 - 1, graph::GBE_NOTE_ON, &[110.0, 0.5]),
+                75 => event(0, graph::GBE_GATE_OFF, &[]),
+                // A mod reset while idle.
+                90 => {
+                    for &mod_id in &mods {
+                        param(mod_id, PARAM_RESET_COUNTER, 1.0);
+                    }
+                }
+                100 => event(3, graph::GBE_NOTE_ON, &[550.0, 0.9]),
+                103 => event(BLOCK as u32 - 1, graph::GBE_GATE_OFF, &[]),
+                // A gate held by param, with no event and the voice not
+                // marked active: constant-high lanes the declared check reads.
+                110 => param(gp_id, gp::PARAM_GATE as usize, 1.0),
+                115 => param(gp_id, gp::PARAM_GATE as usize, 0.0),
+                _ => {}
+            }
+            unsafe { graph::process_next_block(lg, output.as_mut_ptr(), BLOCK as c_int) };
+            let read = |id: c_int, into: &mut [f32]| unsafe {
+                let mut size = 0;
+                assert!(graph::get_node_state_into(lg, id, into.as_mut_ptr().cast(),
+                    std::mem::size_of_val(into), &mut size));
+                assert_eq!(size, std::mem::size_of_val(into));
+            };
+            let mut frames = [0.0f32; LANES * BLOCK];
+            read(observer, &mut frames);
+            let mut states = [[0.0f32; STATE_SIZE]; 2];
+            for (state, &mod_id) in states.iter_mut().zip(&mods) {
+                read(mod_id, state);
+            }
+            out.frames.push(frames);
+            out.states.push(states);
+        }
+        unsafe { graph::destroy_live_graph(lg) };
+        set_sampler_active_mask(TRACK, 0);
+        out
+    }
+
+    #[test]
+    fn idle_fast_path_matches_reference_through_trigger_release_and_retrig() {
+        // The counters are process-wide; start from zero so another test in
+        // the same binary (plain `cargo test`) cannot leak counts in.
+        DECLARED_RAMP_SKIPS.store(0, Ordering::Relaxed);
+        DECLARED_GATE_CHECKS.store(0, Ordering::Relaxed);
+        let reference = run(true);
+        assert_eq!(DECLARED_RAMP_SKIPS.load(Ordering::Relaxed), 0);
+        assert_eq!(DECLARED_GATE_CHECKS.load(Ordering::Relaxed), 0);
+        let fast = run(false);
+        assert!(DECLARED_RAMP_SKIPS.load(Ordering::Relaxed) > 100, "idle blocks must take the declared-ramp skip");
+        assert!(DECLARED_GATE_CHECKS.load(Ordering::Relaxed) > 50, "idle blocks must read the declared gate");
+        for (block, (a, b)) in reference.frames.iter().zip(&fast.frames).enumerate() {
+            for (index, (x, y)) in a.iter().zip(b).enumerate() {
+                assert_eq!(x.to_bits(), y.to_bits(),
+                    "block {block} lane {} frame {}", index / BLOCK, index % BLOCK);
+            }
+        }
+        for (block, (a, b)) in reference.states.iter().zip(&fast.states).enumerate() {
+            for voice in 0..2 {
+                // The lane cache is keyed by graph-local IO generations.
+                for idx in 0..OUTPUT_LANE_CACHE {
+                    assert_eq!(a[voice][idx].to_bits(), b[voice][idx].to_bits(),
+                        "block {block} voice {voice} state[{idx}]");
+                }
+            }
+        }
+        // The scenario reaches the states it is meant to: bars counted while
+        // idle, and both voices sounding then silent.
+        let last = &fast.states[fast.states.len() - 1];
+        assert!(last[0][IDX_BAR_COUNT] >= 3.0, "bar count {}", last[0][IDX_BAR_COUNT]);
+        let lane_peak = |block: usize, lane: usize| fast.frames[block][lane * BLOCK..(lane + 1) * BLOCK]
+            .iter().fold(0.0f32, |peak, v| peak.max(v.abs()));
+        assert!(lane_peak(22, 1) > 0.1 && lane_peak(22, NUM_OUTPUTS + 1) > 0.1, "envelopes sound while playing");
+        assert_eq!(lane_peak(130, 1), 0.0);
     }
 }

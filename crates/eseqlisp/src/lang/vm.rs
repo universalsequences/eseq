@@ -3496,6 +3496,21 @@ pub fn register_core_natives(vm: &mut VM) {
     // (kind-bindings spec §3.3), and a color wherever widgets parse one.
     vm.register_native("rgb", |args| tagged_list("rgb", args));
 
+    // (set-instance-view-frame! f) → render every instance view as
+    // (f view self) from now on (the UI's chrome around a kind's view); nil
+    // renders views bare again. Every call re-renders the instance views.
+    vm.register_native_with_vm("set-instance-view-frame!", |args, vm| match args.first() {
+        Some(Value::Nil) | None => {
+            vm.set_instance_view_frame(None);
+            Value::Bool(true)
+        }
+        Some(frame) if is_callable(frame) => {
+            vm.set_instance_view_frame(Some(frame.clone()));
+            Value::Bool(true)
+        }
+        Some(_) => Value::Bool(false),
+    });
+
     // (unbind-view-buffer "*name*") → stop rendering a bound buffer.
     vm.register_native_with_vm("unbind-view-buffer", |args, vm| match args.first() {
         Some(Value::String(target)) => Value::Bool(vm.unbind_view_buffer(target)),
@@ -4597,6 +4612,7 @@ pub fn register_core_natives(vm: &mut VM) {
         "set-nth",
         NAMESPACE_REF_NATIVE,
         "bind-view-buffer",
+        "set-instance-view-frame!",
     ]);
 }
 
@@ -4605,6 +4621,11 @@ pub fn register_core_natives(vm: &mut VM) {
 
 /// `(get collection :key)`: see `register_core_natives`.
 fn core_get(args: &[&Value]) -> Value {
+    // A map also takes a string key (a host map keyed by id, e.g.
+    // `(get project.instances-by-id (str id))`).
+    if let (Some(Value::Map(m)), Some(Value::String(k))) = (args.first().copied(), args.get(1).copied()) {
+        return m.get(&k[..]).map(|v| v.borrow().clone()).unwrap_or(Value::Nil);
+    }
     let Some(Value::Keyword(k)) = args.get(1).copied() else {
         return Value::Nil;
     };

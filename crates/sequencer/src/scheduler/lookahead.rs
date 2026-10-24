@@ -552,6 +552,23 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     // runtimes already consumed those boundaries, so re-enqueue what they
     // emitted instead (eseq-groove.8). Then forget what can no longer sound.
     if let Some(generation) = clock.take_graph_replay_generation() {
+        // A kit switched off since (docs/rig-spec.md §6) replays nothing.
+        // Graph runtimes and manifests are parallel; an entry's graph is
+        // found by id once, its owner read from the manifest at that index.
+        if !base_snapshot.parked_racks.is_empty() {
+            graph_replay.retain(|entry| {
+                let owner = graph_runtimes
+                    .iter()
+                    .position(|graph| graph.id == entry.graph_id)
+                    .and_then(|index| graph_manifests.get(index))
+                    .and_then(|manifest| manifest.owner_rack);
+                !owner.is_some_and(|group_id| base_snapshot.rack_parked(group_id))
+            });
+        }
+        // Nor does a project-owned instance switched off since (§10).
+        if !base_snapshot.parked_instances.is_empty() {
+            graph_replay.retain(|entry| !base_snapshot.instance_parked(entry.graph_id));
+        }
         replay_retained_graph_emissions(
             graph_replay,
             generation,
@@ -2583,6 +2600,24 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             if graph_runtimes[graph_index].is_empty() {
                 continue;
             }
+            // A switched-off kit's rack-owned graphs do not run in this
+            // chunk's scene (docs/rig-spec.md §6): no fires, no state
+            // advance; they resume where they stood when the kit is on.
+            if graph_manifests
+                .get(graph_index)
+                .and_then(|manifest| manifest.owner_rack)
+                .is_some_and(|group_id| snapshot.rack_parked(group_id))
+            {
+                continue;
+            }
+            // Nor do the graphs of project-owned instances this scene
+            // switches off (docs/rig-spec.md §10).
+            if graph_manifests
+                .get(graph_index)
+                .is_some_and(|manifest| snapshot.instance_parked(manifest.id))
+            {
+                continue;
+            }
             // Graphs earlier in the order, and everything the trigger loop
             // enqueued, are what this graph's `:output` reads can see.
             feed_track_output_reads(
@@ -3179,6 +3214,20 @@ fn run_generator_stage_range<const QUEUE_CAP: usize>(
                     state: fallback_state,
                 };
                 if parked_generators.contains(&generator_id) {
+                    return empty;
+                }
+                // A switched-off kit's rack-owned generators do not tick
+                // (docs/rig-spec.md §6).
+                if !snapshot.parked_racks.is_empty()
+                    && generator_owner_racks
+                        .get(&generator_id)
+                        .is_some_and(|group_id| snapshot.rack_parked(*group_id))
+                {
+                    return empty;
+                }
+                // A project-owned instance the scene switches off does not
+                // tick either (docs/rig-spec.md §10).
+                if snapshot.instance_parked(generator_id) {
                     return empty;
                 }
                 let tick_beat = input.beat;

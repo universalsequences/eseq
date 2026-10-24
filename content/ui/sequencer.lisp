@@ -26,6 +26,8 @@
 
 ;; Drum rack v2: the pad grid's note geometry (docs/drum-rack-v2-spec.md).
 (import eseq.drum-rack-v2)
+;; Bank-scoped display (docs/rig-spec.md §9).
+(import eseq.scene-banks :refer (scene-viewed-bank track-used-in-bank? bank-tracks show-all-tracks))
 
 (import eseq.seq-panels)
 ;; Expr cards' edit buffers (the node bay's edit button, the error dot).
@@ -412,6 +414,49 @@
                     (set! t.expanded expanded))
                   (put-editor-state t (track-param-mode t) (track-cursor t))))
       (tracks))
+    nil))
+
+;; Bank-scoped display (docs/rig-spec.md §9): when the viewed bank or "Show
+;; all tracks" changes, a selection the bank now hides moves to what it
+;; shows: the current track to the nearest shown one, hidden tracks leave a
+;; multi-selection and a hidden range anchor follows the current track.
+;; Only on such a change (`bank-rehome` holds the last bank and show-all
+;; seen), so views that show every track (the arrangement, scripts, the
+;; agent) can still select any track; never while a bus is selected.
+(def-kind bank-rehome
+  :key ()
+  :state ((bank bank :default nil)
+          (all false)
+          (seen false)))
+
+(def rehome-selection (viewed)
+  (let ((t selection.track)
+        (shown (lambda (x) (track-used-in-bank? x viewed))))
+    (when t
+      (let ((next (if (shown t) t (eseq.drum-rack-v2/nearest-shown-track t)))
+            (selected (filter (lambda (x) x.in-selection) (tracks)))
+            (kept (filter shown selected)))
+        (when (and next (not (and (= next t) (= (len kept) (len selected)))))
+          (let ((members (if (listed? next kept) kept (cons next kept))))
+            (if (= (len members) 1)
+              (select-track-for-edit next)
+              (do
+                (seq-select-tracks (map (lambda (x) x.index) members) next.index)
+                (set! selection.track next)
+                (sync-track-cursor-to-global next)))))))
+    (let ((anchor grid-select.anchor))
+      (when (and anchor (not (shown anchor)))
+        (set! grid-select.anchor selection.track)))))
+
+(effect-buffer "*bank-selection-sync*"
+  (let ((viewed (scene-viewed-bank))
+        (all show-all-tracks))
+    (unless (and bank-rehome.seen (= viewed bank-rehome.bank) (= all bank-rehome.all))
+      (set! bank-rehome.seen true)
+      (set! bank-rehome.bank viewed)
+      (set! bank-rehome.all all)
+      (when (< eseq.seq-core-state/selected-bus 0)
+        (rehome-selection viewed)))
     nil))
 
 (def set-track-param-mode (t mode)
@@ -1861,13 +1906,21 @@
       :on-change (lambda (value) (set-inlet! i value :all (edit-all? p)))
       :width 4.6 :height 1.0)))
 
-;; Track-typed inlets (grab's `source`) pick from the track list by name.
+;; Track-typed inlets (grab's `source`) pick from the track list by name:
+;; the tracks the viewed bank uses (docs/rig-spec.md §9), plus the one the
+;; inlet names now so the menu can show it. The pick maps back by label over
+;; every track, so hidden tracks keep their indices.
 (def lane-track-option (index)
   (let ((t (track-at index)))
     (str (+ index 1) " " (if t t.name ""))))
 
 (def lane-track-options ()
   (map (lambda (t) (lane-track-option t.index)) (tracks)))
+
+(def lane-track-menu (current)
+  (let ((named (track-at current)))
+    (map (lambda (t) (lane-track-option t.index))
+      (bank-tracks (scene-viewed-bank) (if named (list named) (list))))))
 
 (def lane-strip-track-inlet-row (p i)
   (h-stack :width :fill :gap 0.3 :align :center
@@ -1879,7 +1932,7 @@
       :bg-color :mixer-strip-bg
       :badge-color :mixer-strip-selected-bg
       :border-color :mixer-strip-selected-bg
-      :options (lane-track-options)
+      :options (lane-track-menu (floor i.value))
       :on-change (lambda (label)
         (set-inlet! i (max 0 (index-of (lane-track-options) label)) :all (edit-all? p)))
       :width 7.5 :height 1.1 :font-size 8.5)))
@@ -3713,7 +3766,7 @@
   (subtree :key (str "seqv-" (group-ui-kind g) "-header-" g.gid)
     (group-header-body g)))
 
-(def group-block (g)
+(def group-block (g viewed)
   (let ((c g.color)
         (radius (eseq.seq-core-state/radius 10))
         (border 2))
@@ -3745,24 +3798,25 @@
         (if g.collapsed
           (nothing)
           (v-stack :width :fill :gap 0.0
-            (each (eseq.drum-rack-v2/shown-members g) |m|
+            (each (eseq.drum-rack-v2/shown-members g viewed) |m|
               (subtree :key (str "sequencer-track-" m.tid)
                 (group-member-row g m)))
-            (each g.racks |child|
+            (each (eseq.drum-rack-v2/grid-racks g viewed) |child|
               (subtree :key (str "sequencer-rack-" child.gid)
-                (group-block child)))))))))
+                (group-block child viewed)))))))))
 
 ;; ── Grid render order ───────────────────────────────────────────────────
 ;; The grid's rows (eseq.drum-rack-v2's group topology): `(dict :kind "track"
 ;; :track t)` for a loose track the grid shows (not collapsed), `(dict :kind
-;; "group" :group g)` for a top-level group.
+;; "group" :group g)` for a top-level group; each carries the viewed bank it
+;; was read under (`:viewed`).
 (def grid-items () (eseq.drum-rack-v2/render-items false))
 
 (def grid-render-item (item)
   (if (= (get item :kind) "group")
     (let ((g (get item :group)))
       (subtree :key (str "sequencer-" (group-ui-kind g) "-" g.gid)
-        (group-block g)))
+        (group-block g (get item :viewed))))
     (let ((t (get item :track)))
       (subtree :key (str "sequencer-track-" t.tid)
         (track-row t true)))))

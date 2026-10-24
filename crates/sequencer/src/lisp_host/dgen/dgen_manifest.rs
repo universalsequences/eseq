@@ -33,6 +33,9 @@ pub struct EffectGraphNodeIds {
 pub struct DGenManifest {
     /// Host-resolved, immutable algorithmic delay at this artifact's sample rate.
     pub effect_latency_samples: Option<u32>,
+    /// The source's `(effect-tail-sleep [seconds])` opt-in; `None` never
+    /// sleeps.
+    pub tail_sleep: Option<super::effect_latency::TailSleep>,
     pub dylib_path: PathBuf,
     pub asset_base: Option<PathBuf>,
     pub version: u32,
@@ -133,18 +136,18 @@ impl DGenManifest {
             .flat_map(|ch| ch.to_lowercase())
             .collect();
         match normalized.as_str() {
-            "gate" => Some(gp::PARAM_GATE as usize),
-            "pitch" => Some(gp::PARAM_PITCH as usize),
-            "velocity" | "vel" => Some(gp::PARAM_VELOCITY as usize),
-            "trigger" | "trig" => Some(gp::PARAM_TRIGGER as usize),
+            "gate" => Some(gp::OUTPUT_GATE),
+            "pitch" => Some(gp::OUTPUT_PITCH),
+            "velocity" | "vel" => Some(gp::OUTPUT_VELOCITY),
+            "trigger" | "trig" => Some(gp::OUTPUT_TRIGGER),
             "pressure" => Some(gp::OUTPUT_PRESSURE),
             "pitchbend" => Some(gp::OUTPUT_PITCH_BEND),
             "modwheel" => Some(gp::OUTPUT_MOD_WHEEL),
             "slide" => Some(gp::OUTPUT_SLIDE),
             "noteon" => Some(gp::OUTPUT_NOTE_ON),
             "legato" => Some(gp::OUTPUT_LEGATO),
-            "clockinc" => Some(gp::PARAM_CLOCK_INC as usize),
-            "clock" | "barclock" => Some(gp::PARAM_CLOCK_PHASE as usize),
+            "clockinc" => Some(gp::OUTPUT_CLOCK_INC),
+            "clock" | "barclock" => Some(gp::OUTPUT_CLOCK_PHASE),
             _ if input.channel < 4 && self.inputs.iter().all(|i| i.name.trim().is_empty()) => {
                 Some(input.channel)
             }
@@ -615,6 +618,7 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
 
     Ok(DGenManifest {
         effect_latency_samples: super::effect_latency::parse_manifest(&v)?,
+        tail_sleep: super::effect_latency::parse_tail_sleep(&v)?,
         dylib_path,
         asset_base: None,
         version,
@@ -1135,7 +1139,17 @@ pub(in crate::lisp_host) fn build_init_message(
     manifest: &DGenManifest,
     process_fn: Option<DGenProcessFn>,
 ) -> Vec<f32> {
-    encode_init_message(slot_id, manifest, process_fn, &init_state_entries(manifest))
+    let mut entries = init_state_entries(manifest);
+    if let Some(tail_sleep) = manifest.tail_sleep {
+        // The opt-in and hold live in the host's trailer after the redzone,
+        // encoded as a declared hold in seconds or the span-fallback sentinel.
+        let cell = match tail_sleep {
+            super::effect_latency::TailSleep::Hold(seconds) => seconds,
+            super::effect_latency::TailSleep::SpanFallback => DGEN_TAIL_HOLD_FALLBACK,
+        };
+        entries.push((dgen_tail_slot(manifest.total_memory_slots, DGEN_TAIL_OPT_IN), cell));
+    }
+    encode_init_message(slot_id, manifest, process_fn, &entries)
 }
 
 /// [`build_init_message`] over caller-assembled `entries`.

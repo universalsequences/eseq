@@ -8,7 +8,7 @@
 (module eseq.view-kit)
 
 (export open-menu! menu-of menu-tree nothing listed? index-of find without named prop-if
-        rgb-part color-rgba dimmed dimmed-part track-color-part)
+        bare-text rgb-part color-rgba dimmed dimmed-part track-color-part)
 
 ;; m's context menu opens at the pointer event's grid point.
 (def open-menu! (m event)
@@ -69,6 +69,12 @@
 
 ;; `(k v)` to splice into a widget's props when v is set, else nothing.
 (def prop-if (k v) (if v (list k v) (list)))
+
+;; The props of text drawn straight on its parent (a badge as a label): no
+;; fill, border or shading of its own. Splice with `(apply badge ...)`.
+(def bare-text
+  (list :background-color :transparent :border-color :transparent
+        :highlight-color :transparent :shadow-color :transparent :bg :transparent))
 
 ;; A component (0 r, 1 g, 2 b) of an :rgb value `(rgb r g b)`.
 (def rgb-part (c i) (nth c (+ i 1)))

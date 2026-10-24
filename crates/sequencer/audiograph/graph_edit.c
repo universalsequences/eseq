@@ -67,6 +67,8 @@ int alloc_edge(LiveGraph *lg) {
          sizeof(float) * (lg->block_size + EDGE_BUFFER_PAD_FLOATS));
   lg->edges[i].silent_pass = 0; // freshly zeroed; never "silent this pass"
   lg->edges[i].silent_frames = 0;
+  lg->edges[i].shape_pass = 0;
+  lg->edges[i].shape = 0;
   return i;
 }
 
@@ -569,7 +571,13 @@ bool apply_write_node_state(LiveGraph *lg, int node_id, size_t dest_offset,
   if (dest_offset > cap_floats || count > cap_floats - dest_offset) {
     return false; // out of bounds
   }
-  memcpy((float *)node->state + dest_offset, source_data, count * sizeof(float));
+  // Count only writes that change the state (see apply_params): re-sending
+  // an identical table must not wake a tail-sleeping node.
+  float *dest = (float *)node->state + dest_offset;
+  if (memcmp(dest, source_data, count * sizeof(float)) != 0) {
+    memcpy(dest, source_data, count * sizeof(float));
+    node->state_writes++;
+  }
   return true;
 }
 

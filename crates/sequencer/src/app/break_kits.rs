@@ -346,7 +346,7 @@ impl App {
                 continue;
             };
             let cable = ProjectKitModConnection {
-                source_output: 0,
+                source_output: connection.source_output,
                 source_pad,
                 destination,
                 dest_input: connection.dest_input,
@@ -397,7 +397,12 @@ impl App {
                 if destination == ModDestination::Track(source_track) {
                     return None;
                 }
-                Some(ModConnection { source_output: 0, source_track, destination, dest_input: cable.dest_input })
+                Some(ModConnection {
+                    source_output: cable.source_output,
+                    source_track,
+                    destination,
+                    dest_input: cable.dest_input,
+                })
             })
             .collect();
         if resolved.is_empty() {
@@ -739,7 +744,8 @@ impl App {
         let bus = BusId(group.bus_id);
         let num_tracks = self.tracks.len();
 
-        let mut assets: HashMap<PathBuf, ProjectSampleAsset> = HashMap::new();
+        // Shared with earlier imports while one runs (docs/rig-spec.md §8).
+        let mut assets: HashMap<PathBuf, ProjectSampleAsset> = self.take_import_sample_assets();
         let mut built = Vec::with_capacity(clips.len());
         // One reminter for every clip, so each new sequencer's node process
         // slots get ONE fresh identity across clips, never the kit's (which
@@ -754,8 +760,14 @@ impl App {
         for (index, clip) in clips.into_iter().enumerate() {
             let pattern =
                 expand_kit_clip_pattern(clip.pattern, &pad_to_position, &members, num_tracks);
-            let (snapshot, _, _) =
-                self.project_pattern_into_snapshot_with_policy(pattern, &mut assets, false)?;
+            let converted = self.project_pattern_into_snapshot_with_policy(pattern, &mut assets, false);
+            let (snapshot, _, _) = match converted {
+                Ok(converted) => converted,
+                Err(error) => {
+                    self.return_import_sample_assets(assets);
+                    return Err(error);
+                }
+            };
             let cells: Vec<Option<TrackPatternData>> = members
                 .iter()
                 .enumerate()
@@ -820,6 +832,7 @@ impl App {
             ));
         }
 
+        self.return_import_sample_assets(assets);
         self.state.with_scenes_mut(|scenes| {
             let mut bank = crate::sequencer::RackClipBank {
                 group_id,
@@ -928,58 +941,69 @@ pub(super) fn migrate_kit_sequencers(
 /// already carry rack data, modulator pads and multi-slot racks are left
 /// alone. Idempotent.
 pub(super) fn lift_plain_pad_clip_lanes(kit: &mut ProjectKitPreset) {
-    use crate::project::ProjectInstrumentType as Kind;
     for clip in &mut kit.clips {
-        let pattern = &mut clip.pattern;
         for (pad, kit_pad) in kit.pads.iter().enumerate() {
-            let Some(sound) = &kit_pad.sound else {
-                continue;
-            };
-            let [template] = sound.rack.slots.as_slice() else {
-                continue;
-            };
-            let is_sampler = match (pattern.instrument_types.get(pad), template.instrument_type) {
-                (Some(Kind::Custom), Kind::Custom) => false,
-                (Some(Kind::Sampler), Kind::Sampler) => true,
-                _ => continue,
-            };
-            if pattern.rack_tracks.get(pad).is_some_and(Option::is_some) {
-                continue;
+            if let Some(sound) = &kit_pad.sound {
+                lift_plain_lane(&mut clip.pattern, pad, sound);
             }
-            let Some(instrument_slot) = pattern.instrument_slots.get(pad).cloned() else {
-                continue;
-            };
-            let mut slot = template.clone();
-            slot.instrument_slot = instrument_slot;
-            if let Some(effects) = pattern.effect_slots.get(pad) {
-                slot.effect_slots = effects.clone();
-            }
-            if let Some(state) = pattern.track_sound_states.get(pad) {
-                slot.track_sound_state = state.clone();
-            }
-            if let Some(mode) = pattern.instrument_run_modes.get(pad) {
-                slot.instrument_run_mode = *mode;
-            }
-            if let Some(offset) = pattern.instrument_base_note_offsets.get(pad) {
-                slot.instrument_base_note_offset = *offset;
-            }
-            if is_sampler {
-                if let Some(Some(path)) = pattern.sample_paths.get(pad) {
-                    slot.sample_path = Some(path.clone());
-                    slot.sample_name = pattern.sample_names.get(pad).cloned();
-                }
-            }
-            if pattern.rack_tracks.len() <= pad {
-                pattern.rack_tracks.resize_with(pad + 1, || None);
-            }
-            pattern.rack_tracks[pad] = Some(crate::project::ProjectRackTrackPattern {
-                routing: sound.rack.routing,
-                slots: vec![slot],
-                macros: sound.rack.macros.clone(),
-            });
-            pattern.instrument_types[pad] = Kind::Rack;
         }
     }
+}
+
+/// [`lift_plain_pad_clip_lanes`] for one lane: give column `column` of
+/// `pattern` the rack slot `sound` (a one-slot rack Sound) plays from, when
+/// the lane was written by a plain instrument or sampler track. Controlled
+/// import (docs/rig-spec.md §8) lifts a plain track's scene lanes the same
+/// way, since the imported track is rebuilt from its Sound. Idempotent.
+pub(super) fn lift_plain_lane(
+    pattern: &mut ProjectPattern,
+    column: usize,
+    sound: &crate::project::ProjectSoundPreset,
+) {
+    use crate::project::ProjectInstrumentType as Kind;
+    let [template] = sound.rack.slots.as_slice() else {
+        return;
+    };
+    let is_sampler = match (pattern.instrument_types.get(column), template.instrument_type) {
+        (Some(Kind::Custom), Kind::Custom) => false,
+        (Some(Kind::Sampler), Kind::Sampler) => true,
+        _ => return,
+    };
+    if pattern.rack_tracks.get(column).is_some_and(Option::is_some) {
+        return;
+    }
+    let Some(instrument_slot) = pattern.instrument_slots.get(column).cloned() else {
+        return;
+    };
+    let mut slot = template.clone();
+    slot.instrument_slot = instrument_slot;
+    if let Some(effects) = pattern.effect_slots.get(column) {
+        slot.effect_slots = effects.clone();
+    }
+    if let Some(state) = pattern.track_sound_states.get(column) {
+        slot.track_sound_state = state.clone();
+    }
+    if let Some(mode) = pattern.instrument_run_modes.get(column) {
+        slot.instrument_run_mode = *mode;
+    }
+    if let Some(offset) = pattern.instrument_base_note_offsets.get(column) {
+        slot.instrument_base_note_offset = *offset;
+    }
+    if is_sampler {
+        if let Some(Some(path)) = pattern.sample_paths.get(column) {
+            slot.sample_path = Some(path.clone());
+            slot.sample_name = pattern.sample_names.get(column).cloned();
+        }
+    }
+    if pattern.rack_tracks.len() <= column {
+        pattern.rack_tracks.resize_with(column + 1, || None);
+    }
+    pattern.rack_tracks[column] = Some(crate::project::ProjectRackTrackPattern {
+        routing: sound.rack.routing,
+        slots: vec![slot],
+        macros: sound.rack.macros.clone(),
+    });
+    pattern.instrument_types[column] = Kind::Rack;
 }
 
 /// `Some(path)` when a recorded sequencer source is a `(load "path")` form.
@@ -1537,6 +1561,7 @@ mod tests {
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
                 expr_source: None,
+                owner_instance: None,
             };
             crate::process::track_process_slot_runtime_id(&slot, 0)
         };

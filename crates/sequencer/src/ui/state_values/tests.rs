@@ -10288,6 +10288,7 @@ use panel_kinds_seed::*;
             0,
             sequencer::sequencer::RackTrackSnapshot::new(
                 vec![sequencer::sequencer::RackSlotSnapshot {
+                    id: 0,
                     instrument_type: sequencer::sequencer::InstrumentType::Sampler,
                     instrument_run_mode: sequencer::sequencer::CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 12.0,
@@ -11317,8 +11318,12 @@ use panel_kinds_seed::*;
         assert_eq!(rack_actions.widget_type, "menu-button");
         assert_eq!(
             rack_actions.props.get("options"),
-            Some(&test_string_list(&["Copy rack (all slots) to all scenes"])),
-            "rack header menu should carry the rack-wide copy"
+            Some(&test_string_list(&[
+                "Copy rack (all slots) to all scenes",
+                "Hide disabled slots",
+                "Purge unused slots…",
+            ])),
+            "rack header menu: the rack-wide copy, hide disabled slots, purge (rig spec §4)"
         );
         assert_finite_nonzero_rect(rack_actions, "rack header action menu");
         assert!(
@@ -27243,6 +27248,8 @@ use panel_kinds_seed::*;
                 // Deleting a clip is the row's [-] button, not a menu entry per clip.
                 // Break kits (spec §7.2) enter through the rack menu too.
                 "export-kit",
+                // Kits on/off per bank (docs/rig-spec.md §6).
+                "kit-off",
                 "ungroup",
                 "color-menu",
             ],
@@ -27297,7 +27304,7 @@ use panel_kinds_seed::*;
             // A rack with no clip bank is a LEGACY rack, so it is offered the
             // one-shot conversion (rack-clips spec §6.3).
             menu_action_ids(&mut editor, 8.0),
-            vec!["rename", "convert-to-clips", "export-kit", "ungroup", "color-menu"],
+            vec!["rename", "convert-to-clips", "export-kit", "kit-off", "ungroup", "color-menu"],
         );
 
         // The kind picker (instance-kinds spec §8.3): one "New <kind> in
@@ -27312,7 +27319,7 @@ use panel_kinds_seed::*;
         });
         assert_eq!(
             menu_action_ids(&mut editor, 8.0),
-            vec!["rename", "convert-to-clips", "new-rack-instance", "export-kit", "ungroup", "color-menu"],
+            vec!["rename", "convert-to-clips", "new-rack-instance", "export-kit", "kit-off", "ungroup", "color-menu"],
         );
         editor.drain_host_commands();
         editor.runtime_mut().eval_str(
@@ -30247,6 +30254,115 @@ use panel_kinds_seed::*;
         summarize("input", &input_samples);
         summarize("frame", &frame_samples);
         summarize("total", &total_samples);
+    }
+
+    /// The clip-stop row under each track's clip grid: a real, finite rect
+    /// inside the strip and below the grid, sized and placed like a grid
+    /// cell, and never taller than its bar on a wide strip; a click stops
+    /// the track by id at the launch quantize. The button follows what the
+    /// track PLAYS (`t.clip-playing`), not what the current scene assigns: live
+    /// for a lane playing an override with no cell, inert for a silent one.
+    #[test]
+    fn metal_seq_mixer_clip_stop_row_sits_under_the_grid_and_stops_by_track_id() {
+        let mut editor = mixer_v2_perf_editor(2, 2);
+        // Track 0 plays a clip its scene cell no longer names (a quantized
+        // stop undone before its boundary, an override); track 1 plays
+        // nothing.
+        for (track, field) in [(0, "assigned"), (1, "active")] {
+            for pattern_id in [track as u64 * 100 + 1, track as u64 * 100 + 2] {
+                let cell = kind_cell(&editor, track, pattern_id);
+                set_field(editor.runtime_mut(), cell, field, Value::Bool(false));
+            }
+            // What the host derives from the cells' `active` (sync_cell_model).
+            let t = kind_track(editor.runtime(), track);
+            set_field(editor.runtime_mut(), t, "clip-playing", Value::Bool(track == 0));
+        }
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("mixer layout");
+        for track in [0, 1] {
+            let strip = find_layout_node_by_stable_key(&layout, &format!("mixer-v2-track-{track}"))
+                .expect("track strip");
+            let cell = find_layout_node_by_stable_key_suffix(
+                &layout, &format!("/track-pattern-cell-{track}-{}", track * 100 + 1),
+            ).expect("first clip cell");
+            let stop = find_layout_node_by_stable_key_suffix(
+                &layout, &format!("/track-clip-stop-{track}"),
+            ).expect("clip stop button");
+            assert_finite_nonzero_rect(stop, "clip stop button");
+            // Under the whole clip area, not just its first row: the stock
+            // 4-cell area ends a full 3 rows below its first cell.
+            assert!(
+                stop.rect.row >= cell.rect.row + 3.0,
+                "the stop row sits under the clip area: stop {:?} cell {:?}", stop.rect, cell.rect
+            );
+            assert!(stop.rect.col >= strip.rect.col && stop.rect.row >= strip.rect.row);
+            assert!(stop.rect.col + stop.rect.width <= strip.rect.col + strip.rect.width + 1e-3);
+            assert!(stop.rect.row + stop.rect.height <= strip.rect.row + strip.rect.height + 1e-3);
+            assert!((stop.rect.col - cell.rect.col).abs() < 1e-3, "left edge of the first column");
+            assert!((stop.rect.width - cell.rect.width).abs() < 1e-3, "a grid cell's width");
+            assert!((stop.rect.height - cell.rect.height).abs() < 1e-3, "a grid cell's height");
+        }
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.mixer/strip-height)").unwrap(),
+            Some(Value::Number(14.8)),
+            "the strip grows by the stop row"
+        );
+
+        let click = |editor: &mut eseqlisp::Editor, track: usize| {
+            let layout = editor.widget_layout().expect("mixer layout");
+            let stop = find_layout_node_by_stable_key_suffix(
+                &layout, &format!("/track-clip-stop-{track}"),
+            ).expect("clip stop button");
+            let on_click = stop.props["on-click"].clone();
+            editor.drain_host_commands();
+            editor.runtime_mut().invoke(on_click, vec![Value::Nil]).expect("click stop");
+            editor.drain_host_commands()
+        };
+        let commands = click(&mut editor, 0);
+        let stops: Vec<_> = commands
+            .iter()
+            .filter_map(|command| match command {
+                eseqlisp::host::HostCommand::Custom { name, payload } if name == "clear-scene-cell" => {
+                    Some(payload.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stops.len(), 1, "one stop command: {commands:?}");
+        let Value::Map(payload) = &stops[0] else { panic!("map payload: {stops:?}") };
+        assert_eq!(*payload["track-id"].borrow(), Value::Number(0.0), "addressed by track id");
+        assert_eq!(*payload["stop"].borrow(), Value::Bool(true), "an explicit stop");
+        assert!(payload.contains_key("quantize"), "carries the launch quantize");
+        assert!(!payload.contains_key("scene"), "the current scene resolves on landing");
+        let commands = click(&mut editor, 1);
+        assert!(
+            !commands.iter().any(|command| matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "clear-scene-cell"
+            )),
+            "a silent track has nothing to stop: {commands:?}"
+        );
+
+        // The widest strip grows the clip cells (scale ~1.86); the stop
+        // button keeps the cells' width but stays inside its one-cell bar.
+        editor
+            .runtime_mut()
+            .eval_str("(setopt eseq.mixer/track-strip-width 24)")
+            .expect("widen the strips");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("mixer layout");
+        let strip = find_layout_node_by_stable_key(&layout, "mixer-v2-track-0").expect("track strip");
+        let cell = find_layout_node_by_stable_key_suffix(&layout, "/track-pattern-cell-0-1")
+            .expect("first clip cell");
+        let stop = find_layout_node_by_stable_key_suffix(&layout, "/track-clip-stop-0")
+            .expect("clip stop button");
+        assert!(cell.rect.height > 1.0, "wide cells grow: {:?}", cell.rect);
+        assert!((stop.rect.width - cell.rect.width).abs() < 1e-3, "a grid cell's width");
+        assert!(stop.rect.height <= 1.0 + 1e-3, "capped at the bar: {:?}", stop.rect);
+        assert!(stop.rect.row + stop.rect.height <= strip.rect.row + strip.rect.height + 1e-3);
     }
 
     #[test]

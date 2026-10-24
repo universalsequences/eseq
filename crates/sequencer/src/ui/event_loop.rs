@@ -364,6 +364,7 @@ pub(crate) fn run_event_loop(
         pending_instrument_preview: None,
         pending_instrument_cancel_restore: None,
         pending_saved_instrument_load: None,
+        pending_project_import: None,
         pending_key_lock_auditions: Vec::new(),
         effect_edit_session: None,
         pending_effect_preview: None,
@@ -428,7 +429,7 @@ pub(crate) fn run_event_loop(
         cached_peak_l_level: 0.0f64,
         cached_peak_r_level: 0.0f64,
         cached_track_peak_levels: vec![0.0; track_names.len()],
-        cached_bus_peak_levels: read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids),
+        cached_bus_peak_levels: read_bus_peak_levels(app.graph.lg, &app),
         cached_modulator_phases: initial_modulator_phases,
         cached_modulator_levels: initial_modulator_levels,
         cached_mod_port_levels: read_mod_port_levels(app.graph.lg, &app),
@@ -925,7 +926,7 @@ pub(crate) fn run_event_loop(
                                         &app.graph.track_node_ids,
                                     );
                                     meters.cached_bus_peak_levels =
-                                        read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+                                        read_bus_peak_levels(app.graph.lg, &app);
                                     (
                                         meters.cached_modulator_phases,
                                         meters.cached_modulator_levels,
@@ -1419,18 +1420,20 @@ pub(crate) fn run_event_loop(
         }
         // A script note drag's frame: once per batch, before the host kinds
         // sync reads the notes.
-        host_commands::notes::flush_note_drag(
-            &mut app,
-            &mut editor,
-            &mut LoopCtx {
+        {
+            let mut ctx = LoopCtx {
                 sessions: &mut sessions,
                 meters: &mut meters,
                 frame: &mut frame,
                 gesture: &mut gesture,
                 track_names: &mut track_names,
                 shared: &shared,
-            },
-        );
+            };
+            host_commands::notes::flush_note_drag(&mut app, &mut editor, &mut ctx);
+            // A queued project import runs one turn after it was asked for,
+            // so its loading toast draws first.
+            crate::project_import_ui::run_pending_import(&mut app, &mut editor, &mut ctx);
+        }
 
         let mut project_load_still_pending = false;
         if app.has_pending_project_load() {
@@ -1533,7 +1536,7 @@ pub(crate) fn run_event_loop(
                             &app.graph.track_node_ids,
                         );
                         meters.cached_bus_peak_levels =
-                            read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+                            read_bus_peak_levels(app.graph.lg, &app);
                         (
                             meters.cached_modulator_phases,
                             meters.cached_modulator_levels,

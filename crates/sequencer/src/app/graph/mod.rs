@@ -109,6 +109,8 @@ fn preserve_rack_slot_configuration(
     mut replacement: RackSlotSnapshot,
     existing: &RackSlotSnapshot,
 ) -> RackSlotSnapshot {
+    // The row keeps its identity: scene state names it by id.
+    replacement.id = existing.id;
     replacement.choke_group = existing.choke_group;
     replacement.instrument_base_note_offset = existing.instrument_base_note_offset;
     replacement.gain = existing.gain;
@@ -123,7 +125,9 @@ fn preserve_rack_slot_configuration(
     replacement
 }
 
-fn instrument_display_name(name: &str) -> String {
+/// An instrument's display name: its file name, without folder or release
+/// pin (`factory:Synths/Digi Syn@2` -> `Digi Syn`).
+pub(in crate::app) fn instrument_display_name(name: &str) -> String {
     // A pinned release id (`factory:Synths/Digi Syn@2`) displays without its pin.
     let (name, _) = crate::app_paths::ContentTier::split_release(name);
     std::path::Path::new(name)
@@ -497,6 +501,8 @@ mod mod_routes;
 mod node_build;
 mod rack_rebuild;
 mod rack_slots;
+pub use rack_slots::RackSlotReplaceScope;
+pub(crate) use rack_slots::{custom_rack_slot_snapshot, sampler_rack_slot_snapshot};
 mod reorder;
 mod slot_bookkeeping;
 mod sync_clear;

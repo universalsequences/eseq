@@ -826,7 +826,7 @@ pub(crate) fn poll_observed_meters(app: &app::App, ctx: &mut LoopCtx<'_>, ct: us
         was.buses,
         meters.cached_bus_peak_levels.len() != app.buses.len(),
     ) {
-        meters.cached_bus_peak_levels = read_bus_peak_levels(lg, &app.graph.bus_node_ids);
+        meters.cached_bus_peak_levels = read_bus_peak_levels(lg, app);
     }
     let modulator_tracks =
         (app.graph.track_node_ids.len()).min(app.graph.track_instrument_types.len());

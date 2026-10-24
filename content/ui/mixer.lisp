@@ -25,17 +25,19 @@
 
 (import eseq.track-collapse)
 (import eseq.drum-rack-v2)
+(import eseq.bank-power :refer (bank-power-toggle))
 ;; Read-only: the step-tab registry names the `(load …)` a script came from.
 (import eseq.seq-step-tabs)
 (import eseq.effects.drag-drop :as effect-dd)
 (import eseq.effects.param-controls :as pc)
 ;; Shared scene-bank view state: the clip grid below shows only the bank the
 ;; transport strip is viewing (scene-banks spec 10.1).
-(import eseq.scene-banks :refer (scene-viewed-bank clip-in-viewed-bank?))
-(import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of prop-if
-                              rgb-part color-rgba track-color-part))
+(import eseq.scene-banks :refer (scene-viewed-bank scene-viewed-bank-id scene-viewed-bank-label clip-in-viewed-bank?
+                                 bank-tracks))
+(import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of prop-if bare-text
+                              rgb-part color-rgba track-color-part find))
 (import eseq.kinds :refer (track tracks buses groups routes graphs selection master project
-                           mod-in-level mod-out-signal launch-cell! launch-rack-clip! save-rack-clip-as!
+                           mod-in-level mod-out-signal launch-cell! stop-track-cell! launch-rack-clip! silence-rack! save-rack-clip-as!
                            convert-rack-to-clips!))
 
 (export render-order
@@ -83,7 +85,9 @@
         bus-mod-port-row
         strip-menu
         strip-rename
-        mod-patch)
+        mod-patch
+        kit-power-action
+        parked-kit-strip)
 
 ;; Strip heights derive from the shared clip-area knob
 ;; (eseq.seq-core-state/mixer-clip-area-height) so a package can grow the
@@ -93,6 +97,10 @@
 ;; of the other strip kinds from it.
 (def clip-area-height ()
   (eseq.seq-core-state/effective-clip-area-height))
+
+;; The clip-stop bar under the clip area; 0 in compact mode.
+(def clip-stop-row-height ()
+  (eseq.seq-core-state/effective-clip-stop-row-height))
 
 ;; Compact mode (eseq.seq-core-state/mixer-show-clip-grid off): no clip grid,
 ;; and the bus/group strips drop the spacers that kept them level with the
@@ -110,7 +118,7 @@
   :doc "Width (cells) of a bus strip in the mixer.")
 
 (def strip-height ()
-  (+ 9.8 (clip-area-height)))
+  (+ 9.8 (clip-area-height) (clip-stop-row-height)))
 
 ;; Grouped strips drop the output dropdown, so they are shorter.
 (def grouped-strip-height ()
@@ -129,11 +137,12 @@
   (strip-height))
 
 ;; Bus and group strips have no clip area, so they absorb the clip-area
-;; growth with a spacer above their meter row; that keeps their meters,
-;; buttons and labels level with the track strips'. Nothing is inserted at
-;; the stock height so the factory layout is unchanged.
-(def clip-growth-spacer ()
-  (let ((extra (- (clip-area-height) 4.0)))
+;; growth past the stock 4.0 cells, and the clip-stop bar, with a spacer
+;; above their meter row; that keeps their meters, buttons and labels level
+;; with the track strips'. `gap` is the caller's v-stack gap, which the
+;; spacer's own slot adds. Compact mode has neither, so inserts nothing.
+(def clip-growth-spacer (&key (gap 0.25))
+  (let ((extra (- (+ (clip-area-height) (clip-stop-row-height)) 4.0 gap)))
     (if (> extra 0)
       (box :width :fill :height extra :bg :transparent)
       nil)))
@@ -268,7 +277,18 @@
       ;; Break kits (docs/rack-clips-and-break-kits-spec.md 7.2): the kit save
       ;; panel, which carries a scene checklist for the clip bank.
       (dict :id :export-kit :label "Export as kit..." :icon :export)
+      ;; Kits on/off per bank (docs/rig-spec.md §6): the viewed bank's.
+      (kit-power-action g)
       (dict :id :ungroup :label "Ungroup" :icon :ungroup))))
+
+;; "Turn kit off in bank C" while it plays in any scene of the viewed bank
+;; (a mixed bank too), "Turn kit on in bank C" while every scene has it off.
+(def kit-power-action (g)
+  (let ((off (eseq.drum-rack-v2/kit-off-in-viewed-bank? g))
+        (bank (scene-viewed-bank-label)))
+    (dict :id (if off :kit-on :kit-off)
+          :label (str "Turn kit " (if off "on" "off") " in bank " bank)
+          :icon :dial)))
 
 ;; The path a project-owned script was loaded from, per the step-tab registry;
 ;; "" when unknown (the moved instance then does not come back by itself on
@@ -705,10 +725,76 @@
   (max 3 (floor (* bus-strip-width 1.1))))
 
 ;; Its own subtree: a launch, a clone or a bank switch re-renders the grid
-;; alone.
+;; alone. The clip-stop bar under it is a subtree of its own too.
 (def track-pattern-grid (t)
-  (subtree :key (str "mixer-v2-track-pattern-grid-" t.index)
-    (track-pattern-cell-grid t)))
+  (v-stack :gap 0 :width :fill
+    (subtree :key (str "mixer-v2-track-pattern-grid-" t.index)
+      (track-pattern-cell-grid t))
+    (subtree :key (str "mixer-v2-track-clip-stop-" t.index)
+      (track-clip-stop-bar t))))
+
+;; ── Clip stop ──
+
+;; The clip-stop glyph: a filled square half the button's height, lit
+;; while there is something to stop, faded into the button otherwise.
+(defwidget mixer-clip-stop-glyph
+  :width 1.9 :height 0.95
+  :paint-margin 0.05
+  :state (enabled)
+  :shader
+  (sdf/fill (sdf/rounded-rect (* height 0.5) (* height 0.5) 0.04)
+    (material :color (if (> enabled 0.5)
+        :icon-fg
+        ;; Inert: the glyph barely lifts off the button.
+        (mix :mixer-control-bg :icon-fg 0.25)))))
+
+;; The clip-stop bar's surface: the clip area's :buffer-bg pulled a little
+;; toward the strip's own :mixer-strip-bg, so the bar reads as a separate
+;; bottom bar under the grid without a new colour.
+(defwidget mixer-clip-stop-bar-bg
+  :width 1 :height 1
+  :shader
+  (sdf/fill (sdf/rounded-rect width height 0)
+    (material :color (mix :buffer-bg :mixer-strip-bg 0.5))))
+
+;; The bar under a clip area holding its stop button (Ableton's clip-stop
+;; row). The button is a clip cell in width and sits in the grid's first
+;; column: the bar lays out the clip grid's own six columns, the rest empty.
+;; Its height is a clip cell's capped at the bar's: a wide strip grows the
+;; cells (`clip-cell-scale` up to ~1.86) but the bar stays one cell tall.
+;; `enabled` (a bool, or a binding such as #'t.clip-playing so a launch
+;; repaints the glyph without re-rendering) dims the button while false;
+;; `on-stop` checks the live state itself, so a dimmed button is inert.
+(def clip-stop-bar (key enabled on-stop)
+  (let ((k (clip-cell-scale))
+        (bar (clip-stop-row-height))
+        (row (min (* 1.0 k) bar))
+        (h (* 0.95 row)))
+    (box :width :fill :height bar :align :top
+      :bg :transparent :background "mixer-clip-stop-bar-bg"
+      (grid :cols 6 :col-width (* 2.0 k) :row-height row :align :center
+        (box :key key
+          :debug-name "mixer-clip-stop"
+          :width (* 1.90 k) :height h
+          :corner-radius (eseq.seq-core-state/radius 4)
+          :background-color :mixer-control-bg
+          :on-click (lambda (event) (on-stop))
+          (mixer-clip-stop-glyph :width (* 1.90 k) :height h :enabled enabled))
+        (each (range 0 5) |i|
+          (box :key (str key "-pad-" i) :width (* 1.90 k) :height h))))))
+
+;; Stop track t: empty its cell in the current scene and silence it, at the
+;; launch quantize boundary. Lit while the track plays a clip
+;; (`t.clip-playing`: a cell is `active`, its effective pattern with a session
+;; override included and not silenced), whatever the current scene assigns.
+;; Bound, so a launch repaints it without re-rendering the bar.
+(def track-clip-stop-bar (t)
+  (clip-stop-bar (str "track-clip-stop-" t.index)
+    #'t.clip-playing
+    (lambda ()
+      (when t.clip-playing
+        (activate-track-control)
+        (stop-track-cell! t)))))
 
 (def track-pattern-cell-grid (t)
   (let ((cells (viewed-bank-track-pattern-cells t))
@@ -1330,7 +1416,8 @@
       :export-kit (eseq.browser/enter-kit-save g)
       :new-rack-instance
       (host-command "packages-new-instance"
-        (dict :module (get action :module) :kind (get action :kind-id) :group-id g.gid))
+        (dict :module (get action :module) :kind (get action :kind-id) :group-id g.gid
+              :bank-id (scene-viewed-bank-id)))
       :move-sequencer-into-rack
       (host-command "move-sequencer-into-rack"
         (dict :group-id g.gid
@@ -1341,6 +1428,8 @@
         (dict :group-id g.gid :sequencer-id (get action :sequencer-id)))
       :convert-to-clips (convert-rack-to-clips! g)
       :save-rack-clip (save-rack-clip-as! g "")
+      :kit-on (eseq.drum-rack-v2/set-kit-in-viewed-bank! g true)
+      :kit-off (eseq.drum-rack-v2/set-kit-in-viewed-bank! g false)
       _ nil)))
 
 (def track-context-menu ()
@@ -1389,11 +1478,6 @@
 
 ;; The track's name badge over its color; it lights white as the delete
 ;; target and dims while the track is silent.
-;; The props of text drawn straight on its parent: no fill, border or
-;; shading of its own.
-(def bare-text
-  (list :background-color :transparent :border-color :transparent
-        :highlight-color :transparent :shadow-color :transparent :bg :transparent))
 
 (def track-badge (t text key &key (width 3.65) (font-size 9) (h-align :center)
                   (v-align nil))
@@ -1479,16 +1563,18 @@
   (let ((all (buses)))
     (append (filter (lambda (b) (not (main-bus? b))) all) (filter main-bus? all))))
 
-;; The tracks, then the buses, as LEFT / RIGHT walk them.
+;; The tracks the viewed bank uses, then the buses, as LEFT / RIGHT walk
+;; them.
 (def channels ()
-  (append (tracks) (display-buses)))
+  (append (bank-tracks (scene-viewed-bank) (list)) (display-buses)))
 
 (def current-channel ()
   (let ((bi eseq.seq-core-state/selected-bus)
         (all (buses)))
     (if (and (>= bi 0) (< bi (len all)))
       (nth all bi)
-      (or (first (filter (lambda (t) t.in-selection) (tracks))) (first (tracks))))))
+      (let ((shown (bank-tracks (scene-viewed-bank) (list))))
+        (or (first (filter (lambda (t) t.in-selection) shown)) (first shown))))))
 
 (def select-channel (delta)
   (let ((all (channels))
@@ -1636,6 +1722,19 @@
 ;; session-view package follows a track's effective clip: only a changed row
 ;; scrolls, so a manual scroll in between holds. A launch re-renders this
 ;; column alone (the follow row); the play glyphs only repaint.
+;; The clip column and its stop bar: stop silences the rack in the current
+;; scene (its clip pointer cleared), at the launch quantize boundary; dimmed
+;; while the current scene plays no clip of it.
+(def rack-clip-area (g)
+  (v-stack :gap 0 :width :fill
+    (rack-clip-column g)
+    (subtree :key (str "mixer-rack-clip-stop-" g.gid)
+      (clip-stop-bar (str "rack-clip-stop-" g.gid) (not (= g.rack-clip nil))
+        (lambda ()
+          (when g.rack-clip
+            (activate-track-control)
+            (silence-rack! g)))))))
+
 (def rack-clip-column (g)
   (subtree :key (str "rack-clip-column-sub-" g.gid)
     (let ((playing g.rack-clip)
@@ -1677,6 +1776,9 @@
 ;; Meter, fader, mute and solo are the group's bus; selecting or dragging
 ;; them selects that bus. With the clip column above, the meter gives up the
 ;; spacer that kept it level.
+;; The slot's v-stack gap, which its clip-growth spacer must know.
+(def group-header-slot-gap 0.175)
+
 (def group-header-slot (g)
   (let ((b g.bus)
       (bus-idx (if b b.index -1))
@@ -1693,13 +1795,13 @@
         (list))
       :drop-meta (dict :kind "bus" :bus bus-idx)
       :on-drop (lambda (event) (drop-on-group-header event g))
-      (v-stack :gap 0.175 :align :center
+      (v-stack :gap group-header-slot-gap :align :center
         (box :height 0.01 :width 0)
         (bus-output-dropdown b)
         ;; Where a plain track strip shows its pattern grid, a clip-bearing
         ;; rack shows its clip run vertically (§6.2). Everything else keeps the
         ;; spacer that levels the meters.
-        (if show-clips (rack-clip-column g) (clip-growth-spacer))
+        (if show-clips (rack-clip-area g) (clip-growth-spacer :gap group-header-slot-gap))
         (if b
           (v-stack :gap 0.4 :align :center
             (box :width :fill :height (if (compact?) 4.1 (if show-clips 3.9 8.1))
@@ -1780,7 +1882,43 @@
 ;; A group rendered as a real container: a colored box wrapping the group's
 ;; channel slot and its member strips, with a top spacer so the color shows
 ;; above the contained tracks.
-(def group-container (g)
+;; A kit the viewed bank switches off (docs/rig-spec.md §6): its pads leave
+;; the bank's mixer (eseq-ka5t.10) but the kit stays, a dimmed, collapsed
+;; strip, so the way back on is always visible: its power dot turns the kit
+;; back on in the viewed bank. A click elsewhere selects the kit and shows
+;; its drum rack in *fx*; its menu has "Turn kit on in bank C".
+(def parked-kit-strip (g)
+  (box :key (str "parked-kit-strip-" g.gid)
+    :debug-name "parked-kit-strip"
+    :width 4.7 :height (group-bus-strip-height)
+    :corner-radius (eseq.seq-core-state/radius 16)
+    :padding 0.3
+    :background-color (color-rgba g.color 0.22)
+    :border-width 2
+    :border-color :mixer-strip-border
+    :on-click (lambda (event) (eseq.sequencer/show-fx-for-group g))
+    :on-right-click (lambda (event) (open-strip-menu event nil g))
+    (v-stack :gap 0.4 :align :center
+      (box :width 0 :height 0.4)
+      (bank-power-toggle (str "parked-kit-power-" g.gid) :off
+        (lambda () (eseq.drum-rack-v2/set-kit-in-viewed-bank! g true)))
+      (apply label (substring g.name 0 6)
+        :key (str "parked-kit-name-" g.gid)
+        :font-size 9 :h-align :center :v-align :center
+        :color :dim
+        bare-text)
+      (apply label "off"
+        :key (str "parked-kit-off-" g.gid)
+        :font-size 8 :h-align :center :v-align :center
+        :color :dim
+        bare-text))))
+
+(def group-container (g viewed)
+  (if (eseq.drum-rack-v2/kit-off-in-viewed-bank? g)
+    (parked-kit-strip g)
+    (live-group-container g viewed)))
+
+(def live-group-container (g viewed)
   (let ((c g.color))
     (box
       :corner-radius (eseq.seq-core-state/radius 16)
@@ -1805,22 +1943,23 @@
           (v-stack :gap 0.0
             (box :width :fill :height 0.85 :bg :transparent)
             (h-stack :gap 0.1
-              (each g.tracks |t|
+              ;; Only what the viewed bank uses (docs/rig-spec.md §9).
+              (each (eseq.drum-rack-v2/bank-members g viewed) |t|
                 (subtree :key (str "mixer-v2-track-" t.index)
                   (track-strip-of t)))
               ;; Child racks draw as their own container inside this block —
               ;; collapsed, that is a single header strip; expanded, the rack
               ;; header plus its members (docs/drum-rack-v2-spec.md).
-              (each g.racks |child|
+              (each (eseq.drum-rack-v2/bank-racks g viewed) |child|
                 (subtree :key (str "mixer-v2-group-" child.gid)
-                  (group-container child))))))))))
+                  (group-container child viewed))))))))))
 
 (def render-item (item)
   (let ((g (get item :group))
         (t (get item :track)))
     (if g
       (subtree :key (str "mixer-v2-group-" g.gid)
-        (group-container g))
+        (group-container g (get item :viewed)))
       (subtree :key (str "mixer-v2-track-" t.index)
         (track-strip-of t)))))
 

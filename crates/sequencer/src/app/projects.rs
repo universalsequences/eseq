@@ -714,6 +714,165 @@ fn migrate_legacy_dgen_param_node_indices(project: &mut ProjectFile) {
     }
 }
 
+/// The file-level half of a project load: every migration that rewrites the
+/// parsed `ProjectFile` before any of it reaches the App (compact carriers
+/// widened, legacy effect names and DGen param indices, qualified instrument
+/// ids, device instance records, legacy kind sources, reserved instance ids).
+/// Shared by the loader and by controlled import (docs/rig-spec.md §8), which
+/// reads another project through the same migrations without loading it.
+/// Returns the instance migration notes.
+pub(crate) fn prepare_project_file_for_load(
+    project: &mut ProjectFile,
+) -> Result<Vec<String>, String> {
+    if project.version > project::project_file_version() {
+        return Err(format!("Unsupported project version {}", project.version));
+    }
+    // In-memory captures (bounce) arrive compact; parsed files already
+    // expanded during deserialization.
+    project.expand_compact_patterns();
+    migrate_dgen_builtin_effect_names(project);
+    if project.version < 2 {
+        migrate_legacy_dgen_param_node_indices(project);
+    }
+    project
+        .map_instrument_ids(|name| {
+            crate::lisp_host::qualify_instrument_id(name).map_err(|error| error.to_string())
+        })
+        .map_err(|error| format!("Could not resolve project instrument id: {error}"))?;
+    project.normalize_device_instances()?;
+    let mut migration_notes = super::instances::migrate_legacy_kind_sources(
+        project.version,
+        &mut project.groups,
+        &mut project.scratch,
+        &mut project.instances,
+        crate::lisp_host::declared_kinds_for_module,
+    );
+    migration_notes.extend(super::instances::rekey_reserved_instance_ids(project));
+    Ok(migration_notes)
+}
+
+/// One track of `project` as a Sound (the container preset the Sounds
+/// browser saves and a kit pad carries), with `pattern` as the scene state
+/// it is read from. A pure read of the file, so controlled import
+/// (docs/rig-spec.md §8) builds pads and tracks from a project it never
+/// loads.
+pub(crate) fn sound_preset_from_project(
+    project: &ProjectFile,
+    track: usize,
+    pattern: &ProjectPattern,
+    name: &str,
+    tags: Vec<String>,
+    author: String,
+) -> Result<crate::project::ProjectSoundPreset, String> {
+    let source_track = project
+        .tracks
+        .get(track)
+        .cloned()
+        .ok_or_else(|| format!("Invalid track index {}", track + 1))?;
+    let ProjectTrack {
+        id,
+        name: track_name,
+        name_user_authored,
+        color,
+        collapsed,
+        kind,
+    } = source_track;
+    let (track_payload, rack_payload) = match kind {
+        ProjectTrackKind::Rack { .. } => {
+            let rack = pattern
+                .rack_tracks
+                .get(track)
+                .cloned()
+                .flatten()
+                .ok_or_else(|| "Rack pattern data is missing".to_string())?;
+            (project.tracks[track].clone(), rack)
+        }
+        // A plain sampler or instrument track is a one-slot rack Sound.
+        ProjectTrackKind::Sampler { .. } | ProjectTrackKind::Custom { .. } => {
+            use crate::project::ProjectInstrumentType as Type;
+            let (instrument_type, sample_path, sample_name, instrument_name, run_mode) = match kind {
+                ProjectTrackKind::Sampler { sample_path } => (
+                    Type::Sampler,
+                    sample_path,
+                    pattern.sample_names.get(track).cloned(),
+                    None,
+                    crate::project::ProjectCustomInstrumentRunMode::Instrument,
+                ),
+                ProjectTrackKind::Custom { instrument_name } => (
+                    Type::Custom,
+                    None,
+                    None,
+                    Some(instrument_name),
+                    pattern.instrument_run_modes.get(track).copied().unwrap_or_default(),
+                ),
+                _ => unreachable!("matched above"),
+            };
+            let slot_source = crate::project::ProjectRackTrackSlot {
+                instrument_type,
+                sample_path: sample_path.clone(),
+                sample_name: sample_name.clone(),
+                instrument_name,
+            };
+            let slot = crate::project::ProjectRackSlotPattern {
+                id: 0,
+                instrument_type,
+                instrument_run_mode: run_mode,
+                instrument_base_note_offset: pattern
+                    .instrument_base_note_offsets
+                    .get(track)
+                    .copied()
+                    .unwrap_or(0.0),
+                choke_group: None,
+                gain: 1.0,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+                enabled: true,
+                max_polyphony: crate::audio::DEFAULT_RACK_SLOT_MAX_POLYPHONY,
+                param_plocks: Vec::new(),
+                instrument_slot: pattern.instrument_slots.get(track).cloned().unwrap_or_default(),
+                effect_slots: pattern.effect_slots.get(track).cloned().unwrap_or_default(),
+                custom_effects: project.custom_effects.get(track).cloned().unwrap_or_default(),
+                track_sound_state: pattern.track_sound_states.get(track).cloned().unwrap_or_default(),
+                sample_path,
+                sample_name,
+            };
+            (
+                ProjectTrack {
+                    id,
+                    name: track_name,
+                    name_user_authored,
+                    color,
+                    collapsed,
+                    kind: ProjectTrackKind::Rack {
+                        routing: crate::project::ProjectRackRouting::Broadcast,
+                        slots: vec![slot_source],
+                    },
+                },
+                crate::project::ProjectRackTrackPattern {
+                    routing: crate::project::ProjectRackRouting::Broadcast,
+                    slots: vec![slot],
+                    macros: crate::project::default_project_rack_macros(),
+                },
+            )
+        }
+        ProjectTrackKind::Empty | ProjectTrackKind::Modulator => {
+            return Err("Empty and modulator tracks cannot be saved as Sounds".to_string())
+        }
+    };
+    let sound = crate::project::ProjectSoundPreset {
+        version: crate::project::project_file_version(),
+        metadata: crate::project::ProjectSoundMetadata {
+            name: name.trim().to_string(),
+            tags,
+            author,
+        },
+        track: track_payload,
+        rack: rack_payload,
+    };
+    Ok(sound)
+}
+
 fn resolve_project_current_track(
     saved_current_track: Option<usize>,
     track_count: usize,
@@ -1146,6 +1305,8 @@ impl App {
     }
 
     pub fn start_new_project(&mut self) {
+        // Import-shared samples belong to the project being replaced.
+        self.import_samples.clear();
         self.editor.pending_project_load = None;
         self.groups.clear();
         self.grooves.clear();
@@ -1431,7 +1592,7 @@ impl App {
         self.queue_loaded_project(name, project)
     }
 
-    fn queue_loaded_project(
+    pub(crate) fn queue_loaded_project(
         &mut self,
         name: &str,
         mut project: project::ProjectFile,
@@ -1444,30 +1605,7 @@ impl App {
             project.patterns.len(),
             project.custom_effects.len()
         );
-        if project.version > project::project_file_version() {
-            return Err(format!("Unsupported project version {}", project.version));
-        }
-        // In-memory captures (bounce) arrive compact; parsed files already
-        // expanded during deserialization.
-        project.expand_compact_patterns();
-        migrate_dgen_builtin_effect_names(&mut project);
-        if project.version < 2 {
-            migrate_legacy_dgen_param_node_indices(&mut project);
-        }
-        project
-            .map_instrument_ids(|name| {
-                crate::lisp_host::qualify_instrument_id(name).map_err(|error| error.to_string())
-            })
-            .map_err(|error| format!("Could not resolve project instrument id: {error}"))?;
-        project.normalize_device_instances()?;
-        let mut migration_notes = super::instances::migrate_legacy_kind_sources(
-            project.version,
-            &mut project.groups,
-            &mut project.scratch,
-            &mut project.instances,
-            crate::lisp_host::declared_kinds_for_module,
-        );
-        migration_notes.extend(super::instances::rekey_reserved_instance_ids(&mut project));
+        let migration_notes = prepare_project_file_for_load(&mut project)?;
         for note in &migration_notes {
             eprintln!("project-load: instance migration: {note}");
         }
@@ -1596,148 +1734,13 @@ impl App {
             return Err(format!("Invalid track index {}", track + 1));
         }
         let project = self.capture_project(name)?;
-        let source_track = project.tracks[track].clone();
         let pattern = project
             .patterns
             .get(project.current_pattern)
             .ok_or_else(|| "Current pattern is missing while saving Sound".to_string())?;
-        let ProjectTrack {
-            id,
-            name: track_name,
-            name_user_authored,
-            color,
-            collapsed,
-            kind,
-        } = source_track;
-        let (track_payload, rack_payload) = match kind {
-            ProjectTrackKind::Rack { .. } => {
-                let rack = pattern
-                    .rack_tracks
-                    .get(track)
-                    .cloned()
-                    .flatten()
-                    .ok_or_else(|| "Rack pattern data is missing".to_string())?;
-                (project.tracks[track].clone(), rack)
-            }
-            ProjectTrackKind::Sampler { sample_path } => {
-                let sample_name = pattern.sample_names.get(track).cloned();
-                let slot_source = crate::project::ProjectRackTrackSlot {
-                    instrument_type: crate::project::ProjectInstrumentType::Sampler,
-                    sample_path: sample_path.clone(),
-                    sample_name: sample_name.clone(),
-                    instrument_name: None,
-                };
-                let slot = crate::project::ProjectRackSlotPattern {
-                    instrument_type: crate::project::ProjectInstrumentType::Sampler,
-                    instrument_run_mode: crate::project::ProjectCustomInstrumentRunMode::Instrument,
-                    instrument_base_note_offset: pattern
-                        .instrument_base_note_offsets
-                        .get(track)
-                        .copied()
-                        .unwrap_or(0.0),
-                    choke_group: None,
-                    gain: 1.0,
-                    pan: 0.0,
-                    mute: false,
-                    solo: false,
-                    enabled: true,
-                    max_polyphony: crate::audio::DEFAULT_RACK_SLOT_MAX_POLYPHONY,
-                    param_plocks: Vec::new(),
-                    instrument_slot: pattern.instrument_slots[track].clone(),
-                    effect_slots: pattern.effect_slots[track].clone(),
-                    custom_effects: project.custom_effects[track].clone(),
-                    track_sound_state: pattern.track_sound_states[track].clone(),
-                    sample_path,
-                    sample_name,
-                };
-                (
-                    ProjectTrack {
-                        id,
-                        name: track_name,
-                        name_user_authored,
-                        color,
-                        collapsed,
-                        kind: ProjectTrackKind::Rack {
-                            routing: crate::project::ProjectRackRouting::Broadcast,
-                            slots: vec![slot_source],
-                        },
-                    },
-                    crate::project::ProjectRackTrackPattern {
-                        routing: crate::project::ProjectRackRouting::Broadcast,
-                        slots: vec![slot],
-                        macros: crate::project::default_project_rack_macros(),
-                    },
-                )
-            }
-            ProjectTrackKind::Custom { instrument_name } => {
-                let slot_source = crate::project::ProjectRackTrackSlot {
-                    instrument_type: crate::project::ProjectInstrumentType::Custom,
-                    sample_path: None,
-                    sample_name: None,
-                    instrument_name: Some(instrument_name.clone()),
-                };
-                let slot = crate::project::ProjectRackSlotPattern {
-                    instrument_type: crate::project::ProjectInstrumentType::Custom,
-                    instrument_run_mode: pattern
-                        .instrument_run_modes
-                        .get(track)
-                        .copied()
-                        .unwrap_or_default(),
-                    instrument_base_note_offset: pattern
-                        .instrument_base_note_offsets
-                        .get(track)
-                        .copied()
-                        .unwrap_or(0.0),
-                    choke_group: None,
-                    gain: 1.0,
-                    pan: 0.0,
-                    mute: false,
-                    solo: false,
-                    enabled: true,
-                    max_polyphony: crate::audio::DEFAULT_RACK_SLOT_MAX_POLYPHONY,
-                    param_plocks: Vec::new(),
-                    instrument_slot: pattern.instrument_slots[track].clone(),
-                    effect_slots: pattern.effect_slots[track].clone(),
-                    custom_effects: project.custom_effects[track].clone(),
-                    track_sound_state: pattern.track_sound_states[track].clone(),
-                    sample_path: None,
-                    sample_name: None,
-                };
-                (
-                    ProjectTrack {
-                        id,
-                        name: track_name,
-                        name_user_authored,
-                        color,
-                        collapsed,
-                        kind: ProjectTrackKind::Rack {
-                            routing: crate::project::ProjectRackRouting::Broadcast,
-                            slots: vec![slot_source],
-                        },
-                    },
-                    crate::project::ProjectRackTrackPattern {
-                        routing: crate::project::ProjectRackRouting::Broadcast,
-                        slots: vec![slot],
-                        macros: crate::project::default_project_rack_macros(),
-                    },
-                )
-            }
-            ProjectTrackKind::Empty | ProjectTrackKind::Modulator => {
-                return Err("Empty and modulator tracks cannot be saved as Sounds".to_string())
-            }
-        };
-        let sound = crate::project::ProjectSoundPreset {
-            version: crate::project::project_file_version(),
-            metadata: crate::project::ProjectSoundMetadata {
-                name: name.trim().to_string(),
-                tags,
-                author,
-            },
-            track: track_payload,
-            rack: rack_payload,
-        };
-        Ok(sound)
+        sound_preset_from_project(&project, track, pattern, name, tags, author)
     }
+
 
     pub fn load_sound_onto_track(&mut self, track: usize, path: &Path) -> Result<(), String> {
         let sound = crate::project::load_sound_preset(path).map_err(|error| error.to_string())?;
@@ -1816,18 +1819,12 @@ impl App {
             match source.instrument_type {
                 crate::project::ProjectInstrumentType::Sampler => {
                     let asset = if let Some(sample_path) = source.sample_path.as_deref() {
-                        let loaded = crate::instruments::sampler::load_wav_buffer(
-                            self.graph.lg.0, Path::new(sample_path),
-                        ).map_err(|error| format!(
+                        // Shared with earlier imports while one runs
+                        // (docs/rig-spec.md §8, `project_import::assets`).
+                        self.load_sound_sample_asset(Path::new(sample_path)).map_err(|error| format!(
                             "Failed to load Sound sample '{}' for slot {}: {error}",
                             sample_path, slot_idx + 1,
-                        ))?;
-                        self.submit_sample_analysis(&loaded);
-                        ProjectSampleAsset {
-                            buffer_id: loaded.buffer_id,
-                            sample_rate: loaded.sample_rate,
-                            decoded_name: loaded.name,
-                        }
+                        ))?
                     } else {
                         self.create_blank_project_sample()?
                     };
@@ -2131,7 +2128,7 @@ impl App {
     /// chain order, with its live parameter snapshot. Mirrors how
     /// `capture_project` reads a bus (`custom_effect_names` up to the first
     /// empty slot, `effect_slots` alongside).
-    fn capture_kit_bus_chain(
+    pub(super) fn capture_kit_bus_chain(
         &self,
         bus_id: u64,
     ) -> Result<crate::project::ProjectKitBusChain, String> {
@@ -2169,7 +2166,7 @@ impl App {
     /// The restore mirrors project load: load each effect into its slot, put
     /// the saved parameters back under the live node ids, push defaults, then
     /// re-point host-managed refs (Convolution Reverb IR, Filter Table).
-    fn restore_kit_bus_chain(
+    pub(super) fn restore_kit_bus_chain(
         &mut self,
         bus_id: u64,
         chain: &crate::project::ProjectKitBusChain,
@@ -2269,23 +2266,37 @@ impl App {
     /// hidden `expr#<hash>` classes exist only in the session that saved it,
     /// and the scheduler skips a slot whose class is unknown. Cheap when
     /// every body is already registered.
-    fn sync_expr_process_classes_after_import(&self) {
+    pub(super) fn sync_expr_process_classes_after_import(&self) {
         for (source, error) in crate::lisp_host::sync_expr_process_classes(&self.state) {
             eprintln!("[expr] imported body does not compile ({error}): {source}");
         }
     }
 
     fn load_kit_as_rack_inner(&mut self, path: &Path) -> Result<(u64, Vec<String>), String> {
-        let mut kit = crate::project::load_kit_preset(path).map_err(|error| error.to_string())?;
+        let kit = crate::project::load_kit_preset(path).map_err(|error| error.to_string())?;
+        let fallback_name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Kit");
+        self.load_kit_preset_as_rack(kit, fallback_name)
+            .map(|(group_id, failures, _)| (group_id, failures))
+    }
+
+    /// [`App::load_kit_as_rack`] for a kit already in hand (one read from a
+    /// `.kit` file, or extracted from another project by controlled import,
+    /// docs/rig-spec.md §8). Unsquashed: the caller owns the undo entry.
+    /// Also returns where each kit-local sequencer id landed (kit id -> the
+    /// new instance or rack-script id).
+    pub(crate) fn load_kit_preset_as_rack(
+        &mut self,
+        mut kit: crate::project::ProjectKitPreset,
+        fallback_name: &str,
+    ) -> Result<(u64, Vec<String>, std::collections::HashMap<u64, u64>), String> {
         let migration_notes = super::break_kits::migrate_kit_sequencers(
             &mut kit,
             crate::lisp_host::declared_kinds_for_module,
         );
         super::break_kits::lift_plain_pad_clip_lanes(&mut kit);
-        let fallback_name = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("Kit");
         let kit_name = if kit.metadata.name.trim().is_empty() {
             fallback_name.to_string()
         } else {
@@ -2359,6 +2370,7 @@ impl App {
                 failures.push(format!("clips: {error}"));
             }
         }
+        self.remap_kit_process_owners(group_id, &id_map);
         // The rack's internal cables (§7.5), once every member exists.
         if let Err(error) = self.install_kit_mod_connections(group_id, &kit.mod_connections, &kit_pad_notes) {
             failures.push(format!("modulation cables: {error}"));
@@ -2370,7 +2382,26 @@ impl App {
                 failures.push(format!("groove: {error}"));
             }
         }
-        Ok((group_id, failures))
+        let ids = id_map.into_iter().map(|(old, rekey)| (old, rekey.id)).collect();
+        Ok((group_id, failures, ids))
+    }
+
+    /// A loaded kit's pad chains name the kit file's instance ids as owners
+    /// (`TrackProcessSlot::owner_instance`, docs/rig-spec.md §10): re-key
+    /// them to the fresh ids `id_map` gave, dropping any it does not name.
+    fn remap_kit_process_owners(
+        &self,
+        group_id: u64,
+        id_map: &std::collections::HashMap<u64, super::break_kits::KitSequencerRekey>,
+    ) {
+        let members = self
+            .groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .map(|group| group.members.clone())
+            .unwrap_or_default();
+        let map: std::collections::HashMap<u64, u64> = id_map.iter().map(|(old, rekey)| (*old, rekey.id)).collect();
+        self.state.remap_process_slot_owners(&members, &map);
     }
 
     /// Build the member track for one kit pad: a track from the pad's Sound,
@@ -2399,7 +2430,7 @@ impl App {
     /// instrument slot, through the same per-parameter command the panel
     /// uses, so the values reach the engine and the current scene alike.
     /// The live slot's own parameter count wins over the saved one.
-    fn apply_kit_modulator_settings(
+    pub(super) fn apply_kit_modulator_settings(
         &mut self,
         track: usize,
         slot: &crate::project::ProjectEffectSlot,
@@ -2656,6 +2687,7 @@ impl App {
                     notes.push(format!("clips: {error}"));
                 }
             }
+            self.remap_kit_process_owners(group_id, &id_map);
             if let Err(error) = self.install_kit_mod_connections(group_id, &kit.mod_connections, &kit_pad_notes) {
                 notes.push(format!("modulation cables: {error}"));
             }
@@ -3242,6 +3274,12 @@ impl ProjectCapture {
         // onto the file.
         let (mut rack_clip_banks, scene_rack_clips) =
             self.capture_rack_clips(scenes_for_takes, num_tracks)?;
+        // Scene-owned swap state (docs/rig-spec.md 3.2), outer index scene.
+        let scene_slot_enable = scenes_for_takes.slot_enable_to_wire(num_tracks);
+        // Kits on/off per scene (docs/rig-spec.md 6), outer index scene.
+        let scene_parked_kits = scenes_for_takes.parked_kits_to_wire();
+        // Project-owned sequencers on/off per scene (docs/rig-spec.md 10).
+        let scene_parked_instances = scenes_for_takes.parked_to_wire(crate::sequencer::ParkedSet::Instances);
         // The arrangement always exists (empty-arrangement spec 7): every
         // save writes one, the empty arrangement included. Serialization maps
         // live pattern-pool ids into the deterministic ids the loader rebuilds
@@ -3290,6 +3328,9 @@ impl ProjectCapture {
             record_armed: self.record_armed,
             scene_cell_presence,
             scene_rack_clips,
+            scene_slot_enable,
+            scene_parked_kits,
+            scene_parked_instances,
             instances: self.instances,
             grooves: self.grooves,
             take_pools,
@@ -4017,6 +4058,8 @@ impl App {
                     self.tracks.len()
                 );
                 self.clear_project_arrangement_state();
+                // Import-shared samples belong to the project being replaced.
+                self.import_samples.clear();
                 {
                     let mut graph = self.graph_controller();
                     graph.clear_all_tracks();
@@ -4705,6 +4748,9 @@ impl App {
             record_armed,
             scene_cell_presence,
             scene_rack_clips,
+            scene_slot_enable,
+            scene_parked_kits,
+            scene_parked_instances,
             take_pools,
             track_sounds,
             track_lane_rosters,
@@ -4971,6 +5017,21 @@ impl App {
             pending.fallback_samples += fallback;
             result?;
         }
+        // Scene-owned swap state (docs/rig-spec.md 3). Every pool pattern
+        // and rack clip cell is installed by now; the live mirror is
+        // restored from the current scene below, so it picks up the ids.
+        if file_version < crate::project::SCENE_SLOT_ENABLE_VERSION {
+            self.state.migrate_legacy_rack_slot_scene_state();
+        } else {
+            self.state.install_scene_slot_enable(&scene_slot_enable);
+            self.state.normalize_rack_slot_ids();
+        }
+        // Kits on/off (docs/rig-spec.md 6): files below v19 carry none and
+        // load with every kit on.
+        self.state.install_scene_parked(crate::sequencer::ParkedSet::Kits, &scene_parked_kits);
+        // Project-owned sequencers on/off (docs/rig-spec.md 10): files below
+        // v20 carry none and load with every instance on everywhere.
+        self.state.install_scene_parked(crate::sequencer::ParkedSet::Instances, &scene_parked_instances);
         self.state
             .set_committed_arrangement(Some(arrangement))
             .map_err(|error| format!("Project arrangement failed to load: {error}"))?;
@@ -6881,6 +6942,9 @@ mod tests {
     ) -> ProjectFile {
         ProjectFile {
             scene_rack_clips: Vec::new(),
+            scene_slot_enable: Vec::new(),
+            scene_parked_kits: Vec::new(),
+            scene_parked_instances: Vec::new(),
             instances: crate::project::ProjectInstances::default(),
             grooves: Vec::new(),
             version: project::project_file_version(),
@@ -7685,5 +7749,482 @@ mod tests {
                 .map(|param| param.node_param_idx)
                 .collect::<Vec<_>>()
         );
+    }
+}
+
+/// Scene-owned swap state through the App (docs/rig-spec.md §3, eseq-ka5t.12):
+/// the bank-scoped slot toggle and its undo, track delete/undo, and the
+/// project file — v18 round trip and the legacy migration.
+#[cfg(test)]
+mod scene_slot_enable_tests {
+    use super::*;
+    use crate::app::test_rig::{launch, new_scene, rack_with_samplers, Rig, PIANO, PLATE};
+    use crate::sequencer::{SceneBankId, SlotEnable};
+
+    fn sample_name(app: &App, track: usize, slot: usize) -> String {
+        app.state.live_rack_track_snapshot(track).unwrap().slots[slot]
+            .sample_id.as_ref().map(|(_, name, _)| name.clone()).unwrap()
+    }
+
+    /// The sample name of every slot scene `scene` plays on `track`, as the
+    /// published scheduler snapshot (what triggers reach) has it.
+    fn playing(app: &mut App, scene: usize, track: usize) -> Vec<String> {
+        launch(app, scene);
+        let snapshot = app.state.latest_scheduler_snapshot();
+        let mut names: Vec<String> = snapshot.tracks[track]
+            .rack_track
+            .as_ref()
+            .expect("a rack")
+            .slots
+            .iter()
+            .filter(|slot| slot.enabled)
+            .map(|slot| slot.sample_id.as_ref().map(|(_, name, _)| name.clone()).unwrap_or_default())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn every_scene_plays(app: &mut App, track: usize) -> Vec<Vec<String>> {
+        (0..app.state.scene_count()).map(|scene| playing(app, scene, track)).collect()
+    }
+
+    #[test]
+    fn the_slot_toggle_writes_only_the_viewed_bank_as_one_undo_step() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let rack = rack_with_samplers(app, &[PLATE, PIANO]);
+        for _ in 0..3 {
+            new_scene(app);
+        }
+        let bank_b = app.state.create_scene_bank().unwrap();
+        for _ in 0..2 {
+            app.state.move_scene_to_scene_bank(2, bank_b).unwrap();
+        }
+        let bank_a = app.state.scene_banks()[0].id;
+        let slot_id = app.state.live_rack_slot_id(rack, 1).unwrap();
+        let undo_before = app.history.undo_len();
+
+        assert!(app.set_rack_slot_enabled_in_bank_recorded(rack, 1, false, Some(bank_b)).unwrap());
+        assert_eq!(app.history.undo_len(), undo_before + 1, "one undo step");
+        assert_eq!(app.state.scenes_enabling_rack_slot(rack, slot_id), vec![0, 1]);
+        assert_eq!(app.state.banks_enabling_rack_slot(rack, slot_id), vec![bank_a]);
+        assert!(
+            !app.set_rack_slot_enabled_in_bank_recorded(rack, 1, false, Some(bank_b)).unwrap(),
+            "the same write again is a no-op"
+        );
+        assert_eq!(app.history.undo_len(), undo_before + 1);
+        let (plate, piano) = (sample_name(app, rack, 0), sample_name(app, rack, 1));
+        let mut both = vec![plate.clone(), piano.clone()];
+        both.sort();
+        assert_eq!(playing(app, 0, rack), both, "bank A keeps both slots");
+        assert_eq!(playing(app, 3, rack), vec![plate.clone()], "bank B parked the piano");
+
+        assert!(matches!(crate::app::edit::undo(app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scenes_enabling_rack_slot(rack, slot_id), vec![0, 1, 2, 3]);
+        assert!(matches!(crate::app::edit::redo(app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scenes_enabling_rack_slot(rack, slot_id), vec![0, 1]);
+        let _ = SceneBankId(0);
+    }
+
+    #[test]
+    fn deleting_and_restoring_a_track_carries_its_scene_slot_state() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let rack = rack_with_samplers(app, &[PLATE, PIANO]);
+        new_scene(app);
+        let bank = app.state.scene_bank_containing(0).unwrap();
+        // Scene state only on the rack track, which sits after track 0.
+        assert!(app.set_rack_slot_enabled_in_bank_recorded(rack, 0, false, Some(bank)).unwrap());
+        let parked = app.state.with_project_scenes(|scenes| scenes.scene_slot_enable(1, rack).cloned());
+        assert!(parked.is_some());
+
+        app.delete_track_recorded(0).expect("delete the track before the rack");
+        let shifted = rack - 1;
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(scenes.scene_slot_enable(1, shifted).cloned(), parked, "the entry moved down");
+            assert!(scenes.scene_slot_enable(1, rack).is_none());
+        });
+        assert!(matches!(crate::app::edit::undo(app), crate::app::history::HistoryReplay::Applied(_)));
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(scenes.scene_slot_enable(1, rack).cloned(), parked, "undo moves it back");
+        });
+
+        // Deleting the rack track itself drops its entries; undo restores them.
+        app.delete_track_recorded(rack).expect("delete the rack");
+        app.state.with_project_scenes(|scenes| {
+            assert!(scenes.scenes.iter().all(|scene| scene.slot_enable.get(&rack).is_none()));
+        });
+        assert!(matches!(crate::app::edit::undo(app), crate::app::history::HistoryReplay::Applied(_)));
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(scenes.scene_slot_enable(1, rack).cloned(), parked);
+        });
+    }
+
+    #[test]
+    fn slot_ids_and_scene_slot_state_round_trip_through_a_project_file() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let rack = rack_with_samplers(app, &[PLATE, PIANO]);
+        new_scene(app);
+        let bank = app.state.scene_bank_containing(0).unwrap();
+        // Scene 1 alone parks the plate.
+        assert!(app.set_rack_slot_enabled_in_bank_recorded(rack, 0, false, Some(bank)).unwrap());
+        app.state.with_scenes_mut(|scenes| {
+            scenes.scenes[0].slot_enable.insert(rack, SlotEnable::from([1, 2]));
+        });
+        let before = every_scene_plays(app, rack);
+        let ids_before: Vec<u64> = app.state.live_rack_track_snapshot(rack).unwrap().slots.iter().map(|s| s.id).collect();
+        let saved = app.capture_project("slot-enable-roundtrip").unwrap();
+        assert_eq!(saved.version, crate::project::project_file_version());
+        assert_eq!(saved.scene_slot_enable[0], vec![(rack, vec![1, 2])]);
+        assert_eq!(saved.scene_slot_enable[1], vec![(rack, vec![2])]);
+        let slots = &saved.patterns[0].rack_tracks[rack].as_ref().unwrap().slots;
+        assert_eq!(slots.iter().map(|slot| slot.id).collect::<Vec<_>>(), ids_before);
+
+        rig.reload("slot-enable-roundtrip", saved);
+        let app = rig.app();
+        let ids_after: Vec<u64> = app.state.live_rack_track_snapshot(rack).unwrap().slots.iter().map(|s| s.id).collect();
+        assert_eq!(ids_after, ids_before);
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(scenes.scene_slot_enable(0, rack), Some(&SlotEnable::from([1, 2])));
+            assert_eq!(scenes.scene_slot_enable(1, rack), Some(&SlotEnable::from([2])));
+        });
+        assert_eq!(every_scene_plays(app, rack), before);
+    }
+
+    #[test]
+    fn a_legacy_project_loads_with_every_scene_playing_what_it_played() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let rack = rack_with_samplers(app, &[PLATE, PLATE]);
+        // Scene 1: a per-pattern replace leaves the piano wav in row 1 (one
+        // sampler, two samples), and row 2 parked in that pattern only.
+        new_scene(app);
+        app.graph_controller()
+            .replace_rack_slot_with_sampler(rack, 0, Path::new(PIANO))
+            .expect("replace in the current pattern only");
+        new_scene(app);
+        let mut saved = app.capture_project("legacy-slots").unwrap();
+        // Make it a v17 file: no slot ids, no scene state, the device set in
+        // the patterns' stored flags.
+        saved.version = 17;
+        saved.scene_slot_enable.clear();
+        let strip = |pattern: &mut crate::project::ProjectPattern| {
+            for rack in pattern.rack_tracks.iter_mut().flatten() {
+                for slot in &mut rack.slots {
+                    slot.id = 0;
+                }
+            }
+        };
+        for pattern in &mut saved.patterns {
+            strip(pattern);
+        }
+        for pattern in saved.carrier_patterns_mut() {
+            strip(pattern);
+        }
+        saved.patterns[1].rack_tracks[rack].as_mut().unwrap().slots[1].enabled = false;
+        let plate = saved.patterns[0].rack_tracks[rack].as_ref().unwrap().slots[0]
+            .sample_name.clone().unwrap();
+        let piano = saved.patterns[1].rack_tracks[rack].as_ref().unwrap().slots[0]
+            .sample_name.clone().unwrap();
+        assert_ne!(plate, piano, "the row held two samples");
+        // Scene 3 was cloned from scene 2: piano in row 1, row 2 still on.
+        let mut plate_and_piano = vec![plate.clone(), piano.clone()];
+        plate_and_piano.sort();
+        let expected = vec![vec![plate.clone(), plate.clone()], vec![piano.clone()], plate_and_piano];
+
+        rig.reload("legacy-slots", saved);
+        let app = rig.app();
+        let rack_after = app.state.live_rack_track_snapshot(rack).unwrap();
+        // A sample is pattern content: the row with two wavs stays one slot.
+        assert_eq!(rack_after.slots.len(), 2, "no split");
+        let ids: Vec<u64> = rack_after.slots.iter().map(|slot| slot.id).collect();
+        assert_eq!(ids, vec![1, 2], "ids by position");
+        assert_eq!(every_scene_plays(app, rack), expected, "every scene plays what it played");
+
+        // Saved again (v18) and reopened: still the same.
+        let resaved = app.capture_project("legacy-slots").unwrap();
+        assert_eq!(resaved.scene_slot_enable.len(), 3);
+        rig.reload("legacy-slots", resaved);
+        let app = rig.app();
+        assert_eq!(app.state.live_rack_track_snapshot(rack).unwrap().slots.len(), 2);
+        assert_eq!(every_scene_plays(app, rack), expected);
+    }
+
+    /// eseq-ka5t.12 manual check on a real project: it loads through the
+    /// App path, and every scene plays the same rack slots as the file's
+    /// stored per-scene flags say (what HEAD plays). Read-only.
+    ///
+    /// ```sh
+    /// ESEQ_RIG_PROJECT=/abs/project.json cargo nextest run -p sequencer --lib \
+    ///   -E 'test(=app::projects::scene_slot_enable_tests::a_real_project_loads_with_every_scene_on_the_same_slots)' \
+    ///   --run-ignored only --no-capture
+    /// ```
+    /// Default: `.local/benchmarks/park-probe-2026-10-23/gotham/fixture.json`.
+    #[test]
+    #[ignore = "needs a real project and its instruments/samples"]
+    fn a_real_project_loads_with_every_scene_on_the_same_slots() {
+        let path = std::env::var_os("ESEQ_RIG_PROJECT").map(PathBuf::from).unwrap_or_else(|| {
+            PathBuf::from("../../.local/benchmarks/park-probe-2026-10-23/gotham/fixture.json")
+        });
+        let project = crate::project::load_project_from_path(&path).expect("read the project");
+        assert!(project.version < crate::project::SCENE_SLOT_ENABLE_VERSION, "a legacy file");
+        // HEAD: each scene's composed pattern carries its slots' stored flags.
+        let stored: Vec<Vec<Option<Vec<bool>>>> = project
+            .patterns
+            .iter()
+            .map(|pattern| {
+                pattern
+                    .rack_tracks
+                    .iter()
+                    .map(|rack| rack.as_ref().map(|rack| rack.slots.iter().map(|slot| slot.enabled).collect()))
+                    .collect()
+            })
+            .collect();
+        let mut rig = Rig::new();
+        rig.app().sample_analysis = crate::analysis::AnalysisService::synchronous();
+        let name = project.name.clone();
+        rig.app().queue_bounce_project(&name, project).unwrap();
+        while rig.app().has_pending_project_load() {
+            rig.app().advance_pending_project_load().expect("the project loads");
+            rig.render();
+        }
+        let app = rig.app();
+        let mut checked = 0;
+        for (scene, tracks) in stored.iter().enumerate() {
+            launch(app, scene);
+            let snapshot = app.state.latest_scheduler_snapshot();
+            for (track, stored) in tracks.iter().enumerate() {
+                let Some(stored) = stored else { continue };
+                let Some(rack) = snapshot.tracks.get(track).and_then(|t| t.rack_track.as_ref()) else {
+                    continue;
+                };
+                let playing: Vec<bool> = rack.slots.iter().map(|slot| slot.enabled).collect();
+                assert_eq!(&playing, stored, "scene {} track {}", scene + 1, track + 1);
+                checked += 1;
+            }
+        }
+        eprintln!("checked {checked} (scene, rack track) pairs");
+        assert!(checked > 0);
+    }
+}
+
+/// Kits on/off per bank through the App (docs/rig-spec.md §6, eseq-ka5t.13):
+/// the bank-scoped toggle and its undo, inheritance by new scenes, kit
+/// deletion, and the project file — v19 round trip and older files.
+#[cfg(test)]
+mod kit_parking_tests {
+    use super::*;
+    use crate::app::test_rig::{launch, Rig};
+    use crate::sequencer::{BankState, RackClipId, SceneBankId, SceneSwapInheritance};
+
+    const KICK: &str = "../../content/impulses/lexicon-300-rich-plate.wav";
+
+    fn new_scene_in(app: &mut App, bank: SceneBankId, inheritance: SceneSwapInheritance) -> usize {
+        let names = app.tracks.clone();
+        app.state
+            .clone_pattern_in_scene_bank(
+                bank,
+                inheritance,
+                names.len(),
+                &app.graph.track_buffer_ids.clone(),
+                &app.graph.track_sample_rates.clone(),
+                &names,
+                &app.graph.track_instrument_types.clone(),
+            )
+            .expect("a new scene")
+    }
+
+    /// A clip-bearing kit with one pad (steps on every beat) and four
+    /// scenes: bank A = {0, 1}, bank B = {2, 3}. Every scene points at a
+    /// clip except scene 3, which leaves the kit intentionally silent.
+    /// Returns (group id, pad track, bank A, bank B).
+    fn kit_rig(app: &mut App) -> (u64, usize, SceneBankId, SceneBankId) {
+        app.graph_controller().add_track(Path::new(KICK)).expect("a loose track");
+        let (group_id, _) = app.create_drum_rack_recorded(None).expect("a kit");
+        let pad = app.graph_controller().add_blank_sampler_track().expect("a pad track");
+        app.assign_rack_pad_track_recorded(group_id, 0, pad).expect("the pad");
+        let mut scenes = app.capture_synchronized_scene_structure_state().expect("scenes");
+        let mut data = scenes.effective_track_pattern(pad).expect("the pad's pattern");
+        data.clear_step_content();
+        for step in [0usize, 4, 8, 12] {
+            data.track_bits[0] |= 1 << step;
+        }
+        assert!(scenes.save_effective_track_pattern(pad, data));
+        app.restore_scene_structure_state(&scenes).expect("install the steps");
+        app.convert_rack_to_clips_recorded(group_id).expect("clips");
+        for _ in 0..3 {
+            let bank = app.state.scene_bank_containing(app.state.current_scene_index()).unwrap();
+            new_scene_in(app, bank, SceneSwapInheritance::Source(app.state.playing_scene()));
+        }
+        let bank_b = app.state.create_scene_bank().unwrap();
+        for _ in 0..2 {
+            app.state.move_scene_to_scene_bank(2, bank_b).unwrap();
+        }
+        let bank_a = app.state.scene_banks()[0].id;
+        app.state.with_scenes_mut(|scenes| assert!(scenes.set_scene_rack_clip(3, group_id, None)));
+        (group_id, pad, bank_a, bank_b)
+    }
+
+    fn pointers(app: &App, group_id: u64) -> Vec<Option<RackClipId>> {
+        app.state.with_project_scenes(|scenes| {
+            (0..scenes.scenes.len()).map(|scene| scenes.scene_rack_clip(scene, group_id)).collect()
+        })
+    }
+
+    /// Whether the kit sounds in each scene, as the scheduler snapshot the
+    /// launch publishes has it (pad triggers gated, sequencers stopped).
+    fn sounding(app: &mut App, group_id: u64, pad: usize) -> Vec<bool> {
+        (0..app.state.scene_count())
+            .map(|scene| {
+                launch(app, scene);
+                let snapshot = app.state.latest_scheduler_snapshot();
+                let parked = app.state.with_project_scenes(|s| s.kit_parked_in_scene(scene, group_id));
+                assert_eq!(snapshot.rack_parked(group_id), parked, "scene {scene}");
+                if parked {
+                    assert!(snapshot.tracks[pad].scene_silenced, "scene {scene}: parked pads are silent");
+                }
+                !snapshot.tracks[pad].scene_silenced
+            })
+            .collect()
+    }
+
+    #[test]
+    fn parking_a_kit_in_bank_b_leaves_bank_a_and_every_clip_pointer_alone() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let (group_id, pad, bank_a, bank_b) = kit_rig(app);
+        let before = pointers(app, group_id);
+        assert_eq!(sounding(app, group_id, pad), vec![true, true, true, false]);
+        let undo_before = app.history.undo_len();
+
+        assert!(app.set_kit_parked_in_bank_recorded(group_id, true, Some(bank_b)).unwrap());
+        assert_eq!(app.history.undo_len(), undo_before + 1, "one undo step");
+        assert!(!app.set_kit_parked_in_bank_recorded(group_id, true, Some(bank_b)).unwrap(), "no-op");
+        assert_eq!(app.history.undo_len(), undo_before + 1);
+        assert_eq!(pointers(app, group_id), before, "parking never touches a clip pointer");
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), BankState::Off);
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_a)).unwrap(), BankState::On);
+        assert_eq!(sounding(app, group_id, pad), vec![true, true, false, false]);
+        launch(app, 2);
+        assert!(app.state.latest_scheduler_snapshot().rack_parked(group_id));
+        assert_eq!(app.kit_parked_bank_index(group_id), Some(1), "bank B is off");
+        launch(app, 0);
+        assert_eq!(app.kit_parked_bank_index(group_id), None);
+
+        assert!(app.set_kit_parked_in_bank_recorded(group_id, false, Some(bank_b)).unwrap());
+        assert_eq!(pointers(app, group_id), before);
+        assert_eq!(
+            sounding(app, group_id, pad),
+            vec![true, true, true, false],
+            "on again: every scene as it was, the intentional silence included"
+        );
+
+        // Undo the unpark, then the park: one step each.
+        assert!(matches!(crate::app::edit::undo(app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), BankState::Off);
+        assert!(matches!(crate::app::edit::undo(app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), BankState::On);
+        assert!(matches!(crate::app::edit::redo(app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), BankState::Off);
+        assert_eq!(pointers(app, group_id), before);
+    }
+
+    #[test]
+    fn a_mixed_bank_reads_mixed_and_turning_it_off_parks_every_scene() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let (group_id, _, _, bank_b) = kit_rig(app);
+        app.state.with_scenes_mut(|scenes| scenes.set_kit_parked_in_scenes(group_id, true, 2..3));
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), BankState::Mixed);
+        assert!(app.set_kit_parked_in_bank_recorded(group_id, true, Some(bank_b)).unwrap());
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), BankState::Off);
+    }
+
+    #[test]
+    fn new_scenes_inherit_the_kits_their_source_or_bank_parks() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let (group_id, _, bank_a, bank_b) = kit_rig(app);
+        assert!(app.set_kit_parked_in_bank_recorded(group_id, true, Some(bank_b)).unwrap());
+        let parked = |app: &App, scene: usize| {
+            app.state.with_project_scenes(|scenes| scenes.kit_parked_in_scene(scene, group_id))
+        };
+        // Clone of a parked scene (into its bank): parked.
+        launch(app, 2);
+        let clone = new_scene_in(app, bank_b, SceneSwapInheritance::Source(2));
+        assert!(parked(app, clone), "a clone takes its source's");
+        // `+` in bank B: the scene before it in the bank.
+        launch(app, 0);
+        let plus = new_scene_in(app, bank_b, SceneSwapInheritance::BankNeighbour);
+        assert!(parked(app, plus), "+ takes the bank's");
+        // `+` in bank A: unparked like bank A.
+        let plus_a = new_scene_in(app, bank_a, SceneSwapInheritance::BankNeighbour);
+        assert!(!parked(app, plus_a));
+        // Copy a parked scene to a new bank.
+        let bank_c = app.state.create_scene_bank().unwrap();
+        let source = app.state.scene_bank_range(bank_b).unwrap().start;
+        let copy = new_scene_in(app, bank_c, SceneSwapInheritance::Source(source));
+        assert!(parked(app, copy), "copy to a new bank takes its source's");
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_c)).unwrap(), BankState::Off);
+    }
+
+    #[test]
+    fn deleting_the_kit_forgets_it_in_every_scene_and_undo_brings_it_back() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let (group_id, _, _, bank_b) = kit_rig(app);
+        assert!(app.set_kit_parked_in_bank_recorded(group_id, true, Some(bank_b)).unwrap());
+        assert_eq!(app.unused_kits(), Vec::<u64>::new(), "bank A still plays it");
+        app.state.with_scenes_mut(|scenes| {
+            let count = scenes.scenes.len();
+            scenes.set_kit_parked_in_scenes(group_id, true, 0..count)
+        });
+        assert_eq!(app.unused_kits(), vec![group_id], "parked everywhere: unused, not deleted");
+        assert!(app.groups.iter().any(|group| group.id == group_id));
+
+        app.delete_group_recorded(group_id).expect("delete the kit");
+        app.state.with_project_scenes(|scenes| {
+            assert!(scenes.scenes.iter().all(|scene| scene.parked_kits.is_empty()));
+        });
+        assert!(matches!(crate::app::edit::undo(app), crate::app::history::HistoryReplay::Applied(_)));
+        app.state.with_project_scenes(|scenes| {
+            assert!(scenes.scenes.iter().all(|scene| scene.parked_kits.contains(&group_id)));
+        });
+    }
+
+    #[test]
+    fn parked_kits_round_trip_a_project_file_and_older_files_park_nothing() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let (group_id, pad, _, bank_b) = kit_rig(app);
+        assert!(app.set_kit_parked_in_bank_recorded(group_id, true, Some(bank_b)).unwrap());
+        let before = sounding(app, group_id, pad);
+        let saved = app.capture_project("kit-parking-roundtrip").unwrap();
+        assert_eq!(saved.version, crate::project::project_file_version());
+        assert!(saved.version >= 19, "parked kits arrived in v19");
+        assert_eq!(
+            saved.scene_parked_kits,
+            vec![vec![], vec![], vec![group_id], vec![group_id]]
+        );
+        let mut legacy = saved.clone();
+        rig.reload("kit-parking-roundtrip", saved);
+        let app = rig.app();
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), BankState::Off);
+        assert_eq!(sounding(app, group_id, pad), before);
+
+        // A v18 file has no field: every kit is on.
+        legacy.version = 18;
+        legacy.scene_parked_kits.clear();
+        let mut json = serde_json::to_value(&legacy).unwrap();
+        assert!(json.get("scene_parked_kits").is_none(), "nothing parked writes nothing");
+        json["version"] = serde_json::json!(18);
+        let legacy: ProjectFile = serde_json::from_value(json).unwrap();
+        rig.reload("kit-parking-legacy", legacy);
+        let app = rig.app();
+        app.state.with_project_scenes(|scenes| {
+            assert!(scenes.scenes.iter().all(|scene| scene.parked_kits.is_empty()));
+        });
+        assert_eq!(sounding(app, group_id, pad), vec![true, true, true, false]);
     }
 }

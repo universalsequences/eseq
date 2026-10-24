@@ -220,7 +220,10 @@ fn bounded(x: f32, lo: f32, hi: f32, default: f32) -> f32 {
     }
 }
 fn slew(x: f64, target: f64, alpha: f64) -> f64 {
-    let y = x + alpha * (target - x);
+    snap(x + alpha * (target - x), target)
+}
+/// `y`, or `target` once within 1e-10 of it, so a smoother settles exactly.
+fn snap(y: f64, target: f64) -> f64 {
     if (y - target).abs() < 1e-10 {
         target
     } else {
@@ -247,6 +250,12 @@ struct State {
     gain: f64,
     first: bool,
     filters: [Filter; 4],
+    /// Frames the input has been silent and the delay ring and wet taps
+    /// below -120 dB (`effects::tail_sleep`). Runtime only, never a param.
+    quiet: f32,
+    /// A settled bypass skipped the DSP and cleared the ring, so re-enabling
+    /// starts from silence rather than from audio recorded before bypass.
+    bypass_idle: bool,
 }
 
 fn capacity(sample_rate: f32) -> usize {
@@ -271,6 +280,43 @@ impl State {
             }
             value.clamp(c.min, c.max) as f64
         })
+    }
+    /// Advance the smoothers and LFO phase over `nf` skipped frames in
+    /// closed form, as the per-frame loop would have, without the ring.
+    /// Targets are held at the block's last frame of modulation (the loop
+    /// reads them per frame; a sleeping block's sources are assumed steady).
+    /// One-pole `y += alpha (t - y)` after `n` frames leaves `(1-alpha)^n` of
+    /// the error, and the loop adds each frame's updated rate to the phase,
+    /// so the phase gains `t n + e0 r (1 - r^n) / (1 - r)` with `r = 1-alpha`.
+    /// `wet` and `gain` chase their (themselves smoothed) targets with the
+    /// same decay, toward the targets' end values; they only scale output,
+    /// which a sleeping chorus does not produce, so this approximation of a
+    /// cascade settles within the 10 ms smoothing time after a wake.
+    unsafe fn advance_asleep(&mut self, inp: *const *mut f32, nf: usize, alpha: f64, enabled: bool) {
+        let sr = self.sample_rate as f64;
+        let sources = std::array::from_fn(|slot| *(*inp.add(2 + slot)).add(nf - 1));
+        let targets = self.effective(sources);
+        let r = 1.0 - alpha;
+        let decay = r.powi(nf.min(i32::MAX as usize) as i32);
+        let settle = |x: f64, target: f64| snap(target + (x - target) * decay, target);
+        let rate_error = self.smooth[RATE] - targets[RATE];
+        let rate_sum = targets[RATE] * nf as f64 + rate_error * r * (1.0 - decay) / alpha;
+        self.phase = (self.phase + rate_sum / sr).fract();
+        for i in 0..COUNT {
+            self.smooth[i] = settle(self.smooth[i], targets[i]);
+        }
+        let (wet, gain) = self.wet_gain_targets(enabled);
+        self.wet = settle(self.wet, wet);
+        self.gain = settle(self.gain, gain);
+    }
+    /// What `wet` and `gain` chase from the smoothed controls: mix and
+    /// output gain, or a dry unity passthrough when bypassed.
+    fn wet_gain_targets(&self, enabled: bool) -> (f64, f64) {
+        if enabled {
+            (self.smooth[MIX], 10.0_f64.powf(self.smooth[OUTPUT] / 20.0))
+        } else {
+            (0.0, 1.0)
+        }
     }
     /// Four-point cubic interpolation; the minimum two-sample read ensures
     /// all four neighbors are already written. No extra dry-path latency.
@@ -304,6 +350,8 @@ unsafe extern "C" fn init(state: *mut c_void, sample_rate: c_int, _: c_int, _: *
             gain: 1.0,
             first: true,
             filters: [Filter::default(); 4],
+            quiet: 0.0,
+            bypass_idle: false,
         },
     );
     reset(state);
@@ -314,6 +362,7 @@ unsafe extern "C" fn reset(state: *mut c_void) {
     s.phase = 0.0;
     s.first = true;
     s.filters = [Filter::default(); 4];
+    s.quiet = 0.0;
     std::ptr::write_bytes(ring(state), 0, s.capacity);
 }
 unsafe extern "C" fn migrate(new: *mut c_void, old: *const c_void) {
@@ -347,7 +396,35 @@ unsafe extern "C" fn process(
     let sr = s.sample_rate as f64;
     let alpha = 1.0 - (-1.0 / (0.01 * sr)).exp();
     let enabled = bounded(s.enabled, 0.0, 1.0, 1.0) >= 0.5;
-    for frame in 0..frames as usize {
+    let nf = frames as usize;
+    // A settled bypass (wet faded out, unity gain) outputs exactly the
+    // sanitized dry signal, so skip the DSP. The ring is cleared once on the
+    // way in so a later re-enable never fades in audio from before bypass.
+    if !enabled && !s.first && s.wet == 0.0 && s.gain == 1.0 && !super::tail_sleep::force_awake(super::tail_sleep::FORCE_NO_BYPASS_SKIP) {
+        if !s.bypass_idle {
+            s.filters = [Filter::default(); 4];
+            std::ptr::write_bytes(buffer, 0, s.capacity);
+            // A cleared ring has nothing left to drain.
+            s.quiet = s.capacity as f32;
+            s.bypass_idle = true;
+        }
+        super::silence::passthrough_sanitized(inp, out, 2, frames);
+        return;
+    }
+    s.bypass_idle = false;
+    // Tail sleep: silent input and a ring that has held only decayed
+    // residue for a whole ring length. The smoothers, LFO phase and write
+    // head still advance, so a wake matches a never-sleeping chorus to
+    // within that residue.
+    let Some(counts_quiet) =
+        super::tail_sleep::sleep_or_count(&s.quiet, inp, 2, out, 2, frames, s.capacity as f32, true)
+    else {
+        s.advance_asleep(inp, nf, alpha, enabled);
+        s.write = (s.write + nf) & (s.capacity - 1);
+        return;
+    };
+    let mut internal_peak = 0.0f32;
+    for frame in 0..nf {
         let dry = [*(*inp).add(frame), *(*inp.add(1)).add(frame)];
         let dry = dry.map(|x| if x.is_finite() { x } else { 0.0 });
         let sources = std::array::from_fn(|slot| *(*inp.add(2 + slot)).add(frame));
@@ -359,12 +436,7 @@ unsafe extern "C" fn process(
                 slew(s.smooth[i], targets[i], alpha)
             };
         }
-        let wet = if enabled { s.smooth[MIX] } else { 0.0 };
-        let gain = if enabled {
-            10.0_f64.powf(s.smooth[OUTPUT] / 20.0)
-        } else {
-            1.0
-        };
+        let (wet, gain) = s.wet_gain_targets(enabled);
         s.wet = if s.first {
             wet
         } else {
@@ -379,7 +451,9 @@ unsafe extern "C" fn process(
         let coefficient = |hz: f64| (std::f64::consts::PI * hz.min(sr * 0.45) / sr).tan();
         let mono = 0.5 * (dry[0] as f64 + dry[1] as f64);
         let high = s.filters[0].tick(mono, coefficient(s.smooth[HP]), true);
-        *buffer.add(s.write) = s.filters[1].tick(high, coefficient(s.smooth[LP]), false) as f32;
+        let written = s.filters[1].tick(high, coefficient(s.smooth[LP]), false) as f32;
+        *buffer.add(s.write) = written;
+        internal_peak = internal_peak.max(written.abs());
         let wet_g = coefficient(s.smooth[WET_LP]);
         for ch in 0..2 {
             let offset = (s.smooth[PHASE] / 360.0).fract();
@@ -387,6 +461,7 @@ unsafe extern "C" fn process(
             let delay = (s.smooth[BASE] + s.smooth[DEPTH] * triangle(phase)) * 0.001 * sr;
             let tap = s.read(buffer, delay);
             let wet = s.filters[2 + ch].tick(tap, wet_g, false);
+            internal_peak = internal_peak.max((wet as f32).abs());
             *(*out.add(ch)).add(frame) = if s.wet == 0.0 && s.gain == 1.0 {
                 dry[ch]
             } else {
@@ -396,6 +471,7 @@ unsafe extern "C" fn process(
         s.phase = (s.phase + s.smooth[RATE] / sr).fract();
         s.write = (s.write + 1) & (s.capacity - 1);
     }
+    super::tail_sleep::note_block(&mut s.quiet, counts_quiet, internal_peak, nf);
 }
 
 pub fn vtable() -> NodeVTable {

@@ -94,15 +94,18 @@ pub(crate) fn device_meter_value(kind: &str, fields: &[(&str, f64)]) -> Value {
     Value::Map(map)
 }
 
-pub(crate) fn read_bus_peak_levels(
-    lg: sequencer::audiograph::LiveGraphPtr,
-    bus_nodes: &[app::BusNodeIds],
-) -> Vec<f64> {
+/// Each bus's meter level, in `app.buses` order. The graph's bus nodes are
+/// found by bus id: their list keeps creation order, which a bus reorder
+/// (or an undo/redo that restores one) does not follow.
+pub(crate) fn read_bus_peak_levels(lg: sequencer::audiograph::LiveGraphPtr, app: &app::App) -> Vec<f64> {
     const STATE_LEN: usize = sequencer::effects::peak_meter::PEAK_METER_STATE_SIZE;
     const STATE_BYTES: usize = STATE_LEN * std::mem::size_of::<f32>();
-    bus_nodes
+    app.buses
         .iter()
-        .map(|bus| {
+        .map(|channel| {
+            let Some(bus) = app.graph.bus_node_ids.iter().find(|nodes| nodes.id == channel.id) else {
+                return 0.0;
+            };
             if bus.meter_id < 0 {
                 return 0.0;
             }

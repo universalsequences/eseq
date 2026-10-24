@@ -16,7 +16,8 @@
 (module eseq.sequencer-keys)
 
 (import eseq.kinds :refer (tracks selection scenes banks transport launch!))
-(import eseq.scene-banks :refer (view-scene-bank! scene-viewed-bank))
+(import eseq.scene-banks :refer (view-scene-bank! scene-viewed-bank bank-tracks))
+(import eseq.view-kit :refer (index-of))
 
 (export mode-name
         cursor-left
@@ -57,12 +58,16 @@
 
 ;; UP / DOWN: select the previous / next track in visual order. The drum
 ;; rack owns the visual order (group members are not contiguous); with no
-;; answer (no row visible) fall back to plain wrap-around.
+;; answer (no row visible) fall back to plain wrap-around over the tracks the
+;; viewed bank uses (docs/rig-spec.md §9), staying put when it uses none.
 (def track-relative (current delta)
   (or (eseq.drum-rack-v2/track-relative current delta)
-      (let ((all (tracks))
-            (n (len all)))
-        (nth all (mod (+ current.index delta n) n)))))
+      (let ((all (bank-tracks (scene-viewed-bank) (list)))
+            (n (len all))
+            (at (index-of all current)))
+        (if (= n 0)
+          current
+          (nth all (mod (+ (max at 0) delta n) n))))))
 
 (def select-track-delta (delta)
   (let ((current selection.track))

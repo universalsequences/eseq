@@ -460,6 +460,7 @@ impl SequencerState {
                 }
             }
         }
+        let scene_slot_enable = scenes.track_slot_enable(track_idx);
         Ok(TrackPatternLaneState {
             pool,
             scene_cells,
@@ -468,6 +469,7 @@ impl SequencerState {
             track_override,
             scene_references,
             sidechains,
+            scene_slot_enable,
         })
     }
 
@@ -497,6 +499,7 @@ impl SequencerState {
             scene.cells[track] = *cell;
             scene.cell_sounds[track] = *cell_sound;
         }
+        scenes.restore_track_slot_enable(track, &snapshot.scene_slot_enable);
         debug_assert!(
             scenes.validate_sound_refs().is_ok(),
             "sound refs invalid after track lane restore: {:?}",
@@ -522,6 +525,7 @@ impl SequencerState {
             return Err("Track history topology no longer matches the project".to_string());
         }
         scenes.move_track_take_pool(last, target);
+        scenes.move_track_slot_enable(last, target);
         let pool = scenes.track_pools.remove(last);
         scenes.track_pools.insert(target, pool);
         let track_override = scenes.track_overrides.remove(last);

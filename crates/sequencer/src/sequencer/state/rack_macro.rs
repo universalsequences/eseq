@@ -272,22 +272,32 @@ pub fn default_rack_macros() -> Vec<RackMacro> {
         .collect()
 }
 
-pub(super) fn remove_rack_macro_slot_targets(macros: &mut [RackMacro], removed_slot: usize) {
-    for rack_macro in macros {
-        rack_macro.mappings.retain(|mapping| match mapping.target {
-            RackMacroTarget::SlotParam { slot, .. }
-            | RackMacroTarget::SlotInstrumentParam { slot, .. }
-            | RackMacroTarget::SlotEffectParam { slot, .. } => slot != removed_slot,
-        });
-        for mapping in &mut rack_macro.mappings {
-            let slot = match &mut mapping.target {
-                RackMacroTarget::SlotParam { slot, .. }
-                | RackMacroTarget::SlotInstrumentParam { slot, .. }
-                | RackMacroTarget::SlotEffectParam { slot, .. } => slot,
-            };
-            if *slot > removed_slot {
-                *slot -= 1;
-            }
+impl RackMacroTarget {
+    fn slot_mut(&mut self) -> &mut usize {
+        match self {
+            Self::SlotParam { slot, .. }
+            | Self::SlotInstrumentParam { slot, .. }
+            | Self::SlotEffectParam { slot, .. } => slot,
         }
+    }
+}
+
+/// Rack macro targets follow their slot through a positional edit; a
+/// mapping onto a deleted slot is dropped (eseq-ka5t.9).
+pub(super) fn remap_rack_macro_slot_targets(
+    macros: &mut [RackMacro],
+    shift: crate::process::RackSlotShift,
+) {
+    for rack_macro in macros {
+        rack_macro.mappings.retain_mut(|mapping| {
+            let slot = mapping.target.slot_mut();
+            match shift.apply(*slot) {
+                Some(moved) => {
+                    *slot = moved;
+                    true
+                }
+                None => false,
+            }
+        });
     }
 }

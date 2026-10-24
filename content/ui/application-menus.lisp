@@ -2,6 +2,7 @@
 (module eseq.application-menus)
 (import eseq.menus :as menus)
 (import eseq.seq-core-state)
+(import eseq.scene-banks)
 (import eseq.kinds :refer (tracks buses selection browser project transport editor))
 (export application-menu-items install-default-menus)
 
@@ -114,6 +115,12 @@
 (def toggle-patch-macros () :doc "Show or hide the patch macro knobs." :command "Show Patch Macros"
   :group "View" :current patch-macros-visible?
   (eseq.seq-panels/seq-toggle-patch-macros-panel))
+;; Bank-scoped display (docs/rig-spec.md §9): every track, or only the ones
+;; the viewed scene bank uses.
+(def all-tracks-shown? () eseq.scene-banks/show-all-tracks)
+(def toggle-show-all-tracks () :doc "Show every track, or only the tracks the viewed scene bank uses."
+  :command "Show All Tracks" :group "View" :current all-tracks-shown?
+  (eseq.scene-banks/toggle-show-all-tracks!))
 (def collapse-all-tracks () :doc "Fold every track row to its header." :command "Collapse All Tracks"
   :group "View"
   (eseq.sequencer/collapse-all-tracks))
@@ -384,6 +391,8 @@
     (dict :id "view-macros" :label "Show Patch Macros" :checked-when (lambda () (patch-macros-visible?))
       :on-select (lambda () (toggle-patch-macros)))
     nil
+    (dict :id "view-all-tracks" :label "Show All Tracks" :checked-when (lambda () (all-tracks-shown?))
+      :on-select (lambda () (toggle-show-all-tracks)))
     (application-menu-entry "view-collapse" "Collapse All Tracks" "" (lambda () (collapse-all-tracks)))
     (application-menu-entry "view-reset" "Restore Default Layout" "" (lambda () (restore-default-layout))))))
 (menus/register-menu (dict :id "Help" :label "Help" :enabled-when commands-enabled?

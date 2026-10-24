@@ -18,11 +18,13 @@
 //! instances' views never share a stable key, a widget id or a subtree cache
 //! entry, even if both views were ever rendered into one tree.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use super::{
-    Chunk, EffectTarget, HashSet, InstanceId, NodeId, OpCode, PendingUiUpdate, ReactiveNode, VM,
-    VMError, Value, clone_value_for_snapshot,
+    Chunk, EffectTarget, HashSet, InstanceId, NativeFunction, NodeId, OpCode, PendingUiUpdate,
+    ReactiveNode, VM, VMError, Value, clone_value_for_snapshot,
 };
 
 /// What a bound view buffer renders.
@@ -59,6 +61,14 @@ struct BoundViewBuffer {
 pub(crate) struct ViewBufferStore {
     by_node: HashMap<NodeId, BoundViewBuffer>,
     by_target: HashMap<String, NodeId>,
+    /// The function every instance view renders through, as `(frame view
+    /// self)`: the UI's chrome around a kind's view (a bank-scoped power
+    /// toggle), registered from Lisp with `(set-instance-view-frame! f)`.
+    /// `None` renders `(view self)` as before.
+    instance_frame: Option<Value>,
+    /// The frame failed: it was reported once and is skipped until it is
+    /// re-registered.
+    instance_frame_failed: bool,
 }
 
 impl ViewBufferStore {
@@ -80,6 +90,8 @@ impl ViewBufferStore {
                 })
                 .collect(),
             by_target: self.by_target.clone(),
+            instance_frame: self.instance_frame.as_ref().map(clone_value_for_snapshot),
+            instance_frame_failed: self.instance_frame_failed,
         }
     }
 }
@@ -90,6 +102,25 @@ pub(crate) fn scoped_key(scope: &str, key: &str) -> String {
 }
 
 impl VM {
+    /// Render every instance view through `frame` (`(frame view self)`), or
+    /// directly again with `None` (`set-instance-view-frame!`). Every
+    /// (re-)registration re-renders every bound instance view, so a
+    /// reloaded frame takes effect at once.
+    pub fn set_instance_view_frame(&mut self, frame: Option<Value>) {
+        self.view_buffers.instance_frame = frame;
+        self.view_buffers.instance_frame_failed = false;
+        let nodes: Vec<NodeId> = self
+            .view_buffers
+            .by_node
+            .iter()
+            .filter(|(_, bound)| matches!(bound.view, BoundView::Instance(_)))
+            .map(|(node_id, _)| *node_id)
+            .collect();
+        for node_id in nodes {
+            self.dag.mark_dirty(node_id);
+        }
+    }
+
     /// Bind the buffer `target` to `view` and schedule its first render
     /// (the host's next reactive cycle runs it, unless the buffer is hidden,
     /// in which case it renders once shown). Rebinding a bound target
@@ -256,14 +287,83 @@ impl VM {
         let (callable, args) = match &bound.view {
             BoundView::Instance(id) => {
                 let id = *id;
-                match self.instance_view_callable(id)? {
-                    Some(view) => (view, vec![Value::Instance(id)]),
-                    None => return Ok(Value::Nil),
+                let Some(view) = self.instance_view_callable(id)? else {
+                    return Ok(Value::Nil);
+                };
+                // A frame that failed once is skipped until it is
+                // re-registered (`set_instance_view_frame`).
+                match self.view_buffers.instance_frame.clone() {
+                    Some(frame) if !self.view_buffers.instance_frame_failed => {
+                        return self.call_framed_view(frame, view, id);
+                    }
+                    _ => (view, vec![Value::Instance(id)]),
                 }
             }
             BoundView::Call { callable, args } => (callable.clone(), args.clone()),
         };
         Ok(self.invoke(callable, args)?.unwrap_or(Value::Nil))
+    }
+
+    /// `(frame view self)`. The frame gets `view` wrapped so the render
+    /// knows whether the view already rendered: when the frame throws after
+    /// the view ran, the view's tree is the fallback, so a broken frame
+    /// never runs a view twice in one render. When the view itself threw
+    /// inside the frame with its own arguments, that error is the render's and
+    /// the frame is not blamed (nor is the view re-run). Otherwise the frame
+    /// never called the view, or called it with other arguments, so it
+    /// renders bare. A frame that failed with a working view is reported once and
+    /// skipped from then on (until re-registered).
+    fn call_framed_view(
+        &mut self,
+        frame: Value,
+        view: Value,
+        id: InstanceId,
+    ) -> Result<Value, VMError> {
+        let outcome: Rc<RefCell<ViewRun>> = Rc::new(RefCell::new(ViewRun::NotRun));
+        let bare = view.clone();
+        let mut wrapped = NativeFunction::new("instance-view", {
+            let outcome = Rc::clone(&outcome);
+            move |args, vm| {
+                let as_bare = matches!(args.as_slice(), [Value::Instance(arg)] if *arg == id);
+                match vm.invoke(view.clone(), args) {
+                    Ok(tree) => {
+                        let tree = tree.unwrap_or(Value::Nil);
+                        *outcome.borrow_mut() = ViewRun::Rendered(tree.clone());
+                        tree
+                    }
+                    Err(error) => {
+                        *outcome.borrow_mut() = ViewRun::Failed { as_bare };
+                        vm.fail_native_call(error);
+                        Value::Nil
+                    }
+                }
+            }
+        });
+        // Arguments reach the view exactly as a direct call passes them.
+        wrapped.ref_aware = true;
+        let error = match self.invoke(
+            frame,
+            vec![Value::NativeFunction(wrapped), Value::Instance(id)],
+        ) {
+            Ok(tree) => return Ok(tree.unwrap_or(Value::Nil)),
+            Err(error) => error,
+        };
+        let outcome = std::mem::replace(&mut *outcome.borrow_mut(), ViewRun::NotRun);
+        let tree = match outcome {
+            ViewRun::Rendered(tree) => tree,
+            // Called exactly as a bare render would call it, the view
+            // failed on its own: its error, propagated through the frame.
+            ViewRun::Failed { as_bare: true } => return Err(error),
+            // The frame never called the view, or called it with other
+            // arguments: render bare. If that fails too the error is the
+            // view's, and the frame is not blamed.
+            ViewRun::NotRun | ViewRun::Failed { as_bare: false } => self
+                .invoke(bare, vec![Value::Instance(id)])?
+                .unwrap_or(Value::Nil),
+        };
+        self.view_buffers.instance_frame_failed = true;
+        eprintln!("eseqlisp: instance view frame failed, rendering views bare: {error:?}");
+        Ok(tree)
     }
 
     /// Dirty the bound views of every live instance of `kind` (its schema,
@@ -293,6 +393,14 @@ impl VM {
         self.pending_widget_trees
             .retain(|pending: &PendingUiUpdate| *pending.target() != target);
     }
+}
+
+/// What the wrapped view did during one framed render.
+enum ViewRun {
+    NotRun,
+    Rendered(Value),
+    /// `as_bare`: the frame passed exactly the arguments a bare render does.
+    Failed { as_bare: bool },
 }
 
 #[cfg(test)]
@@ -409,6 +517,156 @@ mod tests {
         let trees = drain_full_trees(&mut vm);
         assert_eq!(targets(&trees), vec!["*probe · B*"]);
         assert!(widths(&trees[0].1).contains(&Value::Number(5.0)));
+    }
+
+    #[test]
+    fn a_registered_frame_wraps_instance_views_and_re_registering_re_renders() {
+        let mut vm = view_vm(VIEW);
+        vm.create_instance(1, KIND).expect("create");
+        vm.bind_view_buffer("*framed*", BoundView::Instance(1), Some("instance:1".into()));
+        vm.process_dirty_reactive().expect("render bare");
+        let trees = drain_full_trees(&mut vm);
+        assert!(!stable_keys(&trees[0].1).iter().any(|key| key.ends_with("::frame")));
+        eval(
+            &mut vm,
+            r#"(def probe-frame (view s) (v-stack (box :key "frame" :width 1 :height 1) (view s)))
+               (set-instance-view-frame! probe-frame)"#,
+        );
+        vm.process_dirty_reactive().expect("render framed");
+        let keys = stable_keys(&drain_full_trees(&mut vm)[0].1);
+        assert!(keys.contains(&"instance:1::frame".to_string()), "{keys:?}");
+        assert!(keys.contains(&"instance:1::weight-matrix".to_string()), "the view inside: {keys:?}");
+        // Re-registering (a reloaded frame) re-renders through the new one.
+        eval(
+            &mut vm,
+            r#"(def probe-frame-2 (view s) (v-stack (box :key "frame-2" :width 1 :height 1) (view s)))
+               (set-instance-view-frame! probe-frame-2)"#,
+        );
+        vm.process_dirty_reactive().expect("render re-framed");
+        let keys = stable_keys(&drain_full_trees(&mut vm)[0].1);
+        assert!(keys.contains(&"instance:1::frame-2".to_string()), "{keys:?}");
+        // nil unregisters it.
+        eval(&mut vm, "(set-instance-view-frame! nil)");
+        vm.process_dirty_reactive().expect("render bare again");
+        let keys = stable_keys(&drain_full_trees(&mut vm)[0].1);
+        assert!(!keys.iter().any(|key| key.contains("frame")), "{keys:?}");
+    }
+
+    #[test]
+    fn a_throwing_frame_falls_back_to_the_bare_view() {
+        let mut vm = view_vm(VIEW);
+        vm.create_instance(1, KIND).expect("create");
+        vm.bind_view_buffer("*framed*", BoundView::Instance(1), Some("instance:1".into()));
+        eval(
+            &mut vm,
+            r#"(def broken-frame (view s) (view))
+               (set-instance-view-frame! broken-frame)"#,
+        );
+        vm.process_dirty_reactive().expect("a broken frame does not fail the render");
+        let trees = drain_full_trees(&mut vm);
+        let keys = stable_keys(&trees[0].1);
+        assert!(keys.contains(&"instance:1::weight-matrix".to_string()), "the bare view: {keys:?}");
+    }
+
+    /// A view that counts its runs through the native `count-view!`.
+    fn counting_view_vm() -> (VM, std::rc::Rc<std::cell::Cell<u32>>) {
+        let runs = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut vm = VM::new(Vec::new());
+        register_core_natives(&mut vm);
+        crate::widgets::register_widget_natives(&mut vm);
+        let counter = std::rc::Rc::clone(&runs);
+        vm.register_native("count-view!", move |_| {
+            counter.set(counter.get() + 1);
+            Value::Nil
+        });
+        eval(
+            &mut vm,
+            r#"(def probe-view (s) (do (count-view!) (box :key "weight-matrix" :width s.x :height 1)))"#,
+        );
+        let view = vm.global_value("probe-view").expect("probe-view defined");
+        vm.register_instance_kind(
+            InstanceKindSchema::new(KIND)
+                .field("x", Value::Number(1.0))
+                .with_view(Some(view)),
+        )
+        .expect("register kind");
+        vm.create_instance(1, KIND).expect("create");
+        vm.bind_view_buffer("*framed*", BoundView::Instance(1), Some("instance:1".into()));
+        (vm, runs)
+    }
+
+    #[test]
+    fn a_frame_throwing_after_the_view_ran_keeps_its_tree_and_is_skipped_after() {
+        let (mut vm, runs) = counting_view_vm();
+        vm.process_dirty_reactive().expect("render bare");
+        drain_full_trees(&mut vm);
+        runs.set(0);
+        eval(
+            &mut vm,
+            r#"(def late-broken-frame (view s) (do (view s) (no-such-function)))
+               (set-instance-view-frame! late-broken-frame)"#,
+        );
+        vm.process_dirty_reactive().expect("a broken frame does not fail the render");
+        let keys = stable_keys(&drain_full_trees(&mut vm)[0].1);
+        assert!(keys.contains(&"instance:1::weight-matrix".to_string()), "the view's tree: {keys:?}");
+        assert_eq!(runs.get(), 1, "the view ran once, inside the frame");
+
+        // The failed frame is skipped from then on: one bare run per render.
+        vm.set_instance_field(1, "x", Value::Number(5.0)).expect("write");
+        vm.process_dirty_reactive().expect("rerender");
+        let trees = drain_full_trees(&mut vm);
+        assert!(widths(&trees[0].1).contains(&Value::Number(5.0)));
+        assert_eq!(runs.get(), 2);
+
+        // Re-registering tries the frame again.
+        eval(
+            &mut vm,
+            r#"(def good-frame (view s) (v-stack (box :key "frame" :width 1 :height 1) (view s)))
+               (set-instance-view-frame! good-frame)"#,
+        );
+        vm.process_dirty_reactive().expect("render framed");
+        let keys = stable_keys(&drain_full_trees(&mut vm)[0].1);
+        assert!(keys.contains(&"instance:1::frame".to_string()), "{keys:?}");
+        assert_eq!(runs.get(), 3);
+    }
+
+    #[test]
+    fn a_frame_throwing_before_the_view_ran_renders_it_bare_once() {
+        let (mut vm, runs) = counting_view_vm();
+        eval(
+            &mut vm,
+            r#"(def early-broken-frame (view s) (do (no-such-function) (view s)))
+               (set-instance-view-frame! early-broken-frame)"#,
+        );
+        vm.process_dirty_reactive().expect("a broken frame does not fail the render");
+        let keys = stable_keys(&drain_full_trees(&mut vm)[0].1);
+        assert!(keys.contains(&"instance:1::weight-matrix".to_string()), "{keys:?}");
+        assert_eq!(runs.get(), 1);
+    }
+
+    #[test]
+    fn a_view_error_inside_a_good_frame_is_the_views_error() {
+        let (mut vm, runs) = counting_view_vm();
+        eval(
+            &mut vm,
+            r#"(def good-frame (view s) (v-stack (view s)))
+               (set-instance-view-frame! good-frame)"#,
+        );
+        vm.process_dirty_reactive().expect("render framed");
+        drain_full_trees(&mut vm);
+        // A view that throws: the render fails, and the frame is not blamed.
+        eval(&mut vm, "(def broken-view (s) (do (count-view!) (no-such-function)))");
+        let view = vm.global_value("broken-view").expect("broken-view");
+        vm.register_instance_kind(
+            InstanceKindSchema::new(KIND)
+                .field("x", Value::Number(1.0))
+                .with_view(Some(view)),
+        )
+        .expect("re-register");
+        runs.set(0);
+        assert!(vm.process_dirty_reactive().is_err(), "the view's error surfaces");
+        assert_eq!(runs.get(), 1, "the failing view is not re-run bare");
+        assert!(!vm.view_buffers.instance_frame_failed, "the frame is not blamed");
     }
 
     #[test]

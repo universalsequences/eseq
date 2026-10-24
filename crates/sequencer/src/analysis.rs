@@ -12,6 +12,12 @@ pub struct AnalysisJob {
     pub sample_rate: u32,
 }
 
+impl AnalysisJob {
+    pub fn new(buffer_id: i32, samples: Arc<Vec<f32>>, sample_rate: u32) -> Self {
+        Self { buffer_id, samples, sample_rate }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AnalysisResult {
     pub buffer_id: i32,
@@ -203,7 +209,7 @@ pub fn edits_for_sample_path<'a>(
 /// serves (spec §2.7: *loading a different sample discards the edits*).
 pub fn sample_path_hash(path: &str) -> Option<String> {
     let stem = std::path::Path::new(path).file_stem()?.to_str()?;
-    if stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if crate::sample_db::is_content_hash(stem) {
         return Some(stem.to_ascii_lowercase());
     }
     if path.is_empty() {

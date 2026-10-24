@@ -46,6 +46,9 @@ pub(crate) struct EditSessionState {
     pub(crate) pending_instrument_preview: Option<PendingInstrumentPreview>,
     pub(crate) pending_instrument_cancel_restore: Option<PendingInstrumentCancelRestore>,
     pub(crate) pending_saved_instrument_load: Option<PendingSavedInstrumentLoad>,
+    /// A project import the Projects tab asked for, run a loop turn later
+    /// so its loading toast draws first (`project_import_ui`).
+    pub(crate) pending_project_import: Option<crate::project_import_ui::PendingImport>,
     pub(crate) pending_key_lock_auditions: Vec<PendingKeyLockAudition>,
     pub(crate) effect_edit_session: Option<EffectEditSession>,
     pub(crate) pending_effect_preview: Option<PendingEffectPreview>,

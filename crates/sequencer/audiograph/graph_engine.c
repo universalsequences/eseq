@@ -322,6 +322,13 @@ uint32_t ap_current_node_io_generation(void) {
   return g_current_processing_node ? g_current_processing_node->io_generation : 0;
 }
 
+/* Changes whenever a param or bulk state write lands in the running node's
+ * state, so a kernel that caches a fact about its state (a tail-sleep quiet
+ * run) can tell the host touched it. Zero outside a kernel. */
+uint32_t ap_current_node_state_writes(void) {
+  return g_current_processing_node ? g_current_processing_node->state_writes : 0;
+}
+
 /* ===================== Silence propagation =====================
  * A kernel whose inputs are all declared silent may skip its DSP and declare
  * its own outputs silent (after making sure they hold zeros), so idle buses,
@@ -351,6 +358,17 @@ int ap_inputs_silent(void) {
       return 0;
   }
   return 1;
+}
+
+/* True when input `port` reads silence this block: unconnected, or fed by a
+ * source that declared it silent. False outside a kernel. */
+int ap_input_silent(int port) {
+  RTNode *node = g_current_processing_node;
+  LiveGraph *lg = g_current_processing_graph;
+  if (!node || !lg || port < 0 || port >= node->nInputs)
+    return 0;
+  LiveEdge *edge = current_edge(lg, node->inEdgeId, node->nInputs, port);
+  return !edge || edge->silent_pass == lg->render_pass;
 }
 
 /* Declare output `port` all zeros for this block. The caller must have made
@@ -394,11 +412,54 @@ void ap_emit_silence(float *const *out, int n) {
   }
 }
 
+/* ===================== Declared lane shapes =====================
+ * A source may tell its consumers, for one render pass, that an output
+ * buffer has a shape they can summarize without reading every frame. The
+ * buffer itself is always fully written; a shape is only a promise about it,
+ * so a consumer that ignores shapes reads the same values.
+ *
+ * AP_SHAPE_CONSTANT:   every frame of the pass holds the value at frame 0.
+ * AP_SHAPE_PHASE_RAMP: every value is in [0, 1); consecutive frames rise by
+ *                      less than 0.5 except at most one wrap, which falls by
+ *                      more than 0.5; and the pass's total rise is under 0.5,
+ *                      so the last frame is below the first iff it wrapped.
+ *
+ * Used by gatepitch for its control lanes and bar clock so an idle voice
+ * modulator need not scan them (eseq-ka5t.16). */
+void ap_set_output_shape(int port, int shape) {
+  RTNode *node = g_current_processing_node;
+  LiveGraph *lg = g_current_processing_graph;
+  LiveEdge *edge = current_edge(lg, node ? node->outEdgeId : NULL, node ? node->nOutputs : 0, port);
+  if (!edge)
+    return;
+  edge->shape_pass = lg->render_pass;
+  edge->shape = shape;
+}
+
+/* The shape input `port` was declared with this pass: AP_SHAPE_CONSTANT for
+ * an unconnected port (the shared zero buffer) or a declared-silent one,
+ * else the source's declaration, else AP_SHAPE_NONE (also outside a
+ * kernel). */
+int ap_input_shape(int port) {
+  RTNode *node = g_current_processing_node;
+  LiveGraph *lg = g_current_processing_graph;
+  if (!node || !lg || port < 0 || port >= node->nInputs)
+    return AP_SHAPE_NONE;
+  LiveEdge *edge = current_edge(lg, node->inEdgeId, node->nInputs, port);
+  if (!edge || edge->silent_pass == lg->render_pass)
+    return AP_SHAPE_CONSTANT;
+  return edge->shape_pass == lg->render_pass ? edge->shape : AP_SHAPE_NONE;
+}
+
 int ap_current_node_ninputs(void) {
   if (g_current_processing_node) {
     return g_current_processing_node->nInputs;
   }
   return 0; // fallback
+}
+
+int ap_current_node_noutputs(void) {
+  return g_current_processing_node ? g_current_processing_node->nOutputs : 0;
 }
 
 void initialize_engine(int block_Size, int sample_rate) {
@@ -457,19 +518,9 @@ void initialize_engine(int block_Size, int sample_rate) {
 
 // ===================== Parameter Application =====================
 
-#define DGEN_HEADER_SLOTS 5
-#define DGEN_CANARY_INDEX 2
-#define DGEN_HEADER_CANARY_BITS 0x4cd35a1dU
-#define DGEN_STATE_REDZONE_SLOTS 256
-
-static inline bool has_dgen_header_canary(const float *memory) {
-  union {
-    float f;
-    uint32_t u;
-  } bits = {.f = memory[DGEN_CANARY_INDEX]};
-  return bits.u == DGEN_HEADER_CANARY_BITS;
-}
-
+/* Params land at their state index only. (A legacy DGen mirror that copied
+ * writes past the redzone, a leftover of the split read/write span, is gone:
+ * the host keeps runtime cells there, see dgen_ffi.rs.) */
 void apply_params(LiveGraph *g) {
   if (!g || !g->params)
     return;
@@ -509,20 +560,17 @@ void apply_params(LiveGraph *g) {
           }
           continue;
         }
-        memory[m.idx] = m.fvalue;
-        applied++;
-        if (m.idx >= DGEN_HEADER_SLOTS && has_dgen_header_canary(memory)) {
-          int total_slots = (int)memory[1];
-          if (total_slots > 0) {
-            int write_base = DGEN_HEADER_SLOTS + total_slots + DGEN_STATE_REDZONE_SLOTS;
-            int dgen_idx = (int)(m.idx - DGEN_HEADER_SLOTS);
-            int mirrored_idx = write_base + dgen_idx;
-            if (dgen_idx >= 0 && dgen_idx < total_slots &&
-                mirrored_idx >= 0 && mirrored_idx < state_slots) {
-              memory[mirrored_idx] = m.fvalue;
-            }
-          }
+        // Count only value-changing writes: a host re-pushing an unchanged
+        // value (defaults, per-step p-lock restores) must not restart a
+        // tail-sleeping node's quiet run. Bits, so -0.0 vs 0.0 still counts.
+        uint32_t old_bits, new_bits;
+        memcpy(&old_bits, &memory[m.idx], sizeof old_bits);
+        memcpy(&new_bits, &m.fvalue, sizeof new_bits);
+        if (old_bits != new_bits) {
+          memory[m.idx] = m.fvalue;
+          node->state_writes++;
         }
+        applied++;
       }
     }
   }

@@ -3249,7 +3249,7 @@
         }
 
         let cached_track_peak_levels = vec![0.0; app.tracks.len()];
-        let cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+        let cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app);
         let (cached_modulator_phases, cached_modulator_levels) =
             read_modulator_display_values(app.graph.lg, &app);
 

@@ -246,8 +246,7 @@ unsafe extern "C" fn ott_process(
     let out1 = *out.add(1);
 
     if *s.add(STATE_ENABLED) <= 0.5 {
-        std::ptr::copy_nonoverlapping(in0 as *const f32, out0, nf);
-        std::ptr::copy_nonoverlapping(in1 as *const f32, out1, nf);
+        crate::effects::silence::passthrough(inp, out, 2, nframes);
         std::ptr::write_bytes(s.add(STATE_ENV), 0, OTT_STATE_SIZE - STATE_ENV);
         for i in 0..6 {
             *s.add(STATE_METER_LEVEL_DB + i) = LEVEL_FLOOR_DB;

@@ -1236,6 +1236,7 @@ mod rack_slot_named_param_tests {
 
     fn slot(instrument_type: InstrumentType, desc: &EffectDescriptor) -> RackSlotSnapshot {
         RackSlotSnapshot {
+            id: 0,
             instrument_type,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: 0.0,

@@ -1,5 +1,16 @@
 use super::*;
 
+/// Gatepitch outputs gate..=trigger, wired to the voice modulator's inputs of
+/// the same index.
+const GATEPITCH_TO_MODULATOR_PORTS: std::ops::RangeInclusive<usize> =
+    crate::effects::gatepitch::OUTPUT_GATE..=crate::effects::gatepitch::OUTPUT_TRIGGER;
+const _: () = {
+    use crate::effects::gatepitch as gp;
+    use crate::instruments::voice_modulator as vm;
+    assert!(gp::OUTPUT_GATE == vm::INPUT_GATE && gp::OUTPUT_PITCH == vm::INPUT_PITCH);
+    assert!(gp::OUTPUT_VELOCITY == vm::INPUT_VELOCITY && gp::OUTPUT_TRIGGER == vm::INPUT_TRIGGER);
+};
+
 impl GraphController<'_> {
     pub(super) fn create_track_shell(&mut self, idx: usize, name: &str) -> Result<TrackShell, String> {
         if !self.app.track_registry.can_allocate() {
@@ -502,7 +513,10 @@ impl GraphController<'_> {
                 &node_name,
             )?;
             let sampler_id = transaction.own(st.node_id)?;
-            for port in 0..4 {
+            // Gate, pitch, velocity, trigger: the modulator's first inputs
+            // share their index with the gatepitch outputs.
+            for port in GATEPITCH_TO_MODULATOR_PORTS {
+                let port = port as i32;
                 transaction.connect(
                     gp_id,
                     port,
@@ -513,14 +527,14 @@ impl GraphController<'_> {
             }
             transaction.connect(
                 gp_id,
-                crate::effects::gatepitch::PARAM_CLOCK_PHASE as i32,
+                crate::effects::gatepitch::OUTPUT_CLOCK_PHASE as i32,
                 mod_id,
                 crate::instruments::voice_modulator::INPUT_TRANSPORT_BAR_PHASE as i32,
                 &format!("build_sampler_voices voice {v} transport clock"),
             )?;
             transaction.connect(
                 gp_id,
-                crate::effects::gatepitch::PARAM_CLOCK_INC as i32,
+                crate::effects::gatepitch::OUTPUT_CLOCK_INC as i32,
                 mod_id,
                 crate::instruments::voice_modulator::INPUT_TRANSPORT_BAR_PHASE_INC as i32,
                 &format!("build_sampler_voices voice {v} transport clock increment"),
@@ -815,19 +829,19 @@ impl GraphController<'_> {
                     &format!("{voice_context} host channel {}", route.input_channel),
                 )?;
             }
-            for port in 0..4 {
-                transaction.connect(gp_id, port, mod_id, port, &voice_context)?;
+            for port in GATEPITCH_TO_MODULATOR_PORTS {
+                transaction.connect(gp_id, port as i32, mod_id, port as i32, &voice_context)?;
             }
             transaction.connect(
                 gp_id,
-                crate::effects::gatepitch::PARAM_CLOCK_PHASE as i32,
+                crate::effects::gatepitch::OUTPUT_CLOCK_PHASE as i32,
                 mod_id,
                 crate::instruments::voice_modulator::INPUT_TRANSPORT_BAR_PHASE as i32,
                 &format!("{voice_context} transport clock"),
             )?;
             transaction.connect(
                 gp_id,
-                crate::effects::gatepitch::PARAM_CLOCK_INC as i32,
+                crate::effects::gatepitch::OUTPUT_CLOCK_INC as i32,
                 mod_id,
                 crate::instruments::voice_modulator::INPUT_TRANSPORT_BAR_PHASE_INC as i32,
                 &format!("{voice_context} transport clock increment"),

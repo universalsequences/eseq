@@ -10,6 +10,10 @@ use crate::scheduler::build_scheduler_scratch_runtime;
 use crate::sequencer::{AudibleSongRowApplied, SequencerState, SongPlaybackNotice};
 use std::{collections::VecDeque, sync::Arc};
 
+#[cfg(test)]
+#[path = "park_probe.rs"]
+mod park_probe;
+
 /// Graph teardown follows all App/session state, including on preparation errors.
 pub(super) struct WorkerEngine(pub engine::HeadlessEngine);
 impl Drop for WorkerEngine {

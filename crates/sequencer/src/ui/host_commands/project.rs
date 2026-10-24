@@ -267,7 +267,7 @@ pub(super) fn handle(
             ctx.meters.cached_track_peak_levels =
                 read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);
             ctx.meters.cached_bus_peak_levels =
-                read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+                read_bus_peak_levels(app.graph.lg, app);
             (ctx.meters.cached_modulator_phases, ctx.meters.cached_modulator_levels) =
                 read_modulator_display_values(app.graph.lg, &app);
             ctx.meters.last_meter_poll_at = Instant::now();

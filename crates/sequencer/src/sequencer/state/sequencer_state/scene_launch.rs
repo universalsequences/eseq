@@ -298,7 +298,12 @@ impl SequencerState {
             let snapshot_source = launched
                 .into_iter()
                 .collect::<Option<Vec<_>>>()
-                .map(|tracks| {
+                .map(|mut tracks| {
+                    // The launched scene owns which rack slots play
+                    // (docs/rig-spec.md §3.2); the mirror keeps stored flags.
+                    for (track, data) in tracks.iter_mut().enumerate() {
+                        scenes.resolve_scene_track_pattern(scene_idx, track, data);
+                    }
                     (
                         tracks,
                         metadata.0,
@@ -509,6 +514,56 @@ impl SequencerState {
         true
     }
 
+    /// Apply a `TrackStop` launch (the mixer's clip stop): save the live
+    /// state back as any launch does, then silence `track` whatever it
+    /// plays — its override drops and its live grid blanks as a cleared
+    /// cell's does (track-sound spec §2.3); its devices stay. The scene's
+    /// cells are untouched. `bump_pattern_epoch` as for
+    /// `launch_scene_tracks` (false for the scheduler-applied mirror).
+    #[allow(clippy::too_many_arguments)]
+    pub fn stop_track_lane(
+        &self,
+        track: usize,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+        bump_pattern_epoch: bool,
+    ) -> bool {
+        if track >= num_tracks {
+            return false;
+        }
+        let current_snapshot = self.capture_current_pattern_snapshot(
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        );
+        // Read before the release, as `launch_scene_tracks_with_epoch` does.
+        let save_masks = self.masked_save_masks();
+        self.release_bound_device_state();
+        {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            let current_scene = self.current_scene_index();
+            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, save_masks.0, save_masks.1, save_masks.2) {
+                return false;
+            }
+            let Some(slot) = scenes.track_overrides.get_mut(track) else {
+                return false;
+            };
+            *slot = None;
+        }
+        self.clear_live_track_note_content(track);
+        self.set_scene_silenced(track, true);
+        if bump_pattern_epoch {
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        }
+        self.publish_scheduler_snapshot();
+        true
+    }
+
     /// Prebuild the scheduler snapshot a quantized launch would make audible
     /// (the per-row preflight pattern, docs/song-mode-spec.md 9, applied to
     /// session launches): the target scene's cells resolved against the
@@ -529,9 +584,16 @@ impl SequencerState {
         target: &crate::quantized_launch::PatternLaunchTarget,
     ) -> Option<Arc<SequencerSnapshot>> {
         use crate::quantized_launch::PatternLaunchTarget;
+        let stop_mask;
         let (scene_idx, mask) = match target {
             PatternLaunchTarget::Scene { scene } => (*scene, None),
             PatternLaunchTarget::SceneTracks { scene, tracks } => (*scene, Some(tracks)),
+            // A stop is a one-track launch of the playing scene with that
+            // lane forced silent (below).
+            PatternLaunchTarget::TrackStop { track } => {
+                stop_mask = vec![*track];
+                (self.current_scene_index(), Some(&stop_mask))
+            }
             // Override launches are only scheduled during song playback,
             // where the scheduler's boundary machinery is inactive — the
             // legacy control-side apply handles them at the boundary.
@@ -544,7 +606,16 @@ impl SequencerState {
             let placeholder = PatternSnapshot::new_default(1, &[]).track_pattern_data(0)?;
             let mut track_data = Vec::with_capacity(track_count);
             let mut silenced = Vec::with_capacity(track_count);
+            let stopped = match target {
+                PatternLaunchTarget::TrackStop { track } => Some(*track),
+                _ => None,
+            };
             for track in 0..track_count {
+                if stopped == Some(track) {
+                    track_data.push(placeholder.clone());
+                    silenced.push(true);
+                    continue;
+                }
                 let cell = scene.cells.get(track).copied().flatten();
                 match cell {
                     Some(id) => {
@@ -562,6 +633,11 @@ impl SequencerState {
                             silenced.push(true);
                             continue;
                         };
+                        // Which rack slots play follows the scene (rig spec
+                        // §3.2); a per-track launch keeps the playing one's.
+                        let mut data = data;
+                        let owner = if mask.is_some() { scenes.current_scene } else { scene_idx };
+                        scenes.resolve_scene_track_pattern(owner, track, &mut data);
                         track_data.push(data);
                         silenced.push(false);
                     }
@@ -576,9 +652,19 @@ impl SequencerState {
                     }
                 }
             }
+            // A per-track launch keeps the playing scene's kits and
+            // project-owned instances on/off, as it keeps its slot enables;
+            // a scene launch takes its target's (docs/rig-spec.md §3.2, §6,
+            // §10).
+            let parking = scenes.scene_parking(if mask.is_some() {
+                scenes.current_scene
+            } else {
+                scene_idx
+            });
             (
                 track_data,
                 silenced,
+                parking,
                 scene.mod_connections.clone(),
                 scene.neural_networks.clone(),
                 // Composed like the live scene's: a rack-owned graph's
@@ -591,6 +677,7 @@ impl SequencerState {
         let (
             track_data,
             silenced,
+            parking,
             mod_connections,
             neural_networks,
             graph_overrides,
@@ -605,6 +692,7 @@ impl SequencerState {
             graph_overrides,
             scene_slots,
             chain,
+            parking,
         );
         // Only ever scheduled while the transport is playing; stamp it so
         // the deterministic clock treats it as playing regardless of the
@@ -1225,11 +1313,7 @@ impl SequencerState {
             }
             if scene == current_scene {
                 if defer_launch {
-                    if let Some(override_slot) = scenes.track_overrides.get_mut(track) {
-                        if override_slot.is_none() {
-                            *override_slot = playing;
-                        }
-                    }
+                    scenes.pin_override_if_unset(track, playing);
                     None
                 } else {
                     if let Some(override_slot) = scenes.track_overrides.get_mut(track) {
@@ -1264,6 +1348,32 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> Option<PatternId> {
+        self.clear_scene_cell_as(
+            scene,
+            track,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            SceneCellClear::Edit,
+        )
+    }
+
+    /// `clear_scene_cell` with the lane treatment `mode` names when the
+    /// cell is the current scene's (see [`SceneCellClear`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn clear_scene_cell_as(
+        &self,
+        scene: usize,
+        track: usize,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+        mode: SceneCellClear,
+    ) -> Option<PatternId> {
         if track >= num_tracks {
             return None;
         }
@@ -1288,9 +1398,25 @@ impl SequencerState {
             if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, save_masks.0, save_masks.1, save_masks.2) {
                 return None;
             }
+            // The lane's audible identity before the cell clears — the
+            // deferred-stop pin below must name the OUTGOING pattern.
+            let playing = scenes.effective_pattern_id(track);
             let cleared = scenes.clear_cell(scene, track)?;
-            let should_silence =
-                scene == current_scene && scenes.effective_pattern_id(track).is_none();
+            if scene == current_scene {
+                match mode {
+                    SceneCellClear::Edit => {}
+                    SceneCellClear::StopNow => {
+                        // A stop silences what plays, an override included.
+                        if let Some(slot) = scenes.track_overrides.get_mut(track) {
+                            *slot = None;
+                        }
+                    }
+                    SceneCellClear::StopAtBoundary => scenes.pin_override_if_unset(track, playing),
+                }
+            }
+            let should_silence = mode != SceneCellClear::StopAtBoundary
+                && scene == current_scene
+                && scenes.effective_pattern_id(track).is_none();
             (cleared, should_silence)
         };
 
@@ -1368,9 +1494,14 @@ impl SequencerState {
         .expect("the append clone path always has room by creating a bank")
     }
 
+    /// A new scene at the end of `bank`, cloned from the current one; its
+    /// swap state (rack slot enables) is taken as `inheritance` says
+    /// (docs/rig-spec.md §3.3): a blank `+` scene sounds like its bank.
+    #[allow(clippy::too_many_arguments)]
     pub fn clone_pattern_in_scene_bank(
         &self,
         bank: SceneBankId,
+        inheritance: SceneSwapInheritance,
         num_tracks: usize,
         buffer_ids: &[i32],
         sample_rates: &[u32],
@@ -1378,7 +1509,7 @@ impl SequencerState {
         instrument_types: &[InstrumentType],
     ) -> Result<usize, String> {
         self.clone_pattern_impl(
-            Some(bank),
+            Some((bank, inheritance)),
             num_tracks,
             buffer_ids,
             sample_rates,
@@ -1387,9 +1518,10 @@ impl SequencerState {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn clone_pattern_impl(
         &self,
-        bank: Option<SceneBankId>,
+        bank: Option<(SceneBankId, SceneSwapInheritance)>,
         num_tracks: usize,
         buffer_ids: &[i32],
         sample_rates: &[u32],
@@ -1416,7 +1548,7 @@ impl SequencerState {
             scenes.save_scene_snapshot_masked(cur, current_snapshot, save_masks.0, save_masks.1, save_masks.2);
             let old_scene_count = scenes.scene_count();
             let new_idx = match bank {
-                Some(bank) => scenes.new_scene_in_bank(bank)?,
+                Some((bank, inheritance)) => scenes.new_scene_in_bank(bank, inheritance)?,
                 None => scenes.new_scene(),
             };
             if new_idx != old_scene_count {
@@ -1499,6 +1631,11 @@ impl SequencerState {
 
     pub fn scene_banks(&self) -> Vec<SceneBank> {
         self.pattern.scenes.lock().unwrap().scene_banks().to_vec()
+    }
+
+    /// The scene indices bank `bank` spans.
+    pub fn scene_bank_range(&self, bank: SceneBankId) -> Option<std::ops::Range<usize>> {
+        self.pattern.scenes.lock().unwrap().scene_bank_range(bank)
     }
 
     pub fn scene_bank_containing(&self, scene: usize) -> Option<SceneBankId> {

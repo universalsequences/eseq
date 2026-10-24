@@ -34,6 +34,23 @@ pub struct TrackPatternId {
     pub pattern: PatternId,
 }
 
+/// What clearing a cell of the CURRENT scene does to its lane
+/// (`SequencerState::clear_scene_cell_as`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SceneCellClear {
+    /// A plain edit: the lane falls silent only when it is left with no
+    /// pattern (no override either).
+    Edit,
+    /// The mixer's clip stop, unquantized: the lane falls silent now, an
+    /// override it plays included.
+    StopNow,
+    /// The mixer's clip stop, quantized: the cell clears now but the lane
+    /// plays on, its override pinned to the pattern it plays (see
+    /// `ProjectScenes::pin_override_if_unset`), until the caller's pending
+    /// `TrackStop` boundary launch silences it.
+    StopAtBoundary,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TrackPatternCellView {
     pub pattern_id: PatternId,
@@ -97,6 +114,9 @@ pub struct TrackPatternLaneState {
     pub track_override: Option<PatternId>,
     pub scene_references: Vec<SceneTrackReferenceState>,
     pub sidechains: Vec<TrackSidechainPatternState>,
+    /// The lane's `slot_enable` entries by scene identity (rig spec §3.2),
+    /// so undoing a track delete restores its device sets.
+    pub scene_slot_enable: Vec<(SceneId, SlotEnable)>,
 }
 
 impl Default for TrackPatternPool {
@@ -327,6 +347,20 @@ pub struct Scene {
     /// §2). A rack with no entry is silent in this scene; a rack with no clip
     /// bank at all is legacy and resolves through `cells` as before.
     pub rack_clips: Vec<(u64, RackClipId)>,
+    /// Per track (by index): the Instrument Rack slot ids this scene plays
+    /// (docs/rig-spec.md §3.2). Overrides the pattern's stored slot
+    /// `enabled` flags; a track with no entry falls back to them. Remapped
+    /// with `cells` when tracks are deleted or moved.
+    pub slot_enable: std::collections::BTreeMap<usize, SlotEnable>,
+    /// The kits (drum rack group ids) switched off in this scene
+    /// (docs/rig-spec.md §3.2, §6). Independent of `rack_clips`: a kit plays
+    /// when the scene points at one of its clips and does not park it.
+    pub parked_kits: ParkedKits,
+    /// The project-owned kind instances (density, jaki, graph kinds…)
+    /// switched off in this scene (docs/rig-spec.md §10,
+    /// `super::instance_parking`): they do not tick or fire here, and the
+    /// processes they own do not apply.
+    pub parked_instances: ParkedInstances,
     /// Pattern-scoped portable values declared through `defscene`.
     pub scene_slots: SceneSlotStore,
     /// Project-level default process chain: composed ahead of every track's
@@ -412,6 +446,9 @@ impl ProjectScenes {
                 neural_networks: snapshot.neural_networks.clone(),
                 graph_overrides: snapshot.graph_overrides.clone(),
                 rack_clips: Vec::new(),
+                slot_enable: Default::default(),
+                parked_kits: Default::default(),
+                parked_instances: Default::default(),
                 scene_slots: snapshot.scene_slots.clone(),
                 project_process_chain: {
                     let mut chain = snapshot.project_process_chain.clone();
@@ -439,6 +476,9 @@ impl ProjectScenes {
                 neural_networks: Vec::new(),
                 graph_overrides: Vec::new(),
                 rack_clips: Vec::new(),
+                slot_enable: Default::default(),
+                parked_kits: Default::default(),
+                parked_instances: Default::default(),
                 scene_slots: SceneSlotStore::default(),
                 project_process_chain: crate::process::default_project_layer(),
             });
@@ -512,24 +552,49 @@ impl ProjectScenes {
         &self.banks
     }
 
-    pub fn scene_bank_containing(&self, scene: usize) -> Option<SceneBankId> {
-        let mut offset = 0;
-        self.banks.iter().find_map(|bank| {
-            let contains = scene >= offset && scene < offset + bank.len;
-            offset += bank.len;
-            contains.then_some(bank.id)
+    /// Every bank with the scene indices it spans, in bank order.
+    pub(crate) fn scene_bank_ranges(&self) -> impl Iterator<Item = (SceneBankId, std::ops::Range<usize>)> + '_ {
+        self.banks.iter().scan(0, |offset, bank| {
+            let range = *offset..*offset + bank.len;
+            *offset += bank.len;
+            Some((bank.id, range))
         })
     }
 
+    /// The scene indices bank `bank` spans (empty for an empty bank).
+    pub fn scene_bank_range(&self, bank: SceneBankId) -> Option<std::ops::Range<usize>> {
+        self.scene_bank_ranges()
+            .find(|(id, _)| *id == bank)
+            .map(|(_, range)| range)
+    }
+
+    /// `bank`'s id and scene range, `None` meaning the bank holding the
+    /// playing scene (the viewed bank before the UI publishes one): the one
+    /// resolution every "in this bank" edit shares (rig spec §4, §6).
+    pub fn resolve_bank_range(
+        &self,
+        bank: Option<SceneBankId>,
+    ) -> Result<(SceneBankId, std::ops::Range<usize>), String> {
+        let bank = match bank {
+            Some(bank) => bank,
+            None => self
+                .scene_bank_containing(self.current_scene)
+                .ok_or_else(|| "The playing scene belongs to no scene bank".to_string())?,
+        };
+        let range = self
+            .scene_bank_range(bank)
+            .ok_or_else(|| format!("Scene bank {} does not exist", bank.0))?;
+        Ok((bank, range))
+    }
+
+    pub fn scene_bank_containing(&self, scene: usize) -> Option<SceneBankId> {
+        self.scene_bank_ranges()
+            .find(|(_, range)| range.contains(&scene))
+            .map(|(id, _)| id)
+    }
+
     pub fn scene_bank_insert_position(&self, id: SceneBankId) -> Option<usize> {
-        let mut offset = 0;
-        for bank in &self.banks {
-            offset += bank.len;
-            if bank.id == id {
-                return Some(offset);
-            }
-        }
-        None
+        self.scene_bank_range(id).map(|range| range.end)
     }
 
     pub fn scene_bank_for_insert_position(
@@ -1311,6 +1376,18 @@ impl ProjectScenes {
         true
     }
 
+    /// Pin `track`'s session override to `playing` (the pattern the lane
+    /// sounds before a cell edit) unless an override is already set. A
+    /// quantized clip launch or stop edits the current scene's cell now but
+    /// changes what sounds only at the boundary; until then an unpinned
+    /// lane would let any masked save-back file the outgoing pattern's live
+    /// content under the edited cell.
+    pub fn pin_override_if_unset(&mut self, track: usize, playing: Option<PatternId>) {
+        if let Some(slot @ None) = self.track_overrides.get_mut(track) {
+            *slot = playing;
+        }
+    }
+
     /// Resolve every selected cell before changing any override. This keeps a
     /// masked scene launch atomic when a scene contains a stale or empty cell.
     pub fn launch_scene_tracks(
@@ -1527,11 +1604,18 @@ impl ProjectScenes {
                 .create_scene_bank()
                 .expect("scene bank identity space exhausted");
         }
-        self.new_scene_in_bank(bank)
+        self.new_scene_in_bank(bank, SceneSwapInheritance::Source(self.current_scene))
             .expect("the legacy append path always targets a valid non-full bank")
     }
 
-    pub fn new_scene_in_bank(&mut self, bank_id: SceneBankId) -> Result<usize, String> {
+    /// A new scene at the end of `bank_id`, cloned from the current scene;
+    /// its swap state (slot enables, rig spec §3.3) is taken as
+    /// `inheritance` says.
+    pub fn new_scene_in_bank(
+        &mut self,
+        bank_id: SceneBankId,
+        inheritance: SceneSwapInheritance,
+    ) -> Result<usize, String> {
         let bank_index = self
             .banks
             .iter()
@@ -1548,6 +1632,7 @@ impl ProjectScenes {
             .map(|bank| bank.len)
             .sum::<usize>();
         let source_scene = self.scenes.get(self.current_scene).cloned();
+        let swap_state = self.inherited_scene_swap_state(inheritance, scene_idx);
         let mut cells = vec![None; self.track_pools.len()];
         let mut cell_sounds = Vec::with_capacity(self.track_pools.len());
         for track in 0..self.track_pools.len() {
@@ -1613,7 +1698,7 @@ impl ProjectScenes {
             .checked_add(1)
             .expect("scene identity space exhausted");
         let default_name = format!("Scene {}", self.scenes.len() + 1);
-        self.scenes.insert(scene_idx, Scene {
+        let mut scene = Scene {
             id: SceneId(next_id),
             name: default_name,
             cells,
@@ -1623,9 +1708,14 @@ impl ProjectScenes {
             neural_networks,
             graph_overrides,
             rack_clips,
+            slot_enable: Default::default(),
+            parked_kits: Default::default(),
+            parked_instances: Default::default(),
             scene_slots,
             project_process_chain,
-        });
+        };
+        swap_state.apply_to(&mut scene);
+        self.scenes.insert(scene_idx, scene);
         // A clip-bearing rack gets its own new clip the way each plain track
         // got a forked pattern above: the current scene's clip is forked (one
         // fresh pattern, Patch and Mix per member) and the new scene points at
@@ -1675,6 +1765,7 @@ impl ProjectScenes {
         if track < self.track_sounds.len() {
             self.track_sounds.remove(track);
         }
+        self.remove_track_slot_enable(track);
         true
     }
 

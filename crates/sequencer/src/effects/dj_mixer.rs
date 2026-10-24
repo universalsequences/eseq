@@ -44,6 +44,10 @@ const STATE_MOD_SPEED_DEPTH: usize = 28; // 4 slots
 const STATE_MOD_LENGTH_DEPTH: usize = 32; // 4 slots
 const STATE_MOD_LOOP_DEPTH: usize = 36; // 4 slots
 const STATE_MOD_WARP_DEPTH: usize = 40; // 4 slots
+/// Frames the input has been silent, recorded, and the wet read below
+/// -120 dB (`effects::tail_sleep`). Runtime only, never a param.
+const STATE_QUIET_FRAMES: usize = 44;
+const _: () = assert!(STATE_QUIET_FRAMES < HEADER_SLOTS);
 const STATE_BUF_L: usize = HEADER_SLOTS;
 const STATE_BUF_R: usize = STATE_BUF_L + MAX_BUFFER_SAMPLES;
 const STATE_END: usize = STATE_BUF_R + MAX_BUFFER_SAMPLES;
@@ -369,6 +373,58 @@ unsafe extern "C" fn dj_mixer_process(
         *s.add(STATE_CLEAR_FLAG) = 0.0;
     }
 
+    // A settled bypass (nothing can enable it, wet gate fully closed)
+    // outputs the dry input exactly: keep recording so a re-enable plays
+    // current history, park the read head at the window start, skip the rest.
+    let bypass_settled = enabled_base <= 0.5
+        && enabled_depths.iter().all(|d| *d == 0.0)
+        && length_depths.iter().all(|d| *d == 0.0)
+        && wet_gate == 0.0;
+    if bypass_settled && !crate::effects::tail_sleep::force_awake(crate::effects::tail_sleep::FORCE_NO_BYPASS_SKIP) {
+        // Record in at most two contiguous runs (the ring wraps once at most:
+        // a block is far shorter than the buffer), before the in-place copy.
+        let start = write_pos as usize;
+        let first = nf.min(MAX_BUFFER_SAMPLES - start);
+        for (buf, input) in [(buf_l, in0), (buf_r, in1)] {
+            std::ptr::copy_nonoverlapping(input as *const f32, buf.add(start), first);
+            std::ptr::copy_nonoverlapping(input.add(first) as *const f32, buf, nf - first);
+        }
+        write_pos = ((start + nf) % MAX_BUFFER_SAMPLES) as f32;
+        crate::effects::silence::passthrough(inp, out, 2, nframes);
+        // Keep the (unmodulated) length glide moving, closed form, so a
+        // re-enable sizes its window like a never-skipping mixer.
+        let target = base_target.clamp(2.0, (MAX_BUFFER_SAMPLES - 2) as f32);
+        loop_samples = target + (loop_samples - target) * (1.0 - length_k).powi(nf as i32);
+        loop_start = wrap_pos(write_pos - loop_samples);
+        *s.add(STATE_WRITE_POS) = write_pos;
+        *s.add(STATE_READ_POS) = loop_start;
+        *s.add(STATE_LOOP_START) = loop_start;
+        *s.add(STATE_LOOP_END) = write_pos;
+        *s.add(STATE_PREV_LOOP) = 0.0;
+        *s.add(STATE_XFADE_REMAINING) = 0.0;
+        *s.add(STATE_XFADE_TOTAL) = 0.0;
+        *s.add(STATE_LOOP_SAMPLES_SMOOTH) = loop_samples;
+        *s.add(STATE_QUIET_FRAMES) = 0.0;
+        // The transport moves on while bypassed: forget the last sync cycle
+        // so a re-enable does not see a boundary mid-cycle.
+        *s.add(STATE_PREV_SYNC_CYCLE) = -1.0;
+        return;
+    }
+
+    // Tail sleep: silent input recorded over the whole buffer and a quiet
+    // wet read means every sample the heads can reach is decayed residue.
+    // Only a recording (not looping) block counts toward it.
+    let Some(counts_quiet) = crate::effects::tail_sleep::sleep_or_count(
+        s.add(STATE_QUIET_FRAMES), inp, 2, out, 2, nframes, MAX_BUFFER_SAMPLES as f32, true,
+    ) else {
+        // The transport moves on while asleep: forget the last sync cycle so
+        // the wake does not see a boundary mid-cycle and relocate the loop.
+        *s.add(STATE_PREV_SYNC_CYCLE) = -1.0;
+        return;
+    };
+    let mut internal_peak = 0.0f32;
+    let mut looped = false;
+
     for i in 0..nf {
         let input_l = *in0.add(i);
         let input_r = *in1.add(i);
@@ -435,6 +491,7 @@ unsafe extern "C" fn dj_mixer_process(
             xfade_old_read_pos = read_pos;
         }
         prev_loop = loop_active;
+        looped |= loop_active;
 
         if sync && sync_boundary_crossed {
             let (locked_start, locked_end, phase_samples) = sync_window_at_transport_phase(
@@ -464,6 +521,7 @@ unsafe extern "C" fn dj_mixer_process(
 
         let mut wet_l = read_interpolated(buf_l as *const f32, read_pos);
         let mut wet_r = read_interpolated(buf_r as *const f32, read_pos);
+        internal_peak = internal_peak.max(wet_l.abs()).max(wet_r.abs());
         if xfade_remaining > 0.0 && xfade_total > 0.0 {
             let old_l = read_interpolated(buf_l as *const f32, xfade_old_read_pos);
             let old_r = read_interpolated(buf_r as *const f32, xfade_old_read_pos);
@@ -478,6 +536,13 @@ unsafe extern "C" fn dj_mixer_process(
         // Declicked bypass: smoothed equal-gain crossfade between dry and wet.
         let gate_target = if eff_enabled { 1.0 } else { 0.0 };
         wet_gate += gate_k * (gate_target - wet_gate);
+        if gate_target == 0.0 && wet_gate < f32::MIN_POSITIVE && !crate::effects::tail_sleep::force_awake(crate::effects::tail_sleep::FORCE_NO_BYPASS_SKIP) {
+            // Settle the close exactly once it is subnormal (AArch64 keeps
+            // subnormals, so the one-pole would stall near 1e-43 and bypass
+            // never skip). A subnormal gate already leaves the mix equal to
+            // the dry input for any audible input.
+            wet_gate = 0.0;
+        }
         *out0.add(i) = input_l * (1.0 - wet_gate) + wet_l * wet_gate;
         *out1.add(i) = input_r * (1.0 - wet_gate) + wet_r * wet_gate;
 
@@ -565,6 +630,14 @@ unsafe extern "C" fn dj_mixer_process(
     *s.add(STATE_WET_GATE) = wet_gate;
     *s.add(STATE_TRANSPORT_BEAT_PHASE) = transport_beat_phase;
     *s.add(STATE_PREV_SYNC_CYCLE) = prev_sync_cycle;
+    // A looping block holds old history rather than overwriting it, so it
+    // never counts as quiet.
+    crate::effects::tail_sleep::note_block(
+        s.add(STATE_QUIET_FRAMES),
+        counts_quiet && !looped,
+        internal_peak,
+        nf,
+    );
 }
 
 pub fn dj_mixer_vtable() -> NodeVTable {
@@ -831,5 +904,109 @@ mod tests {
             .skip(4096)
             .any(|(a, b)| (*a - *b).abs() > 0.01);
         assert!(differs, "warp should detune output away from input");
+    }
+
+    #[test]
+    fn tail_sleep_waits_for_the_whole_buffer_then_skips_and_wakes() {
+        use crate::effects::tail_sleep::test_support::{burst, sleep_and_wake, Instance};
+        let mut a = init_state(48_000);
+        let mut b = init_state(48_000);
+        let hold = MAX_BUFFER_SAMPLES as f32;
+        let block = 4096;
+        let silent_blocks = MAX_BUFFER_SAMPLES.div_ceil(block) + 12;
+        let sleeper = Instance { state: a.as_mut_ptr().cast(), quiet: &mut a[STATE_QUIET_FRAMES] };
+        let reference = Instance { state: b.as_mut_ptr().cast(), quiet: &mut b[STATE_QUIET_FRAMES] };
+        let report = unsafe {
+            sleep_and_wake(dj_mixer_process, &sleeper, &reference, 6, &burst(9600, 0.5, 11), block,
+                silent_blocks, hold, &burst(4 * block, 0.5, 13))
+        };
+        assert!(report.slept_blocks >= 8 && report.slept_blocks <= 12, "{report:?}");
+        assert!(report.slept_output_exact_zero, "{report:?}");
+        assert!(report.reference_peak_while_asleep <= 1e-6, "{report:?}");
+        // Read and write heads freeze together, so the wake (longer than the
+        // loop lag) reads the fresh input like a never-sleeping mixer.
+        assert!(report.wake_reference_peak > 0.1, "{report:?}");
+        assert!(report.wake_max_diff <= 1e-5, "{report:?}");
+        assert_eq!(report.quiet_after_wake, 0.0);
+    }
+
+    #[test]
+    fn a_held_loop_never_counts_toward_sleep() {
+        let mut state = init_state(48_000);
+        state[STATE_LENGTH_SEC] = MIN_LENGTH_SEC;
+        let input: Vec<f32> = (0..4096).map(|i| (i as f32 * 0.05).sin()).collect();
+        process_block(&mut state, &input, &input);
+        state[STATE_LOOP] = 1.0;
+        let silence = vec![0.0; 4096];
+        for _ in 0..(MAX_BUFFER_SAMPLES / 4096 + 4) {
+            let (out_l, _) = process_block(&mut state, &silence, &silence);
+            assert!(out_l.iter().any(|v| v.abs() > 1e-3), "the held loop must keep playing");
+        }
+        assert_eq!(state[STATE_QUIET_FRAMES], 0.0);
+    }
+
+    #[test]
+    fn settled_bypass_passes_through_exactly_and_skips_the_dsp() {
+        let mut state = init_state(48_000);
+        let input: Vec<f32> = (0..4096).map(|i| (i as f32 * 0.05).sin()).collect();
+        process_block(&mut state, &input, &input);
+        state[STATE_ENABLED] = 0.0;
+        for _ in 0..12 {
+            process_block(&mut state, &input, &input);
+        }
+        assert_eq!(state[STATE_WET_GATE], 0.0, "the closed gate settles exactly");
+        let warp_phase = state[STATE_WARP_PHASE];
+        state[STATE_WARP] = 1.0;
+        let (out_l, out_r) = process_block(&mut state, &input, &input);
+        assert_eq!(out_l, input);
+        assert_eq!(out_r, input);
+        assert_eq!(state[STATE_WARP_PHASE], warp_phase, "bypass ran the DSP");
+    }
+
+    #[test]
+    fn bypass_and_sleep_forget_the_sync_cycle_so_a_wake_does_not_relocate() {
+        let sample_rate = 8_000;
+        let block = 512;
+        let tone: Vec<f32> = (0..block).map(|i| (i as f32 * 0.05).sin()).collect();
+        let silence = vec![0.0f32; block];
+        let fresh = || {
+            let mut state = init_state(sample_rate);
+            state[STATE_SYNC] = 1.0;
+            state[STATE_DIV] = 2.0; // one beat per cycle
+            state[STATE_BPM] = 120.0;
+            state[STATE_TRANSPORT_BEAT_PHASE] = 0.1; // cycle 0
+            process_block(&mut state, &tone, &tone);
+            assert_eq!(state[STATE_PREV_SYNC_CYCLE], 0.0);
+            state
+        };
+        // Wake mid-cycle 2 (well inside it): a remembered cycle 0 would read
+        // as a boundary and crossfade the read head to a new window.
+        let wake = |state: &mut Vec<f32>, input: &[f32]| {
+            state[STATE_TRANSPORT_BEAT_PHASE] = 2.4;
+            process_block(state, input, input);
+            assert_eq!(state[STATE_XFADE_REMAINING], 0.0, "a wake must not relocate the loop mid-cycle");
+            assert_eq!(state[STATE_PREV_SYNC_CYCLE], 2.0);
+        };
+
+        // Settled bypass, then re-enable.
+        let mut state = fresh();
+        state[STATE_ENABLED] = 0.0;
+        for _ in 0..40 {
+            process_block(&mut state, &tone, &tone);
+        }
+        assert_eq!(state[STATE_WET_GATE], 0.0);
+        assert_eq!(state[STATE_PREV_SYNC_CYCLE], -1.0);
+        state[STATE_ENABLED] = 1.0;
+        wake(&mut state, &tone);
+
+        // Tail sleep, then input.
+        let mut state = fresh();
+        let mut slept = false;
+        for _ in 0..(MAX_BUFFER_SAMPLES / block + 40) {
+            process_block(&mut state, &silence, &silence);
+            slept |= state[STATE_PREV_SYNC_CYCLE] == -1.0;
+        }
+        assert!(slept && state[STATE_PREV_SYNC_CYCLE] == -1.0, "never slept");
+        wake(&mut state, &tone);
     }
 }

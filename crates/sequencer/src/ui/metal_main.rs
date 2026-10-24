@@ -22,6 +22,7 @@ mod piano_roll;
 mod presented;
 mod patch_learn;
 mod profile;
+mod project_import_ui;
 mod ui_benchmark;
 mod frame_pacer;
 mod roll_record;

@@ -6,8 +6,10 @@
 ;; (import eseq.effects.buffers) from library code.
 (module eseq.effects.buffers)
 
-(import eseq.kinds :refer (tracks buses engine selection editor))
+(import eseq.kinds :refer (tracks buses engine selection editor project))
 (import eseq.drum-rack-v2)
+(import eseq.bank-power)
+(import eseq.glance)
 (import eseq.effects.devices :as dv)
 (import eseq.effects.drag-drop :as dd)
 (import eseq.effects.effect-panels :as ep)
@@ -142,7 +144,65 @@
 ;; is a pure lookups module over the group kinds — no view, no top-level
 ;; registrations — that answers nil when no rack is selected.
 
+;; The kit's power toggle (docs/rig-spec.md §6): eseq.bank-power's
+;; bank-scoped toggle for the viewed bank. A mixed bank (some scenes off)
+;; shows on with a small dot beside it; clicking turns the whole bank off.
+;; The hint after the name stands in for a tooltip ("Kit on in bank C").
+(def rack-kit-power-toggle (g kit-state)
+  (eseq.bank-power/bank-power-toggle (str "rack-kit-power-" g.gid) kit-state
+    (lambda () (eseq.drum-rack-v2/toggle-kit-in-viewed-bank! g))))
+
+;; The kit's sequencers (docs/rig-spec.md §7): a compact panel beside the
+;; pads with each rack-owned instance's glance (eseq.glance), an empty box
+;; while the kit owns none (a nil subtree body never re-renders). The subtree is the only reader of project.instances,
+;; so an instance added, moved or renamed re-renders this panel alone.
+(def rack-sequencer-ids (g)
+  (map (lambda (r) (get r :id))
+       (filter (lambda (r) (= (get r :owner-rack) g.gid)) project.instances)))
+
+;; The panel body's rows below its header, and one card's caption (its
+;; row plus the card's gap).
+(def rack-sequencers-body-height (- st/fx-fixed-panel-height 2.0))
+(def rack-sequencer-caption-height 1.1)
+(def rack-sequencer-card-gap 0.5)
+
+;; Each glance's height with `n` cards: the body shared evenly, at most 6.5
+;; and at least 2; past three cards the list scrolls.
+(def rack-sequencer-glance-height (n)
+  (let ((share (/ (- rack-sequencers-body-height (* rack-sequencer-card-gap (- n 1))) (max 1 n))))
+    (min 6.5 (max 2 (- share rack-sequencer-caption-height)))))
+
+(def rack-sequencers-panel (g)
+  (subtree :key (str "rack-fx-sequencers-" g.gid)
+    (let ((ids (rack-sequencer-ids g)))
+      (if (empty? ids)
+        (box :width 0 :height 0)
+        (box :debug-name "rack-fx-sequencers-panel"
+          :key (str "rack-fx-sequencers-panel-" g.gid)
+          :background (pf/panel-surface)
+          :color :instrument-panel-bg
+          :header :fx-panel-header-bg
+          :selected-header :fx-panel-header-bg
+          :width 15 :height st/fx-fixed-panel-height
+          :padding 0 :v-align :start :h-align :start
+          (v-stack :gap 0 :height :fill :width :fill
+            (box :width :fill :height 1 :padding 0 :v-align :center :h-align :start
+              (h-stack :gap 0.6 :align :center
+                (pf/fx-panel-header-leading-spacer)
+                (label "Sequencers" :v-align :center
+                  :font-size 11 :color :white :bg :transparent)))
+            (scroll :key (str "rack-fx-sequencers-scroll-" g.gid)
+              :debug-name "rack-fx-sequencers-scroll"
+              :width :fill :height (- st/fx-fixed-panel-height 1)
+              (box :width :fill :padding 0.4 :v-align :start
+                (v-stack :gap rack-sequencer-card-gap :width :fill
+                  (each ids |id|
+                    (eseq.glance/glance-card id
+                      (dict :height (rack-sequencer-glance-height (len ids)) :color g.color
+                            :key (str "rack-fx-glance-" g.gid)))))))))))))
+
 (def rack-selection-panel (g)
+  (let ((kit (eseq.drum-rack-v2/kit-viewed-header g)))
   (v-stack :padding 0.05 :gap 1
     (h-stack :gap 1 :align :start
       (box :debug-name "rack-fx-pads-panel"
@@ -159,9 +219,14 @@
             :width :fill :height 1 :padding 0 :v-align :center :h-align :start
             (h-stack :debug-name "rack-fx-header-row" :gap 0.6 :align :center :width :fill
               (pf/fx-panel-header-leading-spacer)
+              (rack-kit-power-toggle g (get kit :state))
               (label (substring g.name 0 12)
                 :v-align :center
                 :font-size 11 :color :white :bg :transparent)
+              (label (get kit :hint)
+                :debug-name "rack-kit-power-hint"
+                :v-align :center
+                :font-size 9 :color :dim :bg :transparent)
               (box :flex 1 :height 0.15)
               (box :debug-name "rack-kit-save-button" :padding 0 :width 2 :align :center
                 (v-stack
@@ -179,13 +244,14 @@
               (eseq.sequencer/pad-map g)
               (eseq.sequencer/pad-grid g)
               ))))
+      (rack-sequencers-panel g)
       ;; The pad grid's right-click menu (Role ▸ …), overlaying the grid.
       (eseq.sequencer/rack-pad-context-menu)
       ;; Rack-level fx still matter: the bus chain stays right here, edited the
       ;; same way an ordinary bus selection edits it.
       (each (selected-bus-effects) |d slot-idx|
         (bus-effect-panel d))
-      (drop-placeholder-panel))))
+      (drop-placeholder-panel)))))
 
 (def bus-selection-panel ()
   (v-stack :padding 0.05 :gap 1

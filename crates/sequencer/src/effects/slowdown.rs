@@ -165,6 +165,9 @@ struct State {
     tone: f64,
     lowpass: [f32; 2],
     table: [[f32; TAPS]; PHASES + 1],
+    /// Frames the input has been silent and the wet path below -120 dB
+    /// (`effects::tail_sleep`). Runtime only, never a param.
+    quiet: f32,
 }
 
 fn capacity(sample_rate: f32) -> usize {
@@ -466,6 +469,19 @@ impl State {
         self.local_phase = 0.0;
         self.latch_cycle(&self.effective_params([0.0; MOD_SLOTS]));
         self.fade_age = self.fade_length;
+        self.quiet = 0.0;
+    }
+
+    /// Record a block of input into the history without running the heads:
+    /// a settled bypass keeps the history current for a later re-enable.
+    unsafe fn record(&mut self, ring: *mut f32, inputs: [*mut f32; 2], nf: usize) {
+        for i in 0..nf {
+            for ch in 0..2 {
+                let x = *inputs[ch].add(i);
+                *ring.add(ch * self.capacity + self.write) = if x.is_finite() { x } else { 0.0 };
+            }
+            self.write = (self.write + 1) & (self.capacity - 1);
+        }
     }
 
     fn restart(&mut self, params: &[f32; PARAM_COUNT]) {
@@ -547,6 +563,7 @@ unsafe extern "C" fn init(state: *mut c_void, sample_rate: c_int, _: c_int, _: *
             tone: 20000.0,
             lowpass: [0.0; 2],
             table,
+            quiet: 0.0,
         },
     );
     reset(state);
@@ -607,7 +624,24 @@ unsafe extern "C" fn process(
         s.transport_driven = false;
         s.transport_cycle = -1;
     }
-    for i in 0..nframes as usize {
+    let nf = nframes as usize;
+    // A settled bypass (wet faded to exactly 0) outputs the dry input
+    // untouched: record the history and skip the heads.
+    if finite(s.params[ENABLED], 0.0, 1.0, 1.0) < 0.5 && s.wet == 0.0 && !super::tail_sleep::force_awake(super::tail_sleep::FORCE_NO_BYPASS_SKIP) {
+        s.record(buffer, inputs, nf);
+        super::silence::passthrough(inp, out, 2, nframes);
+        s.quiet = 0.0;
+        return;
+    }
+    // Tail sleep: silent input recorded over the whole history ring and a
+    // wet path below -120 dB means every read is decayed residue.
+    let Some(counts_quiet) =
+        super::tail_sleep::sleep_or_count(&s.quiet, inp, 2, out, 2, nframes, s.capacity as f32, true)
+    else {
+        return;
+    };
+    let mut internal_peak = 0.0f32;
+    for i in 0..nf {
         let dry = [*inputs[0].add(i), *inputs[1].add(i)];
         for ch in 0..2 {
             // Do not let a nonfinite upstream sample poison the history forever.
@@ -668,6 +702,7 @@ unsafe extern "C" fn process(
             if s.lowpass[ch].abs() < 1e-20 {
                 s.lowpass[ch] = 0.0;
             }
+            internal_peak = internal_peak.max(s.lowpass[ch].abs()).max(sample[ch].abs());
             *outputs[ch].add(i) = if s.wet == 0.0 {
                 dry[ch]
             } else {
@@ -680,6 +715,7 @@ unsafe extern "C" fn process(
         s.age += 1;
         s.write = (s.write + 1) & (s.capacity - 1);
     }
+    super::tail_sleep::note_block(&mut s.quiet, counts_quiet, internal_peak, nf);
 }
 
 #[cfg(test)]

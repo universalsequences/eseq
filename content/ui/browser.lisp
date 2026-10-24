@@ -19,7 +19,13 @@
 (import eseq.drum-rack-v2)
 (import eseq.view-kit :refer (open-menu! menu-of listed? find))
 (import eseq.preview-strip :refer (sync-preview! toggle-preview! preview-strip))
-(import eseq.kinds :refer (track tracks scenes groups project selection browser))
+(import eseq.kinds :refer (track tracks scenes groups project selection browser banks
+                           instance-row activate-instance-like-bank! purge-unused-instances!))
+(import eseq.bank-power :refer (instance-bank-state bank-power-hint))
+(import eseq.instance-frame :refer (instance-viewed-state instance-power-menu-label
+                                    toggle-instance-in-viewed-bank!))
+(import eseq.scene-banks :refer (scene-viewed-bank scene-viewed-bank-id))
+(import eseq.project-browser :refer (peek-mode? peek-project! peek-open? peek-mode-button peek-panel))
 
 (export browser-view
         sample-pick
@@ -318,7 +324,9 @@
   (eseq.seq-panels/seq-show-fx-lower-panel)
   (status (if (= preset "") (str "Loading instrument: " name) (str "Loading preset: " preset))))
 
-;; i: the track's position (a drop target's address).
+;; i: the track's position (a drop target's address). The swap applies to
+;; the viewed bank only (:bank-id): when another bank plays the track, the
+;; host keeps that bank's device (docs/rig-spec.md §4).
 (def swap-track-instrument (i name preserve-track-selection)
   (if (or (= name nil) (= name ""))
     (status "Drop an instrument, not a folder")
@@ -327,7 +335,8 @@
         (show-loading! name)
         (host-command "swap-track-instrument"
           (dict :track i :name name
-            :preserve-track-selection preserve-track-selection))
+            :preserve-track-selection preserve-track-selection
+            :bank-id (eseq.scene-banks/scene-viewed-bank-id)))
         (eseq.seq-panels/seq-show-fx-lower-panel)
         (status (str "Loading instrument swap: " name)))
       (status "This track cannot load an instrument"))))
@@ -342,7 +351,8 @@
     (do
       (host-command "swap-track-builtin-instrument"
         (dict :track i :name name
-          :preserve-track-selection preserve-track-selection))
+          :preserve-track-selection preserve-track-selection
+          :bank-id (eseq.scene-banks/scene-viewed-bank-id)))
       (set! browser-view.tab "samples")
       (eseq.seq-panels/seq-show-fx-lower-panel)
       (status "Loading sampler"))
@@ -384,7 +394,8 @@
         (if (instrument-type? (track-at i) "custom")
           (host-command "convert-track-to-sampler"
             (dict :track i :path path :preserve-browser-context true
-              :preserve-track-selection (get target :from-pad)))
+              :preserve-track-selection (get target :from-pad)
+              :bank-id (eseq.scene-banks/scene-viewed-bank-id)))
           (host-command "load-sample-into-track"
             (dict :track i :path path :preserve-browser-context true
               :preserve-track-selection (get target :from-pad))))
@@ -440,7 +451,8 @@
             (show-loading! instrument)
             (host-command "swap-track-instrument"
               (dict :track i :name instrument :preset (get payload :preset)
-                :preserve-track-selection (get target :from-pad)))
+                :preserve-track-selection (get target :from-pad)
+                :bank-id (eseq.scene-banks/scene-viewed-bank-id)))
             (eseq.seq-panels/seq-show-fx-lower-panel)
             (status (str "Loading preset: " (get payload :preset))))
           (status "This track cannot load an instrument"))
@@ -1741,10 +1753,14 @@ Previews each preset as you move through the list; Esc puts the loaded one back.
 
 ;; `kind` is one of the row's :kinds. One read off an unattached module's
 ;; source has no :id yet; the host resolves it by :kind-name after attaching.
+;; A project-owned instance plays only in the viewed bank (docs/rig-spec.md
+;; §10), so every create names it (:bank-id).
 (def new-instance-of (item kind group-id)
   (let ((fields (if (= (get kind :id) nil)
-                  (dict :module (get item :module) :kind-name (get kind :name))
-                  (dict :module (get item :module) :kind (get kind :id)))))
+                  (dict :module (get item :module) :kind-name (get kind :name)
+                        :bank-id (scene-viewed-bank-id))
+                  (dict :module (get item :module) :kind (get kind :id)
+                        :bank-id (scene-viewed-bank-id)))))
     (host-command "packages-new-instance"
       (if (< group-id 0) fields (merge fields :group-id group-id)))))
 
@@ -1770,7 +1786,8 @@ then creates the instance and opens its tab."
   ;; A kind read off an unloaded module's source has no :kind id yet; the
   ;; host resolves it by :kind-name once the attach has loaded it.
   (host-command "packages-new-instance"
-    (dict :module (get choice :module) :kind (get choice :kind) :kind-name (get choice :name))))
+    (dict :module (get choice :module) :kind (get choice :kind) :kind-name (get choice :name)
+          :bank-id (scene-viewed-bank-id))))
 
 ;; Enter or double-click (instance-kinds spec §8.3). An instance row opens
 ;; its tab (a placeholder row only says why it cannot). A module row: no kinds -> attach it (the host loads the module
@@ -1819,9 +1836,59 @@ then creates the instance and opens its tab."
 (def rack-groups ()
   (filter |g| g.rack (groups)))
 
+;; A project-owned instance row's bank entries (docs/rig-spec.md §10):
+;; "Turn off in bank C" / "Turn on in bank C"; while it is not on in the
+;; viewed bank, "Turn on in bank C like bank A" per bank it plays in (its
+;; settings from the first scene there that plays it); "Purge unused
+;; sequencers…" on a row every scene switches off.
+(def instance-bank-actions (item)
+  (let ((id (get item :instance-id))
+        (viewed (scene-viewed-bank))
+        (row (instance-row id)))
+    (if (or (= row nil) (not (= (get item :owner-rack) nil)))
+      (list)
+      (append
+        (append
+          (list (dict :id :instance-power :key "power"
+                      :label (instance-power-menu-label id) :icon :dial :group :bank))
+          (if (= (instance-viewed-state id) :on)
+            (list)
+            (map (lambda (b)
+                   (dict :id :instance-recall
+                         :key (str "recall-" b.bid)
+                         :bank b
+                         :label (str "Turn on in bank " (if viewed viewed.label "") " like bank " b.label)
+                         :icon nil
+                         :group :bank))
+              (filter (lambda (b)
+                        (and (not (= b viewed))
+                             (not (= (instance-bank-state id b) :off))))
+                (banks)))))
+        (if (get row :unused)
+          (list (package-action :purge-unused "purge-unused" "Purge unused sequencers..." nil :delete))
+          (list))))))
+
+;; An instance row's detail with its state in the viewed bank when it is not
+;; plainly on there ("project · Off in bank C"), so a switched-off sequencer
+;; reads as one in the list. Nested rows are annotated too.
+(def bank-annotated-items (items)
+  (map (lambda (item)
+         (let ((children (get item :children))
+               (nested (if children (merge item :children (bank-annotated-items children)) item)))
+           (if (and (instance-item? nested) (= (get nested :owner-rack) nil))
+             (let ((b (scene-viewed-bank))
+                   (bank-state (instance-bank-state (get nested :instance-id) b)))
+               (if (= bank-state :on)
+                 nested
+                 (merge nested :detail
+                   (str (get nested :detail) " · " (bank-power-hint nil bank-state (if b b.label ""))))))
+             nested)))
+    items))
+
 ;; Instance row: Open, Rename, Duplicate, Move to <rack> per other rack /
-;; Give back to project, Delete. A placeholder (kind not loaded) has no view
-;; to open and cannot be duplicated until its package comes back.
+;; Give back to project, the bank entries, Delete. A placeholder (kind not
+;; loaded) has no view to open and cannot be duplicated until its package
+;; comes back.
 (def instance-menu-actions (item)
   (let ((owner-rack (get item :owner-rack))
         (live (get item :registered?)))
@@ -1844,7 +1911,9 @@ then creates the instance and opens its tab."
           (if (= owner-rack nil)
             (list)
             (list (package-action :give-back "give-back" "Give back to project" nil :move)))))
-      (list (package-action :delete-instance "delete" "Delete" nil :delete)))))
+      (append
+        (instance-bank-actions item)
+        (list (package-action :delete-instance "delete" "Delete" nil :delete))))))
 
 ;; Module row: `New <kind>` per kind first (attaching first if needed) --
 ;; the reason a kind module is in the tree -- then Attach/Remove + Always
@@ -1946,10 +2015,16 @@ then creates the instance and opens its tab."
           (if (= id :move-to-rack)
             (host-command "instance-move" (dict :id instance :group-id (get action :group-id)))
             (if (= id :give-back)
-              (host-command "instance-move" (dict :id instance))
+              (host-command "instance-move" (dict :id instance :bank-id (scene-viewed-bank-id)))
               (if (= id :delete-instance)
                 (host-command "instance-delete" (dict :id instance))
-                nil))))))))
+                (if (= id :instance-power)
+                  (toggle-instance-in-viewed-bank! instance)
+                  (if (= id :instance-recall)
+                    (activate-instance-like-bank! instance (scene-viewed-bank) (get action :bank))
+                    (if (= id :purge-unused)
+                      (purge-unused-instances!)
+                      nil)))))))))))
 
 (def select-module-menu-action (item action)
   (let ((id (get action :id)))
@@ -2051,7 +2126,7 @@ then creates the instance and opens its tab."
 ;; check / bookmark glyphs read those files back. The C-x p text view
 ;; drives the same host commands.
 (def packages-tab-panel ()
-  (let ((items (seq-package-tree browser-view.search project.instances)))
+  (let ((items (bank-annotated-items (seq-package-tree browser-view.search project.instances))))
     (v-stack :key "packages-tab-panel" :width :fill :gap 0.5 :flex 1
       (if package-draft.open
         (package-new-panel)
@@ -2079,7 +2154,14 @@ then creates the instance and opens its tab."
               :on-activate (lambda (item) (activate-package-item item))
               :on-right-click (lambda (event) (open-package-menu event)))))))))
 
-(def projects-tab-panel ()
+;; A project row opens the project, or, with Peek on, shows it read-only
+;; for controlled import (docs/rig-spec.md §8, `eseq.project-browser`).
+(def activate-project-row (item)
+  (if (peek-mode?)
+    (peek-project! (get item :label))
+    (load-project (get item :label))))
+
+(def projects-list-panel ()
   (let ((items (seq-project-tree browser-view.search)))
     (v-stack :key "projects-tab-panel" :width :fill :gap 0.5 :flex 1
       (box :width :fill :padding 0.25
@@ -2091,7 +2173,8 @@ then creates the instance and opens its tab."
             :height 1.3
             :font-size 10.5
             :on-click |x y r| (new-project)
-            :color :white)))
+            :color :white)
+          (peek-mode-button)))
       (box :width :fill :padding 0.25
         (label "Projects"
           :font-size 10
@@ -2110,8 +2193,13 @@ then creates the instance and opens its tab."
               :selected-label project.name
               :expand-all false
               :focusable true
-              :on-select (lambda (item) (load-project (get item :label)))
-              :on-activate (lambda (item) (load-project (get item :label))))))))))
+              :on-select (lambda (item) (activate-project-row item))
+              :on-activate (lambda (item) (activate-project-row item)))))))))
+
+(def projects-tab-panel ()
+  (if (peek-open?)
+    (peek-panel)
+    (projects-list-panel)))
 
 (def active-tab-panel ()
   (if (= browser-view.tab "samples") (samples-panel)

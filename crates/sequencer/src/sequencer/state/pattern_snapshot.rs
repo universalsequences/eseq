@@ -253,6 +253,11 @@ impl RackMacroRuntimeValues {
 
 #[derive(Clone, Debug)]
 pub struct RackSlotSnapshot {
+    /// Stable slot identity (docs/rig-spec.md §3.2), unique within the
+    /// track: a slot keeps its id in every pattern of the track, and scene
+    /// state (`Scene::slot_enable`) names slots by it. `0` means "not yet
+    /// assigned"; `ProjectScenes::normalize_rack_slot_ids` assigns one.
+    pub id: u64,
     pub instrument_type: InstrumentType,
     pub instrument_run_mode: CustomInstrumentRunMode,
     pub instrument_base_note_offset: f32,
@@ -264,7 +269,10 @@ pub struct RackSlotSnapshot {
     /// Live-set gate (eseq-bw9v): a disabled slot receives no triggers, its
     /// FX chain is bypassed and it never holds an idle engine voice, so it
     /// costs nothing while another slot carries the part. Unlike mute this
-    /// is not a p-lockable param; it is per pattern like the rest of the slot.
+    /// is not a p-lockable param. This is the pattern's STORED flag: a scene
+    /// with a `slot_enable` entry for the track overrides it (rig spec §3.2),
+    /// so readers that need what plays resolve it through the scene
+    /// (`ProjectScenes::resolve_rack_slot_enable`).
     pub enabled: bool,
     pub max_polyphony: usize,
     pub param_plocks: RackSlotParamPlocks,
@@ -674,8 +682,10 @@ pub(super) fn replace_rack_slot_source_preserving_controls(
     let effect_slots = slot.effect_slots.clone();
     let effect_descriptors = slot.effect_descriptors.clone();
     let custom_effect_names = slot.custom_effect_names.clone();
+    let id = slot.id;
 
     *slot = replacement.clone();
+    slot.id = id;
     slot.choke_group = choke_group;
     slot.instrument_base_note_offset = instrument_base_note_offset;
     slot.gain = gain;

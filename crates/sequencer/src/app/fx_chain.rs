@@ -456,43 +456,39 @@ impl FxChainLeaseStore {
         }).collect();
     }
 
-    pub fn reindex_rack_slots_after_delete(&mut self, track: usize, deleted_slot: usize) {
+    /// Re-key every row and source by `remap` (a positional edit).
+    fn remap_locators(&mut self, remap: impl Fn(FxChainLocator) -> FxChainLocator) {
         let rows = std::mem::take(&mut self.rows);
-        self.rows = rows
-            .into_iter()
-            .map(|(locator, row)| {
-                let locator = match locator {
-                    FxChainLocator::RackSlot { track: owner, slot }
-                        if owner == track && slot > deleted_slot =>
-                    {
-                        FxChainLocator::RackSlot {
-                            track: owner,
-                            slot: slot - 1,
-                        }
-                    }
-                    other => other,
-                };
-                (locator, row)
-            })
-            .collect();
+        self.rows = rows.into_iter().map(|(locator, row)| (remap(locator), row)).collect();
         let sources = std::mem::take(&mut self.sources);
         self.sources = sources
             .into_iter()
-            .map(|(locator, row)| {
-                let locator = match locator {
-                    FxChainLocator::RackSlot { track: owner, slot }
-                        if owner == track && slot > deleted_slot =>
-                    {
-                        FxChainLocator::RackSlot {
-                            track: owner,
-                            slot: slot - 1,
-                        }
-                    }
-                    other => other,
-                };
-                (locator, row)
-            })
+            .map(|(locator, row)| (remap(locator), row))
             .collect();
+    }
+
+    /// `track`'s rack slot hosts follow a positional slot edit. A deleted
+    /// slot's host is retired before this runs, so it holds nothing to move.
+    fn shift_rack_slot_hosts(&mut self, track: usize, shift: crate::process::RackSlotShift) {
+        self.remap_locators(|locator| match locator {
+            FxChainLocator::RackSlot { track: owner, slot } if owner == track => {
+                FxChainLocator::RackSlot {
+                    track: owner,
+                    slot: shift.apply(slot).unwrap_or(slot),
+                }
+            }
+            other => other,
+        });
+    }
+
+    pub fn reindex_rack_slots_after_delete(&mut self, track: usize, deleted_slot: usize) {
+        self.shift_rack_slot_hosts(track, crate::process::RackSlotShift::Removed(deleted_slot));
+    }
+
+    /// A rack slot was inserted at `inserted_slot` on `track`: hosts at or
+    /// after it move one position down (eseq-ka5t.9).
+    pub fn reindex_rack_slots_after_insert(&mut self, track: usize, inserted_slot: usize) {
+        self.shift_rack_slot_hosts(track, crate::process::RackSlotShift::Inserted(inserted_slot));
     }
 
     pub fn move_rack_slot_host(&mut self, track: usize, source_slot: usize, target_slot: usize) {

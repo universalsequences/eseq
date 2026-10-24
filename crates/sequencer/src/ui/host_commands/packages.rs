@@ -1312,6 +1312,10 @@ fn new_instance_from_package(
             if let Some(group_id) = extract_usize_from_payload(payload, "group-id") {
                 fields.push(("group-id", Value::Number(group_id as f64)));
             }
+            // The bank it is made in (docs/rig-spec.md §10).
+            if let Some(bank) = super::scene_banks::scene_bank_id(payload) {
+                fields.push(("bank-id", Value::Number(bank.0 as f64)));
+            }
             super::instances::handle(
                 "instance-create",
                 crate::values::map_value(fields),

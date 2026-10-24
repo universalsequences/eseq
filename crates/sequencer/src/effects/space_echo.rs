@@ -175,7 +175,10 @@ const STATE_SPRING_TYPE_MIX: usize = STATE_SPRING_B + SPRING_TANK_STATE_LEN;
 const STATE_SPRING_ACTIVE: usize = STATE_SPRING_TYPE_MIX + 1;
 const STATE_GRAMPIAN: usize = STATE_SPRING_ACTIVE + 1;
 const STATE_TAPE_OFFSET: usize = STATE_GRAMPIAN + grampian::STATE_LEN;
-const STATE_END: usize = STATE_TAPE_OFFSET + TAPE_BUF_LEN;
+/// Frames the input has been silent and the tape, heads and springs below
+/// -120 dB (`effects::tail_sleep`). Runtime only, never a param.
+const STATE_QUIET_FRAMES: usize = STATE_TAPE_OFFSET + TAPE_BUF_LEN;
+const STATE_END: usize = STATE_QUIET_FRAMES + 1;
 
 pub const SPACE_ECHO_STATE_SIZE: usize = STATE_END;
 
@@ -461,8 +464,7 @@ unsafe extern "C" fn space_echo_process(
         // Bypass leaves the spring voices dormant; re-enabling must not
         // resurrect whatever tail they were holding.
         *s.add(STATE_SPRING_ACTIVE) = 0.0;
-        std::ptr::copy_nonoverlapping(in0 as *const f32, out0, nf);
-        std::ptr::copy_nonoverlapping(in1 as *const f32, out1, nf);
+        crate::effects::silence::passthrough(inp, out, 2, nframes);
         return;
     }
 
@@ -514,6 +516,17 @@ unsafe extern "C" fn space_echo_process(
         *s.add(STATE_MOD_REVERB_DEPTH_1 + 3),
     ];
     let rate_mod_active = mod_rate_depths.iter().any(|d| d.abs() > 1e-6);
+
+    // Tail sleep: silent input and a tape loop, heads and springs that have
+    // held only decayed residue for a whole tape length. Age > 0 injects hiss
+    // and splice thumps into the loop forever, which is sound, so an aged
+    // machine never sleeps.
+    let Some(counts_quiet) = super::tail_sleep::sleep_or_count(
+        s.add(STATE_QUIET_FRAMES), inp, 2, out, 2, nframes, TAPE_BUF_LEN as f32, age == 0.0,
+    ) else {
+        return;
+    };
+    let mut internal_peak = 0.0f32;
 
     // Per-block coefficients. The loss cutoff tracks tape speed: slower tape
     // loses more highs, so cranking REPEAT RATE down also darkens the repeats.
@@ -955,12 +968,24 @@ unsafe extern "C" fn space_echo_process(
         let echo_out_l = (echo + side) * echo_gain;
         let echo_out_r = (echo - side) * echo_gain;
         let rev_gain = (smooth_reverb + reverb_mod).clamp(0.0, 1.5);
+        internal_peak = internal_peak
+            .max(rec.abs())
+            .max(echo.abs())
+            .max(side.abs())
+            .max(tank_a.abs())
+            .max(tank_b.abs());
         *out0.add(i) = dry_l * smooth_dry + echo_out_l + (0.85 * tank_a + 0.35 * tank_b) * rev_gain;
         *out1.add(i) = dry_r * smooth_dry + echo_out_r + (0.35 * tank_a + 0.85 * tank_b) * rev_gain;
 
         wpos = (wpos + 1) % TAPE_BUF_LEN;
     }
 
+    super::tail_sleep::note_block(
+        s.add(STATE_QUIET_FRAMES),
+        counts_quiet,
+        internal_peak,
+        nf,
+    );
     *s.add(STATE_SMOOTH_SPEED) = smooth_speed;
     *s.add(STATE_SMOOTH_INTENSITY) = smooth_intensity;
     *s.add(STATE_SMOOTH_ECHO) = smooth_echo;
@@ -1396,6 +1421,53 @@ mod tests {
             bright > dark * 1.5,
             "treble knob should shape the reverb-only tail: dark {dark} vs bright {bright}"
         );
+    }
+
+    #[test]
+    fn tail_sleep_needs_a_new_machine_and_wakes_like_a_never_sleeping_one() {
+        use crate::effects::tail_sleep::test_support::{burst, sleep_and_wake, Instance};
+        // Echo only (mode 5), and echo + the Grampian spring (mode 7). The
+        // RE-201 spring fit rings for tens of seconds near its -80 dB gate,
+        // so it is left out to keep the test short; it sleeps the same way.
+        for (mode, spring_type) in [(5.0, 0.0), (7.0, 1.0)] {
+            let mut a = init_state();
+            let mut b = init_state();
+            for state in [&mut a, &mut b] {
+                // Age 0: no hiss or splice thumps, so the loop can fall silent.
+                state[STATE_AGE] = 0.0;
+                state[STATE_WOW_FLUTTER] = 0.0;
+                state[STATE_MODE] = mode;
+                state[STATE_INTENSITY] = 0.2;
+                state[STATE_SPRING_TYPE] = spring_type;
+            }
+            let hold = TAPE_BUF_LEN as f32;
+            let sleeper = Instance { state: a.as_mut_ptr().cast(), quiet: &mut a[STATE_QUIET_FRAMES] };
+            let reference = Instance { state: b.as_mut_ptr().cast(), quiet: &mut b[STATE_QUIET_FRAMES] };
+            let report = unsafe {
+                sleep_and_wake(space_echo_process, &sleeper, &reference, 6, &burst(4800, 0.5, 23), 2048,
+                    300, hold, &burst(2048, 0.5, 29))
+            };
+            assert!(report.slept_blocks > 20, "mode {mode}: {report:?}");
+            assert!(report.slept_output_exact_zero, "mode {mode}: {report:?}");
+            assert!(report.reference_peak_while_asleep <= 1e-5, "mode {mode}: {report:?}");
+            assert!(report.wake_reference_peak > 0.1, "mode {mode}: {report:?}");
+            assert!(report.wake_max_diff <= 1e-4, "mode {mode}: {report:?}");
+            assert_eq!(report.quiet_after_wake, 0.0);
+        }
+    }
+
+    #[test]
+    fn an_aged_machine_hisses_on_and_never_sleeps() {
+        let mut state = init_state();
+        assert!(state[STATE_AGE] > 0.0);
+        let silence = vec![0.0f32; 2048];
+        let mut last_peak = 0.0f32;
+        for _ in 0..(3 * TAPE_BUF_LEN / 2048) {
+            let (out_l, _) = render(&mut state, &silence, &silence);
+            last_peak = out_l.iter().fold(0.0, |p, v| p.max(v.abs()));
+        }
+        assert!(last_peak > 1e-6, "tape hiss must keep playing: {last_peak}");
+        assert_eq!(state[STATE_QUIET_FRAMES], 0.0);
     }
 
     #[test]

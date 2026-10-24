@@ -6218,6 +6218,7 @@ mod tests {
             fanout: Default::default(),
             unbound_ports: Default::default(),
             expr_source: None,
+            owner_instance: None,
             bindings: Default::default(),
         });
         node

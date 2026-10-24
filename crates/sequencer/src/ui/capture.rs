@@ -1112,6 +1112,21 @@ fn apply_capture_host_commands(
             applied = true;
             continue;
         }
+        // Kit and cell edits through the live handlers' own model halves, so
+        // a fixture can show a clip-bearing kit, a kit switched off in the
+        // playing scene's bank, and a track the current scene gives no cell
+        // (the mixer's dimmed clip stop).
+        let kit_or_cell_edit = match name.as_str() {
+            "clear-scene-cell" => Some(
+                crate::host_commands::clear_scene_cell_command(app, payload.clone()).map(|_| ()),
+            ),
+            _ => crate::host_commands::apply_kit_command(&name, &payload, app),
+        };
+        if let Some(result) = kit_or_cell_edit {
+            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
+            applied = true;
+            continue;
+        }
         // Sound-palette open/close so fixtures can capture the palette modal.
         if let Some(result) =
             crate::host_commands::apply_sound_palette_view_command(&name, &payload, app)

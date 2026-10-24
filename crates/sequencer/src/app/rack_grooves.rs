@@ -157,15 +157,9 @@ pub(super) fn kit_groove_settings(
 /// "<name> copy", then "<name> copy 2", ... — the first not already a pool
 /// groove's name.
 fn unique_copy_name(pool: &[ProjectGroove], name: &str) -> String {
-    let base = format!("{name} copy");
-    let taken = |candidate: &str| pool.iter().any(|groove| groove.name == candidate);
-    if !taken(&base) {
-        return base;
-    }
-    (2..)
-        .map(|n| format!("{base} {n}"))
-        .find(|candidate| !taken(candidate))
-        .expect("an unbounded range always finds a free name")
+    super::first_free_name(&format!("{name} copy"), |candidate| {
+        pool.iter().any(|groove| groove.name == candidate)
+    })
 }
 
 impl App {
