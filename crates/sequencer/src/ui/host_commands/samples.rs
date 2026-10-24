@@ -188,6 +188,42 @@ pub(super) fn handle(
                         );
                     }
                     let path = Path::new(&path_str);
+                    // A sample onto a synth track another bank plays: the
+                    // track becomes an Instrument Rack and the sampler plays
+                    // in the viewed bank only (docs/rig-spec.md §4). A sample
+                    // onto a sampler track is content, loaded as before.
+                    let bank = super::scene_banks::scene_bank_id(&payload);
+                    match app.swap_track_to_sample_for_bank(track, path, bank) {
+                        Ok(None) => {}
+                        Ok(Some(outcome)) => {
+                            sync_after_instrument_track_apply_with_selection(
+                                &mut app,
+                                &mut editor,
+                                &ctx.shared.state.clone(),
+                                track,
+                                &current_track,
+                                &mut *ctx.track_names,
+                                &ctx.shared.track_pan_ids.clone(),
+                                &ctx.shared.record_armed.clone(),
+                                &ctx.shared.accumulator_names.clone(),
+                                &ctx.shared.ui_epoch.clone(),
+                                lg_raw,
+                                preserve_track_selection,
+                            );
+                            ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            editor.handle_host_event(HostEvent::Status(
+                                "Replaced the instrument for this bank with a sampler".to_string(),
+                            ));
+                            super::rack::show_kept_banks_notice(&app, &mut editor, &outcome);
+                            return;
+                        }
+                        Err(error) => {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Error swapping to a sampler for this bank: {error}"
+                            )));
+                            return;
+                        }
+                    }
                     match load_or_convert_sampler_track(
                         &mut app,
                         &mut editor,

@@ -31,7 +31,7 @@
 (import eseq.effects.param-controls :as pc)
 ;; Shared scene-bank view state: the clip grid below shows only the bank the
 ;; transport strip is viewing (scene-banks spec 10.1).
-(import eseq.scene-banks :refer (scene-viewed-bank clip-in-viewed-bank?))
+(import eseq.scene-banks :refer (scene-viewed-bank scene-viewed-bank-label clip-in-viewed-bank?))
 (import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of prop-if
                               rgb-part color-rgba track-color-part))
 (import eseq.kinds :refer (track tracks buses groups routes graphs selection master project
@@ -83,7 +83,9 @@
         bus-mod-port-row
         strip-menu
         strip-rename
-        mod-patch)
+        mod-patch
+        kit-power-action
+        parked-kit-strip)
 
 ;; Strip heights derive from the shared clip-area knob
 ;; (eseq.seq-core-state/mixer-clip-area-height) so a package can grow the
@@ -268,7 +270,18 @@
       ;; Break kits (docs/rack-clips-and-break-kits-spec.md 7.2): the kit save
       ;; panel, which carries a scene checklist for the clip bank.
       (dict :id :export-kit :label "Export as kit..." :icon :export)
+      ;; Kits on/off per bank (docs/rig-spec.md §6): the viewed bank's.
+      (kit-power-action g)
       (dict :id :ungroup :label "Ungroup" :icon :ungroup))))
+
+;; "Turn kit off in bank C" while it plays in any scene of the viewed bank
+;; (a mixed bank too), "Turn kit on in bank C" while every scene has it off.
+(def kit-power-action (g)
+  (let ((off (eseq.drum-rack-v2/kit-off-in-viewed-bank? g))
+        (bank (scene-viewed-bank-label)))
+    (dict :id (if off :kit-on :kit-off)
+          :label (str "Turn kit " (if off "on" "off") " in bank " bank)
+          :icon :dial)))
 
 ;; The path a project-owned script was loaded from, per the step-tab registry;
 ;; "" when unknown (the moved instance then does not come back by itself on
@@ -1341,6 +1354,8 @@
         (dict :group-id g.gid :sequencer-id (get action :sequencer-id)))
       :convert-to-clips (convert-rack-to-clips! g)
       :save-rack-clip (save-rack-clip-as! g "")
+      :kit-on (eseq.drum-rack-v2/set-kit-in-viewed-bank! g true)
+      :kit-off (eseq.drum-rack-v2/set-kit-in-viewed-bank! g false)
       _ nil)))
 
 (def track-context-menu ()
@@ -1780,7 +1795,48 @@
 ;; A group rendered as a real container: a colored box wrapping the group's
 ;; channel slot and its member strips, with a top spacer so the color shows
 ;; above the contained tracks.
+(defwidget mixer-kit-off-dot
+  :width 1.55 :height 1.0
+  :paint-margin 0.1
+  :shader
+  (sdf/fill (sdf/circle 0.86) (material :color :device-disabled)))
+
+;; A kit the viewed bank switches off (docs/rig-spec.md §6): its pads leave
+;; the bank's mixer (eseq-ka5t.10) but the kit stays, a dimmed, collapsed
+;; strip, so the way back on is always visible. A click selects the kit and
+;; shows its drum rack in *fx* (the power toggle there reads off); its menu
+;; has "Turn kit on in bank C".
+(def parked-kit-strip (g)
+  (box :key (str "parked-kit-strip-" g.gid)
+    :debug-name "parked-kit-strip"
+    :width 4.7 :height (group-bus-strip-height)
+    :corner-radius (eseq.seq-core-state/radius 16)
+    :padding 0.3
+    :background-color (color-rgba g.color 0.22)
+    :border-width 2
+    :border-color :mixer-strip-border
+    :on-click (lambda (event) (eseq.sequencer/show-fx-for-group g))
+    :on-right-click (lambda (event) (open-strip-menu event nil g))
+    (v-stack :gap 0.4 :align :center
+      (box :width 0 :height 0.4)
+      (mixer-kit-off-dot)
+      (apply label (substring g.name 0 6)
+        :key (str "parked-kit-name-" g.gid)
+        :font-size 9 :h-align :center :v-align :center
+        :color :dim
+        bare-text)
+      (apply label "off"
+        :key (str "parked-kit-off-" g.gid)
+        :font-size 8 :h-align :center :v-align :center
+        :color :dim
+        bare-text))))
+
 (def group-container (g)
+  (if (eseq.drum-rack-v2/kit-off-in-viewed-bank? g)
+    (parked-kit-strip g)
+    (live-group-container g)))
+
+(def live-group-container (g)
   (let ((c g.color))
     (box
       :corner-radius (eseq.seq-core-state/radius 16)

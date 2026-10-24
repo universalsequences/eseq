@@ -17,6 +17,8 @@
 (export scene-bank-view
         scene-viewed-bank
         scene-viewed-bank-index
+        scene-viewed-bank-id
+        scene-viewed-bank-label
         view-scene-bank!
         view-new-scene-bank!
         clip-in-viewed-bank?)
@@ -82,6 +84,18 @@
 (def scene-viewed-bank-index ()
   (let ((b (scene-viewed-bank)))
     (if b b.index 0)))
+
+;; The viewed bank's stable id, the :bank-id an "in this bank" host command
+;; takes (docs/rig-spec.md §4); 0 before the host publishes any bank, which
+;; the host reads as the playing scene's bank.
+(def scene-viewed-bank-id ()
+  (let ((b (scene-viewed-bank)))
+    (if b b.bid 0)))
+
+;; The viewed bank's label (A, or A — its name); "" before any is published.
+(def scene-viewed-bank-label ()
+  (let ((b (scene-viewed-bank)))
+    (if b b.label "")))
 
 ;; Clip-grid membership (spec §10.1): cell c (a track's pattern) belongs to
 ;; the viewed bank `viewed` (a bank instance, (scene-viewed-bank), read once

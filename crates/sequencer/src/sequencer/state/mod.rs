@@ -51,6 +51,8 @@ mod rack_clips;
 pub use rack_clips::*;
 mod slot_enable;
 pub use slot_enable::*;
+mod kit_parking;
+pub use kit_parking::*;
 mod track_registry;
 pub use track_registry::*;
 mod rack_macro;

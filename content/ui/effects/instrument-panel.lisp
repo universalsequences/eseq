@@ -4,8 +4,8 @@
 (import eseq.macro-state :as ms :refer (macro-arm))
 (import eseq.effects.devices :as dv)
 (import eseq.effects.panel-data :as pd)
-(import eseq.view-kit :refer (listed?))
-(import eseq.scene-banks :refer (scene-viewed-bank))
+(import eseq.view-kit :refer (listed? open-menu! menu-of))
+(import eseq.scene-banks :refer (scene-viewed-bank scene-viewed-bank-id scene-viewed-bank-label))
 (import eseq.effects.state :as st :refer (effect-mods instrument-view))
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.drag-drop :as dd)
@@ -239,28 +239,75 @@
   (let ((rm (nth macros i)))
     (if rm (rack-macro-control track rm) (box :width 5.7 :height 4.35))))
 
+;; ── Drop-to-swap, scoped to the viewed bank (docs/rig-spec.md §4) ──
+;;
+;; One rule: a drop changes only the viewed bank. An empty row adds a slot
+;; that plays in the bank's scenes only; a filled row (or the selected
+;; slot's instrument panel) replaces the device for the bank: the host
+;; overwrites the slot when no other bank plays it, else inserts the new
+;; device right after it and leaves the other banks on the old one. Before
+;; the host publishes any bank there is no viewed bank: id 0, which the
+;; host reads as the playing scene's.
+
+;; Per-viewer rack panel options: hide the slots the playing scene does not
+;; play (default off), so a track that collected devices over a set shows
+;; what plays here.
+(def-kind rack-panel-options
+  :key ()
+  :state ((hide-disabled false)))
+
+;; The slot row context menu (its slot), and the slot armed for "Replace in
+;; all banks": the next instrument or sample dropped on it overwrites it in
+;; every pattern (-1: none armed).
+(def-kind rack-slot-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)
+          (track -1)
+          (slot -1)
+          (arm-track -1)
+          (arm-slot -1)))
+
+(def rack-slot-armed? (track slot)
+  (and (= rack-slot-menu.arm-track track) (= rack-slot-menu.arm-slot slot)))
+
+(def rack-slot-disarm ()
+  (set! rack-slot-menu.arm-track -1)
+  (set! rack-slot-menu.arm-slot -1))
+
+;; The replace payload's scope: :all-banks when the slot is armed (the arm
+;; is used up), else the viewed bank.
+(def rack-swap-payload (track slot d)
+  (if (rack-slot-armed? track slot)
+    (do
+      (rack-slot-disarm)
+      (merge d :all-banks true))
+    (merge d :bank-id (scene-viewed-bank-id))))
+
 (def rack-panel-drop-on-rack (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
     (let ((track (get target :track))
           (path (get payload :path))
           (name (get payload :name))
-          (drag-type (get event :drag-type)))
+          (drag-type (get event :drag-type))
+          (bank (scene-viewed-bank-id)))
       (if (= drag-type "sample")
         (if path
           (host-command "add-rack-sample-slot"
-            (dict :track track :path path :preserve-browser-context true))
+            (dict :track track :path path :preserve-browser-context true :bank-id bank))
           (status "Drop a sample file, not a folder"))
         (if (= drag-type "instrument")
           (if name
             (host-command "add-rack-instrument-slot"
-              (dict :track track :name name))
+              (dict :track track :name name :bank-id bank))
             (status "Drop an instrument, not a folder"))
           (if (= drag-type "instrument-preset")
             (let ((instrument (eseq.browser/preset-payload-instrument payload)))
               (if instrument
                 (host-command "add-rack-instrument-slot"
-                  (dict :track track :name instrument :preset (get payload :preset)))
+                  (dict :track track :name instrument :preset (get payload :preset)
+                        :bank-id bank))
                 (status "Drop an instrument preset")))
             (status "Drop a sample or instrument")))))))
 
@@ -275,35 +322,35 @@
         (drag-type (get event :drag-type)))
     (if (= drag-type "sound")
       (eseq.browser/drop-sound-on-track event)
-      (if (= drag-type "instrument")
-        (let ((name (get payload :name)))
-          (if name
-            (host-command "replace-rack-slot-instrument"
-              (dict :track (get target :track)
-                    :slot (get target :slot)
-                    :name name))
-            (status "Drop an instrument, not a folder")))
-        ;; A preset of the layer's own instrument only switches its preset;
-        ;; the host decides, like it does for a track swap.
-        (if (= drag-type "instrument-preset")
-          (let ((instrument (eseq.browser/preset-payload-instrument payload)))
-            (if instrument
+      (let ((track (get target :track))
+            (slot (get target :slot)))
+        (if (= drag-type "instrument")
+          (let ((name (get payload :name)))
+            (if name
               (host-command "replace-rack-slot-instrument"
-                (dict :track (get target :track)
-                      :slot (get target :slot)
-                      :name instrument
-                      :preset (get payload :preset)))
-              (status "Drop an instrument preset")))
-        (if (= drag-type "sample")
-          (let ((path (get payload :path)))
-            (if path
-              (host-command "replace-rack-slot-sample"
-                (dict :track (get target :track)
-                      :slot (get target :slot)
-                      :path path
-                      :preserve-browser-context true))
-              (status "Drop a sample file, not a folder")))
-          (status "Drop a sample or instrument")))))))
+                (rack-swap-payload track slot (dict :track track :slot slot :name name)))
+              (status "Drop an instrument, not a folder")))
+          ;; A preset of the layer's own instrument only switches its preset;
+          ;; the host decides, like it does for a track swap.
+          (if (= drag-type "instrument-preset")
+            (let ((instrument (eseq.browser/preset-payload-instrument payload)))
+              (if instrument
+                (host-command "replace-rack-slot-instrument"
+                  (rack-swap-payload track slot
+                    (dict :track track :slot slot :name instrument
+                          :preset (get payload :preset))))
+                (status "Drop an instrument preset")))
+            ;; A sample onto a sampler slot is content (that pattern's
+            ;; sample); onto a synth slot, a new device for the bank.
+            (if (= drag-type "sample")
+              (let ((path (get payload :path)))
+                (if path
+                  (host-command "replace-rack-slot-sample"
+                    (rack-swap-payload track slot
+                      (dict :track track :slot slot :path path
+                            :preserve-browser-context true)))
+                  (status "Drop a sample file, not a folder")))
+              (status "Drop a sample or instrument"))))))))
 
 (def rack-slot-select (slot)
   (host-command "select-rack-slot"
@@ -385,6 +432,14 @@
           :slot (get slot :idx)
           :value (rack-choke-group-label-value label))))
 
+;; A slot row takes effects (its chain) and devices (replace for the bank).
+(def rack-slot-row-drop (slot event)
+  (let ((drag-type (get event :drag-type)))
+    (if (or (= drag-type "sample") (= drag-type "instrument")
+            (= drag-type "instrument-preset") (= drag-type "sound"))
+      (rack-selected-instrument-drop event)
+      (rack-slot-drop-fx slot event))))
+
 (def rack-slot-drop-fx (slot event)
   (let ((payload (get event :payload)))
     (if (= (get payload :kind) "rack-effect-instance")
@@ -425,6 +480,7 @@
 ;; :active).
 (def rack-slot-strip (inst slot sd)
   (let ((selected (get slot :selected))
+      (armed (rack-slot-armed? (get slot :track) (get slot :idx)))
       (delete-target #'sd.delete-target)
       (muted sd.muted-display)
       (soloed sd.soloed-display))
@@ -443,13 +499,15 @@
         :rack-row-border)
       :selected-border-color :mixer-strip-selected-border
       :corner-radius 10
-      :drop-types (list "audio-effect")
+      :drop-types (list "audio-effect" "sample" "instrument" "instrument-preset")
       :drop-meta (dict :kind "rack-slot-fx"
         :track (get slot :track)
-        :rack-slot (get slot :idx))
+        :rack-slot (get slot :idx)
+        :slot (get slot :idx))
       :drop-hover-border-color :mixer-strip-selected-border
-      :on-drop (lambda (event) (rack-slot-drop-fx slot event))
+      :on-drop (lambda (event) (rack-slot-row-drop slot event))
       :on-click |x y r| (rack-slot-select slot)
+      :on-right-click (lambda (event) (open-rack-slot-menu event slot))
       (h-stack :width :fill :height :fill :gap 0.15 :align :center
         (box :width 0.5)
         ;; The slot number doubles as the live-set enable toggle (eseq-bw9v):
@@ -463,7 +521,7 @@
           :on-click |x y r| (rack-slot-set-enabled slot (not (get slot :enabled))))
         (box :width 0.5)
         (box :key (str "rack-slot-label-" (get slot :idx))
-          :width 10.0 :height :fill  :padding 0
+          :width 8.2 :height :fill  :padding 0
           :selected delete-target
           :background-color :transparent
           :selected-background-color :fx-panel-header-selected-bg
@@ -471,13 +529,21 @@
           :on-click |x y r| (rack-slot-select-delete-target slot)
           (v-stack
             (box :height 0.2)
-            (label (substring (get slot :display-name) 0 14)
+            (label (substring (get slot :display-name) 0 12)
               :font-size 10.5
               :color (if (get slot :enabled) :fg :dim)
               :v-align :baseline
               :active delete-target
               :active-color :white
               :bg :transparent)))
+        ;; The banks that play this slot (recall: its power toggle turns it
+        ;; on here); "all banks" while armed for a replace in all banks.
+        (box :key (str "rack-slot-banks-" (get slot :idx))
+          :debug-name (str "rack-slot-banks-" (get slot :idx))
+          :width 2.4 :height :fill :padding 0 :v-align :center
+          (if armed
+            (label "all" :font-size 7.5 :color :yellow :bg :transparent)
+            (rack-slot-bank-letters sd)))
         
         
         (rack-slot-param-wrapper inst slot sd "gain"
@@ -527,6 +593,80 @@
           )
         (box :width 0.2)
         ))))
+
+;; A bank's letter (its label before the name: "A — Verse" shows A).
+(def bank-letter (b) (first (string-split b.label " ")))
+
+;; The slot device's banks as small letters; "-" when no scene plays it.
+(def rack-slot-bank-letters (sd)
+  (let ((banks sd.banks))
+    (if (= (len banks) 0)
+      (label "-" :font-size 7.5 :color :dim :bg :transparent)
+      (h-stack :gap 0.15 :align :center
+        (each banks |b i|
+          (label (bank-letter b) :font-size 7.5 :color :dim :bg :transparent))))))
+
+(def open-rack-slot-menu (event slot)
+  (set! rack-slot-menu.track (get slot :track))
+  (set! rack-slot-menu.slot (get slot :idx))
+  (open-menu! rack-slot-menu event))
+
+(def rack-slot-menu-close () (set! rack-slot-menu.open false))
+
+(def rack-slot-use-only-here ()
+  (let ((track rack-slot-menu.track)
+        (slot rack-slot-menu.slot))
+    (rack-slot-menu-close)
+    (host-command "use-rack-slot-only-in-bank"
+      (dict :track track :slot slot :bank-id (scene-viewed-bank-id)))))
+
+(def rack-slot-arm-all-banks ()
+  (let ((track rack-slot-menu.track)
+        (slot rack-slot-menu.slot))
+    (rack-slot-menu-close)
+    (if (rack-slot-armed? track slot)
+      (do (rack-slot-disarm) (status "Replace in all banks cancelled"))
+      (do
+        (set! rack-slot-menu.arm-track track)
+        (set! rack-slot-menu.arm-slot slot)
+        (status (str "Drop an instrument or sample on layer " (+ slot 1)
+                     " to replace it in all banks"))))))
+
+;; The slot row menu. "Replace in all banks" is the only gesture here that
+;; touches other banks, and says so.
+(def rack-slot-context-menu ()
+  (let ((label (scene-viewed-bank-label))
+        (armed (rack-slot-armed? rack-slot-menu.track rack-slot-menu.slot)))
+    (menu-of rack-slot-menu
+      (menu-item (if (= label "") "Use only this in this bank" (str "Use only this in bank " label))
+        :key "rack-slot-menu-use-only"
+        :on-select (lambda (e) (rack-slot-use-only-here)))
+      (menu-item (if armed "Cancel replace in all banks" "Replace in all banks…")
+        :key "rack-slot-menu-all-banks"
+        :on-select (lambda (e) (rack-slot-arm-all-banks))))))
+
+(def rack-hide-disabled-label ()
+  (if rack-panel-options.hide-disabled "Show disabled slots" "Hide disabled slots"))
+
+(def rack-purge-label "Purge unused slots…")
+
+;; The rack header's ••• menu: the rack-wide copy, hide disabled slots, and
+;; purge (the host names the slots it would delete in a confirmation).
+(def rack-actions-menu (inst)
+  (pf/rack-header-actions-menu inst
+    (list (rack-hide-disabled-label) rack-purge-label)
+    (lambda (item)
+      (if (= item rack-purge-label)
+        (host-command "confirm-purge-unused-rack-slots" (dict :track (get inst :track)))
+        (set! rack-panel-options.hide-disabled
+          (not rack-panel-options.hide-disabled))))))
+
+;; The slots the list shows: every slot, or with "hide disabled slots" on,
+;; the ones the playing scene plays.
+(def rack-shown-slots (inst)
+  (if rack-panel-options.hide-disabled
+    (filter (lambda (slot) (get slot :enabled)) (get inst :slots))
+    (get inst :slots)))
 
 (def rack-empty-selected-panel (inst)
   (box :debug-name "rack-empty-selected-panel"
@@ -631,7 +771,7 @@
                 :color :dim :bg :transparent))
             )
           (if (rack-panel-expanded? inst)
-            (pf/rack-header-actions-menu inst)
+            (rack-actions-menu inst)
             (box :width 0 :height 0))
           (if (rack-panel-expanded? inst)
             (box :debug-name "rack-preset-button" :padding 0 :width 2 :align :center
@@ -652,13 +792,15 @@
               :background-color :mixer-control-bg
               :border-color :buffer-bg
               :corner-radius 10
-              (v-stack :debug-name "rack-chain-list" :gap 0.025 :height 5 :width :fill
-                (if (> (len (get inst :slots)) 0)
-                  (each (get inst :slots) |slot idx|
-                    (rack-slot-row inst slot))
-                  (box :width :fill :height 9 :h-align :center :v-align :center
-                    (label "Drop an Instrument or Sample"
-                      :font-size 11 :color :dim :bg :transparent)))))
+              (let ((shown (rack-shown-slots inst)))
+                (v-stack :debug-name "rack-chain-list" :gap 0.025 :height 5 :width :fill
+                  (rack-slot-context-menu)
+                  (if (> (len shown) 0)
+                    (each shown |slot idx|
+                      (rack-slot-row inst slot))
+                    (box :width :fill :height 9 :h-align :center :v-align :center
+                      (label "Drop an Instrument or Sample"
+                        :font-size 11 :color :dim :bg :transparent))))))
             (box :width 0 :height 0)))))
     :key (str "rack-panel-" (get inst :track)) :debug-name "rack-panel"
     :drop-types (list "sample" "instrument" "instrument-preset" "sound")

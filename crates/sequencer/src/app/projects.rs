@@ -1431,7 +1431,7 @@ impl App {
         self.queue_loaded_project(name, project)
     }
 
-    fn queue_loaded_project(
+    pub(crate) fn queue_loaded_project(
         &mut self,
         name: &str,
         mut project: project::ProjectFile,
@@ -3246,6 +3246,8 @@ impl ProjectCapture {
             self.capture_rack_clips(scenes_for_takes, num_tracks)?;
         // Scene-owned swap state (docs/rig-spec.md 3.2), outer index scene.
         let scene_slot_enable = scenes_for_takes.slot_enable_to_wire(num_tracks);
+        // Kits on/off per scene (docs/rig-spec.md 6), outer index scene.
+        let scene_parked_kits = scenes_for_takes.parked_kits_to_wire();
         // The arrangement always exists (empty-arrangement spec 7): every
         // save writes one, the empty arrangement included. Serialization maps
         // live pattern-pool ids into the deterministic ids the loader rebuilds
@@ -3295,6 +3297,7 @@ impl ProjectCapture {
             scene_cell_presence,
             scene_rack_clips,
             scene_slot_enable,
+            scene_parked_kits,
             instances: self.instances,
             grooves: self.grooves,
             take_pools,
@@ -4711,6 +4714,7 @@ impl App {
             scene_cell_presence,
             scene_rack_clips,
             scene_slot_enable,
+            scene_parked_kits,
             take_pools,
             track_sounds,
             track_lane_rosters,
@@ -4986,6 +4990,9 @@ impl App {
             self.state.install_scene_slot_enable(&scene_slot_enable);
             self.state.normalize_rack_slot_ids();
         }
+        // Kits on/off (docs/rig-spec.md 6): files below v19 carry none and
+        // load with every kit on.
+        self.state.install_scene_parked_kits(&scene_parked_kits);
         self.state
             .set_committed_arrangement(Some(arrangement))
             .map_err(|error| format!("Project arrangement failed to load: {error}"))?;
@@ -6897,6 +6904,7 @@ mod tests {
         ProjectFile {
             scene_rack_clips: Vec::new(),
             scene_slot_enable: Vec::new(),
+            scene_parked_kits: Vec::new(),
             instances: crate::project::ProjectInstances::default(),
             grooves: Vec::new(),
             version: project::project_file_version(),
@@ -7710,89 +7718,12 @@ mod tests {
 #[cfg(test)]
 mod scene_slot_enable_tests {
     use super::*;
+    use crate::app::test_rig::{launch, new_scene, rack_with_samplers, Rig, PIANO, PLATE};
     use crate::sequencer::{SceneBankId, SlotEnable};
-
-    const PLATE: &str = "../../content/impulses/lexicon-300-rich-plate.wav";
-    const PIANO: &str = "../../content/impulses/prepared/yamaha-g5.wav";
-
-    struct Rig {
-        engine: Option<crate::audio::engine::HeadlessEngine>,
-        app: Option<App>,
-    }
-
-    impl Rig {
-        fn new() -> Self {
-            let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
-            let app = App::new(
-                Arc::clone(&engine.state),
-                engine.lg_ptr,
-                engine.sample_rate,
-                engine.buses.clone(),
-                Arc::clone(&engine.master_recorder),
-                engine.keyboard_tx.clone(),
-            );
-            Self { engine: Some(engine), app: Some(app) }
-        }
-
-        fn app(&mut self) -> &mut App {
-            self.app.as_mut().unwrap()
-        }
-
-        fn render(&self) {
-            let lg = self.engine.as_ref().unwrap().lg_ptr;
-            unsafe { crate::audiograph::prepare_graph_for_render(lg.0) };
-        }
-    }
-
-    impl Drop for Rig {
-        fn drop(&mut self) {
-            drop(self.app.take());
-            if let Some(engine) = self.engine.take() {
-                unsafe { engine.destroy() };
-            }
-        }
-    }
-
-    /// A rack track (index `rack`) with a sampler slot per `samples`.
-    fn rack_with_samplers(app: &mut App, samples: &[&str]) -> usize {
-        app.graph_controller().add_track(Path::new(PLATE)).expect("a first track");
-        let rack = app.graph_controller().add_empty_layer_rack_track().unwrap();
-        for sample in samples {
-            app.graph_controller()
-                .add_sampler_slot_to_rack(rack, Path::new(sample))
-                .expect("a sampler slot");
-        }
-        rack
-    }
 
     fn sample_name(app: &App, track: usize, slot: usize) -> String {
         app.state.live_rack_track_snapshot(track).unwrap().slots[slot]
             .sample_id.as_ref().map(|(_, name, _)| name.clone()).unwrap()
-    }
-
-    fn new_scene(app: &mut App) -> usize {
-        let names = app.tracks.clone();
-        app.state.clone_pattern(
-            names.len(),
-            &app.graph.track_buffer_ids.clone(),
-            &app.graph.track_sample_rates.clone(),
-            &names,
-            &app.graph.track_instrument_types.clone(),
-        )
-    }
-
-    fn launch(app: &mut App, scene: usize) {
-        let names = app.tracks.clone();
-        app.state
-            .launch_scene(
-                scene,
-                names.len(),
-                &app.graph.track_buffer_ids.clone(),
-                &app.graph.track_sample_rates.clone(),
-                &names,
-                &app.graph.track_instrument_types.clone(),
-            )
-            .expect("scene launches");
     }
 
     /// The sample name of every slot scene `scene` plays on `track`, as the
@@ -7815,20 +7746,6 @@ mod scene_slot_enable_tests {
 
     fn every_scene_plays(app: &mut App, track: usize) -> Vec<Vec<String>> {
         (0..app.state.scene_count()).map(|scene| playing(app, scene, track)).collect()
-    }
-
-    fn reload(rig: &mut Rig, name: &str, project: ProjectFile) {
-        let encoded = serde_json::to_value(&project).unwrap();
-        let restored: ProjectFile = serde_json::from_value(encoded).unwrap();
-        rig.app().queue_loaded_project(name, restored).unwrap();
-        for _ in 0..200 {
-            if !rig.app().has_pending_project_load() {
-                break;
-            }
-            rig.app().advance_pending_project_load().unwrap();
-            rig.render();
-        }
-        assert!(!rig.app().has_pending_project_load(), "the project finished loading");
     }
 
     #[test]
@@ -7924,7 +7841,7 @@ mod scene_slot_enable_tests {
         let slots = &saved.patterns[0].rack_tracks[rack].as_ref().unwrap().slots;
         assert_eq!(slots.iter().map(|slot| slot.id).collect::<Vec<_>>(), ids_before);
 
-        reload(&mut rig, "slot-enable-roundtrip", saved);
+        rig.reload("slot-enable-roundtrip", saved);
         let app = rig.app();
         let ids_after: Vec<u64> = app.state.live_rack_track_snapshot(rack).unwrap().slots.iter().map(|s| s.id).collect();
         assert_eq!(ids_after, ids_before);
@@ -7976,7 +7893,7 @@ mod scene_slot_enable_tests {
         plate_and_piano.sort();
         let expected = vec![vec![plate.clone(), plate.clone()], vec![piano.clone()], plate_and_piano];
 
-        reload(&mut rig, "legacy-slots", saved);
+        rig.reload("legacy-slots", saved);
         let app = rig.app();
         let rack_after = app.state.live_rack_track_snapshot(rack).unwrap();
         // A sample is pattern content: the row with two wavs stays one slot.
@@ -7988,7 +7905,7 @@ mod scene_slot_enable_tests {
         // Saved again (v18) and reopened: still the same.
         let resaved = app.capture_project("legacy-slots").unwrap();
         assert_eq!(resaved.scene_slot_enable.len(), 3);
-        reload(&mut rig, "legacy-slots", resaved);
+        rig.reload("legacy-slots", resaved);
         let app = rig.app();
         assert_eq!(app.state.live_rack_track_snapshot(rack).unwrap().slots.len(), 2);
         assert_eq!(every_scene_plays(app, rack), expected);
@@ -8049,5 +7966,225 @@ mod scene_slot_enable_tests {
         }
         eprintln!("checked {checked} (scene, rack track) pairs");
         assert!(checked > 0);
+    }
+}
+
+/// Kits on/off per bank through the App (docs/rig-spec.md §6, eseq-ka5t.13):
+/// the bank-scoped toggle and its undo, inheritance by new scenes, kit
+/// deletion, and the project file — v19 round trip and older files.
+#[cfg(test)]
+mod kit_parking_tests {
+    use super::*;
+    use crate::app::test_rig::{launch, Rig};
+    use crate::sequencer::{KitBankState, RackClipId, SceneBankId, SceneSwapInheritance};
+
+    const KICK: &str = "../../content/impulses/lexicon-300-rich-plate.wav";
+
+    fn new_scene_in(app: &mut App, bank: SceneBankId, inheritance: SceneSwapInheritance) -> usize {
+        let names = app.tracks.clone();
+        app.state
+            .clone_pattern_in_scene_bank(
+                bank,
+                inheritance,
+                names.len(),
+                &app.graph.track_buffer_ids.clone(),
+                &app.graph.track_sample_rates.clone(),
+                &names,
+                &app.graph.track_instrument_types.clone(),
+            )
+            .expect("a new scene")
+    }
+
+    /// A clip-bearing kit with one pad (steps on every beat) and four
+    /// scenes: bank A = {0, 1}, bank B = {2, 3}. Every scene points at a
+    /// clip except scene 3, which leaves the kit intentionally silent.
+    /// Returns (group id, pad track, bank A, bank B).
+    fn kit_rig(app: &mut App) -> (u64, usize, SceneBankId, SceneBankId) {
+        app.graph_controller().add_track(Path::new(KICK)).expect("a loose track");
+        let (group_id, _) = app.create_drum_rack_recorded(None).expect("a kit");
+        let pad = app.graph_controller().add_blank_sampler_track().expect("a pad track");
+        app.assign_rack_pad_track_recorded(group_id, 0, pad).expect("the pad");
+        let mut scenes = app.capture_synchronized_scene_structure_state().expect("scenes");
+        let mut data = scenes.effective_track_pattern(pad).expect("the pad's pattern");
+        data.clear_step_content();
+        for step in [0usize, 4, 8, 12] {
+            data.track_bits[0] |= 1 << step;
+        }
+        assert!(scenes.save_effective_track_pattern(pad, data));
+        app.restore_scene_structure_state(&scenes).expect("install the steps");
+        app.convert_rack_to_clips_recorded(group_id).expect("clips");
+        for _ in 0..3 {
+            let bank = app.state.scene_bank_containing(app.state.current_scene_index()).unwrap();
+            new_scene_in(app, bank, SceneSwapInheritance::Source(app.state.playing_scene()));
+        }
+        let bank_b = app.state.create_scene_bank().unwrap();
+        for _ in 0..2 {
+            app.state.move_scene_to_scene_bank(2, bank_b).unwrap();
+        }
+        let bank_a = app.state.scene_banks()[0].id;
+        app.state.with_scenes_mut(|scenes| assert!(scenes.set_scene_rack_clip(3, group_id, None)));
+        (group_id, pad, bank_a, bank_b)
+    }
+
+    fn pointers(app: &App, group_id: u64) -> Vec<Option<RackClipId>> {
+        app.state.with_project_scenes(|scenes| {
+            (0..scenes.scenes.len()).map(|scene| scenes.scene_rack_clip(scene, group_id)).collect()
+        })
+    }
+
+    /// Whether the kit sounds in each scene, as the scheduler snapshot the
+    /// launch publishes has it (pad triggers gated, sequencers stopped).
+    fn sounding(app: &mut App, group_id: u64, pad: usize) -> Vec<bool> {
+        (0..app.state.scene_count())
+            .map(|scene| {
+                launch(app, scene);
+                let snapshot = app.state.latest_scheduler_snapshot();
+                let parked = app.state.with_project_scenes(|s| s.kit_parked_in_scene(scene, group_id));
+                assert_eq!(snapshot.rack_parked(group_id), parked, "scene {scene}");
+                if parked {
+                    assert!(snapshot.tracks[pad].scene_silenced, "scene {scene}: parked pads are silent");
+                }
+                !snapshot.tracks[pad].scene_silenced
+            })
+            .collect()
+    }
+
+    #[test]
+    fn parking_a_kit_in_bank_b_leaves_bank_a_and_every_clip_pointer_alone() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let (group_id, pad, bank_a, bank_b) = kit_rig(app);
+        let before = pointers(app, group_id);
+        assert_eq!(sounding(app, group_id, pad), vec![true, true, true, false]);
+        let undo_before = app.history.undo_len();
+
+        assert!(app.set_kit_parked_in_bank_recorded(group_id, true, Some(bank_b)).unwrap());
+        assert_eq!(app.history.undo_len(), undo_before + 1, "one undo step");
+        assert!(!app.set_kit_parked_in_bank_recorded(group_id, true, Some(bank_b)).unwrap(), "no-op");
+        assert_eq!(app.history.undo_len(), undo_before + 1);
+        assert_eq!(pointers(app, group_id), before, "parking never touches a clip pointer");
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), KitBankState::Off);
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_a)).unwrap(), KitBankState::On);
+        assert_eq!(sounding(app, group_id, pad), vec![true, true, false, false]);
+        launch(app, 2);
+        assert!(app.state.latest_scheduler_snapshot().rack_parked(group_id));
+        assert_eq!(app.kit_parked_bank_index(group_id), Some(1), "bank B is off");
+        launch(app, 0);
+        assert_eq!(app.kit_parked_bank_index(group_id), None);
+
+        assert!(app.set_kit_parked_in_bank_recorded(group_id, false, Some(bank_b)).unwrap());
+        assert_eq!(pointers(app, group_id), before);
+        assert_eq!(
+            sounding(app, group_id, pad),
+            vec![true, true, true, false],
+            "on again: every scene as it was, the intentional silence included"
+        );
+
+        // Undo the unpark, then the park: one step each.
+        assert!(matches!(crate::app::edit::undo(app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), KitBankState::Off);
+        assert!(matches!(crate::app::edit::undo(app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), KitBankState::On);
+        assert!(matches!(crate::app::edit::redo(app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), KitBankState::Off);
+        assert_eq!(pointers(app, group_id), before);
+    }
+
+    #[test]
+    fn a_mixed_bank_reads_mixed_and_turning_it_off_parks_every_scene() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let (group_id, _, _, bank_b) = kit_rig(app);
+        app.state.with_scenes_mut(|scenes| scenes.set_kit_parked_in_scenes(group_id, true, 2..3));
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), KitBankState::Mixed);
+        assert!(app.set_kit_parked_in_bank_recorded(group_id, true, Some(bank_b)).unwrap());
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), KitBankState::Off);
+    }
+
+    #[test]
+    fn new_scenes_inherit_the_kits_their_source_or_bank_parks() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let (group_id, _, bank_a, bank_b) = kit_rig(app);
+        assert!(app.set_kit_parked_in_bank_recorded(group_id, true, Some(bank_b)).unwrap());
+        let parked = |app: &App, scene: usize| {
+            app.state.with_project_scenes(|scenes| scenes.kit_parked_in_scene(scene, group_id))
+        };
+        // Clone of a parked scene (into its bank): parked.
+        launch(app, 2);
+        let clone = new_scene_in(app, bank_b, SceneSwapInheritance::Source(2));
+        assert!(parked(app, clone), "a clone takes its source's");
+        // `+` in bank B: the scene before it in the bank.
+        launch(app, 0);
+        let plus = new_scene_in(app, bank_b, SceneSwapInheritance::BankNeighbour);
+        assert!(parked(app, plus), "+ takes the bank's");
+        // `+` in bank A: unparked like bank A.
+        let plus_a = new_scene_in(app, bank_a, SceneSwapInheritance::BankNeighbour);
+        assert!(!parked(app, plus_a));
+        // Copy a parked scene to a new bank.
+        let bank_c = app.state.create_scene_bank().unwrap();
+        let source = app.state.scene_bank_range(bank_b).unwrap().start;
+        let copy = new_scene_in(app, bank_c, SceneSwapInheritance::Source(source));
+        assert!(parked(app, copy), "copy to a new bank takes its source's");
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_c)).unwrap(), KitBankState::Off);
+    }
+
+    #[test]
+    fn deleting_the_kit_forgets_it_in_every_scene_and_undo_brings_it_back() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let (group_id, _, _, bank_b) = kit_rig(app);
+        assert!(app.set_kit_parked_in_bank_recorded(group_id, true, Some(bank_b)).unwrap());
+        assert_eq!(app.unused_kits(), Vec::<u64>::new(), "bank A still plays it");
+        app.state.with_scenes_mut(|scenes| {
+            let count = scenes.scenes.len();
+            scenes.set_kit_parked_in_scenes(group_id, true, 0..count)
+        });
+        assert_eq!(app.unused_kits(), vec![group_id], "parked everywhere: unused, not deleted");
+        assert!(app.groups.iter().any(|group| group.id == group_id));
+
+        app.delete_group_recorded(group_id).expect("delete the kit");
+        app.state.with_project_scenes(|scenes| {
+            assert!(scenes.scenes.iter().all(|scene| scene.parked_kits.is_empty()));
+        });
+        assert!(matches!(crate::app::edit::undo(app), crate::app::history::HistoryReplay::Applied(_)));
+        app.state.with_project_scenes(|scenes| {
+            assert!(scenes.scenes.iter().all(|scene| scene.parked_kits.contains(&group_id)));
+        });
+    }
+
+    #[test]
+    fn parked_kits_round_trip_a_project_file_and_older_files_park_nothing() {
+        let mut rig = Rig::new();
+        let app = rig.app();
+        let (group_id, pad, _, bank_b) = kit_rig(app);
+        assert!(app.set_kit_parked_in_bank_recorded(group_id, true, Some(bank_b)).unwrap());
+        let before = sounding(app, group_id, pad);
+        let saved = app.capture_project("kit-parking-roundtrip").unwrap();
+        assert_eq!(saved.version, crate::project::project_file_version());
+        assert_eq!(saved.version, 19);
+        assert_eq!(
+            saved.scene_parked_kits,
+            vec![vec![], vec![], vec![group_id], vec![group_id]]
+        );
+        let mut legacy = saved.clone();
+        rig.reload("kit-parking-roundtrip", saved);
+        let app = rig.app();
+        assert_eq!(app.kit_state_in_bank(group_id, Some(bank_b)).unwrap(), KitBankState::Off);
+        assert_eq!(sounding(app, group_id, pad), before);
+
+        // A v18 file has no field: every kit is on.
+        legacy.version = 18;
+        legacy.scene_parked_kits.clear();
+        let mut json = serde_json::to_value(&legacy).unwrap();
+        assert!(json.get("scene_parked_kits").is_none(), "nothing parked writes nothing");
+        json["version"] = serde_json::json!(18);
+        let legacy: ProjectFile = serde_json::from_value(json).unwrap();
+        rig.reload("kit-parking-legacy", legacy);
+        let app = rig.app();
+        app.state.with_project_scenes(|scenes| {
+            assert!(scenes.scenes.iter().all(|scene| scene.parked_kits.is_empty()));
+        });
+        assert_eq!(sounding(app, group_id, pad), vec![true, true, true, false]);
     }
 }

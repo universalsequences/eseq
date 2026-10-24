@@ -427,7 +427,10 @@ impl App {
         let current = self.state.latest_scheduler_snapshot();
         let mut snapshot = crate::sequencer::SequencerSnapshot::capture_from_track_pattern_data(
             &self.state, &tracks, current.mod_connections.clone(), Vec::new(), Vec::new(),
-            current.scene_slots.clone(), Default::default());
+            current.scene_slots.clone(), Default::default(),
+            // A kit the playing scene switches off stays silent in the
+            // audition too (docs/rig-spec.md §6).
+            prepared.scenes.current_parked_kits());
         snapshot.transport.bpm = prepared.bpm;
         self.state.note_audition.start(crate::scheduler::audition::AuditionLoop {
             snapshot, steps: prepared.steps, span: (start, end),
@@ -836,6 +839,28 @@ mod tests {
         super::super::edit::redo(&mut app);
         assert_eq!(app.state.transport.bpm.load(std::sync::atomic::Ordering::Relaxed), 120);
         assert_ne!(app.state.effective_track_pattern_id(0), original);
+    }
+
+    /// A kit the playing scene switches off stays silent in the audition
+    /// (docs/rig-spec.md §6, eseq-ka5t.13).
+    #[test]
+    fn retrospective_audition_keeps_a_parked_kit_silent() {
+        const KIT: u64 = 7;
+        let mut app = app();
+        app.state.set_rack_memberships(vec![crate::graph::RackMembership {
+            group_id: KIT,
+            members: vec![1],
+        }]);
+        app.state.with_scenes_mut(|scenes| {
+            let count = scenes.scenes.len();
+            scenes.set_kit_parked_in_scenes(KIT, true, 0..count)
+        });
+        draft(&mut app);
+        app.audition_retrospective(0.0, 4.0, 1).unwrap();
+        let snapshot = app.state.note_audition.pending_snapshot().expect("the audition loop");
+        assert_eq!(snapshot.parked_racks, vec![KIT]);
+        assert!(snapshot.tracks[1].scene_silenced, "the parked pad is silent");
+        assert!(!snapshot.tracks[0].scene_silenced, "a loose track plays");
     }
 
     #[test]

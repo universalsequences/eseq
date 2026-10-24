@@ -15,8 +15,9 @@
 
 (module eseq.drum-rack-v2)
 
-(import eseq.kinds :refer (tracks groups project))
+(import eseq.kinds :refer (tracks groups project set-kit-parked! kit-bank-state))
 (import eseq.view-kit :refer (index-of listed?))
+(import eseq.scene-banks :refer (scene-viewed-bank scene-viewed-bank-label))
 
 (export rack-of-bus
         selected-bus-rack
@@ -44,7 +45,13 @@
         groove-extract-label
         groove-reserved-labels
         pool-groove-labels
-        pool-groove-label)
+        pool-groove-label
+        kit-viewed-state
+        kit-off-in-viewed-bank?
+        kit-power-hint
+        kit-viewed-header
+        toggle-kit-in-viewed-bank!
+        set-kit-in-viewed-bank!)
 
 ;; The drum rack backed by the bus at position `bus-idx` (what a bus-driven
 ;; surface, the *fx* buffer, asks: "is this selection a kit?"), else nil.
@@ -324,3 +331,44 @@
 (def pool-groove-label (pg)
   (let ((at (index-of project.groove-pool pg)))
     (if (< at 0) "" (nth (pool-groove-labels) at))))
+
+;; ── Kits on/off per bank (docs/rig-spec.md §6) ──
+;; A kit plays in a scene when the scene points at one of its clips and does
+;; not switch it off. The drum rack panel's power toggle and the mixer's
+;; group menu write every scene of the VIEWED bank; before the host has
+;; published a bank there is none, and the playing scene's decides.
+
+;; Kit g in bank b: :on, :off or :mixed (some scenes off). With no bank
+;; published yet (b nil), the playing scene's decides.
+(def kit-state-in (g b)
+  (if b (kit-bank-state g b) (if g.parked :off :on)))
+
+;; Kit g in the viewed bank.
+(def kit-viewed-state (g)
+  (kit-state-in g (scene-viewed-bank)))
+
+;; Whether drum rack g is off in every scene of the viewed bank.
+(def kit-off-in-viewed-bank? (g)
+  (and g.rack (= (kit-viewed-state g) :off)))
+
+;; "Kit on in bank C" / "Kit off in bank C" for a kit in `kit-state` in the
+;; bank labelled `bank-label` (mixed reads on, "some scenes off" after it).
+(def kit-power-hint (kit-state bank-label)
+  (str "Kit " (if (= kit-state :off) "off" "on") " in bank " bank-label
+       (if (= kit-state :mixed) " (some scenes off)" "")))
+
+;; The drum rack header's view of kit g, read once per render: the viewed
+;; bank is looked up once. (dict :state kit-state :hint text)
+(def kit-viewed-header (g)
+  (let ((b (scene-viewed-bank))
+        (kit-state (kit-state-in g b)))
+    ;; b's label, as scene-viewed-bank-label reads it (b is in hand).
+    (dict :state kit-state :hint (kit-power-hint kit-state (if b b.label "")))))
+
+;; Switch kit g on (`on` true) or off in every scene of the viewed bank.
+(def set-kit-in-viewed-bank! (g on)
+  (set-kit-parked! g (scene-viewed-bank) (not on)))
+
+;; The power toggle: on or mixed turns the whole bank off; off turns it on.
+(def toggle-kit-in-viewed-bank! (g)
+  (set-kit-in-viewed-bank! g (= (kit-viewed-state g) :off)))

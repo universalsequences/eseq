@@ -51,6 +51,7 @@ use super::*;
 use crate::host_commands::StripControl;
 use sequencer::effects::EffectDescriptor;
 use std::hash::{Hash, Hasher};
+use std::collections::BTreeMap;
 
 /// The device sync's state (in [`HostKinds`]).
 #[derive(Default)]
@@ -498,10 +499,14 @@ fn rack_layout(
     app: &app::App,
     rack: &sequencer::sequencer::RackTrackSnapshot,
     slot_enable: Option<&sequencer::sequencer::SlotEnable>,
+    banks: &BTreeMap<u64, u128>,
+    bank_ids: &[Option<InstanceId>],
 ) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     rack.slots.len().hash(&mut hasher);
+    bank_ids.hash(&mut hasher);
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
+        banks.get(&slot.id).hash(&mut hasher);
         instrument_type_label(slot.instrument_type).hash(&mut hasher);
         rack_slot_raw_name(app, slot_idx, slot).hash(&mut hasher);
         let enabled = sequencer::sequencer::resolve_slot_enabled(slot, slot_enable);
@@ -579,7 +584,7 @@ impl HostKinds {
         );
         if all_racks || devices.rack_revision != Some(rack_revision) {
             devices.rack_revision = Some(rack_revision);
-            outcome.merge(devices.sync_racks(pusher, app, &self.track_ids, all_racks));
+            outcome.merge(devices.sync_racks(pusher, app, &self.track_ids, &self.bank_ids, all_racks));
         }
         let bus = (fx_epoch, ui_epoch, registry);
         if FamilyKey::moved(&mut devices.bus_key, bus, &self.bus_ids, &[]) {
@@ -665,11 +670,29 @@ impl DeviceState {
         pusher: &mut Pusher<'_>,
         app: &app::App,
         track_ids: &[Option<InstanceId>],
+        bank_ids: &[Option<InstanceId>],
         all: bool,
     ) -> PassOutcome {
-        // A slot's `enabled` is the playing scene's (docs/rig-spec.md §3.2).
+        // A slot's `enabled` is the playing scene's (docs/rig-spec.md §3.2),
+        // its bank letters the banks with a scene that plays it (§4 recall):
+        // bitmasks for the rack tracks only, in one pass over the scenes.
         // Read before the rack lock: scene launches lock scenes then racks.
-        let slot_enables = app.state.with_project_scenes(|scenes| scenes.current_scene_slot_enables());
+        let rack_tracks: Vec<usize> = (0..track_ids.len())
+            .filter(|track| {
+                app.graph.track_instrument_types.get(*track)
+                    == Some(&sequencer::sequencer::InstrumentType::Rack)
+            })
+            .collect();
+        let (slot_enables, masks) = app.state.with_project_scenes(|scenes| {
+            (
+                scenes.current_scene_slot_enables(),
+                scenes.rack_slot_bank_masks(&rack_tracks),
+            )
+        });
+        let mut slot_banks: Vec<BTreeMap<u64, u128>> = vec![BTreeMap::new(); track_ids.len()];
+        for (track, mask) in rack_tracks.into_iter().zip(masks) {
+            slot_banks[track] = mask;
+        }
         let racks = app.state.pattern.rack_tracks.lock().unwrap();
         let mut outcome = PassOutcome::default();
         self.racks
@@ -688,7 +711,8 @@ impl DeviceState {
             };
             let rack = racks.get(track).and_then(Option::as_ref);
             let slot_enable = slot_enables.get(track).and_then(Option::as_ref);
-            let layout = rack.map(|rack| rack_layout(app, rack, slot_enable));
+            let banks = &slot_banks[track];
+            let layout = rack.map(|rack| rack_layout(app, rack, slot_enable, banks, bank_ids));
             let cached = &mut self.racks[track];
             if !all && cached.layout == layout {
                 continue;
@@ -703,12 +727,14 @@ impl DeviceState {
             // container is the slot's instance, known after reconciling).
             let mut models = Vec::new();
             let mut holders: Vec<Option<usize>> = Vec::new();
+            let mut slot_masks: HashMap<usize, u128> = HashMap::new();
             for (slot_idx, slot) in rack
                 .into_iter()
                 .flat_map(|rack| rack.slots.iter().enumerate())
             {
                 let device = DeviceSlot::RackSlot(slot_idx);
                 let holder = models.len();
+                slot_masks.insert(holder, banks.get(&slot.id).copied().unwrap_or(0));
                 models.push(DeviceModel {
                     device,
                     did: device.did(app, track),
@@ -754,6 +780,14 @@ impl DeviceState {
             for (at, slot_id) in &slot_ids {
                 let effects = children.remove(at).unwrap_or_default();
                 pusher.push(*slot_id, f::DEVICE_DEVICES, instance_list(effects));
+                let mask = slot_masks.remove(at).unwrap_or(0);
+                let banks = bank_ids
+                    .iter()
+                    .enumerate()
+                    .take(128)
+                    .filter(|(index, _)| mask & (1_u128 << index) != 0)
+                    .filter_map(|(_, id)| *id);
+                pusher.push(*slot_id, f::DEVICE_BANKS, instance_list(banks));
             }
             let slot_ids = slot_ids.into_iter().map(|(_, id)| id);
             if let Some(instrument) = instrument {

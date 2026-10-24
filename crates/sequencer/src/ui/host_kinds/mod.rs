@@ -105,6 +105,7 @@ mod arrangement;
 mod devices;
 mod events;
 mod generators;
+mod kit_parking;
 mod graphs;
 mod lanes;
 mod live;
@@ -1017,6 +1018,10 @@ pub(crate) mod f {
     pub(crate) const GROUP_GROOVE: FieldKey = (GROUP, "groove");
     pub(crate) const GROUP_ARR_CLIPS: FieldKey = (GROUP, "arr-clips");
     pub(crate) const GROUP_PENDING_ARR_CLIPS: FieldKey = (GROUP, "pending-arr-clips");
+    pub(crate) const GROUP_PARKED: FieldKey = (GROUP, "parked");
+    pub(crate) const GROUP_PARKED_BANKS: FieldKey = (GROUP, "parked-banks");
+    pub(crate) const GROUP_MIXED_BANKS: FieldKey = (GROUP, "mixed-banks");
+    pub(crate) const GROUP_UNUSED: FieldKey = (GROUP, "unused");
 
     pub(crate) const DEVICE_TRACK: FieldKey = (DEVICE, "track");
     pub(crate) const DEVICE_BUS: FieldKey = (DEVICE, "bus");
@@ -1058,6 +1063,9 @@ pub(crate) mod f {
     pub(crate) const DEVICE_CHOKE: FieldKey = (DEVICE, "choke");
     pub(crate) const DEVICE_DISPLAY_NAME: FieldKey = (DEVICE, "display-name");
     pub(crate) const DEVICE_INSTRUMENT_NAME: FieldKey = (DEVICE, "instrument-name");
+    /// The banks with a scene that plays a rack slot (empty: no scene
+    /// does), docs/rig-spec.md §4 recall.
+    pub(crate) const DEVICE_BANKS: FieldKey = (DEVICE, "banks");
     pub(crate) const DEVICE_NODE_ID: FieldKey = (DEVICE, "node-id");
     pub(crate) const DEVICE_STRIP_MACROS: FieldKey = (DEVICE, "strip-macros");
     pub(crate) const DEVICE_SOUND_BINDING: FieldKey = (DEVICE, "sound-binding");
@@ -1603,6 +1611,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     // fields; `modulators` registered with its descriptor (`panel`).
     (f::DEVICE_DISPLAY_NAME, ":string", Model),
     (f::DEVICE_INSTRUMENT_NAME, ":string", Model),
+    (f::DEVICE_BANKS, "(list-of bank)", Model),
     // The effect's graph node (`panel::effect_node`), read while observed.
     (f::DEVICE_NODE_ID, ":int", Live),
     // Computed while observed (`devices::sync_sound_bindings`).
@@ -1850,6 +1859,10 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::GROUP_GROOVE, "groove", Model),
     (f::GROUP_ARR_CLIPS, "(list-of :any)", Model),
     (f::GROUP_PENDING_ARR_CLIPS, "(list-of :any)", Model),
+    (f::GROUP_PARKED, ":bool", Model),
+    (f::GROUP_PARKED_BANKS, "(list-of bank)", Model),
+    (f::GROUP_MIXED_BANKS, "(list-of bank)", Model),
+    (f::GROUP_UNUSED, ":bool", Model),
     (f::TRANSPORT_PLAYING, ":bool", Live),
     (f::TRANSPORT_RECORDING, ":bool", Live),
     (f::TRANSPORT_SCENE, "scene", Model),
@@ -2792,6 +2805,8 @@ pub(crate) struct HostKinds {
     song: SongState,
     /// The drum racks' pads, clips and grooves, the groove pool and library.
     racks: RackState,
+    /// The kits' on/off per bank feed (`kit_parking`).
+    kit_parking_key: Option<kit_parking::KitParkingKey>,
     /// Devices beyond the track chain: MIDI effects, bus effects, drum rack
     /// slots and their effects.
     pub(crate) devices: DeviceState,
@@ -3019,6 +3034,7 @@ impl HostKinds {
         sync_phase("sync-lane-model", || self.sync_lane_model(&mut pusher));
         sync_phase("sync-cell-model", || self.sync_cell_model(&mut pusher, app));
         sync_phase("sync-rack-clips", || self.sync_rack_clips(&mut pusher, app));
+        sync_phase("sync-kit-parking", || self.sync_kit_parking(&mut pusher, app));
         sync_phase("sync-rack-model", || self.sync_rack_model(&mut pusher, app));
         sync_phase("sync-groove-library", || self.sync_groove_library(&mut pusher, app));
         sync_phase("sync-song-model", || self.sync_song_model(&mut pusher, app));
@@ -3162,6 +3178,7 @@ impl HostKinds {
         self.route_keys.clear();
         self.scene_ids.clear();
         self.bank_ids.clear();
+        self.kit_parking_key = None;
         self.track_generation = Some(generation);
     }
 

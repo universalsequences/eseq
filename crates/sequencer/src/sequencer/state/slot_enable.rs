@@ -42,17 +42,21 @@ pub type SceneSlotEnableWire = Vec<Vec<(usize, Vec<u64>)>>;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SceneSwapState {
     pub slot_enable: BTreeMap<usize, SlotEnable>,
+    /// The kits switched off (eseq-ka5t.13, `super::kit_parking`).
+    pub parked_kits: super::ParkedKits,
 }
 
 impl SceneSwapState {
     pub fn of(scene: &Scene) -> Self {
         Self {
             slot_enable: scene.slot_enable.clone(),
+            parked_kits: scene.parked_kits.clone(),
         }
     }
 
     pub fn apply_to(self, scene: &mut Scene) {
         scene.slot_enable = self.slot_enable;
+        scene.parked_kits = self.parked_kits;
     }
 }
 
@@ -627,16 +631,18 @@ impl SequencerState {
         self.pattern.scenes.revision()
     }
 
-    /// The project process chain and every track's slot enables of the
-    /// playing scene, under one scenes lock (scheduler capture; read before
-    /// the rack lock: scene launches lock scenes then racks).
+    /// The project process chain, every track's slot enables and the kits
+    /// switched off (eseq-ka5t.13) of the playing scene, under one scenes
+    /// lock (scheduler capture; read before the rack lock: scene launches
+    /// lock scenes then racks).
     pub(crate) fn capture_scene_track_inputs(
         &self,
-    ) -> (crate::process::TrackProcessChain, Vec<Option<SlotEnable>>) {
+    ) -> (crate::process::TrackProcessChain, Vec<Option<SlotEnable>>, Vec<u64>) {
         let scenes = self.pattern.scenes.lock().unwrap();
         (
             scenes.current_project_process_chain(),
             scenes.current_scene_slot_enables(),
+            scenes.current_parked_kits(),
         )
     }
 

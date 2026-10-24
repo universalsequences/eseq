@@ -116,7 +116,12 @@ pub use crate::groove::{
 //       fills shorter racks with disabled copies, and writes every scene's
 //       enabled set from the flags its pattern stored, so every scene plays
 //       what it played (`migrate_legacy_rack_slot_scene_state`).
-const PROJECT_FILE_VERSION: u32 = 18;
+//  19 - kits on/off per bank (docs/rig-spec.md 6, eseq-ka5t.13): each scene
+//       records the kits (drum rack group ids) it switches off
+//       (`ProjectFile::scene_parked_kits`). Older files have none and load
+//       with every kit on, which is what they played. Older builds would
+//       drop the field and play parked kits, so they must refuse the file.
+const PROJECT_FILE_VERSION: u32 = 19;
 
 /// The first file version whose rack slots and scenes carry the scene-owned
 /// swap state (version history entry 18).
@@ -444,6 +449,11 @@ pub struct ProjectFile {
     /// scene. Absent in files below v18, which migrate on load.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scene_slot_enable: Vec<Vec<(usize, Vec<u64>)>>,
+    /// Per scene, `Scene::parked_kits` (docs/rig-spec.md 3.2, 6): the group
+    /// ids of the kits switched off there. Outer index = scene; empty when
+    /// no scene parks a kit, and absent in files below v19 (nothing parked).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scene_parked_kits: Vec<Vec<u64>>,
     /// Host-owned instances of package kinds (instance-kinds spec §5).
     /// Absent in older files, which load with none.
     #[serde(default, skip_serializing_if = "ProjectInstances::is_unused")]
@@ -646,6 +656,8 @@ struct ProjectFileWire {
     #[serde(default)]
     scene_slot_enable: Vec<Vec<(usize, Vec<u64>)>>,
     #[serde(default)]
+    scene_parked_kits: Vec<Vec<u64>>,
+    #[serde(default)]
     instances: ProjectInstances,
     #[serde(default)]
     grooves: Vec<ProjectGroove>,
@@ -722,6 +734,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             track_lane_rosters: wire.track_lane_rosters,
             scene_rack_clips: wire.scene_rack_clips,
             scene_slot_enable: wire.scene_slot_enable,
+            scene_parked_kits: wire.scene_parked_kits,
             instances: wire.instances,
             grooves: wire.grooves,
         };
@@ -4961,6 +4974,7 @@ mod tests {
         ProjectFile {
             scene_rack_clips: Vec::new(),
             scene_slot_enable: Vec::new(),
+            scene_parked_kits: Vec::new(),
             grooves: Vec::new(),
             instances: ProjectInstances::default(),
             version: project_file_version(),

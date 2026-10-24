@@ -43,6 +43,12 @@ impl AuditionMailbox {
         *pending = Some((generation, score));
     }
 
+    /// The loop `start` queued and the scheduler has not taken yet.
+    #[cfg(test)]
+    pub(crate) fn pending_snapshot(&self) -> Option<SequencerSnapshot> {
+        self.pending.lock().unwrap().as_ref().map(|(_, score)| score.snapshot.clone())
+    }
+
     pub fn stop(&self) {
         let mut pending = self.pending.lock().unwrap();
         self.active.store(0, Ordering::Release);

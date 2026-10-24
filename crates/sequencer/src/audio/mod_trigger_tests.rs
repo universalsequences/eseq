@@ -96,7 +96,7 @@ impl Rig {
             engine.buses.clone(), engine.master_recorder.clone(), tx,
         );
         let manifest = crate::lisp_host::DGenManifest {
-            effect_latency_samples: None, dylib_path: Default::default(), asset_base: None,
+            effect_latency_samples: None, tail_sleep: false, dylib_path: Default::default(), asset_base: None,
             version: 1, process_abi: String::new(), total_memory_slots: 1,
             params: vec![], groups: vec![], envelopes: vec![], inputs: vec![],
             modulators: vec![], mod_outputs: vec![], amp_output_channel: None, probes: vec![], mod_destinations: vec![],

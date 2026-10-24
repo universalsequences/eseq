@@ -142,7 +142,32 @@
 ;; is a pure lookups module over the group kinds — no view, no top-level
 ;; registrations — that answers nil when no rack is selected.
 
+(defwidget rack-kit-mixed-dot
+  :width 0.5 :height 0.5
+  :paint-margin 0.1
+  :shader
+  (sdf/fill (sdf/circle 0.8) (material :color :fg)))
+
+;; The kit's power toggle (docs/rig-spec.md §6): the instrument/effect enable
+;; dot, scoped to the viewed bank. A mixed bank (some scenes off) shows on
+;; with a small dot beside it; clicking turns the whole bank off. The hint
+;; after the name stands in for a tooltip ("Kit on in bank C").
+(def rack-kit-power-toggle (g kit-state)
+  (do
+    (h-stack :debug-name "rack-kit-power" :gap 0 :align :center
+      (box :width 1.55 :height 0.99 :v-align :center :h-align :center :padding 0
+        (fx-enabled-dot
+          :key (str "rack-kit-power-" g.gid)
+          :active (if (= kit-state :off) 0 1)
+          :on-click |x y r| (eseq.drum-rack-v2/toggle-kit-in-viewed-bank! g)))
+      (if (= kit-state :mixed)
+        (box :debug-name "rack-kit-power-mixed" :width 0.5 :height 0.99
+          :v-align :center :h-align :center :padding 0
+          (rack-kit-mixed-dot))
+        (box :width 0 :height 0)))))
+
 (def rack-selection-panel (g)
+  (let ((kit (eseq.drum-rack-v2/kit-viewed-header g)))
   (v-stack :padding 0.05 :gap 1
     (h-stack :gap 1 :align :start
       (box :debug-name "rack-fx-pads-panel"
@@ -159,9 +184,14 @@
             :width :fill :height 1 :padding 0 :v-align :center :h-align :start
             (h-stack :debug-name "rack-fx-header-row" :gap 0.6 :align :center :width :fill
               (pf/fx-panel-header-leading-spacer)
+              (rack-kit-power-toggle g (get kit :state))
               (label (substring g.name 0 12)
                 :v-align :center
                 :font-size 11 :color :white :bg :transparent)
+              (label (get kit :hint)
+                :debug-name "rack-kit-power-hint"
+                :v-align :center
+                :font-size 9 :color :dim :bg :transparent)
               (box :flex 1 :height 0.15)
               (box :debug-name "rack-kit-save-button" :padding 0 :width 2 :align :center
                 (v-stack
@@ -185,7 +215,7 @@
       ;; same way an ordinary bus selection edits it.
       (each (selected-bus-effects) |d slot-idx|
         (bus-effect-panel d))
-      (drop-placeholder-panel))))
+      (drop-placeholder-panel)))))
 
 (def bus-selection-panel ()
   (v-stack :padding 0.05 :gap 1

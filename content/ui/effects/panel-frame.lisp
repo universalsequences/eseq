@@ -85,11 +85,16 @@
 
 (def rack-copy-all-scenes-label "Copy rack (all slots) to all scenes")
 
-(def rack-header-actions-menu (inst)
+;; The rack header's ••• menu: the rack-wide copy, then the caller's
+;; `extra` items, each handled by (on-extra item).
+(def rack-header-actions-menu (inst &optional (extra '()) (on-extra nil))
   (header-actions-menu
     (str "rack-header-actions-" (get inst :track))
-    (list rack-copy-all-scenes-label)
-    (lambda (item) (rack-copy-values-to-all-scenes inst))))
+    (cons rack-copy-all-scenes-label extra)
+    (lambda (item)
+      (if (= item rack-copy-all-scenes-label)
+        (rack-copy-values-to-all-scenes inst)
+        (if on-extra (on-extra item) nil)))))
 
 (def header-actions-menu (debug-name options action)
   (menu-button

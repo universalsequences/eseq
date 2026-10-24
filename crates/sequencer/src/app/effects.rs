@@ -13,6 +13,7 @@ use crate::sequencer::{BusPatternSnapshot, CustomInstrumentRunMode, InstrumentTy
 use eseqlisp::vm::{format_lisp_source, Value as LispValue};
 use eseqlisp::Editor as LispEditor;
 
+use super::graph::instrument_display_name;
 use super::fx_chain::{
     push_fx_param, rewire_fx_chain, FxChainLocator, FxGraphEditBatch, FxLeaseSlotRemoval,
     RetainedEffectSource,
@@ -21,6 +22,7 @@ use super::{
     App, CompileTarget, EffectTab, HookCallback, HookUnit, PendingCompile, Region,
 };
 
+#[derive(Clone)]
 pub(crate) struct PreparedRackInstrument {
     pub name: String,
     pub engine_id: usize,
@@ -102,16 +104,6 @@ fn sidechain_active_state_param(effect_name: &str, input_channel: usize) -> Opti
         }
         _ => None,
     }
-}
-
-fn instrument_display_name(name: &str) -> String {
-    // A pinned release id (`factory:Synths/Digi Syn@2`) displays without its pin.
-    let (name, _) = crate::app_paths::ContentTier::split_release(name);
-    std::path::Path::new(name)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(name)
-        .to_string()
 }
 
 impl App {
@@ -632,40 +624,26 @@ impl App {
         })
     }
 
+    /// Add saved instrument `name` as a slot of rack `track`, enabled in
+    /// every scene (programmatic callers; the UI's drop is bank-scoped:
+    /// `add_saved_instrument_slot_to_rack_in_bank_sync`).
     pub fn add_saved_instrument_slot_to_rack_sync(
         &mut self,
         track: usize,
         name: &str,
     ) -> Result<usize, String> {
-        self.add_saved_instrument_slot_to_rack_scoped_sync(track, name, false)
-    }
-
-    /// `only_here`: the new slot is switched off in every pattern but the
-    /// current one, inside the same undo entry (docs/rig-spec.md §4).
-    pub fn add_saved_instrument_slot_to_rack_scoped_sync(
-        &mut self,
-        track: usize,
-        name: &str,
-        only_here: bool,
-    ) -> Result<usize, String> {
         let prepared = self.prepare_saved_instrument_for_rack_slot_sync(name)?;
         let lib_ptr: *const lisp_host::LoadedDGenLib =
             &self.editor.instrument_libs[prepared.lib_index];
-        self.apply_recorded_rack_slot_add(track, "Add rack instrument", |app| {
-            let slot_idx = unsafe {
-                app.graph_controller().add_custom_slot_to_rack(
-                    track,
-                    &prepared.name,
-                    prepared.engine_id,
-                    &prepared.manifest,
-                    &*lib_ptr,
-                    prepared.run_mode,
-                )
-            }?;
-            if only_here {
-                app.state.park_rack_slot_outside_current_pattern(track, slot_idx);
-            }
-            Ok(slot_idx)
+        self.apply_recorded_rack_slot_add(track, "Add rack instrument", |app| unsafe {
+            app.graph_controller().add_custom_slot_to_rack(
+                track,
+                &prepared.name,
+                prepared.engine_id,
+                &prepared.manifest,
+                &*lib_ptr,
+                prepared.run_mode,
+            )
         })
     }
 
@@ -2516,6 +2494,40 @@ impl App {
             .map(|slot| slot.node_id as i32)
             .ok_or_else(|| "Bus effect slot not found".to_string())?;
         self.apply_restored_filter_table_to_node(node_id, reference, table)
+    }
+
+    /// Load `values`' prepared impulse response and filter table (a
+    /// Convolution Reverb's or Filter Table's host-managed data, decoded once
+    /// and shared by `Arc`) into the live node of rack slot `rack_slot`'s
+    /// effect `effect_slot`. A no-op for any other effect. Shared by device
+    /// history replay and the "replace for this bank" effect copy
+    /// (eseq-ka5t.9), so a copied reverb is never left with nothing loaded.
+    pub(crate) fn restore_prepared_rack_effect_data(
+        &self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        values: &crate::effects::EffectSlotValuesSnapshot,
+    ) -> Result<(), String> {
+        if let (Some(reference), Some(ir)) = (&values.ir, &values.prepared_ir) {
+            self.restore_prepared_rack_effect_ir(
+                track,
+                rack_slot,
+                effect_slot,
+                reference,
+                ir.clone(),
+            )?;
+        }
+        if let (Some(reference), Some(table)) = (&values.table, &values.prepared_table) {
+            self.restore_prepared_rack_filter_table(
+                track,
+                rack_slot,
+                effect_slot,
+                reference,
+                table.clone(),
+            )?;
+        }
+        Ok(())
     }
 
     pub(crate) fn restore_prepared_rack_filter_table(
@@ -5507,7 +5519,7 @@ mod tests {
 
     fn test_instrument_manifest() -> lisp_host::DGenManifest {
         lisp_host::DGenManifest {
-            effect_latency_samples: None,
+            effect_latency_samples: None, tail_sleep: false,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 1,

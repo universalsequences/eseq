@@ -721,7 +721,7 @@
 
     fn test_instrument_manifest() -> DGenManifest {
         DGenManifest {
-            effect_latency_samples: None,
+            effect_latency_samples: None, tail_sleep: false,
             dylib_path: PathBuf::new(),
             asset_base: None,
             version: 1,

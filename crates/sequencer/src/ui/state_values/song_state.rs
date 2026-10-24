@@ -490,17 +490,8 @@ pub(crate) fn song_take_lane_states(app: &app::App) -> Vec<u8> {
     states
 }
 
-pub(crate) fn scene_bank_auto_label(mut index: usize) -> String {
-    let mut reversed = Vec::new();
-    loop {
-        reversed.push(b'A' + (index % 26) as u8);
-        if index < 26 {
-            break;
-        }
-        index = index / 26 - 1;
-    }
-    reversed.reverse();
-    String::from_utf8(reversed).expect("scene bank labels contain only ASCII letters")
+pub(crate) fn scene_bank_auto_label(index: usize) -> String {
+    sequencer::sequencer::scene_bank_auto_label(index)
 }
 
 /// A scene bank's display label: its auto label (`A`, `B`, …), with its

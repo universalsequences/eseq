@@ -1914,6 +1914,9 @@ impl App {
             macro_mappings: self
                 .macro_engine
                 .capture_instrument_mappings_for_track(track),
+            scene_slot_enable: self
+                .state
+                .with_project_scenes(|scenes| scenes.track_slot_enable(track)),
         })
     }
 
@@ -2027,6 +2030,23 @@ impl App {
         &mut self,
         track: usize,
     ) -> Result<(), String> {
+        self.group_track_to_instrument_rack_then_recorded(
+            track,
+            "Group track to Instrument Rack",
+            |_| Ok(()),
+        )
+    }
+
+    /// Group `track` into an Instrument Rack, then run `then` on the rack,
+    /// as ONE undo step (eseq-ka5t.9: a drop on a plain track another bank
+    /// plays converts it and swaps for the bank in one gesture). A failure
+    /// anywhere restores the plain track.
+    pub fn group_track_to_instrument_rack_then_recorded<T>(
+        &mut self,
+        track: usize,
+        label: &'static str,
+        then: impl FnOnce(&mut App) -> Result<T, String>,
+    ) -> Result<T, String> {
         finish_active_gesture(self);
         let track_id = self
             .track_registry
@@ -2035,8 +2055,13 @@ impl App {
         let before_instrument = self.capture_track_instrument_state(track)?;
         let before_effects = self.capture_track_effect_chain_state(track, None)?;
 
-        if let Err(error) = self.graph_controller().group_track_to_instrument_rack(track) {
-            return match self.restore_grouped_track_before_state(
+        let grouped = self
+            .graph_controller()
+            .group_track_to_instrument_rack(track)
+            .and_then(|()| then(self));
+        let result = match grouped {
+            Ok(result) => result,
+            Err(error) => return match self.restore_grouped_track_before_state(
                 track,
                 &before_instrument,
                 &before_effects,
@@ -2045,8 +2070,8 @@ impl App {
                 Err(rollback_error) => Err(format!(
                     "Grouping the track failed ({error}); restoring the original track also failed ({rollback_error})"
                 )),
-            };
-        }
+            },
+        };
 
         let after_instrument = match self.capture_track_instrument_state(track) {
             Ok(state) => state,
@@ -2100,7 +2125,7 @@ impl App {
             + effect_patch.retained_bytes()
             + instrument_patch.retained_bytes();
         self.history.commit(
-            "Group track to Instrument Rack",
+            label,
             None,
             EditPatch::Composite(vec![
                 EditPatch::EffectChain(effect_patch),
@@ -2108,7 +2133,7 @@ impl App {
             ]),
             retained_bytes,
         );
-        Ok(())
+        Ok(result)
     }
 
     /// Record a scene-slot write that the UI VM has already applied. Repeated
@@ -3957,6 +3982,19 @@ impl App {
     }
 
     fn restore_track_instrument_state(
+        &mut self,
+        track: usize,
+        target: &TrackInstrumentState,
+    ) -> Result<(), String> {
+        self.restore_track_instrument_container(track, target)?;
+        // Who plays which slot, as captured (eseq-ka5t.9): the container
+        // restore's own funnels write entries for a rebuilt rack.
+        self.state.restore_track_slot_enable(track, &target.scene_slot_enable);
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
+    fn restore_track_instrument_container(
         &mut self,
         track: usize,
         target: &TrackInstrumentState,
@@ -10620,28 +10658,13 @@ fn push_live_device_values(
                 app.push_rack_slot_instrument_defaults_for_track(target.track);
                 for (effect_slot, effect) in values.effect_slots.iter().enumerate() {
                     app.push_rack_slot_effect_defaults(target.track, slot_idx, effect_slot);
-                    if let (Some(reference), Some(ir)) = (&effect.ir, &effect.prepared_ir) {
-                        app.restore_prepared_rack_effect_ir(
-                            target.track,
-                            slot_idx,
-                            effect_slot,
-                            reference,
-                            ir.clone(),
-                        )
-                        .map_err(EditError::ReplayFailed)?;
-                    }
-                    if let (Some(reference), Some(table)) =
-                        (&effect.table, &effect.prepared_table)
-                    {
-                        app.restore_prepared_rack_filter_table(
-                            target.track,
-                            slot_idx,
-                            effect_slot,
-                            reference,
-                            table.clone(),
-                        )
-                        .map_err(EditError::ReplayFailed)?;
-                    }
+                    app.restore_prepared_rack_effect_data(
+                        target.track,
+                        slot_idx,
+                        effect_slot,
+                        effect,
+                    )
+                    .map_err(EditError::ReplayFailed)?;
                 }
             }
         }

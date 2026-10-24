@@ -802,6 +802,11 @@ pub struct TrackInstrumentState {
     pub display_name_user_authored: bool,
     pub patterns: TrackInstrumentPatternStateSnapshot,
     pub macro_mappings: TrackInstrumentMacroMappings,
+    /// Every scene's `slot_enable` entry for the track (docs/rig-spec.md
+    /// §3.2): which rack slots each scene plays is part of the container, so
+    /// one undo of a bank-scoped swap restores the devices and who plays
+    /// them together (eseq-ka5t.9).
+    pub scene_slot_enable: Vec<(crate::sequencer::SceneId, crate::sequencer::SlotEnable)>,
 }
 
 #[derive(Clone, Debug)]

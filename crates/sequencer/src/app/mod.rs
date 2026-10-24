@@ -55,10 +55,15 @@ mod project_save;
 pub use project_save::ProjectSaveOutcome;
 mod break_kits;
 mod rack_clips;
+mod kit_parking;
 #[cfg(test)]
 mod launch_benchmark;
 pub mod rack_grooves;
 mod rack_sequencers;
+mod rack_swap;
+#[cfg(test)]
+pub(crate) mod test_rig;
+pub use rack_swap::{SwapKind, SwapOutcome, SwapScope};
 mod bus_outputs;
 pub mod pending_capture;
 pub mod retrospective;
@@ -450,7 +455,7 @@ mod engine_registry_tests {
 
     fn manifest() -> DGenManifest {
         DGenManifest {
-            effect_latency_samples: None,
+            effect_latency_samples: None, tail_sleep: false,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 2,
@@ -1872,29 +1877,51 @@ impl DeviceIdentityRegistry {
         }
     }
 
-    /// Forget `track`'s rack slot `slot` (a deleted slot) and its effects'
-    /// identities; the slots after it keep theirs, each one position down,
-    /// so no identity passes to another slot.
-    pub fn remove_rack_slot(&mut self, track: crate::sequencer::TrackId, slot: usize) {
+    /// Re-key `track`'s rack slot identities by a positional edit: each
+    /// keeps its identity at its new position, so no identity passes to
+    /// another slot. Returns the identity of a deleted slot.
+    fn shift_rack_slots(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        shift: crate::process::RackSlotShift,
+    ) -> Option<crate::sequencer::RackSlotId> {
         self.generation += 1;
-        let shifted = self
+        let bound = self
             .rack_slots
             .iter()
-            .filter(|((owner, at), _)| *owner == track && *at >= slot)
+            .filter(|((owner, _), _)| *owner == track)
             .map(|((_, at), id)| (*at, *id))
             .collect::<Vec<_>>();
-        for (at, id) in &shifted {
+        for (at, id) in &bound {
             self.rack_slots.remove(&(track, *at));
             self.rack_slot_locations.remove(id);
         }
-        for (at, id) in shifted {
-            if at == slot {
-                self.forget_rack_slot_effects(id);
-                continue;
+        let mut removed = None;
+        for (at, id) in bound {
+            match shift.apply(at) {
+                Some(moved) => {
+                    self.rack_slots.insert((track, moved), id);
+                    self.rack_slot_locations.insert(id, (track, moved));
+                }
+                None => removed = Some(id),
             }
-            self.rack_slots.insert((track, at - 1), id);
-            self.rack_slot_locations.insert(id, (track, at - 1));
         }
+        removed
+    }
+
+    /// Forget `track`'s rack slot `slot` (a deleted slot) and its effects'
+    /// identities; the slots after it keep theirs, each one position down.
+    pub fn remove_rack_slot(&mut self, track: crate::sequencer::TrackId, slot: usize) {
+        if let Some(id) = self.shift_rack_slots(track, crate::process::RackSlotShift::Removed(slot)) {
+            self.forget_rack_slot_effects(id);
+        }
+    }
+
+    /// A slot was inserted at `slot` on `track` (eseq-ka5t.9): the slots at
+    /// and after it keep their identities one position down, and `slot`
+    /// itself has none until first asked for.
+    pub fn insert_rack_slot(&mut self, track: crate::sequencer::TrackId, slot: usize) {
+        self.shift_rack_slots(track, crate::process::RackSlotShift::Inserted(slot));
     }
 
     pub(crate) fn clear_track(&mut self, track: crate::sequencer::TrackId) {

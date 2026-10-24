@@ -559,6 +559,7 @@ mod focus_steps;
 mod generator;
 mod graph;
 mod graph_demos_view;
+mod kit_parking_view;
 mod lanes;
 mod mixer;
 mod mixer_view;

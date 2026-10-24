@@ -837,7 +837,7 @@ impl MacroEngine {
         for macro_definition in &mut self.macros {
             macro_definition.mappings.retain(|mapping| {
                 let should_remove = mapping.scope == ParamScope::Track(track)
-                    && matches!(&mapping.target, ParamTarget::InstrumentParam { .. });
+                    && is_instrument_container_target(&mapping.target);
                 removed += usize::from(should_remove);
                 !should_remove
             });
@@ -863,10 +863,7 @@ impl MacroEngine {
                         .enumerate()
                         .filter(|(_, mapping)| {
                             mapping.scope == ParamScope::Track(track)
-                                && matches!(
-                                    mapping.target,
-                                    ParamTarget::InstrumentParam { .. }
-                                )
+                                && is_instrument_container_target(&mapping.target)
                         })
                         .map(|(index, mapping)| (index, mapping.clone()))
                         .collect::<Vec<_>>();
@@ -945,6 +942,37 @@ impl MacroEngine {
         }
         self.rebuild_ownership();
         Ok(())
+    }
+
+    /// `track`'s Instrument Rack slots moved by `shift` (eseq-ka5t.9):
+    /// mappings onto a slot follow their device, and mappings onto a deleted
+    /// slot are dropped. Resolved identities are re-derived by the caller's
+    /// `revalidate_mappings` (the slot's position is part of the key).
+    pub fn remap_rack_slot_mappings(&mut self, track: usize, shift: crate::process::RackSlotShift) {
+        use crate::process::RackSlotRemap;
+        let mut changed = false;
+        for macro_definition in &mut self.macros {
+            macro_definition.mappings.retain_mut(|mapping| {
+                if mapping.scope != ParamScope::Track(track) {
+                    return true;
+                }
+                match mapping.target.shift_rack_slot(shift) {
+                    RackSlotRemap::Unchanged => true,
+                    RackSlotRemap::Moved(_) => {
+                        mapping.resolved_key = None;
+                        changed = true;
+                        true
+                    }
+                    RackSlotRemap::Removed => {
+                        changed = true;
+                        false
+                    }
+                }
+            });
+        }
+        if changed {
+            self.rebuild_ownership();
+        }
     }
 
     pub fn remap_effect_mappings_for_track(
@@ -1480,6 +1508,18 @@ pub fn lerp_curved(range_min: f32, range_max: f32, value: f32, curve: MacroCurve
         }
     };
     range_min + (range_max - range_min) * curved
+}
+
+/// The targets a track's instrument container owns: its instrument's
+/// params and, on an Instrument Rack, its slots' (instrument history
+/// captures and restores them together, eseq-ka5t.9).
+fn is_instrument_container_target(target: &ParamTarget) -> bool {
+    matches!(
+        target,
+        ParamTarget::InstrumentParam { .. }
+            | ParamTarget::RackSlotParam { .. }
+            | ParamTarget::RackSlotInstrumentParam { .. }
+    )
 }
 
 #[cfg(test)]

@@ -6,6 +6,9 @@ pub(super) const COMMANDS: &[&str] = &[
     "add-rack-sample-slot",
     "replace-rack-slot-sample",
     "delete-rack-slot",
+    "use-rack-slot-only-in-bank",
+    "purge-unused-rack-slots",
+    "confirm-purge-unused-rack-slots",
     "add-rack-slot-effect",
     "insert-rack-slot-effect-before-slot",
     "delete-rack-slot-effect",
@@ -320,6 +323,58 @@ pub(super) fn rack_slot_plock_applied(
     }
 }
 
+/// A swap command's scope: `:all-banks true` (the slot menu's "Replace in
+/// all banks"), else the viewed bank (`:bank-id`, else the playing scene's),
+/// docs/rig-spec.md §4.
+pub(super) fn swap_scope(payload: &Value) -> app::SwapScope {
+    if extract_bool_from_payload(payload, "all-banks") {
+        app::SwapScope::AllBanks
+    } else {
+        app::SwapScope::Bank(super::scene_banks::scene_bank_id(payload))
+    }
+}
+
+/// "Kept Piano for banks A, B": the banks that kept the old device when a
+/// swap inserted a new slot (`None`: nothing was kept).
+pub(super) fn kept_banks_notice(app: &app::App, outcome: &app::SwapOutcome) -> Option<String> {
+    if outcome.kept_banks.is_empty() {
+        return None;
+    }
+    let banks = app.state.scene_banks();
+    let labels: Vec<String> = outcome
+        .kept_banks
+        .iter()
+        .filter_map(|id| banks.iter().position(|bank| bank.id == *id))
+        .map(crate::state_values::scene_bank_auto_label)
+        .collect();
+    let name = if outcome.old_name.is_empty() {
+        "the old device"
+    } else {
+        outcome.old_name.as_str()
+    };
+    let noun = if labels.len() == 1 { "bank" } else { "banks" };
+    Some(format!("Kept {name} for {noun} {}", labels.join(", ")))
+}
+
+pub(super) fn show_kept_banks_notice(
+    app: &app::App,
+    editor: &mut Editor,
+    outcome: &app::SwapOutcome,
+) {
+    if let Some(notice) = kept_banks_notice(app, outcome) {
+        editor.show_toast(notice, eseqlisp::ToastKind::Success);
+    }
+}
+
+/// The status line and notice after a slot swap to `what`.
+fn report_swap(app: &app::App, editor: &mut Editor, outcome: &app::SwapOutcome, what: &str) {
+    editor.handle_host_event(HostEvent::Status(format!(
+        "Replaced rack layer {} with {what}",
+        outcome.slot + 1
+    )));
+    show_kept_banks_notice(app, editor, outcome);
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle(
     name: &str,
@@ -353,15 +408,14 @@ pub(super) fn handle(
                         );
                     }
                     let path = Path::new(&path_str);
-                    let only_here = extract_bool_from_payload(&payload, "only-here");
-                    match app.apply_recorded_rack_slot_add(track, "Add rack sample", |app| {
-                        let slot_idx =
-                            app.graph_controller().add_sampler_slot_to_rack(track, path)?;
-                        if only_here {
-                            app.state.park_rack_slot_outside_current_pattern(track, slot_idx);
-                        }
-                        Ok(slot_idx)
-                    }) {
+                    // Always bank-scoped (docs/rig-spec.md §4 "add"): the new
+                    // slot plays in the viewed bank (`:bank-id`, else the
+                    // playing scene's) and is disabled in every other scene.
+                    // `:only-here` (the pre-rev-3 per-pattern park) is still
+                    // accepted from older callers (a local proto-rig package
+                    // sends it) and ignored.
+                    let bank = super::scene_banks::scene_bank_id(&payload);
+                    match app.add_rack_sample_slot_in_bank_recorded(track, path, bank) {
                         Ok(slot_idx) => {
                             sync_after_instrument_track_apply(
                                 &mut app,
@@ -416,17 +470,12 @@ pub(super) fn handle(
                             &path_str,
                         );
                     }
-                    match app.apply_recorded_rack_slot_source_replacement(
-                        track,
-                        slot,
-                        "Replace rack sample",
-                        |app| app.graph_controller().replace_rack_slot_with_sampler(
-                            track,
-                            slot,
-                            Path::new(&path_str),
-                        ),
-                    ) {
-                        Ok(()) => {
+                    // A sample onto a sampler slot is content (that pattern's
+                    // sample); onto a synth slot it is a new device, replaced
+                    // for the viewed bank (docs/rig-spec.md §4).
+                    let scope = swap_scope(&payload);
+                    match app.swap_rack_slot_to_sample(track, slot, Path::new(&path_str), scope) {
+                        Ok(outcome) => {
                             sync_after_instrument_track_apply(
                                 &mut app,
                                 &mut editor,
@@ -440,10 +489,8 @@ pub(super) fn handle(
                                 &ui_epoch,
                                 lg_raw,
                             );
-                            editor.handle_host_event(HostEvent::Status(format!(
-                                "Replaced rack layer {} with sample",
-                                slot + 1
-                            )));
+                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            report_swap(&app, &mut editor, &outcome, "sample");
                         }
                         Err(error) => {
                             if preserve_browser_context {
@@ -464,6 +511,89 @@ pub(super) fn handle(
                 )),
             }
         }
+        "use-rack-slot-only-in-bank" => {
+            // "Use only this in bank X" (docs/rig-spec.md §4 recall).
+            let track = extract_usize_from_payload(&payload, "track")
+                .or_else(|| current_track_for_app(&mut app, &current_track));
+            let slot = extract_usize_from_payload(&payload, "slot");
+            let bank = super::scene_banks::scene_bank_id(&payload);
+            match (track, slot) {
+                (Some(track), Some(slot)) => {
+                    match app.use_only_rack_slot_in_bank_recorded(track, slot, bank) {
+                        Ok(_) => {
+                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            refresh_instrument_panel_reactive(&ui_epoch);
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Rack layer {} is the only one playing in this bank",
+                                slot + 1
+                            )));
+                        }
+                        Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                            "Could not switch the rack layers: {error}"
+                        ))),
+                    }
+                }
+                _ => editor.handle_host_event(HostEvent::Status(
+                    "Use-only is missing a track or layer".to_string(),
+                )),
+            }
+        }
+        "confirm-purge-unused-rack-slots" => {
+            // The confirmation names exactly the slots the purge deletes
+            // (the host's list), docs/rig-spec.md §4 purge.
+            let track = extract_usize_from_payload(&payload, "track")
+                .or_else(|| current_track_for_app(&mut app, &current_track));
+            let Some(track) = track else {
+                editor.handle_host_event(HostEvent::Status("Purge is missing a track".to_string()));
+                return;
+            };
+            let unused = app.unused_rack_slot_names(track);
+            if unused.is_empty() {
+                editor.handle_host_event(HostEvent::Status("No unused rack layers".to_string()));
+                return;
+            }
+            let names = unused
+                .iter()
+                .map(|(slot, name)| format!("{} {name}", slot + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let message = escape_lisp_string(&format!(
+                "Delete unused layers (no scene plays them): {names}?"
+            ));
+            if let Err(error) = editor.runtime_mut().eval_str(&format!(
+                "(eseq.file-dialogs/open-confirm \"{message}\" \
+                 (lambda () (host-command \"purge-unused-rack-slots\" (dict :track {track}))))"
+            )) {
+                editor.handle_host_event(HostEvent::Status(format!(
+                    "Could not ask to purge: {error:?}"
+                )));
+            }
+        }
+        "purge-unused-rack-slots" => {
+            // Deletes the slots no scene enables (docs/rig-spec.md §4
+            // purge); the panel confirms first, naming them.
+            let track = extract_usize_from_payload(&payload, "track")
+                .or_else(|| current_track_for_app(&mut app, &current_track));
+            match track {
+                Some(track) => match app.purge_unused_rack_slots_recorded(track) {
+                    Ok(purged) => {
+                        refresh_instrument_panel_reactive(&ui_epoch);
+                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                        editor.handle_host_event(HostEvent::Status(match purged.len() {
+                            0 => "No unused rack layers".to_string(),
+                            1 => "Deleted 1 unused rack layer".to_string(),
+                            n => format!("Deleted {n} unused rack layers"),
+                        }));
+                    }
+                    Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                        "Could not purge rack layers: {error}"
+                    ))),
+                },
+                None => editor.handle_host_event(HostEvent::Status(
+                    "Purge is missing a track".to_string(),
+                )),
+            }
+        }
         "delete-rack-slot" => {
             let track = extract_usize_from_payload(&payload, "track")
                 .or_else(|| current_track_for_app(&mut app, &current_track));
@@ -473,16 +603,10 @@ pub(super) fn handle(
                     match app.apply_recorded_instrument_binding_mutation(
                         track,
                         "Delete rack layer",
-                        |app| {
-                            app.graph_controller().delete_rack_slot(track, slot_idx)?;
-                            // The slots after it keep their identities (the
-                            // after-state captures them), so a held device
-                            // handle never passes to the next slot.
-                            if let Some(track_id) = app.track_registry.id_at(track) {
-                                app.device_registry.remove_rack_slot(track_id, slot_idx);
-                            }
-                            Ok(())
-                        },
+                        // The slots after it keep their identities, process
+                        // targets and macro mappings, so nothing that named
+                        // a later slot passes to its neighbour.
+                        |app| app.delete_rack_slot_with_identity(track, slot_idx),
                     ) {
                         Ok(()) => {
                             refresh_instrument_panel_reactive(&ui_epoch);
@@ -1048,9 +1172,10 @@ pub(super) fn handle(
                 .filter(|preset| !preset.is_empty());
             match (track, name) {
                 (Some(track), Some(name)) => {
-                    let only_here = extract_bool_from_payload(&payload, "only-here");
-                    match app.add_saved_instrument_slot_to_rack_scoped_sync(track, &name, only_here)
-                    {
+                    // Bank-scoped like `add-rack-sample-slot`; `:only-here`
+                    // is accepted and ignored (see there).
+                    let bank = super::scene_banks::scene_bank_id(&payload);
+                    match app.add_saved_instrument_slot_to_rack_in_bank_sync(track, &name, bank) {
                         Ok(slot_idx) => {
                             let preset_error = preset.as_deref().and_then(|preset| {
                                 load_instrument_preset_into_rack_slot(
@@ -1108,22 +1233,27 @@ pub(super) fn handle(
                     // A preset of the instrument the layer already runs only
                     // switches the preset; anything else replaces the layer
                     // first and then loads the preset onto it.
+                    // Replaced for the viewed bank (docs/rig-spec.md §4): the
+                    // new device may land in a slot inserted after this one.
+                    let scope = swap_scope(&payload);
                     let replaced = if preset.is_some()
                         && rack_slot_runs_instrument(&app, track, slot, &name)
                     {
-                        Ok(false)
+                        Ok(None)
                     } else {
-                        app.replace_rack_slot_with_saved_instrument_sync(track, slot, &name)
-                            .map(|()| true)
+                        app.swap_rack_slot_to_saved_instrument(track, slot, &name, scope)
+                            .map(Some)
                     };
                     match replaced {
-                        Ok(replaced) => {
+                        Ok(outcome) => {
+                            let target_slot = outcome.as_ref().map_or(slot, |outcome| outcome.slot);
                             let preset_error = preset.as_deref().and_then(|preset| {
                                 load_instrument_preset_into_rack_slot(
-                                    &mut app, track, slot, &name, preset,
+                                    &mut app, track, target_slot, &name, preset,
                                 )
                                 .err()
                             });
+                            let replaced = outcome.is_some();
                             sync_after_instrument_track_apply(
                                 &mut app,
                                 &mut editor,
@@ -1144,9 +1274,17 @@ pub(super) fn handle(
                                         "Loaded preset '{preset}' on rack layer {}",
                                         slot + 1
                                     ),
-                                    _ => format!("Replaced rack layer {} with {}", slot + 1, name),
+                                    _ => format!(
+                                        "Replaced rack layer {} with {}",
+                                        target_slot + 1,
+                                        name
+                                    ),
                                 },
                             ));
+                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            if let Some(outcome) = &outcome {
+                                show_kept_banks_notice(&app, &mut editor, outcome);
+                            }
                         }
                         Err(error) => editor.handle_host_event(HostEvent::Status(
                             format!("Error replacing rack instrument layer: {error}"),

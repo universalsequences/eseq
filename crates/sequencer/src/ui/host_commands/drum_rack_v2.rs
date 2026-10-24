@@ -19,6 +19,8 @@ pub(super) const COMMANDS: &[&str] = &[
     "save-rack-clip-as",
     "delete-rack-clip",
     "rename-rack-clips-in-order",
+    // Kits on/off per bank (docs/rig-spec.md §6).
+    "set-kit-parked",
 ];
 
 /// How long a pad-grid hit sounds before its note-off. The pad grid is a
@@ -331,6 +333,29 @@ pub(super) fn handle(
                 .collect(),
             );
             super::scenes::handle("switch-pattern", relaunch, app, editor, ctx);
+        }
+        // Switch a kit off (`:value` true) or on in every scene of the
+        // viewed bank (`:bank-id`, else the playing scene's), one undo step.
+        "set-kit-parked" => {
+            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
+            let Some(group_id) = group_id else {
+                editor.handle_host_event(HostEvent::Status(
+                    "set-kit-parked needs a group id".to_string(),
+                ));
+                return;
+            };
+            let parked = extract_bool_from_payload(&payload, "value");
+            let bank = super::scene_banks::scene_bank_id(&payload);
+            match app.set_kit_parked_in_bank_recorded(group_id, parked, bank) {
+                Ok(_) => {
+                    let rt = editor.runtime_mut();
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Could not switch the kit: {error}"
+                ))),
+            }
         }
         "save-rack-clip-as" => {
             let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);

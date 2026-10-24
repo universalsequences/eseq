@@ -2096,8 +2096,12 @@
         assert!(other.slots[0].sample_id.is_none());
     }
 
+    /// eseq-ka5t.9 replaces `:only-here`'s pattern park: the insert
+    /// primitive behind "replace for this bank" puts one new slot id at a
+    /// position in every pattern, plays nowhere until enabled, and shifts
+    /// the rack macro targets after it with their device.
     #[test]
-    fn parked_rack_slot_plays_only_in_the_current_pattern() {
+    fn inserted_rack_slot_is_one_id_in_every_pattern_and_plays_nowhere() {
         let state = make_state_with_tracks(1);
         state.replace_pattern_repository(
             vec![
@@ -2107,35 +2111,58 @@
             0,
         );
         state.restore_current_pattern_from_repository().unwrap();
-        state.set_rack_track_for_all_pattern_snapshots(0, sample_rack_track_snapshot());
-
-        state.append_rack_slot_for_all_pattern_snapshots(
-            0,
-            sample_sampler_rack_slot(123, "swap-in", 48_000, 88),
-        );
-        assert!(state.park_rack_slot_outside_current_pattern(0, 1));
-
-        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+        let mut rack = sample_rack_track_snapshot();
+        rack.slots.push(sample_sampler_rack_slot(123, "second", 48_000, 88));
+        rack.slots[0].gain = 0.4;
+        rack.macros[0].mappings.push(RackMacroMapping {
+            target: RackMacroTarget::SlotParam { slot: 1, param: "gain".to_string() },
+            range_min: 0.0,
+            range_max: 1.0,
+            curve: RackMacroCurve::Linear,
+        });
+        state.set_rack_track_for_all_pattern_snapshots(0, rack);
+        let before: Vec<u64> = state.pattern.rack_tracks.lock().unwrap()[0]
             .as_ref()
             .unwrap()
-            .clone();
-        assert!(live.slots[1].enabled);
+            .slots
+            .iter()
+            .map(|slot| slot.id)
+            .collect();
 
-        let repository = state.export_pattern_repository();
-        let other = repository[1].rack_tracks[0].as_ref().unwrap();
-        assert_eq!(other.slots.len(), 2, "slot lists stay aligned");
-        // eseq-ka5t.12: the park is scene state now (docs/rig-spec.md §3.2),
-        // so another scene sharing the pattern would not hear it either.
-        let (old_id, new_id) = (live.slots[0].id, live.slots[1].id);
-        assert_ne!(old_id, new_id);
+        let id = state
+            .insert_rack_slot_for_all_pattern_snapshots(
+                0,
+                1,
+                sample_sampler_rack_slot(124, "inserted", 48_000, 89),
+                Some(0),
+            )
+            .expect("inserts");
+
+        assert!(!before.contains(&id), "a fresh id");
+        let live = state.pattern.rack_tracks.lock().unwrap()[0].as_ref().unwrap().clone();
+        assert_eq!(
+            live.slots.iter().map(|slot| slot.id).collect::<Vec<_>>(),
+            vec![before[0], id, before[1]]
+        );
+        assert_eq!(live.slots[1].gain, 0.4, "the replaced slot's controls carry over");
+        assert_eq!(
+            live.macros[0].mappings[0].target,
+            RackMacroTarget::SlotParam { slot: 2, param: "gain".to_string() },
+            "the macro still drives the device it drove"
+        );
+        for snapshot in state.export_pattern_repository() {
+            let rack = snapshot.rack_tracks[0].as_ref().unwrap();
+            assert_eq!(rack.slots.iter().map(|slot| slot.id).collect::<Vec<_>>(), vec![before[0], id, before[1]]);
+            assert_eq!(rack.macros[0].mappings[0].target, live.macros[0].mappings[0].target);
+        }
         state.with_project_scenes(|scenes| {
-            let current = scenes.scene_slot_enable(0, 0).expect("current scene entry");
-            let other = scenes.scene_slot_enable(1, 0).expect("other scene entry");
-            assert!(current.contains(&new_id));
-            assert!(!other.contains(&new_id));
-            assert!(other.contains(&old_id), "only the new slot is parked");
+            for scene in 0..scenes.scenes.len() {
+                let entry = scenes.scene_slot_enable(scene, 0).expect("materialized entry");
+                assert!(!entry.contains(&id), "scene {scene} does not play the new slot yet");
+                assert!(entry.contains(&before[0]));
+            }
         });
-        assert_eq!(state.live_rack_slot_enabled(0, 1), Some(true));
+        assert_eq!(state.live_rack_slot_enabled(0, 1), Some(false));
     }
 
     #[test]

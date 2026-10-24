@@ -888,19 +888,10 @@ impl App {
             .state
             .live_rack_slot_id(track, slot_idx)
             .ok_or_else(|| format!("Track {} has no rack slot {}", track + 1, slot_idx + 1))?;
-        let (range, changes) = self.state.with_project_scenes(|scenes| {
-            let bank = match bank {
-                Some(bank) => bank,
-                None => scenes
-                    .scene_bank_containing(scenes.current_scene)
-                    .ok_or_else(|| "The playing scene belongs to no scene bank".to_string())?,
-            };
-            let range = scenes
-                .scene_bank_range(bank)
-                .ok_or_else(|| format!("Scene bank {} does not exist", bank.0))?;
-            let changes = scenes.rack_slot_enable_would_change(track, slot_id, value, range.clone());
-            Ok::<_, String>((range, changes))
-        })?;
+        let (_, range) = self.bank_scene_range(bank)?;
+        let changes = self.state.with_project_scenes(|scenes| {
+            scenes.rack_slot_enable_would_change(track, slot_id, value, range.clone())
+        });
         if !changes {
             return Ok(false);
         }

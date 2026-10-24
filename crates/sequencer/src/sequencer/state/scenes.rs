@@ -335,6 +335,10 @@ pub struct Scene {
     /// `enabled` flags; a track with no entry falls back to them. Remapped
     /// with `cells` when tracks are deleted or moved.
     pub slot_enable: std::collections::BTreeMap<usize, SlotEnable>,
+    /// The kits (drum rack group ids) switched off in this scene
+    /// (docs/rig-spec.md §3.2, §6). Independent of `rack_clips`: a kit plays
+    /// when the scene points at one of its clips and does not park it.
+    pub parked_kits: ParkedKits,
     /// Pattern-scoped portable values declared through `defscene`.
     pub scene_slots: SceneSlotStore,
     /// Project-level default process chain: composed ahead of every track's
@@ -421,6 +425,7 @@ impl ProjectScenes {
                 graph_overrides: snapshot.graph_overrides.clone(),
                 rack_clips: Vec::new(),
                 slot_enable: Default::default(),
+                parked_kits: Default::default(),
                 scene_slots: snapshot.scene_slots.clone(),
                 project_process_chain: {
                     let mut chain = snapshot.project_process_chain.clone();
@@ -449,6 +454,7 @@ impl ProjectScenes {
                 graph_overrides: Vec::new(),
                 rack_clips: Vec::new(),
                 slot_enable: Default::default(),
+                parked_kits: Default::default(),
                 scene_slots: SceneSlotStore::default(),
                 project_process_chain: crate::process::default_project_layer(),
             });
@@ -523,7 +529,7 @@ impl ProjectScenes {
     }
 
     /// Every bank with the scene indices it spans, in bank order.
-    fn scene_bank_ranges(&self) -> impl Iterator<Item = (SceneBankId, std::ops::Range<usize>)> + '_ {
+    pub(crate) fn scene_bank_ranges(&self) -> impl Iterator<Item = (SceneBankId, std::ops::Range<usize>)> + '_ {
         self.banks.iter().scan(0, |offset, bank| {
             let range = *offset..*offset + bank.len;
             *offset += bank.len;
@@ -536,6 +542,25 @@ impl ProjectScenes {
         self.scene_bank_ranges()
             .find(|(id, _)| *id == bank)
             .map(|(_, range)| range)
+    }
+
+    /// `bank`'s id and scene range, `None` meaning the bank holding the
+    /// playing scene (the viewed bank before the UI publishes one): the one
+    /// resolution every "in this bank" edit shares (rig spec §4, §6).
+    pub fn resolve_bank_range(
+        &self,
+        bank: Option<SceneBankId>,
+    ) -> Result<(SceneBankId, std::ops::Range<usize>), String> {
+        let bank = match bank {
+            Some(bank) => bank,
+            None => self
+                .scene_bank_containing(self.current_scene)
+                .ok_or_else(|| "The playing scene belongs to no scene bank".to_string())?,
+        };
+        let range = self
+            .scene_bank_range(bank)
+            .ok_or_else(|| format!("Scene bank {} does not exist", bank.0))?;
+        Ok((bank, range))
     }
 
     pub fn scene_bank_containing(&self, scene: usize) -> Option<SceneBankId> {
@@ -1648,6 +1673,7 @@ impl ProjectScenes {
             graph_overrides,
             rack_clips,
             slot_enable: Default::default(),
+            parked_kits: Default::default(),
             scene_slots,
             project_process_chain,
         };

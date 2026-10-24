@@ -1,6 +1,7 @@
 mod accessors;
 mod instrument_reset;
 mod rack_editing;
+mod rack_slot_insert;
 mod effect_propagation;
 mod repository_edit;
 mod publish;

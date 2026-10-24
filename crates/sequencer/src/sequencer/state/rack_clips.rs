@@ -201,6 +201,8 @@ impl ProjectScenes {
                 .retain(|(group_id, _)| live.contains(group_id));
         }
         self.live_rack_clips.retain(|(group_id, _)| live.contains(group_id));
+        // A deleted kit is parked nowhere (docs/rig-spec.md §6).
+        self.retain_parked_kits(&live);
         self.repair_rack_clips();
     }
 

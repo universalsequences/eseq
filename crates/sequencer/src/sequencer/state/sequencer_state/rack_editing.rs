@@ -580,23 +580,6 @@ impl SequencerState {
         slot
     }
 
-    /// `:only-here` (rig spec §2): rack slot `slot_idx` plays in the current
-    /// scene only. Since eseq-ka5t.12 this writes scene state — the slot is
-    /// enabled in the current scene's `slot_enable` and disabled in every
-    /// other scene's — instead of the stored flags of the other patterns, so
-    /// another scene sharing the current pattern no longer hears it either.
-    /// The pattern-scoped name stays until eseq-ka5t.9 replaces the gesture
-    /// with the bank-scoped drop. Returns false when the slot does not exist.
-    pub fn park_rack_slot_outside_current_pattern(&self, track: usize, slot_idx: usize) -> bool {
-        let Some(slot_id) = self.live_rack_slot_id(track, slot_idx) else {
-            return false;
-        };
-        let mut scenes = self.pattern.scenes.lock().unwrap();
-        let current = scenes.current_scene;
-        scenes.set_rack_slot_enabled_where(track, slot_id, |scene, _| Some(scene == current));
-        true
-    }
-
     pub fn remove_rack_slot_from_all_pattern_snapshots(
         &self,
         track: usize,
@@ -607,7 +590,7 @@ impl SequencerState {
         {
             if slot_idx < live_rack_track.slots.len() {
                 removed = Some(live_rack_track.slots.remove(slot_idx).id);
-                remove_rack_macro_slot_targets(&mut live_rack_track.macros, slot_idx);
+                remap_rack_macro_slot_targets(&mut live_rack_track.macros, crate::process::RackSlotShift::Removed(slot_idx));
             }
         }
         let Some(removed_id) = removed else {
@@ -623,7 +606,7 @@ impl SequencerState {
                 if let Some(rack_track) = patch.rack_track.as_mut() {
                     if slot_idx < rack_track.slots.len() {
                         rack_track.slots.remove(slot_idx);
-                        remove_rack_macro_slot_targets(&mut rack_track.macros, slot_idx);
+                        remap_rack_macro_slot_targets(&mut rack_track.macros, crate::process::RackSlotShift::Removed(slot_idx));
                     }
                 }
             }
@@ -661,7 +644,7 @@ impl SequencerState {
         if let Some(Some(live_rack_track)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track)
         {
             live_rack_track.slots.remove(slot_idx);
-            remove_rack_macro_slot_targets(&mut live_rack_track.macros, slot_idx);
+            remap_rack_macro_slot_targets(&mut live_rack_track.macros, crate::process::RackSlotShift::Removed(slot_idx));
         }
 
         let mut scenes = self.pattern.scenes.lock().unwrap();
@@ -678,7 +661,7 @@ impl SequencerState {
             .as_mut()
             .expect("validated current rack track before rack slot removal");
         rack_track.slots.remove(slot_idx);
-        remove_rack_macro_slot_targets(&mut rack_track.macros, slot_idx);
+        remap_rack_macro_slot_targets(&mut rack_track.macros, crate::process::RackSlotShift::Removed(slot_idx));
         true
     }
 

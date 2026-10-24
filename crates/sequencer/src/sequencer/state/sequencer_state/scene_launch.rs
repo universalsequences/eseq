@@ -586,9 +586,18 @@ impl SequencerState {
                     }
                 }
             }
+            // A per-track launch keeps the playing scene's kits on/off, as
+            // it keeps its slot enables; a scene launch takes its target's
+            // (docs/rig-spec.md §3.2, §6).
+            let parked_kits = scenes.scene_parked_kits(if mask.is_some() {
+                scenes.current_scene
+            } else {
+                scene_idx
+            });
             (
                 track_data,
                 silenced,
+                parked_kits,
                 scene.mod_connections.clone(),
                 scene.neural_networks.clone(),
                 // Composed like the live scene's: a rack-owned graph's
@@ -601,6 +610,7 @@ impl SequencerState {
         let (
             track_data,
             silenced,
+            parked_kits,
             mod_connections,
             neural_networks,
             graph_overrides,
@@ -615,6 +625,7 @@ impl SequencerState {
             graph_overrides,
             scene_slots,
             chain,
+            parked_kits,
         );
         // Only ever scheduled while the transport is playing; stamp it so
         // the deterministic clock treats it as playing regardless of the

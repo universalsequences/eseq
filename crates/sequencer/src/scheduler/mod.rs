@@ -80,3 +80,5 @@ const PROCESS_EVENT_CASCADE_LIMIT: usize = 1024;
 mod tests;
 #[cfg(test)]
 mod expr_tests;
+#[cfg(test)]
+mod kit_parking_tests;

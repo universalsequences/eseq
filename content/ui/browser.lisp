@@ -318,7 +318,9 @@
   (eseq.seq-panels/seq-show-fx-lower-panel)
   (status (if (= preset "") (str "Loading instrument: " name) (str "Loading preset: " preset))))
 
-;; i: the track's position (a drop target's address).
+;; i: the track's position (a drop target's address). The swap applies to
+;; the viewed bank only (:bank-id): when another bank plays the track, the
+;; host keeps that bank's device (docs/rig-spec.md §4).
 (def swap-track-instrument (i name preserve-track-selection)
   (if (or (= name nil) (= name ""))
     (status "Drop an instrument, not a folder")
@@ -327,7 +329,8 @@
         (show-loading! name)
         (host-command "swap-track-instrument"
           (dict :track i :name name
-            :preserve-track-selection preserve-track-selection))
+            :preserve-track-selection preserve-track-selection
+            :bank-id (eseq.scene-banks/scene-viewed-bank-id)))
         (eseq.seq-panels/seq-show-fx-lower-panel)
         (status (str "Loading instrument swap: " name)))
       (status "This track cannot load an instrument"))))
@@ -342,7 +345,8 @@
     (do
       (host-command "swap-track-builtin-instrument"
         (dict :track i :name name
-          :preserve-track-selection preserve-track-selection))
+          :preserve-track-selection preserve-track-selection
+          :bank-id (eseq.scene-banks/scene-viewed-bank-id)))
       (set! browser-view.tab "samples")
       (eseq.seq-panels/seq-show-fx-lower-panel)
       (status "Loading sampler"))
@@ -384,7 +388,8 @@
         (if (instrument-type? (track-at i) "custom")
           (host-command "convert-track-to-sampler"
             (dict :track i :path path :preserve-browser-context true
-              :preserve-track-selection (get target :from-pad)))
+              :preserve-track-selection (get target :from-pad)
+              :bank-id (eseq.scene-banks/scene-viewed-bank-id)))
           (host-command "load-sample-into-track"
             (dict :track i :path path :preserve-browser-context true
               :preserve-track-selection (get target :from-pad))))
@@ -440,7 +445,8 @@
             (show-loading! instrument)
             (host-command "swap-track-instrument"
               (dict :track i :name instrument :preset (get payload :preset)
-                :preserve-track-selection (get target :from-pad)))
+                :preserve-track-selection (get target :from-pad)
+                :bank-id (eseq.scene-banks/scene-viewed-bank-id)))
             (eseq.seq-panels/seq-show-fx-lower-panel)
             (status (str "Loading preset: " (get payload :preset))))
           (status "This track cannot load an instrument"))

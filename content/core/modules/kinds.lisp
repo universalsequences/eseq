@@ -52,6 +52,7 @@
         launch-cell! select-region! clear-region! take-none take-governed take-latched
         pad-role-options groove-scale-options set-clip-groove!
         trigger-pad! launch-rack-clip! silence-rack! save-rack-clip-as! delete-rack-clip!
+        set-kit-parked! kit-bank-state unused-kits
         convert-rack-to-clips! use-library-groove! apply-groove-to-all-clips! extract-groove!
         duplicate-groove! delete-groove! save-groove-to-library!
         process-library set-process-enabled! set-inlet! set-fanout! set-lane-steps! move-process!
@@ -703,6 +704,7 @@
          ;; The panel header and its meters (spec §14.2l).
          (display-name :string :doc "The name the panel header shows: an instrument's or rack slot's without its folder or pin (a drum rack's track name, Sampler for a sampler), else name")
          (instrument-name :string :doc "A track instrument's or drum rack slot's full name, folder and pin included (factory:Drums/808 Kick/; Modulator or Instrument for an unnamed one): what a custom UI dispatches on; empty for any other device")
+         (banks (list-of bank) :doc "An Instrument Rack slot's banks: those with a scene that plays it; empty when no scene does (unused) and for any other device (docs/rig-spec.md §4 recall)")
          (node-id :int :doc "An effect's graph node (a track chain, bus or drum rack slot effect's), which the effect commands check; 0 while it has none and for any other device")
          (sound-binding :string :doc "A track instrument's bound sound (the header badge): the patch name, else the binding's (Take 2 · bars 0-2, Pattern 2); empty when unbound or for any other device. Computed while observed (an unobserved one reads its last value, empty before)")
          (meter :any :doc "The device's output meter selector, a device-meter's :source (names the device, not a node); nil for a MIDI effect")
@@ -1368,7 +1370,15 @@
          (arr-clips (list-of :any)
                     :doc "The rack's arrangement rack lane, in order: (dict :cid :start :end :rack-clip :name :color :rings :length :cycle :phase :members) each; :rings holds one list of hit offsets (0..1) per member, :members one (dict :track :pid :length :note-dots :phase :offset-steps) per member with a pattern (docs/arrangement-rack-lanes-spec.md)")
          (pending-arr-clips (list-of :any)
-                    :doc "While an arrangement capture runs: the rack-lane clips it would write, in time order, as arr-clips less :cid, :end and :cycle (each ends at the next one's start or song.pending-head; a nil :rack-clip only ends the one before); empty otherwise")))
+                    :doc "While an arrangement capture runs: the rack-lane clips it would write, in time order, as arr-clips less :cid, :end and :cycle (each ends at the next one's start or song.pending-head; a nil :rack-clip only ends the one before); empty otherwise")
+         ;; Kits on/off per bank (docs/rig-spec.md §6): a kit plays in a
+         ;; scene when the scene points at one of its clips and does not
+         ;; switch it off. Read a bank's state with kit-bank-state; switch
+         ;; it with set-kit-parked!.
+         (parked    :bool   :doc "A drum rack the playing scene switches off: its pads get no triggers and its sequencers do not run")
+         (parked-banks (list-of bank) :doc "The banks whose every scene switches this drum rack off")
+         (mixed-banks (list-of bank) :doc "The banks where some scenes switch this drum rack off and others do not")
+         (unused    :bool   :doc "A drum rack every scene switches off (listed for purge, never deleted for you)")))
 
 ;; A drum rack pad: (nth g.pads 0). Keyed by its member track, so moving the
 ;; pad to another note (a swap included) or reordering keeps the instance.
@@ -2180,6 +2190,29 @@
 (def launch-rack-clip! (rc)
   (host-command "launch-rack-clip"
     (dict :group-id rc.group.gid :clip-id rc.cid :quantize (launch-quantize))))
+
+;; Switch kit (drum rack) g off (`parked` true) or on in every scene of
+;; bank b, as one undo step (docs/rig-spec.md §6). Clip pointers are left
+;; alone, so on again restores every scene, intentional silences included.
+;; A nil b means the playing scene's bank.
+(def set-kit-parked! (g b parked)
+  (host-command "set-kit-parked"
+    (if b
+      (dict :group-id g.gid :bank-id b.bid :value parked)
+      (dict :group-id g.gid :value parked))))
+
+;; Kit g over the scenes of bank b: :on, :off (every scene switches it off)
+;; or :mixed (some do).
+;; eseq.kinds is core and does not import eseq.view-kit, so no listed?.
+(def kit-bank-in? (b bs) (reduce |found x| (or found (= x b)) false bs))
+(def kit-bank-state (g b)
+  (if (kit-bank-in? b g.parked-banks)
+    :off
+    (if (kit-bank-in? b g.mixed-banks) :mixed :on)))
+
+;; The drum racks every scene switches off (unused project-wide).
+(def unused-kits ()
+  (filter (lambda (g) g.unused) (groups)))
 
 ;; Silence rack g in the current scene.
 (def silence-rack! (g)

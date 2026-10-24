@@ -11318,8 +11318,12 @@ use panel_kinds_seed::*;
         assert_eq!(rack_actions.widget_type, "menu-button");
         assert_eq!(
             rack_actions.props.get("options"),
-            Some(&test_string_list(&["Copy rack (all slots) to all scenes"])),
-            "rack header menu should carry the rack-wide copy"
+            Some(&test_string_list(&[
+                "Copy rack (all slots) to all scenes",
+                "Hide disabled slots",
+                "Purge unused slots…",
+            ])),
+            "rack header menu: the rack-wide copy, hide disabled slots, purge (rig spec §4)"
         );
         assert_finite_nonzero_rect(rack_actions, "rack header action menu");
         assert!(
@@ -27244,6 +27248,8 @@ use panel_kinds_seed::*;
                 // Deleting a clip is the row's [-] button, not a menu entry per clip.
                 // Break kits (spec §7.2) enter through the rack menu too.
                 "export-kit",
+                // Kits on/off per bank (docs/rig-spec.md §6).
+                "kit-off",
                 "ungroup",
                 "color-menu",
             ],
@@ -27298,7 +27304,7 @@ use panel_kinds_seed::*;
             // A rack with no clip bank is a LEGACY rack, so it is offered the
             // one-shot conversion (rack-clips spec §6.3).
             menu_action_ids(&mut editor, 8.0),
-            vec!["rename", "convert-to-clips", "export-kit", "ungroup", "color-menu"],
+            vec!["rename", "convert-to-clips", "export-kit", "kit-off", "ungroup", "color-menu"],
         );
 
         // The kind picker (instance-kinds spec §8.3): one "New <kind> in
@@ -27313,7 +27319,7 @@ use panel_kinds_seed::*;
         });
         assert_eq!(
             menu_action_ids(&mut editor, 8.0),
-            vec!["rename", "convert-to-clips", "new-rack-instance", "export-kit", "ungroup", "color-menu"],
+            vec!["rename", "convert-to-clips", "new-rack-instance", "export-kit", "kit-off", "ungroup", "color-menu"],
         );
         editor.drain_host_commands();
         editor.runtime_mut().eval_str(
