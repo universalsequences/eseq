@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "modal-band",
+  "params": [
+    "n",
+    "freqs",
+    "count"
+  ],
+  "outputs": [
+    "mask"
+  ],
+  "summary": "Per-mode gain mask: mode count plus a soft fade below Nyquist.",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

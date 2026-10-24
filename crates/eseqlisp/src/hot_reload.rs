@@ -435,6 +435,16 @@ impl SourceManager {
         self.diagnostics.clone()
     }
 
+    pub fn diagnostics_len(&self) -> usize {
+        self.diagnostics.len()
+    }
+
+    /// The diagnostics recorded after the first `seen`; with
+    /// [`Self::diagnostics_len`] taken before an eval, that eval's own.
+    pub fn diagnostics_since(&self, seen: usize) -> Vec<String> {
+        self.diagnostics.get(seen..).unwrap_or_default().to_vec()
+    }
+
     pub fn module_graph(&self) -> &ModuleGraph {
         &self.module_graph
     }

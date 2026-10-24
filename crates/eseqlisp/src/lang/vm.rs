@@ -3194,6 +3194,14 @@ fn clone_value_for_snapshot(value: &Value) -> Value {
     }
 }
 
+/// The optional width argument of `pp-str` / `pp-forms`.
+fn source_print_width(arg: Option<&Value>) -> usize {
+    match arg {
+        Some(Value::Number(n)) if *n >= 1.0 => *n as usize,
+        _ => super::source_print::DEFAULT_WIDTH,
+    }
+}
+
 /// Register built-in functions available in all contexts.
 pub fn register_core_natives(vm: &mut VM) {
     // (dict :key val :key val ...) → Map
@@ -4444,6 +4452,32 @@ pub fn register_core_natives(vm: &mut VM) {
             }
         }
         Value::String(s)
+    });
+
+    // (symbol "name" ...) → a symbol from concatenated strings/symbols/numbers,
+    // for building generated names: (symbol prefix "_q1").
+    vm.register_native("symbol", |args| {
+        let mut name = String::new();
+        for arg in &args {
+            match arg {
+                Value::String(s) | Value::Symbol(s) | Value::Keyword(s) => name.push_str(s),
+                Value::Number(_) => name.push_str(&format_lisp_source(arg)),
+                _ => return Value::Nil,
+            }
+        }
+        if name.is_empty() { Value::Nil } else { Value::Symbol(name) }
+    });
+    // (pp-str form [width]) / (pp-forms forms [width]) → the data printed
+    // back as a readable source file, broken to width (see source_print).
+    vm.register_native("pp-str", |args| {
+        let width = source_print_width(args.get(1));
+        Value::String(args.first().map(|v| super::source_print::pretty(v, width)).unwrap_or_default())
+    });
+    vm.register_native("pp-forms", |args| {
+        let width = source_print_width(args.get(1));
+        Value::String(
+            args.first().map(|v| super::source_print::pretty_forms(v, width)).unwrap_or_default(),
+        )
     });
 
     // (read-string text) → one s-expression of data, never evaluated
@@ -12330,6 +12364,57 @@ counter
                 Rc::new(RefCell::new(Value::Number(10.0))),
                 Rc::new(RefCell::new(Value::Number(22.0))),
             ]))
+        );
+    }
+
+    fn assert_evals_equal(vm: &mut VM, actual: &str, expected: &str) {
+        let actual_value = vm.eval_str(actual).expect("actual eval");
+        let expected_value = vm.eval_str(expected).expect("expected eval");
+        assert_eq!(actual_value, expected_value, "{actual} vs {expected}");
+    }
+
+    #[test]
+    fn runtime_quasiquote_fills_holes_from_function_args() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.eval_str("(def history-form (name n) `(make-history ,name @shape [ ,n ]))")
+            .expect("define template function");
+
+        assert_evals_equal(
+            &mut vm,
+            "(history-form 'str_q1 (* 8 10))",
+            "'(make-history str_q1 @shape [ 80 ])",
+        );
+    }
+
+    #[test]
+    fn runtime_quasiquote_splices_locals_and_captured_values() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+
+        assert_evals_equal(
+            &mut vm,
+            "(let ((xs (list 0.5 0.75)) (head 0.25))\n\
+               `(tensor @data [ ,head ,@xs 1 ]))",
+            "'(tensor @data [ 0.25 0.5 0.75 1 ])",
+        );
+        assert_evals_equal(
+            &mut vm,
+            "(let ((scale 3))\n\
+               (map (lambda (i) `(def ,i (* ,scale ,i))) (list 1 2)))",
+            "'((def 1 (* 3 1)) (def 2 (* 3 2)))",
+        );
+    }
+
+    #[test]
+    fn runtime_quasiquote_without_holes_matches_quote() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+
+        assert_evals_equal(
+            &mut vm,
+            "`(param length @default 10 (nested \"m\" :unit) 2)",
+            "'(param length @default 10 (nested \"m\" :unit) 2)",
         );
     }
 

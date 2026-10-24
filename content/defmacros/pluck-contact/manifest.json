@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "pluck-contact",
+  "params": [
+    "gap",
+    "C",
+    "arm",
+    "k",
+    "threshold"
+  ],
+  "outputs": [
+    "force"
+  ],
+  "summary": "Modalys pluck connection: implicit, energy-safe catch/hold/release force.",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

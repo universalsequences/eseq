@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "name": "modal-predict",
+  "params": [
+    "s1",
+    "s2",
+    "a",
+    "b"
+  ],
+  "outputs": [
+    "free"
+  ],
+  "summary": "Modal protocol 1: free (unforced) state from the last two states.",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

@@ -141,6 +141,9 @@ pub use eseq::expr_promote::{
     write_promoted_process, PromoteTarget,
 };
 pub use eseq::scratch_runtime::*;
+pub use eseq::modal_patch::{
+    generate_modal_instrument, is_modal_patch_script, ModalInstrument, ModalScriptHost,
+};
 pub use eseq::sequencer_natives::*;
 
 pub use editor_flow::*;

@@ -51,6 +51,9 @@ pub(crate) struct EditSessionState {
     pub(crate) pending_effect_preview: Option<PendingEffectPreview>,
     pub(crate) pending_effect_cancel_restore: Option<PendingEffectCancelRestore>,
     pub(crate) package_view_session: Option<PackageViewSession>,
+    /// Draft tracks driven by modal patch script buffers (eseq-k0m2.9).
+    pub(crate) modal_drafts: Vec<super::host_commands::modal_drafts::ModalDraft>,
+    pub(crate) pending_modal_compiles: Vec<super::host_commands::modal_drafts::PendingModalCompile>,
     pub(crate) pending_agentic_bubbles: HashMap<String, PendingAgenticBubble>,
     /// In-flight Jev ghost-cable requests (eseq-c049), one worker thread each.
     pub(crate) pending_jev_suggestions: Vec<PendingJevSuggestion>,

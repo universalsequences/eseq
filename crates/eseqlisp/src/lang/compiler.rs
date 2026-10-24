@@ -531,7 +531,6 @@ pub struct Compiler<'a> {
     pub macros: std::rc::Rc<HashMap<String, MacroDef>>,
     macro_evaluator: Option<Box<MacroEvaluator<'a>>>,
     next_macro_expansion_ordinal: usize,
-    compiling_macro_body: usize,
     active_expansion_origin: Option<ExpansionOrigin>,
     compiling_source_origin_payload: bool,
 }
@@ -1154,7 +1153,6 @@ impl<'a> Compiler<'a> {
             macros: Default::default(),
             macro_evaluator: None,
             next_macro_expansion_ordinal: 0,
-            compiling_macro_body: 0,
             active_expansion_origin: None,
             compiling_source_origin_payload: false,
         }
@@ -1205,7 +1203,6 @@ impl<'a> Compiler<'a> {
             macros,
             macro_evaluator: None,
             next_macro_expansion_ordinal: 0,
-            compiling_macro_body: 0,
             active_expansion_origin: None,
             compiling_source_origin_payload: false,
         }
@@ -3385,7 +3382,7 @@ impl<'a> Compiler<'a> {
         self.global_symbols.intern(qualified)
     }
 
-    fn compile_macro_quasiquote(&mut self, expr: &Expression) -> Result<(), CompilerError> {
+    fn compile_quasiquote(&mut self, expr: &Expression) -> Result<(), CompilerError> {
         match expr {
             Expression::Unquote(inner) => self.compile_expression(inner),
             Expression::UnquoteSplicing(_) => Err(CompilerError::InvalidArg),
@@ -3395,7 +3392,7 @@ impl<'a> Compiler<'a> {
                     .any(|item| matches!(item, Expression::UnquoteSplicing(_)));
                 if !has_splice {
                     for item in items {
-                        self.compile_macro_quasiquote(item)?;
+                        self.compile_quasiquote(item)?;
                     }
                     self.emit(OpCode::MakeList(items.len()));
                     return Ok(());
@@ -3404,7 +3401,7 @@ impl<'a> Compiler<'a> {
                     if let Expression::UnquoteSplicing(inner) = item {
                         self.compile_expression(inner)?;
                     } else {
-                        self.compile_macro_quasiquote(item)?;
+                        self.compile_quasiquote(item)?;
                         self.emit(OpCode::MakeList(1));
                     }
                 }
@@ -3414,7 +3411,7 @@ impl<'a> Compiler<'a> {
             Expression::QuoteList(items) => {
                 let quote_idx = self.use_string_constant("quote");
                 self.emit(OpCode::PushSymbol(quote_idx));
-                self.compile_macro_quasiquote(&Expression::List(items.clone()))?;
+                self.compile_quasiquote(&Expression::List(items.clone()))?;
                 self.emit(OpCode::MakeList(2));
                 Ok(())
             }
@@ -3431,7 +3428,7 @@ impl<'a> Compiler<'a> {
                 self.emit(OpCode::MakeList(2));
                 Ok(())
             }
-            Expression::Quasiquote(inner) => self.compile_macro_quasiquote(inner),
+            Expression::Quasiquote(inner) => self.compile_quasiquote(inner),
             other => self.compile_expression(other),
         }
     }
@@ -3471,10 +3468,7 @@ impl<'a> Compiler<'a> {
             origins: Vec::new(),
             lambda_list,
         });
-        self.compiling_macro_body += 1;
-        let compile_result = self.compile_expression(body);
-        self.compiling_macro_body -= 1;
-        compile_result?;
+        self.compile_expression(body)?;
         let scope = self.scopes.pop().unwrap();
         self.emit(OpCode::Return);
         self.current_chunk = previous_chunk_idx;
@@ -4699,14 +4693,9 @@ impl<'a> Compiler<'a> {
                 }
                 self.emit(OpCode::MakeList(items.len()));
             }
-            Expression::Quasiquote(inner) => {
-                if self.compiling_macro_body > 0 {
-                    self.compile_macro_quasiquote(inner)?;
-                } else {
-                    // Outside of macro context, quasiquote behaves like quote.
-                    self.compile_quoted_expression(inner)?;
-                }
-            }
+            // Runtime templates and macro bodies share one codegen: holes are
+            // compiled in the current scope, so `,x` sees locals and upvalues.
+            Expression::Quasiquote(inner) => self.compile_quasiquote(inner)?,
             Expression::Unquote(_) | Expression::UnquoteSplicing(_) => {
                 // Unquote outside quasiquote is an error.
                 return Err(CompilerError::InvalidArg);

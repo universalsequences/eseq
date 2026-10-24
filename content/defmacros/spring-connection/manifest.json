@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "spring-connection",
+  "params": [
+    "gap",
+    "C",
+    "stiffness"
+  ],
+  "outputs": [
+    "force"
+  ],
+  "summary": "Modalys spring/adhere connection: implicit force between two access points.",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "rect-plate",
+  "params": [
+    "pm",
+    "pn",
+    "young",
+    "density",
+    "thick",
+    "lx",
+    "ly"
+  ],
+  "outputs": [
+    "freqs"
+  ],
+  "summary": "Rectangular plate mode frequencies (Kirchhoff, simply supported).",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

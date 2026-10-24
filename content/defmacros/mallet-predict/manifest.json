@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "mallet-predict",
+  "params": [
+    "x",
+    "v",
+    "hit",
+    "drop",
+    "speed"
+  ],
+  "outputs": [
+    "x",
+    "v"
+  ],
+  "summary": "Mallet protocol 1: free position/velocity of a thrown mass (reset on hit).",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

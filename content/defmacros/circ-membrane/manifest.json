@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "circ-membrane",
+  "params": [
+    "r",
+    "theta"
+  ],
+  "outputs": [
+    "ratios",
+    "phi"
+  ],
+  "summary": "Circular membrane modes: Bessel frequency ratios and unit-mass mode shapes at a point.",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

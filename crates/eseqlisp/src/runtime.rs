@@ -2447,6 +2447,9 @@ impl Runtime {
             ("gensym", "(gensym base)", "Return a deterministic symbol unique to the current macro expansion site."),
             ("macroexpand", "(macroexpand 'form)", "Return the fully expanded syntax for a quoted form in the authoring VM."),
             ("source", "(source value ...)", "Concatenate values as Lisp source text."),
+            ("pp-str", "(pp-str form [width])", "Print data as Lisp source, broken to width (default 96)."),
+            ("pp-forms", "(pp-forms forms [width])", "Print each form as Lisp source on its own line(s)."),
+            ("symbol", "(symbol part ...)", "Return a symbol named by concatenating strings, symbols and numbers."),
             ("fmt", "(fmt template value ...)", "Format values into {} placeholders in template."),
             ("abs", "(abs x)", "Return the absolute value."),
             ("sqrt", "(sqrt x)", "Return the square root."),
@@ -2705,6 +2708,17 @@ impl Runtime {
     /// keep a stale entry from poisoning a later path-based eval.
     pub fn take_source_load_errors(&mut self) -> Vec<String> {
         self.vm.take_source_load_errors()
+    }
+
+    /// How many source diagnostics are recorded; the path-based eval entry
+    /// points move load errors there, so a caller reads this before an eval
+    /// and [`Self::source_diagnostics_since`] after it to report that eval's.
+    pub fn source_diagnostics_len(&self) -> usize {
+        self.vm.source_manager.diagnostics_len()
+    }
+
+    pub fn source_diagnostics_since(&self, seen: usize) -> Vec<String> {
+        self.vm.source_manager.diagnostics_since(seen)
     }
 
     /// See [`crate::vm::VM::override_modules`].

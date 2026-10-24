@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "name": "rect-plate-shape",
+  "params": [
+    "pm",
+    "pn",
+    "x",
+    "y"
+  ],
+  "outputs": [
+    "phi"
+  ],
+  "summary": "Rectangular plate unit-mass mode shapes at a point.",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

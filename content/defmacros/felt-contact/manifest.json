@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "felt-contact",
+  "params": [
+    "gap",
+    "C",
+    "stiffness"
+  ],
+  "outputs": [
+    "force"
+  ],
+  "summary": "Modalys felt/strike connection: one-sided implicit contact force.",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

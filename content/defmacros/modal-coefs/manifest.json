@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "modal-coefs",
+  "params": [
+    "freqs",
+    "sigma"
+  ],
+  "outputs": [
+    "a",
+    "b"
+  ],
+  "summary": "Modal two-pole coefficients (a, b) from frequency and decay rate.",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}
