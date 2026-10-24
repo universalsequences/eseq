@@ -28,6 +28,7 @@
         shown-members
         bank-members
         bank-racks
+        grid-racks
         nearest-shown-track
         visible-track-order
         mixer-visible-track-order
@@ -98,14 +99,17 @@
 ;; top-level group, `b` the viewed bank read once for the whole render. The
 ;; grid leaves collapsed loose tracks out; the mixer (`collapsed-tracks`
 ;; true) draws them as narrow badges. Both leave out what the viewed bank
-;; does not use (docs/rig-spec.md §9; eseq.scene-banks).
+;; does not use (docs/rig-spec.md §9; eseq.scene-banks); the grid also
+;; leaves out a kit the bank switches off (grid-group?).
 (def render-items (collapsed-tracks)
   (render-items-in collapsed-tracks (scene-viewed-bank)))
 
 ;; render-items over bank `viewed`; nil keeps everything (the structural
 ;; order: the eseq.scene-banks predicates read a nil bank as "every track").
 (def render-items-in (collapsed-tracks viewed)
-  (let ((top (filter (lambda (g) (and (not g.parent) (group-used-in-bank? g viewed)))
+  (let ((top (filter (lambda (g)
+                       (and (not g.parent)
+                            (if collapsed-tracks (group-used-in-bank? g viewed) (grid-group? g viewed))))
                      (groups)))
         (anchored (map (lambda (g) (dict :group g :anchor (group-anchor g))) top))
         (group-item (lambda (ga) (dict :kind "group" :group (get ga :group) :viewed viewed))))
@@ -132,6 +136,16 @@
 (def bank-racks (g viewed)
   (filter (lambda (r) (group-used-in-bank? r viewed)) g.racks))
 
+;; Whether the grid shows group g in bank `viewed`: as group-used-in-bank?,
+;; minus a kit the bank switches off. Only the mixer keeps that kit (its
+;; dimmed strip is the way back on, docs/rig-spec.md §6).
+(def grid-group? (g viewed)
+  (if g.rack (= (kit-bank-view g viewed) :shown) (group-used-in-bank? g viewed)))
+
+;; The child racks of g the grid shows in bank `viewed`.
+(def grid-racks (g viewed)
+  (filter (lambda (r) (grid-group? r viewed)) g.racks))
+
 ;; Group g's member tracks the grid shows in bank `viewed`: collapsed ones
 ;; hide exactly as loose ones do, and so do those the bank does not use.
 (def shown-members (g viewed)
@@ -148,7 +162,7 @@
     (reduce |acc child|
       (append acc (group-track-order child viewed collapse))
       (if (= collapse :rows) (shown-members g viewed) (bank-members g viewed))
-      (bank-racks g viewed))))
+      (if (= collapse :rows) (grid-racks g viewed) (bank-racks g viewed)))))
 
 ;; The track rows of render items `items` (their own :viewed bank), in
 ;; order, under `collapse` (see group-track-order).

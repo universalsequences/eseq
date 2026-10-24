@@ -514,7 +514,9 @@ pub(crate) fn queued_transport_scene(state: &SequencerState) -> Option<usize> {
         .and_then(|target| match target {
             PatternLaunchTarget::Scene { scene }
             | PatternLaunchTarget::SceneTracks { scene, .. } => Some(scene),
-            PatternLaunchTarget::TrackPattern { .. } => None,
+            PatternLaunchTarget::TrackPattern { .. } | PatternLaunchTarget::TrackStop { .. } => {
+                None
+            }
         })
 }
 
@@ -532,7 +534,7 @@ pub(crate) fn queued_track_clip(state: &SequencerState, track: usize) -> Option<
             state.scene_track_pattern_id(scene, track).map(|id| id.0)
         }
         PatternLaunchTarget::TrackPattern { pattern, .. } => Some(pattern),
-        PatternLaunchTarget::Scene { .. } => None,
+        PatternLaunchTarget::Scene { .. } | PatternLaunchTarget::TrackStop { .. } => None,
     }
 }
 

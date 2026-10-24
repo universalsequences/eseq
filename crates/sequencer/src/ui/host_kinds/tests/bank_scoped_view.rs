@@ -267,38 +267,3 @@ fn a_selection_is_rehomed_only_when_the_view_changes_and_never_off_a_bus() {
     let anchor = h.bank_eval("(let ((g eseq.sequencer/grid-select) (a g.anchor)) a.index)");
     assert_eq!(anchor, Value::Number(0.0));
 }
-
-#[test]
-fn an_instrument_rack_tracks_device_line_names_its_enabled_slot() {
-    let (mut h, _) = two_bank_harness();
-    h.rack_track();
-    h.sync();
-    h.show_all();
-    h.bank_eval("(view-scene-bank! bank-b)");
-    h.show_all();
-    let tid = h.bank_eval("(let ((t (track 2))) t.tid)");
-    let Value::Number(tid) = tid else { panic!("tid") };
-    let (tree, _) = h.buffer_tree("*sequencer*");
-    assert!(
-        widget_keyed(&tree, &format!("track-device-line-label-{}", tid as u64)).is_some(),
-        "the rack track's row has a device line"
-    );
-    let names_first = "(let ((t (track 2)) (rk (first t.devices)) (d (first rk.devices)))
-                         (= (eseq.sequencer/device-line-text t)
-                            (str (eseq.sequencer/clip-label d.display-name 10) SUFFIX)))";
-    assert_eq!(h.bank_eval(&names_first.replace("SUFFIX", "\"\"")), Value::Bool(true));
-    // A second enabled slot adds a count.
-    let buffer = sequencer::instruments::sampler::create_silent_buffer(h.app.graph.lg.0).expect("buffer");
-    h.app
-        .apply_recorded_rack_slot_add(2, "Add rack sample", |app| {
-            app.graph_controller().add_sampler_slot_to_rack_buffer(2, buffer, 44_100, "Second")
-        })
-        .expect("second slot");
-    h.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
-    h.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
-    h.sync();
-    h.show_all();
-    assert_eq!(h.bank_eval(&names_first.replace("SUFFIX", "\" +1\"")), Value::Bool(true));
-    // A plain track has none.
-    assert!(!h.has_widget("*sequencer*", "track-device-line-label-0"));
-}

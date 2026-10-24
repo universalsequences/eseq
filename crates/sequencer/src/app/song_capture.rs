@@ -343,6 +343,10 @@ impl App {
             PatternLaunchTarget::TrackPattern { track, pattern } => CaptureLaunchKind::Tracks {
                 overrides: vec![(*track, PatternId(*pattern))],
             },
+            // A capture has no "lane stops here" event, so the clip stop is
+            // refused while a take is active (`clear-scene-cell :stop`); one
+            // queued before the take began applies unrecorded.
+            PatternLaunchTarget::TrackStop { .. } => return,
         };
         let Some(take) = self.song_capture_take.as_mut() else {
             return;

@@ -2115,9 +2115,11 @@ impl App {
         let scene = match target {
             PatternLaunchTarget::Scene { scene }
             | PatternLaunchTarget::SceneTracks { scene, .. } => Some(*scene),
-            // Override launches carry no scene: they launch a pool pattern
-            // into the lane without touching the cell assignments.
-            PatternLaunchTarget::TrackPattern { .. } => None,
+            // Override launches and stops carry no scene: they launch a pool
+            // pattern into (or silence) the lane without touching the cells.
+            PatternLaunchTarget::TrackPattern { .. } | PatternLaunchTarget::TrackStop { .. } => {
+                None
+            }
         };
         if let Some(scene) = scene {
             if scene >= self.state.scene_count() {
@@ -2220,6 +2222,26 @@ impl App {
                 }
                 self.state.effective_pattern_sample_ids(num_tracks)
             }
+            PatternLaunchTarget::TrackStop { track } => {
+                if *track >= num_tracks {
+                    return Err(PatternLaunchError::TrackOutOfRange { track: *track });
+                }
+                // The mirror of a scheduler-applied stop skips the epoch
+                // bump, as the SceneTracks mirror does.
+                let stopped = self.state.stop_track_lane(
+                    *track,
+                    num_tracks,
+                    &self.graph.track_buffer_ids,
+                    &self.graph.track_sample_rates,
+                    &self.tracks,
+                    &self.graph.track_instrument_types,
+                    !mirror,
+                );
+                if !stopped {
+                    return Err(PatternLaunchError::TrackOutOfRange { track: *track });
+                }
+                self.state.effective_pattern_sample_ids(num_tracks)
+            }
         };
 
         self.graph_controller().apply_sample_ids(&sample_ids);
@@ -2280,6 +2302,12 @@ impl App {
                 PatternLaunchTarget::TrackPattern { track, .. } => {
                     // `launch_track_pattern` already pinned the lane's
                     // override to the launched pattern id.
+                    self.state.latch_song_manual_override([*track]);
+                }
+                PatternLaunchTarget::TrackStop { track } => {
+                    // A stop is the performer's too. Its override is empty,
+                    // so the masked save-backs skip the blanked lane as
+                    // stale rather than writing silence into a cell.
                     self.state.latch_song_manual_override([*track]);
                 }
             }
@@ -2394,7 +2422,8 @@ impl App {
                     PatternLaunchTarget::SceneTracks { tracks, .. } => {
                         self.state.bump_track_launch_generations(tracks.iter().copied())
                     }
-                    PatternLaunchTarget::TrackPattern { track, .. } => {
+                    PatternLaunchTarget::TrackPattern { track, .. }
+                    | PatternLaunchTarget::TrackStop { track } => {
                         self.state.bump_track_launch_generations([*track])
                     }
                 }

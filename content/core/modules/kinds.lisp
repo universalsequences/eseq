@@ -49,7 +49,7 @@
         mute-group-options accum-mode-options tuning-root-options tuning-mode-options
         voice-priority-options mono-trigger-options mod-role-options mod-steps-options swing-resolution-options
         roll-rate-options launch-quantize-options record-quantize-options
-        launch-cell! select-region! clear-region! take-none take-governed take-latched
+        launch-cell! stop-track-cell! select-region! clear-region! take-none take-governed take-latched
         pad-role-options groove-scale-options set-clip-groove!
         trigger-pad! launch-rack-clip! silence-rack! save-rack-clip-as! delete-rack-clip!
         set-kit-parked! unused-kits
@@ -1156,6 +1156,7 @@
          ;; The arrangement.
          (clips     (list-of clip) :doc "The clips on the track's arrangement lane, in time order")
          (cells     (list-of cell) :doc "The track's patterns (the mixer's clip grid), by pattern id")
+         (clip-playing :bool :doc "One of the track's cells plays (a cell's `active`): what the mixer's clip stop stops")
          (used-banks (list-of bank) :doc "The banks with a scene that uses the track: one that gives it a pattern cell (steps or none); a kit's pad follows its kit (the kit's used-banks); empty when no scene does. Bank-scoped views hide a track the viewed bank does not use (docs/rig-spec.md §9, eseq.scene-banks/used-in-viewed-bank?)")
          (governed  :int    :doc "take-none, take-governed (a take plays on the lane: steps dimmed and locked) or take-latched (a take lane the performer latched away)")
          (latched   :bool   :set set-track-latched
@@ -2035,6 +2036,15 @@
 (def launch-cell! (c)
   (host-command "set-scene-cell"
     (dict :track-id c.track.tid :pattern-id c.pid :quantize (launch-quantize))))
+
+;; Stop track t: empty its cell in the current scene (who plays is scene
+;; state) and silence whatever it plays, with the transport's launch
+;; quantization: the cell clears now and the track falls silent at the
+;; boundary. One undo step; the track (by id) and the current scene resolve
+;; when the command lands.
+(def stop-track-cell! (t)
+  (host-command "clear-scene-cell"
+    (dict :track-id t.tid :stop true :quantize (launch-quantize))))
 
 ;; Select the region from track t1 to track t2 (either order) between beats
 ;; start and end (song.region); a degenerate one clears it. :scene-lane true

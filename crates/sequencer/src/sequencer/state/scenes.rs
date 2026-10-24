@@ -34,6 +34,23 @@ pub struct TrackPatternId {
     pub pattern: PatternId,
 }
 
+/// What clearing a cell of the CURRENT scene does to its lane
+/// (`SequencerState::clear_scene_cell_as`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SceneCellClear {
+    /// A plain edit: the lane falls silent only when it is left with no
+    /// pattern (no override either).
+    Edit,
+    /// The mixer's clip stop, unquantized: the lane falls silent now, an
+    /// override it plays included.
+    StopNow,
+    /// The mixer's clip stop, quantized: the cell clears now but the lane
+    /// plays on, its override pinned to the pattern it plays (see
+    /// `ProjectScenes::pin_override_if_unset`), until the caller's pending
+    /// `TrackStop` boundary launch silences it.
+    StopAtBoundary,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TrackPatternCellView {
     pub pattern_id: PatternId,
@@ -1357,6 +1374,18 @@ impl ProjectScenes {
         let Some(target) = self.track_overrides.get_mut(track) else { return false };
         *target = Some(id);
         true
+    }
+
+    /// Pin `track`'s session override to `playing` (the pattern the lane
+    /// sounds before a cell edit) unless an override is already set. A
+    /// quantized clip launch or stop edits the current scene's cell now but
+    /// changes what sounds only at the boundary; until then an unpinned
+    /// lane would let any masked save-back file the outgoing pattern's live
+    /// content under the edited cell.
+    pub fn pin_override_if_unset(&mut self, track: usize, playing: Option<PatternId>) {
+        if let Some(slot @ None) = self.track_overrides.get_mut(track) {
+            *slot = playing;
+        }
     }
 
     /// Resolve every selected cell before changing any override. This keeps a

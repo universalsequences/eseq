@@ -345,6 +345,8 @@ pub(crate) mod f {
     pub(crate) const TRACK_SETTING_LOCKS: FieldKey = (TRACK, "setting-locks");
     pub(crate) const TRACK_CLIPS: FieldKey = (TRACK, "clips");
     pub(crate) const TRACK_CELLS: FieldKey = (TRACK, "cells");
+    /// Whether one of the track's cells plays (the mixer's clip stop).
+    pub(crate) const TRACK_CLIP_PLAYING: FieldKey = (TRACK, "clip-playing");
     /// The banks with a scene that uses the track (docs/rig-spec.md §9).
     pub(crate) const TRACK_USED_BANKS: FieldKey = (TRACK, "used-banks");
     pub(crate) const TRACK_GOVERNED: FieldKey = (TRACK, "governed");
@@ -1397,6 +1399,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     // shared latch mask.
     (f::TRACK_CLIPS, "(list-of clip)", Model),
     (f::TRACK_CELLS, "(list-of cell)", Model),
+    (f::TRACK_CLIP_PLAYING, ":bool", Model),
     // Bank-scoped display (`bank_usage`), when the scenes moved.
     (f::TRACK_USED_BANKS, "(list-of bank)", Model),
     (f::TRACK_GOVERNED, ":int", Model),

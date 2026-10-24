@@ -734,10 +734,6 @@ in Lisp. proto-rig's per-frame walk of every cell and clip (§7) is fine at
 gotham's size and is not at hundreds of scenes. Hidden tracks keep their
 indices; nothing in the engine renumbers.
 
-**A track's device line** shows the slot enabled in the current scene (if
-several are, the first and a count); clicking it opens the slot list for
-recall (§4).
-
 **As built (eseq-ka5t.10).** The viewed bank is Lisp state, so the host
 publishes per-bank lists instead of one boolean: `track.used-banks` and
 `group.used-banks` (`ProjectScenes::bank_usage`, one pass over the scenes
@@ -761,10 +757,10 @@ menus (graph demos, neural variable-reset) and jaki's project routes; a
 rack-owned sequencer's pad routes stay whole. A menu keeps the track its
 control names now. A selected track the bank hides hands the selection to the
 nearest shown one, and hidden tracks leave a multi-selection, only when the
-viewed bank or "Show all tracks" changes and no bus is selected. A kit the bank parks keeps its sequencer header and its
-dimmed mixer strip (also under show-all). The device line is on Instrument
-Rack tracks' sequencer rows (first enabled slot "+N"; a click shows the slot
-list in *fx*). The arrangement view still shows every track: it spans banks.
+viewed bank or "Show all tracks" changes and no bus is selected. A kit the bank parks leaves the sequencer grid
+entirely and keeps only its dimmed mixer strip, whose power dot turns it back
+on. There is no device line on sequencer rows: the user found it noise
+(2026-10-24); the Instrument Rack panel in *fx* shows the slots. The arrangement view still shows every track: it spans banks.
 
 ## 10. Project-owned sequencer membership (later)
 

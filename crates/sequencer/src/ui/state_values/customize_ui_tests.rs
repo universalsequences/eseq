@@ -112,7 +112,7 @@ fn customize_lists_the_mixer_clip_knob_under_its_module_and_edits_resize_the_mix
     eval(&mut editor, "(setopt eseq.seq-core-state/mixer-show-clip-grid true)");
     assert_eq!(
         eval(&mut editor, "(eseq.seq-core-state/mixer-panel-height)"),
-        Value::Number(14.5)
+        Value::Number(15.5)
     );
     // The picker's on-change path.
     eval(
@@ -121,7 +121,7 @@ fn customize_lists_the_mixer_clip_knob_under_its_module_and_edits_resize_the_mix
     );
     assert_eq!(
         eval(&mut editor, "(eseq.seq-core-state/mixer-panel-height)"),
-        Value::Number(19.5),
+        Value::Number(20.5),
         "the mixer derives its height from the knob"
     );
     assert_eq!(
@@ -149,7 +149,7 @@ fn customize_lists_the_mixer_clip_knob_under_its_module_and_edits_resize_the_mix
     );
     assert_eq!(
         eval(&mut editor, "(eseq.seq-core-state/mixer-panel-height)"),
-        Value::Number(14.5)
+        Value::Number(15.5)
     );
 }
 
@@ -305,7 +305,7 @@ fn compact_mixer_knob_drops_the_clip_grid_and_shrinks_the_mixer_panel() {
     eval(&mut editor, "(setopt eseq.seq-core-state/mixer-show-clip-grid true)");
     assert_eq!(
         eval(&mut editor, "(eseq.seq-core-state/mixer-panel-height)"),
-        Value::Number(14.5)
+        Value::Number(15.5)
     );
     eval(
         &mut editor,
@@ -335,7 +335,7 @@ fn compact_mixer_knob_drops_the_clip_grid_and_shrinks_the_mixer_panel() {
     );
     assert_eq!(
         eval(&mut editor, "(eseq.seq-core-state/mixer-panel-height)"),
-        Value::Number(19.5)
+        Value::Number(20.5)
     );
 }
 

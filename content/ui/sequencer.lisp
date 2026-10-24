@@ -3362,41 +3362,7 @@
               (track-header t bare))
             (track-grid t)
             (box :flex 1 :width :fill :height 0.1 :bg :transparent)
-            (track-device-line t)
             (track-actions t))))))
-
-;; ── Device line (docs/rig-spec.md §9) ──
-;; An Instrument Rack track's (`t.rack`) slots the playing scene enables
-;; (slot `enabled` is the playing scene's, §3.2): the first one's name, "+N"
-;; for the others, "No slot on" for none. Other tracks get none: their name
-;; badge already says what they play. A click selects the track and shows
-;; its slot list in *fx*, the Instrument Rack panel (§4 recall).
-(def device-line-text (t)
-  (let ((rack (first t.devices))
-        (on (if rack (filter (lambda (d) d.enabled) rack.devices) (list)))
-        (n (len on)))
-    (if (= n 0)
-      "No slot on"
-      (let ((d (first on)))
-        (str (clip-label d.display-name 10) (if (> n 1) (str " +" (- n 1)) ""))))))
-
-(def track-device-line (t)
-  (if t.rack
-    (subtree :key (str "seqv-device-line-" t.tid)
-      (box :key (str "track-device-line-" t.tid)
-        :debug-name "track-device-line"
-        :width 7 :height 1.2 :padding 0
-        :background-color :transparent
-        :on-click (lambda (event)
-          (track-control-click event t
-            (lambda ()
-              (select-track-for-edit t)
-              (eseq.seq-panels/seq-show-fx-lower-panel))))
-        (label (device-line-text t)
-          :key (str "track-device-line-label-" t.tid)
-          :width 7 :height 1.2 :font-size 9 :h-align :right :v-align :center
-          :color :dim :bg :transparent)))
-    (nothing)))
 
 ;; ── Track groups ────────────────────────────────────────────────────────
 ;; Regular groups and drum racks share one nested block: a header row owns the
@@ -3835,7 +3801,7 @@
             (each (eseq.drum-rack-v2/shown-members g viewed) |m|
               (subtree :key (str "sequencer-track-" m.tid)
                 (group-member-row g m)))
-            (each (eseq.drum-rack-v2/bank-racks g viewed) |child|
+            (each (eseq.drum-rack-v2/grid-racks g viewed) |child|
               (subtree :key (str "sequencer-rack-" child.gid)
                 (group-block child viewed)))))))))
 

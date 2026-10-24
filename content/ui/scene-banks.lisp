@@ -141,11 +141,12 @@
   (set! show-all-tracks (not show-all-tracks)))
 
 ;; Kit (drum rack) g in bank `viewed`: :shown when the bank plays it, :off
-;; when every scene of the bank switches it off (its header and dimmed strip
-;; stay, its pads hide), else :hidden. A kit no bank plays shows, with one
-;; exception: a kit parked in every scene reads :off in every bank (its
-;; `used-banks` is empty because it is parked, not because it is new), so
-;; its pads hide everywhere and only its dimmed strip offers the way back.
+;; when every scene of the bank switches it off (its dimmed mixer strip
+;; stays; the sequencer grid hides it, pads and header), else :hidden. A kit
+;; no bank plays shows, with one exception: a kit parked in every scene
+;; reads :off in every bank (its `used-banks` is empty because it is parked,
+;; not because it is new), so its pads hide everywhere and only its dimmed
+;; strip offers the way back.
 (def kit-bank-view (g viewed)
   (let ((in g.used-banks))
     (if (or show-all-tracks (not viewed) (kit/listed? viewed in))

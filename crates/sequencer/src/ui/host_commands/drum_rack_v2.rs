@@ -27,6 +27,47 @@ pub(super) const COMMANDS: &[&str] = &[
 /// performance view, not a latch: a click is a hit, exactly as a key press is.
 const PAD_HIT_DURATION: Duration = Duration::from_millis(180);
 
+/// `convert-rack-to-clips {:group-id}`'s model edit (recorded), with the
+/// status it reports.
+fn convert_rack_to_clips(payload: &Value, app: &mut app::App) -> Result<String, String> {
+    let group_id = extract_usize_from_payload(payload, "group-id")
+        .map(|id| id as u64)
+        .ok_or("convert-rack-to-clips needs a group id")?;
+    let created = app.convert_rack_to_clips_recorded(group_id)?;
+    Ok(format!(
+        "{} now has {created} clip(s)",
+        group_name(app, group_id).unwrap_or_else(|| "Rack".to_string())
+    ))
+}
+
+/// `set-kit-parked {:group-id :value :bank}`'s model edit (recorded); no
+/// `:bank` means the bank of the playing scene.
+fn set_kit_parked(payload: &Value, app: &mut app::App) -> Result<(), String> {
+    let group_id = extract_usize_from_payload(payload, "group-id")
+        .map(|id| id as u64)
+        .ok_or("set-kit-parked needs a group id")?;
+    let parked = extract_bool_from_payload(payload, "value");
+    let bank = super::scene_banks::scene_bank_id(payload);
+    app.set_kit_parked_in_bank_recorded(group_id, parked, bank)
+        .map(|_| ())
+        .map_err(|error| format!("Could not switch the kit: {error}"))
+}
+
+/// The model edit of kit command `name` (`set-kit-parked`,
+/// `convert-rack-to-clips`), without the live handler's UI follow-up: the
+/// capture harness's route. `None` for any other command.
+pub(crate) fn apply_kit_command(
+    name: &str,
+    payload: &Value,
+    app: &mut app::App,
+) -> Option<Result<(), String>> {
+    match name {
+        "convert-rack-to-clips" => Some(convert_rack_to_clips(payload, app).map(|_| ())),
+        "set-kit-parked" => Some(set_kit_parked(payload, app)),
+        _ => None,
+    }
+}
+
 pub(super) fn handle(
     name: &str,
     payload: Value,
@@ -283,25 +324,13 @@ pub(super) fn handle(
         }
         // Legacy rack -> clips, once (§4.3). One undoable patch, no audible
         // change: every scene keeps playing exactly what it played.
-        "convert-rack-to-clips" => {
-            let Some(group_id) = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64)
-            else {
-                editor.handle_host_event(HostEvent::Status(
-                    "convert-rack-to-clips needs a group id".to_string(),
-                ));
-                return;
-            };
-            match app.convert_rack_to_clips_recorded(group_id) {
-                Ok(created) => {
-                    sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
-                    editor.handle_host_event(HostEvent::Status(format!(
-                        "{} now has {created} clip(s)",
-                        group_name(app, group_id).unwrap_or_else(|| "Rack".to_string())
-                    )));
-                }
-                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+        "convert-rack-to-clips" => match convert_rack_to_clips(&payload, app) {
+            Ok(status) => {
+                sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+                editor.handle_host_event(HostEvent::Status(status));
             }
-        }
+            Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+        },
         // Clip launch (§4.4): set the pointer in the current scene, then
         // relaunch the current scene through the ordinary scene-launch path,
         // so it rides quantized launch with no new boundary code.
@@ -336,27 +365,14 @@ pub(super) fn handle(
         }
         // Switch a kit off (`:value` true) or on in every scene of the
         // viewed bank (`:bank-id`, else the playing scene's), one undo step.
-        "set-kit-parked" => {
-            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
-            let Some(group_id) = group_id else {
-                editor.handle_host_event(HostEvent::Status(
-                    "set-kit-parked needs a group id".to_string(),
-                ));
-                return;
-            };
-            let parked = extract_bool_from_payload(&payload, "value");
-            let bank = super::scene_banks::scene_bank_id(&payload);
-            match app.set_kit_parked_in_bank_recorded(group_id, parked, bank) {
-                Ok(_) => {
-                    let rt = editor.runtime_mut();
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
-                }
-                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
-                    "Could not switch the kit: {error}"
-                ))),
+        "set-kit-parked" => match set_kit_parked(&payload, app) {
+            Ok(()) => {
+                let rt = editor.runtime_mut();
+                rt.run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
             }
-        }
+            Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+        },
         "save-rack-clip-as" => {
             let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
             let name = extract_string_from_payload(&payload, "name").unwrap_or_default();

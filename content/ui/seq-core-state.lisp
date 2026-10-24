@@ -45,6 +45,7 @@
         group-selected-ref
         mixer-clip-area-height
         mixer-panel-height
+        effective-clip-stop-row-height
         corner-radius-scale
         radius)
 
@@ -230,6 +231,11 @@
 (def effective-clip-area-height ()
   (if mixer-show-clip-grid mixer-clip-area-height 0))
 
+;; The clip-stop bar under the clip area (one clip-grid row, the Ableton
+;; clip-stop row): shown with the grid, nothing in compact mode.
+(def effective-clip-stop-row-height ()
+  (if mixer-show-clip-grid 1.0 0))
+
 ;; Read by the host's file watcher each frame (eseq-aj2t). Changes made
 ;; while it is off are not replayed: switching it back on rescans
 ;; instruments and effects; package and init.lisp edits load on their next
@@ -251,4 +257,4 @@
 ;; The *mixer* tile height eseq.seq-layout pins: a 13.8-cell strip plus the
 ;; buffer's own padding/border was 14.5 with the stock 4.0 clip area.
 (def mixer-panel-height ()
-  (+ 10.5 (effective-clip-area-height)))
+  (+ 10.5 (effective-clip-area-height) (effective-clip-stop-row-height)))

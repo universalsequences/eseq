@@ -1,4 +1,5 @@
 use crate::*;
+use sequencer::quantized_launch::{LaunchQuantize, PatternLaunchTarget, QuantizedLaunchOwner};
 
 fn adjacent_scene_index(state: &SequencerState, delta: i32) -> Option<usize> {
     use sequencer::quantized_launch::{PatternLaunchTarget, QuantizedLaunchOwner};
@@ -76,7 +77,8 @@ pub(super) const COMMANDS: &[&str] = &[
     "delete-pattern",
 ];
 
-/// `set-scene-cell` addressed by stable ids (`launch-cell!`): `:track-id`
+/// `set-scene-cell` / `clear-scene-cell` addressed by stable ids
+/// (`launch-cell!`, `stop-track-cell!`): `:track-id`
 /// resolved to the track's position when the command lands, and no
 /// `:scene` meaning the current scene. Legacy payloads (`:scene :track`)
 /// pass through unchanged.
@@ -97,6 +99,126 @@ fn scene_cell_by_ids(app: &app::App, payload: Value) -> Result<Value, String> {
         map.insert("scene".to_string(), number(app.state.current_scene_index()));
     }
     Ok(Value::Map(map))
+}
+
+/// The transport launch quantize named `label`.
+fn launch_quantize(label: &str) -> Result<LaunchQuantize, String> {
+    LaunchQuantize::from_transport_label(label)
+        .ok_or_else(|| format!("Unknown scene launch quantization: {label}"))
+}
+
+/// The payload's `:quantize` label (absent: off), parsed.
+fn payload_launch_quantize(payload: &Value) -> Result<LaunchQuantize, String> {
+    launch_quantize(&extract_string_from_payload(payload, "quantize").unwrap_or_else(|| "off".to_string()))
+}
+
+/// `payload_launch_quantize`, or `None` after an error event naming it.
+fn launch_quantize_from_payload(payload: &Value, editor: &mut Editor) -> Option<LaunchQuantize> {
+    payload_launch_quantize(payload)
+        .map_err(|error| editor.handle_host_event(HostEvent::Error(error)))
+        .ok()
+}
+
+/// Queue `target` at `quantize` under `track`'s `TrackClip` owner (a
+/// re-click on the same track replaces its pending launch). The status
+/// names it as track `track`'s `what` ("clip 7", "stop").
+fn queue_track_clip_launch(
+    state: &SequencerState,
+    target: PatternLaunchTarget,
+    quantize: LaunchQuantize,
+    track: usize,
+    what: &str,
+) -> Result<String, String> {
+    let owner = QuantizedLaunchOwner::TrackClip(track as u32);
+    match state.schedule_quantized_pattern_launch(target, quantize, owner) {
+        Ok(token) => Ok(format!(
+            "Queued track {} {what} at {} (launch {token})",
+            track + 1,
+            quantize.transport_label(),
+        )),
+        Err(error) => Err(format!("Could not queue track {} {what}: {error:?}", track + 1)),
+    }
+}
+
+/// Report a status (`Ok`) or an error.
+fn report(editor: &mut Editor, result: Result<String, String>) {
+    editor.handle_host_event(match result {
+        Ok(status) => HostEvent::Status(status),
+        Err(error) => HostEvent::Error(error),
+    });
+}
+
+/// `clear-scene-cell {:scene :track}` (or by `:track-id`, see
+/// `scene_cell_by_ids`): clear that cell, one undo step. With `:stop true`
+/// (the mixer's clip stop, `stop-track-cell!`) a cell of the current scene
+/// stops its lane too, at the payload's `:quantize`: unquantized at once,
+/// else the cell clears now and a `TrackStop` launch silences the lane at
+/// the boundary. Returns the status to report. The live handler and the
+/// capture harness both run it.
+pub(crate) fn clear_scene_cell_command(app: &mut app::App, payload: Value) -> Result<String, String> {
+    let payload = scene_cell_by_ids(app, payload).map_err(|error| format!("clear-scene-cell: {error}"))?;
+    let (Some(scene), Some(track)) = (
+        extract_usize_from_payload(&payload, "scene"),
+        extract_usize_from_payload(&payload, "track"),
+    ) else {
+        return Err("Scene cell clear failed: missing scene or track".to_string());
+    };
+    let stop = extract_bool_from_payload(&payload, "stop");
+    let current = scene == app.state.current_scene_index();
+    let mut quantize = LaunchQuantize::Off;
+    if stop {
+        // During song playback authority the current scene's cells are the
+        // arrangement's rows: clearing one would retroactively silence the
+        // lane wherever a row resolves this scene (the same reason
+        // `set-scene-cell` delegates to an override launch).
+        if current && app.song_playback_authority_active() {
+            return Err("Clip stop is unavailable while the song plays".to_string());
+        }
+        // A capture records launches, and has no "this lane stops" event.
+        if app.pending_capture_active() {
+            return Err("Clip stop is unavailable while an arrangement capture records".to_string());
+        }
+        quantize = payload_launch_quantize(&payload)?;
+    }
+    let queued = current && quantize != LaunchQuantize::Off;
+    let mode = match (stop, queued) {
+        (false, _) => sequencer::sequencer::SceneCellClear::Edit,
+        (true, false) => sequencer::sequencer::SceneCellClear::StopNow,
+        (true, true) => sequencer::sequencer::SceneCellClear::StopAtBoundary,
+    };
+    let num_tracks = app.tracks.len();
+    let cleared = app.apply_recorded_scene_structure_mutation("Clear scene cell", |app| {
+        app.state
+            .clear_scene_cell_as(
+                scene,
+                track,
+                num_tracks,
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+                mode,
+            )
+            .ok_or_else(|| format!("Could not clear scene {} track {}", scene + 1, track + 1))
+    });
+    let Ok(pattern_id) = cleared else {
+        return Err(format!("Scene cell clear failed: scene {}, track {}", scene + 1, track + 1));
+    };
+    if queued {
+        return queue_track_clip_launch(
+            &app.state,
+            PatternLaunchTarget::TrackStop { track },
+            quantize,
+            track,
+            "stop",
+        );
+    }
+    if stop && current {
+        // A stop now also drops the track's pending clip launch, which
+        // would otherwise restart the lane at its boundary.
+        let _ = app.state.quantized_launches().cancel_owner(QuantizedLaunchOwner::TrackClip(track as u32));
+    }
+    Ok(format!("Cleared scene {} track {} pattern {}", scene + 1, track + 1, pattern_id.0))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -139,15 +261,12 @@ pub(super) fn handle(
                 ));
                 return;
             };
-            let Some(quantize) =
-                sequencer::quantized_launch::LaunchQuantize::from_transport_label(
-                    &label,
-                )
-            else {
-                editor.handle_host_event(HostEvent::Error(format!(
-                    "Unknown scene launch quantization: {label}"
-                )));
-                return;
+            let quantize = match launch_quantize(&label) {
+                Ok(quantize) => quantize,
+                Err(error) => {
+                    editor.handle_host_event(HostEvent::Error(error));
+                    return;
+                }
             };
             // UI state of record (not saved); the host kinds push it as
             // `transport.launch-quantize` at the next sync.
@@ -404,21 +523,10 @@ pub(super) fn handle(
             // a SceneTracks launch — the scheduler applies it with the same
             // chunk split scene launches use. Only a click into the CURRENT
             // scene is a launch; other scenes stay a plain edit.
-            let quantize_label = extract_string_from_payload(&payload, "quantize")
-                .unwrap_or_else(|| "off".to_string());
-            let Some(quantize) =
-                sequencer::quantized_launch::LaunchQuantize::from_transport_label(
-                    &quantize_label,
-                )
-            else {
-                editor.handle_host_event(HostEvent::Error(format!(
-                    "Unknown scene launch quantization: {quantize_label}"
-                )));
+            let Some(quantize) = launch_quantize_from_payload(&payload, editor) else {
                 return;
             };
-            if scene == app.state.current_scene_index()
-                && quantize != sequencer::quantized_launch::LaunchQuantize::Off
-            {
+            if scene == app.state.current_scene_index() && quantize != LaunchQuantize::Off {
                 let num_tracks = app.tracks.len();
                 let queued = app.apply_recorded_scene_structure_mutation(
                     "Assign scene cell",
@@ -451,27 +559,14 @@ pub(super) fn handle(
                     )));
                     return;
                 }
-                match state.schedule_quantized_pattern_launch(
-                    sequencer::quantized_launch::PatternLaunchTarget::SceneTracks {
-                        scene,
-                        tracks: vec![track],
-                    },
+                let queued = queue_track_clip_launch(
+                    &state,
+                    PatternLaunchTarget::SceneTracks { scene, tracks: vec![track] },
                     quantize,
-                    sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(
-                        track as u32,
-                    ),
-                ) {
-                    Ok(token) => editor.handle_host_event(HostEvent::Status(format!(
-                        "Queued track {} clip {} at {} (launch {})",
-                        track + 1,
-                        pattern_id,
-                        quantize.transport_label(),
-                        token
-                    ))),
-                    Err(error) => editor.handle_host_event(HostEvent::Error(format!(
-                        "Could not queue clip launch: {error:?}"
-                    ))),
-                }
+                    track,
+                    &format!("clip {pattern_id}"),
+                );
+                report(editor, queued);
                 return;
             }
             let profile = pattern_switch_profile_enabled();
@@ -561,57 +656,10 @@ pub(super) fn handle(
                 scene + 1
             )));
         }
-        "clear-scene-cell" => {
-            let Value::Map(ref map) = payload else {
-                editor.handle_host_event(HostEvent::Status(
-                    "Scene cell clear failed: invalid payload".to_string(),
-                ));
-                return;
-            };
-            let scene = map.get("scene").and_then(|cell| match &*cell.borrow() {
-                Value::Number(n) => Some(*n as usize),
-                _ => None,
-            });
-            let track = map.get("track").and_then(|cell| match &*cell.borrow() {
-                Value::Number(n) => Some(*n as usize),
-                _ => None,
-            });
-            let (Some(scene), Some(track)) = (scene, track) else {
-                editor.handle_host_event(HostEvent::Status(
-                    "Scene cell clear failed: missing scene or track".to_string(),
-                ));
-                return;
-            };
-            let num_tracks = app.tracks.len();
-            let cleared = app.apply_recorded_scene_structure_mutation(
-                "Clear scene cell",
-                |app| app.state.clear_scene_cell(
-                    scene,
-                    track,
-                    num_tracks,
-                    &app.graph.track_buffer_ids,
-                    &app.graph.track_sample_rates,
-                    &app.tracks,
-                    &app.graph.track_instrument_types,
-                ).ok_or_else(|| format!(
-                    "Could not clear scene {} track {}", scene + 1, track + 1
-                )),
-            );
-            let Ok(pattern_id) = cleared else {
-                editor.handle_host_event(HostEvent::Status(format!(
-                    "Scene cell clear failed: scene {}, track {}",
-                    scene + 1,
-                    track + 1
-                )));
-                return;
-            };
-            editor.handle_host_event(HostEvent::Status(format!(
-                "Cleared scene {} track {} pattern {}",
-                scene + 1,
-                track + 1,
-                pattern_id.0
-            )));
-        }
+        "clear-scene-cell" => match clear_scene_cell_command(app, payload) {
+            Ok(status) => editor.handle_host_event(HostEvent::Status(status)),
+            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+        },
         "launch-track-pattern" => {
             // Spec 7.3: manual track-pattern launches are rejected while song
             // playback is the launch authority.
@@ -657,40 +705,18 @@ pub(super) fn handle(
             // deferred apply runs through the central launch seam
             // (`apply_pattern_launch_at` via the due drain), which latches
             // the lane and records the capture event at the boundary beat.
-            let quantize_label = extract_string_from_payload(&payload, "quantize")
-                .unwrap_or_else(|| "off".to_string());
-            let Some(quantize) =
-                sequencer::quantized_launch::LaunchQuantize::from_transport_label(
-                    &quantize_label,
-                )
-            else {
-                editor.handle_host_event(HostEvent::Error(format!(
-                    "Unknown scene launch quantization: {quantize_label}"
-                )));
+            let Some(quantize) = launch_quantize_from_payload(&payload, editor) else {
                 return;
             };
-            if quantize != sequencer::quantized_launch::LaunchQuantize::Off {
-                match state.schedule_quantized_pattern_launch(
-                    sequencer::quantized_launch::PatternLaunchTarget::TrackPattern {
-                        track,
-                        pattern: pattern_id,
-                    },
+            if quantize != LaunchQuantize::Off {
+                let queued = queue_track_clip_launch(
+                    &state,
+                    PatternLaunchTarget::TrackPattern { track, pattern: pattern_id },
                     quantize,
-                    sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(
-                        track as u32,
-                    ),
-                ) {
-                    Ok(token) => editor.handle_host_event(HostEvent::Status(format!(
-                        "Queued track {} clip {} at {} (launch {})",
-                        track + 1,
-                        pattern_id,
-                        quantize.transport_label(),
-                        token
-                    ))),
-                    Err(error) => editor.handle_host_event(HostEvent::Error(format!(
-                        "Could not queue clip launch: {error:?}"
-                    ))),
-                }
+                    track,
+                    &format!("clip {pattern_id}"),
+                );
+                report(editor, queued);
                 return;
             }
             let launched = app.state.launch_track_pattern(
@@ -773,16 +799,10 @@ pub(super) fn handle(
                         editor.handle_host_event(HostEvent::Error(message.to_string()));
                         return;
                     }
-                    let quantize_label =
-                        extract_string_from_payload(&payload, "quantize")
-                            .unwrap_or_else(|| "off".to_string());
-                    let Some(quantize) = sequencer::quantized_launch::LaunchQuantize::from_transport_label(&quantize_label) else {
-                        editor.handle_host_event(HostEvent::Error(format!(
-                            "Unknown scene launch quantization: {quantize_label}"
-                        )));
+                    let Some(quantize) = launch_quantize_from_payload(&payload, editor) else {
                         return;
                     };
-                    if quantize != sequencer::quantized_launch::LaunchQuantize::Off {
+                    if quantize != LaunchQuantize::Off {
                         match state.schedule_quantized_pattern_launch(
                             sequencer::quantized_launch::PatternLaunchTarget::Scene {
                                 scene: idx,
@@ -1215,29 +1235,12 @@ mod tests {
         )
     }
 
-    /// Drives the REAL `dispatch_custom_host_command` -> `scenes::handle`
-    /// seam for a mixer clip click (`set-scene-cell` into the current scene)
-    /// with the transport launch quantize set: the cell assignment must land
-    /// as an edit, the audible restore must NOT happen, and a `SceneTracks`
-    /// launch must be pending under the per-track `TrackClip` owner. With
-    /// quantize off the legacy immediate restore must be untouched.
-    #[test]
-    fn quantized_clip_click_defers_the_audible_launch_and_queues_scene_tracks() {
-        const TRACK: usize = 0;
-
-        let state = Arc::new(sequencer::sequencer::SequencerState::new(
-            1,
-            vec![sequencer::sequencer::default_empty_effect_chain()],
-        ));
-        // Scene 0: empty pattern (current). Scene 1: pattern with step 4 set.
-        let first = sequencer::sequencer::PatternSnapshot::new_default(1, &[]);
-        let mut second = sequencer::sequencer::PatternSnapshot::new_default(1, &[]);
-        second.track_bits[TRACK][0] |= 1u64 << 4;
-        state.replace_pattern_repository(vec![first, second], 0);
-        state.restore_current_pattern_from_repository().unwrap();
-        let target_id = state.scene_track_pattern_id(1, TRACK).unwrap();
-        assert!(!state.pattern.patterns[TRACK].is_active(4));
-
+    /// The real host-command seam for one-track tests: an `App` over
+    /// `state`, an `Editor` and a `LoopCtx`, handed to `run`.
+    fn with_one_track_host(
+        state: Arc<sequencer::sequencer::SequencerState>,
+        run: impl FnOnce(&mut app::App, &mut Editor, &mut LoopCtx<'_>),
+    ) {
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
         let mut app = app::App::new(
             state.clone(),
@@ -1261,7 +1264,7 @@ mod tests {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
 
-        let current_track = Arc::new(AtomicUsize::new(TRACK));
+        let current_track = Arc::new(AtomicUsize::new(0));
         let sample_db = sequencer::sample_db::SampleDb::open_in_memory().expect("open in-memory sample db");
         let shared = SharedHandles {
             state: state.clone(),
@@ -1332,116 +1335,277 @@ mod tests {
             shared: &shared,
         };
 
-        dispatch_custom_host_command(
-            "set-scene-cell",
-            scene_cell_payload(0.0, TRACK as f64, target_id.0 as f64, "1 bar"),
-            &mut app,
-            &mut editor,
-            &mut ctx,
-        );
+        run(&mut app, &mut editor, &mut ctx);
+    }
 
-        // The edit landed but nothing sounded: cell assigned, live grid
-        // still empty, and the launch is pending under the TrackClip owner.
-        assert_eq!(state.scene_track_pattern_id(0, TRACK), Some(target_id));
-        assert!(
-            !state.pattern.patterns[TRACK].is_active(4),
-            "a quantized clip click must not restore the pattern immediately"
-        );
-        assert_eq!(
-            state.quantized_launches().pending_target(
-                sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(TRACK as u32)
-            ),
-            Some(
-                sequencer::quantized_launch::PatternLaunchTarget::SceneTracks {
-                    scene: 0,
-                    tracks: vec![TRACK],
-                }
-            ),
-            "the clip click must queue a SceneTracks launch under its track's owner"
-        );
+    /// The mixer's clip stop (`stop-track-cell!` -> `clear-scene-cell
+    /// :stop true` by `:track-id`) through the real host-command seam:
+    /// unquantized it clears the current scene's cell and silences the lane
+    /// at once; quantized it clears the cell now but leaves the lane playing
+    /// until the queued `TrackStop` launch applies. Either way it is one
+    /// undo step that restores the cell AND makes the lane audible again.
+    #[test]
+    fn clip_stop_clears_the_current_cell_quantized_and_undoes_in_one_step() {
+        use sequencer::quantized_launch::{PatternLaunchTarget, QuantizedLaunchOwner};
+        const TRACK: usize = 0;
 
-        // Quantize off: the legacy immediate restore.
-        dispatch_custom_host_command(
-            "set-scene-cell",
-            scene_cell_payload(0.0, TRACK as f64, target_id.0 as f64, "off"),
-            &mut app,
-            &mut editor,
-            &mut ctx,
-        );
-        assert!(
-            state.pattern.patterns[TRACK].is_active(4),
-            "an unquantized clip click must restore the pattern immediately"
-        );
+        let state = Arc::new(sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let mut playing = sequencer::sequencer::PatternSnapshot::new_default(1, &[]);
+        playing.track_bits[TRACK][0] |= 1u64 << 4;
+        state.replace_pattern_repository(vec![playing], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let cell = state.scene_track_pattern_id(0, TRACK).expect("scene 0 has a cell");
+        assert!(state.pattern.patterns[TRACK].is_active(4));
 
-        // The override-launch path (`launch-track-pattern` — where
-        // `set-scene-cell` delegates during song playback authority) must
-        // quantize through the same seam: with quantize set the pool
-        // pattern is NOT launched immediately and a TrackPattern launch is
-        // pending; with quantize off it launches immediately.
-        let original_id = {
-            let cells = state.track_pattern_cells(TRACK);
-            cells
-                .iter()
-                .map(|cell| cell.pattern_id)
-                .find(|id| *id != target_id)
-                .expect("the original scene-0 pattern stays in the pool")
-        };
-        dispatch_custom_host_command(
-            "launch-track-pattern",
-            scene_cell_payload(0.0, TRACK as f64, original_id.0 as f64, "1 bar"),
-            &mut app,
-            &mut editor,
-            &mut ctx,
-        );
-        assert!(
-            state.pattern.patterns[TRACK].is_active(4),
-            "a quantized override launch must not swap the live pattern immediately"
-        );
-        assert_eq!(
-            state.quantized_launches().pending_target(
-                sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(TRACK as u32)
-            ),
-            Some(
-                sequencer::quantized_launch::PatternLaunchTarget::TrackPattern {
-                    track: TRACK,
-                    pattern: original_id.0,
-                }
-            ),
-            "the override launch must queue a TrackPattern target under its track's owner"
-        );
-        dispatch_custom_host_command(
-            "launch-track-pattern",
-            scene_cell_payload(0.0, TRACK as f64, original_id.0 as f64, "off"),
-            &mut app,
-            &mut editor,
-            &mut ctx,
-        );
-        assert!(
-            !state.pattern.patterns[TRACK].is_active(4),
-            "an unquantized override launch must swap the live pattern immediately"
-        );
+        with_one_track_host(state.clone(), |app, editor, ctx| {
+            let tid = app.track_registry.id_at(TRACK).expect("track id").0;
+            let stop = |quantize: &str| {
+                Value::Map(HashMap::from([
+                    ("track-id".into(), Rc::new(RefCell::new(Value::Number(tid as f64)))),
+                    ("stop".into(), Rc::new(RefCell::new(Value::Bool(true)))),
+                    ("quantize".into(), Rc::new(RefCell::new(Value::String(quantize.into())))),
+                ]))
+            };
+            let undo_once = |app: &mut app::App| {
+                assert!(matches!(
+                    sequencer::app::edit::undo(app),
+                    sequencer::app::history::HistoryReplay::Applied(_)
+                ));
+            };
+            let assert_audible = |why: &str| {
+                assert_eq!(state.scene_track_pattern_id(0, TRACK), Some(cell), "{why}: the cell");
+                assert!(!state.is_scene_silenced(TRACK), "{why}: the lane is not silenced");
+                assert!(state.pattern.patterns[TRACK].is_active(4), "{why}: the pattern plays");
+            };
 
-        // Hardware scene buttons enqueue relative commands. Exercise the real
-        // command registry/handler in a batch, with no UI sync between presses.
-        // Movement follows the pending scene and does not wrap at either edge.
-        for (delta, expected) in [(1.0, 1), (1.0, 1), (-1.0, 0), (-1.0, 0)] {
+            // Quantize off: cleared and silent at once.
+            dispatch_custom_host_command("clear-scene-cell", stop("off"), app, editor, ctx);
+            assert_eq!(state.scene_track_pattern_id(0, TRACK), None, "the cell clears");
+            assert!(state.is_scene_silenced(TRACK), "an unquantized stop silences now");
+            assert!(!state.pattern.patterns[TRACK].is_active(4));
+            assert_eq!(
+                state.quantized_launches().pending_target(QuantizedLaunchOwner::TrackClip(TRACK as u32)),
+                None
+            );
+            undo_once(app);
+            assert_audible("undoing an unquantized stop");
+
+            // Quantized: the edit lands now, the silence at the boundary.
+            dispatch_custom_host_command("clear-scene-cell", stop("1 bar"), app, editor, ctx);
+            assert_eq!(state.scene_track_pattern_id(0, TRACK), None, "the cell clears now");
+            assert!(!state.is_scene_silenced(TRACK), "the lane plays until the boundary");
+            assert!(state.pattern.patterns[TRACK].is_active(4));
+            let target = PatternLaunchTarget::TrackStop { track: TRACK };
+            assert_eq!(
+                state.quantized_launches().pending_target(QuantizedLaunchOwner::TrackClip(TRACK as u32)),
+                Some(target.clone()),
+                "the stop queues an explicit TrackStop launch"
+            );
+            // The boundary's control-side apply of that launch stops the lane.
+            app.apply_pattern_launch(&target).expect("a TrackStop applies");
+            assert!(state.is_scene_silenced(TRACK), "the boundary silences the lane");
+            assert!(!state.pattern.patterns[TRACK].is_active(4));
+            undo_once(app);
+            assert_audible("one undo step after the boundary");
+        });
+    }
+
+    /// Generic masked `SceneTracks` launches (scene macros) keep requiring
+    /// every masked cell: an empty one is `MissingSceneCell`, not a stop.
+    /// And an unquantized clip stop silences a lane playing an override
+    /// other than its cell, the override included.
+    #[test]
+    fn masked_launch_of_an_empty_cell_fails_and_a_stop_drops_the_override() {
+        use sequencer::quantized_launch::PatternLaunchTarget;
+        const TRACK: usize = 0;
+
+        let state = Arc::new(sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let first = sequencer::sequencer::PatternSnapshot::new_default(1, &[]);
+        let mut second = sequencer::sequencer::PatternSnapshot::new_default(1, &[]);
+        second.track_bits[TRACK][0] |= 1u64 << 4;
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let other = state.scene_track_pattern_id(1, TRACK).unwrap();
+
+        with_one_track_host(state.clone(), |app, editor, ctx| {
+            // The lane plays scene 1's pattern as an override over its cell.
+            let launch = scene_cell_payload(0.0, TRACK as f64, other.0 as f64, "off");
+            dispatch_custom_host_command("launch-track-pattern", launch, app, editor, ctx);
+            assert!(state.pattern.patterns[TRACK].is_active(4), "the override plays");
+
+            let tid = app.track_registry.id_at(TRACK).expect("track id").0;
+            let stop = Value::Map(HashMap::from([
+                ("track-id".into(), Rc::new(RefCell::new(Value::Number(tid as f64)))),
+                ("stop".into(), Rc::new(RefCell::new(Value::Bool(true)))),
+                ("quantize".into(), Rc::new(RefCell::new(Value::String("off".into())))),
+            ]));
+            dispatch_custom_host_command("clear-scene-cell", stop, app, editor, ctx);
+            assert_eq!(state.scene_track_pattern_id(0, TRACK), None);
+            assert!(state.is_scene_silenced(TRACK), "the stop silences the override too");
+            assert!(!state.pattern.patterns[TRACK].is_active(4));
+
+            let masked = PatternLaunchTarget::SceneTracks { scene: 0, tracks: vec![TRACK] };
+            assert!(
+                matches!(
+                    app.apply_pattern_launch(&masked),
+                    Err(sequencer::app::PatternLaunchError::MissingSceneCell { scene: 0, track: TRACK })
+                ),
+                "a masked launch of an empty cell stays an error"
+            );
+            assert!(
+                state.preflight_pattern_launch_snapshot(&masked).is_none(),
+                "and does not preflight"
+            );
+            assert!(
+                state
+                    .preflight_pattern_launch_snapshot(&PatternLaunchTarget::TrackStop { track: TRACK })
+                    .is_some_and(|snapshot| snapshot.tracks[TRACK].scene_silenced),
+                "a TrackStop preflights the lane silent"
+            );
+        });
+    }
+
+    /// Drives the REAL `dispatch_custom_host_command` -> `scenes::handle`
+    /// seam for a mixer clip click (`set-scene-cell` into the current scene)
+    /// with the transport launch quantize set: the cell assignment must land
+    /// as an edit, the audible restore must NOT happen, and a `SceneTracks`
+    /// launch must be pending under the per-track `TrackClip` owner. With
+    /// quantize off the legacy immediate restore must be untouched.
+    #[test]
+    fn quantized_clip_click_defers_the_audible_launch_and_queues_scene_tracks() {
+        const TRACK: usize = 0;
+
+        let state = Arc::new(sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        // Scene 0: empty pattern (current). Scene 1: pattern with step 4 set.
+        let first = sequencer::sequencer::PatternSnapshot::new_default(1, &[]);
+        let mut second = sequencer::sequencer::PatternSnapshot::new_default(1, &[]);
+        second.track_bits[TRACK][0] |= 1u64 << 4;
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let target_id = state.scene_track_pattern_id(1, TRACK).unwrap();
+        assert!(!state.pattern.patterns[TRACK].is_active(4));
+
+        with_one_track_host(state.clone(), |app, editor, ctx| {
+            dispatch_custom_host_command(
+                "set-scene-cell",
+                scene_cell_payload(0.0, TRACK as f64, target_id.0 as f64, "1 bar"),
+                app,
+                editor,
+                ctx,
+            );
+
+            // The edit landed but nothing sounded: cell assigned, live grid
+            // still empty, and the launch is pending under the TrackClip owner.
+            assert_eq!(state.scene_track_pattern_id(0, TRACK), Some(target_id));
+            assert!(
+                !state.pattern.patterns[TRACK].is_active(4),
+                "a quantized clip click must not restore the pattern immediately"
+            );
+            assert_eq!(
+                state.quantized_launches().pending_target(
+                    sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(TRACK as u32)
+                ),
+                Some(
+                    sequencer::quantized_launch::PatternLaunchTarget::SceneTracks {
+                        scene: 0,
+                        tracks: vec![TRACK],
+                    }
+                ),
+                "the clip click must queue a SceneTracks launch under its track's owner"
+            );
+
+            // Quantize off: the legacy immediate restore.
+            dispatch_custom_host_command(
+                "set-scene-cell",
+                scene_cell_payload(0.0, TRACK as f64, target_id.0 as f64, "off"),
+                app,
+                editor,
+                ctx,
+            );
+            assert!(
+                state.pattern.patterns[TRACK].is_active(4),
+                "an unquantized clip click must restore the pattern immediately"
+            );
+
+            // The override-launch path (`launch-track-pattern` — where
+            // `set-scene-cell` delegates during song playback authority) must
+            // quantize through the same seam: with quantize set the pool
+            // pattern is NOT launched immediately and a TrackPattern launch is
+            // pending; with quantize off it launches immediately.
+            let original_id = {
+                let cells = state.track_pattern_cells(TRACK);
+                cells
+                    .iter()
+                    .map(|cell| cell.pattern_id)
+                    .find(|id| *id != target_id)
+                    .expect("the original scene-0 pattern stays in the pool")
+            };
+            dispatch_custom_host_command(
+                "launch-track-pattern",
+                scene_cell_payload(0.0, TRACK as f64, original_id.0 as f64, "1 bar"),
+                app,
+                editor,
+                ctx,
+            );
+            assert!(
+                state.pattern.patterns[TRACK].is_active(4),
+                "a quantized override launch must not swap the live pattern immediately"
+            );
+            assert_eq!(
+                state.quantized_launches().pending_target(
+                    sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(TRACK as u32)
+                ),
+                Some(
+                    sequencer::quantized_launch::PatternLaunchTarget::TrackPattern {
+                        track: TRACK,
+                        pattern: original_id.0,
+                    }
+                ),
+                "the override launch must queue a TrackPattern target under its track's owner"
+            );
+            dispatch_custom_host_command(
+                "launch-track-pattern",
+                scene_cell_payload(0.0, TRACK as f64, original_id.0 as f64, "off"),
+                app,
+                editor,
+                ctx,
+            );
+            assert!(
+                !state.pattern.patterns[TRACK].is_active(4),
+                "an unquantized override launch must swap the live pattern immediately"
+            );
+
+            // Hardware scene buttons enqueue relative commands. Exercise the real
+            // command registry/handler in a batch, with no UI sync between presses.
+            // Movement follows the pending scene and does not wrap at either edge.
+            for (delta, expected) in [(1.0, 1), (1.0, 1), (-1.0, 0), (-1.0, 0)] {
+                let payload = Value::Map(HashMap::from([
+                    ("delta".into(), Rc::new(RefCell::new(Value::Number(delta)))),
+                    ("quantize".into(), Rc::new(RefCell::new(Value::String("1 bar".into())))),
+                ]));
+                dispatch_custom_host_command(
+                    "switch-pattern-relative", payload, app, editor, ctx);
+                assert_eq!(state.current_scene_index(), 0);
+                assert_eq!(state.quantized_launches().pending_target(
+                    sequencer::quantized_launch::QuantizedLaunchOwner::Transport),
+                    Some(sequencer::quantized_launch::PatternLaunchTarget::Scene { scene: expected }));
+            }
             let payload = Value::Map(HashMap::from([
-                ("delta".into(), Rc::new(RefCell::new(Value::Number(delta)))),
-                ("quantize".into(), Rc::new(RefCell::new(Value::String("1 bar".into())))),
+                ("delta".into(), Rc::new(RefCell::new(Value::Number(1.0)))),
+                ("quantize".into(), Rc::new(RefCell::new(Value::String("off".into())))),
             ]));
             dispatch_custom_host_command(
-                "switch-pattern-relative", payload, &mut app, &mut editor, &mut ctx);
-            assert_eq!(state.current_scene_index(), 0);
-            assert_eq!(state.quantized_launches().pending_target(
-                sequencer::quantized_launch::QuantizedLaunchOwner::Transport),
-                Some(sequencer::quantized_launch::PatternLaunchTarget::Scene { scene: expected }));
-        }
-        let payload = Value::Map(HashMap::from([
-            ("delta".into(), Rc::new(RefCell::new(Value::Number(1.0)))),
-            ("quantize".into(), Rc::new(RefCell::new(Value::String("off".into())))),
-        ]));
-        dispatch_custom_host_command(
-            "switch-pattern-relative", payload, &mut app, &mut editor, &mut ctx);
-        assert_eq!(state.current_scene_index(), 1, "quantization off launches immediately");
+                "switch-pattern-relative", payload, app, editor, ctx);
+            assert_eq!(state.current_scene_index(), 1, "quantization off launches immediately");
+        });
     }
 }

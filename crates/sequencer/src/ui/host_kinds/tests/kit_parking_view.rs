@@ -101,6 +101,11 @@ fn a_parked_kit_reads_off_in_its_bank_and_keeps_a_dimmed_strip_in_the_mixer() {
     assert_eq!(strips.len(), 1, "the parked kit's strip is in the bank's mixer");
     let menu = h.kit_eval("(get (eseq.mixer/kit-power-action g) :label)");
     assert_eq!(menu, Value::String("Turn kit on in bank A".into()));
+    // The sequencer grid drops it, header and pads: the mixer strip is the
+    // one way back on.
+    let in_grid = "(len (filter (lambda (i) (let ((gi (get i :group))) (and gi (= gi.gid g.gid))))
+                                (eseq.sequencer/grid-items)))";
+    assert_eq!(h.kit_eval(in_grid), Value::Number(0.0), "the off kit leaves the sequencer grid");
 
     // Clicking it selects the kit: *fx* shows its drum rack, toggle off.
     h.fire_and_show(&strips[0], "on-click", Value::Nil);
@@ -117,6 +122,20 @@ fn a_parked_kit_reads_off_in_its_bank_and_keeps_a_dimmed_strip_in_the_mixer() {
     assert_eq!(sent, vec!["set-kit-parked".to_string()]);
     assert_eq!(h.kit_eval("(kit-bank-state g b)"), kw("on"));
     assert!(h.kit_widgets("*mixer*", "parked-kit-strip").is_empty());
+    assert_eq!(h.kit_eval(in_grid), Value::Number(1.0), "back in the grid once on");
+
+    // The dimmed strip's own power dot turns the kit back on.
+    h.kit_turn("(set-kit-parked! g b true)");
+    let (mixer, _) = h.buffer_tree("*mixer*");
+    let click = widget_keyed(&mixer, &format!("parked-kit-power-{group_id}"))
+        .and_then(|dot| dot.get("on-click").cloned())
+        .expect("the strip's power dot");
+    h.editor
+        .runtime_mut()
+        .invoke(click, vec![Value::Nil, Value::Nil, Value::Nil])
+        .expect("power dot click");
+    h.kit_settle();
+    assert_eq!(h.kit_eval("(kit-bank-state g b)"), kw("on"), "one click on the dimmed strip");
 }
 
 #[test]

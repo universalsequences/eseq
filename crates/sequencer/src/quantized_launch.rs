@@ -68,6 +68,11 @@ pub enum PatternLaunchTarget {
     /// scheduled during song playback, where boundary launches degrade to
     /// the control-side apply at the boundary anyway.
     TrackPattern { track: usize, pattern: u64 },
+    /// An explicit stop of one track's lane (the mixer's clip stop): the
+    /// lane falls silent at the boundary whatever it plays — its override
+    /// drops and its live grid blanks; the scene's cells are untouched
+    /// (the stop gesture clears the current cell itself, as an edit).
+    TrackStop { track: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -489,6 +494,7 @@ impl PendingQuantizedLaunches {
                 PatternLaunchTarget::TrackPattern { track, .. } => {
                     (Some(vec![*track]), None)
                 }
+                PatternLaunchTarget::TrackStop { track } => (Some(vec![*track]), None),
             };
             install = match (&install, &tracks) {
                 (SessionLaunchInstall::AllTracks, _) | (_, None) => {
@@ -826,7 +832,9 @@ fn canonicalize_target(
     scene_count: usize,
     track_count: usize,
 ) -> Result<PatternLaunchTarget, QuantizedLaunchSubmitError> {
-    if let PatternLaunchTarget::TrackPattern { track, .. } = &target {
+    if let PatternLaunchTarget::TrackPattern { track, .. } | PatternLaunchTarget::TrackStop { track } =
+        &target
+    {
         if *track >= track_count {
             return Err(QuantizedLaunchSubmitError::TrackOutOfRange {
                 track: *track,
@@ -841,13 +849,17 @@ fn canonicalize_target(
         PatternLaunchTarget::Scene { scene } | PatternLaunchTarget::SceneTracks { scene, .. } => {
             *scene
         }
-        PatternLaunchTarget::TrackPattern { .. } => unreachable!("handled above"),
+        PatternLaunchTarget::TrackPattern { .. } | PatternLaunchTarget::TrackStop { .. } => {
+            unreachable!("handled above")
+        }
     };
     if scene >= scene_count {
         return Err(QuantizedLaunchSubmitError::SceneOutOfRange { scene, scene_count });
     }
     match target {
-        PatternLaunchTarget::Scene { .. } | PatternLaunchTarget::TrackPattern { .. } => Ok(target),
+        PatternLaunchTarget::Scene { .. }
+        | PatternLaunchTarget::TrackPattern { .. }
+        | PatternLaunchTarget::TrackStop { .. } => Ok(target),
         PatternLaunchTarget::SceneTracks { scene, mut tracks } => {
             tracks.sort_unstable();
             tracks.dedup();
