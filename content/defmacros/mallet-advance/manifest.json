@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "mallet-advance",
+  "params": [
+    "x",
+    "v",
+    "F",
+    "C",
+    "drop"
+  ],
+  "outputs": [
+    "x",
+    "v"
+  ],
+  "summary": "Mallet protocol 4: apply contact force, park above the drop height.",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

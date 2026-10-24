@@ -14,6 +14,8 @@ fn main() {
 const USAGE: &str = "usage: eseq run
        eseq run -noui [FILE]
        eseq paths
+       eseq lisp run FILE...
+       eseq modal emit PATCH.lisp [DIR]
        eseq authoring seed [DIR]
        eseq authoring skill
        eseq instrument check DIR_OR_NAME [--no-render]
@@ -23,6 +25,77 @@ const USAGE: &str = "usage: eseq run
        eseq package install AUTHOR/NAME GIT_URL
        eseq package import PATH_OR_ARCHIVE
        eseq package export AUTHOR/NAME VERSION OUT_DIR (instrument:<name>|effect:<name>|presets:<factory-instrument>)...";
+
+/// A core VM (no app, no UI) whose imports resolve like the app's: local
+/// modules, installed packages, then factory content (`eseq.modal`).
+fn core_vm() -> eseqlisp::vm::VM {
+    let mut vm = eseqlisp::vm::VM::new(Vec::new());
+    eseqlisp::vm::register_core_natives(&mut vm);
+    eseqlisp::vm::register_math_natives(&mut vm);
+    let (roots, _) = sequencer::app_paths::app_paths().module_load_roots();
+    vm.source_manager.set_scoped_module_load_roots(roots);
+    vm
+}
+
+/// Generate an instrument from a modal patch script (its last form is an
+/// `eseq.modal` patch) into DIR, by default the user instrument folder under
+/// the patch's :name. Writes dsp.lisp, ui.lisp and instrument.json.
+fn emit_modal(script: &str, dir: Option<&String>) -> Result<(), String> {
+    let path = PathBuf::from(script);
+    let source =
+        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut vm = core_vm();
+    let instrument = sequencer::lisp_host::generate_modal_instrument(&mut vm, path.clone(), &source)
+        .map_err(|errors| format!("{}:\n  {}", path.display(), errors.join("\n  ")))?;
+    let dir = match dir {
+        Some(dir) => PathBuf::from(dir),
+        None => sequencer::app_paths::app_paths().user_instruments_dir().join(&instrument.name),
+    };
+    instrument.write_to(&dir)?;
+    println!("wrote {}", dir.display());
+    Ok(())
+}
+
+/// Evaluate eseqlisp files in order in one core VM (no app, no UI) and print
+/// the last file's value when it is a string. Generator scripts build source
+/// as data and write it with `(write-text-file path text)`; relative paths
+/// resolve against the current directory. Only this CLI registers that
+/// native, so app UI code cannot write files.
+fn run_lisp(files: &[String]) -> Result<(), String> {
+    use eseqlisp::vm::Value;
+    use sequencer::lisp_host::ModalScriptHost;
+    let mut vm = core_vm();
+    vm.register_native("write-text-file", |args| match args.as_slice() {
+        [Value::String(path), Value::String(text)] => {
+            let path = PathBuf::from(path);
+            if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                if let Err(error) = std::fs::create_dir_all(parent) {
+                    eprintln!("eseq: write-text-file {}: {error}", path.display());
+                    return Value::Nil;
+                }
+            }
+            match std::fs::write(&path, text) {
+                Ok(()) => Value::String(path.display().to_string()),
+                Err(error) => {
+                    eprintln!("eseq: write-text-file {}: {error}", path.display());
+                    Value::Nil
+                }
+            }
+        }
+        _ => Value::Nil,
+    });
+    let mut last = None;
+    for file in files {
+        let path = PathBuf::from(file);
+        let source = std::fs::read_to_string(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        last = vm.eval_at(path, &source).map_err(|lines| lines.join("\n"))?;
+    }
+    if let Some(Value::String(text)) = last {
+        print!("{text}");
+    }
+    Ok(())
+}
 
 /// Audition rate for `check`; matches the default device rate.
 const CHECK_SAMPLE_RATE: u32 = 48_000;
@@ -46,6 +119,12 @@ fn run(args: Vec<String>) -> Result<(), String> {
             run_app(true, file.first())
         }
         [paths] if paths == "paths" => print_paths(),
+        [lisp, run, files @ ..] if lisp == "lisp" && run == "run" && !files.is_empty() => {
+            run_lisp(files)
+        }
+        [modal, emit, script, dir @ ..] if modal == "modal" && emit == "emit" && dir.len() <= 1 => {
+            emit_modal(script, dir.first())
+        }
         [authoring, seed, dir @ ..] if authoring == "authoring" && seed == "seed" && dir.len() <= 1 => {
             let paths = sequencer::app_paths::app_paths();
             paths

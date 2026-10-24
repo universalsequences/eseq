@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "name": "modal-material",
+  "params": [
+    "material"
+  ],
+  "outputs": [
+    "density",
+    "young"
+  ],
+  "summary": "Modalys material table: index -> (density, young's modulus).",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

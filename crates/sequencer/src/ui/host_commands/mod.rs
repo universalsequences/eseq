@@ -24,6 +24,7 @@ mod instrument_params;
 mod lanes;
 mod learn;
 mod misc;
+pub(crate) mod modal_drafts;
 pub(crate) mod notes;
 pub(crate) mod packages;
 mod panel;

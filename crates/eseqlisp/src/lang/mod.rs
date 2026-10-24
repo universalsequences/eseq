@@ -3,6 +3,7 @@ pub mod def_header;
 pub mod modules;
 pub mod parser;
 pub mod sdf_codegen;
+pub mod source_print;
 mod sdf_geometry;
 pub mod sdf_hit;
 pub mod vm;

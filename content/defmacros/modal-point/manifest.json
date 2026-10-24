@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "name": "modal-point",
+  "params": [
+    "free",
+    "phi",
+    "G"
+  ],
+  "outputs": [
+    "y",
+    "C"
+  ],
+  "summary": "Modal protocol 2: access point position and compliance.",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

@@ -369,6 +369,8 @@ pub(crate) fn run_event_loop(
         pending_effect_preview: None,
         pending_effect_cancel_restore: None,
         package_view_session: None,
+        modal_drafts: Vec::new(),
+        pending_modal_compiles: Vec::new(),
         pending_agentic_bubbles: HashMap::new(),
         pending_jev_suggestions: Vec::new(),
         queued_jev_suggestions: Vec::new(),
@@ -2102,6 +2104,12 @@ pub(crate) fn run_event_loop(
                 }
             }
         }
+        host_commands::modal_drafts::poll_modal_draft_compiles(
+            &mut app,
+            &mut editor,
+            &mut sessions,
+            &shared.ui_epoch,
+        );
         poll_learn_job(
             &mut app,
             &mut sessions,

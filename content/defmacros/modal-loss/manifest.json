@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "modal-loss",
+  "params": [
+    "freqs",
+    "const_loss",
+    "freq_loss"
+  ],
+  "outputs": [
+    "sigma"
+  ],
+  "summary": "Per-mode decay rate: constant + proportional + air (f^2) loss.",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

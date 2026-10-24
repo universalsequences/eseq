@@ -23,12 +23,20 @@
 ;; Everything else is private. Subtree :key strings and :debug-name strings
 ;; are byte-identical (hazard e) — they are flat keyspaces that never qualify.
 
+;; A grouped param drops its group's prefix, spelled `group.` or `group_`
+;; (DGenLisp names cannot hold a dot, so generated patches use `str_length`).
 (def param-display-name (p)
-  (let ((name (if (get p :display-name) (get p :display-name) (get p :name))))
-    (let ((group-prefix (if (get p :group) (str (get p :group) ".") false)))
-      (if (and group-prefix (string-starts-with? name group-prefix))
-        (substring name (len group-prefix) (len name))
-        name))))
+  (let ((name (if (get p :display-name) (get p :display-name) (get p :name)))
+        (strip (lambda (name prefix)
+                 (if (string-starts-with? name prefix)
+                   (substring name (len prefix) (len name))
+                   false))))
+    (if (get p :group)
+      (let ((dotted (strip name (str (get p :group) "."))))
+        (if dotted dotted
+          (let ((underscored (strip name (str (get p :group) "_"))))
+            (if underscored underscored name))))
+      name)))
 
 (def param-options (p)
   (let ((options (get p :options)))

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "stiff-string-freqs",
+  "params": [
+    "n",
+    "f0",
+    "young",
+    "density",
+    "radius",
+    "length"
+  ],
+  "outputs": [
+    "freqs"
+  ],
+  "summary": "Stiff-string mode frequencies held on pitch f0 (material + geometry inharmonicity).",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

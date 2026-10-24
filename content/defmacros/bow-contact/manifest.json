@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "bow-contact",
+  "params": [
+    "y",
+    "y_prev",
+    "x_prev",
+    "C",
+    "vb",
+    "v0",
+    "pressure"
+  ],
+  "outputs": [
+    "force",
+    "x"
+  ],
+  "summary": "Modalys bow connection: implicit stick-slip friction force (bracket scan + one regula falsi step).",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}
