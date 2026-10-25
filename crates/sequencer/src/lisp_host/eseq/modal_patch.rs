@@ -1122,6 +1122,75 @@ mod tests {
     }
 
     #[test]
+    fn a_unison_string_is_struck_and_bridged_as_one() {
+        let script = "(import eseq.modal :as m)
+(m/patch :name \"probe-unison\"
+  :objects (list (m/mallet 'ham) (m/string 'str :modes 8 :unison 3 :detune 1.5) (m/plate 'board :grid 2))
+  :connections (list (m/felt 'hit 'ham 'str 0.12 :exponent 3)
+                     (m/spring 'bridge 'str 0.99 'board (list 0.4 0.5)))
+  :listens (list (m/listen 'board (list 0.6 0.3))))";
+        let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("unison.lisp"), script).unwrap();
+        let squashed = instrument.dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        // One set of knobs: the copies read the first string's and connection's params.
+        assert!(squashed.contains("(param str_detune @group str @default 1.5"), "{squashed}");
+        assert!(!squashed.contains("(param str_u1_"), "{squashed}");
+        assert!(squashed.contains("(def hit_u2_felt hit_felt)"), "{squashed}");
+        assert!(squashed.contains("(def bridge_u1_stiff bridge_stiff)"), "{squashed}");
+        // The copies sit +detune and -detune cents away.
+        assert!(squashed.contains("(def str_u1_f0 (* f0 str_tune (pow 2 (/ (* 1 str_detune) 1200))))"), "{squashed}");
+        assert!(squashed.contains("(def str_u2_f0 (* f0 str_tune (pow 2 (/ (* -1 str_detune) 1200))))"), "{squashed}");
+        // Each copy has its own contact state and is bridged, centred in time.
+        assert!(squashed.contains("(make-history hit_u2_h)"), "{squashed}");
+        assert!(squashed.contains("(spring-centred (- bridge_u2_y_a0 bridge_u2_y_b0) bridge_u2_gap_old"), "{squashed}");
+        assert!(!instrument.ui.contains("str_u1"), "{}", instrument.ui);
+        for (args, error) in [
+            (":unison 2.5", "string str: :unison is a whole number of strings, got 2.5"),
+            (":unison 2 :planes 2", "string str: :unison and :planes 2 do not combine"),
+        ] {
+            let bad = script.replace(":unison 3 :detune 1.5", args);
+            let errors = generate_modal_instrument(&mut modal_vm(), PathBuf::from("unison.lisp"), &bad).unwrap_err();
+            assert!(errors.contains(&error.to_string()), "{errors:?}");
+        }
+    }
+
+    #[test]
+    fn by_note_values_follow_the_played_note() {
+        let script = "(import eseq.modal :as m)
+(m/patch :name \"probe-scale\"
+  :objects (list (m/mallet 'ham) (m/string 'str :length (m/by-note 27.5 2.0 262 0.66 4186 0.05)
+                                               :const-loss (m/by-note 27.5 0 4186 1)))
+  :connections (list (m/felt 'hit 'ham 'str (m/by-note 27.5 0.12 4186 0.06)))
+  :listens (list (m/listen 'str 0.3)))";
+        let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("scale.lisp"), script).unwrap();
+        let squashed = instrument.dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        // The knob is the value at C4 (log-interpolated between 27.5 and 262 Hz) ...
+        assert!(squashed.contains("(param str_length_c4 @group str @default 0.6605 @min 0.2 @max 20 @unit m)"), "{squashed}");
+        assert!(instrument.ui.contains("\"str.str_length_c4\""), "{}", instrument.ui);
+        // ... and the curve scales it at the note; a curve through 0 shifts it.
+        // Worked out when the pitch or a knob changes, latched back to audio rate.
+        assert!(squashed.contains("(def note_ln (log (event-hold f0 bynote_tick)))"), "{squashed}");
+        assert!(squashed.contains("(def str_length_e (* (event-hold str_length_c4 bynote_tick) (exp (+"), "{squashed}");
+        assert!(squashed.contains("(def str_length (latch str_length_e bynote_tick))"), "{squashed}");
+        assert!(squashed.contains("(def str_loss_e (+ (event-hold str_loss_c4 bynote_tick) (+ -0.448"), "{squashed}");
+        // Access points follow too; the code reads the note's value.
+        assert!(squashed.contains("(def hit_str_at (latch hit_str_at_e bynote_tick))"), "{squashed}");
+        assert!(squashed.contains("(sin (* str_n 3.14159265 hit_str_at))"), "{squashed}");
+        for (curve, error) in [
+            ("(m/by-note 27.5 2.0)", "str_length: m/by-note takes pitch value pairs, at least two, got (27.5 2)"),
+            ("(m/by-note 262 0.66 27.5 2.0)", "str_length: m/by-note's pitches must be positive and rising, got (262 27.5)"),
+            ("(m/by-note 27.5 40 4186 30)", "str_length: m/by-note is 35.16 at C4, outside its knob's 0.2..20"),
+        ] {
+            let bad = script.replace("(m/by-note 27.5 2.0 262 0.66 4186 0.05)", curve);
+            let errors = generate_modal_instrument(&mut modal_vm(), PathBuf::from("scale.lisp"), &bad).unwrap_err();
+            assert!(errors.contains(&error.to_string()), "{errors:?}");
+        }
+        // A curve given as a point is checked too.
+        let bad_at = script.replace("(m/by-note 27.5 0.12 4186 0.06)", "(m/by-note 27.5 0.12)");
+        let errors = generate_modal_instrument(&mut modal_vm(), PathBuf::from("scale.lisp"), &bad_at).unwrap_err();
+        assert!(errors.contains(&"felt hit b: m/by-note takes pitch value pairs, at least two, got (27.5 0.12)".to_string()), "{errors:?}");
+    }
+
+    #[test]
     fn routes_only_scripts_that_import_eseq_modal() {
         assert!(is_modal_patch_script("(import eseq.modal :as m)\n(m/patch)"));
         assert!(is_modal_patch_script("(import eseq.modal)"));

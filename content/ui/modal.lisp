@@ -18,8 +18,8 @@
 ;;   (m/patch :name "my-cello"
 ;;     :objects     (list (m/string 'str :made-of mat/nylon) (m/plate 'body))
 ;;     :connections (list (m/bow 'bow 'str 0.12)
-;;                        (m/spring 'bridge 'str 0.99 'body (list 0.55 0.4)))
-;;     :listens     (list (m/listen 'str 0.85)))
+;;                        (m/spring 'bridge 'str 0.999 'body (list 0.55 0.4)))
+;;     :listens     (list (m/listen 'str 0.97)))
 ;;
 ;; (check patch) lists what is wrong with a patch by name ("spring bridge: no
 ;; object bdy"); (dsp patch) assumes a patch that checks clean.
@@ -41,7 +41,7 @@
         pluck spring mount felt bow strike stop fingerboard force position speed listen patch plane
         tone-hole reed lips jet strokes stroke-point
         envelope noise sine constant signal tap-position tap-speed tap-force tap-contact speaker spectral
-        pickup amp
+        pickup amp by-note
         check dsp ui generate)
 
 ;; ── small helpers ───────────────────────────────────────────────────────────
@@ -61,11 +61,112 @@
 (def sum-form (terms)
   (if (empty? terms) 0 (if (= (len terms) 1) (first terms) (cons '+ terms))))
 
+;; ── values that follow the note ─────────────────────────────────────────────
+;; Any knob argument can follow the played note instead of being one number,
+;; as a piano's strings shorten and thin up the keyboard:
+;;   (m/string 'str :length (m/by-note 27.5 2.0 262 0.66 4186 0.05))
+;; Between the given pitches it is interpolated over log frequency: of the
+;; logs of the values when all are positive (so a length halves smoothly
+;; over an octave), of the values themselves otherwise; outside them it holds
+;; the end value. The knob sets the value at C4 and moves the whole curve
+;; with it: it scales a positive curve and shifts any other.
+
+;; The pitch a by-note knob shows its value at, Hz.
+(def by-note-ref 261.63)
+
+;; A value following the played note.
+;;   points  pitch value pitch value ...: pitches in Hz, rising
+(def by-note (&rest points) (dict :kind :by-note :points points))
+
+;; True when x is a by-note value.
+;;   x  anything
+(def by-note? (x) (and (map? x) (= (get x :kind) :by-note)))
+
+;; Every other item of xs, from start (0 or 1).
+;;   xs     a list
+;;   start  the first index
+(def every-other (xs start) (map (lambda (k) (nth xs (+ start (* 2 k)))) (range (floor (/ (len xs) 2)))))
+
+;; A by-note's pitches and values, as two lists.
+;;   curve  a by-note
+(def by-note-hz (curve) (every-other (get curve :points) 0))
+(def by-note-values (curve) (every-other (get curve :points) 1))
+
+;; True when a by-note interpolates logs of its values (all positive).
+;;   curve  a by-note
+(def by-note-log? (curve) (all? (lambda (v) (> v 0)) (by-note-values curve)))
+
+;; What is wrong with a by-note as an argument: pairs of numbers, at least
+;; two, pitches positive and rising.
+;;   what   the param, for messages ("str_length")
+;;   curve  a by-note
+(def by-note-errors (what curve)
+  (let ((pts (get curve :points)))
+    (if (or (< (len pts) 4) (not (= (mod (len pts) 2) 0)) (not (all? number? pts)))
+      (list (str what ": m/by-note takes pitch value pairs, at least two, got " (source pts)))
+      (let ((hz (by-note-hz curve)))
+        (if (and (> (first hz) 0) (all? (lambda (k) (< (nth hz k) (nth hz (+ k 1)))) (range (- (len hz) 1)))) nil
+          (list (str what ": m/by-note's pitches must be positive and rising, got " (source hz))))))))
+
+;; A by-note in the domain it is interpolated in (log pitch; log value when
+;; all are positive): its first value and each segment as (x0 width slope).
+;; The curve at log pitch x is y0 plus every slope times clamp(x - x0, 0,
+;; width).
+;;   curve  a by-note that by-note-errors finds nothing wrong with
+(def by-note-segments (curve)
+  (let ((xs (map log (by-note-hz curve))) (lg (by-note-log? curve)))
+    (let ((ys (map (lambda (v) (if lg (log v) v)) (by-note-values curve))))
+      (dict :y0 (first ys)
+            :segs (map (lambda (k) (let ((w (- (nth xs (+ k 1)) (nth xs k))))
+                                     (list (nth xs k) w (/ (- (nth ys (+ k 1)) (nth ys k)) w))))
+                       (range (- (len xs) 1)))))))
+
+;; The curve at pitch hz, in its interpolation domain.
+;;   curve  a by-note
+;;   hz     a pitch, Hz
+(def by-note-raw (curve hz)
+  (let ((sg (by-note-segments curve)) (x (log hz)))
+    (reduce (lambda (y sv) (+ y (* (nth sv 2) (clamp (- x (nth sv 0)) 0 (nth sv 1))))) (get sg :y0) (get sg :segs))))
+
+;; The curve at pitch hz, as the generated code interpolates it.
+;;   curve  a by-note
+;;   hz     a pitch, Hz
+(def by-note-at (curve hz) (let ((y (by-note-raw curve hz))) (if (by-note-log? curve) (exp y) y)))
+
+;; Forms defining every by-note param's value from its knob: the curve at
+;; the note, scaled or shifted so it passes through the knob's value at C4.
+;; It changes only when the pitch or a knob does, so it is worked out on
+;; bynote_tick (see change-tick-forms) and latched back to audio rate.
+;;   specs  every param spec
+(def by-note-forms (specs)
+  (let ((curved (filter (lambda (p) (get p :by-note)) specs)))
+    (if (empty? curved) (list)
+      (append
+        (change-tick-forms "bynote" (cons 'f0 (map (lambda (p) (get p :sym)) curved)))
+        (list '(def note_ln (log (event-hold f0 bynote_tick))))
+        (concat-all
+          (map (lambda (p)
+                 (let ((curve (get p :by-note)) (sg (by-note-segments (get p :by-note))))
+                   (let ((offset (sum-form (cons (- (get sg :y0) (by-note-raw curve by-note-ref))
+                                                 (map (lambda (sv) `(* ,(nth sv 2) (clip (- note_ln ,(nth sv 0)) 0 ,(nth sv 1))))
+                                                      (get sg :segs)))))
+                         (knob `(event-hold ,(get p :sym) bynote_tick)))
+                     (list `(def ,(symbol (get p :uses) "_e") ,(if (by-note-log? curve) `(* ,knob (exp ,offset)) `(+ ,knob ,offset)))
+                           `(def ,(get p :uses) (latch ,(symbol (get p :uses) "_e") bynote_tick))))))
+               curved))))))
+
+;; The symbol generated code reads a param by: its knob's, or for a by-note
+;; param the value at the note its knob scales.
+;;   p  a param spec
+(def spec-ref (p) (if (get p :uses) (get p :uses) (get p :sym)))
+
 ;; A param spec: one DGenLisp param of an object, connection or mic, plus
 ;; how the generated panel shows it.
 ;;   id       the owner's id; the param is named id_name and grouped by id
 ;;   name     the param's own name, a string ("length")
-;;   default  its initial value (for a menu, the option's index)
+;;   default  its initial value (for a menu, the option's index), or an
+;;            m/by-note: the param id_name then follows the note and its
+;;            knob, id_name_c4, is the value at C4
 ;;   lo, hi   its range
 ;;   options  a list of option strings: makes the param a menu
 ;;   unit     a unit symbol for @unit ('m, 'mm, 'Hz, 'ms), or nil
@@ -73,9 +174,22 @@
 ;;   taper    the panel knob's taper, :linear or :log
 ;;   dec      decimals shown (default: picked from hi, 2 / 1 / 0)
 (def pspec (id name default lo hi &key (options nil) (unit nil) (title nil) (taper :linear) (dec nil))
-  (dict :sym (nm id name) :group id :default default :min lo :max hi :options options :unit unit
-        :title (if title title name) :taper taper
-        :dec (if dec dec (if (<= hi 10) 2 (if (<= hi 100) 1 0)))))
+  (let ((curve (if (by-note? default) default nil)))
+    (dict :sym (if curve (nm id (str name "_c4")) (nm id name)) :uses (if curve (nm id name) nil) :by-note curve
+          :name name :group id
+          ;; a malformed curve (check reports it) shows its first value
+          :default (if curve (if (empty? (by-note-errors "" curve)) (sig-figs (by-note-at curve by-note-ref) 4) lo) default)
+          :min lo :max hi :options options :unit unit
+          :title (if title title name) :taper taper
+          :dec (if dec dec (if (<= hi 10) 2 (if (<= hi 100) 1 0))))))
+
+;; x rounded to n significant figures (a knob default that prints short).
+;;   x  a number
+;;   n  how many figures
+(def sig-figs (x n)
+  (if (= x 0) 0
+    (let ((k (pow 10 (- (- n 1) (floor (/ (log (abs x)) (log 10)))))))
+      (/ (round (* x k)) k))))
 
 ;; The DGenLisp (param ...) form declaring a param spec: a menu with
 ;; @options when it has options, else a range with @min / @max (and @unit).
@@ -157,6 +271,12 @@
 ;;   xs    a list
 (def any? (pred xs) (not (empty? (filter pred xs))))
 
+;; True when pred holds for every item of xs.
+;;   pred  a predicate
+;;   xs    a list
+(def all? (pred xs) (= (len (filter pred xs)) (len xs)))
+
+
 ;; True when xs[k] appears nowhere before k.
 ;;   xs  a list
 ;;   k   a position in it
@@ -205,11 +325,21 @@
 ;;               params; connections and listens address either
 ;;   split       the second direction's frequency ratio to the first (they
 ;;               beat when it is not 1)
+;;   unison      how many strings the note has, as a piano's two or three:
+;;               copies sharing every param (one panel section), each
+;;               connection to the string made to each copy (a hammer
+;;               strikes them all, a bridge carries them all); a listen
+;;               hears the first
+;;   detune      with unison: the copies' detuning, cents: +detune, -detune,
+;;               +2 detune ... (they beat, and through a shared bridge they
+;;               exchange energy, a piano's two-stage decay)
 (def string (id &key (made-of mat/steel) (length 0.65) (radius-mm 0.5) (modes 60)
-                 (freq-loss 0.4) (const-loss 0.3) (mute 6) (tune 1) (planes 1) (split 1.0007))
-  (dict :id id :title "STRING" :kind :string :lumped false :modes modes :stuff made-of :planes planes
+                 (freq-loss 0.4) (const-loss 0.3) (mute 6) (tune 1) (planes 1) (split 1.0007)
+                 (unison 1) (detune 1))
+  (dict :id id :title "STRING" :kind :string :lumped false :modes modes :stuff made-of :planes planes :unison unison
         :params (append (material-params id made-of)
                 (if (= planes 2) (list (pspec id "split" split 0.99 1.01 :title "Split" :dec 4)) (list))
+                (if (> unison 1) (list (pspec id "detune" detune 0 30 :unit 'cents :title "Detune" :dec 2)) (list))
                 (list (pspec id "length" length 0.2 20 :unit 'm :title "Length" :taper :log)
                       (pspec id "radius" radius-mm 0.1 5 :unit 'mm :title "Radius" :taper :log)
                       (pspec id "hf_loss" freq-loss 0 10 :title "HF loss")
@@ -360,12 +490,12 @@
 ;; A mass thrown at an object on each hit. Pair it with felt.
 ;;   id     the object's id ('mal)
 ;;   mass   relative to one modal mass of what it strikes; useful values are
-;;          0.002..0.5 (a 120-mode head's point is ~60x lighter than a
+;;          0.002..2 (a 120-mode head's point is ~60x lighter than a
 ;;          string's)
 ;;   speed  throw speed; scaled by the hit's velocity
 (def mallet (id &key (mass 0.01) (speed 1))
   (dict :id id :title "MALLET" :kind :mallet :lumped true
-        :params (list (pspec id "mass" mass 0.002 0.5 :title "Mass" :taper :log :dec 3)
+        :params (list (pspec id "mass" mass 0.002 2 :title "Mass" :taper :log :dec 3)
                       (pspec id "speed" speed 0.1 4 :title "Speed"))))
 
 ;; A modal object defined by data (Modalys' single-point / multiple-points):
@@ -753,18 +883,20 @@
 ;;   pressure    bow force relative to the point's give; lifts as the bow
 ;;               slows
 ;;   speed       bow speed at full velocity
-;;   slip        how wide the stick region is, relative to the speed
+;;   slip        how wide the stick region is, relative to the speed; below
+;;               about 2 the bow whistles on the string's 3rd or 4th
+;;               harmonic instead of the sawtooth Helmholtz motion
 ;;   attack-ms   time for the bow to come up to speed, ms
 ;;   release-ms  time for it to stop after the note is released, ms
 ;;   hair        on a string with :planes 2: the hair's depth into the
 ;;               second direction; the bow then presses that direction down,
 ;;               and its friction pressure is the pressure param times the
 ;;               contact force over its 50 ms mean (nil: a constant pressure)
-(def bow (id b at &key (pressure 0.2) (speed 0.2) (slip 1) (attack-ms 60) (release-ms 120) (hair nil) (weight 1))
+(def bow (id b at &key (pressure 0.2) (speed 0.2) (slip 4) (attack-ms 60) (release-ms 120) (hair nil) (weight 1))
   (dict :id id :title "BOW" :law :bow :a nil :b b :a-at nil :b-at at :weight weight :hair hair
         :params (append (list (pspec id "pressure" pressure 0.01 2 :title "Pressure" :taper :log)
                               (pspec id "speed" speed 0.01 1 :title "Speed" :taper :log)
-                              (pspec id "slip" slip 0.1 3 :title "Slip")
+                              (pspec id "slip" slip 0.1 8 :title "Slip")
                               (pspec id "attack" attack-ms 1 1000 :unit 'ms :title "Attack" :taper :log)
                               (pspec id "release" release-ms 1 2000 :unit 'ms :title "Release" :taper :log))
                         (if hair (list (pspec id "hair" hair 0.0001 0.02 :title "Hair" :dec 4)) (list)))))
@@ -1291,6 +1423,60 @@
                    :shared-params (get o :params) :title (str (get o :title) " v")))
     (list o)))
 
+;; An object and, for a string with :unison n, its n - 1 copies: id_u1,
+;; id_u2 ... reading the first's params (as a second direction does), each
+;; knowing its place for its detuning.
+;;   o  an object
+(def expand-unison (o)
+  (if (> (unison-count o) 1)
+    (cons o (map (lambda (k) (merge o :id (unison-id (get o :id) k) :plane-of (get o :id) :unison-k k :unison 1
+                                    :params (list) :shared-params (get o :params)))
+                 (range 1 (get o :unison))))
+    (list o)))
+
+;; How many strings an object stands for: its :unison, 1 for any other.
+;;   o  an object
+(def unison-count (o) (if (and o (get o :unison)) (get o :unison) 1))
+
+;; The id of a unison string's k-th copy (k from 1).
+;;   id  the string's id
+;;   k   the copy
+(def unison-id (id k) (nm id (str "u" k)))
+
+;; How many detunings a unison copy sits from the first: +1, -1, +2, -2 ...
+;;   k  the copy, from 1
+(def unison-sign (k) (* (if (= (mod k 2) 1) 1 -1) (floor (/ (+ k 1) 2))))
+
+;; Each connection, and for one with an end on a unison string its copy to
+;; every copy of that string: hidden, at the same point, its params the
+;; first's (see unison-alias-forms), its state its own.
+;;   conns    the connections
+;;   objects  the objects as given (before expansion)
+(def expand-unison-connections (conns objects)
+  (let ((count-of (lambda (id) (unison-count (find-id id objects)))))
+    (concat-all
+      (map (lambda (c)
+             (let ((side (if (> (count-of (get c :b)) 1) :b (if (and (get c :a) (> (count-of (get c :a)) 1)) :a nil))))
+               (if (or (= side nil) (get c :internal)) (list c)
+                 (cons c (map (lambda (k) (merge c :id (unison-id (get c :id) k) side (unison-id (get c side) k) :params (list)
+                                                 :internal true :owner (get c :id) :coords-of (get c :id) :alias-of (get c :id)))
+                              (range 1 (count-of (get c side))))))))
+           conns))))
+
+;; Forms giving a unison copy's connection its first's params: a def of
+;; each of the copy's param names as the first's.
+;;   patch  the patch
+;;   conns  its connections, resolved
+(def unison-alias-forms (patch conns)
+  (concat-all
+    (map (lambda (c)
+           (let ((owner (find-id (get c :alias-of) conns)))
+             ;; not the point's params: a copy reads its owner's (:coords-of)
+             (map (lambda (spec) `(def ,(nm (get c :id) (get spec :name)) ,(spec-ref spec)))
+                  (append (get owner :params) (list (weight-param (get owner :id) (get owner :weight)))
+                          (if (get owner :signal) (tap-params patch owner) (list))))))
+         (filter (lambda (c) (get c :alias-of)) conns))))
+
 ;; The hidden contact a bow with :hair presses its string's second direction
 ;; down with: a stop from above at the hair depth, faded with the bow, its
 ;; point the bow's.
@@ -1324,8 +1510,8 @@
 ;;                its sound back into the objects
 (def patch (&key (name "modal") (objects nil) (connections nil) (listens nil) (level 1) (voicing nil) (tone nil)
                 (amp nil))
-  (let ((conns (expand-connections connections)))
-    (let ((planed (concat-all (map expand-planes objects)))
+  (let ((conns (expand-unison-connections (expand-connections connections) objects)))
+    (let ((planed (concat-all (map expand-unison (concat-all (map expand-planes objects)))))
           (compiled (map (lambda (o) (compile-points o conns listens planed)) planed)))
       (dict :name name
             ;; a mix hybrid carries its part objects, for its ends and listens
@@ -1422,8 +1608,12 @@
 ;; The object in patch whose id is id, or nil.
 ;;   patch  a patch
 ;;   id     an object id
-(def find-object (patch id)
-  (first (filter (lambda (o) (= (get o :id) id)) (get patch :objects))))
+(def find-object (patch id) (find-id id (get patch :objects)))
+
+;; The item of xs whose :id is id, or nil.
+;;   id  an id
+;;   xs  a list of dicts with :id
+(def find-id (id xs) (first (filter (lambda (q) (= (get q :id) id)) xs)))
 
 ;; A keyword's name without its colon: (bare :steel) -> "steel".
 ;;   k  a keyword
@@ -1453,7 +1643,7 @@
   (if (get obj :lumped) nil
     (if (= (get obj :kind) :data) (data-at-errors who obj at)
     (if (one-d? obj)
-      (if (number? at) nil
+      (if (or (number? at) (by-note? at)) nil
         (list (str who ": " (bare (get obj :kind)) " " (source (get obj :id))
                    " takes one position 0..1, got " (source at))))
       (if (number? at)
@@ -1688,6 +1878,8 @@
           (if (empty? (get patch :listens)) (list "a patch needs at least one listen point") nil)
           (duplicate-ids patch)
           (material-errors patch)
+          (by-note-check patch)
+          (unison-errors patch)
           (concat-all (map (lambda (o) (if (= (get o :kind) :data) (data-errors o) nil)) (all-objects patch)))
           (concat-all (map spectral-errors (all-objects patch)))
           (concat-all (map (lambda (o) (hybrid-errors patch o)) (filter hybrid? (get patch :objects))))
@@ -1697,12 +1889,61 @@
                            (get patch :connections)))
           (concat-all (map (lambda (c) (if (get c :signal) (append (signal-errors c) (tap-errors patch c)) nil))
                            (get patch :connections)))
-          (concat-all (map (lambda (c) (connection-errors patch c)) (get patch :connections)))
+          (concat-all (map (lambda (c) (connection-errors patch c)) (filter (lambda (c) (not (get c :alias-of))) (get patch :connections))))
           (concat-all (map (lambda (l) (listen-errors patch l)) (get patch :listens)))
           (if (or (= (get patch :amp) nil) (and (map? (get patch :amp)) (= (get (get patch :amp) :kind) :amp))) nil
             (list (str "patch: :amp is an m/amp, got " (source (get patch :amp)))))
           (if (member? (list nil :one :poly) (get patch :voicing)) nil
             (list (str "patch: :voicing is :one or :poly, got " (source (get patch :voicing))))))))
+
+;; What is wrong with a patch's m/by-note values: each knob's curve (and its
+;; value at C4 within the knob's range), and the curves given as access
+;; points and listen gains, which become knobs later.
+;;   patch  the patch
+(def by-note-check (patch)
+  (let ((given (filter (lambda (c) (not (get c :alias-of))) (get patch :connections)))
+        (raw (lambda (what x) (concat-all (map (lambda (v) (if (by-note? v) (by-note-errors what v) nil))
+                                               (if (list? x) x (list x)))))))
+    (concat-all
+      (append
+        (map (lambda (p)
+               (if (not (get p :by-note)) nil
+                 (let ((what (source (get p :uses))) (errs (by-note-errors (source (get p :uses)) (get p :by-note))))
+                   (if (not (empty? errs)) errs
+                     (let ((v (by-note-at (get p :by-note) by-note-ref)))
+                       (if (and (>= v (get p :min)) (<= v (get p :max))) nil
+                         (list (str what ": m/by-note is " (sig-figs v 4) " at C4, outside its knob's "
+                                    (get p :min) ".." (get p :max)))))))))
+             (concat-all (map (lambda (x) (if (get x :params) (get x :params) nil)) (append (all-objects patch) given))))
+        (map (lambda (c) (append (raw (str (what c) " a") (get c :a-at)) (raw (str (what c) " b") (get c :b-at)))) given)
+        (map (lambda (l) (append (raw (str "listen " (source (get l :obj))) (get l :at))
+                                 (raw (str "listen " (source (get l :obj)) " gain") (get l :gain))))
+             (get patch :listens))))))
+
+;; What is wrong with a patch's unison strings: a count that is not a whole
+;; number above 1, one with two directions, one inside a hybrid, or a
+;; connection between two unison strings (whose copies have no pairing).
+;;   patch  the patch
+(def unison-errors (patch)
+  (let ((given (filter (lambda (o) (not (get o :unison-k))) (get patch :objects)))
+        (parts (concat-all (map (lambda (o) (if (= (get o :kind) :melt) (map (lambda (q) (get q :id)) (get o :parts))
+                                              (if (= (get o :kind) :mix) (get o :parts) nil)))
+                                (get patch :objects)))))
+    (append
+      (concat-all
+        (map (lambda (o)
+               (let ((n (get o :unison)) (what (str "string " (source (get o :id)))))
+                 (if (or (= n nil) (= n 1)) nil
+                   (if (not (and (number? n) (= n (floor n)) (> n 1)))
+                     (list (str what ": :unison is a whole number of strings, got " (source n)))
+                     (if (= (get o :planes) 2) (list (str what ": :unison and :planes 2 do not combine"))
+                       (if (member? parts (get o :id)) (list (str what ": a unison string cannot be part of a hybrid")) nil))))))
+             (append given (concat-all (map (lambda (o) (if (= (get o :kind) :melt) (get o :parts) nil)) (get patch :objects))))))
+      (concat-all
+        (map (lambda (c) (if (and (get c :a) (> (unison-count (find-object patch (get c :a))) 1)
+                                  (> (unison-count (find-object patch (get c :b))) 1))
+                           (list (str (what c) ": both ends are unison strings")) nil))
+             (filter (lambda (c) (not (get c :alias-of))) (get patch :connections)))))))
 
 ;; ── access-point params ─────────────────────────────────────────────────────
 
@@ -1728,8 +1969,10 @@
           (list (pspec cid (str on "_pt") (compiled-slot obj at) 0 (- (len (get obj :compiled)) 1)
                        :title (str lb " point") :dec 0)))
       (if (one-d? obj)
-        (list (pspec cid (str on "_at") at (if (member? (list :bar :tube) (get obj :kind)) 0 0.01)
-                     (if (member? (list :bar :tube) (get obj :kind)) 1 0.99)
+        ;; up to 0.999: a bowed string's bridge sits right at its end (a
+        ;; stiff point at 0.99 pins it a second time and the bow cannot lock)
+        (list (pspec cid (str on "_at") at (if (member? (list :bar :tube) (get obj :kind)) 0 0.001)
+                     (if (member? (list :bar :tube) (get obj :kind)) 1 0.999)
                      :title (str lb " at")))
         (if (rect? obj)
           (list (pspec cid (str on "_x") (nth at 0) 0.01 0.99 :title (str lb " x"))
@@ -1745,7 +1988,7 @@
 ;; the point from at run time.
 ;;   cid, side, obj  as for access-params
 (def access-syms (cid side obj)
-  (map (lambda (p) (get p :sym)) (access-params cid side obj (list 0 0))))
+  (map spec-ref (access-params cid side obj (list 0 0))))
 
 ;; Forms defining phi-sym, obj's mode-shape vector at an access point
 ;; (masked to the modes that sound): sin(n pi x) on a string, the plate's
@@ -1980,7 +2223,7 @@
 ;; True when obj has a mute param (its own, or its first direction's).
 ;;   obj  an object
 (def muted? (obj)
-  (member? (map (lambda (spec) (get spec :sym)) (if (get obj :plane-of) (get obj :shared-params) (get obj :params)))
+  (member? (map spec-ref (if (get obj :plane-of) (get obj :shared-params) (get obj :params)))
            (pp obj "mute")))
 
 ;; The mask of modes that sound: the first count modes, faded below Nyquist.
@@ -1994,7 +2237,11 @@
 ;;   obj  a string
 (def string-setup (obj)
   (append (material-defs obj)
-          (list `(def ,(p obj "f0") (* f0 ,(pp obj "tune") ,@(if (get obj :plane-of) (list (pp obj "split")) (list))))
+          (list `(def ,(p obj "f0") (* f0 ,(pp obj "tune")
+                                         ,@(if (get obj :unison-k)
+                                             ;; a unison copy: +detune, -detune, +2 detune ... cents
+                                             (list `(pow 2 (/ (* ,(unison-sign (get obj :unison-k)) ,(pp obj "detune")) 1200)))
+                                             (if (get obj :plane-of) (list (pp obj "split")) (list)))))
                 `(def ,(p obj "n") (+ (iota ,(get obj :modes)) 1))
                 `(def ,(p obj "freqs") (stiff-string-freqs ,(p obj "n") ,(p obj "f0") ,(p obj "young") ,(p obj "density")
                                          (* ,(pp obj "radius") 0.001) ,(pp obj "length")))
@@ -2212,7 +2459,7 @@
               (if (any? (lambda (o) (and (get o :held) (or (get o :root) (and (get o :spectral) (get (get o :spectral) :follow)))))
                         objs)
                 (list 'f0) (list))
-              (concat-all (map (lambda (o) (map (lambda (spec) (get spec :sym)) (get o :params))) objs))))))
+              (concat-all (map (lambda (o) (map spec-ref (get o :params))) objs))))))
 
 ;; Forms defining coef_tick, when held coefficients are computed (on
 ;; DGenLisp's event clock): a note's start, the first sample, and any sample
@@ -2220,15 +2467,21 @@
 ;; factory Modal Snare's). A param moving continuously recomputes them every
 ;; sample while it moves; a still one costs nothing.
 ;;   patch  the patch
-(def coef-tick-forms (patch)
-  (let ((inputs (coef-inputs patch))
-        (h (lambda (k) (symbol "coef_in" k))))
-    (append (list '(make-history coef_started))
+(def coef-tick-forms (patch) (change-tick-forms "coef" (coef-inputs patch)))
+
+;; Forms defining <name>_tick: 1 on a note's first sample, on the
+;; instrument's first, and whenever one of inputs changed since the last
+;; sample (each kept in a history <name>_in<k>).
+;;   name    the tick's prefix, a string
+;;   inputs  forms to watch
+(def change-tick-forms (name inputs)
+  (let ((h (lambda (k) (symbol name "_in" k))) (started (symbol name "_started")))
+    (append (list `(make-history ,started))
             (map (lambda (k) `(make-history ,(h k))) (range (len inputs)))
-            (list `(def coef_tick (max hit (lte (read-history coef_started) 0)
-                                       ,@(map (lambda (k) `(gt (abs (- ,(nth inputs k) (read-history ,(h k)))) 0))
-                                              (range (len inputs)))))
-                  '(write-history coef_started 1))
+            (list `(def ,(symbol name "_tick") (max hit (lte (read-history ,started) 0)
+                                                    ,@(map (lambda (k) `(gt (abs (- ,(nth inputs k) (read-history ,(h k)))) 0))
+                                                           (range (len inputs)))))
+                  `(write-history ,started 1))
             (map (lambda (k) `(write-history ,(h k) ,(nth inputs k))) (range (len inputs))))))
 
 ;; Protocol step 1: forms defining obj_free, where obj would be this sample
@@ -2536,7 +2789,7 @@
     (map (lambda (s)
            (concat-all
              (map (lambda (k)
-                    (let ((c (nth conns k)) (cid (get (nth conns k) :id)) (tag (str s))
+                    (let ((c (nth conns k)) (cid (get (nth conns k) :id)) (tag (str s)) (centred (centred? patch (nth conns k)))
                           (others (lambda (id)
                                     (append (terms-of conns exciters id)
                                             (concat-all
@@ -2550,7 +2803,11 @@
                                                    springs))))))
                       (append (if (get c :a) (end-forms c "a" (find-object patch (get c :a)) others tag (= s 0)) nil)
                               (end-forms c "b" (find-object patch (get c :b)) others tag (= s 0))
-                              (sweep-law-forms c s tag)
+                              (if (and (= s 0) centred)
+                                (list `(def ,(nm cid "gap_old") (- ,(old-point (find-object patch (get c :a)) (nm cid "phi_a"))
+                                                                   ,(old-point (find-object patch (get c :b)) (nm cid "phi_b")))))
+                                nil)
+                              (sweep-law-forms (if centred (merge c :centred true) c) s tag)
                               (if (= s (- sweeps 1))
                                 (append (list `(def ,(nm cid "F") ,(nm cid (str "F" s))))
                                         ;; a blown law's flow, for next sample's change; lips' own lip force
@@ -2601,7 +2858,33 @@
         (list `(def ,F (* ,w (felt-contact (- ,(n "height") ,yb) ,cb ,(n "stiff")))))
         ;; the stop is the lower end, fixed: b is pushed up by -felt-contact
         (list `(def ,F (* -1 ,w (felt-contact (- ,yb ,(n "height")) ,cb ,(n "stiff"))))))
-      (list `(def ,F (* ,w (spring-connection (- ,ya ,yb) (+ ,ca ,cb) ,(n "stiff"))))))))))))))
+      (if (get c :centred)
+        (list `(def ,F (* ,w (spring-centred (- ,ya ,yb) ,(n "gap_old") (+ ,ca ,cb) ,(n "stiff") ,spring-keep))))
+        (list `(def ,F (* ,w (spring-connection (- ,ya ,yb) (+ ,ca ,cb) ,(n "stiff")))))))))))))))
+
+;; How much of the backward step's damping a centred spring keeps
+;; (spring-centred): 0.98 settles a near-rigid spring's own oscillation in
+;; about a hundred samples and leaves a hundredth of the backward step's
+;; drain on the modes it joins.
+(def spring-keep 0.98)
+
+;; True when c is a spring solved centred in time (spring-centred): both its
+;; ends keep their state the sample before last (every object but a mallet
+;; and a mix hybrid).
+;;   patch  the patch
+;;   c      a resolved connection
+(def centred? (patch c)
+  (and (spring? c)
+       (all? (lambda (id) (let ((o (find-object patch id))) (not (member? (list :mallet :mix) (get o :kind)))))
+             (list (get c :a) (get c :b)))))
+
+;; A form for where obj's access point was the sample before last: its
+;; state two samples back through the point's shape (phi), or that state
+;; itself on a lumped object.
+;;   obj  an object other than a mallet or a mix
+;;   phi  the point's shape symbol
+(def old-point (obj phi)
+  (if (get obj :lumped) `(read-history ,(p obj "s2")) `(sum (* ,phi (read-history ,(p obj "s2"))))))
 
 ;; A blown flow law solved for the mouthpiece pressure. An air column's
 ;; modes are driven by the rate of change of the flow into it (its input
@@ -3370,7 +3653,7 @@
   (map (lambda (name) (list 'use-defmacro name))
        '(stiff-string-freqs rect-plate rect-plate-shape circ-membrane
          modal-band modal-loss modal-coefs modal-predict modal-point modal-advance
-         two-mass-coefs mallet-predict mallet-advance pluck-contact spring-connection
+         two-mass-coefs mallet-predict mallet-advance pluck-contact spring-connection spring-centred
          felt-contact bow-contact voice-amp)))
 
 ;; Every param spec of the instrument, in declaration order: the objects',
@@ -3401,6 +3684,8 @@
       (list (preamble)
             (map param-form (all-params patch conns))
             (library-imports)
+            (by-note-forms (all-params patch conns))
+            (unison-alias-forms patch conns)
             (if (keyed? patch) (key-forms) (list))
             (if (or (any-held? patch) (any? strokes? conns)) (coef-tick-forms patch) (list))
             (concat-all (map (lambda (o) (held-pass o (spectral-pass o (object-setup o)))) objects))

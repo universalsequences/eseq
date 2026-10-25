@@ -124,6 +124,31 @@ per-sample code.
 `m/felt` takes `:exponent :hysteresis :tau-ms` for Stulov's hysteretic
 felt (`examples/piano-hammer.lisp`).
 
+**Following the note.** Any knob argument can be a curve over the played
+pitch instead of one number: `(m/by-note 27.5 2.0 262 0.66 4186 0.05)`
+(pitch value pairs, interpolated over log pitch: geometrically when every
+value is positive). The knob, `str_length_c4`, sets the value at C4 and moves
+the whole curve with it. Real instruments are scaled this way: a piano's
+strings shorten from 2 m to 5 cm and its hammers lighten up the keyboard; a
+cello's wound strings keep one stiffness over its range. A string's pitch
+comes from tension, so a fixed length and radius make its stiffness go as
+1/f0^2: the bass of a one-size piano is eight times too inharmonic (clangy,
+tinny) and a one-size cello cannot bow its low notes cleanly.
+
+**Unison.** `(m/string 'str ... :unison 3 :detune 1.5)` is a piano's three
+strings: copies sharing every param (one panel section, a Detune knob in
+cents), each connection to `'str` made to every copy (the hammer strikes
+them all, the bridge carries them all). Through a shared bridge they decay
+in two stages, the in-step motion draining into the board and the
+out-of-step motion ringing on (Weinreich's aftersound). A listen hears the
+first copy.
+
+**The piano** (`examples/piano.lisp`) is fitted to the 30 Salamander Grand
+references PM Piano is calibrated from, by PM Piano's own metric
+(`tools/pm-piano/compare.py`'s partial-band error) plus the envelope and the
+spectral centroid: scale, gauge, hammer, felt, strike point, losses, detune
+and the board's mass ratio are each an `m/by-note` curve through the fit.
+
 **Directions.** `(m/string 'str :planes 2)` adds a second transverse
 direction, `(m/plane 'str 1)`, with the same params (`split` detunes it
 slightly). A bow with `:hair d` on such a string presses the second
@@ -251,7 +276,11 @@ Each sample follows the protocol of the `content/defmacros/modal-*` macros:
 predict every object's free motion; solve the exciters (pluck, felt) in turn;
 solve springs and bows together by Gauss-Seidel sweeps; commit every object.
 All forces are solved inside the sample from both ends' compliance, so any
-stiffness is stable.
+stiffness is stable. A spring is centred in time (unless an end is a mallet or a mix)
+(`spring-centred`): a force acting on the next sample's gap alone takes a
+factor 1/sqrt(1 + kC) out of every mode at the point each sample, and kC
+grows with pitch squared, so bridges drained treble strings in a fraction of
+a second whatever their stiffness.
 
 ## Rules learned the hard way
 
@@ -263,8 +292,13 @@ stiffness is stable.
   caught at, and a bow reads its point's true previous position.
 - Connections sharing an object are solved jointly; one sequential pass let
   stiff springs on a light body, and a bow next to a bridge, pump energy in.
-- Bowing needs harmonic modes: use nylon/gut-like materials at low notes and
-  put bridges at the string's end (0.99), not part-way in.
+- Bowing needs harmonic modes: keep the string's stiffness low at low notes
+  (a radius following the note) and put bridges at the string's very end
+  (0.999): a stiff point at 0.99 pins it a second time. The bow's slip below
+  about 2 whistles on the 3rd or 4th harmonic, a woodwind's sound, instead
+  of Helmholtz motion (the default is 4).
+- A body's lowest mode belongs near its real one, well damped: a 0.75 m
+  plate of 4 mm spruce rings at 60 Hz and wolfs a cello's whole low octave.
 - Masses are relative to one modal mass; a 120-mode head's point is ~60x
   lighter, so useful mallets are 0.002..0.5.
 

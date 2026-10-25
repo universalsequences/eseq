@@ -1,7 +1,9 @@
 ;; A felt hammer on a stiff steel string with Stulov's hysteretic felt: the
 ;; harder the hit, the stiffer the felt gets (exponent 2.5), so loud notes
 ;; are brighter than soft ones (modestly here: about twice the energy above
-;; 1.5 kHz from soft to loud), as on a piano.
+;; 1.5 kHz from soft to loud), as on a piano. One string of one size: the
+;; felt's demo, not a piano (examples/piano.lisp is one, scaled across the
+;; keyboard and fitted to a recorded grand).
 (import eseq.modal :as m)
 (import eseq.modal.materials :as mat)
 
