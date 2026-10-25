@@ -37,8 +37,9 @@
 (import eseq.modal.materials :as mat)
 
 (export string plate membrane finger mallet modal-data bar rect-membrane oscillator circ-plate solid
-        melt mix
+        melt mix-hybrid tube
         pluck spring felt bow strike stop fingerboard force position speed listen patch plane
+        tone-hole reed lips jet
         envelope noise sine constant signal tap-position tap-speed tap-force tap-contact spectral
         check dsp ui generate)
 
@@ -374,6 +375,7 @@
         (am (given amps :amps))
         (sh (given shapes :shapes))
         (ones (map (lambda (k) 1) (range n))))
+    (pad-one-mode
     (dict :id id :title "MODES" :label "modal-data" :kind :data :lumped false :modes n
           :data-error (if (string? data) data nil)
           :freqs (reorder fs)
@@ -385,7 +387,18 @@
           :root (given root :root)
           :fixed-pitch (= (given root :root) nil)
           :params (append (list (pspec id "decay" decay 0.05 20 :title "Decay x" :taper :log))
-                          (note-params id tune mute (if mass mass (if (given nil :mass) (given nil :mass) 1)))))))
+                          (note-params id tune mute (if mass mass (if (given nil :mass) (given nil :mass) 1))))))))
+
+;; A one-mode data object with a second, silent mode (zero shape, so never
+;; driven or heard): DGenLisp mishandles one-element tensors, and a one-mode
+;; object (an oscillator) would not move at all (eseq-k0m2.32).
+;;   obj  a data object
+(def pad-one-mode (obj)
+  (if (not (= (get obj :modes) 1)) obj
+    (merge obj :modes 2
+           :freqs (append (get obj :freqs) (list 100000))
+           :losses (append (get obj :losses) (list 1))
+           :shapes (map (lambda (row) (append row (list 0))) (get obj :shapes)))))
 
 ;; A finite-element solid (Modalys' finite-element objects): any 3-D shape,
 ;; solved for its modes by modal-solve (the first time; then from a cache)
@@ -426,6 +439,51 @@
                     (filter (lambda (j) (> (nth xs j) (nth xs k))) sorted)))
           (list) (range (len xs))))
 
+;; An air column (Modalys' closed-closed / closed-open / open-open tubes):
+;; its modes are standing pressure waves along the bore, the fundamental on
+;; the played note. x = 0 is the mouthpiece end.
+;;   closed-open  odd harmonics, pressure shapes cos((2k-1) pi x / 2): a
+;;                clarinet's cylinder
+;;   open-open    every harmonic, sin(k pi x): a flute
+;;   closed-closed (or :cone, a conical bore's complete series, as a
+;;                closed-closed approximation) every harmonic, cos(k pi x):
+;;                a saxophone, an oboe, brass with lips
+;; Losses: a constant, a viscothermal wall term rising with sqrt(f), and
+;; radiation rising with f (hf-loss) plus modal-loss's air.
+;;   id      the object's id ('bore)
+;;   ends    :closed-open, :open-open, :closed-closed or :cone
+;;   modes   how many modes (fixed when generated)
+;;   loss    damping at every frequency
+;;   wall    the sqrt(f) damping of the bore walls
+;;   hf-loss damping that rises with frequency (radiation)
+;;   tune, mute, mass  as for the other note-following objects
+(def tube (id &key (ends :closed-open) (modes 20) (loss 2) (wall 1) (hf-loss 0.3) (mute 30) (tune 1) (mass 1))
+  (dict :id id :title "TUBE" :kind :tube :lumped false :modes modes :ends ends
+        :params (append (list (pspec id "loss" loss 0 40 :title "Loss")
+                              (pspec id "wall" wall 0 10 :title "Wall")
+                              (pspec id "hf_loss" hf-loss 0 10 :title "HF loss"))
+                        (note-params id tune mute mass))))
+
+;; A form for a tube's pressure mode shapes at x (sin for open-open, else
+;; cos, of wave pi x), masked; with gradient, their derivative in x (the
+;; air's velocity there, which steers a jet).
+;;   obj       a tube
+;;   x         the position form
+;;   gradient  true for d/dx
+(def tube-shape (obj x gradient)
+  (let ((open (= (get obj :ends) :open-open)) (arg `(* ,(p obj "wave") 3.14159265 ,x)))
+    (if gradient
+      `(* ,(p obj "wave") 3.14159265 ,(if open `(cos ,arg) `(* -1 (sin ,arg))) ,(p obj "mask"))
+      `(* (,(if open 'sin 'cos) ,arg) ,(p obj "mask")))))
+
+;; A tube's mode k (from 0): its frequency ratio to the fundamental, and its
+;; pressure shape's wavenumber over pi (cos for a closed mouthpiece end, sin
+;; for an open one).
+;;   ends  as for tube
+;;   k     the mode
+(def tube-ratio (ends k) (if (= ends :closed-open) (+ (* 2 k) 1) (+ k 1)))
+(def tube-wave (ends k) (if (= ends :closed-open) (* 0.5 (+ (* 2 k) 1)) (+ k 1)))
+
 ;; A melt hybrid (Modalys' melt-hybrid): one object whose modal data is a
 ;; blend of two objects', so morphing changes what it is (a string into a
 ;; plate, one material into another) while it rings. Frequencies blend in
@@ -446,7 +504,7 @@
 ;;   id     the hybrid's id ('h)
 ;;   a, b   the two objects' ids (modal objects in the patch)
 ;;   morph  0 is all a, 1 all b (a param)
-(def mix (id a b &key (morph 0.5))
+(def mix-hybrid (id a b &key (morph 0.5))
   (dict :id id :title "MIX" :kind :mix :lumped false :parts (list a b)
         :params (list (pspec id "morph" morph 0 1 :title "Morph"))))
 
@@ -601,6 +659,96 @@
               :params (append (list (pspec id "stiff" stiffness 0 2000 :title "Hold" :taper :log :dec 0))
                               (signal-params id press)))
         (merge (stop (nm id "board") b at :height board) :coords-of id)))
+
+;; ── air ─────────────────────────────────────────────────────────────────────
+;; Blown connections on a tube's mouthpiece point. Each takes a breath
+;; signal (default an envelope on the note) scaling its blowing pressure.
+
+;; A tone hole: the tube's pressure released at a point while it is open
+;; (a stiff pull of the pressure toward 0, weighted by open), which shortens
+;; the column acoustically and raises its pitch.
+;;   id    the connection's id ('h1)
+;;   tube  the tube's id
+;;   at    where along it
+;;   open  0 closed .. 1 open (its weight param)
+;;   size  how fully it releases, relative to the point's give
+(def tone-hole (id tube at &key (open 1) (size 300))
+  (merge (position id tube at :stiffness size :weight open) :title "TONE HOLE"))
+
+;; A single reed (the normalised clarinet model, Modalys' normalised-valve):
+;; with blowing pressure gamma and the mouthpiece pressure p (both relative
+;; to the pressure that shuts the reed), the flow into the tube is
+;; zeta (1 - gamma + p) sqrt|gamma - p| (signed), and 0 while p is below
+;; gamma - 1 (the reed beats shut). p is solved with the flow it causes,
+;; inside the sample (12 bisection steps).
+;;   id        the connection's id ('reed)
+;;   tube      the tube's id
+;;   at        the mouthpiece point (0, a closed end)
+;;   blow      gamma at full breath (it sounds above about 1/3)
+;;   zeta      the reed's opening (brightness)
+;;   coupling  how strongly the flow drives the tube
+;;   scale     the tube pressure that counts as the reed's closing pressure
+;;   breath    a signal 0..1
+;;   weight    0..1
+(def reed (id tube at &key (blow 0.6) (zeta 0.3) (coupling 10) (scale 1)
+                           (breath (envelope :attack-ms 30 :sustain 1 :release-ms 40)) (weight 1))
+  (dict :id id :title "REED" :law :reed :a nil :b tube :a-at nil :b-at at :signal breath :weight weight
+        :params (append (list (pspec id "blow" blow 0 1.5 :title "Blow")
+                              (pspec id "zeta" zeta 0.05 1.5 :title "Reed")
+                              (pspec id "coupling" coupling 0.001 100 :title "Couple" :taper :log :dec 3)
+                              (pspec id "scale" scale 0.001 10 :title "Scale" :taper :log :dec 3))
+                        (signal-params id breath))))
+
+;; Lips on a brass mouthpiece (Modalys' valve): an outward-striking lip,
+;; pushed open by the pressure difference gamma - p, whose opening
+;; max(0, 1 + y / rest) lets a flow zeta h sqrt|gamma - p| (signed) into the
+;; tube. The flow is solved with the pressure it causes; the lip moves by
+;; beta (gamma - p) from the mouthpiece's pressure before this sample's flow.
+;;   id        the connection's id ('lips)
+;;   lip       the lip object's id (m/oscillator, near the note)
+;;   tube      the tube's id
+;;   at        the mouthpiece point
+;;   blow      gamma at full breath
+;;   zeta      the flow's scale
+;;   beta      how hard the pressure pushes the lip
+;;   rest      the lip displacement that closes it
+;;   coupling, scale, breath, weight  as for reed
+;;   lip-at    the lip's point (0 for an oscillator)
+(def lips (id lip tube at &key (blow 0.7) (zeta 0.5) (beta 0.1) (rest 0.05) (coupling 1) (scale 1)
+                               (breath (envelope :attack-ms 40 :sustain 1 :release-ms 50)) (lip-at 0) (weight 1))
+  (dict :id id :title "LIPS" :law :lips :a lip :b tube :a-at lip-at :b-at at :signal breath :weight weight :split true
+        :params (append (list (pspec id "blow" blow 0 1.5 :title "Blow")
+                              (pspec id "zeta" zeta 0.05 2 :title "Flow")
+                              (pspec id "beta" beta 0.0001 1 :title "Push" :taper :log :dec 4)
+                              (pspec id "rest" rest 0.001 1 :title "Rest" :taper :log :dec 3)
+                              (pspec id "coupling" coupling 0.001 100 :title "Couple" :taper :log :dec 3)
+                              (pspec id "scale" scale 0.001 10 :title "Scale" :taper :log :dec 3))
+                        (signal-params id breath))))
+
+;; An air jet across a flute's embouchure (Modalys' jet + labium): the
+;; breath plus turbulence plus the mouth's own acoustic velocity (last
+;; sample), delayed by the jet's travel to the edge and saturated (tanh),
+;; drives the tube. The delay is ratio periods of the note: about half a
+;; period sounds the fundamental, less overblows.
+;;   id        the connection's id ('jet)
+;;   tube      the tube's id
+;;   at        the embouchure point (near an open end)
+;;   blow      breath level
+;;   ratio     the jet delay in periods of the note
+;;   feedback  how much the mouth's velocity steers the jet
+;;   noise     turbulence, relative to the breath
+;;   gain      how hard the jet drives the tube
+;;   breath    a signal 0..1
+;;   weight    0..1
+(def jet (id tube at &key (blow 0.5) (ratio 0.5) (feedback 1) (noise 0.05) (gain 0.02)
+                          (breath (envelope :attack-ms 60 :sustain 1 :release-ms 60)) (weight 1))
+  (dict :id id :title "JET" :law :jet :a nil :b tube :a-at nil :b-at at :signal breath :weight weight
+        :params (append (list (pspec id "blow" blow 0 2 :title "Blow")
+                              (pspec id "ratio" ratio 0.05 2 :title "Jet" :dec 3)
+                              (pspec id "feedback" feedback 0 100 :title "Steer" :taper :log)
+                              (pspec id "noise" noise 0 1 :title "Noise")
+                              (pspec id "gain" gain 0.000001 2 :title "Drive" :taper :log :dec 6))
+                        (signal-params id breath))))
 
 ;; ── drivers and signals ─────────────────────────────────────────────────────
 ;; Drivers move an access point from outside the patch (Modalys' force,
@@ -1024,7 +1172,7 @@
 
 ;; True for objects whose points are one position 0..1 (strings, bars).
 ;;   obj  an object
-(def one-d? (obj) (member? (list :string :bar) (get obj :kind)))
+(def one-d? (obj) (member? (list :string :bar :tube) (get obj :kind)))
 
 ;; True for rectangular objects, whose points are (x y) in 0..1.
 ;;   obj  an object
@@ -1158,8 +1306,28 @@
                    (= (get (find-object patch (get c :b)) :kind) :mix))
             (list (str (what c) ": cannot end on a mix; connect the parts, or use a melt"))
             nil)
+          (air-errors patch c)
           (if (get c :a) (end-errors patch c "a" (get c :a) (get c :a-at)) nil)
           (end-errors patch c "b" (get c :b) (get c :b-at))))
+
+;; What is wrong with a blown connection: it must blow into a tube, at a
+;; point where the tube has pressure (not an open end), and lips need a
+;; modal-data lip (an oscillator).
+;;   patch  the patch
+;;   c      a connection
+(def air-errors (patch c)
+  (if (not (member? (list :reed :lips :jet) (get c :law))) nil
+    (let ((tube (find-object patch (get c :b))) (lip (if (get c :a) (find-object patch (get c :a)) nil)))
+      (append
+        (if (and tube (not (= (get tube :kind) :tube)))
+          (list (str (what c) ": blows into a tube (m/tube), not " (source (get c :b))))
+          (if (and tube (not (= (get c :law) :jet)) (= (get tube :ends) :open-open)
+                   (number? (get c :b-at)) (or (< (get c :b-at) 0.01) (> (get c :b-at) 0.99)))
+            (list (str (what c) ": " (source (get c :b)) " is open there (no pressure); use a closed end"))
+            nil))
+        (if (and (= (get c :law) :lips) lip (not (= (get lip :kind) :data)))
+          (list (str (what c) ": the lip is an m/oscillator (or modal-data), not " (source (get c :a))))
+          nil)))))
 
 ;; What is wrong with a listen: a missing object, or a bad position.
 ;;   patch  the patch
@@ -1283,7 +1451,8 @@
           (list (pspec cid (str on "_pt") (compiled-slot obj at) 0 (- (len (get obj :compiled)) 1)
                        :title (str lb " point") :dec 0)))
       (if (one-d? obj)
-        (list (pspec cid (str on "_at") at (if (= (get obj :kind) :bar) 0 0.01) (if (= (get obj :kind) :bar) 1 0.99)
+        (list (pspec cid (str on "_at") at (if (member? (list :bar :tube) (get obj :kind)) 0 0.01)
+                     (if (member? (list :bar :tube) (get obj :kind)) 1 0.99)
                      :title (str lb " at")))
         (if (rect? obj)
           (list (pspec cid (str on "_x") (nth at 0) 0.01 0.99 :title (str lb " x"))
@@ -1312,6 +1481,7 @@
     (if (= kind :melt) (melt-shape-defs obj coords phi-sym)
     (if (= kind :data) (data-shape-defs obj coords phi-sym)
     (if (= kind :bar) (bar-shape-defs obj (first coords) phi-sym)
+    (if (= kind :tube) (list `(def ,phi-sym ,(tube-shape obj (first coords) false)))
     (if (= kind :circ-plate) (circ-plate-shape-defs obj coords phi-sym)
     (if (= kind :string)
       (list `(def ,phi-sym (* (sin (* ,(nm id "n") 3.14159265 ,(first coords))) ,(nm id "mask"))))
@@ -1319,7 +1489,7 @@
         (list `(def ,phi-sym (* (rect-plate-shape ,(nm id "pm") ,(nm id "pn") ,(nth coords 0) ,(nth coords 1))
                                 ,(nm id "mask"))))
         (list `(def (,(nm phi-sym "ratios") ,(nm phi-sym "raw")) (circ-membrane ,(nth coords 0) ,(nth coords 1)))
-              `(def ,phi-sym (* ,(nm phi-sym "raw") ,(nm id "mask"))))))))))))
+              `(def ,phi-sym (* ,(nm phi-sym "raw") ,(nm id "mask")))))))))))))
 
 ;; shape-defs for a melt: each part's shape at its own point, blended.
 ;;   obj      a melt
@@ -1460,13 +1630,28 @@
     (if (= kind :mix) (list)
     (if (= kind :data) (data-setup obj)
     (if (= kind :bar) (bar-setup obj)
+    (if (= kind :tube) (tube-setup obj)
     (if (= kind :rect-membrane) (rect-membrane-setup obj)
     (if (= kind :circ-plate) (circ-plate-setup obj)
     (if (= kind :string) (string-setup obj)
     (if (= kind :plate) (plate-setup obj)
     (if (= kind :membrane) (membrane-setup obj)
     (if (= kind :two-mass) (finger-setup obj)
-      (mallet-setup obj)))))))))))))
+      (mallet-setup obj))))))))))))))
+
+;; object-setup for a tube: its ratio and wavenumber tables, frequencies on
+;; the note, and losses with the wall's sqrt(f) term.
+;;   obj  a tube
+(def tube-setup (obj)
+  (let ((m (get obj :modes)) (ends (get obj :ends)))
+    (append
+      (list `(def ,(p obj "wave") ,(tensor-form (map (lambda (k) (tube-wave ends k)) (range m))))
+            `(def ,(p obj "f0") (* f0 ,(p obj "tune")))
+            `(def ,(p obj "freqs") (* ,(tensor-form (map (lambda (k) (tube-ratio ends k)) (range m))) ,(p obj "f0")))
+            (mask-def obj m)
+            `(def ,(p obj "sigma") (+ (modal-loss ,(p obj "freqs") ,(p obj "loss") ,(p obj "hf_loss"))
+                                     (* ,(p obj "wall") 0.1 (sqrt ,(p obj "freqs"))))))
+      (setup-tail obj (p obj "f0")))))
 
 ;; object-setup for a melt: both parts' setups (their coefficients are what
 ;; it blends), then its own: log-blended frequencies, blended mask, losses,
@@ -1724,18 +1909,21 @@
 ;;   f   the symbol holding c's force (cid_F, or one sweep's cid_F2)
 (def terms-with (c id f)
   (let ((cid (get c :id)))
+    ;; a :split connection (lips) pushes its a end by its own force
+    (let ((fa (if (get c :split) (symbol f "_a") f)))
     (append
       (if (= (get c :b) id) (list (if (get c :b-lumped) f `(* ,f ,(nm cid "phi_b")))) nil)
-      (if (= (get c :a) id) (list (if (get c :a-lumped) `(* -1 ,f) `(* -1 ,f ,(nm cid "phi_a")))) nil)
+      (if (= (get c :a) id) (list (if (get c :a-lumped) `(* -1 ,fa) `(* -1 ,fa ,(nm cid "phi_a")))) nil)
       ;; a part of a mix hybrid at either end: its share of the force
       (concat-all
         (map (lambda (side)
                (let ((mix (get c (if (= side "a") :a-mix :b-mix))))
                  (if (and mix (member? (get mix :parts) id))
                    (let ((k (index-of (get mix :parts) id)) (x (nm (get mix :id) "morph")))
-                     (list `(* ,(if (= side "a") -1 1) ,(if (= k 0) `(- 1 ,x) x) ,f ,(nm cid (str "phi_" side "_" k)))))
+                     (list `(* ,(if (= side "a") -1 1) ,(if (= k 0) `(- 1 ,x) x) ,(if (= side "a") fa f)
+                              ,(nm cid (str "phi_" side "_" k)))))
                    nil)))
-             (list "a" "b"))))))
+             (list "a" "b")))))))
 
 ;; terms-with c's final force, cid_F.
 ;;   c   a resolved connection
@@ -1803,6 +1991,7 @@
     (if (= (get c :law) :pluck)
       (list `(def ,(nm cid "thr") (* ,(nm cid "thresh") (+ 0.25 (* 0.75 hit_velocity))))
             `(def ,(nm cid "F") (* ,(nm cid "weight") (pluck-contact ,gap ,cc hit ,(nm cid "stiff") ,(nm cid "thr")))))
+    (if (= (get c :law) :jet) (jet-forms c patch)
     (if (= (get c :law) :force)
       (append (signal-forms c patch)
               (list `(def ,(nm cid "F") (* ,(nm cid "weight") ,(nm cid "gain")
@@ -1816,7 +2005,32 @@
             `(def ,(nm cid "k") (* ,(nm cid "felt") (+ 1 (* ,(nm cid "hardness")
                                    (/ (read-history ,(nm cid "squash")) (/ ,(nm (get c :a) "speed") samplerate))))))
             `(def ,(nm cid "F") (* ,(nm cid "weight") (felt-contact ,(nm cid "gap") ,(nm cid "Cs") ,(nm cid "k"))))
-            `(write-history ,(nm cid "squash") (max 0 (* -1 (- ,(nm cid "gap") (* ,(nm cid "Cs") ,(nm cid "F"))))))))))))
+            `(write-history ,(nm cid "squash") (max 0 (* -1 (- ,(nm cid "gap") (* ,(nm cid "Cs") ,(nm cid "F")))))))))))))
+
+;; The jet: breath (with turbulence) plus the air's velocity at the mouth
+;; last sample (for a tube: its modes' pressure gradient there),
+;; delayed by ratio periods of the note, through tanh.
+;;   c      a jet connection
+;;   patch  the patch
+(def jet-forms (c patch)
+  (let ((n (lambda (suffix) (nm (get c :id) suffix))) (tube (find-object patch (get c :b))))
+    (append (signal-forms c patch)
+            (list `(def ,(n "breath") (* ,(n "blow") (max 0 ,(n "sig"))))
+                  ;; the air's velocity at the embouchure, which steers the
+                  ;; jet: each mode's amplitude times its pressure gradient
+                  ;; shape there (largest at an open end)
+                  `(def ,(n "grad") ,(tube-shape tube (first (access-syms (get c :id) "b" tube)) true))
+                  `(def ,(n "mouth") (sum (* (read-history ,(p tube "s1")) ,(n "grad"))))
+                  `(def ,(n "in") (+ (* ,(n "breath") (+ 1 (* ,(n "noise") (- (* 2 (noise)) 1))))
+                                     (* ,(n "feedback") ,(n "mouth"))))
+                  ;; ratio periods of the tube's own pitch (ratio <= 2, f0 >= 20 Hz)
+                  `(def ,(n "delayed") (delay ,(n "in") (/ (* ,(n "ratio") samplerate) ,(p tube "f0")) @max-delay 9600))
+                  `(make-history ,(n "u_h"))
+                  ;; the jet's flow into the tube; the tube takes its change
+                  ;; (see blown-forms)
+                  `(def ,(n "u") (tanh (- ,(n "delayed") ,(n "breath"))))
+                  `(def ,(n "F") (* ,(weight-of c) ,(n "gain") (- ,(n "u") (read-history ,(n "u_h")))))
+                  `(write-history ,(n "u_h") ,(n "u"))))))
 
 ;; Stulov's felt, solved inside the sample: the force magnitude f that
 ;; equals law(f) = Q / C u0 (r^p - eps h) with r = u / u0 the compression it
@@ -1892,13 +2106,17 @@
 (def driver-pre-forms (c patch)
   (let ((cid (get c :id)))
     (append (signal-forms c patch)
+            (if (member? (list :reed :lips) (get c :law))
+              (list `(make-history ,(nm cid "u_h"))
+                    ;; the blowing pressure, once per sample
+                    `(def ,(nm cid "gamma") (* ,(nm cid "blow") (max 0 ,(nm cid "sig")))))
             (if (= (get c :law) :fingerboard) (list)
             (if (= (get c :law) :position)
               (list `(def ,(nm cid "anchor") ,(nm cid "sig")))
               (list `(make-history ,(nm cid "anchor_h"))
                     `(def ,(nm cid "anchor") (+ (* (exp (/ -0.5 samplerate)) (read-history ,(nm cid "anchor_h")))
                                                 (/ (* ,(nm cid "gain") ,(nm cid "sig")) samplerate)))
-                    `(write-history ,(nm cid "anchor_h") ,(nm cid "anchor"))))))))
+                    `(write-history ,(nm cid "anchor_h") ,(nm cid "anchor")))))))))
 
 ;; Connection predicates. Springs, bows and position / speed drivers are
 ;; solved by the sweeps (sweeps?); plucks, felts and forces are exciters,
@@ -1906,7 +2124,7 @@
 ;;   c  a connection
 (def spring? (c) (= (get c :law) :spring))
 (def bow? (c) (= (get c :law) :bow))
-(def driver? (c) (member? (list :position :speed :fingerboard) (get c :law)))
+(def driver? (c) (member? (list :position :speed :fingerboard :reed :lips) (get c :law)))
 (def sweeps? (c) (or (spring? c) (bow? c) (driver? c) (member? (list :strike :stop) (get c :law))))
 (def exciter? (c) (not (sweeps? c)))
 
@@ -1956,6 +2174,13 @@
                               (sweep-law-forms c s tag)
                               (if (= s (- sweeps 1))
                                 (append (list `(def ,(nm cid "F") ,(nm cid (str "F" s))))
+                                        ;; a blown law's flow, for next sample's change; lips' own lip force
+                                        (if (member? (list :reed :lips) (get c :law))
+                                          (list `(write-history ,(nm cid "u_h") ,(blown-sym c (nm cid (str "F" s)) "u")))
+                                          nil)
+                                        (if (get c :split)
+                                          (list `(def ,(symbol (nm cid "F") "_a") ,(symbol (nm cid (str "F" s)) "_a")))
+                                          nil)
                                         (if (bow? c) (list `(write-history ,(nm cid "x_prev") ,(nm cid (str "x" s)))) nil))
                                 nil))))
                   springs)))
@@ -1983,6 +2208,8 @@
                             ;; pressure follows the hair contact's force
                             (max 0.000001 (* ,(n "pressure") ,(n "env") ,w
                                              ,@(if (get c :hair) (list `(read-history ,(n "press_h"))) (list)))))))
+    (if (= law :reed) (reed-law-forms c F yb cb w)
+    (if (= law :lips) (lips-law-forms c s F ya yb cb w)
     (if (= law :fingerboard)
       (list `(def ,F (* ,w (max 0 ,(n "sig")) (spring-connection (- 0 ,yb) ,cb ,(n "stiff")))))
     (if (driver? c)
@@ -1995,7 +2222,80 @@
         (list `(def ,F (* ,w (felt-contact (- ,(n "height") ,yb) ,cb ,(n "stiff")))))
         ;; the stop is the lower end, fixed: b is pushed up by -felt-contact
         (list `(def ,F (* -1 ,w (felt-contact (- ,yb ,(n "height")) ,cb ,(n "stiff"))))))
-      (list `(def ,F (* ,w (spring-connection (- ,ya ,yb) (+ ,ca ,cb) ,(n "stiff"))))))))))))
+      (list `(def ,F (* ,w (spring-connection (- ,ya ,yb) (+ ,ca ,cb) ,(n "stiff"))))))))))))))
+
+;; A blown flow law solved for the mouthpiece pressure. An air column's
+;; modes are driven by the rate of change of the flow into it (its input
+;; impedance is j w / (w_n^2 - w^2 + ...)), so the force on the tube is
+;; coupling times the flow's change this sample, u(p) - u_prev. Forms
+;; defining F where p = y / scale is the pressure that leaves:
+;; p = p0 + K (u(p) - u_prev), p0 = yb / scale, K = w C coupling / scale
+;; (capped at 0.9 / zeta so h(p) = p - p0 - K (u(p) - u_prev) rises: one
+;; root); by 12 bisection steps on a bracket covering the flow there.
+;;   c       the connection
+;;   F       the force symbol to define
+;;   yb, cb  the tube point's free pressure and give, as symbols
+;;   w       the weight form
+;;   flow    (lambda (p) form) for the flow at pressure p
+;;   umax    a bound on |flow|
+(def blown-forms (c F yb cb w flow umax)
+  (let ((n (lambda (suffix) (blown-sym c F suffix)))
+        (prev `(read-history ,(nm (get c :id) "u_h")))
+        (steps 12))
+    (let ((p0 (n "p0")) (k (n "K")) (half (n "half")))
+      (append
+        (list `(def ,p0 (/ ,yb ,(nm (get c :id) "scale")))
+              ;; with the weight, so the solved pressure is the applied
+              ;; force's; capped so h stays monotone (K u' < 1, u' <= zeta)
+              `(def ,k (min (/ (* ,w ,cb ,(nm (get c :id) "coupling")) ,(nm (get c :id) "scale"))
+                            (/ 0.9 (max ,(nm (get c :id) "zeta") 0.000001))))
+              ;; wide enough for the flow near p0 and the bound on it
+              `(def ,half (+ (* 2 ,k (+ ,umax (abs ,(flow p0)) (abs ,prev))) 0.000001))
+              `(def ,(n "lo0") (- ,p0 ,half))
+              `(def ,(n "hi0") (+ ,p0 ,half)))
+        (concat-all
+          (map (lambda (j)
+                 (let ((lo (n (str "lo" j))) (hi (n (str "hi" j))) (mid (n (str "mid" j))) (up (n (str "up" j))))
+                   (list `(def ,mid (* 0.5 (+ ,lo ,hi)))
+                         ;; h(mid) > 0: the root is below mid
+                         `(def ,up (gt (- ,mid ,p0 (* ,k (- ,(flow mid) ,prev))) 0))
+                         `(def ,(n (str "lo" (+ j 1))) (gswitch ,up ,lo ,mid))
+                         `(def ,(n (str "hi" (+ j 1))) (gswitch ,up ,mid ,hi)))))
+               (range steps)))
+        (list `(def ,(n "p") (* 0.5 (+ ,(n (str "lo" steps)) ,(n (str "hi" steps)))))
+              `(def ,(n "u") ,(flow (n "p")))
+              `(def ,F (* ,w ,(nm (get c :id) "coupling") (- ,(n "u") ,prev))))))))
+
+;; The symbol of one of a blown law's per-sweep values: cid_<suffix>_<F>.
+;;   c       the connection
+;;   F       that sweep's force symbol
+;;   suffix  the value's name
+(def blown-sym (c F suffix) (nm (get c :id) (str suffix "_" (source F))))
+
+;; The reed law (see reed): gamma from the breath, the flow
+;; zeta (1 - gamma + p) sqrt|gamma - p| sign(gamma - p) above p = gamma - 1.
+;;   c, F, yb, cb, w  as for blown-forms
+(def reed-law-forms (c F yb cb w)
+  (let ((n (lambda (suffix) (nm (get c :id) suffix))))
+    (append
+      (blown-forms c F yb cb w
+                   (lambda (pp) `(* (gt ,pp (- ,(n "gamma") 1)) ,(n "zeta") (+ 1 (- ,(n "gamma")) ,pp)
+                                    (sqrt (abs (- ,(n "gamma") ,pp))) (sign (- ,(n "gamma") ,pp))))
+                   `(* ,(n "zeta") 3 (sqrt (+ 2 ,(n "gamma"))))))))
+
+;; The lips law (see lips): the opening from the lip's position, the flow
+;; solved as for the reed, and the lip's own force beta (gamma - p0) from
+;; the pressure before this sample's flow, as F_a (terms-with's a-end force
+;; for a :split connection; it pushes the lip by -F_a).
+;;   c, s, F, ya, yb, cb, w  as for sweep-law-forms
+(def lips-law-forms (c s F ya yb cb w)
+  (let ((n (lambda (suffix) (nm (get c :id) suffix))) (h (nm (get c :id) (str "open" s))))
+    (append
+      (list `(def ,h (max 0 (+ 1 (/ ,ya ,(n "rest"))))))
+      (blown-forms c F yb cb w
+                   (lambda (pp) `(* ,(n "zeta") ,h (sqrt (abs (- ,(n "gamma") ,pp))) (sign (- ,(n "gamma") ,pp))))
+                   `(* ,(n "zeta") ,h (sqrt (+ 2 ,(n "gamma")))))
+      (list `(def ,(symbol F "_a") (* -1 ,w ,(n "beta") (- ,(n "gamma") (/ ,yb ,(n "scale")))))))))
 
 ;; A connection's weight form: its weight param, or the form a hidden
 ;; connection is weighted by.

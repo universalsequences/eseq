@@ -42,7 +42,7 @@ bridges any number of tuned strings onto one body.
 | `m/rect-membrane` (fixed edges, `:aspect`, follows the note) | `(x y)` |
 | `m/circ-plate` (`:edge :free` or `:clamped`; cymbals, gongs; modes solved from the Bessel equations, pitch from material and size) | `(r theta)` |
 | `m/bar` (free bar, follows the note; `:undercut` 1 tunes modes 2 and 3 to 4x and 10x, marimba-style) | `x` in 0..1 |
-| `m/oscillator` (one mode at the note: a reed, a lip, a resonance) | lumped-like, any |
+| `m/oscillator` (one mode at the note: a reed, a lip, a resonance) | `0` |
 | `m/finger` (Modalys' two-mass: hand on a stroke + soft tip) | lumped |
 | `m/mallet` (thrown mass) | lumped |
 | `m/modal-data` (modes from data: frequencies, losses or bandwidths, shapes over points; `:root` makes it follow the note) | point index, or `(x y z)` for the nearest point |
@@ -89,9 +89,21 @@ force's `:saturate` bounds a self-driven loop (`examples/feedback-gong.lisp`).
 
 **Hybrids.** `(m/melt 'h objA objB :morph x)` blends two objects' modal data
 (equal mode counts; positions on it are `(list atA atB)`):
-`examples/melt.lisp` morphs a string into a membrane. `(m/mix 'h 'a 'b)`
+`examples/melt.lisp` morphs a string into a membrane. `(m/mix-hybrid 'h 'a 'b)`
 shares connections and listens between two objects in the patch
 (`examples/mix.lisp`).
+
+**Air.** `(m/tube 'bore :ends :closed-open)` (also `:open-open`,
+`:closed-closed`, `:cone`) is an air column on the note. Blown connections
+take a `:breath` signal and drive the tube by the flow's change, the way an
+air column's input impedance does:
+- `(m/reed 'reed 'bore 0 :blow 0.7)`: the normalised clarinet reed (speaks
+  above blow ~1/3; `examples/clarinet.lisp`)
+- `(m/lips 'lips 'lip 'bore 0)`: a lip oscillator (`m/oscillator`) buzzing
+  into the bore (`examples/brass.lisp`)
+- `(m/jet 'jet 'bore 0.05)`: a flute jet, delayed and saturated
+  (`examples/flute.lisp`; it favours overblown registers, eseq-k0m2.33)
+- `(m/tone-hole 'h 'bore 0.66 :open 1)`: opening it shortens the column
 
 `(m/spectral obj ...)` adds Modalys' pseudo-physical controls to any object:
 `bend` (cents) and `diffraction` (rho: 1 leaves the partials, below 1 pulls

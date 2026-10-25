@@ -243,7 +243,8 @@ Stulov felt; feedback taps; melt and mix hybrids)
    sources for driver connections (sympathetic loops, self-oscillation).
 10. Hybrids: melt (interpolate modal data) and mix (split energy).
 
-**Tier 3: the air family**
+**Tier 3: the air family** (done 2026-10-25: tubes, tone holes, reed, lips,
+jet; the flute jet favours overblown registers, eseq-k0m2.33)
 
 11. Tubes (cylindrical and conical, three end conditions), adhere across
     domains, holes.

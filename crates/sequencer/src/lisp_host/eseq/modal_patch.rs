@@ -719,7 +719,7 @@ mod tests {
         assert!(disc.contains("(def o_order (tensor @shape [6] @data [0 1 2 0 3 1]))"), "{disc}");
 
         let osc = struck_dsp("(m/oscillator 'o :tune 0.5)", "0", "0");
-        assert!(osc.contains("(def o_hz (tensor @shape [1] @data [440]))"), "{osc}");
+        assert!(osc.contains("(def o_hz (tensor @shape [2] @data [440 100000]))"), "{osc}");
         assert!(osc.contains("(def o_ratio (* o_tune (/ f0 440)))"), "{osc}");
     }
 
@@ -911,7 +911,7 @@ mod tests {
 
         let mix = "(import eseq.modal :as m)
 (m/patch :name \"probe-mix\"
-  :objects (list (m/finger 'fin) (m/string 'lo) (m/string 'hi :tune 1.5) (m/mix 'pair 'lo 'hi))
+  :objects (list (m/finger 'fin) (m/string 'lo) (m/string 'hi :tune 1.5) (m/mix-hybrid 'pair 'lo 'hi))
   :connections (list (m/pluck 'pick 'fin 'pair (list 0.2 0.2)))
   :listens (list (m/listen 'pair (list 0.8 0.8))))";
         let squashed = generate_modal_instrument(&mut modal_vm(), PathBuf::from("mix.lisp"), mix).unwrap().dsp
@@ -921,6 +921,45 @@ mod tests {
         assert!(squashed.contains("(* 1 (- 1 pair_morph) pick_F pick_phi_b_0)"), "{squashed}");
         assert!(squashed.contains("(* 1 pair_morph pick_F pick_phi_b_1)"), "{squashed}");
         assert!(squashed.contains("(def mic1_v (+ (* (- 1 pair_morph) mic1_0_v) (* pair_morph mic1_1_v)))"), "{squashed}");
+    }
+
+    #[test]
+    fn air_family() {
+        let script = "(import eseq.modal :as m)
+(m/patch :name \"probe-air\"
+  :objects (list (m/tube 'bore :ends :closed-open :modes 4) (m/tube 'pipe :ends :open-open :modes 3)
+                 (m/tube 'horn :ends :cone :modes 3) (m/oscillator 'lip))
+  :connections (list (m/reed 'reed 'bore 0) (m/tone-hole 'hole 'bore 0.66)
+                     (m/lips 'lips 'lip 'horn 0) (m/jet 'jet 'pipe 0.05))
+  :listens (list (m/listen 'bore 0.5)))";
+        let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("air.lisp"), script).unwrap();
+        let squashed = instrument.dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Closed-open: odd harmonics, cos shapes; open-open: every harmonic, sin.
+        assert!(squashed.contains("(* (tensor @shape [4] @data [1 3 5 7]) bore_f0)"), "{squashed}");
+        assert!(squashed.contains("(def bore_wave (tensor @shape [4] @data [0.5 1.5 2.5 3.5]))"), "{squashed}");
+        assert!(squashed.contains("(sin (* pipe_wave 3.14159265"), "{squashed}");
+        // The reed: an implicit pressure solve, the tube driven by the flow's change.
+        assert!(squashed.contains("(def reed_F3 (* reed_weight reed_coupling (- reed_u_reed_F3 (read-history reed_u_h))))"), "{squashed}");
+        assert!(squashed.contains("(write-history reed_u_h reed_u_reed_F3)"), "{squashed}");
+        // A tone hole is a weighted pressure release.
+        assert!(squashed.contains("(spring-connection (- hole_anchor hole_y_b0) hole_C_b0 hole_stiff)"), "{squashed}");
+        // The lips push the lip by their own force, the tube by the flow's.
+        assert!(squashed.contains("(* -1 lips_F_a lips_phi_a)"), "{squashed}");
+        assert!(squashed.contains("(def lips_open0 (max 0 (+ 1 (/ lips_y_a0 lips_rest))))"), "{squashed}");
+        // The jet: delayed by ratio periods, steered by the air's velocity at the mouth.
+        assert!(squashed.contains("(delay jet_in (/ (* jet_ratio samplerate) pipe_f0) @max-delay 9600)"), "{squashed}");
+        assert!(squashed.contains("(def jet_mouth (sum (* (read-history pipe_s1) jet_grad)))"), "{squashed}");
+        // Blowing into a non-tube, or at an open end, is a check error.
+        for (bad, expected) in [
+            ("(m/reed 'reed 'pipe 0)", "reed reed: pipe is open there (no pressure); use a closed end"),
+            ("(m/jet 'jet 'lip 0)", "jet jet: blows into a tube (m/tube), not lip"),
+        ] {
+            let script = script.replace("(m/reed 'reed 'bore 0)", bad);
+            let errors = generate_modal_instrument(&mut modal_vm(), PathBuf::from("air.lisp"), &script).unwrap_err();
+            assert!(errors.contains(&expected.to_string()), "{errors:?}");
+        }
+        // A one-mode oscillator carries a silent second mode (eseq-k0m2.32).
+        assert!(squashed.contains("(def lip_hz (tensor @shape [2] @data [440 100000]))"), "{squashed}");
     }
 
     #[test]
