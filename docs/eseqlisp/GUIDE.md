@@ -818,7 +818,7 @@ cargo nextest run -p sequencer -E 'test(/customize_lists_the_mixer_clip_knob/)'
 + - * / min max  = < > <= >=
 abs sqrt sin cos floor ceil round fract log exp pow atan2 mod rand-int
 list first rest cons nth set-nth len append empty? reverse range zip chunks find-by-key
-dict get merge keys  number? string?
+dict get merge keys  number? string? map? list?
 str fmt substring str-contains? string-split string-trim string-downcase
 string-starts-with? string-ends-with?
 map filter reduce for-each each

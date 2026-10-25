@@ -3562,6 +3562,10 @@ pub fn register_core_natives(vm: &mut VM) {
 
     vm.register_borrowing_native("string?", core_is_string);
 
+    vm.register_borrowing_native("map?", core_is_map);
+
+    vm.register_borrowing_native("list?", core_is_list);
+
     vm.register_native("set-nth", |args| {
         let (Some(Value::List(items)), Some(Value::Number(idx)), Some(value)) =
             (args.first(), args.get(1), args.get(2))
@@ -4595,6 +4599,7 @@ pub fn register_core_natives(vm: &mut VM) {
         "append", "list", "empty?", "set-nth", "map", "filter", "reduce",
         "zip", "nth", "reverse", "chunks", "range", "not", "str", "substring",
         "str-contains?", "gensym", "source", "fmt", "number?", "string?",
+        "map?", "list?",
     ]);
 
     // Natives that store or forward binding refs take them as they are
@@ -4724,6 +4729,14 @@ fn core_is_number(args: &[&Value]) -> Value {
 
 fn core_is_string(args: &[&Value]) -> Value {
     Value::Bool(matches!(args.first().copied(), Some(Value::String(_))))
+}
+
+fn core_is_map(args: &[&Value]) -> Value {
+    Value::Bool(matches!(args.first().copied(), Some(Value::Map(_))))
+}
+
+fn core_is_list(args: &[&Value]) -> Value {
+    Value::Bool(matches!(args.first().copied(), Some(Value::List(_))))
 }
 
 fn core_nth(args: &[&Value]) -> Value {

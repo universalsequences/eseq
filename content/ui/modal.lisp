@@ -14,8 +14,9 @@
 ;; grouped by id, so the instrument panel shows one section per object.
 ;;
 ;;   (import eseq.modal :as m)
+;;   (import eseq.modal.materials :as mat)
 ;;   (m/patch :name "my-cello"
-;;     :objects     (list (m/string 'str :material :nylon) (m/plate 'body))
+;;     :objects     (list (m/string 'str :made-of mat/nylon) (m/plate 'body))
 ;;     :connections (list (m/bow 'bow 'str 0.12)
 ;;                        (m/spring 'bridge 'str 0.99 'body (list 0.55 0.4)))
 ;;     :listens     (list (m/listen 'str 0.85)))
@@ -33,9 +34,11 @@
 
 (module eseq.modal)
 
+(import eseq.modal.materials :as mat)
+
 (export string plate membrane finger mallet
         pluck spring felt bow listen patch
-        check dsp ui generate materials)
+        check dsp ui generate)
 
 ;; ── small helpers ───────────────────────────────────────────────────────────
 
@@ -53,22 +56,6 @@
 ;;   terms  a list of forms
 (def sum-form (terms)
   (if (empty? terms) 0 (if (= (len terms) 1) (first terms) (cons '+ terms))))
-
-;; Every material keyword, in the order of content/defmacros/modal-material's
-;; table, so a keyword's position is the index that macro takes.
-(def material-keys ()
-  (list :uranium :steel :brass :aluminium :granite :nylon :carbon :diamond :spruce))
-
-;; Every material's name as a string ("steel"): the menu options of a
-;; material param. Exported, so a script can list them.
-(def materials () (map bare (material-keys)))
-
-;; A material's index in material-keys, or nil when it names no material.
-;;   m  a keyword from material-keys (:steel), or already an index
-(def material-index (m)
-  (if (number? m) m
-    (let ((hits (filter (lambda (k) (= (nth (material-keys) k) m)) (range (len (material-keys))))))
-      (if (empty? hits) nil (first hits)))))
 
 ;; A param spec: one DGenLisp param of an object, connection or mic, plus
 ;; how the generated panel shows it.
@@ -95,12 +82,29 @@
     (append `(param ,(get p :sym) @group ,(get p :group) @default ,(get p :default) @min ,(get p :min) @max ,(get p :max))
             (if (get p :unit) `(@unit ,(get p :unit)) nil))))
 
-;; The "material" menu param of an object.
-;;   id        the object's id
-;;   material  its starting material, a keyword or index
-(def material-param (id material)
-  (pspec id "material" (material-index material) 0 (- (len (material-keys)) 1)
-         :options (materials) :title "Material"))
+;; What an object is made of, as given: one material (eseq.modal.materials)
+;; or a list of them to choose between. The materials as a list either way.
+;;   made-of  a material or a list of materials
+(def material-choices (made-of) (if (mat/material? made-of) (list made-of) made-of))
+
+;; The object's "material" menu param when it offers several materials (the
+;; first is the default); none when it is made of one.
+;;   id       the object's id
+;;   made-of  a material or a list of materials
+(def material-params (id made-of)
+  (let ((choices (material-choices made-of)))
+    (if (= (len choices) 1) nil
+      (list (pspec id "material" 0 0 (- (len choices) 1)
+                   :options (map (lambda (m) (get m :name)) choices) :title "Material")))))
+
+;; A form choosing among values by a menu param's index: values[idx], with
+;; DGenLisp's selector (1-based; the index is a param, so it can change
+;; while playing). A single value is just itself.
+;;   idx     the menu param's symbol
+;;   values  one number per menu option
+(def pick-form (idx values)
+  (if (= (len values) 1) (first values)
+    `(selector (+ 1 (clip (round ,idx) 0 ,(- (len values) 1))) ,@values)))
 
 ;; ── objects ─────────────────────────────────────────────────────────────────
 ;; Each constructor returns an object dict:
@@ -110,14 +114,16 @@
 ;;   :lumped  true for objects with one coordinate (scalar state, phi = 1)
 ;;            instead of a mode vector
 ;;   :modes   how many modes its state vectors hold
-;;   :stuff   the material as written, for check (objects with a material
-;;            only; not :material, which dict would auto-quote)
+;;   :stuff   what it is made of as written (:made-of), for check and the
+;;            material defs; objects with a material only. Not :material,
+;;            whose value every call auto-quotes (it carries shader code
+;;            for widgets)
 ;;   :params  its param specs, in panel order
 ;; Lengths are in metres unless a name says otherwise.
 
 ;; A stiff string. Its fundamental follows the played note.
 ;;   id          the object's id ('str)
-;;   material    a material keyword (:steel); a menu param
+;;   made-of     a material (mat/steel), or a list of them: a menu param
 ;;   length      speaking length, m
 ;;   radius-mm   radius, mm; with material and length it sets the stiffness
 ;;               (inharmonicity)
@@ -126,21 +132,21 @@
 ;;   const-loss  damping at every frequency (panel "Loss")
 ;;   mute        extra damping while the note is released
 ;;   tune        frequency ratio to the played note
-(def string (id &key (material :steel) (length 0.65) (radius-mm 0.5) (modes 60)
+(def string (id &key (made-of mat/steel) (length 0.65) (radius-mm 0.5) (modes 60)
                  (freq-loss 0.4) (const-loss 0.3) (mute 6) (tune 1))
-  (dict :id id :title "STRING" :kind :string :lumped false :modes modes :stuff material
-        :params (list (material-param id material)
-                      (pspec id "length" length 0.2 20 :unit 'm :title "Length" :taper :log)
+  (dict :id id :title "STRING" :kind :string :lumped false :modes modes :stuff made-of
+        :params (append (material-params id made-of)
+                (list (pspec id "length" length 0.2 20 :unit 'm :title "Length" :taper :log)
                       (pspec id "radius" radius-mm 0.1 5 :unit 'mm :title "Radius" :taper :log)
                       (pspec id "hf_loss" freq-loss 0 10 :title "HF loss")
                       (pspec id "loss" const-loss 0 20 :title "Loss")
                       (pspec id "mute" mute 0 60 :title "Mute")
-                      (pspec id "tune" tune 0.25 4 :title "Tune" :dec 3))))
+                      (pspec id "tune" tune 0.25 4 :title "Tune" :dec 3)))))
 
 ;; A simply supported rectangular plate, 8 x 8 modes. Its pitch comes from its
 ;; material and size, not the note (a soundboard or body).
 ;;   id        the object's id ('body)
-;;   material  a material keyword (:spruce); a menu param
+;;   made-of   a material (mat/spruce), or a list of them: a menu param
 ;;   thick-mm  thickness, mm
 ;;   width     width, m
 ;;   height    height, m
@@ -148,16 +154,16 @@
 ;;             plates move less when a connection pushes them
 ;;   loss      damping at every frequency
 ;;   damp      damping that rises with frequency (panel "HF damp")
-(def plate (id &key (material :spruce) (thick-mm 3) (width 0.45) (height 0.35)
+(def plate (id &key (made-of mat/spruce) (thick-mm 3) (width 0.45) (height 0.35)
                 (mass 30) (loss 4) (damp 0.3))
-  (dict :id id :title "PLATE" :kind :plate :lumped false :modes 64 :stuff material
-        :params (list (material-param id material)
-                      (pspec id "thick" thick-mm 0.5 20 :unit 'mm :title "Thick" :taper :log)
+  (dict :id id :title "PLATE" :kind :plate :lumped false :modes 64 :stuff made-of
+        :params (append (material-params id made-of)
+                (list (pspec id "thick" thick-mm 0.5 20 :unit 'mm :title "Thick" :taper :log)
                       (pspec id "mass" mass 1 1000 :title "Mass" :taper :log)
                       (pspec id "width" width 0.05 2 :title "Width")
                       (pspec id "height" height 0.05 2 :title "Height")
                       (pspec id "loss" loss 0 40 :title "Loss")
-                      (pspec id "damp" damp 0 5 :title "HF damp"))))
+                      (pspec id "damp" damp 0 5 :title "HF damp")))))
 
 ;; A circular drum head with 120 Bessel modes. Its fundamental follows the
 ;; played note.
@@ -370,16 +376,51 @@
          (filter (lambda (k) (not (empty? (filter (lambda (j) (= (nth ids j) (nth ids k))) (range k)))))
                  (range (len ids))))))
 
-;; One message per object whose material is not in material-keys.
+;; True when made-of is a material or a non-empty list of materials.
+;;   made-of  what an object's :made-of was given
+(def made-of? (made-of)
+  (let ((choices (material-choices made-of)))
+    (if (list? choices)
+      (if (empty? choices) false (empty? (filter (lambda (m) (not (mat/material? m))) choices)))
+      false)))
+
+;; True when obj is made of a material (strings and plates).
+;;   obj  an object
+(def has-material? (obj) (if (= (get obj :kind) :string) true (= (get obj :kind) :plate)))
+
+;; What is wrong with one material, as messages naming who uses it.
+;;   who  the message prefix ("string str")
+;;   m    a material
+(def material-field-errors (who m)
+  (let ((label (if (string? (get m :name)) (get m :name) "a material")))
+    (append (if (string? (get m :name)) nil (list (str who ": a material needs a :name string")))
+            (concat-all
+              (map (lambda (field)
+                     (if (number? (get m field)) nil
+                       (list (str who ": material " label " needs a number " (source field)))))
+                   (list :density :young :poisson))))))
+
+;; What is wrong with what obj is made of: not a material or a list of them
+;; (an old keyword material such as :steel lands here), a material missing a
+;; field, or a menu with two materials of one name.
+;;   obj  a string or plate
+(def made-of-errors (obj)
+  (let ((who (str (bare (get obj :kind)) " " (source (get obj :id))))
+        (made-of (get obj :stuff)))
+    (if (not (made-of? made-of))
+      (list (str who ": :made-of takes a material such as mat/steel, or a list of them; got "
+                 (source made-of)))
+      (let ((choices (material-choices made-of))
+            (names (map (lambda (m) (get m :name)) (material-choices made-of))))
+        (append (concat-all (map (lambda (m) (material-field-errors who m)) choices))
+                (map (lambda (k) (str who ": two materials are called " (nth names k)))
+                     (filter (lambda (k) (not (empty? (filter (lambda (j) (= (nth names j) (nth names k))) (range k)))))
+                             (range (len names)))))))))
+
+;; Every material problem in a patch.
 ;;   patch  the patch
 (def material-errors (patch)
-  (concat-all
-    ;; objects without a material (membrane, finger, mallet) have no :stuff
-    (map (lambda (o) (if (and (not (= (get o :stuff) nil)) (= (material-index (get o :stuff)) nil))
-                       (list (str (bare (get o :kind)) " " (source (get o :id)) ": no material "
-                                  (source (get o :stuff)) "; one of " (source (material-keys))))
-                       nil))
-         (get patch :objects))))
+  (concat-all (map (lambda (o) (if (has-material? o) (made-of-errors o) nil)) (get patch :objects))))
 
 ;; Everything wrong with a patch, as a list of messages; empty when it is
 ;; fine. dsp and ui assume a patch this finds nothing wrong with.
@@ -445,6 +486,25 @@
 ;;   name  the name's suffix
 (def p (obj name) (nm (get obj :id) name))
 
+;; The Young's modulus a plate's macros take for material m. rect-plate
+;; computes with Poisson's ratio 0.3 (sqrt(E / (12 rho (1 - 0.09)))), so
+;; scaling E by 0.91 / (1 - nu^2) gives the plate formula with m's own ratio.
+;;   obj  a string or plate
+;;   m    a material
+(def young-for (obj m)
+  (if (= (get obj :kind) :plate)
+    (/ (* (get m :young) 0.91) (- 1 (* (get m :poisson) (get m :poisson))))
+    (get m :young)))
+
+;; Forms defining obj_density and obj_young from what obj is made of: the
+;; numbers themselves for one material, picked by the material menu param
+;; for several.
+;;   obj  a string or plate
+(def material-defs (obj)
+  (let ((choices (material-choices (get obj :stuff))) (idx (p obj "material")))
+    (list `(def ,(p obj "density") ,(pick-form idx (map (lambda (m) (get m :density)) choices)))
+          `(def ,(p obj "young") ,(pick-form idx (map (lambda (m) (young-for obj m)) choices))))))
+
 ;; Forms run every sample before predicting obj: its mode frequencies, the
 ;; mask of modes that sound, damping, the modal-coefs a / b, wref (its
 ;; reference angular frequency per sample), G (force -> mode gain; C for a
@@ -454,7 +514,7 @@
 (def object-setup (obj)
   (let ((id (get obj :id)) (kind (get obj :kind)) (m (get obj :modes)))
     (if (= kind :string)
-      (list `(def (,(p obj "density") ,(p obj "young")) (modal-material ,(p obj "material")))
+      (append (material-defs obj) (list
             `(def ,(p obj "f0") (* f0 ,(p obj "tune")))
             `(def ,(p obj "n") (+ (iota ,m) 1))
             `(def ,(p obj "freqs") (stiff-string-freqs ,(p obj "n") ,(p obj "f0") ,(p obj "young") ,(p obj "density")
@@ -467,12 +527,12 @@
             `(def ,(p obj "mass") 1)
             `(def ,(p obj "G") (* ,(p obj "wref") ,(p obj "wref")))
             `(make-history ,(p obj "s1") @shape [ ,m ])
-            `(make-history ,(p obj "s2") @shape [ ,m ]))
+            `(make-history ,(p obj "s2") @shape [ ,m ])))
     (if (= kind :plate)
-      (list `(def ,(p obj "grid") (iota 64))
+      (append (material-defs obj) (list
+            `(def ,(p obj "grid") (iota 64))
             `(def ,(p obj "pm") (+ (floor (/ ,(p obj "grid") 8)) 1))
             `(def ,(p obj "pn") (+ (- ,(p obj "grid") (* 8 (floor (/ ,(p obj "grid") 8)))) 1))
-            `(def (,(p obj "density") ,(p obj "young")) (modal-material ,(p obj "material")))
             `(def ,(p obj "thick_m") (* ,(p obj "thick") 0.001))
             `(def ,(p obj "freqs") (rect-plate ,(p obj "pm") ,(p obj "pn") ,(p obj "young") ,(p obj "density")
                                      ,(p obj "thick_m") ,(p obj "width") ,(p obj "height")))
@@ -484,7 +544,7 @@
             `(def ,(p obj "wref") (min (* twopi (/ ,(p obj "f11") samplerate)) 2.8))
             `(def ,(p obj "G") (/ (* ,(p obj "wref") ,(p obj "wref")) ,(p obj "mass")))
             `(make-history ,(p obj "s1") @shape [ 64 ])
-            `(make-history ,(p obj "s2") @shape [ 64 ]))
+            `(make-history ,(p obj "s2") @shape [ 64 ])))
     (if (= kind :membrane)
       (list `(def (,(p obj "ratios") ,(p obj "phi0")) (circ-membrane 0 0))
             `(def ,(p obj "f0") (* f0 ,(p obj "tune")))
@@ -842,7 +902,7 @@
 ;; the generated code may call.
 (def library-imports ()
   (map (lambda (name) (list 'use-defmacro name))
-       '(modal-material stiff-string-freqs rect-plate rect-plate-shape circ-membrane
+       '(stiff-string-freqs rect-plate rect-plate-shape circ-membrane
          modal-band modal-loss modal-coefs modal-predict modal-point modal-advance
          two-mass-coefs mallet-predict mallet-advance pluck-contact spring-connection
          felt-contact bow-contact voice-amp)))

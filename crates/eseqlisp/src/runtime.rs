@@ -2368,6 +2368,8 @@ impl Runtime {
             ),
             ("number?", "(number? x)", "Whether x is a number."),
             ("string?", "(string? x)", "Whether x is a string."),
+            ("map?", "(map? x)", "Whether x is a map (a dict)."),
+            ("list?", "(list? x)", "Whether x is a list."),
             (
                 "current-source-path",
                 "(current-source-path)",

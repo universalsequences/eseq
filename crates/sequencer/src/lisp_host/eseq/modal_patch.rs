@@ -159,8 +159,9 @@ mod tests {
     }
 
     const CELLO: &str = "(import eseq.modal :as m)
+(import eseq.modal.materials :as mat)
 (m/patch :name \"probe-cello\"
-  :objects (list (m/string 'str :material :nylon) (m/plate 'body))
+  :objects (list (m/string 'str :made-of mat/nylon) (m/plate 'body))
   :connections (list (m/bow 'bow 'str 0.12)
                      (m/spring 'bridge 'str 0.99 'body (list 0.55 0.4)))
   :listens (list (m/listen 'str 0.85)))";
@@ -207,6 +208,52 @@ mod tests {
         let errors =
             generate_modal_instrument(&mut vm, PathBuf::from("cello.lisp"), &script).unwrap_err();
         assert_eq!(errors, vec!["spring bridge: no object bdy".to_string()]);
+    }
+
+    #[test]
+    fn a_list_of_materials_becomes_a_menu_and_one_becomes_numbers() {
+        let mut vm = modal_vm();
+        let script = CELLO.replace(
+            "(m/plate 'body)",
+            "(m/plate 'body :made-of (list mat/spruce mat/maple (mat/material :name \"cedar\" :density 380 :young 9e9)))",
+        );
+        let instrument =
+            generate_modal_instrument(&mut vm, PathBuf::from("cello.lisp"), &script).unwrap();
+        let dsp = &instrument.dsp;
+        // One material: its numbers, and no menu.
+        assert!(dsp.contains("(def str_density 1140)"), "{dsp}");
+        assert!(dsp.contains("(def str_young 3000000000)"), "{dsp}");
+        assert!(!dsp.contains("str_material"), "{dsp}");
+        // Several: a menu param named after them, picked by its index.
+        assert!(dsp.contains("(param body_material @group body @options [\"spruce\" \"maple\" \"cedar\"]"), "{dsp}");
+        assert!(dsp.contains("(selector (+ 1 (clip (round body_material) 0 2)) 450 650 380)"), "{dsp}");
+        assert!(instrument.ui.contains("\"body.body_material\""), "{}", instrument.ui);
+    }
+
+    #[test]
+    fn rejects_a_keyword_material() {
+        let mut vm = modal_vm();
+        let script = CELLO.replace("mat/nylon", ":nylon");
+        let errors =
+            generate_modal_instrument(&mut vm, PathBuf::from("cello.lisp"), &script).unwrap_err();
+        assert_eq!(
+            errors,
+            vec!["string str: :made-of takes a material such as mat/steel, or a list of them; got :nylon".to_string()]
+        );
+    }
+
+    #[test]
+    fn checks_every_material_field() {
+        let mut vm = modal_vm();
+        for (made_of, expected) in [
+            ("nil", "string str: :made-of takes a material such as mat/steel, or a list of them; got nil"),
+            ("(mat/material :name \"gut\" :density nil)", "string str: material gut needs a number :density"),
+            ("(list mat/nylon (merge mat/steel :name \"nylon\"))", "string str: two materials are called nylon"),
+        ] {
+            let script = CELLO.replace("mat/nylon)", &format!("{made_of})"));
+            let errors = generate_modal_instrument(&mut vm, PathBuf::from("cello.lisp"), &script).unwrap_err();
+            assert_eq!(errors, vec![expected.to_string()], "{made_of}");
+        }
     }
 
     #[test]

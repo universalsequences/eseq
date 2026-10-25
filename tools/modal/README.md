@@ -19,11 +19,12 @@ A script imports the module and ends with the patch:
 
 ```lisp
 (import eseq.modal :as m)
+(import eseq.modal.materials :as mat)
 
 (m/patch :name "my-guitar"
   :objects     (list (m/finger 'fin :depth 0.1)
-                     (m/string 'str :material :steel :length 0.65 :modes 60)
-                     (m/plate 'body :material :spruce))
+                     (m/string 'str :made-of mat/steel :length 0.65 :modes 60)
+                     (m/plate 'body :made-of mat/spruce))
   :connections (list (m/pluck 'pick 'fin 'str 0.8)
                      (m/spring 'bridge 'str 0.96 'body (list 0.55 0.4)))
   :listens     (list (m/listen 'str 0.2 :gain 0.6)
@@ -48,10 +49,24 @@ bridges any number of tuned strings onto one body.
 | `(m/spring id a a-at b b-at)` | bridge / adhere |
 | `(m/bow id obj at)` | stick-slip friction, sustains under the gate |
 
-Materials are keywords: `:uranium :steel :brass :aluminium :granite :nylon
-:carbon :diamond :spruce`. `(m/check patch)` lists what is wrong with a patch
-by name (`spring bridge: no object bdy`); `eseq modal emit` prints the same
-list instead of writing anything.
+Materials are data. `eseq.modal.materials` (`content/ui/modal/materials.lisp`)
+holds a library (`mat/steel`, `mat/nylon`, `mat/spruce`, `mat/bronze`,
+`mat/glass`, ...), each a dict of name, density, Young's modulus and
+Poisson's ratio. A string or plate is `:made-of` one, or a list of them to
+pick from on the panel (the first is the default):
+
+```lisp
+(m/plate 'body :made-of (list mat/spruce mat/maple mat/rosewood))
+(m/string 'str :made-of (mat/material :name "gut" :density 1300 :young 5e9))
+(m/string 'str :made-of (merge mat/steel :name "spring steel" :young 2.1e11))
+```
+
+(The argument is not called `:material`: every call quotes the value after
+`:material`, which carries shader code for widgets.)
+
+`(m/check patch)` lists what is wrong with a patch by name (`spring bridge:
+no object bdy`); `eseq modal emit` prints the same list instead of writing
+anything.
 
 Every param is named after its object or connection (`str_length`,
 `bridge_stiff`) and grouped by it (`@group str`), so the auto-generated panel
