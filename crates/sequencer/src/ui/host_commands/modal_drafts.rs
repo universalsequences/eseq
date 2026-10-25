@@ -7,6 +7,8 @@
 
 use crate::*;
 
+pub(super) const COMMANDS: &[&str] = &["modal-draft-save-open", "modal-draft-save"];
+
 /// A draft track one script buffer drives.
 pub(crate) struct ModalDraft {
     /// The buffer's file path, or `buffer:<name>` for an unsaved buffer.
@@ -33,6 +35,8 @@ pub(crate) struct PendingModalCompile {
     receiver: std::sync::mpsc::Receiver<PreviewCompileOutcome>,
 }
 
+/// The instrument panel tells a draft by this prefix (`modal-draft?` in
+/// content/ui/effects/instrument-panel.lisp).
 fn draft_engine_name(name: &str) -> String {
     format!("modal-draft/{name}")
 }
@@ -318,4 +322,126 @@ pub(crate) fn poll_modal_draft_compiles(
         reload_instrument_panels(editor);
         editor.refresh_visible_layouts_for_buffer_named("*fx*");
     }
+}
+
+/// The `:track` of `payload` and the draft playing on it.
+fn draft_on_track<'a>(
+    app: &app::App,
+    drafts: &'a [ModalDraft],
+    payload: &Value,
+) -> Result<(usize, &'a ModalDraft), String> {
+    let track = extract_usize_from_payload(payload, "track").ok_or("Missing draft track")?;
+    let engine_id = app
+        .graph
+        .track_engine_ids
+        .get(track)
+        .copied()
+        .flatten()
+        .ok_or("That track has no instrument")?;
+    drafts
+        .iter()
+        .find(|draft| draft.engine_id == engine_id)
+        .map(|draft| (track, draft))
+        .ok_or_else(|| "That track is not a modal patch draft".to_string())
+}
+
+/// Write the draft's running instrument into the user instrument folder as
+/// `name`. Replacing a saved one needs `overwrite`; the track stays the
+/// script's draft, so later evaluations keep recompiling it. An error
+/// carries the typed name when that name is already saved (Save becomes
+/// Replace), else "".
+fn save_draft(
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+    payload: &Value,
+) -> Result<String, (String, String)> {
+    let (_, draft) = draft_on_track(app, &ctx.sessions.modal_drafts, payload)
+        .map_err(|error| (error, String::new()))?;
+    // The running engine's source: the draft's dsp.lisp may hold a recompile
+    // that failed or is still pending.
+    let dsp = app
+        .editor
+        .engine_registry
+        .get(draft.engine_id)
+        .map(|engine| engine.source.clone())
+        .ok_or_else(|| ("The draft has no running engine".to_string(), String::new()))?;
+    let raw = extract_string_from_payload(payload, "name").unwrap_or_default();
+    if raw.trim().is_empty() {
+        return Err(("Name the instrument".to_string(), String::new()));
+    }
+    let slug = sequencer::agent::actions::normalize_patch_name(&raw, "modal-instrument");
+    let (dir, legacy_file) = finalized_instrument_storage_paths(&slug);
+    let exists = format!("Instrument '{slug}' already exists");
+    if legacy_file.exists() {
+        // A single-file instrument: not one a draft save can replace.
+        return Err((exists, String::new()));
+    }
+    if dir.exists() && !extract_bool_from_payload(payload, "overwrite") {
+        return Err((exists, raw));
+    }
+    // A replaced patcher-built instrument's layout sidecar would mark the
+    // generated dsp as patch-authored.
+    let _ = std::fs::remove_file(patcher_layout_sidecar_path_for_dsp(&dir.join("dsp.lisp")));
+    sequencer::lisp_host::ModalInstrument { name: slug.clone(), dsp, ui: draft.ui.clone() }
+        .write_to(&dir)
+        .map_err(|error| (error, String::new()))?;
+    sequencer::lisp_host::invalidate_instrument_release_index();
+    // Puts the saved instrument's panel in the catalog, as the instrument
+    // editor's saves do.
+    reload_instrument_panels(editor);
+    sync_sidebar_browser(app, app.ui.cursor_track);
+    Ok(slug)
+}
+
+pub(super) fn handle(
+    name: &str,
+    payload: Value,
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+) {
+    let result = match name {
+        "modal-draft-save-open" => {
+            draft_on_track(app, &ctx.sessions.modal_drafts, &payload).and_then(|(track, draft)| {
+                let default_name = draft.name.clone();
+                // A modal only receives pointer input through the active tile.
+                super::file_menu::activate_dialog_tile(editor);
+                editor
+                    .runtime_mut()
+                    .invoke_global(
+                        "eseq.modal.save/open",
+                        vec![Value::Number(track as f64), Value::String(default_name)],
+                    )
+                    .map(|_| ())
+                    .map_err(|error| format!("{error:?}"))
+            })
+        }
+        "modal-draft-save" => match save_draft(app, editor, ctx, &payload) {
+            Ok(slug) => {
+                editor.show_toast(format!("Saved instrument '{slug}'"), eseqlisp::ToastKind::Success);
+                editor
+                    .runtime_mut()
+                    .invoke_global("eseq.modal.save/close", Vec::new())
+                    .map(|_| ())
+                    .map_err(|error| format!("{error:?}"))
+            }
+            // The form shows the error; a transient message only without it.
+            Err((error, taken)) => editor
+                .runtime_mut()
+                .invoke_global(
+                    "eseq.modal.save/fail",
+                    vec![Value::String(error.clone()), Value::String(taken)],
+                )
+                .map(|_| ())
+                .map_err(|_| error),
+        },
+        _ => Ok(()),
+    };
+    if let Err(error) = result {
+        editor.show_transient_message(error);
+    }
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    editor.mark_needs_redraw();
 }

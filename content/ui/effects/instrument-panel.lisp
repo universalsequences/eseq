@@ -854,6 +854,18 @@
             :on-change (lambda (v) (pc/fx-set-instrument-value p v)))))
       (box :width 0 :height 0))))
 
+;; A modal patch script's draft track (src/ui/host_commands/modal_drafts.rs
+;; runs it as `modal-draft/<patch name>`). It has no saved instrument to hold
+;; presets, so its header saves the instrument itself instead.
+(def modal-draft? (inst)
+  (string-starts-with? (str (get inst :name)) "modal-draft/"))
+
+(def modal-draft-save-button (inst)
+  (button "Save instrument"
+    :debug-name "modal-draft-save-button"
+    :height 0.9 :padding 0.4 :font-size 10
+    :on-click |x y r| (host-command "modal-draft-save-open" (dict :track (get inst :track)))))
+
 (def instrument-panel (inst)
   (if (= (get inst :type) "sampler")
     (sp/sampler-panel inst)
@@ -880,13 +892,15 @@
                 (instrument-base-note-control inst)
                 (instrument-polyphony-control)
                 (pf/instrument-header-actions-menu inst)
-                (box :debug-name "instrument-preset-button" :padding 0.0 :width 2 :align :center
-                  (v-stack
-                    (box :width 1 :height 0.1)
-                    (fx-mini-save-icon
-                      :on-click |x y r| (eseq.browser/enter-preset-save)
-                      :active 0))
-                  )
+                (if (modal-draft? inst)
+                  (modal-draft-save-button inst)
+                  (box :debug-name "instrument-preset-button" :padding 0.0 :width 2 :align :center
+                    (v-stack
+                      (box :width 1 :height 0.1)
+                      (fx-mini-save-icon
+                        :on-click |x y r| (eseq.browser/enter-preset-save)
+                        :active 0))
+                    ))
                 (box :width 0.5)
                 ))
             (pf/fx-panel-body "instrument-content-box"
