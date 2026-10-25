@@ -18,18 +18,36 @@ pub(crate) struct ModalDraft {
     /// script (modal.lisp), and is the draft's asset base.
     pub(crate) dir: PathBuf,
     pub(crate) generation: u64,
+    /// The ui.lisp source of the engine running now: the panel shows this,
+    /// not the file, which a pending compile has already overwritten.
+    pub(crate) ui: String,
 }
 
 pub(crate) struct PendingModalCompile {
     key: String,
     generation: u64,
-    /// The patch's :name, recorded on the draft once the compile applies.
+    /// The patch's :name and panel, recorded on the draft once the compile
+    /// applies.
     name: String,
+    ui: String,
     receiver: std::sync::mpsc::Receiver<PreviewCompileOutcome>,
 }
 
 fn draft_engine_name(name: &str) -> String {
     format!("modal-draft/{name}")
+}
+
+/// Show every draft's panel (by its engine name) on the next rebuild.
+fn sync_draft_panels(drafts: &[ModalDraft]) {
+    set_draft_instrument_uis(
+        drafts
+            .iter()
+            .map(|draft| {
+                let path = draft.dir.join("ui.lisp").display().to_string();
+                (draft_engine_name(&draft.name), (path, draft.ui.clone()))
+            })
+            .collect(),
+    );
 }
 
 fn buffer_key(buffer: &eseqlisp::buffer::Buffer) -> String {
@@ -91,6 +109,7 @@ pub(super) fn evaluate_modal_buffer(
                 let _ = std::fs::remove_dir_all(&draft.dir);
                 false
             });
+            sync_draft_panels(&ctx.sessions.modal_drafts);
             create_draft(app, editor, ctx, key, instrument, &script, replaced);
         }
     }
@@ -129,6 +148,7 @@ fn update_draft(
         key,
         generation,
         name: instrument.name,
+        ui: instrument.ui,
         receiver,
     });
     editor.handle_host_event(HostEvent::Status(status));
@@ -168,19 +188,6 @@ fn create_draft(
         }
     };
     let _ = app.force_instrument_enabled(track);
-    sync_after_instrument_track_apply(
-        app,
-        editor,
-        &ctx.shared.state,
-        track,
-        &ctx.shared.current_track,
-        &mut *ctx.track_names,
-        &ctx.shared.track_pan_ids,
-        &ctx.shared.record_armed,
-        &ctx.shared.accumulator_names,
-        &ctx.shared.ui_epoch,
-        ctx.shared.lg_raw,
-    );
     let Some(engine_id) = app.graph.track_engine_ids.get(track).and_then(|id| *id) else {
         let _ = app.graph_controller().delete_track(track);
         let _ = std::fs::remove_dir_all(&dir);
@@ -199,7 +206,23 @@ fn create_draft(
         name: instrument.name,
         dir,
         generation: 0,
+        ui: instrument.ui,
     });
+    sync_draft_panels(&ctx.sessions.modal_drafts);
+    reload_instrument_panels(editor);
+    sync_after_instrument_track_apply(
+        app,
+        editor,
+        &ctx.shared.state,
+        track,
+        &ctx.shared.current_track,
+        &mut *ctx.track_names,
+        &ctx.shared.track_pan_ids,
+        &ctx.shared.record_armed,
+        &ctx.shared.accumulator_names,
+        &ctx.shared.ui_epoch,
+        ctx.shared.lg_raw,
+    );
     editor.handle_host_event(HostEvent::Status(status));
 }
 
@@ -215,16 +238,17 @@ pub(crate) fn poll_modal_draft_compiles(
     let mut finished = Vec::new();
     sessions.pending_modal_compiles.retain(|pending| match pending.receiver.try_recv() {
         Ok(outcome) => {
-            finished.push((pending.key.clone(), pending.generation, pending.name.clone(), Some(outcome)));
+            finished.push((pending.key.clone(), pending.generation, pending.name.clone(), pending.ui.clone(), Some(outcome)));
             false
         }
         Err(std::sync::mpsc::TryRecvError::Empty) => true,
         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-            finished.push((pending.key.clone(), pending.generation, pending.name.clone(), None));
+            finished.push((pending.key.clone(), pending.generation, pending.name.clone(), pending.ui.clone(), None));
             false
         }
     });
-    for (key, generation, name, outcome) in finished {
+    let mut panels_changed = false;
+    for (key, generation, name, ui, outcome) in finished {
         let Some(draft) = sessions
             .modal_drafts
             .iter_mut()
@@ -266,6 +290,9 @@ pub(crate) fn poll_modal_draft_compiles(
             editor_error(editor, error);
             continue;
         }
+        // The panel dispatches on the engine name, so a rename changes it too.
+        panels_changed |= draft.ui != ui || draft.name != name;
+        draft.ui = ui;
         draft.name = name;
         let changed: Vec<(usize, f32)> = app
             .graph
@@ -285,5 +312,10 @@ pub(crate) fn poll_modal_draft_compiles(
         }
         ui_epoch.fetch_add(1, Ordering::Relaxed);
         editor.handle_host_event(HostEvent::Status(format!("Updated draft '{}'", draft.name)));
+    }
+    if panels_changed {
+        sync_draft_panels(&sessions.modal_drafts);
+        reload_instrument_panels(editor);
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
     }
 }
