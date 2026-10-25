@@ -26,6 +26,7 @@ pub mod scale_editor;
 pub mod live_audio;
 pub mod linegraph;
 pub mod matrix;
+pub mod mesh_widget;
 pub(crate) mod menu_style;
 pub mod mixer_meter;
 pub mod modal;
