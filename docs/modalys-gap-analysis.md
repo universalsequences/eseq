@@ -173,6 +173,11 @@ accesses), or the whole table if they move.
 
 ### 4.3 Mesh view: a vertex stage for `defwidget`
 
+Built on Metal (eseq-k0m2.28): docs/defwidget-vertex-stage.md has the syntax
+as it landed (`(out :position … :varyings …)`, `(dot amps (table-row
+vertex-id))`, `:src` / `mesh-load` for eseq-modes files) and
+`eseq.modal.mesh-view` the `mode-mesh-view` widget. The proposal as written:
+
 `defwidget` today is a full-quad fragment shader; a mesh is vertex-centric.
 Proposal: give `defwidget` an optional vertex stage written in the same Lisp
 shader DSL.

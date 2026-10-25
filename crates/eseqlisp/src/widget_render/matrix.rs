@@ -169,7 +169,8 @@ fn pie_display(props: &HashMap<String, Value>, value: f32) -> (f32, f32) {
     }
 }
 
-fn flatten_numbers(value: &Value, out: &mut Vec<f32>) {
+/// The finite numbers in `value` (nested lists and bound refs read through).
+pub(super) fn flatten_numbers(value: &Value, out: &mut Vec<f32>) {
     match value {
         Value::Number(number) if number.is_finite() => out.push(*number as f32),
         Value::ReactiveRef { slot, .. } => out.push(crate::reactive::read_float_slot(slot) as f32),

@@ -1,6 +1,9 @@
 # defwidget Array States & Live-Audio Data — Spec
 
-Status: draft, 2026-10-18. Design from a chat session with Alec; no code yet.
+Status: draft, 2026-10-18. Design from a chat session with Alec. Partly
+built 2026-10-25 for mesh widgets only (docs/defwidget-vertex-stage.md):
+`(name :floats n)` entries and the clamped `(name i)` read, fed from a Lisp
+list per instance; rank-2, `f32-array`, snapshots and `:source` are not.
 Companion concepts: `defwidget` scalar `:state` (existing,
 `crates/eseqlisp/src/lang/vm/widget_state.rs`), the SDF shader DSL →
 Metal/WGSL lowering (`crates/eseqlisp/src/lang/sdf_codegen.rs`), and the

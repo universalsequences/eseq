@@ -5,6 +5,12 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 mod geometry;
+mod mesh;
+
+pub use mesh::{
+    MAX_MESH_ARRAY_FLOATS, MAX_MESH_ARRAYS, MAX_MESH_VARYINGS, MESH_PREAMBLE_MSL,
+    MESH_PREAMBLE_WGSL, MeshArrayState, MeshShaderOutput, MeshVarying, mesh_array_offsets,
+};
 
 /// The colour of the theme slot a widget is painting for (see
 /// `ShaderEmitter::emit_slot_material`).
@@ -111,6 +117,8 @@ struct ShaderEmitter {
     /// Theme slots whose widget is being inlined, innermost last: the slot's
     /// own keyword inside its widget is the plain colour.
     splicing: Vec<String>,
+    /// Set while emitting a stage of a mesh widget (`mesh.rs`).
+    mesh: Option<mesh::MeshEmit>,
 }
 
 struct MaterialSpec<'a> {
@@ -189,6 +197,7 @@ impl ShaderEmitter {
             current_region_id: None,
             next_region_id: 0,
             splicing: Vec::new(),
+            mesh: None,
         }
     }
 
@@ -407,9 +416,12 @@ impl ShaderEmitter {
                 let Some(Expression::Symbol(head)) = items.first() else {
                     return None;
                 };
+                if let Some(type_name) = self.mesh_expr_type(head) {
+                    return Some(type_name);
+                }
                 match head.as_str() {
                     "vec2" => Some("float2"),
-                    "vec3" => Some("float3"),
+                    "vec3" | "cross" => Some("float3"),
                     "vec4" | "rgba" | "sdf/region" | "sdf/fill" | "sdf/paint" | "sdf/stroke" | "sdf/stroke-px" | "sdf/layer" => {
                         Some("float4")
                     }
@@ -422,10 +434,17 @@ impl ShaderEmitter {
                         .get(1)
                         .and_then(|expr| self.expr_type(expr))
                         .or_else(|| items.get(2).and_then(|expr| self.expr_type(expr))),
-                    // normalize preserves its input type (float2→float2, float3→float3)
-                    "normalize" => items.get(1).and_then(|expr| self.expr_type(expr)),
-                    // + and * propagate type from first operand
-                    "+" | "-" | "*" | "/" => items.get(1).and_then(|expr| self.expr_type(expr)),
+                    // Componentwise intrinsics keep their (first) input's type.
+                    "normalize" | "abs" | "fract" | "floor" | "ceil" | "round" | "sin" | "cos"
+                    | "exp" | "sqrt" | "fwidth" | "dfdx" | "dfdy" | "clamp" | "min" | "max" => {
+                        items.get(1).and_then(|expr| self.expr_type(expr))
+                    }
+                    // Arithmetic broadcasts a scalar: the widest operand's type,
+                    // so `(* u normal)` is a float3 like `(* normal u)`.
+                    "+" | "-" | "*" | "/" => items[1..]
+                        .iter()
+                        .filter_map(|expr| self.expr_type(expr))
+                        .max_by_key(|type_name| vector_width(type_name)),
                     _ => None,
                 }
             }
@@ -464,6 +483,11 @@ impl ShaderEmitter {
                     ));
                 };
                 let args = &items[1..];
+                if self.mesh.is_some()
+                    && let Some(result) = self.emit_mesh_form(head, args)
+                {
+                    return result;
+                }
                 match head.as_str() {
                     // Special forms
                     "let" => self.emit_let(args),
@@ -498,8 +522,19 @@ impl ShaderEmitter {
                     "exp" | "abs" | "sin" | "cos" | "sqrt" | "fract" | "floor" | "ceil" | "round"
                     | "length" | "normalize" | "fwidth" => self.emit_func_call(head, args),
 
+                    // Screen-space derivatives (a mesh face's normal is
+                    // `(normalize (cross (dfdx p) (dfdy p)))`).
+                    "dfdx" | "dfdy" => {
+                        let name = match (self.language, head.as_str()) {
+                            (ShaderLanguage::Wgsl, "dfdx") => "dpdx",
+                            (ShaderLanguage::Wgsl, _) => "dpdy",
+                            _ => head.as_str(),
+                        };
+                        self.emit_func_call(name, args)
+                    }
+
                     // 2-arg math intrinsics
-                    "pow" | "atan2" | "dot" => self.emit_func_call(head, args),
+                    "pow" | "atan2" | "dot" | "cross" => self.emit_func_call(head, args),
                     "mod" if self.language == ShaderLanguage::Metal => {
                         self.emit_func_call("fmod", args)
                     }
@@ -1397,6 +1432,16 @@ fn format_float(n: f64) -> String {
     }
 }
 
+/// Components of a shader type: 1 for `float` (and anything else).
+fn vector_width(type_name: &str) -> usize {
+    match type_name {
+        "float2" => 2,
+        "float3" => 3,
+        "float4" => 4,
+        _ => 1,
+    }
+}
+
 fn expr_returns_float4(expr: &Expression) -> bool {
     returns_float4_with(expr, &mut Vec::new())
 }
@@ -1562,24 +1607,31 @@ fn emit_uniform_declarations(
         ShaderLanguage::Metal => "in",
         ShaderLanguage::Wgsl => "input",
     };
-    for (idx, name) in state_symbols.iter().enumerate() {
+    emit_uniform_declarations_from(shader, state_symbols, language, |idx| {
         let register = match idx / 4 {
             0 => "uniform_a",
             1 => "uniform_b",
             2 => "uniform_c",
             _ => "uniform_d",
         };
-        let component = ["x", "y", "z", "w"][idx % 4];
+        format!("{input}.{register}.{}", ["x", "y", "z", "w"][idx % 4])
+    });
+}
+
+/// [`emit_uniform_declarations`] with float `idx` read from `source(idx)`,
+/// then one `float3` per `:rgb` uniform over its three components.
+fn emit_uniform_declarations_from(
+    shader: &mut String,
+    state_symbols: &[String],
+    language: ShaderLanguage,
+    source: impl Fn(usize) -> String,
+) {
+    for (idx, name) in state_symbols.iter().enumerate() {
+        let value = source(idx);
         let name = metal_safe_symbol(name);
         match language {
-            ShaderLanguage::Metal => writeln!(
-                shader,
-                "    float sdf_state_{name} = {input}.{register}.{component};"
-            ),
-            ShaderLanguage::Wgsl => writeln!(
-                shader,
-                "    let sdf_state_{name}: f32 = {input}.{register}.{component};"
-            ),
+            ShaderLanguage::Metal => writeln!(shader, "    float sdf_state_{name} = {value};"),
+            ShaderLanguage::Wgsl => writeln!(shader, "    let sdf_state_{name}: f32 = {value};"),
         }
         .unwrap();
     }
@@ -2018,6 +2070,32 @@ fn compile_sdf_to_wgsl_with_state_theme_and_options(
     })
 }
 
+/// Compile a mesh widget's `:vertex` and `:shader` bodies (both
+/// macro-expanded) into one Metal module with `mesh_vert` and `mesh_frag`:
+/// see `sdf_codegen/mesh.rs` and docs/defwidget-vertex-stage.md.
+pub fn compile_mesh_to_metal(
+    vertex: &Expression,
+    fragment: &Expression,
+    state_symbols: &[String],
+    arrays: &[MeshArrayState],
+) -> Result<MeshShaderOutput, CodegenError> {
+    mesh::compile_mesh_shader(
+        ShaderLanguage::Metal, vertex, fragment, state_symbols, arrays, theme::current(),
+    )
+}
+
+/// [`compile_mesh_to_metal`] for the wgpu backend.
+pub fn compile_mesh_to_wgsl(
+    vertex: &Expression,
+    fragment: &Expression,
+    state_symbols: &[String],
+    arrays: &[MeshArrayState],
+) -> Result<MeshShaderOutput, CodegenError> {
+    mesh::compile_mesh_shader(
+        ShaderLanguage::Wgsl, vertex, fragment, state_symbols, arrays, theme::current(),
+    )
+}
+
 /// Compile only the Metal SDF expression (no shader wrapper).
 pub fn compile_sdf_expr(expr: &Expression) -> Result<(Vec<String>, String), CodegenError> {
     compile_sdf_expr_with_theme(expr, theme::current())
@@ -2104,7 +2182,16 @@ mod tests {
         }
     }
 
-    fn shader_from_defwidget(expr: &Expression) -> Option<(&Expression, Vec<String>)> {
+    /// A corpus `defwidget`'s shader, its `:vertex` body (a mesh widget),
+    /// its scalar state names and its `(name :floats n)` array states.
+    struct CorpusWidget<'a> {
+        shader: &'a Expression,
+        vertex: Option<&'a Expression>,
+        state: Vec<String>,
+        arrays: Vec<MeshArrayState>,
+    }
+
+    fn shader_from_defwidget(expr: &Expression) -> Option<CorpusWidget<'_>> {
         let Expression::List(items) = expr else {
             return None;
         };
@@ -2113,18 +2200,31 @@ mod tests {
         }
 
         let mut shader = None;
+        let mut vertex = None;
         let mut state = Vec::new();
+        let mut arrays = Vec::new();
         let mut index = 2;
         while index + 1 < items.len() {
             if let Expression::Keyword(key) = &items[index] {
                 match key.as_str() {
                     "shader" => shader = Some(&items[index + 1]),
+                    "vertex" => vertex = Some(&items[index + 1]),
                     "state" => {
                         if let Expression::List(symbols) = &items[index + 1] {
-                            state.extend(symbols.iter().filter_map(|symbol| match symbol {
-                                Expression::Symbol(name) => Some(name.clone()),
-                                _ => None,
-                            }));
+                            for entry in symbols {
+                                match entry {
+                                    Expression::Symbol(name) => state.push(name.clone()),
+                                    Expression::List(parts) => {
+                                        if let [Expression::Symbol(name), Expression::Keyword(kind), Expression::Number(len)] =
+                                            parts.as_slice()
+                                            && kind == "floats"
+                                        {
+                                            arrays.push(MeshArrayState { name: name.clone(), len: *len as usize });
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                     }
                     _ => {}
@@ -2134,7 +2234,16 @@ mod tests {
                 index += 1;
             }
         }
-        shader.map(|shader| (shader, state))
+        shader.map(|shader| CorpusWidget { shader, vertex, state, arrays })
+    }
+
+    /// A complete WGSL module (a mesh widget's) that naga accepts.
+    fn assert_valid_wgsl_module(source: &str) {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|error| panic!("WGSL parse failed:\n{}\n\n{source}", error.emit_to_string(source)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("WGSL validation failed: {error:#?}\n\n{source}"));
     }
 
     fn content_lisp_files(path: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -2290,20 +2399,46 @@ mod tests {
         label: &str,
         expression: &Expression,
     ) -> bool {
-        let Some((shader, state_names)) = shader_from_defwidget(expression) else {
+        let Some(widget) = shader_from_defwidget(expression) else {
             return false;
         };
-        let expanded = runtime
-            .expand_macros_expression(shader)
-            .unwrap_or_else(|error| panic!("failed to expand shader from {label}: {error}"));
+        let state_names = widget.state;
+        let expand = |runtime: &mut crate::runtime::Runtime, body: &Expression| {
+            runtime
+                .expand_macros_expression(body)
+                .unwrap_or_else(|error| panic!("failed to expand shader from {label}: {error}"))
+        };
+        let expanded = expand(runtime, widget.shader);
+        // A mesh widget's state is planned over both of its stages.
+        let vertex = widget.vertex.map(|vertex| expand(runtime, vertex));
+        let planned = match &vertex {
+            Some(vertex) => Expression::List(vec![
+                Expression::Symbol("do".into()),
+                vertex.clone(),
+                expanded.clone(),
+            ]),
+            None => expanded.clone(),
+        };
         let plan = runtime
-            .plan_sdf_widget_state(label, &state_names, &expanded)
+            .plan_sdf_widget_state(label, &state_names, &planned)
             .unwrap_or_else(|error| panic!("state plan failed for {label}: {error}"));
         // defwidget rejects a shader over the uniform budget.
         if let Some(error) = plan.budget_error(label) {
             panic!("{error}");
         }
         let state_symbols = plan.uniforms();
+        if let Some(vertex) = vertex {
+            for language in [ShaderLanguage::Metal, ShaderLanguage::Wgsl] {
+                let output = mesh::compile_mesh_shader(
+                    language, &vertex, &expanded, &state_symbols, &widget.arrays, theme::default_theme(),
+                )
+                .unwrap_or_else(|error| panic!("mesh codegen ({language:?}) failed for {label}: {error}"));
+                if language == ShaderLanguage::Wgsl {
+                    assert_valid_wgsl_module(&output.shader_source);
+                }
+            }
+            return true;
+        }
         let metal = compile_sdf_to_metal_with_state_and_theme(
             &expanded,
             &state_symbols,
