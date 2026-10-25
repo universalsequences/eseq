@@ -60,6 +60,51 @@ line) or an `eseq-modes` `.json` from `eseq modal solve`.
 `examples/bell-data.lisp` strikes a resonance-model bell. A data object with
 more than 64 points keeps only the points its connections and listens use.
 
+**Identified models.** A model fitted from a recording plays its measured
+strokes instead of being struck. `tools/pm-ride/export_modes.py` writes the
+ride behind the factory PM Ride Kit as `examples/data/ride.modes.json`: 688
+modes with measured losses (`"measured": true`, so no air loss is added),
+twelve strokes, each a complex residue per mode, and a wash of the
+~1500 weaker modes as band noise. `examples/ride-kit.lisp` rebuilds the
+factory instrument from it:
+
+```lisp
+(def ride (modal-read-data "data/ride.modes.json"))
+(m/patch :name "modal-ride-kit" :voicing :one :level 2 :tone 20000
+  :objects (list (m/modal-data 'ride :data ride :follow :octave))
+  :connections (list (m/strokes 'stick 'ride))
+  :listens (list (m/listen 'ride 0 :hear :position)))
+```
+
+- `(m/strokes id obj)`: the key picks a stroke (C, C#, ... in every octave)
+  and the hit injects its residue into every mode on top of the ring. Its
+  params: Hardness (a shorter or longer stick contact; a fixed energy
+  budget), Vel > timbre, Click and Click tone (the stick's noise), Wash.
+- `m/modal-data :follow :octave` transposes the object by the key's octave;
+  `:muffle` (tape: loss rising with sqrt f) and `:mute` (a choke on release)
+  act on the modes and the wash alike.
+- `(m/listen obj at :hear :position)` hears displacement as it is (what the
+  residues are), not the normalised velocity.
+- `(m/patch ... :voicing :one)` declares the host's voice mode (instrument.json
+  `voice_controls`): every hit lands on one ringing plate. `:tone hz` adds an
+  output low-pass.
+- `(m/stroke-point data "Ride")` is the point where that stroke struck (the
+  export infers each spot's mode shape from its residue), for physical
+  connections there: `examples/ride-mallet.lisp` plays the measured plate with
+  a felt mallet; `examples/ride-warp.lisp` warps its partials with
+  `m/spectral`.
+
+Rendered against the factory PM Ride Kit, the twelve strokes match in level
+and in every band to 0.2 dB, and sample for sample to 0.3-1.6% RMS at the
+recorded octave, retriggers included, at 8.6% of one core against the
+factory's 9.8%. `examples/fe-ride.lisp` is the other road to a ride: its geometry,
+solved by finite elements and shown in 3-D (240 modes, up to ~4 kHz).
+
+A data object following the note (`:root`, `:follow`) computes its
+coefficients when a note starts and when a param they depend on changes
+(`coef_tick`), on DGenLisp's event clock, and latches them for the
+per-sample code.
+
 | Connections | Between |
 |---|---|
 | `(m/pluck id finger obj at)` | catch, hold, release |
@@ -73,6 +118,7 @@ more than 64 points keeps only the points its connections and listens use.
 | `(m/strike id a a-at b b-at)` | stiff one-sided contact between two points (`:offset`) |
 | `(m/stop id obj at :height h)` | a rigid floor under a point: sitar jawari, buzz |
 | `(m/fingerboard id string at :press s)` | clamps the string while pressed, plus a board to buzz on |
+| `(m/strokes id obj)` | plays a data object's measured strokes (see Identified models) |
 
 `m/felt` takes `:exponent :hysteresis :tau-ms` for Stulov's hysteretic
 felt (`examples/piano-hammer.lisp`).
@@ -84,7 +130,8 @@ direction down, and its friction pressure follows that contact's force
 (`examples/bowed-bi-string.lisp`).
 
 **Feedback taps.** Signals that read last sample: `(m/tap-position obj at)`,
-`(m/tap-speed obj at)`, `(m/tap-force conn)`, `(m/tap-contact conn)`. A
+`(m/tap-speed obj at)`, `(m/tap-force conn)`, `(m/tap-contact conn)`, and
+`(m/speaker)` (an amp's sound; see Electric). A
 force's `:saturate` bounds a self-driven loop (`examples/feedback-gong.lisp`).
 
 **Hybrids.** `(m/melt 'h objA objB :morph x)` blends two objects' modal data
@@ -104,6 +151,46 @@ air column's input impedance does:
 - `(m/jet 'jet 'bore 0.05)`: a flute jet, delayed and saturated
   (`examples/flute.lisp`; it favours overblown registers, eseq-k0m2.33)
 - `(m/tone-hole 'h 'bore 0.66 :open 1)`: opening it shortens the column
+
+**Electric.** A guitar's pickup, its amp, and the air between the amp and
+the guitar, so the amp's sound can drive the strings (feedback):
+
+```lisp
+(m/patch :name "modal-eno-lead" :voicing :one
+  :objects (list (m/finger 'pick :depth 0.06 :stroke-ms 6)
+                 (m/string 'str :made-of mat/steel :radius-mm 0.33 :const-loss 0.1 :freq-loss 0.06)
+                 (m/plate 'body :made-of mat/maple :thick-mm 10 :mass 30 :damp 1.5))
+  :connections (list (m/pluck 'plk 'pick 'str 0.82)
+                     (m/force 'air 'body (list 0.4 0.6) :gain 0.008 :signal (m/speaker :distance 2 :angle 60))
+                     (m/force 'bridge 'str 0.98 :gain 1 :signal (m/tap-position 'body (list 0.5 0.45))))
+  :listens (list (m/pickup 'str 0.92 :height 3 :coil-hz 2600))
+  :amp (m/amp :drive 30 :bias 0.25 :bloom 0.5))
+```
+
+- `(m/pickup obj at :height h :coil-hz f :coil-q q)`: a listen that hears the
+  string as a magnetic pickup does: its speed times how fast the flux
+  changes with its distance from the pole, which grows as the string comes
+  closer (louder, asymmetric, more even harmonics; `height` is in units of
+  a firm pluck's swing), through the coil's resonant low-pass.
+- `(m/patch ... :amp (m/amp ...))`: the mix plays through an amp inside the
+  instrument before the output. Fuzz (drive into tanh about a bias, which
+  drifts as loud peaks charge its coupling capacitor: Bloom;
+  antiderivative-antialiased), a bass / mid / treble stack, a power stage
+  whose drive sags with its load, then the speaker cone and cabinet.
+- `(m/speaker :distance m :angle deg)`: a signal for any driver. It is
+  the speaker's sound at that distance (delayed by the air, falling as
+  1 / distance) and off-axis angle (a 12-inch cone beams, so off axis it
+  loses its top).
+- A solid body takes almost nothing back from its strings, so the example
+  couples the body to the string one way (a force from `m/tap-position`)
+  rather than with a bridge spring. A spring that near the end pins the
+  string, scattering energy into fast-decaying high partials.
+
+`examples/eno-lead.lisp` sustains held notes and then blooms into
+feedback. Air > Distance picks the partial (fundamental, octave, twelfth),
+Air > Gain is how much sound the guitar catches, and the amp's clipping
+holds the loop. Keep `:voicing :one`: in poly mode every voice gets its own
+amp.
 
 `(m/spectral obj ...)` adds Modalys' pseudo-physical controls to any object:
 `bend` (cents) and `diffraction` (rho: 1 leaves the partials, below 1 pulls

@@ -16,6 +16,10 @@ use crate::sequencer::CustomInstrumentRunMode;
 /// plain host-owned global, overwritten on every call.
 const PATCH_SLOT: &str = "eseq-modal-patch-under-generation";
 
+/// The param eseq.modal declares for a patch's :voicing, bound to the host's
+/// voice mode in instrument.json.
+const VOICE_MODE_PARAM: &str = "out_voice_mode";
+
 /// A generated instrument: the name the patch asked for, its dsp.lisp and
 /// its ui.lisp panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,16 +30,24 @@ pub struct ModalInstrument {
 }
 
 impl ModalInstrument {
-    /// Write dsp.lisp, ui.lisp and instrument.json into `dir`, creating it.
+    /// Write dsp.lisp, ui.lisp and instrument.json into `dir`, creating it;
+    /// instrument.json binds the voice-mode param when the patch has one.
     /// The eseq-modes files ui.lisp's mesh views read (`:src "….modes.json"`)
     /// are copied beside them and ui.lisp points at the copies, so the folder
     /// does not depend on the solve cache or a draft folder.
     pub fn write_to(&self, dir: &Path) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
-        let metadata = format!(
-            "{{\"version\": 1, \"run_mode\": \"{}\"}}\n",
-            CustomInstrumentRunMode::Instrument.as_str()
-        );
+        let mut metadata = serde_json::json!({
+            "version": 1,
+            "run_mode": CustomInstrumentRunMode::Instrument.as_str(),
+        });
+        // a patch with :voicing declares the host's voice-mode param (the
+        // draft save path rebuilds a ModalInstrument from the dsp alone, so
+        // the dsp is what says so)
+        if self.dsp.contains(&format!("(param {VOICE_MODE_PARAM} ")) {
+            metadata["voice_controls"] = serde_json::json!({ "mode": VOICE_MODE_PARAM });
+        }
+        let metadata = format!("{metadata}\n");
         let mut ui = self.ui.clone();
         for from in mesh_sources(&self.ui) {
             let from = PathBuf::from(from);
@@ -91,7 +103,10 @@ pub const READ_DATA_NATIVE: &str = "modal-read-data";
 /// relative `path` is taken from the folder of the script being generated.
 /// - `.json`: an "eseq-modes" v1 file (`eseq modal solve` output): `:freqs`,
 ///   `:shapes` (one list of N per point), `:points` / `:normals` (one
-///   `(x y z)` per point), `:triangles` (flat point indices), `:mass`.
+///   `(x y z)` per point), `:triangles` (flat point indices), `:mass`;
+///   optionally `:losses` (1/s per mode) and an identified model's
+///   `:measured`, `:strokes`, `:wash` and `:contact-s` (see
+///   tools/pm-ride/export_modes.py).
 /// - anything else: an IRCAM resonance model (modres text, one mode per
 ///   line: index, frequency Hz, amplitude dB, bandwidth Hz; `;` comments):
 ///   `:freqs`, `:amps` (linear), `:bandwidths`.
@@ -102,7 +117,7 @@ pub fn read_modal_data_file(path: &str) -> Result<Value, String> {
     });
     let text = std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
     let parsed = if path.extension().is_some_and(|ext| ext == "json") {
-        modes_json_value(&text).map(|value| with_file(value, &path))
+        modes_json_value(&text).map(|(value, mesh)| if mesh { with_file(value, &path) } else { value })
     } else {
         modres_value(&text)
     };
@@ -198,7 +213,7 @@ fn solve_native(args: &[Value]) -> Result<Value, String> {
         .join(format!("{}.unit.modes.json", crate::sample_manifest::sha256_hex(key.as_bytes())));
     // A cached file is already at unit modal mass; one that does not parse
     // is solved again.
-    if let Ok(value) = std::fs::read_to_string(&cache).map_err(|error| error.to_string()).and_then(|text| modes_json_value(&text)) {
+    if let Ok((value, _)) = std::fs::read_to_string(&cache).map_err(|error| error.to_string()).and_then(|text| modes_json_value(&text)) {
         return Ok(with_file(value, &cache));
     }
     let (mut solid, _) = solve(&spec, &base)?;
@@ -212,7 +227,7 @@ fn solve_native(args: &[Value]) -> Result<Value, String> {
             let _ = std::fs::rename(&staging, &cache);
         }
     }
-    modes_json_value(&text).map(|value| with_file(value, &cache))
+    modes_json_value(&text).map(|(value, _)| with_file(value, &cache))
 }
 
 /// Bumped when the solver's output changes, so cached solves are redone.
@@ -343,7 +358,9 @@ fn data_dict(fields: Vec<(&str, Value)>) -> Value {
     Value::Map(fields.into_iter().map(|(key, value)| (key.to_string(), cell(value))).collect::<HashMap<_, _>>())
 }
 
-fn modes_json_value(text: &str) -> Result<Value, String> {
+/// The data dict of an eseq-modes file, and whether it has a mesh to view
+/// (triangles).
+fn modes_json_value(text: &str) -> Result<(Value, bool), String> {
     let json: serde_json::Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
     if json["format"] != "eseq-modes" || json["version"] != 1 {
         return Err("not an eseq-modes v1 file".to_string());
@@ -365,13 +382,47 @@ fn modes_json_value(text: &str) -> Result<Value, String> {
     if freqs.is_empty() || shapes.len() != freqs.len() * (points.len() / 3) {
         return Err("\"shapes\" must hold one value per point per mode".to_string());
     }
-    // normals and triangles are for the mesh view, which reads :file itself
-    Ok(data_dict(vec![
+    let mut fields = vec![
         ("freqs", numbers(freqs.iter().copied())),
         ("shapes", rows(&shapes, freqs.len())),
         ("points", rows(&points, 3)),
         ("mass", Value::Number(json["mass"].as_f64().unwrap_or(1.0))),
-    ]))
+    ];
+    if json.get("losses").is_some() {
+        let losses = floats("losses")?;
+        if losses.len() != freqs.len() {
+            return Err("\"losses\" must hold one value per mode".to_string());
+        }
+        fields.push(("losses", numbers(losses)));
+    }
+    // an identified model's measured data, passed through for eseq.modal:
+    // its strokes, wash and the stick contact they were measured with
+    let mut value = data_dict(fields);
+    if let Value::Map(map) = &mut value {
+        for key in ["measured", "strokes", "wash", "contact_s"] {
+            if let Some(item) = json.get(key) {
+                map.insert(key.replace('_', "-"), cell(json_to_lisp(item)));
+            }
+        }
+    }
+    // normals and triangles are for the mesh view, which reads :file itself
+    let mesh = json["triangles"].as_array().is_some_and(|triangles| !triangles.is_empty());
+    Ok((value, mesh))
+}
+
+/// JSON as a Lisp value, the reverse of [`lisp_to_json`]: objects become
+/// dicts (keys with `_` read as `-`), arrays lists.
+fn json_to_lisp(value: &serde_json::Value) -> Value {
+    match value {
+        serde_json::Value::Null => Value::Nil,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => Value::Number(n.as_f64().unwrap_or(0.0)),
+        serde_json::Value::String(text) => Value::String(text.clone()),
+        serde_json::Value::Array(items) => Value::List(items.iter().map(|item| cell(json_to_lisp(item))).collect()),
+        serde_json::Value::Object(map) => Value::Map(
+            map.iter().map(|(key, item)| (key.replace('_', "-"), cell(json_to_lisp(item)))).collect(),
+        ),
+    }
 }
 
 fn modres_value(text: &str) -> Result<Value, String> {
@@ -720,7 +771,8 @@ mod tests {
 
         let osc = struck_dsp("(m/oscillator 'o :tune 0.5)", "0", "0");
         assert!(osc.contains("(def o_hz (tensor @shape [2] @data [440 100000]))"), "{osc}");
-        assert!(osc.contains("(def o_ratio (* o_tune (/ f0 440)))"), "{osc}");
+        // following the note, its coefficients are held on the coefficient tick
+        assert!(osc.contains("(def o_ratio (event-hold (* o_tune (/ f0 440)) coef_tick))"), "{osc}");
     }
 
     #[test]
@@ -960,6 +1012,95 @@ mod tests {
         }
         // A one-mode oscillator carries a silent second mode (eseq-k0m2.32).
         assert!(squashed.contains("(def lip_hz (tensor @shape [2] @data [440 100000]))"), "{squashed}");
+    }
+
+    #[test]
+    fn measured_strokes_on_one_voice() {
+        let dir = tempfile::tempdir().unwrap();
+        // 3 measured modes (the last out of order), two strokes, two wash bands.
+        let modes = serde_json::json!({
+            "format": "eseq-modes", "version": 1, "measured": true, "contact_s": 0.0003,
+            "freqs": [300.0, 700.0, 500.0], "losses": [3.0, 7.0, 5.0],
+            "points": [0, 0, 0], "shapes": [1, 1, 1], "mass": 1,
+            "strokes": [
+                {"name": "a", "re": [0.1, 0.2, 0.3], "im": [0.4, 0.5, 0.6], "click": {"rms": 0.01, "decay_s": 0.001, "hz": 6000}},
+                {"name": "b", "re": [0.7, 0.8, 0.9], "im": [1.0, 1.1, 1.2], "click": {"rms": 0.02, "decay_s": 0.002, "hz": 7000}}
+            ],
+            "wash": {"hz": [1000, 2000], "buildup": [100, 200], "fast_rate": [30, 40], "slow_rate": [3, 4],
+                     "fast_power": [[1, 2], [3, 4]], "slow_power": [[5, 6], [7, 8]]}
+        });
+        std::fs::write(dir.path().join("ride.modes.json"), modes.to_string()).unwrap();
+        let script = "(import eseq.modal :as m)
+(m/patch :name \"probe-ride\" :voicing :one :tone 18000
+  :objects (list (m/modal-data 'ride :data (modal-read-data \"ride.modes.json\") :follow :octave))
+  :connections (list (m/strokes 'stick 'ride))
+  :listens (list (m/listen 'ride 0 :hear :position)))";
+        let instrument = generate_modal_instrument(&mut modal_vm(), dir.path().join("ride.lisp"), script).unwrap();
+        let squashed = instrument.dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Modes and residues sorted together; measured losses get no air loss.
+        assert!(squashed.contains("(def ride_hz (tensor @shape [3] @data [300 500 700]))"), "{squashed}");
+        assert!(squashed.contains("(def stick_re_t (tensor @shape [2 3] @data [0.1 0.3 0.2 0.7 0.9 0.8]))"), "{squashed}");
+        assert!(!squashed.contains("(modal-loss ride_freqs"), "{squashed}");
+        // The octave transposes, held on the coefficient tick and latched back.
+        assert!(squashed.contains("(def ride_ratio (event-hold (* ride_tune key_transpose) coef_tick))"), "{squashed}");
+        assert!(squashed.contains("(def ride_a (latch ride_a_e coef_tick))"), "{squashed}");
+        assert!(squashed.contains("(def stick_ref_pole (exp (/ -1 (* 0.0003 samplerate))))"), "{squashed}");
+        // A hit pushes its residue straight into the modes, in two samples.
+        assert!(squashed.contains("(modal-advance ride_free (+ (* ride_G 0) stick_push))"), "{squashed}");
+        assert!(squashed.contains("(def stick_push (+ (* hit stick_di) (read-history stick_pend)))"), "{squashed}");
+        // Heard as position; the click and wash join the mix; the tone filter.
+        assert!(squashed.contains("(def mic1_v mic1_y)"), "{squashed}");
+        assert!(squashed.contains("(def mix (+ (* mic1_v mic1_gain) stick_out))"), "{squashed}");
+        assert!(squashed.contains("(def stick_wash_fast_t (tensor @shape [2 2] @data [1 2 3 4]))"), "{squashed}");
+        assert!(squashed.contains("(min out_tone (* samplerate 0.43)) 0.707 0)"), "{squashed}");
+        // One voice: the host's voice mode param, bound in instrument.json.
+        assert!(squashed.contains("(param out_voice_mode @group out @default 1 @min 0 @max 3)"), "{squashed}");
+        let out = dir.path().join("out");
+        instrument.write_to(&out).unwrap();
+        let metadata: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("instrument.json")).unwrap()).unwrap();
+        assert_eq!(metadata["voice_controls"]["mode"], "out_voice_mode");
+        // No mesh to view in a one-point identified model.
+        assert!(!instrument.ui.contains("mode-mesh-cycle"), "{}", instrument.ui);
+        // Strokes need a data object with strokes.
+        let bad = script.replace("(m/strokes 'stick 'ride)", "(m/strokes 'stick 'nope)");
+        let errors = generate_modal_instrument(&mut modal_vm(), dir.path().join("ride.lisp"), &bad).unwrap_err();
+        assert!(errors.contains(&"strokes stick: no object nope".to_string()), "{errors:?}");
+    }
+
+    #[test]
+    fn electric_guitar_feeds_its_amp_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = "(import eseq.modal :as m)
+(m/patch :name \"probe-lead\" :voicing :one
+  :objects (list (m/finger 'pick) (m/string 'str :modes 8) (m/plate 'body :grid 2))
+  :connections (list (m/pluck 'plk 'pick 'str 0.8)
+                     (m/force 'air 'body (list 0.4 0.6) :gain 0.01 :signal (m/speaker :distance 2 :angle 60))
+                     (m/force 'bridge 'str 0.98 :gain 1 :signal (m/tap-position 'body (list 0.5 0.45))))
+  :listens (list (m/pickup 'str 0.92 :height 3))
+  :amp (m/amp :drive 30))";
+        let instrument = generate_modal_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), script).unwrap();
+        let squashed = instrument.dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        // The pickup: speed times the flux gradient at the string's distance, through the coil.
+        assert!(squashed.contains("(def mic1_near (/ 1 (- 1 (clip (* (/ (* str_mass (/ 0.5 plk_thresh)) mic1_height) mic1_y) -0.9 0.6))))"), "{squashed}");
+        assert!(squashed.contains("mic1_near mic1_near mic1_near) (min mic1_coil_hz (* 0.45 samplerate)) mic1_coil_q 0)"), "{squashed}");
+        // The amp plays the mix and is what the output hears.
+        assert!(squashed.contains("(def amp_x (* (svf heard 80 0.5 2) amp_drive))"), "{squashed}");
+        assert!(squashed.contains("(def raw (* amp_speaker out_gain))"), "{squashed}");
+        assert!(squashed.contains("(param amp_drive @group amp @default 30 @min 1 @max 500)"), "{squashed}");
+        // The speaker's sound reaches the body a sample (at least) later, off axis.
+        assert!(squashed.contains("(make-history amp_speaker_h)"), "{squashed}");
+        assert!(squashed.contains("(write-history amp_speaker_h amp_speaker)"), "{squashed}");
+        assert!(squashed.contains("(delay (read-history amp_speaker_h) (max 0 (- (/ (* air_speaker_distance samplerate) 343) 1)) @max-delay 8192)"), "{squashed}");
+        assert!(squashed.contains("(sin (* air_speaker_angle 0.017453292519943295))"), "{squashed}");
+        assert!(instrument.ui.contains("\"AMP\""), "{}", instrument.ui);
+        // m/speaker needs an amp; :amp must be one.
+        let no_amp = script.replace(":amp (m/amp :drive 30)", "");
+        let errors = generate_modal_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &no_amp).unwrap_err();
+        assert!(errors.contains(&"force air: m/speaker needs the patch's :amp".to_string()), "{errors:?}");
+        let bad_amp = script.replace(":amp (m/amp :drive 30)", ":amp 3");
+        let errors = generate_modal_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &bad_amp).unwrap_err();
+        assert!(errors.contains(&"patch: :amp is an m/amp, got 3".to_string()), "{errors:?}");
     }
 
     #[test]

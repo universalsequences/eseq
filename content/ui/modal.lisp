@@ -39,8 +39,9 @@
 (export string plate membrane finger mallet modal-data bar rect-membrane oscillator circ-plate solid
         melt mix-hybrid tube
         pluck spring felt bow strike stop fingerboard force position speed listen patch plane
-        tone-hole reed lips jet
-        envelope noise sine constant signal tap-position tap-speed tap-force tap-contact spectral
+        tone-hole reed lips jet strokes stroke-point
+        envelope noise sine constant signal tap-position tap-speed tap-force tap-contact speaker spectral
+        pickup amp
         check dsp ui generate)
 
 ;; ── small helpers ───────────────────────────────────────────────────────────
@@ -113,6 +114,33 @@
 ;;   values  a list of numbers
 (def tensor-form (values) `(tensor @shape [ ,(len values) ] @data [ ,@values ]))
 
+;; A tensor literal of rows (a list of equal-length lists).
+;;   rows  the rows
+(def table-form (rows)
+  `(tensor @shape [ ,(len rows) ,(len (first rows)) ] @data [ ,@(concat-all rows) ]))
+
+;; A form for row k of a table tensor of rows n wide.
+;;   table  the table's symbol
+;;   n      its row width
+;;   k      a form for the row
+(def table-row-form (table n k) `(gather ,table (+ (iota ,n) (* ,k ,n))))
+
+;; strokes with f applied to each one's residues (:re and :im).
+;;   f        a function from a list of values to a list
+;;   strokes  a list of strokes
+(def map-residues (f strokes) (map (lambda (st) (merge st :re (f (get st :re)) :im (f (get st :im)))) strokes))
+
+;; A form for a one-pole decay's per-sample pole: e^(-1 / (seconds sr)).
+;;   seconds  a form for the time constant, s
+(def pole-form (seconds) `(exp (/ -1 (* ,seconds samplerate))))
+
+;; A form for hz kept below Nyquist (at 0.45 of the sample rate), for filters.
+;;   hz  a form
+(def below-nyquist (hz) `(min ,hz (* 0.45 samplerate)))
+
+;; White noise in -1..1 (DGenLisp's noise is 0..1).
+(def white-noise-form () '(- (* 2 (noise)) 1))
+
 ;; The first position of x in xs, or nil.
 ;;   xs  a list
 ;;   x   a value
@@ -123,6 +151,11 @@
 ;;   xs  a list
 ;;   x   a value
 (def member? (xs x) (not (= (index-of xs x) nil)))
+
+;; True when pred holds for some item of xs.
+;;   pred  a predicate
+;;   xs    a list
+(def any? (pred xs) (not (empty? (filter pred xs))))
 
 ;; True when xs[k] appears nowhere before k.
 ;;   xs  a list
@@ -356,24 +389,44 @@
 ;;               points; default a single point with amps (or all 1)
 ;;   points      one (x y z) per point, so accesses can name a position
 ;;   root        the frequency the data was tuned at; nil keeps it fixed
+;;   follow      :octave to transpose by the played note's octave (from the
+;;               C4 octave, -3..+3), so twelve keys can each play a stroke
+;;               of one cymbal (see strokes); nil otherwise
+;;   strokes     measured strokes, one dict per key from C: :re and :im (the
+;;               complex residue, one value per mode, a hit injects: :im is
+;;               heard at once, :re a quarter cycle on), :name, and
+;;               :click (dict :rms :decay-s :hz); played by m/strokes
 ;;   tune        frequency ratio (to the note when root is given)
 ;;   decay       multiplies every loss (panel "Decay x")
-;;   mute        extra damping while the note is released
+;;   muffle      tape or a resting hand: loss growing with sqrt(f), up to
+;;               40/s at 1 kHz (panel "Muffle")
+;;   mute        extra damping while the note is released (a choke)
 ;;   mass        relative to one modal mass, as for a plate (default 1)
+;;   air-loss    whether to add modal-loss's air loss; default true unless
+;;               the data is :measured (its losses already hold it)
+;; An eseq-modes file of an identified model (tools/pm-ride/export_modes.py)
+;; also carries :strokes, :wash and :contact-s for m/strokes.
 (def modal-data (id &key (data nil) (freqs nil) (losses nil) (bandwidths nil) (amps nil)
-                    (shapes nil) (points nil) (root nil) (tune 1) (decay 1) (mute 0) (mass nil))
+                    (shapes nil) (points nil) (root nil) (follow nil) (strokes nil) (tune 1) (decay 1)
+                    (muffle 0) (mute 0) (mass nil) (air-loss nil))
   (let ((table (if (map? data) data nil))
         (given (lambda (value key) (if value value (if table (get table key) nil))))
         (fs (given freqs :freqs))
         (n (if (list? fs) (len fs) 0))
-        (order (sort-by-value (if (list? fs) fs (list))))
-        ;; already sorted data (a solver's) is left as it is
-        (sorted (= order (range n)))
+        ;; already sorted data (a solver's, a fitter's) is left as it is
+        (sorted (or (< n 2) (empty? (filter (lambda (k) (> (nth fs k) (nth fs (+ k 1)))) (range (- n 1))))))
+        (order (if sorted (range n) (sort-by-value fs)))
         (reorder (lambda (xs) (if (and (not sorted) (list? xs) (= (len xs) n)) (map (lambda (k) (nth xs k)) order) xs)))
         (ls (given losses :losses))
         (bw (given bandwidths :bandwidths))
         (am (given amps :amps))
         (sh (given shapes :shapes))
+        (st (given strokes :strokes))
+        (measured (= (given nil :measured) true))
+        (root-hz (given root :root))
+        ;; its coefficients follow the note: computed when a note starts
+        ;; and when an input changes, not every sample (see held-pass)
+        (held (or (not (= root-hz nil)) (not (= follow nil))))
         (ones (map (lambda (k) 1) (range n))))
     (pad-one-mode
     (dict :id id :title "MODES" :label "modal-data" :kind :data :lumped false :modes n
@@ -382,11 +435,18 @@
           :losses (reorder (if ls ls (map (lambda (b) (* 3.14159265 b)) (if bw bw ones))))
           :shapes (map reorder (if (list? sh) sh (list (if am am ones))))
           :points (given points :points)
+          :strokes (if (list? st) (map-residues reorder st) nil)
+          :wash (given nil :wash)
+          :contact-s (given nil :contact-s)
+          :air-loss (if (= air-loss nil) (not measured) air-loss)
           ;; the eseq-modes file it came from, for the panel's mesh view
           :mesh-file (given nil :file)
-          :root (given root :root)
-          :fixed-pitch (= (given root :root) nil)
-          :params (append (list (pspec id "decay" decay 0.05 20 :title "Decay x" :taper :log))
+          :root root-hz
+          :follow follow
+          :fixed-pitch (not held)
+          :held held
+          :params (append (list (pspec id "decay" decay 0.05 20 :title "Decay x" :taper :log)
+                                (pspec id "muffle" muffle 0 1 :title "Muffle"))
                           (note-params id tune mute (if mass mass (if (given nil :mass) (given nil :mass) 1))))))))
 
 ;; A one-mode data object with a second, silent mode (zero shape, so never
@@ -398,7 +458,8 @@
     (merge obj :modes 2
            :freqs (append (get obj :freqs) (list 100000))
            :losses (append (get obj :losses) (list 1))
-           :shapes (map (lambda (row) (append row (list 0))) (get obj :shapes)))))
+           :shapes (map (lambda (row) (append row (list 0))) (get obj :shapes))
+           :strokes (if (get obj :strokes) (map-residues (lambda (xs) (append xs (list 0))) (get obj :strokes)) nil))))
 
 ;; A finite-element solid (Modalys' finite-element objects): any 3-D shape,
 ;; solved for its modes by modal-solve (the first time; then from a cache)
@@ -609,6 +670,48 @@
         :params (list (pspec id "stiff" stiffness 1 5000 :title "Hard" :taper :log :dec 0)
                       (pspec id "height" height -0.02 0.02 :title "Height" :dec 4))))
 
+;; Measured strokes played on a data object (an identified model, such as
+;; the ride in tools/modal/examples/ride-kit.lisp): the key picks a stroke
+;; (C, C#, ... in every octave, wrapping onto the strokes the object has),
+;; and the hit injects that stroke's measured complex residue into every
+;; mode, on top of whatever is still ringing, so close modes keep their
+;; recorded phase and beat as they did. The stick: the residues are the
+;; modes' response to the measured contact; Hardness shortens or lengthens
+;; it (a finite energy budget: a harder stick moves energy up, never adds
+;; it), and Vel > timbre softens soft hits. A stroke's click (stick noise
+;; above the modes) and, when the data has one, the wash (dense weak modes
+;; as band noise, with each stroke's measured level, build-up and decay)
+;; sound with it; both follow the object's Decay, Muffle and Mute.
+;;   id          the connection's id ('stick)
+;;   b           the struck data object (with :strokes)
+;;   hardness    stick hardness 0..1 (0.5 is the measured stick)
+;;   dynamics    how much softer a soft hit's contact is (Vel > timbre)
+;;   click       the click's level, 0..3 (1 as measured)
+;;   click-tone  shifts the click's centre by -1.5..+1.5 octaves
+;;   wash        the wash's level, 0..2 (1 as measured)
+;;   weight      0..1, the strokes' level
+(def strokes (id b &key (hardness 0.5) (dynamics 0.5) (click 1) (click-tone 0) (wash 1) (weight 1))
+  (dict :id id :title "STROKES" :law :strokes :a nil :b b :a-at nil :b-at nil :weight weight
+        :params (list (pspec id "hardness" hardness 0 1 :title "Hardness")
+                      (pspec id "dynamics" dynamics 0 1 :title "Vel > timbre")
+                      (pspec id "click" click 0 3 :title "Click")
+                      (pspec id "click_tone" click-tone -1 1 :title "Click tone")
+                      (pspec id "wash" wash 0 2 :title "Wash"))))
+
+;; The point of a data object (or the data it was read from) where its
+;; stroke called name struck, for a physical connection there (an identified
+;; model's point k + 1 is stroke k's spot; see tools/pm-ride/export_modes.py);
+;; 0, the microphone, when no stroke has that name.
+;;   data  a data dict or data object, with :strokes
+;;   name  the stroke's name ("Ride", "Bell")
+(def stroke-point (data name)
+  (let ((found (filter (lambda (st) (= (get st :name) name)) (if (list? (get data :strokes)) (get data :strokes) (list)))))
+    (if (empty? found) 0 (if (get (first found) :point) (get (first found) :point) 0))))
+
+;; True when c plays measured strokes.
+;;   c  a connection
+(def strokes? (c) (= (get c :law) :strokes))
+
 ;; A bow driving b's access point at a steady speed while the note is held,
 ;; by stick-slip friction (see content/defmacros/bow-contact). It has no
 ;; object of its own: Modalys drives the bow through a position connection;
@@ -805,6 +908,23 @@
 ;;   conn  a connection id
 (def tap-contact (conn) (dict :kind :signal :name :tap-contact :short "tap" :args (list conn)))
 
+;; What the patch's amp (its :amp) sounds like distance metres from its
+;; speaker and angle degrees off its axis: the speaker's output last sample,
+;; delayed by the air's travel (distance / 343 m/s), falling as 1 / distance,
+;; and losing its top off axis: a 12-inch cone beams, so off axis it is a
+;; low-pass at about 580 Hz / sin angle (a piston of radius 0.15 m). A force
+;; on the guitar driven by it closes the acoustic feedback loop; the force's
+;; gain is how much of the sound the guitar catches. The distance moves which
+;; partial the loop favours (and Doppler-bends it while it moves); the angle
+;; how far up the harmonics it can squeal.
+;;   distance  metres from the speaker
+;;   angle     degrees off its axis, 0 .. 90
+(def speaker (&key (distance 1.5) (angle 45)) (dict :kind :signal :name :speaker :args (list distance angle)))
+
+;; The history holding a patch amp's speaker output, which amp-forms writes
+;; and m/speaker reads a sample later.
+(def speaker-history () 'amp_speaker_h)
+
 ;; True for the taps that read an object's point.
 ;;   sig  a signal
 (def point-tap? (sig) (member? (list :tap-position :tap-speed) (get sig :name)))
@@ -837,7 +957,7 @@
                :value (lambda (n args patch)
                         `(* (adsr gate hit ,(n "_attack") ,(n "_decay") ,(n "_sustain") ,(n "_release")) hit_velocity)))
     :noise (dict :params (lambda (cid n args) nil) :forms (lambda (n args patch) nil)
-                 :value (lambda (n args patch) `(- (* 2 (noise)) 1)))
+                 :value (lambda (n args patch) (white-noise-form)))
     :sine (dict :params (lambda (cid n args)
                           (list (pspec cid (str n "_ratio") (nth args 0) 0.125 16 :title "Ratio" :taper :log :dec 3)))
                 :forms (lambda (n args patch) nil)
@@ -864,7 +984,19 @@
     :tap-force (dict :params (lambda (cid n args) nil) :forms (lambda (n args patch) nil)
                      :value (lambda (n args patch) `(read-history ,(nm (first args) "F_h"))))
     :tap-contact (dict :params (lambda (cid n args) nil) :forms (lambda (n args patch) nil)
-                       :value (lambda (n args patch) `(gt (abs (read-history ,(nm (first args) "F_h"))) 0.0000001)))))
+                       :value (lambda (n args patch) `(gt (abs (read-history ,(nm (first args) "F_h"))) 0.0000001)))
+    ;; the air's travel, at least the sample the history already delays
+    :speaker (dict :params (lambda (cid n args)
+                             (list (pspec cid (str n "_distance") (nth args 0) 0.05 10 :unit 'm :title "Distance" :taper :log)
+                                   (pspec cid (str n "_angle") (nth args 1) 0 90 :unit 'deg :title "Angle" :dec 0)))
+                   :forms (lambda (n args patch) nil)
+                   :value (lambda (n args patch)
+                            ;; 8192 samples hold 10 m at 192 kHz
+                            `(/ (svf (delay (read-history ,(speaker-history)) (max 0 (- (/ (* ,(n "_distance") samplerate) 343) 1))
+                                            @max-delay 8192)
+                                     ,(below-nyquist `(/ 580 (max (sin (* ,(n "_angle") 0.017453292519943295)) 0.01)))
+                                     0.6 0)
+                                (max ,(n "_distance") 0.05))))))
 
 ;; A driver's signals as a list (one signal, or a list of them).
 ;;   sig  a signal or a list of signals
@@ -952,7 +1084,9 @@
                  (if (empty? (filter (lambda (other) (= (get other :id) target)) (get patch :connections)))
                    (list (str (what c) ": tap on no connection " (source target)))
                    nil)
-                 nil))))
+                 (if (and (= (get sig :name) :speaker) (not (get patch :amp)))
+                   (list (str (what c) ": m/speaker needs the patch's :amp"))
+                   nil)))))
          (filter map? (signals-of (get c :signal))))))
 
 ;; The connections some driver's force tap reads, by id.
@@ -1010,13 +1144,40 @@
                               (pspec id "stiff" stiffness 0 1000 :title "Hold" :taper :log :dec 1))
                         (signal-params id signal))))
 
-;; A listening point (a mic): the output hears the velocity of obj at at.
+;; A listening point (a mic): the output hears the velocity of obj at at
+;; (Modalys' speed output), or its position.
 ;;   obj   the object's id
 ;;   at    where on it to listen, a position as for a connection
 ;;   gain  this mic's level in the mix
 ;;   modes  which modes it hears, as mode numbers from 0 (Modalys'
 ;;          point-output selector); nil hears all
-(def listen (obj at &key (gain 1) (modes nil)) (dict :obj obj :at at :gain gain :modes modes))
+;;   hear   :speed (normalised so objects of any pitch and mass mix at
+;;          similar levels), or :position, the point's displacement as it
+;;          is: what measured strokes were heard as
+(def listen (obj at &key (gain 1) (modes nil) (hear :speed))
+  (dict :obj obj :at at :gain gain :modes modes :hear hear))
+
+;; A magnetic pickup: a listen that hears obj the way a guitar's coil does.
+;; The coil's voltage is the string's speed times how fast the magnet's flux
+;; changes with its distance, which grows as the string nears the pole
+;; (about 1 / gap^3): a pickup set close is louder, and asymmetric, adding
+;; even harmonics. The coil and the cable's capacitance make a resonant
+;; low-pass. Where it sits along the string is its comb filter, as for any
+;; listen (0.1 by the bridge, 0.25 at the neck).
+;;   obj      the string's id
+;;   at       where the pole sits, a position as for a listen
+;;   gain     its level in the mix
+;;   height   the pole's distance from the string at rest, in units of a
+;;            firm pluck's swing: lower is closer
+;;   coil-hz  the coil's resonance (a bright single coil ~5 kHz, a
+;;            humbucker ~2.5 kHz)
+;;   coil-q   how pronounced that resonance is (0.5 none)
+(def pickup (obj at &key (gain 1) (height 3) (coil-hz 3500) (coil-q 2))
+  (dict :obj obj :at at :gain gain :modes nil :hear :pickup :height height :coil-hz coil-hz :coil-q coil-q))
+
+;; True for a listen made by pickup.
+;;   l  a listen
+(def pickup? (l) (= (get l :hear) :pickup))
 
 ;; obj with Modalys' pseudo-physical controls: its spectrum warped without
 ;; recomputing it. Every mode's frequency is multiplied by freq-scales (one
@@ -1086,7 +1247,16 @@
 ;;   connections  a list of connections, solved in this order
 ;;   listens      a list of listens, mixed into the output
 ;;   level        an overall output trim
-(def patch (&key (name "modal") (objects nil) (connections nil) (listens nil) (level 1))
+;;   voicing      nil, or :one (every hit on one ringing instrument, as a
+;;                cymbal is played: the host's mono voicing) or :poly; either
+;;                adds the host's Voicing param (0 poly, 1 one voice, ...)
+;;   tone         nil, or a starting cutoff (Hz) for an output Tone param: a
+;;                gentle low-pass, 1 kHz .. 20 kHz
+;;   amp          nil, or an amplifier (m/amp) the mix plays through before
+;;                the output: inside the instrument, so m/speaker can feed
+;;                its sound back into the objects
+(def patch (&key (name "modal") (objects nil) (connections nil) (listens nil) (level 1) (voicing nil) (tone nil)
+                (amp nil))
   (let ((conns (expand-connections connections)))
     (let ((planed (concat-all (map expand-planes objects)))
           (compiled (map (lambda (o) (compile-points o conns listens planed)) planed)))
@@ -1098,7 +1268,7 @@
                                                     (get o :parts)))
                                         o))
                           compiled)
-            :connections conns :listens listens :level level))))
+            :connections conns :listens listens :level level :voicing voicing :tone tone :amp amp))))
 
 ;; ── data objects' points ────────────────────────────────────────────────────
 ;; A data object's accesses address its points by index or by (x y z) (the
@@ -1146,7 +1316,9 @@
 (def positions-on (id connections listens objects)
   (let ((on (lambda (target)
               (append (map (lambda (c) (if (= (get c :a) target) (get c :a-at) (get c :b-at)))
-                           (filter (lambda (c) (or (= (get c :a) target) (= (get c :b) target))) connections))
+                           ;; strokes play every mode, at no point
+                           (filter (lambda (c) (and (not (strokes? c)) (or (= (get c :a) target) (= (get c :b) target))))
+                                   connections))
                       (map (lambda (l) (get l :at)) (filter (lambda (l) (= (get l :obj) target)) listens))))))
     (append (on id)
             (concat-all
@@ -1242,6 +1414,10 @@
         (n (get obj :modes))
         (points (get obj :points)))
     (if (get obj :data-error) (list (str name ": " (get obj :data-error)))
+    (if (not (member? (list nil :octave) (get obj :follow)))
+      (list (str name ": :follow is :octave, got " (source (get obj :follow))))
+    (if (and (get obj :follow) (get obj :root))
+      (list (str name ": give :root (follow the note) or :follow :octave, not both"))
     (if (= n 0)
       (list (str name ": needs :freqs, a list of mode frequencies"))
       (append (if (or (= points nil) (and (list? points) (= (len points) (point-count obj)))) nil
@@ -1251,7 +1427,7 @@
               (concat-all (map (lambda (k) (if (= (len (nth (get obj :shapes) k)) n) nil
                                              (list (str name ": shape row " k " has "
                                                         (len (nth (get obj :shapes) k)) " values for " n " modes"))))
-                               (range (point-count obj)))))))))
+                               (range (point-count obj)))))))))))
 
 ;; What is wrong with a hybrid: a melt's parts with different mode counts, a
 ;; mix's parts missing or lumped.
@@ -1296,10 +1472,12 @@
       (list (str (what c) ": no object " (source id)))
       (at-errors (str (what c) " " side) obj at))))
 
-;; What is wrong with a connection: both ends on one object, or either end.
+;; What is wrong with a connection: both ends on one object, or either end
+;; (strokes: see strokes-errors).
 ;;   patch  the patch
 ;;   c      the connection
 (def connection-errors (patch c)
+  (if (strokes? c) (strokes-errors patch c)
   (append (if (= (get c :a) (get c :b)) (list (str (what c) ": both ends on " (source (get c :b)))) nil)
           ;; these read their struck object's own wref / state, which a mix has none of
           (if (and (member? (list :bow :felt) (get c :law)) (find-object patch (get c :b))
@@ -1308,7 +1486,7 @@
             nil)
           (air-errors patch c)
           (if (get c :a) (end-errors patch c "a" (get c :a) (get c :a-at)) nil)
-          (end-errors patch c "b" (get c :b) (get c :b-at))))
+          (end-errors patch c "b" (get c :b) (get c :b-at)))))
 
 ;; What is wrong with a blown connection: it must blow into a tube, at a
 ;; point where the tube has pressure (not an open end), and lips need a
@@ -1337,6 +1515,13 @@
     (if (= obj nil)
       (list (str "listen: no object " (source (get l :obj))))
       (append (at-errors "listen" obj (get l :at))
+              (if (or (member? (list :speed :position) (get l :hear)) (and (pickup? l) (get l :height)))
+                (if (and (member? (list :position :pickup) (get l :hear)) (= (get obj :kind) :mix))
+                  ;; its parts' displacements are in different units
+                  (list (str "listen " (source (get l :obj)) ": :hear " (source (get l :hear)) " is not for a mix"))
+                  nil)
+                (list (str "listen " (source (get l :obj)) ": :hear is :speed or :position (m/pickup makes a pickup), got "
+                           (source (get l :hear)))))
               (if (= (get l :modes) nil) nil
               (if (= (get obj :kind) :mix) (list (str "listen " (source (get l :obj)) ": :modes is not for a mix"))
                 (map (lambda (k) (str "listen " (source (get l :obj)) ": no mode " k " (it has "
@@ -1425,7 +1610,11 @@
           (concat-all (map (lambda (c) (if (get c :signal) (append (signal-errors c) (tap-errors patch c)) nil))
                            (get patch :connections)))
           (concat-all (map (lambda (c) (connection-errors patch c)) (get patch :connections)))
-          (concat-all (map (lambda (l) (listen-errors patch l)) (get patch :listens))))))
+          (concat-all (map (lambda (l) (listen-errors patch l)) (get patch :listens)))
+          (if (or (= (get patch :amp) nil) (and (map? (get patch :amp)) (= (get (get patch :amp) :kind) :amp))) nil
+            (list (str "patch: :amp is an m/amp, got " (source (get patch :amp)))))
+          (if (member? (list nil :one :poly) (get patch :voicing)) nil
+            (list (str "patch: :voicing is :one or :poly, got " (source (get patch :voicing))))))))
 
 ;; ── access-point params ─────────────────────────────────────────────────────
 
@@ -1526,7 +1715,7 @@
 ;;   sym    the symbol to define
 ;;   blend  true to blend, false for the nearest row
 (def table-row-defs (table n index top sym blend)
-  (let ((row (lambda (k) `(gather ,table (+ (iota ,n) (* ,k ,n)))))
+  (let ((row (lambda (k) (table-row-form table n k)))
         (x (nm sym "x")) (i (nm sym "i")))
     (if blend
       (list `(def ,x (clip ,index 0 ,top))
@@ -1585,13 +1774,13 @@
 ;;   coords   (list point-param), or none when it has one compiled point
 ;;   phi-sym  the symbol to define
 (def data-shape-defs (obj coords phi-sym)
-  (let ((top (- (len (get obj :compiled)) 1)))
+  (let ((top (- (len (get obj :compiled)) 1)) (row (nm phi-sym "row")))
     (append (table-row-defs (p obj "shapes") (get obj :modes) (if (empty? coords) 0 (first coords)) top
-                            (nm phi-sym "row")
+                            row
                             ;; a subset of a big object's points: neighbours in the
                             ;; table are not neighbours on the object
                             (= (len (get obj :compiled)) (point-count obj)))
-            (list `(def ,phi-sym (* ,(nm phi-sym "row") ,(p obj "mask")))))))
+            (list `(def ,phi-sym (* ,row ,(p obj "mask")))))))
 
 ;; ── per-object DSP ──────────────────────────────────────────────────────────
 
@@ -1663,7 +1852,7 @@
         (blend (lambda (name) (lerp (p a name) (p b name))))
         ;; a part's release-mute factor (setup-tail's g), 1 when it has none
         (mute-of (lambda (part) (if (muted? part) (p part "g") 1))))
-    (append (spectral-pass a (object-setup a)) (spectral-pass b (object-setup b))
+    (append (held-pass a (spectral-pass a (object-setup a))) (held-pass b (spectral-pass b (object-setup b)))
             (list `(def ,(p obj "freqs") (exp (+ (* (- 1 ,x) (log ,(p a "freqs"))) (* ,x (log ,(p b "freqs"))))))
                   `(def ,(p obj "mask") ,(blend "mask"))
                   `(def ,(p obj "sigma") ,(blend "sigma"))
@@ -1785,9 +1974,7 @@
             `(def ,(p obj "l2") ,(tensor-form (map l2 modes)))
             `(def ,(p obj "order") ,(tensor-form (map (lambda (mode) (get mode :m)) modes)))
             `(def ,(p obj "radial")
-               (tensor @shape [ ,(circ-samples) ,(len modes) ]
-                       @data [ ,@(concat-all (map (lambda (r) (map (lambda (mode) (nth (get mode :radial) r)) modes))
-                                                  (range (circ-samples)))) ]))
+               ,(table-form (map (lambda (r) (map (lambda (mode) (nth (get mode :radial) r)) modes)) (range (circ-samples)))))
             `(def ,(p obj "scale") (/ (* ,(p obj "c") ,(p obj "thick") 0.001 ,(p obj "tune"))
                                       (* twopi ,(p obj "radius") ,(p obj "radius"))))
             `(def ,(p obj "freqs") (* ,(p obj "l2") ,(p obj "scale")))
@@ -1840,23 +2027,121 @@
 
 ;; object-setup for a data object: its numbers as tensors (the shape rows of
 ;; its compiled points only), then the same coefficients as any modal object.
-;; Losses add the always-on air loss of modal-loss. wref is at the pitch
-;; heard: the root when the data names one (a bell's hum sits an octave under
-;; it), else the lowest mode.
+;; Losses add muffle's sqrt(f) term (of the data's own frequencies), and the always-on air loss of
+;; modal-loss unless the data is measured. wref is at the pitch heard: the
+;; root when the data names one (a bell's hum sits an octave under it), else
+;; the lowest mode. Its ratio to the data's own pitch is the tune param,
+;; times the note over the root, or the note's octave (:follow :octave);
+;; then it is held on coef_tick (see held-pass).
 ;;   obj  a data object (after compile-points)
 (def data-setup (obj)
   (let ((rows (map (lambda (k) (nth (get obj :shapes) k)) (get obj :compiled)))
-        (ratio (if (get obj :root) `(* ,(p obj "tune") (/ f0 ,(get obj :root))) (p obj "tune")))
+        (ratio (if (get obj :root) `(* ,(p obj "tune") (/ f0 ,(get obj :root)))
+                 (if (= (get obj :follow) :octave) `(* ,(p obj "tune") key_transpose) (p obj "tune"))))
         (pitch (if (get obj :root) (get obj :root) (first (get obj :freqs)))))
     (append
       (list `(def ,(p obj "hz") ,(tensor-form (get obj :freqs)))
             `(def ,(p obj "loss0") ,(tensor-form (get obj :losses)))
-            `(def ,(p obj "shapes") (tensor @shape [ ,(len rows) ,(get obj :modes) ] @data [ ,@(concat-all rows) ]))
-            `(def ,(p obj "ratio") ,ratio)
+            `(def ,(p obj "shapes") ,(table-form rows))
+            `(def ,(p obj "ratio") ,(if (get obj :held) `(event-hold ,ratio coef_tick) ratio))
             `(def ,(p obj "freqs") (* ,(p obj "hz") ,(p obj "ratio")))
             (mask-def obj (get obj :modes))
-            `(def ,(p obj "sigma") (+ (* ,(p obj "loss0") ,(p obj "decay")) (modal-loss ,(p obj "freqs") 0 0))))
+            `(def ,(p obj "sigma")
+               (+ (* ,(p obj "loss0") ,(p obj "decay"))
+                  ,(muffle-loss-form obj (p obj "hz"))
+                  ,@(if (get obj :air-loss) (list `(modal-loss ,(p obj "freqs") 0 0)) (list)))))
       (setup-tail obj `(* ,pitch ,(p obj "ratio"))))))
+
+;; The setup forms of an object whose coefficients are held (:held, a data
+;; object following the note: :root or :follow), rewritten so their work runs
+;; on coef_tick only: what the per-sample code reads (the coefficients, with the release
+;; mute's factor g, the mask and wref) is defined as obj_<name>_e, computed
+;; on the tick's event clock, and obj_<name> latches it back to audio rate.
+;; Every input of that work is event-held (the ratio, params, g), so DGen
+;; schedules it on the tick; reading the latched value every sample costs
+;; nothing. Any other object's forms pass through.
+;;   obj    an object
+;;   forms  its setup forms, after spectral-pass
+(def held-pass (obj forms)
+  (if (not (get obj :held)) forms
+    (let ((names (map (lambda (n) (p obj n)) (list "a" "b" "mask" "wref")))
+          (held (lambda (sym) (member? names sym)))
+          (event (lambda (sym) (if (held sym) (symbol sym "_e") sym)))
+          (g (p obj "g"))
+          (latches (lambda (syms) (map (lambda (sym) `(def ,sym (latch ,(symbol sym "_e") coef_tick))) (filter held syms)))))
+      (concat-all
+        (map (lambda (f)
+               (if (and (list? f) (= (first f) 'def))
+                 (let ((target (nth f 1)))
+                   (if (list? target)
+                     (if (not (any? held target)) (list f)
+                       (cons `(def ,(map event target) ,(nth f 2)) (latches target)))
+                     (if (held target)
+                       (cons `(def ,(event target) ,(subst-form (nth f 2) g `(event-hold ,g coef_tick))) (latches (list target)))
+                       (list f))))
+                 (list f)))
+             forms)))))
+
+;; form with every occurrence of the symbol from replaced by to.
+;;   form  a form
+;;   from  a symbol
+;;   to    its replacement
+(def subst-form (form from to)
+  (if (= form from) to
+    (if (list? form) (map (lambda (x) (subst-form x from to)) form) form)))
+
+;; True when a patch has an object holding its coefficients (see held-pass).
+;;   patch  the patch
+(def any-held? (patch) (any? (lambda (o) (get o :held)) (all-objects patch)))
+
+;; True when a patch reads the played key (an object following its octave,
+;; or strokes picked by it).
+;;   patch  the patch
+(def keyed? (patch)
+  (or (any? (lambda (o) (= (get o :follow) :octave)) (all-objects patch))
+      (any? strokes? (get patch :connections))))
+
+;; Forms for the played key, latched when a note starts: key_offset
+;; (semitones from C4), key_row (0..11 within its octave) and key_transpose
+;; (2 to the octave from C4's, -3..+3 as tools/pm-ride/build.py's
+;; OCTAVE_RANGE).
+(def key-forms ()
+  (list '(def key_offset (latch (round (+ (* 12 (/ (log (/ f0 440)) (log 2))) 9)) hit))
+        '(def key_octave (floor (/ key_offset 12)))
+        '(def key_row (- key_offset (* 12 key_octave)))
+        '(def key_transpose (pow 2 (clip key_octave -3 3)))))
+
+;; What coef_tick's coefficients are computed from, besides the key: the
+;; params of each held object and of each object strokes play (whose wash
+;; bank is latched on it), the gate (for a release mute), and the note's
+;; pitch for an object following it continuously (:root, or spectral
+;; :follow-note).
+;;   patch  the patch
+(def coef-inputs (patch)
+  (let ((struck (map (lambda (c) (get c :b)) (filter strokes? (get patch :connections)))))
+    (let ((objs (filter (lambda (o) (or (get o :held) (member? struck (get o :id)))) (all-objects patch))))
+      (append (list 'gate)
+              (if (any? (lambda (o) (and (get o :held) (or (get o :root) (and (get o :spectral) (get (get o :spectral) :follow)))))
+                        objs)
+                (list 'f0) (list))
+              (concat-all (map (lambda (o) (map (lambda (spec) (get spec :sym)) (get o :params))) objs))))))
+
+;; Forms defining coef_tick, when held coefficients are computed (on
+;; DGenLisp's event clock): a note's start, the first sample, and any sample
+;; on which one of their inputs changes (exact change detection, as the
+;; factory Modal Snare's). A param moving continuously recomputes them every
+;; sample while it moves; a still one costs nothing.
+;;   patch  the patch
+(def coef-tick-forms (patch)
+  (let ((inputs (coef-inputs patch))
+        (h (lambda (k) (symbol "coef_in" k))))
+    (append (list '(make-history coef_started))
+            (map (lambda (k) `(make-history ,(h k))) (range (len inputs)))
+            (list `(def coef_tick (max hit (lte (read-history coef_started) 0)
+                                       ,@(map (lambda (k) `(gt (abs (- ,(nth inputs k) (read-history ,(h k)))) 0))
+                                              (range (len inputs)))))
+                  '(write-history coef_started 1))
+            (map (lambda (k) `(write-history ,(h k) ,(nth inputs k))) (range (len inputs))))))
 
 ;; Protocol step 1: forms defining obj_free, where obj would be this sample
 ;; with no force on it (a finger's tip also follows its hand; a mallet also
@@ -1885,9 +2170,10 @@
 ;; Protocol step 4: forms defining obj_next, obj's state with every force
 ;; applied, and writing it to its histories. The library macros take and
 ;; return values; the patch owns the histories.
-;;   obj    the object
-;;   terms  every connection's force term on it, as terms-of gives
-(def object-commit (obj terms)
+;;   obj     the object
+;;   terms   every connection's force term on it, as terms-of gives
+;;   pushes  what strokes add to its modes' state directly (pushes-on)
+(def object-commit (obj terms pushes)
   (let ((kind (get obj :kind)) (total (sum-form terms)))
     (if (= kind :mallet)
       (list `(def (,(p obj "next") ,(p obj "next_v"))
@@ -1895,7 +2181,10 @@
             `(write-history ,(p obj "hx") ,(p obj "next"))
             `(write-history ,(p obj "hv") ,(p obj "next_v")))
       (list `(def ,(p obj "next") (modal-advance ,(p obj "free")
-                                    ,(if (= kind :two-mass) `(* ,(p obj "C") ,total) `(* ,(p obj "G") ,total))))
+                                    ;; even an empty force term (G 0): without it DGen
+                                    ;; fuses the strokes' push worse (15% more CPU)
+                                    ,(sum-form (cons (if (= kind :two-mass) `(* ,(p obj "C") ,total) `(* ,(p obj "G") ,total))
+                                                     pushes))))
             `(write-history ,(p obj "s2") (read-history ,(p obj "s1")))
             `(write-history ,(p obj "s1") ,(p obj "next"))))))
 
@@ -1925,10 +2214,11 @@
                    nil)))
              (list "a" "b")))))))
 
-;; terms-with c's final force, cid_F.
+;; terms-with c's final force, cid_F (none for strokes, which push the
+;; modes' state directly: see pushes-on).
 ;;   c   a resolved connection
 ;;   id  an object id
-(def terms-on (c id) (terms-with c id (nm (get c :id) "F")))
+(def terms-on (c id) (if (strokes? c) nil (terms-with c id (nm (get c :id) "F"))))
 
 ;; Every final force term on object id from the connections at indices.
 ;;   conns    the resolved connections
@@ -2021,7 +2311,7 @@
                   ;; shape there (largest at an open end)
                   `(def ,(n "grad") ,(tube-shape tube (first (access-syms (get c :id) "b" tube)) true))
                   `(def ,(n "mouth") (sum (* (read-history ,(p tube "s1")) ,(n "grad"))))
-                  `(def ,(n "in") (+ (* ,(n "breath") (+ 1 (* ,(n "noise") (- (* 2 (noise)) 1))))
+                  `(def ,(n "in") (+ (* ,(n "breath") (+ 1 (* ,(n "noise") ,(white-noise-form))))
                                      (* ,(n "feedback") ,(n "mouth"))))
                   ;; ratio periods of the tube's own pitch (ratio <= 2, f0 >= 20 Hz)
                   `(def ,(n "delayed") (delay ,(n "in") (/ (* ,(n "ratio") samplerate) ,(p tube "f0")) @max-delay 9600))
@@ -2314,9 +2604,10 @@
       (concat-all
         (map (lambda (k)
                (let ((c (nth conns k)) (before (filter (lambda (j) (< j k)) exciters)))
-                 (append (if (get c :a) (end-forms c "a" (find-object patch (get c :a)) (lambda (id) (terms-of conns before id)) "" true) nil)
-                         (end-forms c "b" (find-object patch (get c :b)) (lambda (id) (terms-of conns before id)) "" true)
-                         (exciter-forms c patch))))
+                 (if (strokes? c) (strokes-forms c patch)
+                   (append (if (get c :a) (end-forms c "a" (find-object patch (get c :a)) (lambda (id) (terms-of conns before id)) "" true) nil)
+                           (end-forms c "b" (find-object patch (get c :b)) (lambda (id) (terms-of conns before id)) "" true)
+                           (exciter-forms c patch)))))
              exciters))
       (concat-all (map (lambda (k) (bow-pre-forms (nth conns k))) (indices-where conns bow?)))
       (concat-all (map (lambda (k) (driver-pre-forms (nth conns k) patch)) (indices-where conns driver?)))
@@ -2361,11 +2652,251 @@
   (if (get c :internal) (list)
     (append (get c :params)
             (list (weight-param (get c :id) (get c :weight)))
-            ;; a connection placed at another's point has no point params
-            (if (get c :coords-of) (list)
+            ;; a connection placed at another's point has no point params,
+            ;; nor do strokes (they play every mode)
+            (if (or (get c :coords-of) (strokes? c)) (list)
               (append (if (get c :a) (access-params (get c :id) "a" (find-object patch (get c :a)) (get c :a-at)) nil)
                       (access-params (get c :id) "b" (find-object patch (get c :b)) (get c :b-at))))
             (if (get c :signal) (tap-params patch c) (list)))))
+
+;; ── measured strokes ────────────────────────────────────────────────────────
+
+;; A tensor literal of values padded to two (DGenLisp mishandles one-element
+;; tensors, eseq-k0m2.32), for tables read with peek.
+;;   values  a list of numbers
+(def peek-table-form (values) (tensor-form (if (= (len values) 1) (append values (list 0)) values)))
+
+;; Forms for a strokes connection (see strokes), defining cid_push (what the
+;; hit adds to the struck object's modes this sample, applied at its commit)
+;; and cid_out (its click and wash, added to the mix). The hit's work runs on
+;; the hit's event clock (event-hold), latched back to audio rate.
+;;
+;; A stroke's residue (re, im) is a mode's state as a phasor (im heard, re a
+;; quarter cycle on). The object's two-sample state takes it as two pushes:
+;; im on the hit, then s re - c im the next sample, where c and s are the
+;; mode's radius times the cosine and sine of its frequency (from its
+;; coefficients: c = a/2, s = sqrt(-b - c^2)).
+;; The fallback contact time, click Q and octave range follow
+;; tools/pm-ride/build.py (CONTACT_SECONDS, CLICK_Q, OCTAVE_RANGE).
+;;   c      a strokes connection
+;;   patch  the patch
+(def strokes-forms (c patch)
+  (let ((obj (find-object patch (get c :b)))
+        (n (lambda (suffix) (nm (get c :id) suffix)))
+        (o (lambda (name) (p obj name)))
+        (sts (get obj :strokes))
+        (modes (get obj :modes))
+        (contact (if (get obj :contact-s) (get obj :contact-s) 0.00025))
+        (clicks (lambda (field) (map (lambda (st) (let ((v (if (get st :click) (get (get st :click) field) nil)))
+                                                    (if (number? v) v 0)))
+                                     sts))))
+    (append
+      (list `(def ,(n "re_t") ,(table-form (map (lambda (st) (get st :re)) sts)))
+            `(def ,(n "im_t") ,(table-form (map (lambda (st) (get st :im)) sts)))
+            ;; the key's stroke, wrapped onto the strokes there are
+            `(def ,(n "row") (- key_row (* ,(len sts) (floor (/ key_row ,(len sts))))))
+            `(def ,(n "row_e") (event-hold ,(n "row") hit))
+            `(def ,(n "ratio") (latch ,(o "ratio") hit))
+            ;; the stick: residues are the modes' response to a two-pole
+            ;; contact force of the measured time; the live one multiplies
+            ;; each by the exact complex ratio, live / measured, squared for
+            ;; the two poles
+            `(def ,(n "hz") (* ,(o "hz") (event-hold ,(n "ratio") hit)))
+            `(def ,(n "ref_pole") ,(pole-form contact))
+            `(def ,(n "tau") (* ,contact (pow 2 (* 3 (- 0.5 ,(n "hardness"))))
+                                (+ 1 (* 1.5 ,(n "dynamics") (- 1 hit_velocity)))))
+            `(def ,(n "live_pole") ,(pole-form `(event-hold ,(n "tau") hit)))
+            `(def ,(n "w") (* twopi (/ (min ,(n "hz") (* 0.48 samplerate)) samplerate))))
+      (cos-sin-defs (n "w"))
+      (pole-response-defs (n "ref") (n "ref_pole") (n "w"))
+      (pole-response-defs (n "live") (n "live_pole") (n "w"))
+      (list
+            `(def ,(n "live_norm") ,(guarded (norm2-form (n "live_re") (n "live_im"))))
+            `(def ,(n "q_re") (/ (+ (* ,(n "ref_re") ,(n "live_re")) (* ,(n "ref_im") ,(n "live_im"))) ,(n "live_norm")))
+            `(def ,(n "q_im") (/ (- (* ,(n "ref_im") ,(n "live_re")) (* ,(n "ref_re") ,(n "live_im"))) ,(n "live_norm")))
+            `(def ,(n "dc") (/ (* (- 1 ,(n "live_pole")) (- 1 ,(n "live_pole"))) (* (- 1 ,(n "ref_pole")) (- 1 ,(n "ref_pole")))))
+            `(def ,(n "c_re") (* ,(n "dc") (- (* ,(n "q_re") ,(n "q_re")) (* ,(n "q_im") ,(n "q_im")))))
+            `(def ,(n "c_im") (* ,(n "dc") 2 ,(n "q_re") ,(n "q_im")))
+            ;; modes the transposition puts near Nyquist fade out
+            `(def ,(n "band") (clip (/ (- (* samplerate 0.47) ,(n "hz")) (* samplerate 0.07)) 0 1))
+            `(def ,(n "re") (* ,(table-row-form (n "re_t") modes (n "row_e")) ,(n "band")))
+            `(def ,(n "im") (* ,(table-row-form (n "im_t") modes (n "row_e")) ,(n "band")))
+            ;; a finite energy budget: a harder stick redistributes, never
+            ;; manufactures, modal energy
+            `(def ,(n "e") ,(norm2-form (n "re") (n "im")))
+            `(def ,(n "energy") (min 1 (sqrt (/ (sum ,(n "e"))
+                                                ,(guarded `(sum (* ,(n "e") ,(norm2-form (n "c_re") (n "c_im")))))))))
+            `(def ,(n "scale") (* (event-hold hit_velocity hit) ,(n "weight") ,(n "energy")))
+            ;; only the two pushes run per sample (latched); the rest stays
+            ;; on the hit's clock
+            `(def ,(n "dr") (event-hold (* ,(n "scale") (- (* ,(n "re") ,(n "c_re")) (* ,(n "im") ,(n "c_im")))) hit))
+            `(def ,(n "di_e") (event-hold (* ,(n "scale") (+ (* ,(n "re") ,(n "c_im")) (* ,(n "im") ,(n "c_re")))) hit))
+            `(def ,(n "di") (latch ,(n "di_e") hit))
+            `(def ,(n "cos") (* 0.5 (event-hold ,(o "a") hit)))
+            `(def ,(n "sin") (sqrt (max 0 (- (* -1 (event-hold ,(o "b") hit)) (* ,(n "cos") ,(n "cos"))))))
+            `(def ,(n "p1") (latch (event-hold (- (* ,(n "sin") ,(n "dr")) (* ,(n "cos") ,(n "di_e"))) hit) hit))
+            `(make-history ,(n "pend") @shape [ ,modes ])
+            `(def ,(n "push") (+ (* hit ,(n "di")) (read-history ,(n "pend"))))
+            `(write-history ,(n "pend") (* hit ,(n "p1")))
+            ;; the click: band-passed noise falling in a millisecond or two
+            `(def ,(n "click_t") ,(peek-table-form (clicks :rms)))
+            `(def ,(n "click_decay_t") ,(peek-table-form (clicks :decay-s)))
+            `(def ,(n "click_hz_t") ,(peek-table-form (clicks :hz)))
+            `(make-history ,(n "click_h"))
+            `(def ,(n "click_pole") (latch (event-hold ,(pole-form `(max (peek ,(n "click_decay_t") ,(n "row_e")) 0.0001)) hit) hit))
+            `(def ,(n "click_env") (+ (* (read-history ,(n "click_h")) ,(n "click_pole"))
+                                      (* hit (peek ,(n "click_t") ,(n "row")) hit_velocity ,(n "click") ,(n "weight"))))
+            `(write-history ,(n "click_h") ,(n "click_env"))
+            `(def ,(n "click_hz") (latch (* (max (peek ,(n "click_hz_t") ,(n "row")) 20) ,(n "ratio") (pow 2 (* 1.5 ,(n "click_tone")))) hit))
+            `(def ,(n "click_out") (svf (* ,(white-noise-form) ,(n "click_env")) ,(below-nyquist (n "click_hz")) 1.5 1)))
+      (if (get obj :wash) (wash-forms c obj) (list `(def ,(n "wash_out") 0)))
+      (list `(def ,(n "out") (+ ,(n "click_out") ,(n "wash_out")))))))
+
+;; Forms defining w_cos and w_sin, once for every pole-response-defs at w.
+;;   w  the frequency's symbol
+(def cos-sin-defs (w) (list `(def ,(symbol w "_cos") (cos ,w)) `(def ,(symbol w "_sin") (sin ,w))))
+
+;; Forms defining name_re and name_im, the response 1 - pole e^(-iw) of a
+;; one-pole contact force at w (two of them make the stick's contact).
+;;   name  the symbol prefix
+;;   pole  a form for the pole
+;;   w     the frequency's symbol, with cos-sin-defs
+(def pole-response-defs (name pole w)
+  (list `(def ,(symbol name "_re") (- 1 (* ,pole ,(symbol w "_cos"))))
+        `(def ,(symbol name "_im") (* ,pole ,(symbol w "_sin")))))
+
+;; A form for re^2 + im^2.
+;;   re, im  forms
+(def norm2-form (re im) `(+ (* ,re ,re) (* ,im ,im)))
+
+;; A divisor kept away from zero: event inputs read zero between events.
+;;   form  a form
+(def guarded (form) `(max 0.00000000000000000001 ,form))
+
+;; A form for muffle's loss at frequencies hz: up to 40/s at 1 kHz, rising
+;; with sqrt(f) (tools/pm-ride/build.py's LOSS_REFERENCE_HZ). It takes the
+;; data's own frequencies, untransposed, as PM Ride Kit does, so it stays
+;; param-rate work.
+;;   obj  a data object
+;;   hz   a form for the frequencies
+(def muffle-loss-form (obj hz) `(* 40 ,(p obj "muffle") ,(p obj "muffle") (sqrt (/ ,hz 1000))))
+
+;; Forms for a strokes connection's wash, cid_wash_out: white noise through
+;; a bank of band-passes (two cascaded TPT state-variable stages per band of
+;; Q 3, build.py's WASH_Q, normalised to unit output variance), each band's
+;; power envelope charged by the stroke's measured power, filling in over the
+;; band's measured build-up time and decaying at its measured rate (a fast
+;; and a slow component). Powers add, as incoherent dense modes do. Hardness
+;; reshapes it with the modes' contact ratio; Decay, Muffle and Mute act on
+;; it as on the modes. The Wash param scales its power (squared, as PM Ride
+;; Kit does: 2 is +12 dB).
+;;   c    a strokes connection
+;;   obj  its data object, with :wash
+(def wash-forms (c obj)
+  (let ((n (lambda (suffix) (nm (get c :id) (str "wash_" suffix))))
+        (k (lambda (suffix) (nm (get c :id) suffix)))
+        (o (lambda (name) (p obj name)))
+        (wash (get obj :wash))
+        (bands (len (get wash :hz)))
+        (power (lambda (name table rates)
+                 (let ((m (lambda (suffix) (n (str name "_" suffix)))))
+                   (list `(def ,(m "t") ,(table-form table))
+                         `(def ,(m "inject") (latch (event-hold (* ,(table-row-form (m "t") bands (k "row_e")) ,(n "vel_power")) hit) hit))
+                         `(def ,(m "rate") (+ (* ,(tensor-form rates) ,(o "decay")) ,(muffle-loss-form obj (n "hz_t"))))
+                         `(def ,(m "fall") (* (exp (/ (* -2 ,(m "rate")) samplerate))
+                                              ,@(if (muted? obj) (list (o "g") (o "g")) (list))))
+                         `(make-history ,(m "charge") @shape [ ,bands ])
+                         `(def ,(m "charged") (+ (* (read-history ,(m "charge")) ,(n "settle")) (* hit ,(m "inject"))))
+                         `(write-history ,(m "charge") ,(m "charged"))
+                         `(make-history ,(m "power") @shape [ ,bands ])
+                         `(def ,(m "now") (+ (* (read-history ,(m "power")) ,(m "fall")) (* ,(m "charged") (- 1 ,(n "settle")))))
+                         `(write-history ,(m "power") ,(m "now"))))))
+        (stage (lambda (j source)
+                 (let ((m (lambda (suffix) (n (str "s" j "_" suffix)))))
+                   (list `(make-history ,(m "1") @shape [ ,bands ])
+                         `(make-history ,(m "2") @shape [ ,bands ])
+                         `(def ,(m "v3") (- ,source (read-history ,(m "2"))))
+                         `(def ,(m "v1") (+ (* ,(n "a1") (read-history ,(m "1"))) (* ,(n "a2") ,(m "v3"))))
+                         `(def ,(m "v2") (+ (read-history ,(m "2")) (* ,(n "a2") (read-history ,(m "1"))) (* ,(n "a3") ,(m "v3"))))
+                         `(write-history ,(m "1") (- (* 2 ,(m "v1")) (read-history ,(m "1"))))
+                         `(write-history ,(m "2") (- (* 2 ,(m "v2")) (read-history ,(m "2"))))
+                         `(def ,(m "out") (/ ,(m "v1") 3.0)))))))
+    (append
+      (list `(def ,(n "hz_t") ,(tensor-form (get wash :hz)))
+            ;; the bank, at the object's transposition
+            `(def ,(n "hz") (* ,(n "hz_t") ,(o "ratio")))
+            `(def ,(n "open") (gt (* 0.45 samplerate) ,(n "hz")))
+            `(def ,(n "g") (tan (* pi (/ ,(below-nyquist (n "hz")) samplerate))))
+            `(def ,(n "d") (/ 1 (+ 1 (* ,(n "g") (+ ,(n "g") (/ 1 3.0))))))
+            `(def ,(n "a1") (latch ,(n "d") coef_tick))
+            `(def ,(n "a2") (latch (* ,(n "g") ,(n "d")) coef_tick))
+            `(def ,(n "a3") (latch (* ,(n "g") ,(n "g") ,(n "d")) coef_tick))
+            ;; two unit-peak band-passes have noise bandwidth (pi/4)(f/Q);
+            ;; uniform noise in [-1, 1] has variance 1/3
+            `(def ,(n "norm") (latch (* ,(n "open") (sqrt (/ (* 1.5 samplerate) (* 0.25 pi (/ (max ,(n "hz") 1) 3.0))))) coef_tick))
+            ;; the stick's contact ratio at each band
+            `(def ,(n "w") (* twopi (/ (min (* ,(n "hz_t") (event-hold ,(k "ratio") hit)) (* 0.48 samplerate)) samplerate))))
+      (cos-sin-defs (n "w"))
+      (pole-response-defs (n "live") (k "live_pole") (n "w"))
+      (pole-response-defs (n "ref") (k "ref_pole") (n "w"))
+      (list `(def ,(n "ratio") (/ ,(norm2-form (n "ref_re") (n "ref_im")) ,(guarded (norm2-form (n "live_re") (n "live_im")))))
+            `(def ,(n "vel") (* (event-hold hit_velocity hit) ,(k "energy") ,(k "weight")))
+            `(def ,(n "vel_power") (* ,(n "ratio") ,(n "ratio") ,(k "dc") ,(k "dc") ,(n "vel") ,(n "vel")))
+            `(def ,(n "settle") (exp (/ (* -1 ,(tensor-form (get wash :buildup))) samplerate))))
+      (power "fast" (get wash :fast-power) (get wash :fast-rate))
+      (power "slow" (get wash :slow-power) (get wash :slow-rate))
+      (list `(def ,(n "gain") (* (sqrt (+ ,(n "fast_now") ,(n "slow_now"))) ,(n "norm") ,(k "wash") ,(k "wash"))))
+      (stage 1 (white-noise-form))
+      (stage 2 (n "s1_out"))
+      (list `(def ,(n "out") (sum (* ,(n "s2_out") ,(n "gain"))))))))
+
+;; Every strokes connection's push on object id, as forms (none when no
+;; strokes play it).
+;;   conns  the resolved connections
+;;   id     an object id
+(def pushes-on (conns id)
+  (map (lambda (c) (nm (get c :id) "push")) (filter (lambda (c) (and (strokes? c) (= (get c :b) id))) conns)))
+
+;; What is wrong with a strokes connection: its object must be a data object
+;; with :strokes whose residues have one value per mode.
+;;   patch  the patch
+;;   c      a strokes connection
+(def strokes-errors (patch c)
+  (let ((obj (find-object patch (get c :b))))
+    (if (= obj nil) (list (str (what c) ": no object " (source (get c :b))))
+      (if (or (not (= (get obj :kind) :data)) (not (list? (get obj :strokes))) (empty? (get obj :strokes)))
+        (list (str (what c) ": " (source (get c :b)) " has no :strokes (a modal-data object with measured strokes)"))
+        (append
+          (concat-all
+            (map (lambda (k)
+                   (let ((st (nth (get obj :strokes) k)))
+                     (if (and (list? (get st :re)) (list? (get st :im))
+                              (= (len (get st :re)) (get obj :modes)) (= (len (get st :im)) (get obj :modes)))
+                       nil
+                       (list (str (what c) ": stroke " k " needs :re and :im with one value per mode ("
+                                  (get obj :modes) ")")))))
+                 (range (len (get obj :strokes)))))
+          (if (get obj :wash) (wash-errors c (get obj :wash) (len (get obj :strokes))) nil))))))
+
+;; What is wrong with a wash: :hz, :buildup, :fast-rate and :slow-rate need
+;; one value per band, :fast-power and :slow-power one row of them per
+;; stroke.
+;;   c        the strokes connection
+;;   wash     the wash dict
+;;   strokes  how many strokes
+(def wash-errors (c wash strokes)
+  (let ((bands (if (list? (get wash :hz)) (len (get wash :hz)) 0))
+        (sized (lambda (xs n) (and (list? xs) (= (len xs) n)))))
+    (if (= bands 0) (list (str (what c) ": the wash needs :hz, one centre per band"))
+      (append
+        (concat-all (map (lambda (key) (if (sized (get wash key) bands) nil
+                                          (list (str (what c) ": wash " (source key) " needs " bands " values"))))
+                         (list :buildup :fast-rate :slow-rate)))
+        (concat-all (map (lambda (key)
+                           (let ((rows (get wash key)))
+                             (if (and (sized rows strokes) (empty? (filter (lambda (row) (not (sized row bands))) rows))) nil
+                               (list (str (what c) ": wash " (source key) " needs " strokes " rows of " bands)))))
+                         (list :fast-power :slow-power)))))))
 
 ;; ── listening ───────────────────────────────────────────────────────────────
 
@@ -2382,7 +2913,7 @@
 (def listen-forms (patch l k)
   (let ((obj (find-object patch (get l :obj))) (lid (mic k)))
     (if (= (get obj :kind) :mix) (mix-listen-forms patch obj l k)
-      (hearing-forms obj l lid lid))))
+      (hearing-forms obj l lid lid (excite-norm patch (get patch :connections))))))
 
 ;; Forms defining <s>_v, the velocity obj is heard with at listen l's point
 ;; (normalised by its reference frequency and mass so that a light string
@@ -2391,13 +2922,37 @@
 ;;   l     the listen
 ;;   lid   the listen's id (its point params' owner)
 ;;   s     the symbol prefix of what is defined
-(def hearing-forms (obj l lid s)
+;;   norm  a form for the patch's output normalisation (excite-norm), which
+;;         a pickup measures its distance in
+(def hearing-forms (obj l lid s norm)
   (append (shape-defs obj (access-syms lid "mic" obj) (nm s "phi"))
           (list `(make-history ,(nm s "prev"))
                 ;; the param-rate factors first, so DGen can fold them once per block
-                `(def ,(nm s "y") (sum (* ,(nm s "phi") ,@(hearing-gains obj l) ,(p obj "next"))))
-                `(def ,(nm s "v") (/ (* (- ,(nm s "y") (read-history ,(nm s "prev"))) ,(p obj "mass")) ,(p obj "wref")))
-                `(write-history ,(nm s "prev") ,(nm s "y")))))
+                `(def ,(nm s "y") (sum (* ,(nm s "phi") ,@(hearing-gains obj l) ,(p obj "next")))))
+          (if (= (get l :hear) :position) (list `(def ,(nm s "v") ,(nm s "y")))
+            (if (pickup? l) (pickup-forms obj lid s norm)
+              (list `(def ,(nm s "v") ,(speed-form obj s)))))
+          (list `(write-history ,(nm s "prev") ,(nm s "y")))))
+
+;; A form for the velocity heard at <s>_y, normalised by the object's
+;; reference frequency and mass.
+;;   obj  the heard object
+;;   s    the symbol prefix of the listen's defs
+(def speed-form (obj s) `(/ (* (- ,(nm s "y") (read-history ,(nm s "prev"))) ,(p obj "mass")) ,(p obj "wref")))
+
+;; What a pickup hears, <s>_v: the normalised speed times the flux gradient
+;; at the string's distance from the pole, 1 / (1 - u)^3 with u its
+;; displacement over the height (normalised as the output is, so a firm
+;; pluck swings about 1; kept short of the pole), through the coil's
+;; resonance.
+;;   obj   the heard object
+;;   lid   the pickup's listen id (its params' owner)
+;;   s     the symbol prefix of what is defined
+;;   norm  a form for the output normalisation
+(def pickup-forms (obj lid s norm)
+  (list `(def ,(nm s "near") (/ 1 (- 1 (clip (* (/ (* ,(p obj "mass") ,norm) ,(nm lid "height")) ,(nm s "y")) -0.9 0.6))))
+        `(def ,(nm s "v") (svf (* ,(speed-form obj s) ,(nm s "near") ,(nm s "near") ,(nm s "near"))
+                               ,(below-nyquist (nm lid "coil_hz")) ,(nm lid "coil_q") 0))))
 
 ;; listen-forms on a mix hybrid: each part heard at its own point, mixed
 ;; (1 - morph) and morph into mic<k>_v.
@@ -2408,7 +2963,8 @@
 (def mix-listen-forms (patch obj l k)
   (let ((lid (mic k)) (x (p obj "morph")) (parts (get obj :part-objs)))
     (append
-      (concat-all (map (lambda (j) (hearing-forms (nth parts j) l lid (nm lid j))) (range 2)))
+      ;; (a mix has no pickup, so no normalisation)
+      (concat-all (map (lambda (j) (hearing-forms (nth parts j) l lid (nm lid j) nil)) (range 2)))
       (list `(def ,(nm lid "v") (+ (* (- 1 ,x) ,(nm (nm lid 0) "v")) (* ,x ,(nm (nm lid 1) "v"))))))))
 
 ;; Per-mode factors on what a listen hears: the object's spectral gains and
@@ -2460,7 +3016,10 @@
                          `(def ,(p obj "f1_0") ,(mode0 f0s n))
                          `(def ,bent (* ,f0s (pow 2 (/ ,(pp obj "bend") 1200))
                                         ;; ,@nil fails, so an empty splice is (list)
-                                        ,@(if (get sp :follow) (list `(/ f0 ,(p obj "f1_0"))) (list))))
+                                        ,@(if (get sp :follow)
+                                            ;; a held object's inputs are event-held (see held-pass)
+                                            (list `(/ ,(if (get obj :held) '(event-hold f0 coef_tick) 'f0) ,(p obj "f1_0")))
+                                            (list))))
                          `(def ,(p obj "f1_b") ,(mode0 bent n))
                          `(def ,(p obj "freqs")
                             (max 1 (+ (* (- ,bent ,(p obj "f1_b")) (log (+ (* ,(pp obj "diffraction") 1.718281828) 1)))
@@ -2492,11 +3051,38 @@
 ;; The output gain param spec, out_gain.
 (def out-gain-param () (pspec 'out "gain" 0.5 0 2 :title "Gain"))
 
-;; Every param spec of the k-th mic: its position, then its gain.
+;; The host's Voicing param, out_voice_mode (bound in instrument.json; the
+;; host finds it by that name, modal_patch.rs's VOICE_MODE_PARAM), when
+;; the patch has :voicing: 0 poly, 1 one voice (retriggered), as the host's
+;; voice modes; none otherwise.
+;;   patch  the patch
+(def voicing-params (patch)
+  (let ((v (get patch :voicing)))
+    (if (= v nil) (list) (list (pspec 'out "voice_mode" (if (= v :poly) 0 1) 0 3 :title "Voicing" :dec 0)))))
+
+;; The output Tone param, out_tone, when the patch has :tone; none otherwise.
+;;   patch  the patch
+(def tone-params (patch)
+  (if (get patch :tone) (list (pspec 'out "tone" (get patch :tone) 1000 20000 :unit 'Hz :title "Tone" :taper :log)) (list)))
+
+;; A pickup's own params: its height and its coil's resonance (none for
+;; other listens).
+;;   patch  the patch
+;;   k      the listen's position, from 0
+(def pickup-params (patch k)
+  (let ((l (nth (get patch :listens) k)) (id (mic k)))
+    (if (pickup? l)
+      (list (pspec id "height" (get l :height) 0.3 30 :title (str (source id) " height") :taper :log)
+            (pspec id "coil_hz" (get l :coil-hz) 1000 10000 :unit 'Hz :title (str (source id) " coil") :taper :log)
+            (pspec id "coil_q" (get l :coil-q) 0.5 6 :title (str (source id) " peak")))
+      (list))))
+
+;; Every param spec of the k-th mic: its position, its gain, then a
+;; pickup's own.
 ;;   patch  the patch
 ;;   k      the listen's position, from 0
 (def listen-params (patch k)
-  (append (mic-at-params patch k) (list (mic-gain-param patch k))))
+  (append (mic-at-params patch k) (list (mic-gain-param patch k)) (pickup-params patch k)))
 
 ;; A form for the output's level normalisation by what drives the patch (its
 ;; first pluck, felt or bow), so the output sits near the same level whatever
@@ -2528,6 +3114,100 @@
 ;;   obj  an object
 (def fixed-pitch? (obj)
   (and (get obj :fixed-pitch) (not (and (get obj :spectral) (get (get obj :spectral) :follow)))))
+
+;; ── the amp ─────────────────────────────────────────────────────────────────
+;; A guitar amplifier inside the instrument (a patch's :amp), so its sound
+;; can reach back into the objects (m/speaker). Its stages, in order:
+;;   input     a coupling capacitor's high-pass (80 Hz)
+;;   fuzz      drive into tanh about a bias point, which makes it asymmetric
+;;             (even harmonics); the stage's grid current charges its
+;;             coupling capacitor on loud peaks, drifting the bias (bloom:
+;;             the swell and sputter of a hard-driven fuzz). Antiderivative
+;;             antialiased: tanh's integral, log cosh, differenced over the
+;;             step, so its harmonics fold back far less at 48 kHz
+;;   tone      bass, mid and treble bands added to or taken from the signal
+;;   power     a second, softer tanh whose drive sags as the supply is
+;;             loaded (the power-amp compression of a cranked amp)
+;;   speaker   the cone's resonance (a high-pass peaking at 100 Hz) and the
+;;             cabinet's falling top: two low-passes from cab Hz
+;;   level     the speaker's loudness, the feedback's too
+
+;; An amplifier for a patch's :amp.
+;;   drive   the preamp's gain into the fuzz
+;;   bias    the fuzz's asymmetry (0 symmetric)
+;;   bloom   how far loud playing drifts the bias
+;;   bass, mid, treble  the tone stack, 1 flat (0 .. 2)
+;;   power   the power stage's drive
+;;   sag     how much the supply sags under load
+;;   cab     where the cabinet's top falls away, Hz
+;;   level   the speaker's level
+(def amp (&key (drive 20) (bias 0.2) (bloom 0.5) (bass 1) (mid 1) (treble 1) (power 2) (sag 0.3) (cab 4500)
+               (level 0.5))
+  (dict :kind :amp
+        :params (list (pspec 'amp "drive" drive 1 500 :title "Drive" :taper :log :dec 1)
+                      (pspec 'amp "bias" bias 0 0.8 :title "Bias")
+                      (pspec 'amp "bloom" bloom 0 1 :title "Bloom")
+                      (pspec 'amp "bass" bass 0 2 :title "Bass")
+                      (pspec 'amp "mid" mid 0 2 :title "Mid")
+                      (pspec 'amp "treble" treble 0 2 :title "Treble")
+                      (pspec 'amp "power" power 0.5 10 :title "Power" :taper :log)
+                      (pspec 'amp "sag" sag 0 1 :title "Sag")
+                      (pspec 'amp "cab" cab 1500 10000 :unit 'Hz :title "Cab" :taper :log)
+                      (pspec 'amp "level" level 0 2 :title "Level"))))
+
+;; The amp's params (none without one).
+;;   patch  the patch
+(def amp-params (patch) (if (get patch :amp) (get (get patch :amp) :params) (list)))
+
+;; log cosh z without overflow: |z| + log(1 + e^-2|z|) - log 2, tanh's
+;; integral.
+;;   z  a form
+(def log-cosh-form (z) `(- (+ (abs ,z) (log (+ 1 (exp (* -2 (abs ,z)))))) 0.6931471805599453))
+
+;; A one-pole follower's coefficient for a time constant.
+;;   seconds  the time constant, s
+(def follow-coef (seconds) `(- 1 ,(pole-form seconds)))
+
+;; The amp's forms on the signal named in, ending in amp_speaker (and its
+;; history, which m/speaker reads next sample).
+;;   in  the input signal's symbol
+(def amp-forms (in)
+  (list `(def amp_x (* (svf ,in 80 0.5 2) amp_drive))
+        ;; the bias, less what loud peaks charged the coupling cap with
+        '(make-history amp_charge)
+        '(def amp_b (- amp_bias (* amp_bloom (read-history amp_charge))))
+        '(def amp_z (+ amp_x amp_b))
+        '(make-history amp_zp)
+        ;; tanh's integral now and (kept) last sample
+        '(make-history amp_lcp)
+        `(def amp_lc ,(log-cosh-form 'amp_z))
+        '(def amp_dz (- amp_z (read-history amp_zp)))
+        '(def amp_far (gt (abs amp_dz) 0.00001))
+        '(def amp_fuzz (- (gswitch amp_far
+                                   (/ (- amp_lc (read-history amp_lcp)) (gswitch amp_far amp_dz 1))
+                                   (tanh (* 0.5 (+ amp_z (read-history amp_zp)))))
+                          (tanh amp_b)))
+        '(write-history amp_zp amp_z)
+        '(write-history amp_lcp amp_lc)
+        ;; charges in ~5 ms on positive peaks, leaks over ~200 ms
+        `(def amp_peak (max 0 amp_fuzz))
+        `(write-history amp_charge (+ (read-history amp_charge)
+                                      (* (gswitch (gt amp_peak (read-history amp_charge)) ,(follow-coef 0.005) ,(follow-coef 0.2))
+                                         (- amp_peak (read-history amp_charge)))))
+        ;; the next stage's coupling capacitor blocks the bias's DC
+        '(def amp_t (svf amp_fuzz 30 0.5 2))
+        '(def amp_tone (+ amp_t (* (- amp_bass 1) (svf amp_t 120 0.6 0))
+                          (* (- amp_mid 1) (/ (svf amp_t 700 0.8 1) 0.8))
+                          (* (- amp_treble 1) (svf amp_t 2200 0.6 2))))
+        ;; the supply sags with the power drawn (~60 ms)
+        '(make-history amp_load)
+        '(def amp_pw (tanh (/ (* amp_tone amp_power) (+ 1 (* 4 amp_sag (read-history amp_load))))))
+        `(write-history amp_load (+ (read-history amp_load) (* ,(follow-coef 0.06) (- (* amp_pw amp_pw) (read-history amp_load)))))
+        '(def amp_cone (svf amp_pw 100 1.4 2))
+        `(def amp_speaker (* (svf (svf amp_cone (min amp_cab (* 0.4 samplerate)) 0.9 0)
+                                  ,(below-nyquist '(* 1.25 amp_cab)) 0.6 0)
+                             amp_level))
+        `(write-history ,(speaker-history) amp_speaker)))
 
 ;; ── the whole program ───────────────────────────────────────────────────────
 
@@ -2579,7 +3259,10 @@
   (concat-all (list (concat-all (map (lambda (o) (get o :params)) (get patch :objects)))
                     (concat-all (map (lambda (c) (connection-params patch c)) conns))
                     (concat-all (map (lambda (k) (listen-params patch k)) (range (len (get patch :listens)))))
-                    (list (out-gain-param)))))
+                    (amp-params patch)
+                    (list (out-gain-param))
+                    (tone-params patch)
+                    (voicing-params patch))))
 
 ;; Every form of the instrument's dsp.lisp, in the order one sample runs:
 ;; preamble, params, macro imports, each object's setup and prediction, the
@@ -2596,13 +3279,17 @@
       (list (preamble)
             (map param-form (all-params patch conns))
             (library-imports)
-            (concat-all (map (lambda (o) (spectral-pass o (object-setup o))) objects))
+            (if (keyed? patch) (key-forms) (list))
+            (if (or (any-held? patch) (any? strokes? conns)) (coef-tick-forms patch) (list))
+            (concat-all (map (lambda (o) (held-pass o (spectral-pass o (object-setup o)))) objects))
             (concat-all (map object-predict (filter physical? objects)))
-            ;; the force histories feedback taps read
+            ;; the force histories feedback taps read, and the speaker's
             (map (lambda (id) `(make-history ,(nm id "F_h"))) tapped)
+            (if (get patch :amp) (list `(make-history ,(speaker-history))) (list))
             (connection-forms patch conns)
             (map (lambda (id) `(write-history ,(nm id "F_h") ,(nm id "F"))) tapped)
-            (concat-all (map (lambda (o) (object-commit o (terms-of conns (range (len conns)) (get o :id))))
+            (concat-all (map (lambda (o) (object-commit o (terms-of conns (range (len conns)) (get o :id))
+                                                        (pushes-on conns (get o :id))))
                              (filter physical? objects)))
             ;; a bow needs its point's true position after every force
             (concat-all (map (lambda (c) (if (bow? c)
@@ -2611,10 +3298,17 @@
                                            nil))
                              conns))
             (concat-all (map (lambda (k) (listen-forms patch (nth listens k) k)) (range (len listens))))
-            (list `(def mix ,(sum-form (map (lambda (k) `(* ,(nm (mic k) "v") ,(nm (mic k) "gain")))
-                                            (range (len listens)))))
-                  `(def raw (* mix ,(excite-norm patch conns) ,(get patch :level) out_gain))
-                  '(make-history dcx)
+            (list `(def mix ,(sum-form (append (map (lambda (k) `(* ,(nm (mic k) "v") ,(nm (mic k) "gain")))
+                                                    (range (len listens)))
+                                               ;; strokes' click and wash
+                                               (map (lambda (c) (nm (get c :id) "out")) (filter strokes? conns))))))
+            ;; the mix at its level, through the amp when there is one; then
+            ;; the output gain and the tone filter
+            (let ((norm (excite-norm patch conns)))
+              (let ((sound (if (get patch :amp) '(* amp_speaker out_gain) `(* mix ,norm ,(get patch :level) out_gain))))
+                (append (if (get patch :amp) (cons `(def heard (* mix ,norm ,(get patch :level))) (amp-forms 'heard)) (list))
+                        (list `(def raw ,(if (get patch :tone) `(svf ,sound (min out_tone (* samplerate 0.43)) 0.707 0) sound))))))
+            (list '(make-history dcx)
                   '(make-history dcy)
                   '(def dc-out (+ (- raw (read-history dcx)) (* 0.9995 (read-history dcy))))
                   '(write-history dcx raw)
@@ -2643,7 +3337,10 @@
   (let ((ks (range (len (get patch :listens)))))
     (append (map (lambda (k) (mic-gain-param patch k)) ks)
             (list (out-gain-param))
-            (concat-all (map (lambda (k) (mic-at-params patch k :label (source (mic k)))) ks)))))
+            (tone-params patch)
+            (voicing-params patch)
+            (concat-all (map (lambda (k) (mic-at-params patch k :label (source (mic k)))) ks))
+            (concat-all (map (lambda (k) (pickup-params patch k)) ks)))))
 
 ;; The panel's sections, in order: each object, each connection, OUTPUT.
 ;; Each is (dict :title :tab :params): the panel heading ("STRING str"), the
@@ -2657,6 +3354,7 @@
             (map (lambda (c) (dict :title (str (get c :title) " " (source (get c :id))) :tab (source (get c :id))
                                    :params (connection-params patch c)))
                  conns)
+            (if (get patch :amp) (list (dict :title "AMP" :tab "amp" :params (amp-params patch))) (list))
             (list (dict :title "OUTPUT" :tab "out" :params (output-params patch))))))
 
 ;; The section number of the object or connection called id.

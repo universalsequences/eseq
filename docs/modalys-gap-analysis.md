@@ -259,3 +259,53 @@ wgpu mesh pass eseq-k0m2.29, live voice amplitudes eseq-k0m2.30)
 15. `defwidget` vertex stage and the mode-mesh view (§4.3), after eseq-nu3h.
 
 Each item also wants a bundled example instrument in `tools/modal/examples/`.
+
+**Tier 5: identified models** (done 2026-10-25, eseq-k0m2.34-.40: the
+factory PM Ride Kit rebuilt as an eseq.modal patch)
+
+16. Measured strokes (`m/strokes`): complex residues per mode, injected on
+    top of the ring; the key picks the stroke and the octave transposes
+    (`modal-data :follow :octave`); the stick's contact ratio with a fixed
+    energy budget; click; the wash of weak modes as band noise.
+17. One-voice instruments (`patch :voicing`, instrument.json
+    `voice_controls`), an output Tone, `listen :hear :position`, measured
+    losses without the added air loss, Muffle.
+18. Coefficients of note-following data objects on DGenLisp's event clock
+    (`coef_tick`: a note's start or a change in what they are computed
+    from, latched back to audio rate): what makes 688 modes cost less than
+    the hand-written ride.
+
+Against the factory instrument the strokes match to 0.2 dB per band and
+0.3-1.6% RMS per sample at the recorded octave, at slightly less CPU. This goes
+past what we import from Modalys: its resonance-model text (modres) carries
+each mode's amplitude and bandwidth, with no phase and no per-stroke tables. Still open: rivets (a loose
+mass on the plate pumped energy, and the identified data has no mode shapes
+across the plate to place one), and a self-sustaining cymbal (a feedback
+loop runs away on one partial without gain control).
+
+**Tier 6: electric instruments** (done 2026-10-25, eseq-k0m2.42: an electric
+lead guitar feeding back through its amp)
+
+19. A magnetic pickup (`m/pickup`): a listen hearing speed times the flux
+    gradient at the string's distance from the pole, (1 - y/h)^-3, through
+    the coil's resonance. Lowering it adds even harmonics (2nd at -36 dB
+    at height 30, -16 dB at 3, 0 dB at 0.5).
+20. An amp inside the instrument (`patch :amp`, `m/amp`): coupling high-pass,
+    an antiderivative-antialiased asymmetric fuzz whose bias drifts as loud
+    peaks charge its coupling capacitor (bloom), a tone stack, a power stage
+    sagging with its load, the speaker cone and cabinet. Off-harmonic
+    content about -72 dB at default drive, -48 dB at 500x.
+21. Acoustic feedback (`m/speaker :distance :angle`): the speaker's output,
+    delayed by the air's travel, falling as 1/distance and low-passed off
+    the cone's axis, as a signal for any driver. Modalys has no electronics,
+    so this is past it, though it is the same feedback-tap idea.
+
+`examples/eno-lead.lisp`: a light steel string, a bridge pickup, a fuzz amp,
+2 m of air onto the maple body, and the body's motion moving the string's
+end. That last coupling is one way (a force from a position tap): a bridge
+spring at 0.99 pinned the string near its end, so its truncated modes
+scattered energy into fast-decaying high partials, and high notes died in
+about a second. Held notes sustain, then the
+distance picks the partial the loop blooms into (fundamental, octave,
+twelfth), and the amp's clipping holds it: the gain control the
+self-sustaining cymbal lacked. 3.3% of a core.
