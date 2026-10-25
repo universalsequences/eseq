@@ -37,10 +37,21 @@ bridges any number of tuned strings onto one body.
 | Objects | Access point |
 |---|---|
 | `m/string` (stiff string, follows the note, `:tune` ratio) | `x` in 0..1 |
-| `m/plate` (simply supported, 8 x 8 modes) | `(x y)` |
+| `m/plate` (simply supported, `:grid` x `:grid` modes, default 8) | `(x y)` |
 | `m/membrane` (circular, 120 Bessel modes, `:tune`) | `(r theta)` |
+| `m/rect-membrane` (fixed edges, `:aspect`, follows the note) | `(x y)` |
+| `m/circ-plate` (`:edge :free` or `:clamped`; cymbals, gongs; modes solved from the Bessel equations, pitch from material and size) | `(r theta)` |
+| `m/bar` (free bar, follows the note; `:undercut` 1 tunes modes 2 and 3 to 4x and 10x, marimba-style) | `x` in 0..1 |
+| `m/oscillator` (one mode at the note: a reed, a lip, a resonance) | lumped-like, any |
 | `m/finger` (Modalys' two-mass: hand on a stroke + soft tip) | lumped |
 | `m/mallet` (thrown mass) | lumped |
+| `m/modal-data` (modes from data: frequencies, losses or bandwidths, shapes over points; `:root` makes it follow the note) | point index, or `(x y z)` for the nearest point |
+
+`(modal-read-data "file")` reads data for `m/modal-data :data`, relative to
+the script: an IRCAM resonance model (text: index, Hz, dB, bandwidth Hz per
+line) or an `eseq-modes` `.json` from `eseq modal solve`.
+`examples/bell-data.lisp` strikes a resonance-model bell. A data object with
+more than 64 points keeps only the points its connections and listens use.
 
 | Connections | Between |
 |---|---|
@@ -48,6 +59,23 @@ bridges any number of tuned strings onto one body.
 | `(m/felt id mallet obj at)` | one-sided, hardening felt |
 | `(m/spring id a a-at b b-at)` | bridge / adhere |
 | `(m/bow id obj at)` | stick-slip friction, sustains under the gate |
+| `(m/force id obj at :signal s)` | pushes the point with gain x signal |
+| `(m/position id obj at :signal s)` | holds the point at the signal (a constant 0 clamps it) |
+| `(m/speed id obj at :signal s)` | moves the point at gain x signal |
+
+`(m/spectral obj ...)` adds Modalys' pseudo-physical controls to any object:
+`bend` (cents) and `diffraction` (rho: 1 leaves the partials, below 1 pulls
+them toward the lowest, above 1 spreads them) params, `:follow-note` (the
+lowest mode on the played note, for plates), and per-mode lists
+`:freq-scales`, `:loss-scales`, `:gains` (a mode equalizer on what listens
+hear). `(m/listen obj at :modes (list 0 2))` hears only those modes.
+
+Every connection has a `weight` param (0..1) that scales its force (a bow's
+pressure), to fade it in or out or couple partly. A driver's signal is data:
+`(m/envelope :attack-ms :decay-ms :sustain :release-ms)`, `(m/noise)`,
+`(m/sine :ratio r)` (at r times the note), `(m/constant v)`, or any
+DGenLisp form `(m/signal '(...))`; a list of signals is their product.
+`examples/ebow.lisp` sustains a string with a sine force at the note.
 
 Materials are data. `eseq.modal.materials` (`content/ui/modal/materials.lisp`)
 holds a library (`mat/steel`, `mat/nylon`, `mat/spruce`, `mat/bronze`,

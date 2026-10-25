@@ -142,7 +142,8 @@ pub use eseq::expr_promote::{
 };
 pub use eseq::scratch_runtime::*;
 pub use eseq::modal_patch::{
-    generate_modal_instrument, is_modal_patch_script, ModalInstrument, ModalScriptHost,
+    generate_modal_instrument, is_modal_patch_script, modal_natives, read_modal_data_file,
+    register_modal_natives, ModalInstrument, ModalScriptHost, CIRC_PLATE_NATIVE, READ_DATA_NATIVE,
 };
 pub use eseq::sequencer_natives::*;
 

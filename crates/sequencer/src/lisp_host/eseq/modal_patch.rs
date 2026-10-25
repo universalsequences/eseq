@@ -3,7 +3,10 @@
 //! `eseq.modal` module (`content/ui/modal.lisp`). Shared by `eseq modal emit`
 //! and the app's draft evaluation, so both report the same errors.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use eseqlisp::vm::{Value, VM};
 
@@ -49,6 +52,165 @@ pub fn is_modal_patch_script(source: &str) -> bool {
     })
 }
 
+thread_local! {
+    /// The folder of the script being generated, which relative data files
+    /// (`modal-read-data`) resolve against.
+    static SCRIPT_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// The native a patch script reads modal data with:
+/// `(modal-read-data "bell.modes.json")` or `(modal-read-data "bell.txt")`.
+pub const READ_DATA_NATIVE: &str = "modal-read-data";
+
+/// Read a modal data file into the dict `eseq.modal/modal-data` takes. A
+/// relative `path` is taken from the folder of the script being generated.
+/// - `.json`: an "eseq-modes" v1 file (`eseq modal solve` output): `:freqs`,
+///   `:shapes` (one list of N per point), `:points` / `:normals` (one
+///   `(x y z)` per point), `:triangles` (flat point indices), `:mass`.
+/// - anything else: an IRCAM resonance model (modres text, one mode per
+///   line: index, frequency Hz, amplitude dB, bandwidth Hz; `;` comments):
+///   `:freqs`, `:amps` (linear), `:bandwidths`.
+pub fn read_modal_data_file(path: &str) -> Result<Value, String> {
+    let path = SCRIPT_DIR.with(|dir| match dir.borrow().as_ref() {
+        Some(dir) if Path::new(path).is_relative() => dir.join(path),
+        _ => PathBuf::from(path),
+    });
+    let text = std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let parsed = if path.extension().is_some_and(|ext| ext == "json") {
+        modes_json_value(&text)
+    } else {
+        modres_value(&text)
+    };
+    parsed.map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// The native eseq.modal's circular plates are solved with:
+/// `(modal-circ-plate-modes :free nu count samples)`.
+pub const CIRC_PLATE_NATIVE: &str = "modal-circ-plate-modes";
+
+/// The natives eseq.modal calls, by name, as (args) -> value or a
+/// user-facing error. The CLI and tests register them on a bare VM
+/// ([`register_modal_natives`]); the app on its runtime.
+pub fn modal_natives() -> [(&'static str, fn(&[Value]) -> Result<Value, String>); 2] {
+    [(READ_DATA_NATIVE, read_data_native), (CIRC_PLATE_NATIVE, circ_plate_native)]
+}
+
+fn read_data_native(args: &[Value]) -> Result<Value, String> {
+    match args.first() {
+        Some(Value::String(path)) => read_modal_data_file(path),
+        _ => Err(format!("{READ_DATA_NATIVE} takes a file path")),
+    }
+}
+
+/// (edge nu count samples) -> one (dict :lambda :m :radial) per mode.
+fn circ_plate_native(args: &[Value]) -> Result<Value, String> {
+    use super::modal_plates::{circ_plate_modes, PlateEdge};
+    let number = |k: usize| match args.get(k) {
+        Some(Value::Number(n)) => Ok(*n),
+        _ => Err(format!("{CIRC_PLATE_NATIVE} takes (edge nu count samples)")),
+    };
+    let edge = match args.first() {
+        Some(Value::Keyword(k) | Value::String(k)) if k.trim_start_matches(':') == "clamped" => PlateEdge::Clamped,
+        Some(Value::Keyword(k) | Value::String(k)) if k.trim_start_matches(':') == "free" => PlateEdge::Free,
+        _ => return Err(format!("{CIRC_PLATE_NATIVE}: edge is :free or :clamped")),
+    };
+    let modes = circ_plate_modes(edge, number(1)?, number(2)?.max(1.0) as usize, number(3)?.max(2.0) as usize);
+    Ok(Value::List(
+        modes
+            .into_iter()
+            .map(|mode| {
+                cell(data_dict(vec![
+                    ("lambda", Value::Number(mode.lambda)),
+                    ("m", Value::Number(mode.m as f64)),
+                    ("radial", numbers(mode.radial)),
+                ]))
+            })
+            .collect(),
+    ))
+}
+
+/// Register [`modal_natives`] on a bare VM (the CLI and tests). A failing
+/// call returns its message as a string; eseq.modal's check reports it.
+pub fn register_modal_natives(vm: &mut VM) {
+    for (name, native) in modal_natives() {
+        vm.register_native(name, move |args| native(&args).unwrap_or_else(Value::String));
+    }
+}
+
+fn cell(value: Value) -> Rc<RefCell<Value>> {
+    Rc::new(RefCell::new(value))
+}
+
+fn numbers(values: impl IntoIterator<Item = f64>) -> Value {
+    Value::List(values.into_iter().map(|v| cell(Value::Number(v))).collect())
+}
+
+fn rows(values: &[f64], width: usize) -> Value {
+    Value::List(values.chunks(width.max(1)).map(|row| cell(numbers(row.iter().copied()))).collect())
+}
+
+fn data_dict(fields: Vec<(&str, Value)>) -> Value {
+    Value::Map(fields.into_iter().map(|(key, value)| (key.to_string(), cell(value))).collect::<HashMap<_, _>>())
+}
+
+fn modes_json_value(text: &str) -> Result<Value, String> {
+    let json: serde_json::Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    if json["format"] != "eseq-modes" || json["version"] != 1 {
+        return Err("not an eseq-modes v1 file".to_string());
+    }
+    let floats = |key: &str| -> Result<Vec<f64>, String> {
+        json[key]
+            .as_array()
+            .ok_or_else(|| format!("missing \"{key}\""))?
+            .iter()
+            .map(|v| v.as_f64().ok_or_else(|| format!("\"{key}\" holds a non-number")))
+            .collect()
+    };
+    let freqs = floats("freqs")?;
+    let shapes = floats("shapes")?;
+    let points = floats("points")?;
+    if points.len() % 3 != 0 {
+        return Err("\"points\" must hold x y z per point".to_string());
+    }
+    if freqs.is_empty() || shapes.len() != freqs.len() * (points.len() / 3) {
+        return Err("\"shapes\" must hold one value per point per mode".to_string());
+    }
+    // normals and triangles are for the mesh view; the DSP does not need them
+    let optional = |key: &str| if json[key].is_null() { Ok(Vec::new()) } else { floats(key) };
+    Ok(data_dict(vec![
+        ("freqs", numbers(freqs.iter().copied())),
+        ("shapes", rows(&shapes, freqs.len())),
+        ("points", rows(&points, 3)),
+        ("normals", rows(&optional("normals")?, 3)),
+        ("triangles", numbers(optional("triangles")?)),
+        ("mass", Value::Number(json["mass"].as_f64().unwrap_or(1.0))),
+    ]))
+}
+
+fn modres_value(text: &str) -> Result<Value, String> {
+    let (mut freqs, mut amps, mut bandwidths) = (Vec::new(), Vec::new(), Vec::new());
+    for (number, line) in text.lines().enumerate() {
+        let line = line.split(';').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<f64> = line
+            .split_whitespace()
+            .map(|field| field.parse::<f64>().map_err(|_| format!("line {}: {field:?} is not a number", number + 1)))
+            .collect::<Result<_, _>>()?;
+        let [_, freq, amp_db, bandwidth] = fields[..] else {
+            return Err(format!("line {}: expected index, frequency, amplitude (dB), bandwidth", number + 1));
+        };
+        freqs.push(freq);
+        amps.push(10f64.powf(amp_db / 20.0));
+        bandwidths.push(bandwidth);
+    }
+    if freqs.is_empty() {
+        return Err("no modes".to_string());
+    }
+    Ok(data_dict(vec![("freqs", numbers(freqs)), ("amps", numbers(amps)), ("bandwidths", numbers(bandwidths))]))
+}
+
 /// Evaluate `script` (attributed to `path`) in `vm`, then check and generate
 /// the patch its last form returns. Errors are user-facing lines: a script
 /// that fails to evaluate, a last form that is not a patch, or every problem
@@ -58,7 +220,11 @@ pub fn generate_modal_instrument(
     path: PathBuf,
     script: &str,
 ) -> Result<ModalInstrument, Vec<String>> {
-    let value = host.eval_at(path, script)?;
+    let dir = path.parent().map(Path::to_path_buf);
+    let previous = SCRIPT_DIR.with(|cell| cell.replace(dir));
+    let value = host.eval_at(path, script);
+    SCRIPT_DIR.with(|cell| *cell.borrow_mut() = previous);
+    let value = value?;
     if !is_patch(value.as_ref()) {
         return Err(vec![
             "the script's last form must be a patch: (m/patch :objects ... :listens ...)".to_string(),
@@ -153,6 +319,7 @@ mod tests {
         let mut vm = VM::new(Vec::new());
         eseqlisp::vm::register_core_natives(&mut vm);
         eseqlisp::vm::register_math_natives(&mut vm);
+        register_modal_natives(&mut vm);
         let content = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content");
         vm.source_manager.set_module_load_roots(vec![content]);
         vm
@@ -254,6 +421,203 @@ mod tests {
             let errors = generate_modal_instrument(&mut vm, PathBuf::from("cello.lisp"), &script).unwrap_err();
             assert_eq!(errors, vec![expected.to_string()], "{made_of}");
         }
+    }
+
+    /// A data object whose patch is in `dir`, struck by a mallet at `at`
+    /// and heard at `listen`.
+    fn data_patch(data: &str, at: &str, listen: &str) -> String {
+        format!(
+            "(import eseq.modal :as m)
+(m/patch :name \"probe-data\"
+  :objects (list (m/mallet 'mal) (m/modal-data 'obj :data {data}))
+  :connections (list (m/felt 'hit 'mal 'obj {at}))
+  :listens (list (m/listen 'obj {listen})))"
+        )
+    }
+
+    #[test]
+    fn reads_a_resonance_model_relative_to_the_script() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bell.txt"), "; a bell\n1 110 -6 0.5\n2 220 0 1.0\n").unwrap();
+        let script = data_patch("(modal-read-data \"bell.txt\")", "0", "0");
+        let instrument =
+            generate_modal_instrument(&mut modal_vm(), dir.path().join("bell.lisp"), &script).unwrap();
+        let dsp = &instrument.dsp;
+        assert!(dsp.contains("(def obj_hz (tensor @shape [2] @data [110 220]))"), "{dsp}");
+        // Bandwidths become decay rates pi bw; one point, so no point param.
+        assert!(dsp.contains("1.570796325 3.14159265"), "{dsp}");
+        assert!(!dsp.contains("obj_pt"), "{dsp}");
+    }
+
+    #[test]
+    fn reads_eseq_modes_and_finds_points_by_position() {
+        let dir = tempfile::tempdir().unwrap();
+        // 3 points on a line, 2 modes: point 2 is at x = 1.
+        let modes = serde_json::json!({
+            "format": "eseq-modes", "version": 1, "freqs": [100.0, 250.0],
+            "points": [0, 0, 0, 0.5, 0, 0, 1, 0, 0], "normals": [0, 0, 1, 0, 0, 1, 0, 0, 1],
+            "triangles": [], "shapes": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6], "mass": 0.2
+        });
+        std::fs::write(dir.path().join("bar.modes.json"), modes.to_string()).unwrap();
+        let script = data_patch("(modal-read-data \"bar.modes.json\")", "(list 0.9 0 0)", "1");
+        let instrument =
+            generate_modal_instrument(&mut modal_vm(), dir.path().join("bar.lisp"), &script).unwrap();
+        let dsp = &instrument.dsp;
+        assert!(dsp.contains("(def obj_shapes (tensor @shape [3 2] @data [0.1 0.2 0.3 0.4 0.5 0.6]))"), "{dsp}");
+        // (0.9 0 0) is nearest point 2; the mic sits on point 1.
+        assert!(dsp.contains("(param hit_obj_pt @group hit @default 2 @min 0 @max 2"), "{dsp}");
+        assert!(dsp.contains("(param mic1_obj_pt @group mic1 @default 1 @min 0 @max 2"), "{dsp}");
+    }
+
+    #[test]
+    fn a_large_data_object_compiles_only_the_points_in_use() {
+        let shapes: Vec<String> = (0..100).map(|k| format!("(list {k} 1)")).collect();
+        let data = format!("(dict :freqs (list 100 200) :shapes (list {}))", shapes.join(" "));
+        let instrument =
+            generate_modal_instrument(&mut modal_vm(), PathBuf::from("big.lisp"), &data_patch(&data, "70", "30"))
+                .unwrap();
+        let dsp = &instrument.dsp;
+        assert!(dsp.contains("(def obj_shapes (tensor @shape [2 2] @data [70 1 30 1]))"), "{dsp}");
+        assert!(dsp.contains("(param hit_obj_pt @group hit @default 0 @min 0 @max 1"), "{dsp}");
+        assert!(dsp.contains("(param mic1_obj_pt @group mic1 @default 1 @min 0 @max 1"), "{dsp}");
+    }
+
+    #[test]
+    fn checks_data_objects() {
+        let mut vm = modal_vm();
+        for (data, at, expected) in [
+            ("(dict :freqs (list 100 200) :losses (list 1))", "0", "modal-data obj: 1 losses for 2 modes"),
+            ("(dict :freqs (list 100) :shapes (list (list 1) (list 1)))", "5", "felt hit b: modal-data obj has points 0..1, got 5"),
+            ("(dict :freqs (list 100))", "(list 1 2 3)", "felt hit b: modal-data obj has no :points to find (1 2 3) among"),
+        ] {
+            let errors = generate_modal_instrument(&mut vm, PathBuf::from("x.lisp"), &data_patch(data, at, "0"))
+                .unwrap_err();
+            assert_eq!(errors, vec![expected.to_string()], "{data}");
+        }
+    }
+
+    /// The dsp of a patch striking `object` (id 'o) at `at` and hearing it at
+    /// `listen`.
+    fn struck_dsp(object: &str, at: &str, listen: &str) -> String {
+        let script = format!(
+            "(import eseq.modal :as m)
+(import eseq.modal.materials :as mat)
+(m/patch :name \"probe\"
+  :objects (list (m/mallet 'mal) {object})
+  :connections (list (m/felt 'hit 'mal 'o {at}))
+  :listens (list (m/listen 'o {listen})))"
+        );
+        generate_modal_instrument(&mut modal_vm(), PathBuf::from("probe.lisp"), &script).unwrap().dsp
+    }
+
+    #[test]
+    fn generates_the_analytic_objects() {
+        let bar = struck_dsp("(m/bar 'o :modes 4)", "0.4", "0.1");
+        assert!(bar.contains("(def o_beta (tensor @shape [4] @data [4.73004074 7.85320462 10.9956078 14.1371655]))"), "{bar}");
+        // natural ratios 1 : 2.7565 : 5.4039 : 8.933, undercut targets 1 : 4 : 10
+        assert!(bar.contains("@data [1 2.7565"), "{bar}");
+        assert!(bar.contains("@data [1 4 10 16.5305"), "{bar}");
+        assert!(bar.contains("(param hit_o_at @group hit @default 0.4 @min 0 @max 1"), "{bar}");
+
+        let skin = struck_dsp("(m/rect-membrane 'o :grid 3)", "(list 0.3 0.4)", "(list 0.5 0.5)");
+        assert!(skin.contains("(def o_grid (iota 9))"), "{skin}");
+        assert!(skin.contains("(make-history o_s1 @shape [9])"), "{skin}");
+
+        let plate = struck_dsp("(m/plate 'o :grid 5)", "(list 0.3 0.4)", "(list 0.5 0.5)");
+        assert!(plate.contains("(def o_grid (iota 25))"), "{plate}");
+
+        // A clamped disc's first mode: lambda^2 = 10.2158 (Leissa).
+        let disc = struck_dsp("(m/circ-plate 'o :edge :clamped :modes 6)", "(list 0.3 0)", "(list 0.5 1)");
+        assert!(disc.contains("@data [10.2158"), "{disc}");
+        assert!(disc.contains("(def o_order (tensor @shape [6] @data [0 1 2 0 3 1]))"), "{disc}");
+
+        let osc = struck_dsp("(m/oscillator 'o :tune 0.5)", "0", "0");
+        assert!(osc.contains("(def o_hz (tensor @shape [1] @data [440]))"), "{osc}");
+        assert!(osc.contains("(def o_ratio (* o_tune (/ f0 440)))"), "{osc}");
+    }
+
+    #[test]
+    fn drivers_and_weights() {
+        let script = "(import eseq.modal :as m)
+(m/patch :name \"probe-drivers\"
+  :objects (list (m/string 'str))
+  :connections (list (m/force 'ebow 'str 0.3 :signal (list (m/envelope :sustain 1) (m/sine :ratio 2)))
+                     (m/position 'clamp 'str 0.5)
+                     (m/speed 'push 'str 0.7 :signal (m/constant 0.5))
+                     (m/bow 'bow 'str 0.12 :weight 0.5))
+  :listens (list (m/listen 'str 0.2)))";
+        let instrument =
+            generate_modal_instrument(&mut modal_vm(), PathBuf::from("drivers.lisp"), script).unwrap();
+        let dsp = &instrument.dsp;
+        // The force is gain x envelope x sine, solved once like an exciter.
+        assert!(dsp.contains("(adsr gate hit ebow_env_attack ebow_env_decay ebow_env_sustain ebow_env_release)"), "{dsp}");
+        assert!(dsp.contains("(sin (* twopi (phasor (* f0 ebow_sine1_ratio))))"), "{dsp}");
+        assert!(dsp.contains("(def ebow_F (* ebow_weight ebow_gain ebow_sig))"), "{dsp}");
+        assert!(dsp.contains("(param ebow_env_sustain @group ebow @default 1"), "{dsp}");
+        // Position pins to its signal; speed integrates it with a leak.
+        assert!(dsp.contains("(def clamp_anchor clamp_sig)"), "{dsp}");
+        assert!(dsp.contains("(def push_sig push_const_value)"), "{dsp}");
+        assert!(dsp.contains("(* (exp (/ -0.5 samplerate)) (read-history push_anchor_h))"), "{dsp}");
+        assert!(dsp.contains("(spring-connection (- clamp_anchor clamp_y_b0) clamp_C_b0 clamp_stiff)"), "{dsp}");
+        // Every connection has a weight; the bow's scales its pressure.
+        assert!(dsp.contains("(param bow_weight @group bow @default 0.5 @min 0 @max 1"), "{dsp}");
+        assert!(dsp.contains("(* bow_pressure bow_env bow_weight)"), "{dsp}");
+    }
+
+    #[test]
+    fn spectral_controls_and_mode_selection() {
+        let script = "(import eseq.modal :as m)
+(m/patch :name \"probe-spectral\"
+  :objects (list (m/finger 'fin)
+                 (m/spectral (m/plate 'pl :grid 2) :follow-note true :loss-scales (list 2) :gains (list 1 0.5)))
+  :connections (list (m/pluck 'pick 'fin 'pl (list 0.3 0.4)))
+  :listens (list (m/listen 'pl (list 0.2 0.7) :modes (list 0 3))))";
+        let instrument =
+            generate_modal_instrument(&mut modal_vm(), PathBuf::from("spectral.lisp"), script).unwrap();
+        let dsp = &instrument.dsp;
+        assert!(dsp.contains("(param pl_bend @group pl @default 0 @min -2400 @max 2400 @unit ct)"), "{dsp}");
+        assert!(dsp.contains("(param pl_diffraction @group pl @default 1"), "{dsp}");
+        // The raw spectrum is kept; the warp follows the note from mode 0.
+        assert!(dsp.contains("(def pl_f1_0 (sum (* pl_freqs0 (tensor @shape [4] @data [1 0 0 0]))))"), "{dsp}");
+        assert!(dsp.contains("(/ f0 pl_f1_0)"), "{dsp}");
+        assert!(dsp.contains("(log (+ (* pl_diffraction 1.718281828) 1))"), "{dsp}");
+        assert!(dsp.contains("(tensor @shape [4] @data [2 1 1 1])"), "{dsp}");
+        // The mic hears modes 0 and 3, through the object's gains.
+        assert!(dsp.contains("(tensor @shape [4] @data [1 0.5 1 1])"), "{dsp}");
+        assert!(dsp.contains("(tensor @shape [4] @data [1 0 0 1])"), "{dsp}");
+    }
+
+    #[test]
+    fn checks_spectral_listens_and_data_files() {
+        let mut vm = modal_vm();
+        let patch = |objects: &str, listen: &str| {
+            format!(
+                "(import eseq.modal :as m)
+(m/patch :name \"probe\" :objects (list (m/mallet 'mal) {objects})
+  :connections (list (m/felt 'hit 'mal 'o 0)) :listens (list {listen}))"
+            )
+        };
+        for (objects, listen, expected) in [
+            ("(m/spectral (m/mallet 'x)) (m/bar 'o)", "(m/listen 'o 0.1)", "mallet x: spectral needs a modal object"),
+            ("(m/bar 'o :modes 4)", "(m/listen 'o 0.1 :modes (list 4))", "listen o: no mode 4 (it has 4, from 0)"),
+            ("(m/modal-data 'o :data (modal-read-data \"missing.txt\"))", "(m/listen 'o 0)", "missing.txt"),
+            ("(m/modal-data 'o :freqs (list 100) :shapes (list (list 1) (list 1)) :points (list (list 0 0 0)))",
+             "(m/listen 'o 0)", "modal-data o: 1 points for 2 shape rows"),
+        ] {
+            let errors = generate_modal_instrument(&mut vm, PathBuf::from("x.lisp"), &patch(objects, listen)).unwrap_err();
+            assert!(errors.iter().any(|error| error.contains(expected)), "{objects}: {errors:?}");
+        }
+        // Data modes are sorted by frequency, losses and shape columns with them.
+        let dsp = generate_modal_instrument(
+            &mut vm,
+            PathBuf::from("x.lisp"),
+            &patch("(m/modal-data 'o :freqs (list 300 100 200) :losses (list 3 1 2) :amps (list 0.3 0.1 0.2))", "(m/listen 'o 0)"),
+        )
+        .unwrap()
+        .dsp;
+        assert!(dsp.contains("(def o_hz (tensor @shape [3] @data [100 200 300]))"), "{dsp}");
+        assert!(dsp.contains("(def o_loss0 (tensor @shape [3] @data [1 2 3]))"), "{dsp}");
+        assert!(dsp.contains("@data [0.1 0.2 0.3]"), "{dsp}");
     }
 
     #[test]

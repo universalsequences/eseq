@@ -2465,6 +2465,8 @@ impl Runtime {
             ("fract", "(fract x)", "Return the fractional part."),
             ("pow", "(pow base exponent)", "Return base raised to exponent."),
             ("atan2", "(atan2 y x)", "Return the angle of vector x/y in radians."),
+            ("bessel-j", "(bessel-j m x)", "Bessel function of the first kind J_m(x), integer order m."),
+            ("bessel-i", "(bessel-i m x)", "Modified Bessel function of the first kind I_m(x), integer order m."),
             ("mod", "(mod a b)", "Return the floating-point remainder of a divided by b."),
             ("clamp", "(clamp value low high)", "Clamp value to the inclusive numeric range."),
             ("mix", "(mix a b t)", "Linearly interpolate between a and b by t."),

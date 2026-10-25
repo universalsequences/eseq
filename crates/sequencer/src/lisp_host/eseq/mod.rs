@@ -14,6 +14,7 @@ pub mod graph_update;
 pub mod kinds;
 pub mod midi_fx;
 pub mod modal_patch;
+pub mod modal_plates;
 pub mod neural_natives;
 pub mod process_dsl_parse;
 pub mod process_library;

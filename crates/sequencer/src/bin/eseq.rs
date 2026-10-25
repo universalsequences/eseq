@@ -32,6 +32,7 @@ fn core_vm() -> eseqlisp::vm::VM {
     let mut vm = eseqlisp::vm::VM::new(Vec::new());
     eseqlisp::vm::register_core_natives(&mut vm);
     eseqlisp::vm::register_math_natives(&mut vm);
+    sequencer::lisp_host::register_modal_natives(&mut vm);
     let (roots, _) = sequencer::app_paths::app_paths().module_load_roots();
     vm.source_manager.set_scoped_module_load_roots(roots);
     vm

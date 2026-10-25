@@ -209,7 +209,10 @@ orbit; geometry size limits; which voice the amplitudes come from.
 
 Each tier builds on the previous; within a tier items are independent.
 
-**Tier 1: cheap, high value, no new solver work**
+**Tier 1: cheap, high value, no new solver work** (done 2026-10-25: data
+objects and modal-read-data; bar, rect-membrane, circ-plate, oscillator,
+plate grid; force / position / speed drivers with signals and a weight on
+every connection; m/spectral and listen :modes; see tools/modal/README.md)
 
 1. Data-defined objects (`single-point`, `multiple-points`, modres import):
    the runtime half of FE and of measured instruments.

@@ -36,8 +36,9 @@
 
 (import eseq.modal.materials :as mat)
 
-(export string plate membrane finger mallet
-        pluck spring felt bow listen patch
+(export string plate membrane finger mallet modal-data bar rect-membrane oscillator circ-plate
+        pluck spring felt bow force position speed listen patch
+        envelope noise sine constant signal spectral
         check dsp ui generate)
 
 ;; ── small helpers ───────────────────────────────────────────────────────────
@@ -106,6 +107,36 @@
   (if (= (len values) 1) (first values)
     `(selector (+ 1 (clip (round ,idx) 0 ,(- (len values) 1))) ,@values)))
 
+;; A tensor literal of values (one per mode, usually).
+;;   values  a list of numbers
+(def tensor-form (values) `(tensor @shape [ ,(len values) ] @data [ ,@values ]))
+
+;; The first position of x in xs, or nil.
+;;   xs  a list
+;;   x   a value
+(def index-of (xs x)
+  (reduce (lambda (found k) (if (= found nil) (if (= (nth xs k) x) k nil) found)) nil (range (len xs))))
+
+;; True when xs holds x.
+;;   xs  a list
+;;   x   a value
+(def member? (xs x) (not (= (index-of xs x) nil)))
+
+;; True when xs[k] appears nowhere before k.
+;;   xs  a list
+;;   k   a position in it
+(def first-occurrence? (xs k) (= (index-of xs (nth xs k)) k))
+
+;; The params every note-following object ends with: mute (extra damping
+;; while the note is released), tune (a frequency ratio) and mass (relative
+;; to one modal mass).
+;;   id                the object's id
+;;   tune, mute, mass  their starting values
+(def note-params (id tune mute mass)
+  (list (pspec id "mute" mute 0 60 :title "Mute")
+        (pspec id "tune" tune 0.25 4 :title "Tune" :dec 3)
+        (pspec id "mass" mass 0.01 1000 :title "Mass" :taper :log)))
+
 ;; ── objects ─────────────────────────────────────────────────────────────────
 ;; Each constructor returns an object dict:
 ;;   :id      the name everything the object introduces is prefixed with
@@ -119,6 +150,8 @@
 ;;            whose value every call auto-quotes (it carries shader code
 ;;            for widgets)
 ;;   :params  its param specs, in panel order
+;;   :fixed-pitch  true when its pitch is its own (material, size) rather
+;;                 than the played note's
 ;; Lengths are in metres unless a name says otherwise.
 
 ;; A stiff string. Its fundamental follows the played note.
@@ -154,9 +187,12 @@
 ;;             plates move less when a connection pushes them
 ;;   loss      damping at every frequency
 ;;   damp      damping that rises with frequency (panel "HF damp")
+;;   grid      modes per side: the plate has grid x grid modes (fixed when
+;;             generated)
 (def plate (id &key (made-of mat/spruce) (thick-mm 3) (width 0.45) (height 0.35)
-                (mass 30) (loss 4) (damp 0.3))
-  (dict :id id :title "PLATE" :kind :plate :lumped false :modes 64 :stuff made-of
+                (mass 30) (loss 4) (damp 0.3) (grid 8))
+  (dict :id id :title "PLATE" :kind :plate :lumped false :grid grid :modes (* grid grid) :stuff made-of
+        :fixed-pitch true
         :params (append (material-params id made-of)
                 (list (pspec id "thick" thick-mm 0.5 20 :unit 'mm :title "Thick" :taper :log)
                       (pspec id "mass" mass 1 1000 :title "Mass" :taper :log)
@@ -180,6 +216,85 @@
                       (pspec id "choke" choke 0 60 :title "Choke")
                       (pspec id "tune" tune 0.25 4 :title "Tune" :dec 3)
                       (pspec id "modes" modes 1 120 :title "Modes" :dec 0))))
+
+;; A free bar (Euler-Bernoulli beam, free at both ends): marimba, xylophone,
+;; glockenspiel, vibraphone bars. Its fundamental follows the played note;
+;; the uppers sit at the free bar's 1 : 2.756 : 5.404 : 8.933 ...
+;;   id        the object's id ('bar)
+;;   modes     how many modes (fixed when generated)
+;;   undercut  0 keeps the natural ratios; 1 tunes modes 2 and 3 to 4 and
+;;             10 times the fundamental, as a marimba bar's arch does (a
+;;             spectral approximation of undercutting, not its geometry)
+;;   loss      damping at every frequency
+;;   hf-loss   damping that rises with frequency (panel "HF loss")
+;;   mute      extra damping while the note is released
+;;   tune      frequency ratio to the played note
+;;   mass      relative to one modal mass, as for a plate
+(def bar (id &key (modes 12) (undercut 0) (loss 3) (hf-loss 0.6) (mute 0) (tune 1) (mass 1))
+  (dict :id id :title "BAR" :kind :bar :lumped false :modes modes
+        :params (append (list (pspec id "undercut" undercut 0 1 :title "Undercut")
+                              (pspec id "loss" loss 0 40 :title "Loss")
+                              (pspec id "hf_loss" hf-loss 0 10 :title "HF loss"))
+                        (note-params id tune mute mass))))
+
+;; A rectangular membrane, fixed at its edges (Modalys rect-membrane):
+;; grid x grid modes at f0 sqrt((m / aspect)^2 + n^2), scaled so mode (1, 1)
+;; follows the played note.
+;;   id      the object's id ('head)
+;;   grid    modes per side (fixed when generated)
+;;   aspect  width over height
+;;   loss    damping at every frequency (panel "Decay")
+;;   hf-loss damping that rises with frequency (panel "Dark")
+;;   mute    extra damping while the note is released
+;;   tune    frequency ratio to the played note
+;;   mass    relative to one modal mass
+(def rect-membrane (id &key (grid 8) (aspect 1.4) (loss 6) (hf-loss 1) (mute 0) (tune 1) (mass 1))
+  (dict :id id :title "MEMBRANE" :kind :rect-membrane :lumped false :grid grid :modes (* grid grid)
+        :params (append (list (pspec id "aspect" aspect 0.2 5 :title "Aspect" :taper :log)
+                              (pspec id "loss" loss 0 60 :title "Decay")
+                              (pspec id "hf_loss" hf-loss 0 10 :title "Dark"))
+                        (note-params id tune mute mass))))
+
+;; A circular plate (Modalys clamped-circ-plate / free-circ-plate), Kirchhoff
+;; bending: cymbals, gongs, bells' crowns, tam-tams, steel discs. Its pitch
+;; comes from its material and size (and tune), not the note. The modes are
+;; every root of the plate's Bessel-function frequency equation, solved
+;; natively (modal-circ-plate-modes, Leissa 1969); a free edge's depend on
+;; Poisson's ratio (that of the first material it is made of).
+;;   id        the object's id ('cym)
+;;   edge      :free (cymbals, gongs) or :clamped
+;;   made-of   a material, or a list of them: a menu param
+;;   radius    m
+;;   thick-mm  thickness, mm
+;;   modes     how many modes (fixed when generated)
+;;   loss      damping at every frequency
+;;   damp      damping that rises with frequency (panel "HF damp")
+;;   tune      frequency ratio
+;;   mass      relative to one modal mass, as for a plate
+(def circ-plate (id &key (edge :free) (made-of mat/bronze) (radius 0.2) (thick-mm 1.5) (modes 48)
+                    (loss 2) (damp 0.4) (tune 1) (mass 2))
+  (let ((nu (if (made-of? made-of) (get (first (material-choices made-of)) :poisson) 0.3))
+        (found (modal-circ-plate-modes edge nu modes (circ-samples))))
+  (dict :id id :title (if (= edge :clamped) "CLAMPED PLATE" "FREE PLATE") :kind :circ-plate
+        :lumped false :modes (len found) :plate-modes found :edge edge :stuff made-of :fixed-pitch true
+        :params (append (material-params id made-of)
+                (list (pspec id "radius" radius 0.02 2 :unit 'm :title "Radius" :taper :log)
+                      (pspec id "thick" thick-mm 0.1 20 :unit 'mm :title "Thick" :taper :log)
+                      (pspec id "mass" mass 0.1 1000 :title "Mass" :taper :log)
+                      (pspec id "loss" loss 0 40 :title "Loss")
+                      (pspec id "damp" damp 0 5 :title "HF damp")
+                      (pspec id "tune" tune 0.25 8 :title "Tune" :dec 3))))))
+
+;; A harmonic oscillator (Modalys harmonic-oscillator): one mode, a mass on
+;; a spring, at the played note. The usual reed or lip, or a resonance to
+;; couple a string to. It is a one-mode data object.
+;;   id    the object's id ('osc)
+;;   loss  its decay rate, 1/s
+;;   tune  frequency ratio to the played note
+;;   mass  relative to one modal mass
+(def oscillator (id &key (loss 5) (tune 1) (mass 1))
+  (merge (modal-data id :freqs (list 440) :losses (list loss) :root 440 :tune tune :mass mass)
+         :title "OSC" :label "oscillator"))
 
 ;; A finger (Modalys' two-mass): a hand on a trajectory (from +start to
 ;; -depth over stroke-ms after each hit) with a soft tip hung off it. Pair it
@@ -212,6 +327,65 @@
         :params (list (pspec id "mass" mass 0.002 0.5 :title "Mass" :taper :log :dec 3)
                       (pspec id "speed" speed 0.1 4 :title "Speed"))))
 
+;; A modal object defined by data (Modalys' single-point / multiple-points):
+;; its modes' frequencies and losses, and their shapes over a set of points.
+;; A finite-element solid, a measured resonance model, or numbers written by
+;; hand. Its fundamental is fixed unless the data names the pitch it was
+;; tuned at (root), when the modes follow the played note. The modes are
+;; sorted by frequency (with their losses and shape columns).
+;;   id          the object's id ('bell)
+;;   data        a dict whose :freqs :losses :bandwidths :amps :shapes
+;;               :points :root :mass fill the arguments below that are not
+;;               given: what (modal-read-data "bell.modes.json") or
+;;               (modal-read-data "bell.txt") returns, or your own (an error
+;;               message from modal-read-data is reported by check)
+;;   freqs       mode frequencies, Hz
+;;   losses      per-mode decay rates, 1/s
+;;   bandwidths  per-mode -3 dB bandwidths, Hz (decay rate pi bw), when no
+;;               losses are given; 1 Hz each when neither is
+;;   amps        one gain per mode, for an object heard at a single point
+;;   shapes      one list of N values per point: each mode's shape over the
+;;               points; default a single point with amps (or all 1)
+;;   points      one (x y z) per point, so accesses can name a position
+;;   root        the frequency the data was tuned at; nil keeps it fixed
+;;   tune        frequency ratio (to the note when root is given)
+;;   decay       multiplies every loss (panel "Decay x")
+;;   mute        extra damping while the note is released
+;;   mass        relative to one modal mass, as for a plate (default 1)
+(def modal-data (id &key (data nil) (freqs nil) (losses nil) (bandwidths nil) (amps nil)
+                    (shapes nil) (points nil) (root nil) (tune 1) (decay 1) (mute 0) (mass nil))
+  (let ((table (if (map? data) data nil))
+        (given (lambda (value key) (if value value (if table (get table key) nil))))
+        (fs (given freqs :freqs))
+        (n (if (list? fs) (len fs) 0))
+        (order (sort-by-value (if (list? fs) fs (list))))
+        (reorder (lambda (xs) (if (and (list? xs) (= (len xs) n)) (map (lambda (k) (nth xs k)) order) xs)))
+        (ls (given losses :losses))
+        (bw (given bandwidths :bandwidths))
+        (am (given amps :amps))
+        (sh (given shapes :shapes))
+        (ones (map (lambda (k) 1) (range n))))
+    (dict :id id :title "MODES" :label "modal-data" :kind :data :lumped false :modes n
+          :data-error (if (string? data) data nil)
+          :freqs (reorder fs)
+          :losses (reorder (if ls ls (map (lambda (b) (* 3.14159265 b)) (if bw bw ones))))
+          :shapes (map reorder (if (list? sh) sh (list (if am am ones))))
+          :points (given points :points)
+          :root (given root :root)
+          :fixed-pitch (= (given root :root) nil)
+          :params (append (list (pspec id "decay" decay 0.05 20 :title "Decay x" :taper :log))
+                          (note-params id tune mute (if mass mass (if (given nil :mass) (given nil :mass) 1)))))))
+
+;; The positions of xs's numbers in increasing order (insertion sort; a few
+;; hundred modes at most).
+;;   xs  a list of numbers
+(def sort-by-value (xs)
+  (reduce (lambda (sorted k)
+            (append (filter (lambda (j) (<= (nth xs j) (nth xs k))) sorted)
+                    (list k)
+                    (filter (lambda (j) (> (nth xs j) (nth xs k))) sorted)))
+          (list) (range (len xs))))
+
 ;; ── connections ─────────────────────────────────────────────────────────────
 ;; Each constructor returns a connection dict:
 ;;   :id         the name everything the connection introduces is prefixed with
@@ -225,6 +399,7 @@
 ;;               0..1), or (list r theta) on a membrane (r 0..0.95, theta in
 ;;               radians). Positions become params.
 ;;   :params     the law's own param specs
+;;   :weight     its starting weight (every connection's weight param)
 ;; resolve-connection later adds :a-lumped / :b-lumped.
 
 ;; A finger plucking an object: the tip catches it, holds it as the hand
@@ -236,8 +411,8 @@
 ;;   stiff      how hard the tip grips (panel "Grip")
 ;;   threshold  how far the tip pulls b before it slips off (panel
 ;;              "Release"); softer hits release sooner
-(def pluck (id a b at &key (stiff 20) (threshold 0.05))
-  (dict :id id :title "PLUCK" :law :pluck :a a :b b :a-at nil :b-at at
+(def pluck (id a b at &key (stiff 20) (threshold 0.05) (weight 1))
+  (dict :id id :title "PLUCK" :law :pluck :a a :b b :a-at nil :b-at at :weight weight
         :params (list (pspec id "stiff" stiff 0.5 200 :title "Grip" :taper :log :dec 1)
                       (pspec id "thresh" threshold 0.002 0.3 :title "Release" :taper :log :dec 3))))
 
@@ -247,8 +422,8 @@
 ;;   a-at       where on a it attaches
 ;;   b-at       where on b it attaches
 ;;   stiffness  how stiff it is (panel "Glue"); any value is stable
-(def spring (id a a-at b b-at &key (stiffness 2))
-  (dict :id id :title "SPRING" :law :spring :a a :b b :a-at a-at :b-at b-at
+(def spring (id a a-at b b-at &key (stiffness 2) (weight 1))
+  (dict :id id :title "SPRING" :law :spring :a a :b b :a-at a-at :b-at b-at :weight weight
         :params (list (pspec id "stiff" stiffness 0 50 :title "Glue" :dec 1))))
 
 ;; A one-sided, hardening felt between a mallet and the object it strikes.
@@ -258,8 +433,8 @@
 ;;   b-at      where on b it strikes
 ;;   felt      the felt's stiffness at rest
 ;;   hardness  how much it stiffens as it is squashed, 0..1 (panel "Hard")
-(def felt (id a b b-at &key (felt 0.005) (hardness 0.5))
-  (dict :id id :title "FELT" :law :felt :a a :b b :a-at nil :b-at b-at
+(def felt (id a b b-at &key (felt 0.005) (hardness 0.5) (weight 1))
+  (dict :id id :title "FELT" :law :felt :a a :b b :a-at nil :b-at b-at :weight weight
         :params (list (pspec id "felt" felt 0.0005 5 :title "Felt" :taper :log :dec 4)
                       (pspec id "hardness" hardness 0 1 :title "Hard"))))
 
@@ -276,19 +451,206 @@
 ;;   slip        how wide the stick region is, relative to the speed
 ;;   attack-ms   time for the bow to come up to speed, ms
 ;;   release-ms  time for it to stop after the note is released, ms
-(def bow (id b at &key (pressure 0.2) (speed 0.2) (slip 1) (attack-ms 60) (release-ms 120))
-  (dict :id id :title "BOW" :law :bow :a nil :b b :a-at nil :b-at at
+(def bow (id b at &key (pressure 0.2) (speed 0.2) (slip 1) (attack-ms 60) (release-ms 120) (weight 1))
+  (dict :id id :title "BOW" :law :bow :a nil :b b :a-at nil :b-at at :weight weight
         :params (list (pspec id "pressure" pressure 0.01 2 :title "Pressure" :taper :log)
                       (pspec id "speed" speed 0.01 1 :title "Speed" :taper :log)
                       (pspec id "slip" slip 0.1 3 :title "Slip")
                       (pspec id "attack" attack-ms 1 1000 :unit 'ms :title "Attack" :taper :log)
                       (pspec id "release" release-ms 1 2000 :unit 'ms :title "Release" :taper :log))))
 
+;; Every connection's weight: 0..1 of its force (of its pressure for a bow),
+;; for fading an interaction in or out or coupling partly (Modalys' weight).
+;; Scaling an implicit force down never makes it unstable.
+;;   id      the connection's id
+;;   weight  the starting weight
+(def weight-param (id weight) (pspec id "weight" weight 0 1 :title "Weight"))
+
+;; ── drivers and signals ─────────────────────────────────────────────────────
+;; Drivers move an access point from outside the patch (Modalys' force,
+;; position and speed connections). What drives them is a signal: plain data
+;; naming a little DGenLisp circuit, or a list of signals multiplied
+;; together:
+;;   (m/force 'buzz 'str 0.2 :signal (list (m/envelope :attack-ms 50) (m/sine :ratio 2)))
+;; Each signal kind is a row of signal-kinds: its params, and the forms and
+;; value it emits.
+
+;; DGenLisp's adsr on the gate, restarted by each note and scaled by its
+;; velocity.
+;;   attack-ms, decay-ms, release-ms  stage times, ms
+;;   sustain                          the level held while the gate is up
+(def envelope (&key (attack-ms 5) (decay-ms 300) (sustain 0) (release-ms 100))
+  (dict :kind :signal :name :env :args (list attack-ms decay-ms sustain release-ms)))
+
+;; White noise, -1..1.
+(def noise () (dict :kind :signal :name :noise :args (list)))
+
+;; A sine at ratio times the note.
+;;   ratio  frequency ratio to the note
+(def sine (&key (ratio 1)) (dict :kind :signal :name :sine :args (list ratio)))
+
+;; A constant (a knob).
+;;   value  its starting value, -1..1
+(def constant (value) (dict :kind :signal :name :const :args (list value)))
+
+;; Any DGenLisp expression as a signal; it may use gate, velocity, f0, hit
+;; (1 on a note's first sample), age (seconds since) and hit_velocity.
+;;   form  the expression, quoted
+(def signal (form) (dict :kind :signal :name :form :args (list form)))
+
+;; One row per signal kind:
+;;   :params (lambda (cid n args) specs)  its params
+;;   :forms  (lambda (n args) forms)      what it defines first
+;;   :value  (lambda (n args) form)       its value
+;; where n maps a suffix to the signal's symbol (cid_env_suffix).
+(def signal-kinds ()
+  (dict
+    :env (dict :params (lambda (cid n args)
+                         (list (pspec cid (str n "_attack") (nth args 0) 0.1 2000 :unit 'ms :title "Attack" :taper :log)
+                               (pspec cid (str n "_decay") (nth args 1) 1 10000 :unit 'ms :title "Decay" :taper :log)
+                               (pspec cid (str n "_sustain") (nth args 2) 0 1 :title "Sustain")
+                               (pspec cid (str n "_release") (nth args 3) 1 10000 :unit 'ms :title "Release" :taper :log)))
+               :forms (lambda (n args) nil)
+               :value (lambda (n args)
+                        `(* (adsr gate hit ,(n "_attack") ,(n "_decay") ,(n "_sustain") ,(n "_release")) hit_velocity)))
+    :noise (dict :params (lambda (cid n args) nil) :forms (lambda (n args) nil)
+                 :value (lambda (n args) `(- (* 2 (noise)) 1)))
+    :sine (dict :params (lambda (cid n args)
+                          (list (pspec cid (str n "_ratio") (nth args 0) 0.125 16 :title "Ratio" :taper :log :dec 3)))
+                :forms (lambda (n args) nil)
+                :value (lambda (n args) `(sin (* twopi (phasor (* f0 ,(n "_ratio")))))))
+    :const (dict :params (lambda (cid n args) (list (pspec cid (str n "_value") (nth args 0) -1 1 :title "Value")))
+                 :forms (lambda (n args) nil)
+                 :value (lambda (n args) (n "_value")))
+    :form (dict :params (lambda (cid n args) nil) :forms (lambda (n args) nil)
+                :value (lambda (n args) (first args)))))
+
+;; A driver's signals as a list (one signal, or a list of them).
+;;   sig  a signal or a list of signals
+(def signals-of (sig) (if (map? sig) (list sig) sig))
+
+;; The name a driver's k-th signal's params and forms share: env, env1, ...
+;;   sig  the signal
+;;   k    its position among the driver's signals
+(def signal-name (sig k) (str (bare (get sig :name)) (if (= k 0) "" k)))
+
+;; Calls one column of a driver's signals' rows, with each signal's name
+;; function and args.
+;;   c       a driver connection
+;;   column  :params, :forms or :value
+;;   call    (lambda (f n args) ...) applying that column's function
+(def each-signal (c column call)
+  (let ((cid (get c :id)) (sigs (signals-of (get c :signal))))
+    (map (lambda (k)
+           (let ((sig (nth sigs k)))
+             (call (get (get (signal-kinds) (get sig :name)) column)
+                   (lambda (suffix) (nm cid (str (signal-name sig k) suffix)))
+                   (get sig :args)
+                   (signal-name sig k))))
+         (range (len sigs)))))
+
+;; What is wrong with a driver's signals: anything that is not a signal of a
+;; known kind.
+;;   c  a driver connection
+(def signal-errors (c)
+  (concat-all
+    (map (lambda (sig)
+           (if (and (map? sig) (= (get sig :kind) :signal) (map? (get (signal-kinds) (get sig :name))))
+             nil
+             (list (str (what c) ": " (source sig) " is not a signal (m/envelope, m/noise, m/sine, m/constant, m/signal)"))))
+         (signals-of (get c :signal)))))
+
+;; The params of a driver's signals.
+;;   id   the driver's id
+;;   sig  a signal or a list of them
+(def signal-params (id sig)
+  (concat-all (each-signal (dict :id id :signal sig) :params
+                           (lambda (f n args name) (f id name args)))))
+
+;; Forms defining a driver's signal, cid_sig: each signal's circuit, then
+;; their product.
+;;   c  a driver connection
+(def signal-forms (c)
+  (append (concat-all (each-signal c :forms (lambda (f n args name) (f n args))))
+          (list `(def ,(nm (get c :id) "sig")
+                   ,(product-form (each-signal c :value (lambda (f n args name) (f n args))))))))
+
+;; A form multiplying forms: 1 for none, the form for one, else (* ...).
+;;   forms  a list of forms
+(def product-form (forms)
+  (if (empty? forms) 1 (if (= (len forms) 1) (first forms) (cons '* forms))))
+
+;; A force on b's access point: gain times the signal (a force of 1 moves the
+;; object's fundamental by about one unit, whatever its pitch).
+;;   id      the connection's id ('buzz)
+;;   b       the driven object's id
+;;   at      where on b
+;;   signal  a signal, or a list of them multiplied (default an envelope)
+;;   gain    the force's scale
+;;   weight  0..1, as for every connection
+(def force (id b at &key (signal (envelope)) (gain 0.05) (weight 1))
+  (dict :id id :title "FORCE" :law :force :a nil :b b :a-at nil :b-at at :signal signal :weight weight
+        :params (append (list (pspec id "gain" gain 0 2 :title "Gain" :dec 3))
+                        (signal-params id signal))))
+
+;; Holds b's access point at the signal's value (a displacement) through a
+;; stiff implicit spring: a constant 0 clamps the point (Modalys' position).
+;;   id         the connection's id ('clamp)
+;;   b, at      the driven object and where
+;;   signal     a signal (default (m/constant 0): a clamp)
+;;   stiffness  how hard it holds, relative to the point's give
+;;   weight     0..1
+(def position (id b at &key (signal (constant 0)) (stiffness 50) (weight 1))
+  (dict :id id :title "POSITION" :law :position :a nil :b b :a-at nil :b-at at :signal signal :weight weight
+        :params (append (list (pspec id "stiff" stiffness 0 1000 :title "Hold" :taper :log :dec 1))
+                        (signal-params id signal))))
+
+;; Moves b's access point at gain times the signal (units per second): the
+;; point follows a target the signal's integral drags along, which leaks back
+;; to rest with a 2 s time constant so it never drifts away (Modalys' speed).
+;;   id         the connection's id ('push)
+;;   b, at      the driven object and where
+;;   signal     a signal (default an envelope)
+;;   gain       speed scale
+;;   stiffness  how closely the point follows, relative to its give
+;;   weight     0..1
+(def speed (id b at &key (signal (envelope)) (gain 0.01) (stiffness 50) (weight 1))
+  (dict :id id :title "SPEED" :law :speed :a nil :b b :a-at nil :b-at at :signal signal :weight weight
+        :params (append (list (pspec id "gain" gain 0 1 :title "Gain" :dec 3)
+                              (pspec id "stiff" stiffness 0 1000 :title "Hold" :taper :log :dec 1))
+                        (signal-params id signal))))
+
 ;; A listening point (a mic): the output hears the velocity of obj at at.
 ;;   obj   the object's id
 ;;   at    where on it to listen, a position as for a connection
 ;;   gain  this mic's level in the mix
-(def listen (obj at &key (gain 1)) (dict :obj obj :at at :gain gain))
+;;   modes  which modes it hears, as mode numbers from 0 (Modalys'
+;;          point-output selector); nil hears all
+(def listen (obj at &key (gain 1) (modes nil)) (dict :obj obj :at at :gain gain :modes modes))
+
+;; obj with Modalys' pseudo-physical controls: its spectrum warped without
+;; recomputing it. Every mode's frequency is multiplied by freq-scales (one
+;; per mode, the rest 1), bent by the bend param (cents), made to follow the
+;; note (follow-note: the lowest mode at the played note, for objects with a
+;; pitch of their own, such as plates), then spread about the lowest mode by
+;; the diffraction param rho: f' = (f - f1) ln(rho (e - 1) + 1) + f1, so 1
+;; leaves it, 0 folds every mode onto f1, above 1 stretches it. Losses are
+;; multiplied by loss-scales and what its listens hear by gains (one per mode:
+;; a mode equalizer).
+;;   obj          an object
+;;   bend         starting pitch bend, cents (a param)
+;;   diffraction  starting rho (a param)
+;;   follow-note  true to put the lowest mode on the played note
+;;   freq-scales  per-mode frequency factors
+;;   loss-scales  per-mode loss factors
+;;   gains        per-mode gains for what listens hear
+(def spectral (obj &key (bend 0) (diffraction 1) (follow-note false) (freq-scales nil) (loss-scales nil) (gains nil))
+  (let ((id (get obj :id)))
+    (merge obj
+           :spectral (dict :follow follow-note :freq-scales freq-scales :loss-scales loss-scales :gains gains)
+           :params (append (get obj :params)
+                           (list (pspec id "bend" bend -2400 2400 :unit 'ct :title "Bend" :dec 0)
+                                 (pspec id "diffraction" diffraction 0 3 :title "Spread"))))))
 
 ;; A whole patch.
 ;;   name         the instrument's name; what Save offers, and the folder
@@ -298,9 +660,68 @@
 ;;   listens      a list of listens, mixed into the output
 ;;   level        an overall output trim
 (def patch (&key (name "modal") (objects nil) (connections nil) (listens nil) (level 1))
-  (dict :name name :objects objects :connections connections :listens listens :level level))
+  (dict :name name :objects (map (lambda (o) (compile-points o connections listens)) objects)
+        :connections connections :listens listens :level level))
+
+;; ── data objects' points ────────────────────────────────────────────────────
+;; A data object's accesses address its points by index or by (x y z) (the
+;; nearest point). The DSP holds the shape rows of its compiled points: all of
+;; them up to 64, else only those its connections and listens use (Modalys'
+;; compiled accesses), so a 2000-point solid stays a small table.
+
+;; How many points a data object has.
+;;   obj  a data object
+(def point-count (obj) (len (get obj :shapes)))
+
+;; The point an access position names on a data object: a number is an
+;; index, (x y z) the nearest of its :points; 0 when neither fits.
+;;   obj  a data object
+;;   at   the position
+(def point-index (obj at)
+  (if (number? at) (clamp (round at) 0 (- (point-count obj) 1))
+    (let ((pts (get obj :points)))
+      (if (and (list? at) (= (len at) 3) (list? pts) (not (empty? pts)))
+        (let ((dist (lambda (k) (let ((q (nth pts k)))
+                                  (+ (pow (- (nth q 0) (nth at 0)) 2) (pow (- (nth q 1) (nth at 1)) 2)
+                                     (pow (- (nth q 2) (nth at 2)) 2))))))
+          ;; (best distance) carried, so each point is measured once
+          (first (reduce (lambda (best k) (let ((d (dist k))) (if (< d (nth best 1)) (list k d) best)))
+                         (list 0 (dist 0)) (range (len pts)))))
+        0))))
+
+;; obj with :compiled, the points its DSP holds (in order), when obj is a
+;; data object; any other object unchanged.
+;;   obj          an object
+;;   connections  the patch's connections
+;;   listens      the patch's listens
+(def compile-points (obj connections listens)
+  (if (not (= (get obj :kind) :data)) obj
+    (if (<= (point-count obj) 64) (merge obj :compiled (range (point-count obj)))
+      (let ((id (get obj :id))
+            (ats (append (map (lambda (c) (if (= (get c :a) id) (get c :a-at) (get c :b-at)))
+                              (filter (lambda (c) (or (= (get c :a) id) (= (get c :b) id))) connections))
+                         (map (lambda (l) (get l :at)) (filter (lambda (l) (= (get l :obj) id)) listens))))
+            (used (map (lambda (at) (point-index obj at)) ats))
+            (unique (filter (lambda (k) (empty? (filter (lambda (j) (= (nth used j) (nth used k))) (range k))))
+                            (range (len used)))))
+        (merge obj :compiled (if (empty? unique) (list 0) (map (lambda (k) (nth used k)) unique)))))))
+
+;; Where in a data object's compiled points the point at sits (0 if absent).
+;;   obj  a data object (after compile-points)
+;;   at   an access position
+(def compiled-slot (obj at)
+  (let ((k (point-index obj at)) (cs (get obj :compiled)))
+    (reduce (lambda (found j) (if (= (nth cs j) k) j found)) 0 (range (len cs)))))
 
 ;; ── check ───────────────────────────────────────────────────────────────────
+
+;; True for objects whose points are one position 0..1 (strings, bars).
+;;   obj  an object
+(def one-d? (obj) (member? (list :string :bar) (get obj :kind)))
+
+;; True for rectangular objects, whose points are (x y) in 0..1.
+;;   obj  an object
+(def rect? (obj) (member? (list :plate :rect-membrane) (get obj :kind)))
 
 ;; The object in patch whose id is id, or nil.
 ;;   patch  a patch
@@ -328,13 +749,56 @@
 ;;   at   the position given for it
 (def at-errors (who obj at)
   (if (get obj :lumped) nil
-    (if (= (get obj :kind) :string)
+    (if (= (get obj :kind) :data) (data-at-errors who obj at)
+    (if (one-d? obj)
       (if (number? at) nil
-        (list (str who ": string " (source (get obj :id)) " takes one position 0..1, got " (source at))))
-      (if (number? at)
         (list (str who ": " (bare (get obj :kind)) " " (source (get obj :id))
-                   " takes a position (list x y), got " (source at)))
-        nil))))
+                   " takes one position 0..1, got " (source at))))
+      (if (number? at)
+        (list (str who ": " (bare (get obj :kind)) " " (source (get obj :id)) " takes a position "
+                   (if (rect? obj) "(list x y)" "(list r theta)") ", got " (source at)))
+        nil)))))
+
+;; What is wrong with access point at on data object obj.
+;;   who  the message prefix
+;;   obj  a data object
+;;   at   a point index, or (x y z) when obj has :points
+(def data-at-errors (who obj at)
+  (let ((name (str (get obj :label) " " (source (get obj :id)))))
+    (if (number? at)
+      (if (and (>= at 0) (< at (point-count obj))) nil
+        (list (str who ": " name " has points 0.." (- (point-count obj) 1) ", got " (source at))))
+      (if (and (list? at) (= (len at) 3))
+        (if (list? (get obj :points)) nil
+          (list (str who ": " name " has no :points to find " (source at) " among")))
+        (list (str who ": " name " takes a point index or (list x y z), got " (source at)))))))
+
+;; What is wrong with a data object's numbers: no modes, or a losses or
+;; shape row that does not have one value per mode.
+;;   obj  a data object
+(def data-errors (obj)
+  (let ((name (str (get obj :label) " " (source (get obj :id))))
+        (n (get obj :modes))
+        (points (get obj :points)))
+    (if (get obj :data-error) (list (str name ": " (get obj :data-error)))
+    (if (= n 0)
+      (list (str name ": needs :freqs, a list of mode frequencies"))
+      (append (if (or (= points nil) (and (list? points) (= (len points) (point-count obj)))) nil
+                (list (str name ": " (len points) " points for " (point-count obj) " shape rows")))
+              (if (= (len (get obj :losses)) n) nil
+                (list (str name ": " (len (get obj :losses)) " losses for " n " modes")))
+              (concat-all (map (lambda (k) (if (= (len (nth (get obj :shapes) k)) n) nil
+                                             (list (str name ": shape row " k " has "
+                                                        (len (nth (get obj :shapes) k)) " values for " n " modes"))))
+                               (range (point-count obj)))))))))
+
+;; What is wrong with an object's spectral controls: a lumped object (a
+;; finger, a mallet) has no spectrum to warp.
+;;   obj  an object
+(def spectral-errors (obj)
+  (if (and (get obj :spectral) (get obj :lumped))
+    (list (str (bare (get obj :kind)) " " (source (get obj :id)) ": spectral needs a modal object"))
+    nil))
 
 ;; What is wrong with one end of a connection: a missing object, or a
 ;; position that does not fit it.
@@ -364,7 +828,11 @@
   (let ((obj (find-object patch (get l :obj))))
     (if (= obj nil)
       (list (str "listen: no object " (source (get l :obj))))
-      (at-errors "listen" obj (get l :at)))))
+      (append (at-errors "listen" obj (get l :at))
+              (if (= (get l :modes) nil) nil
+                (map (lambda (k) (str "listen " (source (get l :obj)) ": no mode " k " (it has "
+                                      (get obj :modes) ", from 0)"))
+                     (filter (lambda (k) (or (< k 0) (>= k (get obj :modes)))) (get l :modes))))))))
 
 ;; One message per id used twice among objects and connections (their
 ;; generated names would collide).
@@ -386,7 +854,7 @@
 
 ;; True when obj is made of a material (strings and plates).
 ;;   obj  an object
-(def has-material? (obj) (if (= (get obj :kind) :string) true (= (get obj :kind) :plate)))
+(def has-material? (obj) (member? (list :string :plate :circ-plate) (get obj :kind)))
 
 ;; What is wrong with one material, as messages naming who uses it.
 ;;   who  the message prefix ("string str")
@@ -431,6 +899,9 @@
           (if (empty? (get patch :listens)) (list "a patch needs at least one listen point") nil)
           (duplicate-ids patch)
           (material-errors patch)
+          (concat-all (map (lambda (o) (if (= (get o :kind) :data) (data-errors o) nil)) (get patch :objects)))
+          (concat-all (map spectral-errors (get patch :objects)))
+          (concat-all (map (lambda (c) (if (get c :signal) (signal-errors c) nil)) (get patch :connections)))
           (concat-all (map (lambda (c) (connection-errors patch c)) (get patch :connections)))
           (concat-all (map (lambda (l) (listen-errors patch l)) (get patch :listens))))))
 
@@ -449,13 +920,18 @@
 (def access-params (cid side obj at &key (label nil))
   (let ((on (source (get obj :id))) (lb (if label label (source (get obj :id)))))
     (if (get obj :lumped) nil
-      (if (= (get obj :kind) :string)
-        (list (pspec cid (str on "_at") at 0.01 0.99 :title (str lb " at")))
-        (if (= (get obj :kind) :plate)
+      (if (= (get obj :kind) :data)
+        (if (<= (len (get obj :compiled)) 1) nil
+          (list (pspec cid (str on "_pt") (compiled-slot obj at) 0 (- (len (get obj :compiled)) 1)
+                       :title (str lb " point") :dec 0)))
+      (if (one-d? obj)
+        (list (pspec cid (str on "_at") at (if (= (get obj :kind) :bar) 0 0.01) (if (= (get obj :kind) :bar) 1 0.99)
+                     :title (str lb " at")))
+        (if (rect? obj)
           (list (pspec cid (str on "_x") (nth at 0) 0.01 0.99 :title (str lb " x"))
                 (pspec cid (str on "_y") (nth at 1) 0.01 0.99 :title (str lb " y")))
-          (list (pspec cid (str on "_r") (nth at 0) 0 0.95 :title (str lb " r"))
-                (pspec cid (str on "_angle") (nth at 1) 0 3.14159 :title (str lb " angle"))))))))
+          (list (pspec cid (str on "_r") (nth at 0) 0 (if (= (get obj :kind) :circ-plate) 1 0.95) :title (str lb " r"))
+                (pspec cid (str on "_angle") (nth at 1) 0 3.14159 :title (str lb " angle")))))))))
 
 ;; The symbols of those params, in coordinate order: what shape-defs reads
 ;; the point from at run time.
@@ -471,13 +947,107 @@
 ;;   phi-sym  the symbol to define
 (def shape-defs (obj coords phi-sym)
   (let ((id (get obj :id)) (kind (get obj :kind)))
+    (if (= kind :data) (data-shape-defs obj coords phi-sym)
+    (if (= kind :bar) (bar-shape-defs obj (first coords) phi-sym)
+    (if (= kind :circ-plate) (circ-plate-shape-defs obj coords phi-sym)
     (if (= kind :string)
       (list `(def ,phi-sym (* (sin (* ,(nm id "n") 3.14159265 ,(first coords))) ,(nm id "mask"))))
-      (if (= kind :plate)
+      (if (rect? obj)
         (list `(def ,phi-sym (* (rect-plate-shape ,(nm id "pm") ,(nm id "pn") ,(nth coords 0) ,(nth coords 1))
                                 ,(nm id "mask"))))
         (list `(def (,(nm phi-sym "ratios") ,(nm phi-sym "raw")) (circ-membrane ,(nth coords 0) ,(nth coords 1)))
-              `(def ,phi-sym (* ,(nm phi-sym "raw") ,(nm id "mask"))))))))
+              `(def ,phi-sym (* ,(nm phi-sym "raw") ,(nm id "mask")))))))))))
+
+;; How many radial samples a circular plate's shape table holds.
+(def circ-samples () 64)
+
+;; shape-defs for a circular plate: R(r) from the radial table (linear
+;; between samples) times cos(m theta).
+;;   obj      a circular plate
+;;   coords   (r theta)
+;;   phi-sym  the symbol to define
+(def circ-plate-shape-defs (obj coords phi-sym)
+  (let ((top (- (circ-samples) 1)))
+    (append (table-row-defs (p obj "radial") (get obj :modes) `(* (clip ,(first coords) 0 1) ,top) top
+                            (nm phi-sym "row") true)
+            (list `(def ,phi-sym (* ,(nm phi-sym "row") (cos (* ,(p obj "order") ,(nth coords 1))) ,(p obj "mask")))))))
+
+;; Forms defining sym, a row of a [rows n] table at a fractional row index:
+;; blended linearly between the rows either side, or the nearest row when the
+;; rows are not neighbours of each other.
+;;   table  the table's symbol
+;;   n      its row length
+;;   index  a form for the row index (0..top)
+;;   top    the last row
+;;   sym    the symbol to define
+;;   blend  true to blend, false for the nearest row
+(def table-row-defs (table n index top sym blend)
+  (let ((row (lambda (k) `(gather ,table (+ (iota ,n) (* ,k ,n)))))
+        (x (nm sym "x")) (i (nm sym "i")))
+    (if blend
+      (list `(def ,x (clip ,index 0 ,top))
+            `(def ,i (floor ,x))
+            `(def ,sym (+ (* ,(row i) (- 1 (- ,x ,i))) (* ,(row `(min (+ ,i 1) ,top)) (- ,x ,i)))))
+      (list `(def ,i (clip (round ,index) 0 ,top))
+            `(def ,sym ,(row i))))))
+
+;; The free-free beam's modes, computed when generating (in double
+;; precision) so the DSP never forms cosh / sinh, whose size would swamp a
+;; float. With b = beta L, mode n's shape at x in 0..1 is
+;;   cosh bx + cos bx - s (sinh bx + sin bx)
+;;   = cos bx - s sin bx + A e^(b (x - 1)) + B e^(-bx)
+;; with s = (cosh b - cos b) / (sinh b - sin b),
+;; A = (1 - s) e^b / 2 = (cos b - sin b - e^-b) / (1 - e^-2b - 2 e^-b sin b),
+;; B = (1 + s) / 2; every term stays within a few units.
+;;   modes  how many
+(def bar-betas (modes)
+  (map (lambda (k) (if (< k 4) (nth (list 4.73004074 7.85320462 10.9956078 14.1371655) k)
+                     (* (+ (* 2 (+ k 1)) 1) 1.5707963268)))
+       (range modes)))
+(def bar-s (b) (let ((e (exp (* -1 b))))
+                 ;; (cosh b - cos b) / (sinh b - sin b), times 2 e^-b top and bottom
+                 (/ (- (+ 1 (* e e)) (* 2 e (cos b))) (- (- 1 (* e e)) (* 2 e (sin b))))))
+(def bar-a (b) (let ((e (exp (* -1 b))))
+                 (/ (- (- (cos b) (sin b)) e) (- (- 1 (* e e)) (* 2 e (sin b))))))
+
+;; Each mode's frequency ratio to the fundamental: natural (b_n / b_1)^2,
+;; and the undercut targets (modes 2 and 3 at 4 and 10).
+;;   modes  how many
+(def bar-ratios (modes)
+  (let ((bs (bar-betas modes)))
+    (map (lambda (b) (pow (/ b (first bs)) 2)) bs)))
+(def bar-targets (modes)
+  (let ((natural (bar-ratios modes)))
+    ;; modes above 3 move with mode 3 (by 10 / 5.404), so they stay in order
+    (map (lambda (k) (if (= k 1) 4 (if (= k 0) 1 (* (nth natural k) (/ 10 (nth natural 2))))))
+         (range modes))))
+
+;; shape-defs for a bar: the mode shapes above at x, scaled by 1/sqrt 2 to
+;; the string's unit modal mass (mean square 1/2).
+;;   obj      a bar
+;;   x        the form for the position 0..1
+;;   phi-sym  the symbol to define
+(def bar-shape-defs (obj x phi-sym)
+  (let ((bx `(* ,(p obj "beta") ,x)))
+    (list `(def ,phi-sym
+             (* (+ (cos ,bx) (* -1 ,(p obj "s") (sin ,bx))
+                   (* ,(p obj "A") (exp (* ,(p obj "beta") (- ,x 1))))
+                   (* ,(p obj "B") (exp (* -1 ,bx))))
+                0.70710678 ,(p obj "mask"))))))
+
+;; shape-defs for a data object: its compiled shape row at the point param,
+;; blended linearly between neighbouring rows for a fractional index.
+;;   obj      a data object
+;;   coords   (list point-param), or none when it has one compiled point
+;;   phi-sym  the symbol to define
+(def data-shape-defs (obj coords phi-sym)
+  (let ((top (- (len (get obj :compiled)) 1)))
+    (append (table-row-defs (p obj "shapes") (get obj :modes) (if (empty? coords) 0 (first coords)) top
+                            (nm phi-sym "row")
+                            ;; a subset of a big object's points: neighbours in the
+                            ;; table are not neighbours on the object
+                            (= (len (get obj :compiled)) (point-count obj)))
+            (list `(def ,phi-sym (* ,(nm phi-sym "row") ,(p obj "mask")))))))
 
 ;; ── per-object DSP ──────────────────────────────────────────────────────────
 
@@ -506,71 +1076,197 @@
           `(def ,(p obj "young") ,(pick-form idx (map (lambda (m) (young-for obj m)) choices))))))
 
 ;; Forms run every sample before predicting obj: its mode frequencies, the
-;; mask of modes that sound, damping, the modal-coefs a / b, wref (its
-;; reference angular frequency per sample), G (force -> mode gain; C for a
-;; lumped object) and mass, plus the histories holding its last two states.
-;; A finger computes its hand's position on the stroke; a mallet its throw.
+;; mask of modes that sound, damping, then setup-tail's coefficients and
+;; state. A finger computes its hand's position on the stroke; a mallet its
+;; throw.
 ;;   obj  the object
 (def object-setup (obj)
-  (let ((id (get obj :id)) (kind (get obj :kind)) (m (get obj :modes)))
-    (if (= kind :string)
-      (append (material-defs obj) (list
-            `(def ,(p obj "f0") (* f0 ,(p obj "tune")))
-            `(def ,(p obj "n") (+ (iota ,m) 1))
-            `(def ,(p obj "freqs") (stiff-string-freqs ,(p obj "n") ,(p obj "f0") ,(p obj "young") ,(p obj "density")
-                                     (* ,(p obj "radius") 0.001) ,(p obj "length")))
-            `(def ,(p obj "mask") (modal-band ,(p obj "n") ,(p obj "freqs") ,m))
-            `(def ,(p obj "sigma") (+ (modal-loss ,(p obj "freqs") ,(p obj "loss") ,(p obj "hf_loss"))
-                                     (* ,(p obj "mute") (- 1 gate))))
-            `(def (,(p obj "a") ,(p obj "b")) (modal-coefs ,(p obj "freqs") ,(p obj "sigma")))
-            `(def ,(p obj "wref") (min (* twopi (/ ,(p obj "f0") samplerate)) 2.8))
-            `(def ,(p obj "mass") 1)
-            `(def ,(p obj "G") (* ,(p obj "wref") ,(p obj "wref")))
-            `(make-history ,(p obj "s1") @shape [ ,m ])
-            `(make-history ,(p obj "s2") @shape [ ,m ])))
-    (if (= kind :plate)
-      (append (material-defs obj) (list
-            `(def ,(p obj "grid") (iota 64))
-            `(def ,(p obj "pm") (+ (floor (/ ,(p obj "grid") 8)) 1))
-            `(def ,(p obj "pn") (+ (- ,(p obj "grid") (* 8 (floor (/ ,(p obj "grid") 8)))) 1))
-            `(def ,(p obj "thick_m") (* ,(p obj "thick") 0.001))
-            `(def ,(p obj "freqs") (rect-plate ,(p obj "pm") ,(p obj "pn") ,(p obj "young") ,(p obj "density")
-                                     ,(p obj "thick_m") ,(p obj "width") ,(p obj "height")))
-            `(def ,(p obj "mask") (modal-band (+ ,(p obj "grid") 1) ,(p obj "freqs") 64))
-            `(def ,(p obj "sigma") (modal-loss ,(p obj "freqs") ,(p obj "loss") ,(p obj "damp")))
-            `(def (,(p obj "a") ,(p obj "b")) (modal-coefs ,(p obj "freqs") ,(p obj "sigma")))
-            `(def ,(p obj "f11") (rect-plate 1 1 ,(p obj "young") ,(p obj "density")
-                                   ,(p obj "thick_m") ,(p obj "width") ,(p obj "height")))
-            `(def ,(p obj "wref") (min (* twopi (/ ,(p obj "f11") samplerate)) 2.8))
+  (let ((kind (get obj :kind)))
+    (if (= kind :data) (data-setup obj)
+    (if (= kind :bar) (bar-setup obj)
+    (if (= kind :rect-membrane) (rect-membrane-setup obj)
+    (if (= kind :circ-plate) (circ-plate-setup obj)
+    (if (= kind :string) (string-setup obj)
+    (if (= kind :plate) (plate-setup obj)
+    (if (= kind :membrane) (membrane-setup obj)
+    (if (= kind :two-mass) (finger-setup obj)
+      (mallet-setup obj)))))))))))
+
+;; The coefficients and state every modal object ends with, from its
+;; obj_freqs and obj_sigma: modal-coefs, wref (its reference angular frequency
+;; per sample) from pitch, G (force -> mode gain) from its mass, and the
+;; histories of its last two states. An object with a mute param decays faster
+;; while the note is released through one scalar factor g on the coefficients
+;; (a = 2 r cos w and b = -r^2 take g and g^2), so the coefficients
+;; themselves only change when params do.
+;;   obj    the object
+;;   pitch  a form for the pitch wref is taken at (Hz)
+(def setup-tail (obj pitch)
+  (let ((n (get obj :modes))
+        (muted (member? (map (lambda (spec) (get spec :sym)) (get obj :params)) (p obj "mute"))))
+    (append
+      (if muted
+        (list `(def (,(p obj "a0") ,(p obj "b0")) (modal-coefs ,(p obj "freqs") ,(p obj "sigma")))
+              `(def ,(p obj "g") (exp (/ (* -1 ,(p obj "mute") (- 1 gate)) samplerate)))
+              `(def ,(p obj "a") (* ,(p obj "a0") ,(p obj "g")))
+              `(def ,(p obj "b") (* ,(p obj "b0") ,(p obj "g") ,(p obj "g"))))
+        (list `(def (,(p obj "a") ,(p obj "b")) (modal-coefs ,(p obj "freqs") ,(p obj "sigma")))))
+      (list `(def ,(p obj "wref") (min (* twopi (/ ,pitch samplerate)) 2.8))
             `(def ,(p obj "G") (/ (* ,(p obj "wref") ,(p obj "wref")) ,(p obj "mass")))
-            `(make-history ,(p obj "s1") @shape [ 64 ])
-            `(make-history ,(p obj "s2") @shape [ 64 ])))
-    (if (= kind :membrane)
-      (list `(def (,(p obj "ratios") ,(p obj "phi0")) (circ-membrane 0 0))
+            `(make-history ,(p obj "s1") @shape [ ,n ])
+            `(make-history ,(p obj "s2") @shape [ ,n ])))))
+
+;; The mask of modes that sound: the first count modes, faded below Nyquist.
+;;   obj    the object
+;;   count  a form or number for how many sound
+(def mask-def (obj count)
+  `(def ,(p obj "mask") (modal-band (+ (iota ,(get obj :modes)) 1) ,(p obj "freqs") ,count)))
+
+;; object-setup for a stiff string: stiff-string-freqs at the note, from its
+;; material, radius and length.
+;;   obj  a string
+(def string-setup (obj)
+  (append (material-defs obj)
+          (list `(def ,(p obj "f0") (* f0 ,(p obj "tune")))
+                `(def ,(p obj "n") (+ (iota ,(get obj :modes)) 1))
+                `(def ,(p obj "freqs") (stiff-string-freqs ,(p obj "n") ,(p obj "f0") ,(p obj "young") ,(p obj "density")
+                                         (* ,(p obj "radius") 0.001) ,(p obj "length")))
+                (mask-def obj (get obj :modes))
+                `(def ,(p obj "sigma") (modal-loss ,(p obj "freqs") ,(p obj "loss") ,(p obj "hf_loss")))
+                `(def ,(p obj "mass") 1))
+          (setup-tail obj (p obj "f0"))))
+
+;; object-setup for a rectangular plate: rect-plate over its mode grid, from
+;; its material and size; wref at mode (1, 1).
+;;   obj  a plate
+(def plate-setup (obj)
+  (append (material-defs obj) (grid-defs obj)
+          (list `(def ,(p obj "thick_m") (* ,(p obj "thick") 0.001))
+                `(def ,(p obj "freqs") (rect-plate ,(p obj "pm") ,(p obj "pn") ,(p obj "young") ,(p obj "density")
+                                         ,(p obj "thick_m") ,(p obj "width") ,(p obj "height")))
+                (mask-def obj (get obj :modes))
+                `(def ,(p obj "sigma") (modal-loss ,(p obj "freqs") ,(p obj "loss") ,(p obj "damp")))
+                `(def ,(p obj "f11") (rect-plate 1 1 ,(p obj "young") ,(p obj "density")
+                                       ,(p obj "thick_m") ,(p obj "width") ,(p obj "height"))))
+          (setup-tail obj (p obj "f11"))))
+
+;; object-setup for a circular membrane: circ-membrane's Bessel ratios at the
+;; note; its modes param masks the rest.
+;;   obj  a membrane
+(def membrane-setup (obj)
+  (append (list `(def (,(p obj "ratios") ,(p obj "phi0")) (circ-membrane 0 0))
+                `(def ,(p obj "f0") (* f0 ,(p obj "tune")))
+                `(def ,(p obj "freqs") (* ,(p obj "ratios") ,(p obj "f0")))
+                (mask-def obj (p obj "modes"))
+                `(def ,(p obj "sigma") (+ (modal-loss ,(p obj "freqs") ,(p obj "loss") ,(p obj "bright")) ,(p obj "choke")))
+                `(def ,(p obj "mass") 1))
+          (setup-tail obj (p obj "f0"))))
+
+;; object-setup for a finger: the hand on its stroke and two-mass-coefs.
+;;   obj  a finger
+(def finger-setup (obj)
+  (list `(def ,(p obj "frac") (min (/ (* age 1000) ,(p obj "stroke")) 1))
+        `(def ,(p obj "hand") (- ,(p obj "start") (* (+ ,(p obj "start") ,(p obj "depth")) ,(p obj "frac"))))
+        `(def (,(p obj "a") ,(p obj "b") ,(p obj "follow") ,(p obj "C"))
+           (two-mass-coefs ,(p obj "hz") ,(p obj "damp") ,(p obj "stiff")))
+        `(make-history ,(p obj "s1"))
+        `(make-history ,(p obj "s2"))))
+
+;; object-setup for a mallet: its drop height, throw speed and compliance.
+;;   obj  a mallet
+(def mallet-setup (obj)
+  (list `(def ,(p obj "drop") 0.001)
+        `(def ,(p obj "throw") (/ (* ,(p obj "speed") (+ 0.2 (* 0.8 hit_velocity))) samplerate))
+        `(def ,(p obj "wref") (min (* twopi (/ f0 samplerate)) 2.8))
+        `(def ,(p obj "C") (/ (* ,(p obj "wref") ,(p obj "wref")) ,(p obj "mass")))
+        `(make-history ,(p obj "hx"))
+        `(make-history ,(p obj "hv"))))
+
+;; object-setup for a circular plate: lambda^2, orders and the radial shape
+;; table as tensors; f = lambda^2 c h / (2 pi a^2) with
+;; c = sqrt(E / (12 rho (1 - nu^2))) per material; wref at its lowest mode.
+;;   obj  a circular plate
+(def circ-plate-setup (obj)
+  (let ((modes (get obj :plate-modes))
+        (c-of (lambda (m) (sqrt (/ (get m :young) (* 12 (get m :density) (- 1 (* (get m :poisson) (get m :poisson))))))))
+        (l2 (lambda (mode) (* (get mode :lambda) (get mode :lambda)))))
+    (append
+      (list `(def ,(p obj "c") ,(pick-form (p obj "material") (map c-of (material-choices (get obj :stuff)))))
+            `(def ,(p obj "l2") ,(tensor-form (map l2 modes)))
+            `(def ,(p obj "order") ,(tensor-form (map (lambda (mode) (get mode :m)) modes)))
+            `(def ,(p obj "radial")
+               (tensor @shape [ ,(circ-samples) ,(len modes) ]
+                       @data [ ,@(concat-all (map (lambda (r) (map (lambda (mode) (nth (get mode :radial) r)) modes))
+                                                  (range (circ-samples)))) ]))
+            `(def ,(p obj "scale") (/ (* ,(p obj "c") ,(p obj "thick") 0.001 ,(p obj "tune"))
+                                      (* twopi ,(p obj "radius") ,(p obj "radius"))))
+            `(def ,(p obj "freqs") (* ,(p obj "l2") ,(p obj "scale")))
+            (mask-def obj (len modes))
+            `(def ,(p obj "sigma") (modal-loss ,(p obj "freqs") ,(p obj "loss") ,(p obj "damp"))))
+      (setup-tail obj `(* ,(l2 (first modes)) ,(p obj "scale"))))))
+
+;; The grid of mode indices of a rectangular object: obj_grid 0..g^2-1 and
+;; its 1-based (m, n), obj_pm and obj_pn.
+;;   obj  a plate or rectangular membrane
+(def grid-defs (obj)
+  (let ((g (get obj :grid)))
+    (list `(def ,(p obj "grid") (iota ,(* g g)))
+          `(def ,(p obj "pm") (+ (floor (/ ,(p obj "grid") ,g)) 1))
+          `(def ,(p obj "pn") (+ (- ,(p obj "grid") (* ,g (floor (/ ,(p obj "grid") ,g)))) 1)))))
+
+;; object-setup for a bar: the beam tables as tensors, frequencies from the
+;; note through the undercut blend (in log frequency), losses.
+;;   obj  a bar
+(def bar-setup (obj)
+  (let ((m (get obj :modes)) (bs (bar-betas (get obj :modes))))
+    (append
+      (list `(def ,(p obj "beta") ,(tensor-form bs))
+            `(def ,(p obj "s") ,(tensor-form (map bar-s bs)))
+            `(def ,(p obj "A") ,(tensor-form (map bar-a bs)))
+            `(def ,(p obj "B") ,(tensor-form (map (lambda (b) (/ (+ 1 (bar-s b)) 2)) bs)))
             `(def ,(p obj "f0") (* f0 ,(p obj "tune")))
-            `(def ,(p obj "freqs") (* ,(p obj "ratios") ,(p obj "f0")))
-            `(def ,(p obj "mask") (modal-band (+ (iota 120) 1) ,(p obj "freqs") ,(p obj "modes")))
-            `(def ,(p obj "sigma") (+ (modal-loss ,(p obj "freqs") ,(p obj "loss") ,(p obj "bright")) ,(p obj "choke")))
-            `(def (,(p obj "a") ,(p obj "b")) (modal-coefs ,(p obj "freqs") ,(p obj "sigma")))
-            `(def ,(p obj "wref") (min (* twopi (/ ,(p obj "f0") samplerate)) 2.8))
-            `(def ,(p obj "mass") 1)
-            `(def ,(p obj "G") (* ,(p obj "wref") ,(p obj "wref")))
-            `(make-history ,(p obj "s1") @shape [ 120 ])
-            `(make-history ,(p obj "s2") @shape [ 120 ]))
-    (if (= kind :two-mass)
-      (list `(def ,(p obj "frac") (min (/ (* age 1000) ,(p obj "stroke")) 1))
-            `(def ,(p obj "hand") (- ,(p obj "start") (* (+ ,(p obj "start") ,(p obj "depth")) ,(p obj "frac"))))
-            `(def (,(p obj "a") ,(p obj "b") ,(p obj "follow") ,(p obj "C"))
-               (two-mass-coefs ,(p obj "hz") ,(p obj "damp") ,(p obj "stiff")))
-            `(make-history ,(p obj "s1"))
-            `(make-history ,(p obj "s2")))
-    ;; mallet
-      (list `(def ,(p obj "drop") 0.001)
-            `(def ,(p obj "throw") (/ (* ,(p obj "speed") (+ 0.2 (* 0.8 hit_velocity))) samplerate))
-            `(def ,(p obj "wref") (min (* twopi (/ f0 samplerate)) 2.8))
-            `(def ,(p obj "C") (/ (* ,(p obj "wref") ,(p obj "wref")) ,(p obj "mass")))
-            `(make-history ,(p obj "hx"))
-            `(make-history ,(p obj "hv")))))))))
+            `(def ,(p obj "ratio") (exp (+ (* (- 1 ,(p obj "undercut")) (log ,(tensor-form (bar-ratios m))))
+                                           (* ,(p obj "undercut") (log ,(tensor-form (bar-targets m)))))))
+            `(def ,(p obj "freqs") (* ,(p obj "ratio") ,(p obj "f0")))
+            (mask-def obj m)
+            `(def ,(p obj "sigma") (modal-loss ,(p obj "freqs") ,(p obj "loss") ,(p obj "hf_loss"))))
+      (setup-tail obj (p obj "f0")))))
+
+;; object-setup for a rectangular membrane: mode (m, n) at
+;; sqrt((m / aspect)^2 + n^2) / sqrt(1 / aspect^2 + 1) times the note.
+;;   obj  a rectangular membrane
+(def rect-membrane-setup (obj)
+  (let ((aspect (p obj "aspect")))
+    (append
+      (grid-defs obj)
+      (list `(def ,(p obj "f0") (* f0 ,(p obj "tune")))
+            `(def ,(p obj "freqs")
+               (* ,(p obj "f0")
+                  (/ (sqrt (+ (pow (/ ,(p obj "pm") ,aspect) 2) (pow ,(p obj "pn") 2)))
+                     (sqrt (+ (pow (/ 1 ,aspect) 2) 1)))))
+            (mask-def obj (get obj :modes))
+            `(def ,(p obj "sigma") (modal-loss ,(p obj "freqs") ,(p obj "loss") ,(p obj "hf_loss"))))
+      (setup-tail obj (p obj "f0")))))
+
+;; object-setup for a data object: its numbers as tensors (the shape rows of
+;; its compiled points only), then the same coefficients as any modal object.
+;; Losses add the always-on air loss of modal-loss. wref is at the pitch
+;; heard: the root when the data names one (a bell's hum sits an octave under
+;; it), else the lowest mode.
+;;   obj  a data object (after compile-points)
+(def data-setup (obj)
+  (let ((rows (map (lambda (k) (nth (get obj :shapes) k)) (get obj :compiled)))
+        (ratio (if (get obj :root) `(* ,(p obj "tune") (/ f0 ,(get obj :root))) (p obj "tune")))
+        (pitch (if (get obj :root) (get obj :root) (first (get obj :freqs)))))
+    (append
+      (list `(def ,(p obj "hz") ,(tensor-form (get obj :freqs)))
+            `(def ,(p obj "loss0") ,(tensor-form (get obj :losses)))
+            `(def ,(p obj "shapes") (tensor @shape [ ,(len rows) ,(get obj :modes) ] @data [ ,@(concat-all rows) ]))
+            `(def ,(p obj "ratio") ,ratio)
+            `(def ,(p obj "freqs") (* ,(p obj "hz") ,(p obj "ratio")))
+            (mask-def obj (get obj :modes))
+            `(def ,(p obj "sigma") (+ (* ,(p obj "loss0") ,(p obj "decay")) (modal-loss ,(p obj "freqs") 0 0))))
+      (setup-tail obj `(* ,pitch ,(p obj "ratio"))))))
 
 ;; Protocol step 1: forms defining obj_free, where obj would be this sample
 ;; with no force on it (a finger's tip also follows its hand; a mallet also
@@ -658,7 +1354,7 @@
       (append (if with-phi (shape-defs obj (access-syms cid side obj) (nm cid (str "phi_" side))) nil)
               (list `(def (,y ,cs) (modal-point ,(displaced obj terms) ,(nm cid (str "phi_" side)) ,(p obj "G"))))))))
 
-;; Protocol step 3 for an exciter (pluck or felt): forms defining cid_F from
+;; Protocol step 3 for an exciter (pluck, felt or force): forms defining cid_F from
 ;; the ends end-forms read (tag ""). Exciters keep state, so each is solved
 ;; once per sample. A pluck's release threshold scales with the hit's
 ;; velocity; a felt stiffens with last sample's squash.
@@ -667,7 +1363,10 @@
   (let ((cid (get c :id)) (gap `(- ,(nm cid "y_a") ,(nm cid "y_b"))) (cc `(+ ,(nm cid "C_a") ,(nm cid "C_b"))))
     (if (= (get c :law) :pluck)
       (list `(def ,(nm cid "thr") (* ,(nm cid "thresh") (+ 0.25 (* 0.75 hit_velocity))))
-            `(def ,(nm cid "F") (pluck-contact ,gap ,cc hit ,(nm cid "stiff") ,(nm cid "thr"))))
+            `(def ,(nm cid "F") (* ,(nm cid "weight") (pluck-contact ,gap ,cc hit ,(nm cid "stiff") ,(nm cid "thr")))))
+    (if (= (get c :law) :force)
+      (append (signal-forms c)
+              (list `(def ,(nm cid "F") (* ,(nm cid "weight") ,(nm cid "gain") ,(nm cid "sig")))))
       ;; felt: stiffens with last sample's squash, scaled by a full-speed
       ;; sample of mallet travel
       (list `(make-history ,(nm cid "squash"))
@@ -675,8 +1374,8 @@
             `(def ,(nm cid "Cs") ,cc)
             `(def ,(nm cid "k") (* ,(nm cid "felt") (+ 1 (* ,(nm cid "hardness")
                                    (/ (read-history ,(nm cid "squash")) (/ ,(nm (get c :a) "speed") samplerate))))))
-            `(def ,(nm cid "F") (felt-contact ,(nm cid "gap") ,(nm cid "Cs") ,(nm cid "k")))
-            `(write-history ,(nm cid "squash") (max 0 (* -1 (- ,(nm cid "gap") (* ,(nm cid "Cs") ,(nm cid "F"))))))))))
+            `(def ,(nm cid "F") (* ,(nm cid "weight") (felt-contact ,(nm cid "gap") ,(nm cid "Cs") ,(nm cid "k"))))
+            `(write-history ,(nm cid "squash") (max 0 (* -1 (- ,(nm cid "gap") (* ,(nm cid "Cs") ,(nm cid "F")))))))))))
 
 ;; Forms emitted once before the sweeps for a bow: its speed envelope
 ;; (cid_env, rising over attack while the gate is up and falling over
@@ -696,12 +1395,28 @@
           `(make-history ,(nm cid "y_prev"))
           `(make-history ,(nm cid "x_prev")))))
 
-;; Connection predicates. Springs and bows are solved by the sweeps
-;; (sweeps?); plucks and felts are exciters, solved once beforehand.
+;; Forms emitted once before the sweeps for a position or speed driver: its
+;; signal and cid_anchor, the target its spring pulls the point toward (the
+;; signal itself, or for speed its leaky integral).
+;;   c  a position or speed driver
+(def driver-pre-forms (c)
+  (let ((cid (get c :id)))
+    (append (signal-forms c)
+            (if (= (get c :law) :position)
+              (list `(def ,(nm cid "anchor") ,(nm cid "sig")))
+              (list `(make-history ,(nm cid "anchor_h"))
+                    `(def ,(nm cid "anchor") (+ (* (exp (/ -0.5 samplerate)) (read-history ,(nm cid "anchor_h")))
+                                                (/ (* ,(nm cid "gain") ,(nm cid "sig")) samplerate)))
+                    `(write-history ,(nm cid "anchor_h") ,(nm cid "anchor")))))))
+
+;; Connection predicates. Springs, bows and position / speed drivers are
+;; solved by the sweeps (sweeps?); plucks, felts and forces are exciters,
+;; solved once beforehand.
 ;;   c  a connection
 (def spring? (c) (= (get c :law) :spring))
 (def bow? (c) (= (get c :law) :bow))
-(def sweeps? (c) (if (spring? c) true (bow? c)))
+(def driver? (c) (member? (list :position :speed) (get c :law)))
+(def sweeps? (c) (or (spring? c) (bow? c) (driver? c)))
 (def exciter? (c) (not (sweeps? c)))
 
 ;; The positions in conns of the connections pred accepts.
@@ -753,11 +1468,17 @@
                                                       (read-history ,(nm cid "x_prev")) ,(nm cid (str "C_b" tag)) ,(nm cid "vb")
                                                       (* ,(nm cid "slip") ,(nm cid "vmax"))
                                                       ;; the bow lifts as it slows
-                                                      (max 0.000001 (* ,(nm cid "pressure") ,(nm cid "env"))))))
-                                (list `(def ,(nm cid (str "F" s))
-                                         (spring-connection (- ,(nm cid (str "y_a" tag)) ,(nm cid (str "y_b" tag)))
-                                                            (+ ,(nm cid (str "C_a" tag)) ,(nm cid (str "C_b" tag)))
-                                                            ,(nm cid "stiff")))))
+                                                      (max 0.000001 (* ,(nm cid "pressure") ,(nm cid "env") ,(nm cid "weight"))))))
+                                (if (driver? c)
+                                  (list `(def ,(nm cid (str "F" s))
+                                           (* ,(nm cid "weight")
+                                              (spring-connection (- ,(nm cid "anchor") ,(nm cid (str "y_b" tag)))
+                                                                 ,(nm cid (str "C_b" tag)) ,(nm cid "stiff")))))
+                                  (list `(def ,(nm cid (str "F" s))
+                                           (* ,(nm cid "weight")
+                                              (spring-connection (- ,(nm cid (str "y_a" tag)) ,(nm cid (str "y_b" tag)))
+                                                                 (+ ,(nm cid (str "C_a" tag)) ,(nm cid (str "C_b" tag)))
+                                                                 ,(nm cid "stiff")))))))
                               (if (= s (- sweeps 1))
                                 (append (list `(def ,(nm cid "F") ,(nm cid (str "F" s))))
                                         (if (bow? c) (list `(write-history ,(nm cid "x_prev") ,(nm cid (str "x" s)))) nil))
@@ -782,6 +1503,7 @@
                          (exciter-forms c))))
              exciters))
       (concat-all (map (lambda (k) (bow-pre-forms (nth conns k))) (indices-where conns bow?)))
+      (concat-all (map (lambda (k) (driver-pre-forms (nth conns k))) (indices-where conns driver?)))
       (spring-sweep-forms patch conns exciters springs (if (> (len springs) 1) 4 1)))))
 
 ;; c with :a-lumped and :b-lumped added, whether each end's object is lumped
@@ -798,6 +1520,7 @@
 ;;   c      a connection
 (def connection-params (patch c)
   (append (get c :params)
+          (list (weight-param (get c :id) (get c :weight)))
           (if (get c :a) (access-params (get c :id) "a" (find-object patch (get c :a)) (get c :a-at)) nil)
           (access-params (get c :id) "b" (find-object patch (get c :b)) (get c :b-at))))
 
@@ -818,9 +1541,74 @@
     (append (shape-defs obj (access-syms lid "mic" obj) (nm lid "phi"))
      (list
           `(make-history ,(nm lid "prev"))
-          `(def ,(nm lid "y") (sum (* ,(p obj "next") ,(nm lid "phi"))))
+          ;; the param-rate factors first, so DGen can fold them once per block
+          `(def ,(nm lid "y") (sum (* ,(nm lid "phi") ,@(hearing-gains obj l) ,(p obj "next"))))
           `(def ,(nm lid "v") (/ (* (- ,(nm lid "y") (read-history ,(nm lid "prev"))) ,(p obj "mass")) ,(p obj "wref")))
           `(write-history ,(nm lid "prev") ,(nm lid "y"))))))
+
+;; Per-mode factors on what a listen hears: the object's spectral gains and
+;; the listen's own mode selection, as tensors (none when neither is given).
+;;   obj  the heard object
+;;   l    the listen
+(def hearing-gains (obj l)
+  (let ((n (get obj :modes))
+        (gains (if (get obj :spectral) (get (get obj :spectral) :gains) nil))
+        (picked (get l :modes)))
+    (append (if gains (list (per-mode-tensor gains n 1)) (list))
+            (if picked (list (indicator-tensor n picked)) (list)))))
+
+;; A tensor of n modes, 1 at the modes in picked and 0 elsewhere.
+;;   n       the mode count
+;;   picked  mode numbers from 0
+(def indicator-tensor (n picked)
+  (tensor-form (map (lambda (k) (if (member? picked k) 1 0)) (range n))))
+
+;; A tensor of one value per mode from a list, padded with fill.
+;;   values  a list (shorter is fine)
+;;   n       the mode count
+;;   fill    the value for modes the list does not reach
+(def per-mode-tensor (values n fill)
+  (tensor-form (map (lambda (k) (if (< k (len values)) (nth values k) fill)) (range n))))
+
+;; A form for mode 0 of a computed n-mode tensor (peek takes only stored
+;; tensors): the sum against a one-hot tensor.
+;;   form  the tensor form
+;;   n     its mode count
+(def mode0 (form n) `(sum (* ,form ,(indicator-tensor n (list 0)))))
+
+;; The spectral pass over an object's setup forms (see spectral): its
+;; frequency def becomes the raw spectrum obj_freqs0 and the warped
+;; obj_freqs; its sigma takes the loss scales; its wref moves with the lowest
+;; mode. Objects without spectral pass through.
+;;   obj    an object
+;;   forms  its setup forms
+(def spectral-pass (obj forms)
+  (let ((sp (get obj :spectral)) (n (get obj :modes)))
+    (if (not sp) forms
+      (let ((defines (lambda (f name) (and (list? f) (= (first f) 'def) (= (nth f 1) (p obj name)))))
+            (f0s (p obj "freqs0"))
+            (bent (p obj "freqs_b")))
+        (concat-all
+          (map (lambda (f)
+                 (if (defines f "freqs")
+                   (list `(def ,f0s ,(if (get sp :freq-scales) `(* ,(nth f 2) ,(per-mode-tensor (get sp :freq-scales) n 1)) (nth f 2)))
+                         `(def ,(p obj "f1_0") ,(mode0 f0s n))
+                         `(def ,bent (* ,f0s (pow 2 (/ ,(p obj "bend") 1200))
+                                        ;; ,@nil fails, so an empty splice is (list)
+                                        ,@(if (get sp :follow) (list `(/ f0 ,(p obj "f1_0"))) (list))))
+                         `(def ,(p obj "f1_b") ,(mode0 bent n))
+                         `(def ,(p obj "freqs")
+                            (max 1 (+ (* (- ,bent ,(p obj "f1_b")) (log (+ (* ,(p obj "diffraction") 1.718281828) 1)))
+                                      ,(p obj "f1_b")))))
+                   (if (defines f "sigma")
+                     (list (if (get sp :loss-scales)
+                             `(def ,(p obj "sigma") (* ,(nth f 2) ,(per-mode-tensor (get sp :loss-scales) n 1)))
+                             f))
+                     (if (defines f "wref")
+                       (list `(def ,(p obj "wref0") ,(nth f 2))
+                             `(def ,(p obj "wref") (min (* ,(p obj "wref0") (/ ,(p obj "f1_b") ,(p obj "f1_0"))) 2.8)))
+                       (list f)))))
+               forms))))))
 
 ;; The k-th mic's gain param spec, mic<k>_gain.
 ;;   patch  the patch
@@ -854,7 +1642,7 @@
 ;;   patch  the patch
 ;;   conns  its connections, resolved
 (def excite-norm (patch conns)
-  (let ((drivers (filter (lambda (c) (not (spring? c))) conns)))
+  (let ((drivers (filter (lambda (c) (if (bow? c) true (if (= (get c :law) :pluck) true (= (get c :law) :felt)))) conns)))
     (if (empty? drivers) 1
       (let ((c (first drivers)))
         (if (bow? c)
@@ -862,10 +1650,19 @@
           `(* 0.3 (/ ,(nm (get c :b) "wref") ,(nm (get c :id) "vmax")))
         (if (= (get c :law) :pluck)
           `(/ 0.5 ,(nm (get c :id) "thresh"))
-          ;; (wref / C3)^1.6 flattens the mallet's -9.6 dB/octave
-          `(* (/ samplerate (* ,(nm (get c :a) "speed") 10))
-              (pow (/ 0.01 ,(nm (get c :a) "mass")) 0.45)
-              (pow (/ ,(nm (get c :b) "wref") 0.0171) 1.6))))))))
+          ;; (wref / C3)^1.6 flattens the mallet's -9.6 dB/octave across
+          ;; notes; on an object with a pitch of its own (a plate, a cymbal)
+          ;; it never cuts below C3, so a low one is not muted
+          (let ((b (find-object patch (get c :b))) (wref (nm (get c :b) "wref")))
+            `(* (/ samplerate (* ,(nm (get c :a) "speed") 10))
+                (pow (/ 0.01 ,(nm (get c :a) "mass")) 0.45)
+                (pow (/ ,(if (fixed-pitch? b) `(max ,wref 0.0171) wref) 0.0171) 1.6)))))))))
+
+;; True when obj's pitch is its own rather than the played note's (a plate
+;; not made to follow the note).
+;;   obj  an object
+(def fixed-pitch? (obj)
+  (and (get obj :fixed-pitch) (not (and (get obj :spectral) (get (get obj :spectral) :follow)))))
 
 ;; ── the whole program ───────────────────────────────────────────────────────
 
@@ -896,6 +1693,8 @@
         '(def hit (onset-of trigger))
         '(def age (seconds-since hit))
         '(def hit_velocity (latch velocity hit))
+        ;; per sample: note-following objects recompute their coefficients
+        ;; every sample (hop-hold silences an instrument; eseq-k0m2.31)
         '(def f0 (max pitch 20))))
 
 ;; A (use-defmacro name) form for every protocol macro in content/defmacros
@@ -931,7 +1730,7 @@
       (list (preamble)
             (map param-form (all-params patch conns))
             (library-imports)
-            (concat-all (map object-setup objects))
+            (concat-all (map (lambda (o) (spectral-pass o (object-setup o))) objects))
             (concat-all (map object-predict objects))
             (connection-forms patch conns)
             (concat-all (map (lambda (o) (object-commit o (terms-of conns (range (len conns)) (get o :id)))) objects))

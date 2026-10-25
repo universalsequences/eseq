@@ -4774,6 +4774,61 @@ fn format_binding_ref(namespace: &str, field: &str, index: Option<usize>) -> Str
     }
 }
 
+/// The power series sum_k sign^k (x/2)^(2k+m) / (k! (k+m)!): J_m for sign
+/// -1, I_m for sign 1 (m >= 0).
+fn bessel_series(sign: f64, m: i32, x: f64) -> f64 {
+    let half = x / 2.0;
+    let mut term = (1..=m).fold(1.0, |term, k| term * half / k as f64);
+    let mut sum = term;
+    for k in 0..80 {
+        term *= sign * half * half / ((k + 1) as f64 * (k + m + 1) as f64);
+        sum += term;
+        if term.abs() < 1e-17 * sum.abs() {
+            break;
+        }
+    }
+    sum
+}
+
+/// J_m(x), the Bessel function of the first kind. Below x = 5 by its power
+/// series; above by Miller's backward recurrence normalised with
+/// J_0 + 2 (J_2 + J_4 + ...) = 1, which stays accurate where the series'
+/// terms would grow to e^x and cancel.
+pub fn bessel_j(m: i32, x: f64) -> f64 {
+    if m < 0 {
+        return if m % 2 == 0 { bessel_j(-m, x) } else { -bessel_j(-m, x) };
+    }
+    // J_m(-x) = (-1)^m J_m(x)
+    if x < 0.0 {
+        return if m % 2 == 0 { bessel_j(m, -x) } else { -bessel_j(m, -x) };
+    }
+    if x < 5.0 {
+        return bessel_series(-1.0, m, x);
+    }
+    let start = m + 2 * x.ceil() as i32 + 30;
+    let (mut above, mut here) = (0.0, 1e-30);
+    let (mut wanted, mut norm) = (0.0, 0.0);
+    for k in (1..=start).rev() {
+        let below = 2.0 * k as f64 / x * here - above;
+        above = here;
+        here = below;
+        // `here` is J_(k-1) now
+        if k - 1 == m {
+            wanted = here;
+        }
+        if k - 1 > 0 && (k - 1) % 2 == 0 {
+            norm += 2.0 * here;
+        }
+    }
+    wanted / (norm + here)
+}
+
+/// I_m(x), the modified Bessel function of the first kind, by its power
+/// series (every term positive, so nothing cancels). I_-m = I_m.
+pub fn bessel_i(m: i32, x: f64) -> f64 {
+    bessel_series(1.0, m.abs(), x)
+}
+
 /// Register math intrinsics needed for SDF and general numeric work.
 pub fn register_math_natives(vm: &mut VM) {
     // Single-arg f64 functions
@@ -4816,6 +4871,8 @@ pub fn register_math_natives(vm: &mut VM) {
     math2!("pow", f64::powf);
     math2!("atan2", f64::atan2);
     math2!("mod", |a: f64, b: f64| a % b);
+    math2!("bessel-j", |m: f64, x: f64| bessel_j(m.round() as i32, x));
+    math2!("bessel-i", |m: f64, x: f64| bessel_i(m.round() as i32, x));
 
     macro_rules! math3 {
         ($name:expr, $op:expr) => {
@@ -4939,8 +4996,29 @@ pub fn register_math_natives(vm: &mut VM) {
     vm.mark_natives_expansion_safe(&[
         "abs", "sqrt", "sin", "cos", "floor", "ceil", "round", "fract", "log", "exp", "pow",
         "atan2", "mod", "clamp", "mix", "smoothstep", "vec2", "length", "dot", "bit-and",
-        "bit-or", "bit-xor", "bit-not", "shl", "shr",
+        "bit-or", "bit-xor", "bit-not", "shl", "shr", "bessel-j", "bessel-i",
     ]);
+}
+
+#[cfg(test)]
+mod bessel_tests {
+    use super::{bessel_i, bessel_j};
+
+    #[test]
+    fn bessel_functions_match_tabulated_values() {
+        for (m, x, want) in [
+            (0, 2.404825557695773, 0.0),
+            (1, 10.0, 0.04347274616886144),
+            (3, 20.0, -0.09890139456044968),
+            (0, 1.0, 0.7651976865579666),
+            (5, 4.0, 0.13208665604709826),
+            (2, 30.0, 0.07845124607326552),
+        ] {
+            assert!((bessel_j(m, x) - want).abs() < 1e-10, "J_{m}({x}) = {}", bessel_j(m, x));
+        }
+        assert!((bessel_i(2, 3.0) - 2.245212440929951).abs() < 1e-10);
+        assert!((bessel_i(0, 10.0) - 2815.716628466254).abs() < 1e-6);
+    }
 }
 
 /// Truncate a numeric `Value` toward zero and wrap it into unsigned 32-bit

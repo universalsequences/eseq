@@ -1,0 +1,16 @@
+; A church bell as an IRCAM resonance model (modres text): one mode per line,
+; index, frequency (Hz), amplitude (dB), bandwidth (Hz). The partial ratios
+; are the classic tuned-bell series on a 440 Hz nominal: hum, prime, tierce
+; (minor third), quint, nominal, then the upper partials.
+1  110.0   -6  0.25
+2  220.0   -3  0.6
+3  264.0   -4  0.9
+4  330.0  -10  1.4
+5  440.0    0  1.8
+6  550.0   -8  2.6
+7  587.0   -9  3.0
+8  660.0   -7  3.4
+9  880.0  -12  5.0
+10 1056.0 -14  6.5
+11 1200.0 -16  8.0
+12 1408.0 -18  10.0
