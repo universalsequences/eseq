@@ -1076,7 +1076,7 @@ mod tests {
   :objects (list (m/finger 'pick) (m/string 'str :modes 8) (m/plate 'body :grid 2))
   :connections (list (m/pluck 'plk 'pick 'str 0.8)
                      (m/force 'air 'body (list 0.4 0.6) :gain 0.01 :signal (m/speaker :distance 2 :angle 60))
-                     (m/force 'bridge 'str 0.98 :gain 1 :signal (m/tap-position 'body (list 0.5 0.45))))
+                     (m/mount 'bridge 'body (list 0.5 0.45) 'str 1))
   :listens (list (m/pickup 'str 0.92 :height 3))
   :amp (m/amp :drive 30))";
         let instrument = generate_modal_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), script).unwrap();
@@ -1091,13 +1091,31 @@ mod tests {
         // The speaker's sound reaches the body a sample (at least) later, off axis.
         assert!(squashed.contains("(make-history amp_speaker_h)"), "{squashed}");
         assert!(squashed.contains("(write-history amp_speaker_h amp_speaker)"), "{squashed}");
-        assert!(squashed.contains("(delay (read-history amp_speaker_h) (max 0 (- (/ (* air_speaker_distance samplerate) 343) 1)) @max-delay 8192)"), "{squashed}");
+        assert!(squashed.contains("(def air_speaker_direct (delay (read-history amp_speaker_h) (max 0 (- (/ (* air_speaker_distance samplerate) 343) 1)) @max-delay 8192))"), "{squashed}");
         assert!(squashed.contains("(sin (* air_speaker_angle 0.017453292519943295))"), "{squashed}");
+        // The room: the floor's path among the reflections.
+        assert!(squashed.contains("(delay air_speaker_direct (/ (* (- (sqrt (+ (* air_speaker_distance air_speaker_distance) 2.56)) air_speaker_distance) samplerate) 343) @max-delay 1024)"), "{squashed}");
+        // The mount: the body point's acceleration over a sample squared,
+        // shared among the string's modes (alternating for the end at 1).
+        assert!(squashed.contains("(def bridge_u1 (sum (* (read-history body_s2) bridge_phi_a)))"), "{squashed}");
+        assert!(squashed.contains("(def bridge_d2 (+ (- bridge_u (* 2 bridge_u1)) (read-history bridge_u2)))"), "{squashed}");
+        assert!(squashed.contains("(def bridge_share (tensor @shape [8] @data [0.6366"), "{squashed}");
+        assert!(squashed.contains("(def bridge_push (* bridge_d2 (* -1 bridge_weight bridge_gain bridge_share str_mask)))"), "{squashed}");
+        assert!(squashed.contains("(modal-advance str_free (+ (* str_G (* plk_F plk_phi_b)) bridge_push))"), "{squashed}");
+        assert!(!squashed.contains("param bridge_str_"), "{squashed}");
         assert!(instrument.ui.contains("\"AMP\""), "{}", instrument.ui);
         // m/speaker needs an amp; :amp must be one.
         let no_amp = script.replace(":amp (m/amp :drive 30)", "");
         let errors = generate_modal_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &no_amp).unwrap_err();
         assert!(errors.contains(&"force air: m/speaker needs the patch's :amp".to_string()), "{errors:?}");
+        let bad_mount = script.replace("(m/mount 'bridge 'body (list 0.5 0.45) 'str 1)", "(m/mount 'bridge 'str 0.5 'body 2)");
+        let errors = generate_modal_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &bad_mount).unwrap_err();
+        assert!(errors.contains(&"mount bridge: body is not a string".to_string()), "{errors:?}");
+        assert!(errors.contains(&"mount bridge: end is 0 or 1, got 2".to_string()), "{errors:?}");
+        // A mount reads its object's displacement: not a lumped finger's.
+        let lumped = script.replace("(m/mount 'bridge 'body (list 0.5 0.45) 'str 1)", "(m/mount 'bridge 'pick 0 'str 1)");
+        let errors = generate_modal_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &lumped).unwrap_err();
+        assert!(errors.contains(&"mount bridge: the mount needs a modal object, not pick".to_string()), "{errors:?}");
         let bad_amp = script.replace(":amp (m/amp :drive 30)", ":amp 3");
         let errors = generate_modal_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &bad_amp).unwrap_err();
         assert!(errors.contains(&"patch: :amp is an m/amp, got 3".to_string()), "{errors:?}");

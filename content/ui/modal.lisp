@@ -38,7 +38,7 @@
 
 (export string plate membrane finger mallet modal-data bar rect-membrane oscillator circ-plate solid
         melt mix-hybrid tube
-        pluck spring felt bow strike stop fingerboard force position speed listen patch plane
+        pluck spring mount felt bow strike stop fingerboard force position speed listen patch plane
         tone-hole reed lips jet strokes stroke-point
         envelope noise sine constant signal tap-position tap-speed tap-force tap-contact speaker spectral
         pickup amp
@@ -588,7 +588,8 @@
 ;;   :a-at :b-at each end's access point, nil for a lumped end. A position is
 ;;               a number 0..1 along a string, (list x y) on a plate (each
 ;;               0..1), or (list r theta) on a membrane (r 0..0.95, theta in
-;;               radians). Positions become params.
+;;               radians). Positions become params. A mount's string end
+;;               (0 or 1) is its :end, not a position (its :b-at is nil).
 ;;   :params     the law's own param specs
 ;;   :weight     its starting weight (every connection's weight param)
 ;; resolve-connection later adds :a-lumped / :b-lumped.
@@ -616,6 +617,36 @@
 (def spring (id a a-at b b-at &key (stiffness 2) (weight 1))
   (dict :id id :title "SPRING" :law :spring :a a :b b :a-at a-at :b-at b-at :weight weight
         :params (list (pspec id "stiff" stiffness 0 50 :title "Glue" :dec 1))))
+
+;; A string's end mounted on a point of another object, one way: as a
+;; guitar's body carries its strings' bridge and nut, the mount's motion
+;; shakes the string and takes nothing back (a solid body is far heavier
+;; than its strings). It is a base excitation: each mode is pushed by its
+;; share of the end's motion, 2 / (n pi) (alternating in sign for the end
+;; at 1), times the mount's acceleration, so the string moves relative to
+;; the mount, as a pickup on the body hears it. Off the string's resonances
+;; the mount's motion barely reaches it, so a muted string stops a loop
+;; through its body.
+;;   id      the connection's id ('bridge)
+;;   a       the mount's object (a body)
+;;   a-at    where on it the end sits
+;;   b       the string's id: the direction it names ((m/plane 'str 1) for a
+;;           two-direction string's second), as the mount's point moves in one
+;;   end     which end is mounted: 0 or 1
+;;   gain    the coupling, 1 as rigid
+;;   weight  0..1
+(def mount (id a a-at b end &key (gain 1) (weight 1))
+  (dict :id id :title "MOUNT" :law :mount :a a :b b :a-at a-at :b-at nil :end end :weight weight
+        :params (list (pspec id "gain" gain 0 4 :title "Coupling"))))
+
+;; True when c is a mount.
+;;   c  a connection
+(def mount? (c) (= (get c :law) :mount))
+
+;; True when c moves its object's modes directly (pushes) rather than by a
+;; force at a point: strokes and mounts.
+;;   c  a connection
+(def pusher? (c) (or (strokes? c) (mount? c)))
 
 ;; A one-sided felt between a mallet and the object it strikes. By default it
 ;; hardens with the last sample's squash; given an exponent it is Stulov's
@@ -916,10 +947,31 @@
 ;; on the guitar driven by it closes the acoustic feedback loop; the force's
 ;; gain is how much of the sound the guitar catches. The distance moves which
 ;; partial the loop favours (and Doppler-bends it while it moves); the angle
-;; how far up the harmonics it can squeal.
+;; how far up the harmonics it can squeal. Room adds the sound's reflections
+;; off the floor (the cabinet 0.4 m up, the guitar 1.2 m), the wall 1.5 m
+;; behind the player and one 2 m to the side, each arriving later along its
+;; own path: their delays comb the loop, so more spots feed back, and moving
+;; makes the feedback hunt between partials.
 ;;   distance  metres from the speaker
 ;;   angle     degrees off its axis, 0 .. 90
-(def speaker (&key (distance 1.5) (angle 45)) (dict :kind :signal :name :speaker :args (list distance angle)))
+;;   room      the reflections' strength, 0 (outdoors) .. 1
+(def speaker (&key (distance 1.5) (angle 45) (room 0.5))
+  (dict :kind :signal :name :speaker :args (list distance angle room)))
+
+;; The paths m/speaker's sound takes besides the direct one, given the
+;; distance d (a form, metres): off the floor (the cabinet 0.4 m up, the
+;; guitar 1.2 m), the wall 1.5 m behind the player, the wall 2 m to the
+;; side. Each is (dict :length form :extra-max samples): its length, and a
+;; delay long enough for how much longer than d it is, at 192 kHz.
+;;   d  a form for the distance
+(def room-paths (d)
+  ;; (0.4 + 1.2)^2 = 2.56; twice 1.5 m = 3; twice 2 m, squared = 16
+  (list (dict :length `(sqrt (+ (* ,d ,d) 2.56)) :extra-max 1024)
+        (dict :length `(+ ,d 3) :extra-max 2048)
+        (dict :length `(sqrt (+ (* ,d ,d) 16)) :extra-max 4096)))
+
+;; How much of a reflection comes back from the floor or a wall.
+(def reflection-gain () 0.6)
 
 ;; The history holding a patch amp's speaker output, which amp-forms writes
 ;; and m/speaker reads a sample later.
@@ -988,15 +1040,25 @@
     ;; the air's travel, at least the sample the history already delays
     :speaker (dict :params (lambda (cid n args)
                              (list (pspec cid (str n "_distance") (nth args 0) 0.05 10 :unit 'm :title "Distance" :taper :log)
-                                   (pspec cid (str n "_angle") (nth args 1) 0 90 :unit 'deg :title "Angle" :dec 0)))
-                   :forms (lambda (n args patch) nil)
+                                   (pspec cid (str n "_angle") (nth args 1) 0 90 :unit 'deg :title "Angle" :dec 0)
+                                   (pspec cid (str n "_room") (nth args 2) 0 1 :title "Room")))
+                   ;; the direct sound, delayed by the air (8192 samples hold
+                   ;; 10 m at 192 kHz); each reflection delays it further by
+                   ;; its extra path, so one long buffer serves them all
+                   :forms (lambda (n args patch)
+                            (list `(def ,(n "_direct")
+                                     (delay (read-history ,(speaker-history)) (max 0 (- (/ (* ,(n "_distance") samplerate) 343) 1))
+                                            @max-delay 8192))))
+                   ;; each path falling as 1 / its length, then off axis
                    :value (lambda (n args patch)
-                            ;; 8192 samples hold 10 m at 192 kHz
-                            `(/ (svf (delay (read-history ,(speaker-history)) (max 0 (- (/ (* ,(n "_distance") samplerate) 343) 1))
-                                            @max-delay 8192)
-                                     ,(below-nyquist `(/ 580 (max (sin (* ,(n "_angle") 0.017453292519943295)) 0.01)))
-                                     0.6 0)
-                                (max ,(n "_distance") 0.05))))))
+                            `(svf (+ (* (/ 1 (max ,(n "_distance") 0.05)) ,(n "_direct"))
+                                     ,@(map (lambda (path)
+                                              `(* (/ (* ,(reflection-gain) ,(n "_room")) ,(get path :length))
+                                                  (delay ,(n "_direct") (/ (* (- ,(get path :length) ,(n "_distance")) samplerate) 343)
+                                                         @max-delay ,(get path :extra-max))))
+                                            (room-paths (n "_distance"))))
+                                  ,(below-nyquist `(/ 580 (max (sin (* ,(n "_angle") 0.017453292519943295)) 0.01)))
+                                  0.6 0)))))
 
 ;; A driver's signals as a list (one signal, or a list of them).
 ;;   sig  a signal or a list of signals
@@ -1077,7 +1139,7 @@
              (if (point-tap? sig)
                (let ((o (find-object patch target)))
                  (if (= o nil) (list (str (what c) ": tap on no object " (source target)))
-                   (if (or (get o :lumped) (= (get o :kind) :mix))
+                   (if (stateless? o)
                      (list (str (what c) ": a tap needs a modal object, not " (source target)))
                      (at-errors (str (what c) " tap") o (nth (get sig :args) 1)))))
                (if (force-tap? sig)
@@ -1088,6 +1150,11 @@
                    (list (str (what c) ": m/speaker needs the patch's :amp"))
                    nil)))))
          (filter map? (signals-of (get c :signal))))))
+
+;; True for an object with no modal state to read at a point: lumped, or a
+;; mix (which only routes).
+;;   o  an object
+(def stateless? (o) (or (get o :lumped) (not (physical? o))))
 
 ;; The connections some driver's force tap reads, by id.
 ;;   patch  the patch
@@ -1316,8 +1383,10 @@
 (def positions-on (id connections listens objects)
   (let ((on (lambda (target)
               (append (map (lambda (c) (if (= (get c :a) target) (get c :a-at) (get c :b-at)))
-                           ;; strokes play every mode, at no point
-                           (filter (lambda (c) (and (not (strokes? c)) (or (= (get c :a) target) (= (get c :b) target))))
+                           ;; strokes play every mode, at no point; a mount's
+                           ;; string end is not one either
+                           (filter (lambda (c) (and (not (strokes? c))
+                                                    (or (= (get c :a) target) (and (= (get c :b) target) (not (mount? c))))))
                                    connections))
                       (map (lambda (l) (get l :at)) (filter (lambda (l) (= (get l :obj) target)) listens))))))
     (append (on id)
@@ -1477,8 +1546,11 @@
 ;;   patch  the patch
 ;;   c      the connection
 (def connection-errors (patch c)
+  (append
+  (if (and (get c :a) (= (get c :a) (get c :b))) (list (str (what c) ": both ends on " (source (get c :b)))) nil)
   (if (strokes? c) (strokes-errors patch c)
-  (append (if (= (get c :a) (get c :b)) (list (str (what c) ": both ends on " (source (get c :b)))) nil)
+  (if (mount? c) (mount-errors patch c)
+  (append
           ;; these read their struck object's own wref / state, which a mix has none of
           (if (and (member? (list :bow :felt) (get c :law)) (find-object patch (get c :b))
                    (= (get (find-object patch (get c :b)) :kind) :mix))
@@ -1486,7 +1558,23 @@
             nil)
           (air-errors patch c)
           (if (get c :a) (end-errors patch c "a" (get c :a) (get c :a-at)) nil)
-          (end-errors patch c "b" (get c :b) (get c :b-at)))))
+          (end-errors patch c "b" (get c :b) (get c :b-at)))))))
+
+;; What is wrong with a mount: its string must be a string and its end 0 or
+;; 1; the mount's object one whose state is a displacement to read (not
+;; lumped, a mix or a tube, whose state is the air's) at a fitting point.
+;;   patch  the patch
+;;   c      a mount
+(def mount-errors (patch c)
+  (let ((strung (find-object patch (get c :b))) (body (find-object patch (get c :a))))
+    (append (if (= strung nil) (list (str (what c) ": no object " (source (get c :b))))
+              (if (= (get strung :kind) :string) nil
+                (list (str (what c) ": " (source (get c :b)) " is not a string"))))
+            (if (member? (list 0 1) (get c :end)) nil
+              (list (str (what c) ": end is 0 or 1, got " (source (get c :end)))))
+            (if (and body (or (stateless? body) (= (get body :kind) :tube)))
+              (list (str (what c) ": the mount needs a modal object, not " (source (get c :a))))
+              (end-errors patch c "a" (get c :a) (get c :a-at))))))
 
 ;; What is wrong with a blown connection: it must blow into a tube, at a
 ;; point where the tube has pressure (not an open end), and lips need a
@@ -2172,7 +2260,8 @@
 ;; return values; the patch owns the histories.
 ;;   obj     the object
 ;;   terms   every connection's force term on it, as terms-of gives
-;;   pushes  what strokes add to its modes' state directly (pushes-on)
+;;   pushes  what strokes and mounts add to its modes' state directly
+;;           (pushes-on)
 (def object-commit (obj terms pushes)
   (let ((kind (get obj :kind)) (total (sum-form terms)))
     (if (= kind :mallet)
@@ -2214,11 +2303,11 @@
                    nil)))
              (list "a" "b")))))))
 
-;; terms-with c's final force, cid_F (none for strokes, which push the
-;; modes' state directly: see pushes-on).
+;; terms-with c's final force, cid_F (none for strokes and mounts, which
+;; push the modes' state directly: see pushes-on).
 ;;   c   a resolved connection
 ;;   id  an object id
-(def terms-on (c id) (if (strokes? c) nil (terms-with c id (nm (get c :id) "F"))))
+(def terms-on (c id) (if (pusher? c) nil (terms-with c id (nm (get c :id) "F"))))
 
 ;; Every final force term on object id from the connections at indices.
 ;;   conns    the resolved connections
@@ -2605,9 +2694,10 @@
         (map (lambda (k)
                (let ((c (nth conns k)) (before (filter (lambda (j) (< j k)) exciters)))
                  (if (strokes? c) (strokes-forms c patch)
+                 (if (mount? c) (mount-forms c patch)
                    (append (if (get c :a) (end-forms c "a" (find-object patch (get c :a)) (lambda (id) (terms-of conns before id)) "" true) nil)
                            (end-forms c "b" (find-object patch (get c :b)) (lambda (id) (terms-of conns before id)) "" true)
-                           (exciter-forms c patch)))))
+                           (exciter-forms c patch))))))
              exciters))
       (concat-all (map (lambda (k) (bow-pre-forms (nth conns k))) (indices-where conns bow?)))
       (concat-all (map (lambda (k) (driver-pre-forms (nth conns k) patch)) (indices-where conns driver?)))
@@ -2653,11 +2743,36 @@
     (append (get c :params)
             (list (weight-param (get c :id) (get c :weight)))
             ;; a connection placed at another's point has no point params,
-            ;; nor do strokes (they play every mode)
+            ;; nor do strokes (they play every mode); a mount's string end
+            ;; is fixed
             (if (or (get c :coords-of) (strokes? c)) (list)
               (append (if (get c :a) (access-params (get c :id) "a" (find-object patch (get c :a)) (get c :a-at)) nil)
-                      (access-params (get c :id) "b" (find-object patch (get c :b)) (get c :b-at))))
+                      (if (mount? c) nil (access-params (get c :id) "b" (find-object patch (get c :b)) (get c :b-at)))))
             (if (get c :signal) (tap-params patch c) (list)))))
+
+;; A mount's forms, ending in cid_push on its string: the second difference
+;; of the mount point's displacement (its acceleration over a sample
+;; squared, from the last three samples' state) times each mode's share of
+;; the end's motion, faded where the string's modes do not sound.
+;;   c      a mount
+;;   patch  the patch
+(def mount-forms (c patch)
+  (let ((n (lambda (suffix) (nm (get c :id) suffix)))
+        (body (find-object patch (get c :a)))
+        (strung (find-object patch (get c :b))))
+    (append (shape-defs body (access-syms (get c :id) "a" body) (n "phi_a"))
+            ;; the point's displacement the last two samples (the body's own
+            ;; state), and the one before
+            (list `(def ,(n "u") (sum (* (read-history ,(p body "s1")) ,(n "phi_a"))))
+                  `(def ,(n "u1") (sum (* (read-history ,(p body "s2")) ,(n "phi_a"))))
+                  `(make-history ,(n "u2"))
+                  `(def ,(n "d2") (+ (- ,(n "u") (* 2 ,(n "u1"))) (read-history ,(n "u2"))))
+                  `(write-history ,(n "u2") ,(n "u1"))
+                  `(def ,(n "share") ,(tensor-form (map (lambda (k) (/ (* 2 (if (and (= (get c :end) 1) (= (mod k 2) 1)) -1 1))
+                                                                       (* 3.14159265 (+ k 1))))
+                                                        (range (get strung :modes)))))
+                  ;; the per-mode factors together, so only d2 is per sample
+                  `(def ,(n "push") (* ,(n "d2") (* -1 ,(weight-of c) ,(n "gain") ,(n "share") ,(p strung "mask"))))))))
 
 ;; ── measured strokes ────────────────────────────────────────────────────────
 
@@ -2850,12 +2965,12 @@
       (stage 2 (n "s1_out"))
       (list `(def ,(n "out") (sum (* ,(n "s2_out") ,(n "gain"))))))))
 
-;; Every strokes connection's push on object id, as forms (none when no
-;; strokes play it).
+;; Every strokes or mount connection's push on object id, as forms (none
+;; when nothing pushes it).
 ;;   conns  the resolved connections
 ;;   id     an object id
 (def pushes-on (conns id)
-  (map (lambda (c) (nm (get c :id) "push")) (filter (lambda (c) (and (strokes? c) (= (get c :b) id))) conns)))
+  (map (lambda (c) (nm (get c :id) "push")) (filter (lambda (c) (and (pusher? c) (= (get c :b) id))) conns)))
 
 ;; What is wrong with a strokes connection: its object must be a data object
 ;; with :strokes whose residues have one value per mode.
@@ -3120,16 +3235,21 @@
 ;; can reach back into the objects (m/speaker). Its stages, in order:
 ;;   input     a coupling capacitor's high-pass (80 Hz)
 ;;   fuzz      drive into tanh about a bias point, which makes it asymmetric
-;;             (even harmonics); the stage's grid current charges its
-;;             coupling capacitor on loud peaks, drifting the bias (bloom:
-;;             the swell and sputter of a hard-driven fuzz). Antiderivative
+;;             (even harmonics); the input's peaks charge the stage's
+;;             coupling capacitor, drifting the bias by a share of the
+;;             swing (bloom), so the clipping stays lopsided however hard it
+;;             is driven (a fixed offset vanishes against a big swing): the
+;;             swell, sputter and octave grit of a hard-driven fuzz; near 1
+;;             it gates. Antiderivative
 ;;             antialiased: tanh's integral, log cosh, differenced over the
 ;;             step, so its harmonics fold back far less at 48 kHz
 ;;   tone      bass, mid and treble bands added to or taken from the signal
 ;;   power     a second, softer tanh whose drive sags as the supply is
 ;;             loaded (the power-amp compression of a cranked amp)
-;;   speaker   the cone's resonance (a high-pass peaking at 100 Hz) and the
-;;             cabinet's falling top: two low-passes from cab Hz
+;;   speaker   the cone's resonance (a high-pass peaking at 100 Hz), its
+;;             presence peak (around 2.8 kHz, where a guitar cone's
+;;             break-up rings) and the cabinet's falling top: two low-passes
+;;             from cab Hz
 ;;   level     the speaker's loudness, the feedback's too
 
 ;; An amplifier for a patch's :amp.
@@ -3139,10 +3259,11 @@
 ;;   bass, mid, treble  the tone stack, 1 flat (0 .. 2)
 ;;   power   the power stage's drive
 ;;   sag     how much the supply sags under load
+;;   presence  the cone's presence peak, 0 none
 ;;   cab     where the cabinet's top falls away, Hz
 ;;   level   the speaker's level
-(def amp (&key (drive 20) (bias 0.2) (bloom 0.5) (bass 1) (mid 1) (treble 1) (power 2) (sag 0.3) (cab 4500)
-               (level 0.5))
+(def amp (&key (drive 20) (bias 0.2) (bloom 0.5) (bass 1) (mid 1) (treble 1) (power 2) (sag 0.3) (presence 0.5)
+               (cab 5000) (level 0.5))
   (dict :kind :amp
         :params (list (pspec 'amp "drive" drive 1 500 :title "Drive" :taper :log :dec 1)
                       (pspec 'amp "bias" bias 0 0.8 :title "Bias")
@@ -3152,6 +3273,7 @@
                       (pspec 'amp "treble" treble 0 2 :title "Treble")
                       (pspec 'amp "power" power 0.5 10 :title "Power" :taper :log)
                       (pspec 'amp "sag" sag 0 1 :title "Sag")
+                      (pspec 'amp "presence" presence 0 2 :title "Presence")
                       (pspec 'amp "cab" cab 1500 10000 :unit 'Hz :title "Cab" :taper :log)
                       (pspec 'amp "level" level 0 2 :title "Level"))))
 
@@ -3189,8 +3311,8 @@
                           (tanh amp_b)))
         '(write-history amp_zp amp_z)
         '(write-history amp_lcp amp_lc)
-        ;; charges in ~5 ms on positive peaks, leaks over ~200 ms
-        `(def amp_peak (max 0 amp_fuzz))
+        ;; charges in ~5 ms on the input's positive peaks, leaks over ~200 ms
+        `(def amp_peak (max 0 amp_x))
         `(write-history amp_charge (+ (read-history amp_charge)
                                       (* (gswitch (gt amp_peak (read-history amp_charge)) ,(follow-coef 0.005) ,(follow-coef 0.2))
                                          (- amp_peak (read-history amp_charge)))))
@@ -3203,7 +3325,7 @@
         '(make-history amp_load)
         '(def amp_pw (tanh (/ (* amp_tone amp_power) (+ 1 (* 4 amp_sag (read-history amp_load))))))
         `(write-history amp_load (+ (read-history amp_load) (* ,(follow-coef 0.06) (- (* amp_pw amp_pw) (read-history amp_load)))))
-        '(def amp_cone (svf amp_pw 100 1.4 2))
+        '(def amp_cone (+ (svf amp_pw 100 1.4 2) (* amp_presence (/ (svf amp_pw 2800 1.2 1) 1.2))))
         `(def amp_speaker (* (svf (svf amp_cone (min amp_cab (* 0.4 samplerate)) 0.9 0)
                                   ,(below-nyquist '(* 1.25 amp_cab)) 0.6 0)
                              amp_level))

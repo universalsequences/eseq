@@ -295,17 +295,27 @@ lead guitar feeding back through its amp)
     peaks charge its coupling capacitor (bloom), a tone stack, a power stage
     sagging with its load, the speaker cone and cabinet. Off-harmonic
     content about -72 dB at default drive, -48 dB at 500x.
-21. Acoustic feedback (`m/speaker :distance :angle`): the speaker's output,
-    delayed by the air's travel, falling as 1/distance and low-passed off
-    the cone's axis, as a signal for any driver. Modalys has no electronics,
-    so this is past it, though it is the same feedback-tap idea.
+21. Acoustic feedback (`m/speaker :distance :angle :room`): the speaker's
+    output, delayed by the air's travel, falling as 1/distance, low-passed
+    off the cone's axis, plus floor and wall reflections, as a signal for
+    any driver. Modalys has no electronics, so this is past it, though it
+    is the same feedback-tap idea.
+22. `m/mount`: a string's end carried by another object, one way, as base
+    excitation (each mode pushed by its share of the end's motion times the
+    mount's acceleration), so the string moves relative to its mount.
 
 `examples/eno-lead.lisp`: a light steel string, a bridge pickup, a fuzz amp,
-2 m of air onto the maple body, and the body's motion moving the string's
-end. That last coupling is one way (a force from a position tap): a bridge
-spring at 0.99 pinned the string near its end, so its truncated modes
-scattered energy into fast-decaying high partials, and high notes died in
-about a second. Held notes sustain, then the
-distance picks the partial the loop blooms into (fundamental, octave,
-twelfth), and the amp's clipping holds it: the gain control the
-self-sustaining cymbal lacked. 3.3% of a core.
+2 m of air and a room onto the maple body, which carries the string's bridge
+end. Two couplings were tried first: a bridge spring at 0.99 pinned the
+string near its end, so its truncated modes scattered energy into
+fast-decaying high partials and high notes died in about a second; a force
+from the body's displacement kept the sustain but leaked the body's own
+310 Hz mode to the pickup, so the loop howled on through a muted string.
+With the mount, a body damped as a solid body is, and an envelope on the air
+for the player's hand, release stops the loop within ~0.1 s at any gain.
+Held notes sustain, then the distance picks the partial the loop blooms
+into (fundamental, octave, twelfth, double octave), and the amp's clipping
+holds it: the gain control the self-sustaining cymbal lacked. The fuzz's
+bias drifts by a share of the input's swing, so its feedback tone keeps its
+even harmonics (2nd and 4th within ~10-15 dB of the note) when driven hard.
+3.4% of a core.

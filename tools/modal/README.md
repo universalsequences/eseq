@@ -119,6 +119,7 @@ per-sample code.
 | `(m/stop id obj at :height h)` | a rigid floor under a point: sitar jawari, buzz |
 | `(m/fingerboard id string at :press s)` | clamps the string while pressed, plus a board to buzz on |
 | `(m/strokes id obj)` | plays a data object's measured strokes (see Identified models) |
+| `(m/mount id a a-at string end)` | a string's end carried by another object, one way (see Electric) |
 
 `m/felt` takes `:exponent :hysteresis :tau-ms` for Stulov's hysteretic
 felt (`examples/piano-hammer.lisp`).
@@ -158,13 +159,15 @@ the guitar, so the amp's sound can drive the strings (feedback):
 ```lisp
 (m/patch :name "modal-eno-lead" :voicing :one
   :objects (list (m/finger 'pick :depth 0.06 :stroke-ms 6)
-                 (m/string 'str :made-of mat/steel :radius-mm 0.33 :const-loss 0.1 :freq-loss 0.06)
-                 (m/plate 'body :made-of mat/maple :thick-mm 10 :mass 30 :damp 1.5))
+                 (m/string 'str :made-of mat/steel :radius-mm 0.33 :const-loss 0.1 :freq-loss 0.06 :mute 30)
+                 (m/plate 'body :made-of mat/maple :thick-mm 10 :mass 30 :loss 40 :damp 3))
   :connections (list (m/pluck 'plk 'pick 'str 0.82)
-                     (m/force 'air 'body (list 0.4 0.6) :gain 0.008 :signal (m/speaker :distance 2 :angle 60))
-                     (m/force 'bridge 'str 0.98 :gain 1 :signal (m/tap-position 'body (list 0.5 0.45))))
+                     (m/force 'air 'body (list 0.4 0.6) :gain 0.003
+                              :signal (list (m/speaker :distance 2 :angle 60 :room 0.5)
+                                            (m/envelope :attack-ms 5 :decay-ms 1 :sustain 1 :release-ms 60)))
+                     (m/mount 'bridge 'body (list 0.5 0.45) 'str 1))
   :listens (list (m/pickup 'str 0.92 :height 3 :coil-hz 2600))
-  :amp (m/amp :drive 30 :bias 0.25 :bloom 0.5))
+  :amp (m/amp :drive 30 :bias 0.25 :bloom 0.6 :presence 0.8))
 ```
 
 - `(m/pickup obj at :height h :coil-hz f :coil-q q)`: a listen that hears the
@@ -173,24 +176,35 @@ the guitar, so the amp's sound can drive the strings (feedback):
   closer (louder, asymmetric, more even harmonics; `height` is in units of
   a firm pluck's swing), through the coil's resonant low-pass.
 - `(m/patch ... :amp (m/amp ...))`: the mix plays through an amp inside the
-  instrument before the output. Fuzz (drive into tanh about a bias, which
-  drifts as loud peaks charge its coupling capacitor: Bloom;
-  antiderivative-antialiased), a bass / mid / treble stack, a power stage
-  whose drive sags with its load, then the speaker cone and cabinet.
-- `(m/speaker :distance m :angle deg)`: a signal for any driver. It is
-  the speaker's sound at that distance (delayed by the air, falling as
-  1 / distance) and off-axis angle (a 12-inch cone beams, so off axis it
-  loses its top).
-- A solid body takes almost nothing back from its strings, so the example
-  couples the body to the string one way (a force from `m/tap-position`)
-  rather than with a bridge spring. A spring that near the end pins the
-  string, scattering energy into fast-decaying high partials.
+  instrument before the output. Fuzz (drive into tanh about a bias; the
+  input's peaks charge its coupling capacitor, drifting the bias by a share
+  of the swing, so the clipping stays lopsided however hard it is driven:
+  Bloom; antiderivative-antialiased), a bass / mid / treble stack, a power
+  stage whose drive sags with its load, then the speaker cone with its
+  presence peak and the cabinet.
+- `(m/speaker :distance m :angle deg :room r)`: a signal for any driver. It
+  is the speaker's sound at that distance (delayed by the air, falling as
+  1 / distance), off-axis angle (a 12-inch cone beams, so off axis it loses
+  its top), plus the room's reflections off the floor and two walls, each
+  along its own, longer path.
+- `(m/mount id a a-at string end)`: a string's end (0 or 1) mounted on a
+  point of another object, one way, as a solid body carries its strings'
+  bridge: a base excitation, each mode pushed by its share of the end's
+  motion, 2 / (n pi), times the mount's acceleration. The string moves
+  relative to the mount, as a pickup on the body hears it, and a solid body
+  takes almost nothing back, so the string keeps its sustain. (A bridge
+  spring that near the end pins the string, scattering energy into
+  fast-decaying high partials; a force from the body's displacement leaks
+  the body's own resonance to the pickup, which then howls on through a
+  muted string.)
 
 `examples/eno-lead.lisp` sustains held notes and then blooms into
-feedback. Air > Distance picks the partial (fundamental, octave, twelfth),
-Air > Gain is how much sound the guitar catches, and the amp's clipping
-holds the loop. Keep `:voicing :one`: in poly mode every voice gets its own
-amp.
+feedback. Air > Distance picks the partial (fundamental, octave, twelfth,
+double octave), Air > Gain is how much sound the guitar catches, Air > Room
+how many spots feed back, and the amp's clipping holds the loop. Releasing
+the key is the player's hand on the strings: the envelope on the air closes
+the loop and the mute stops the string within ~0.1 s. Keep `:voicing :one`:
+in poly mode every voice gets its own amp.
 
 `(m/spectral obj ...)` adds Modalys' pseudo-physical controls to any object:
 `bend` (cents) and `diffraction` (rho: 1 leaves the partials, below 1 pulls
