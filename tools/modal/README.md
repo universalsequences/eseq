@@ -96,3 +96,26 @@ stiffness is stable.
   put bridges at the string's end (0.99), not part-way in.
 - Masses are relative to one modal mass; a 120-mode head's point is ~60x
   lighter, so useful mallets are 0.002..0.5.
+
+## Finite-element solids (mesh → modes)
+
+`eseq modal solve SPEC.json OUT.modes.json` meshes a 3-D elastic solid and
+computes its lowest vibration modes (`crates/sequencer/src/modal_fe/`).
+Samples: `fe/bar.json` (free aluminium bar, voxel mesh) and `fe/bell.json`
+(bronze bell revolved from its wall profile, mapped mesh).
+
+A spec names a `solid` (`box`, `cylinder`, `tube`, `sphere`, `shell`,
+`revolve` from `[r, z]` / `[r, z, wall]` profile points, `union`,
+`difference`, or an `obj` file), a `resolution` (`{"cells": N}` along the
+largest extent or `{"element_size": metres}`), a `material`
+(`density`, `young`, `poisson`), an optional `block` region (`box` min/max
+or `sphere` center/radius) whose nodes are clamped, and the number of
+`modes`. A lone revolve with a wall, tube, shell or cylinder gets a
+body-fitted mesh (`"segments": {"along", "around", "through"}` override its
+counts); anything else is voxelized.
+
+The output is the "eseq-modes" v1 JSON document: `freqs` (Hz, ascending,
+rigid-body modes excluded), the boundary surface as `points` / `normals`
+(P×3) and `triangles` (T×3), `shapes` (P×N, point-major: mode k's
+mass-normalized displacement along the normal at point p is
+`shapes[p*N+k]`), `mass` (kg) and the canonical `spec`.

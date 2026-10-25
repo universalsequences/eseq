@@ -16,6 +16,7 @@ const USAGE: &str = "usage: eseq run
        eseq paths
        eseq lisp run FILE...
        eseq modal emit PATCH.lisp [DIR]
+       eseq modal solve SPEC.json OUT.modes.json
        eseq authoring seed [DIR]
        eseq authoring skill
        eseq instrument check DIR_OR_NAME [--no-render]
@@ -53,6 +54,54 @@ fn emit_modal(script: &str, dir: Option<&String>) -> Result<(), String> {
     };
     instrument.write_to(&dir)?;
     println!("wrote {}", dir.display());
+    Ok(())
+}
+
+/// Compute a finite-element solid's modes from a JSON spec and write the
+/// "eseq-modes" v1 document (see `sequencer::modal_fe`).
+fn solve_modal(spec_path: &str, out: &str) -> Result<(), String> {
+    let (spec, solid, stats) = sequencer::modal_fe::solve_file(Path::new(spec_path))?;
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    println!(
+        "mesh: {} nodes, {} elements, {} blocked, {} DOFs, envelope {} entries{}",
+        stats.nodes,
+        stats.elements,
+        stats.blocked_nodes,
+        stats.dofs,
+        stats.envelope,
+        if stats.dropped_cells > 0 {
+            format!(" ({} loose voxel cells dropped)", stats.dropped_cells)
+        } else {
+            String::new()
+        }
+    );
+    println!(
+        "time: mesh {:.0} ms, assemble {:.0} ms, factor {:.0} ms, eigen {:.0} ms ({} Lanczos steps), total {:.0} ms",
+        ms(stats.mesh_time),
+        ms(stats.assemble_time),
+        ms(stats.factor_time),
+        ms(stats.eigen_time),
+        stats.lanczos_steps,
+        ms(stats.total_time)
+    );
+    if stats.converged < spec.modes {
+        eprintln!("eseq: only {} of {} modes converged", stats.converged, spec.modes);
+    }
+    let shown: Vec<String> = solid.freqs.iter().take(12).map(|f| format!("{f:.2}")).collect();
+    println!(
+        "{} modes, mass {:.4} kg, Hz: {}{}",
+        solid.freqs.len(),
+        solid.mass,
+        shown.join(" "),
+        if solid.freqs.len() > 12 { " ..." } else { "" }
+    );
+    std::fs::write(out, solid.to_json(&spec)).map_err(|error| format!("{out}: {error}"))?;
+    println!(
+        "wrote {out} ({} surface points, {} triangles, spec {})",
+        solid.point_count(),
+        solid.triangle_count(),
+        &sequencer::modal_fe::spec_hash(&spec)[..12]
+    );
     Ok(())
 }
 
@@ -125,6 +174,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         [modal, emit, script, dir @ ..] if modal == "modal" && emit == "emit" && dir.len() <= 1 => {
             emit_modal(script, dir.first())
         }
+        [modal, solve, spec, out] if modal == "modal" && solve == "solve" => solve_modal(spec, out),
         [authoring, seed, dir @ ..] if authoring == "authoring" && seed == "seed" && dir.len() <= 1 => {
             let paths = sequencer::app_paths::app_paths();
             paths
