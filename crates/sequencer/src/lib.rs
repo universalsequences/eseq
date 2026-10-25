@@ -77,6 +77,7 @@ pub mod macro_engine;
 pub mod midi_input;
 pub mod mixer_control;
 pub mod mixer_volume;
+pub mod modal_fe;
 pub mod neural;
 pub mod pad_role;
 pub mod patch_fork;
