@@ -232,7 +232,9 @@ every connection; m/spectral and listen :modes; see tools/modal/README.md)
    directions come with the free bar.
 6. Point-output mode selection.
 
-**Tier 2: new physics on the existing solver**
+**Tier 2: new physics on the existing solver** (done 2026-10-25: two
+directions with a hair-pressed bow and the fingerboard; strike, stop and
+Stulov felt; feedback taps; melt and mix hybrids)
 
 7. Directions: bi-string and two-direction masses; then a bow driven by a
    bow object's normal force, and the fingerboard.
@@ -248,7 +250,9 @@ every connection; m/spectral and listen :modes; see tools/modal/README.md)
 12. Reed, then valve (lips) and its leaky / normalised variants.
 13. Jet + labium (flutes).
 
-**Tier 4: 3-D**
+**Tier 4: 3-D** (done 2026-10-25: crates/sequencer/src/modal_fe, m/solid,
+the defwidget vertex stage and mesh views in generated panels; left: the
+wgpu mesh pass eseq-k0m2.29, live voice amplitudes eseq-k0m2.30)
 
 14. Mesh → modes offline pipeline (§4.2 step 2) on top of tier-1 item 1.
 15. `defwidget` vertex stage and the mode-mesh view (§4.3), after eseq-nu3h.

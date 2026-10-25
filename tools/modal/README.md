@@ -47,6 +47,13 @@ bridges any number of tuned strings onto one body.
 | `m/mallet` (thrown mass) | lumped |
 | `m/modal-data` (modes from data: frequencies, losses or bandwidths, shapes over points; `:root` makes it follow the note) | point index, or `(x y z)` for the nearest point |
 
+`(m/solid 'bell :shape (dict :revolve ...) :made-of mat/bronze)` is a
+finite-element solid: any 3-D shape (the spec's "solid", below), solved for
+its modes by `(modal-solve spec)` the first time it is evaluated (a few
+seconds), then read from a cache keyed by the spec. Its shapes are scaled to
+the same unit modal mass as every other object. `examples/fe-bell.lisp`
+strikes a solved bronze bell; `:root` makes it follow the note.
+
 `(modal-read-data "file")` reads data for `m/modal-data :data`, relative to
 the script: an IRCAM resonance model (text: index, Hz, dB, bandwidth Hz per
 line) or an `eseq-modes` `.json` from `eseq modal solve`.
@@ -62,6 +69,29 @@ more than 64 points keeps only the points its connections and listens use.
 | `(m/force id obj at :signal s)` | pushes the point with gain x signal |
 | `(m/position id obj at :signal s)` | holds the point at the signal (a constant 0 clamps it) |
 | `(m/speed id obj at :signal s)` | moves the point at gain x signal |
+
+| `(m/strike id a a-at b b-at)` | stiff one-sided contact between two points (`:offset`) |
+| `(m/stop id obj at :height h)` | a rigid floor under a point: sitar jawari, buzz |
+| `(m/fingerboard id string at :press s)` | clamps the string while pressed, plus a board to buzz on |
+
+`m/felt` takes `:exponent :hysteresis :tau-ms` for Stulov's hysteretic
+felt (`examples/piano-hammer.lisp`).
+
+**Directions.** `(m/string 'str :planes 2)` adds a second transverse
+direction, `(m/plane 'str 1)`, with the same params (`split` detunes it
+slightly). A bow with `:hair d` on such a string presses the second
+direction down, and its friction pressure follows that contact's force
+(`examples/bowed-bi-string.lisp`).
+
+**Feedback taps.** Signals that read last sample: `(m/tap-position obj at)`,
+`(m/tap-speed obj at)`, `(m/tap-force conn)`, `(m/tap-contact conn)`. A
+force's `:saturate` bounds a self-driven loop (`examples/feedback-gong.lisp`).
+
+**Hybrids.** `(m/melt 'h objA objB :morph x)` blends two objects' modal data
+(equal mode counts; positions on it are `(list atA atB)`):
+`examples/melt.lisp` morphs a string into a membrane. `(m/mix 'h 'a 'b)`
+shares connections and listens between two objects in the patch
+(`examples/mix.lisp`).
 
 `(m/spectral obj ...)` adds Modalys' pseudo-physical controls to any object:
 `bend` (cents) and `diffraction` (rho: 1 leaves the partials, below 1 pulls

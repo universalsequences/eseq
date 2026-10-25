@@ -24,7 +24,8 @@
 
 (import eseq.view-kit :refer (without))
 
-(export mode-mesh-view mode-mesh-face string-geometry plate-geometry membrane-geometry)
+(export mode-mesh-view mode-mesh-face mode-mesh-cycle mode-mesh-cycle-face
+        string-geometry plate-geometry membrane-geometry)
 
 (def pi-num 3.14159265358979)
 
@@ -65,6 +66,49 @@
                      &allow-other-keys)
   (apply mode-mesh-face :amps amps :scale scale :yaw yaw :pitch pitch :zoom zoom
          (without props (list :amps :scale :yaw :pitch :zoom))))
+
+;; A mesh that moves by itself: its six lowest modes superposed, each swinging
+;; at its own slow, unrelated rate (weights falling with mode number), so the
+;; view shows how the object can move while no voice is feeding it amplitudes.
+;; Shading as mode-mesh-face.
+(defwidget mode-mesh-cycle-face
+  :width 24 :height 14
+  :animates true
+  :state (scale yaw pitch zoom)
+  :vertex
+  (let ((reach (* scale mesh-radius))
+;; modes past the mesh's own (table-cols) weigh 0 (table clamps
+        ;; to its last column)
+        (w (+ (* (table vertex-id 0) (sin (* itime 1.9)))
+              (* (if (< 1.0 table-cols) 0.8 0.0) (table vertex-id 1) (sin (* itime 2.7)))
+              (* (if (< 2.0 table-cols) 0.65 0.0) (table vertex-id 2) (sin (* itime 3.4)))
+              (* (if (< 3.0 table-cols) 0.5 0.0) (table vertex-id 3) (sin (* itime 4.3)))
+              (* (if (< 4.0 table-cols) 0.4 0.0) (table vertex-id 4) (sin (* itime 5.1)))
+              (* (if (< 5.0 table-cols) 0.3 0.0) (table vertex-id 5) (sin (* itime 6.2)))))
+        (u (/ (* reach w) (max table-peak 0.000001)))
+        (p (+ position (* normal u)))
+        (turn (+ yaw orbit-yaw (* itime 0.15)))
+        (tilt (+ pitch orbit-pitch)))
+    (out :position (orbit-project p turn tilt zoom)
+         :varyings ((disp (/ u (max reach 0.000001)))
+                    (view (orbit-rotate p turn tilt)))))
+  :shader
+  (let ((n (normalize (cross (dfdx view) (dfdy view))))
+        (diffuse (abs (dot n (normalize (vec3 -0.4 0.6 0.7)))))
+        (spec (pow (abs (dot n (normalize (vec3 -0.2 0.3 1.0)))) 24.0))
+        (t (clamp disp -1.0 1.0))
+        (rest (rgba 0.74 0.76 0.80 1.0))
+        (base (if (< t 0.0)
+                  (mix rest (rgba 0.18 0.42 0.95 1.0) (- t))
+                  (mix rest (rgba 0.98 0.52 0.16 1.0) t)))
+        (shade (+ 0.32 (* 0.68 diffuse))))
+    (+ (* base (rgba shade shade shade 1.0)) (rgba (* 0.18 spec) (* 0.18 spec) (* 0.18 spec) 0.0))))
+
+;; A mode-mesh-cycle-face with defaults (:scale 0.1, :yaw 0.6, :pitch 0.5,
+;; :zoom 1); takes :src or :geometry and other widget props.
+(def mode-mesh-cycle (&rest props &key (scale 0.1) (yaw 0.6) (pitch 0.5) (zoom 1) &allow-other-keys)
+  (apply mode-mesh-cycle-face :scale scale :yaw yaw :pitch pitch :zoom zoom
+         (without props (list :scale :yaw :pitch :zoom))))
 
 ;; ── generated geometry ──────────────────────────────────────────────────────
 ;; Each returns a geometry dict with the eseq-modes keys (:points :normals

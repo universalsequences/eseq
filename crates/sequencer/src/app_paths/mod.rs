@@ -778,6 +778,12 @@ impl AppPaths {
         self.dgen_cache_root().join("ir-prep")
     }
 
+    /// Solved finite-element modal solids (eseq.modal's `modal-solve`), as
+    /// eseq-modes files named by their spec's hash.
+    pub fn modal_solid_cache_dir(&self) -> PathBuf {
+        self.dgen_cache_root().join("modal-solids")
+    }
+
     /// Persistent patch-learning job artifacts. These are deliberately kept
     /// outside the transient compiler scratch directory: a completed or
     /// interrupted job is useful after restart for replay and diagnosis.

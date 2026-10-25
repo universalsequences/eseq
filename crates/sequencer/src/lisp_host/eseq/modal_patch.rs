@@ -27,18 +27,43 @@ pub struct ModalInstrument {
 
 impl ModalInstrument {
     /// Write dsp.lisp, ui.lisp and instrument.json into `dir`, creating it.
+    /// The eseq-modes files ui.lisp's mesh views read (`:src "….modes.json"`)
+    /// are copied beside them and ui.lisp points at the copies, so the folder
+    /// does not depend on the solve cache or a draft folder.
     pub fn write_to(&self, dir: &Path) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
         let metadata = format!(
             "{{\"version\": 1, \"run_mode\": \"{}\"}}\n",
             CustomInstrumentRunMode::Instrument.as_str()
         );
-        for (name, text) in [("dsp.lisp", &self.dsp), ("ui.lisp", &self.ui), ("instrument.json", &metadata)] {
+        let mut ui = self.ui.clone();
+        for from in mesh_sources(&self.ui) {
+            let from = PathBuf::from(from);
+            let Some(name) = from.file_name() else { continue };
+            let to = dir.join(name);
+            if from != to {
+                std::fs::copy(&from, &to).map_err(|error| format!("{}: {error}", from.display()))?;
+            }
+            ui = ui.replace(&from.display().to_string(), &to.display().to_string());
+        }
+        for (name, text) in [("dsp.lisp", &self.dsp), ("ui.lisp", &ui), ("instrument.json", &metadata)] {
             let file = dir.join(name);
             std::fs::write(&file, text).map_err(|error| format!("{}: {error}", file.display()))?;
         }
         Ok(())
     }
+}
+
+/// The absolute eseq-modes paths a ui.lisp's mesh views read: every
+/// `:src "…"` naming a .modes.json file.
+fn mesh_sources(ui: &str) -> Vec<String> {
+    ui.match_indices(":src \"")
+        .filter_map(|(at, needle)| {
+            let rest = &ui[at + needle.len()..];
+            let path = &rest[..rest.find('"')?];
+            (path.ends_with(".modes.json") && Path::new(path).is_absolute()).then(|| path.to_string())
+        })
+        .collect()
 }
 
 /// True when `source` imports `eseq.modal` (not a longer module name such as
@@ -77,7 +102,7 @@ pub fn read_modal_data_file(path: &str) -> Result<Value, String> {
     });
     let text = std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
     let parsed = if path.extension().is_some_and(|ext| ext == "json") {
-        modes_json_value(&text)
+        modes_json_value(&text).map(|value| with_file(value, &path))
     } else {
         modres_value(&text)
     };
@@ -91,8 +116,173 @@ pub const CIRC_PLATE_NATIVE: &str = "modal-circ-plate-modes";
 /// The natives eseq.modal calls, by name, as (args) -> value or a
 /// user-facing error. The CLI and tests register them on a bare VM
 /// ([`register_modal_natives`]); the app on its runtime.
-pub fn modal_natives() -> [(&'static str, fn(&[Value]) -> Result<Value, String>); 2] {
-    [(READ_DATA_NATIVE, read_data_native), (CIRC_PLATE_NATIVE, circ_plate_native)]
+pub fn modal_natives() -> [(&'static str, fn(&[Value]) -> Result<Value, String>); 4] {
+    [
+        (READ_DATA_NATIVE, read_data_native),
+        (CIRC_PLATE_NATIVE, circ_plate_native),
+        (SOLVE_NATIVE, solve_native),
+        (NEAREST_NATIVE, nearest_native),
+    ]
+}
+
+/// `(modal-nearest-point points (x y z))`: the index of the nearest of a
+/// list of (x y z) points (a data object's access by position).
+pub const NEAREST_NATIVE: &str = "modal-nearest-point";
+
+fn nearest_native(args: &[Value]) -> Result<Value, String> {
+    let xyz = |value: &Value| -> Option<[f64; 3]> {
+        let Value::List(items) = value else { return None };
+        let n = |k: usize| match items.get(k).map(|v| v.borrow().clone()) {
+            Some(Value::Number(x)) => Some(x),
+            _ => None,
+        };
+        Some([n(0)?, n(1)?, n(2)?])
+    };
+    let (Some(Value::List(points)), Some(at)) = (args.first(), args.get(1).and_then(xyz)) else {
+        return Err(format!("{NEAREST_NATIVE} takes a list of (x y z) points and an (x y z)"));
+    };
+    let distance = |p: [f64; 3]| (0..3).map(|i| (p[i] - at[i]).powi(2)).sum::<f64>();
+    let best = points
+        .iter()
+        .enumerate()
+        .filter_map(|(k, point)| xyz(&point.borrow()).map(|p| (k, distance(p))))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map_or(0, |(k, _)| k);
+    Ok(Value::Number(best as f64))
+}
+
+/// The native a finite-element solid is solved with:
+/// `(modal-solve "bell.json")` or `(modal-solve (dict :solid ... :material ...))`.
+pub const SOLVE_NATIVE: &str = "modal-solve";
+
+/// Solve a finite-element solid spec (see `crate::modal_fe::spec`) given as
+/// a JSON file path (relative to the script) or a Lisp dict (keys as in the
+/// JSON, `-` read as `_`; the material as `:made-of`, any eseq.modal
+/// material, since a call quotes whatever follows `:material`), into the
+/// dict `modal-read-data` returns for an
+/// eseq-modes file, with each mode's shape scaled to eseq.modal's unit modal
+/// mass (mean square 1/2 over the surface points; the solver's are
+/// mass-normalised in kg). Solutions are cached (see the key below), so only
+/// the first evaluation of a solid pays for the solve.
+fn solve_native(args: &[Value]) -> Result<Value, String> {
+    use crate::modal_fe::{solve, spec_hash, SolidSpec};
+    let script_dir = SCRIPT_DIR.with(|dir| dir.borrow().clone()).unwrap_or_else(|| PathBuf::from("."));
+    let (spec, base) = match args.first() {
+        Some(Value::String(path)) => {
+            let path = if Path::new(path).is_relative() { script_dir.join(path) } else { PathBuf::from(path) };
+            let base = path.parent().map(Path::to_path_buf).unwrap_or_else(|| script_dir.clone());
+            (SolidSpec::load(&path)?, base)
+        }
+        Some(value @ Value::Map(_)) => {
+            let mut spec = lisp_to_json(value);
+            if let Some(material) = spec.as_object_mut().and_then(|spec| spec.remove("made_of")) {
+                let pick = |key: &str| material.get(key).cloned().unwrap_or(serde_json::Value::Null);
+                spec["material"] =
+                    serde_json::json!({"density": pick("density"), "young": pick("young"), "poisson": pick("poisson")});
+            }
+            let json = spec.to_string();
+            (SolidSpec::from_json(&json).map_err(|error| format!("{error} in {json}"))?, script_dir)
+        }
+        _ => return Err(format!("{SOLVE_NATIVE} takes a spec file path or a spec dict")),
+    };
+    // The key: the spec, where its relative .obj paths resolve, the .obj
+    // files' contents, and the solver's version (a fix re-solves).
+    let mut key = format!("{SOLVER_VERSION}\n{}\n{}\n", spec_hash(&spec), base.display());
+    let spec_json = serde_json::to_value(&spec).map_err(|error| error.to_string())?;
+    for path in obj_paths(&spec_json) {
+        let bytes = std::fs::read(base.join(&path)).unwrap_or_default();
+        key.push_str(&crate::sample_manifest::sha256_hex(&bytes));
+    }
+    let cache = crate::app_paths::app_paths()
+        .modal_solid_cache_dir()
+        .join(format!("{}.unit.modes.json", crate::sample_manifest::sha256_hex(key.as_bytes())));
+    // A cached file is already at unit modal mass; one that does not parse
+    // is solved again.
+    if let Ok(value) = std::fs::read_to_string(&cache).map_err(|error| error.to_string()).and_then(|text| modes_json_value(&text)) {
+        return Ok(with_file(value, &cache));
+    }
+    let (mut solid, _) = solve(&spec, &base)?;
+    unit_modal_mass(&mut solid);
+    let text = solid.to_json(&spec);
+    if let Some(dir) = cache.parent() {
+        let _ = std::fs::create_dir_all(dir);
+        // write beside, then rename: a reader never sees half a file
+        let staging = dir.join(format!(".{}.tmp", std::process::id()));
+        if std::fs::write(&staging, &text).is_ok() {
+            let _ = std::fs::rename(&staging, &cache);
+        }
+    }
+    modes_json_value(&text).map(|value| with_file(value, &cache))
+}
+
+/// Bumped when the solver's output changes, so cached solves are redone.
+const SOLVER_VERSION: &str = "modal-fe 1";
+
+/// Every .obj path a spec names (in "obj" solids, at any depth).
+fn obj_paths(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .flat_map(|(key, item)| match (key.as_str(), item.get("path").and_then(|p| p.as_str())) {
+                ("obj", Some(path)) => vec![path.to_string()],
+                _ => obj_paths(item),
+            })
+            .collect(),
+        serde_json::Value::Array(items) => items.iter().flat_map(obj_paths).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Scale every mode's shape column to mean square 1/2 over the points
+/// (eseq.modal's unit modal mass; the solver's are mass-normalised in kg).
+fn unit_modal_mass(solid: &mut crate::modal_fe::ModalSolid) {
+    let modes = solid.freqs.len();
+    if modes == 0 {
+        return;
+    }
+    let points = solid.shapes.len() / modes;
+    for k in 0..modes {
+        let mean_square = (0..points).map(|p| (solid.shapes[p * modes + k] as f64).powi(2)).sum::<f64>()
+            / points.max(1) as f64;
+        if mean_square > 0.0 {
+            let scale = (0.5 / mean_square).sqrt() as f32;
+            for p in 0..points {
+                solid.shapes[p * modes + k] *= scale;
+            }
+        }
+    }
+}
+
+/// value (a data dict) with :file, the eseq-modes file it came from, for a
+/// mesh view of the object.
+fn with_file(value: Value, path: &Path) -> Value {
+    match value {
+        Value::Map(mut map) => {
+            map.insert("file".to_string(), cell(Value::String(path.display().to_string())));
+            Value::Map(map)
+        }
+        other => other,
+    }
+}
+
+/// A Lisp value as JSON: dicts become objects (keyword-style keys with `-`
+/// read as `_`), lists arrays, keywords strings.
+fn lisp_to_json(value: &Value) -> serde_json::Value {
+    match value {
+        // whole numbers as integers, for counts (modes, segments, cells)
+        Value::Number(n) if n.fract() == 0.0 && n.abs() < 9e15 => serde_json::json!(*n as i64),
+        Value::Number(n) => serde_json::json!(n),
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::String(text) => serde_json::Value::String(text.clone()),
+        Value::Keyword(k) | Value::Symbol(k) => serde_json::Value::String(k.trim_start_matches(':').replace('-', "_")),
+        Value::List(items) => serde_json::Value::Array(items.iter().map(|item| lisp_to_json(&item.borrow())).collect()),
+        Value::Map(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, item)| (key.trim_start_matches(':').replace('-', "_"), lisp_to_json(&item.borrow())))
+                .collect(),
+        ),
+        _ => serde_json::Value::Null,
+    }
 }
 
 fn read_data_native(args: &[Value]) -> Result<Value, String> {
@@ -175,14 +365,11 @@ fn modes_json_value(text: &str) -> Result<Value, String> {
     if freqs.is_empty() || shapes.len() != freqs.len() * (points.len() / 3) {
         return Err("\"shapes\" must hold one value per point per mode".to_string());
     }
-    // normals and triangles are for the mesh view; the DSP does not need them
-    let optional = |key: &str| if json[key].is_null() { Ok(Vec::new()) } else { floats(key) };
+    // normals and triangles are for the mesh view, which reads :file itself
     Ok(data_dict(vec![
         ("freqs", numbers(freqs.iter().copied())),
         ("shapes", rows(&shapes, freqs.len())),
         ("points", rows(&points, 3)),
-        ("normals", rows(&optional("normals")?, 3)),
-        ("triangles", numbers(optional("triangles")?)),
         ("mass", Value::Number(json["mass"].as_f64().unwrap_or(1.0))),
     ]))
 }
@@ -618,6 +805,122 @@ mod tests {
         assert!(dsp.contains("(def o_hz (tensor @shape [3] @data [100 200 300]))"), "{dsp}");
         assert!(dsp.contains("(def o_loss0 (tensor @shape [3] @data [1 2 3]))"), "{dsp}");
         assert!(dsp.contains("@data [0.1 0.2 0.3]"), "{dsp}");
+    }
+
+    #[test]
+    fn solves_a_solid_from_a_lisp_spec() {
+        // A coarse free steel bar, solved (or read from the cache) on generation.
+        let script = "(import eseq.modal :as m)
+(import eseq.modal.materials :as mat)
+(m/patch :name \"probe-solid\"
+  :objects (list (m/mallet 'mal)
+                 (m/solid 'bar :made-of mat/steel :modes 4 :resolution (dict :cells 12)
+                          :shape (dict :box (dict :size (list 0.3 0.03 0.01)))))
+  :connections (list (m/felt 'hit 'mal 'bar (list 0.15 0 0.005)))
+  :listens (list (m/listen 'bar (list -0.14 0 0.005))))";
+        let dsp = generate_modal_instrument(&mut modal_vm(), PathBuf::from("solid.lisp"), script).unwrap().dsp;
+        let squashed = dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(squashed.contains("(def bar_hz (tensor @shape [4] @data ["), "{dsp}");
+        // its surface points, addressed by (x y z): the nearest point param
+        assert!(squashed.contains("(def bar_shapes (tensor @shape ["), "{dsp}");
+        assert!(squashed.contains("(param hit_bar_pt @group hit"), "{dsp}");
+    }
+
+    #[test]
+    fn strike_stop_and_stulov_felt() {
+        let script = "(import eseq.modal :as m)
+(m/patch :name \"probe-contacts\"
+  :objects (list (m/mallet 'mal) (m/string 'str) (m/plate 'pl))
+  :connections (list (m/felt 'hit 'mal 'str 0.1 :exponent 2.5)
+                     (m/stop 'jaw 'str 0.03 :height -0.001)
+                     (m/strike 'rattle 'str 0.6 'pl (list 0.4 0.4) :offset 0.002))
+  :listens (list (m/listen 'str 0.2)))";
+        let dsp = generate_modal_instrument(&mut modal_vm(), PathBuf::from("contacts.lisp"), script).unwrap().dsp;
+        let squashed = dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        // The stop pushes up from below; the strike pushes the points apart.
+        assert!(squashed.contains("(* -1 jaw_weight (felt-contact (- jaw_y_b0 jaw_height) jaw_C_b0 jaw_stiff))"), "{dsp}");
+        assert!(squashed.contains("(felt-contact (+ (- rattle_y_a0 rattle_y_b0) rattle_offset) (+ rattle_C_a0 rattle_C_b0) rattle_stiff)"), "{dsp}");
+        // Stulov: 5 Newton steps clamped to the bracket, then the remembered compression.
+        assert!(squashed.contains("(def hit_f5 (clip "), "{dsp}");
+        assert!(squashed.contains("(def hit_F (* -1 hit_weight hit_f))"), "{dsp}");
+        assert!(squashed.contains("(param hit_exponent @group hit @default 2.5"), "{dsp}");
+    }
+
+    #[test]
+    fn two_directions_hair_and_fingerboard() {
+        let script = "(import eseq.modal :as m)
+(m/patch :name \"probe-planes\"
+  :objects (list (m/string 'str :planes 2))
+  :connections (list (m/bow 'bow 'str 0.12 :hair 0.002) (m/fingerboard 'fret 'str 0.3))
+  :listens (list (m/listen (m/plane 'str 1) 0.8)))";
+        let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("planes.lisp"), script).unwrap();
+        let squashed = instrument.dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        // The second direction reads the first's params, detuned by split.
+        assert!(squashed.contains("(def str_v_f0 (* f0 str_tune str_split))"), "{squashed}");
+        assert!(squashed.contains("(* str_v_radius") == false, "{squashed}");
+        assert!(squashed.contains("(* str_radius 0.001) str_length)"), "{squashed}");
+        // The hair presses str_v down at the bow's point; the bow's pressure follows it.
+        assert!(squashed.contains("(felt-contact (- bow_hair_height bow_hair_y_b0) bow_hair_C_b0 bow_hair_stiff)"), "{squashed}");
+        assert!(squashed.contains("(def bow_hair_phi_b (* (sin (* str_v_n 3.14159265 bow_str_at)) str_v_mask))"), "{squashed}");
+        assert!(squashed.contains("(read-history bow_press_h)"), "{squashed}");
+        // The fingerboard clamps by its press signal, its board at the same point.
+        assert!(squashed.contains("(* fret_weight (max 0 fret_sig) (spring-connection (- 0 fret_y_b0) fret_C_b0 fret_stiff))"), "{squashed}");
+        assert!(squashed.contains("(sin (* str_n 3.14159265 fret_str_at))"), "{squashed}");
+        // No panel section for the second direction or the hidden hair.
+        assert!(!instrument.ui.contains("STRING v"), "{}", instrument.ui);
+        assert!(!instrument.ui.contains("HAIR"), "{}", instrument.ui);
+    }
+
+    #[test]
+    fn feedback_taps() {
+        let script = "(import eseq.modal :as m)
+(m/patch :name \"probe-taps\"
+  :objects (list (m/mallet 'mal) (m/string 'a) (m/string 'b))
+  :connections (list (m/felt 'hit 'mal 'a 0.1)
+                     (m/force 'sym 'b 0.3 :saturate true :signal (list (m/tap-speed 'a 0.9) (m/tap-contact 'hit))))
+  :listens (list (m/listen 'b 0.2)))";
+        let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("taps.lisp"), script).unwrap();
+        let squashed = instrument.dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        // The tap's point is its own param, its shape read from a's last state.
+        assert!(squashed.contains("(param sym_tap_a_at @group sym_tap @default 0.9"), "{squashed}");
+        assert!(squashed.contains("(- (read-history a_s1) (read-history a_s2))"), "{squashed}");
+        // The felt's force is kept a sample for the contact tap.
+        assert!(squashed.contains("(make-history hit_F_h)"), "{squashed}");
+        assert!(squashed.contains("(write-history hit_F_h hit_F)"), "{squashed}");
+        assert!(squashed.contains("(gt (abs (read-history hit_F_h)) 0.0000001)"), "{squashed}");
+        assert!(squashed.contains("(tanh sym_sig)"), "{squashed}");
+        let bad = script.replace("(m/tap-contact 'hit)", "(m/tap-contact 'nope)");
+        let errors = generate_modal_instrument(&mut modal_vm(), PathBuf::from("taps.lisp"), &bad).unwrap_err();
+        assert_eq!(errors, vec!["force sym: tap on no connection nope".to_string()]);
+    }
+
+    #[test]
+    fn melt_and_mix_hybrids() {
+        let melt = "(import eseq.modal :as m)
+(m/patch :name \"probe-melt\"
+  :objects (list (m/mallet 'mal) (m/melt 'h (m/string 'str :modes 16) (m/rect-membrane 'skin :grid 4)))
+  :connections (list (m/felt 'hit 'mal 'h (list 0.1 (list 0.3 0.4))))
+  :listens (list (m/listen 'h (list 0.7 (list 0.6 0.6)))))";
+        let squashed = generate_modal_instrument(&mut modal_vm(), PathBuf::from("melt.lisp"), melt).unwrap().dsp
+            .split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(squashed.contains("(def h_freqs (exp (+ (* (- 1 h_morph) (log str_freqs)) (* h_morph (log skin_freqs)))))"), "{squashed}");
+        assert!(squashed.contains("(def hit_phi_b (+ (* (- 1 h_morph) hit_phi_b_a) (* h_morph hit_phi_b_b)))"), "{squashed}");
+        let unequal = melt.replace(":modes 16", ":modes 12");
+        let errors = generate_modal_instrument(&mut modal_vm(), PathBuf::from("melt.lisp"), &unequal).unwrap_err();
+        assert_eq!(errors, vec!["melt h: its parts have 12 and 16 modes; give them the same :modes".to_string()]);
+
+        let mix = "(import eseq.modal :as m)
+(m/patch :name \"probe-mix\"
+  :objects (list (m/finger 'fin) (m/string 'lo) (m/string 'hi :tune 1.5) (m/mix 'pair 'lo 'hi))
+  :connections (list (m/pluck 'pick 'fin 'pair (list 0.2 0.2)))
+  :listens (list (m/listen 'pair (list 0.8 0.8))))";
+        let squashed = generate_modal_instrument(&mut modal_vm(), PathBuf::from("mix.lisp"), mix).unwrap().dsp
+            .split_whitespace().collect::<Vec<_>>().join(" ");
+        // The pluck sees the lever of both strings and pushes each by its share.
+        assert!(squashed.contains("(def pick_y_b (+ (* (- 1 pair_morph) pick_y_b_0) (* pair_morph pick_y_b_1)))"), "{squashed}");
+        assert!(squashed.contains("(* 1 (- 1 pair_morph) pick_F pick_phi_b_0)"), "{squashed}");
+        assert!(squashed.contains("(* 1 pair_morph pick_F pick_phi_b_1)"), "{squashed}");
+        assert!(squashed.contains("(def mic1_v (+ (* (- 1 pair_morph) mic1_0_v) (* pair_morph mic1_1_v)))"), "{squashed}");
     }
 
     #[test]

@@ -36,9 +36,10 @@
 
 (import eseq.modal.materials :as mat)
 
-(export string plate membrane finger mallet modal-data bar rect-membrane oscillator circ-plate
-        pluck spring felt bow force position speed listen patch
-        envelope noise sine constant signal spectral
+(export string plate membrane finger mallet modal-data bar rect-membrane oscillator circ-plate solid
+        melt mix
+        pluck spring felt bow strike stop fingerboard force position speed listen patch plane
+        envelope noise sine constant signal tap-position tap-speed tap-force tap-contact spectral
         check dsp ui generate)
 
 ;; ── small helpers ───────────────────────────────────────────────────────────
@@ -165,10 +166,16 @@
 ;;   const-loss  damping at every frequency (panel "Loss")
 ;;   mute        extra damping while the note is released
 ;;   tune        frequency ratio to the played note
+;;   planes      1, or 2 for two transverse directions (Modalys' bi-string):
+;;               the second is the object (m/plane id 1), with the same
+;;               params; connections and listens address either
+;;   split       the second direction's frequency ratio to the first (they
+;;               beat when it is not 1)
 (def string (id &key (made-of mat/steel) (length 0.65) (radius-mm 0.5) (modes 60)
-                 (freq-loss 0.4) (const-loss 0.3) (mute 6) (tune 1))
-  (dict :id id :title "STRING" :kind :string :lumped false :modes modes :stuff made-of
+                 (freq-loss 0.4) (const-loss 0.3) (mute 6) (tune 1) (planes 1) (split 1.0007))
+  (dict :id id :title "STRING" :kind :string :lumped false :modes modes :stuff made-of :planes planes
         :params (append (material-params id made-of)
+                (if (= planes 2) (list (pspec id "split" split 0.99 1.01 :title "Split" :dec 4)) (list))
                 (list (pspec id "length" length 0.2 20 :unit 'm :title "Length" :taper :log)
                       (pspec id "radius" radius-mm 0.1 5 :unit 'mm :title "Radius" :taper :log)
                       (pspec id "hf_loss" freq-loss 0 10 :title "HF loss")
@@ -359,7 +366,9 @@
         (fs (given freqs :freqs))
         (n (if (list? fs) (len fs) 0))
         (order (sort-by-value (if (list? fs) fs (list))))
-        (reorder (lambda (xs) (if (and (list? xs) (= (len xs) n)) (map (lambda (k) (nth xs k)) order) xs)))
+        ;; already sorted data (a solver's) is left as it is
+        (sorted (= order (range n)))
+        (reorder (lambda (xs) (if (and (not sorted) (list? xs) (= (len xs) n)) (map (lambda (k) (nth xs k)) order) xs)))
         (ls (given losses :losses))
         (bw (given bandwidths :bandwidths))
         (am (given amps :amps))
@@ -371,10 +380,41 @@
           :losses (reorder (if ls ls (map (lambda (b) (* 3.14159265 b)) (if bw bw ones))))
           :shapes (map reorder (if (list? sh) sh (list (if am am ones))))
           :points (given points :points)
+          ;; the eseq-modes file it came from, for the panel's mesh view
+          :mesh-file (given nil :file)
           :root (given root :root)
           :fixed-pitch (= (given root :root) nil)
           :params (append (list (pspec id "decay" decay 0.05 20 :title "Decay x" :taper :log))
                           (note-params id tune mute (if mass mass (if (given nil :mass) (given nil :mass) 1)))))))
+
+;; A finite-element solid (Modalys' finite-element objects): any 3-D shape,
+;; solved for its modes by modal-solve (the first time; then from a cache)
+;; and played as a data object. Its pitch is its own (material and size)
+;; unless root makes it follow the note.
+;;   id          the object's id ('bell)
+;;   shape       the solid, as in a spec file's "solid": e.g.
+;;               (dict :revolve (dict :profile (list (list r z wall) ...)))
+;;               or (dict :box (dict :size (list 0.4 0.05 0.012))); see
+;;               tools/modal/README.md
+;;   spec        instead of shape: a whole spec file (relative to the
+;;               script), material and all
+;;   made-of     its material (one; menus need a re-solve per material)
+;;   modes       how many modes to solve for
+;;   resolution  the spec's resolution, e.g. (dict :cells 32)
+;;   block       a region clamped in place, as in a spec; free when nil
+;;   loss        damping at every frequency, 1/s
+;;   hf-loss     damping that rises with frequency (as the string's)
+;;   root, tune, decay, mute, mass  as for modal-data
+(def solid (id &key (shape nil) (spec nil) (made-of mat/steel) (modes 40) (resolution nil) (block nil)
+               (loss 2) (hf-loss 0.3) (root nil) (tune 1) (decay 1) (mute 0) (mass nil))
+  (let ((m (first (material-choices made-of)))
+        ;; :made-of, not :material: a call quotes whatever follows :material
+        (base (dict :solid shape :modes modes :made-of m))
+        (with-res (if resolution (merge base :resolution resolution) base))
+        (data (modal-solve (if spec spec (if block (merge with-res :block block) with-res))))
+        (losses (if (map? data) (map (lambda (f) (+ loss (* hf-loss f 0.01))) (get data :freqs)) nil)))
+    (merge (modal-data id :data data :losses losses :root root :tune tune :decay decay :mute mute :mass mass)
+           :title "SOLID" :label "solid")))
 
 ;; The positions of xs's numbers in increasing order (insertion sort; a few
 ;; hundred modes at most).
@@ -385,6 +425,38 @@
                     (list k)
                     (filter (lambda (j) (> (nth xs j) (nth xs k))) sorted)))
           (list) (range (len xs))))
+
+;; A melt hybrid (Modalys' melt-hybrid): one object whose modal data is a
+;; blend of two objects', so morphing changes what it is (a string into a
+;; plate, one material into another) while it rings. Frequencies blend in
+;; log frequency, losses, coupling and mode shapes linearly. The parts are
+;; objects made for it (not listed in the patch), with the same number of
+;; modes; their params stay on the panel. A position on it is (list atA atB).
+;;   id     the object's id ('h)
+;;   a, b   the two objects (dicts, from m/string, m/plate, ...)
+;;   morph  0 is a, 1 is b (a param)
+(def melt (id a b &key (morph 0.5))
+  (dict :id id :title "MELT" :kind :melt :lumped false :modes (get a :modes) :parts (list a b)
+        :params (append (list (pspec id "morph" morph 0 1 :title "Morph")) (get a :params) (get b :params))))
+
+;; A mix hybrid (Modalys' mix-hybrid): two objects kept whole, a connection or
+;; listen on it shared between them, (1 - morph) to a and morph to b (both
+;; pitches heard). A connection end on it moves (1 - x) ya + x yb and
+;; pushes each by its share of the force. A position on it is (list atA atB).
+;;   id     the hybrid's id ('h)
+;;   a, b   the two objects' ids (modal objects in the patch)
+;;   morph  0 is all a, 1 all b (a param)
+(def mix (id a b &key (morph 0.5))
+  (dict :id id :title "MIX" :kind :mix :lumped false :parts (list a b)
+        :params (list (pspec id "morph" morph 0 1 :title "Morph"))))
+
+;; True for an object with its own state (not a mix, which only routes).
+;;   obj  an object
+(def physical? (obj) (not (= (get obj :kind) :mix)))
+
+;; True for a hybrid of either kind.
+;;   obj  an object
+(def hybrid? (obj) (member? (list :melt :mix) (get obj :kind)))
 
 ;; ── connections ─────────────────────────────────────────────────────────────
 ;; Each constructor returns a connection dict:
@@ -426,17 +498,58 @@
   (dict :id id :title "SPRING" :law :spring :a a :b b :a-at a-at :b-at b-at :weight weight
         :params (list (pspec id "stiff" stiffness 0 50 :title "Glue" :dec 1))))
 
-;; A one-sided, hardening felt between a mallet and the object it strikes.
-;;   id        the connection's id ('hit)
-;;   a         the mallet's id
-;;   b         the struck object's id
-;;   b-at      where on b it strikes
-;;   felt      the felt's stiffness at rest
-;;   hardness  how much it stiffens as it is squashed, 0..1 (panel "Hard")
-(def felt (id a b b-at &key (felt 0.005) (hardness 0.5) (weight 1))
-  (dict :id id :title "FELT" :law :felt :a a :b b :a-at nil :b-at b-at :weight weight
-        :params (list (pspec id "felt" felt 0.0005 5 :title "Felt" :taper :log :dec 4)
-                      (pspec id "hardness" hardness 0 1 :title "Hard"))))
+;; A one-sided felt between a mallet and the object it strikes. By default it
+;; hardens with the last sample's squash; given an exponent it is Stulov's
+;; hysteretic felt (Modalys' felt): F = Q ((u / u0)^p - eps h), with u the
+;; compression, u0 = 1 mm of the mallet's drop and h (u / u0)^p remembered
+;; over tau, so it pushes back less on the way out than on the way in.
+;;   id          the connection's id ('hit)
+;;   a           the mallet's id
+;;   b           the struck object's id
+;;   b-at        where on b it strikes
+;;   felt        the felt's stiffness (Stulov's Q)
+;;   hardness    how much it stiffens as it is squashed, 0..1 (panel "Hard";
+;;               the default law only)
+;;   exponent    Stulov's p (typically 2.2..3.5); nil for the default law
+;;   hysteresis  Stulov's eps, 0..0.9
+;;   tau-ms      how long the felt remembers, ms
+;;   weight      0..1
+(def felt (id a b b-at &key (felt 0.005) (hardness 0.5) (exponent nil) (hysteresis 0.2) (tau-ms 0.5) (weight 1))
+  (dict :id id :title "FELT" :law :felt :a a :b b :a-at nil :b-at b-at :weight weight :stulov (not (= exponent nil))
+        :params (if exponent
+                  (list (pspec id "felt" felt 0.0005 5 :title "Felt" :taper :log :dec 4)
+                        (pspec id "exponent" exponent 1 5 :title "Exponent")
+                        (pspec id "hysteresis" hysteresis 0 0.9 :title "Hysteresis")
+                        (pspec id "tau" tau-ms 0.01 20 :unit 'ms :title "Memory" :taper :log))
+                  (list (pspec id "felt" felt 0.0005 5 :title "Felt" :taper :log :dec 4)
+                        (pspec id "hardness" hardness 0 1 :title "Hard")))))
+
+;; A stiff one-sided contact between two objects' points (Modalys' strike):
+;; pushes them apart while a's point is below b's minus offset (offset is the
+;; gap between them at rest), and nothing otherwise. Implicit, so any stiffness is stable.
+;;   id         the connection's id ('rattle)
+;;   a, a-at    the upper object and its point
+;;   b, b-at    the lower object and its point
+;;   stiffness  relative to the points' give (large is nearly rigid)
+;;   offset     the gap at rest
+;;   weight     0..1
+(def strike (id a a-at b b-at &key (stiffness 200) (offset 0) (weight 1))
+  (dict :id id :title "STRIKE" :law :strike :a a :b b :a-at a-at :b-at b-at :weight weight
+        :params (list (pspec id "stiff" stiffness 1 5000 :title "Hard" :taper :log :dec 0)
+                      (pspec id "offset" offset -0.02 0.02 :title "Gap" :dec 4))))
+
+;; A rigid stop under b's point (Modalys' unilateral strike): the point cannot
+;; go below height. A sitar's jawari or a buzzing fret: a string that rings
+;; against it buzzes.
+;;   id         the connection's id ('jaw)
+;;   b, at      the object and its point
+;;   height     where the stop is (below rest is negative)
+;;   stiffness  relative to the point's give
+;;   weight     0..1
+(def stop (id b at &key (height -0.002) (stiffness 200) (weight 1))
+  (dict :id id :title "STOP" :law :stop :a nil :b b :a-at nil :b-at at :weight weight
+        :params (list (pspec id "stiff" stiffness 1 5000 :title "Hard" :taper :log :dec 0)
+                      (pspec id "height" height -0.02 0.02 :title "Height" :dec 4))))
 
 ;; A bow driving b's access point at a steady speed while the note is held,
 ;; by stick-slip friction (see content/defmacros/bow-contact). It has no
@@ -451,13 +564,18 @@
 ;;   slip        how wide the stick region is, relative to the speed
 ;;   attack-ms   time for the bow to come up to speed, ms
 ;;   release-ms  time for it to stop after the note is released, ms
-(def bow (id b at &key (pressure 0.2) (speed 0.2) (slip 1) (attack-ms 60) (release-ms 120) (weight 1))
-  (dict :id id :title "BOW" :law :bow :a nil :b b :a-at nil :b-at at :weight weight
-        :params (list (pspec id "pressure" pressure 0.01 2 :title "Pressure" :taper :log)
-                      (pspec id "speed" speed 0.01 1 :title "Speed" :taper :log)
-                      (pspec id "slip" slip 0.1 3 :title "Slip")
-                      (pspec id "attack" attack-ms 1 1000 :unit 'ms :title "Attack" :taper :log)
-                      (pspec id "release" release-ms 1 2000 :unit 'ms :title "Release" :taper :log))))
+;;   hair        on a string with :planes 2: the hair's depth into the
+;;               second direction; the bow then presses that direction down,
+;;               and its friction pressure is the pressure param times the
+;;               contact force over its 50 ms mean (nil: a constant pressure)
+(def bow (id b at &key (pressure 0.2) (speed 0.2) (slip 1) (attack-ms 60) (release-ms 120) (hair nil) (weight 1))
+  (dict :id id :title "BOW" :law :bow :a nil :b b :a-at nil :b-at at :weight weight :hair hair
+        :params (append (list (pspec id "pressure" pressure 0.01 2 :title "Pressure" :taper :log)
+                              (pspec id "speed" speed 0.01 1 :title "Speed" :taper :log)
+                              (pspec id "slip" slip 0.1 3 :title "Slip")
+                              (pspec id "attack" attack-ms 1 1000 :unit 'ms :title "Attack" :taper :log)
+                              (pspec id "release" release-ms 1 2000 :unit 'ms :title "Release" :taper :log))
+                        (if hair (list (pspec id "hair" hair 0.0001 0.02 :title "Hair" :dec 4)) (list)))))
 
 ;; Every connection's weight: 0..1 of its force (of its pressure for a bow),
 ;; for fading an interaction in or out or coupling partly (Modalys' weight).
@@ -465,6 +583,24 @@
 ;;   id      the connection's id
 ;;   weight  the starting weight
 (def weight-param (id weight) (pspec id "weight" weight 0 1 :title "Weight"))
+
+;; A finger pressing a string onto a fingerboard (Modalys' mono-fingerboard):
+;; while press is up the string is clamped at its point (a stiff pull to
+;; rest, scaled by the press signal), and a rigid board under that point lets
+;; the string buzz against it. Moving the point slides the fret.
+;;   id         the connection's id ('fret)
+;;   b, at      the string and where the finger stops it
+;;   press      a signal 0..1 for how hard the finger presses (default an
+;;              envelope on the note)
+;;   stiffness  how hard the press holds, relative to the point's give
+;;   board      the board's height under the string (negative)
+;;   weight     0..1
+(def fingerboard (id b at &key (press (envelope :attack-ms 3 :sustain 1 :release-ms 30)) (stiffness 300)
+                       (board -0.0015) (weight 1))
+  (list (dict :id id :title "FINGERBOARD" :law :fingerboard :a nil :b b :a-at nil :b-at at :signal press :weight weight
+              :params (append (list (pspec id "stiff" stiffness 0 2000 :title "Hold" :taper :log :dec 0))
+                              (signal-params id press)))
+        (merge (stop (nm id "board") b at :height board) :coords-of id)))
 
 ;; ── drivers and signals ─────────────────────────────────────────────────────
 ;; Drivers move an access point from outside the patch (Modalys' force,
@@ -498,6 +634,45 @@
 ;;   form  the expression, quoted
 (def signal (form) (dict :kind :signal :name :form :args (list form)))
 
+;; Feedback taps (Modalys' access-position / -speed / -force and
+;; connection-state controllers): what the patch did last sample, as a
+;; signal for a driver, so one object can drive another (sympathetic loops)
+;; or itself (self-oscillation; a force's :saturate keeps that bounded).
+
+;; The displacement of obj's point at at, last sample.
+;;   obj  an object id
+;;   at   a position on it
+(def tap-position (obj at) (dict :kind :signal :name :tap-position :short "tap" :args (list obj at)))
+
+;; The velocity of obj's point at at, last sample, scaled as a listen hears it.
+;;   obj  an object id
+;;   at   a position on it
+(def tap-speed (obj at) (dict :kind :signal :name :tap-speed :short "tap" :args (list obj at)))
+
+;; A connection's force, last sample.
+;;   conn  a connection id
+(def tap-force (conn) (dict :kind :signal :name :tap-force :short "tap" :args (list conn)))
+
+;; 1 while a connection pushes (in contact), last sample, else 0.
+;;   conn  a connection id
+(def tap-contact (conn) (dict :kind :signal :name :tap-contact :short "tap" :args (list conn)))
+
+;; True for the taps that read an object's point.
+;;   sig  a signal
+(def point-tap? (sig) (member? (list :tap-position :tap-speed) (get sig :name)))
+
+;; True for the taps that read a connection's force.
+;;   sig  a signal
+(def force-tap? (sig) (member? (list :tap-force :tap-contact) (get sig :name)))
+
+;; Forms defining a point tap's mode shape at its point, cid_tap_phi.
+;;   n      the tap's symbol function
+;;   args   (obj at)
+;;   patch  the patch
+(def tap-shape-forms (n args patch)
+  (let ((o (find-object patch (first args))))
+    (shape-defs o (access-syms (n "") "tap" o) (n "_phi"))))
+
 ;; One row per signal kind:
 ;;   :params (lambda (cid n args) specs)  its params
 ;;   :forms  (lambda (n args) forms)      what it defines first
@@ -510,29 +685,49 @@
                                (pspec cid (str n "_decay") (nth args 1) 1 10000 :unit 'ms :title "Decay" :taper :log)
                                (pspec cid (str n "_sustain") (nth args 2) 0 1 :title "Sustain")
                                (pspec cid (str n "_release") (nth args 3) 1 10000 :unit 'ms :title "Release" :taper :log)))
-               :forms (lambda (n args) nil)
-               :value (lambda (n args)
+               :forms (lambda (n args patch) nil)
+               :value (lambda (n args patch)
                         `(* (adsr gate hit ,(n "_attack") ,(n "_decay") ,(n "_sustain") ,(n "_release")) hit_velocity)))
-    :noise (dict :params (lambda (cid n args) nil) :forms (lambda (n args) nil)
-                 :value (lambda (n args) `(- (* 2 (noise)) 1)))
+    :noise (dict :params (lambda (cid n args) nil) :forms (lambda (n args patch) nil)
+                 :value (lambda (n args patch) `(- (* 2 (noise)) 1)))
     :sine (dict :params (lambda (cid n args)
                           (list (pspec cid (str n "_ratio") (nth args 0) 0.125 16 :title "Ratio" :taper :log :dec 3)))
-                :forms (lambda (n args) nil)
-                :value (lambda (n args) `(sin (* twopi (phasor (* f0 ,(n "_ratio")))))))
+                :forms (lambda (n args patch) nil)
+                :value (lambda (n args patch) `(sin (* twopi (phasor (* f0 ,(n "_ratio")))))))
     :const (dict :params (lambda (cid n args) (list (pspec cid (str n "_value") (nth args 0) -1 1 :title "Value")))
-                 :forms (lambda (n args) nil)
-                 :value (lambda (n args) (n "_value")))
-    :form (dict :params (lambda (cid n args) nil) :forms (lambda (n args) nil)
-                :value (lambda (n args) (first args)))))
+                 :forms (lambda (n args patch) nil)
+                 :value (lambda (n args patch) (n "_value")))
+    :form (dict :params (lambda (cid n args) nil) :forms (lambda (n args patch) nil)
+                :value (lambda (n args patch) (first args)))
+    ;; taps read last sample's state; their point params come from
+    ;; tap-params (they need the patch)
+    :tap-position (dict :params (lambda (cid n args) nil)
+                        :forms (lambda (n args patch) (tap-shape-forms n args patch))
+                        :value (lambda (n args patch)
+                                 (let ((o (find-object patch (first args))))
+                                   `(sum (* (read-history ,(p o "s1")) ,(n "_phi"))))))
+    :tap-speed (dict :params (lambda (cid n args) nil)
+                     :forms (lambda (n args patch) (tap-shape-forms n args patch))
+                     :value (lambda (n args patch)
+                              (let ((o (find-object patch (first args))))
+                                `(/ (* (sum (* (- (read-history ,(p o "s1")) (read-history ,(p o "s2"))) ,(n "_phi")))
+                                       ,(p o "mass"))
+                                    ,(p o "wref")))))
+    :tap-force (dict :params (lambda (cid n args) nil) :forms (lambda (n args patch) nil)
+                     :value (lambda (n args patch) `(read-history ,(nm (first args) "F_h"))))
+    :tap-contact (dict :params (lambda (cid n args) nil) :forms (lambda (n args patch) nil)
+                       :value (lambda (n args patch) `(gt (abs (read-history ,(nm (first args) "F_h"))) 0.0000001)))))
 
 ;; A driver's signals as a list (one signal, or a list of them).
 ;;   sig  a signal or a list of signals
 (def signals-of (sig) (if (map? sig) (list sig) sig))
 
 ;; The name a driver's k-th signal's params and forms share: env, env1, ...
+;; (a tap's is tap: its kind's name has a hyphen)
 ;;   sig  the signal
 ;;   k    its position among the driver's signals
-(def signal-name (sig k) (str (bare (get sig :name)) (if (= k 0) "" k)))
+(def signal-name (sig k)
+  (str (if (get sig :short) (get sig :short) (bare (get sig :name))) (if (= k 0) "" k)))
 
 ;; Calls one column of a driver's signals' rows, with each signal's name
 ;; function and args.
@@ -550,14 +745,14 @@
          (range (len sigs)))))
 
 ;; What is wrong with a driver's signals: anything that is not a signal of a
-;; known kind.
+;; known kind (m/tap-* included).
 ;;   c  a driver connection
 (def signal-errors (c)
   (concat-all
     (map (lambda (sig)
            (if (and (map? sig) (= (get sig :kind) :signal) (map? (get (signal-kinds) (get sig :name))))
              nil
-             (list (str (what c) ": " (source sig) " is not a signal (m/envelope, m/noise, m/sine, m/constant, m/signal)"))))
+             (list (str (what c) ": " (source sig) " is not a signal (m/envelope, m/noise, m/sine, m/constant, m/signal, m/tap-...)"))))
          (signals-of (get c :signal)))))
 
 ;; The params of a driver's signals.
@@ -569,11 +764,56 @@
 
 ;; Forms defining a driver's signal, cid_sig: each signal's circuit, then
 ;; their product.
-;;   c  a driver connection
-(def signal-forms (c)
-  (append (concat-all (each-signal c :forms (lambda (f n args name) (f n args))))
+;;   c      a driver connection
+;;   patch  the patch (taps read its objects)
+(def signal-forms (c patch)
+  (append (concat-all (each-signal c :forms (lambda (f n args name) (f n args patch))))
           (list `(def ,(nm (get c :id) "sig")
-                   ,(product-form (each-signal c :value (lambda (f n args name) (f n args))))))))
+                   ,(product-form (each-signal c :value (lambda (f n args name) (f n args patch))))))))
+
+;; The point params of a driver's point taps: each tap's point, named
+;; cid_tap_obj_at (apart from the driver's own point).
+;;   patch  the patch
+;;   c      a driver connection
+(def tap-params (patch c)
+  (let ((sigs (signals-of (get c :signal))))
+    (concat-all
+      (map (lambda (k)
+             (let ((sig (nth sigs k)) (o (find-object patch (first (get (nth sigs k) :args)))))
+               (if (and (point-tap? sig) o)
+                 (access-params (nm (get c :id) (signal-name sig k)) "tap" o (nth (get sig :args) 1)
+                                :label (str (signal-name sig k) " " (source (get o :id))))
+                 nil)))
+           (range (len sigs))))))
+
+;; What is wrong with a driver's taps: a point tap on a missing or lumped
+;; object (or a bad position), a force tap on a missing connection.
+;;   patch  the patch
+;;   c      a driver connection
+(def tap-errors (patch c)
+  (concat-all
+    (map (lambda (sig)
+           (let ((target (first (get sig :args))))
+             (if (point-tap? sig)
+               (let ((o (find-object patch target)))
+                 (if (= o nil) (list (str (what c) ": tap on no object " (source target)))
+                   (if (or (get o :lumped) (= (get o :kind) :mix))
+                     (list (str (what c) ": a tap needs a modal object, not " (source target)))
+                     (at-errors (str (what c) " tap") o (nth (get sig :args) 1)))))
+               (if (force-tap? sig)
+                 (if (empty? (filter (lambda (other) (= (get other :id) target)) (get patch :connections)))
+                   (list (str (what c) ": tap on no connection " (source target)))
+                   nil)
+                 nil))))
+         (filter map? (signals-of (get c :signal))))))
+
+;; The connections some driver's force tap reads, by id.
+;;   patch  the patch
+(def tapped-connections (patch)
+  (let ((ids (concat-all
+               (map (lambda (c) (map (lambda (sig) (first (get sig :args))) (filter force-tap? (signals-of (get c :signal)))))
+                    (filter (lambda (c) (get c :signal)) (get patch :connections))))))
+    (map (lambda (k) (nth ids k)) (filter (lambda (k) (first-occurrence? ids k)) (range (len ids))))))
 
 ;; A form multiplying forms: 1 for none, the form for one, else (* ...).
 ;;   forms  a list of forms
@@ -587,10 +827,12 @@
 ;;   at      where on b
 ;;   signal  a signal, or a list of them multiplied (default an envelope)
 ;;   gain    the force's scale
+;;   saturate  true for gain tanh(signal): a bounded push, for feedback
 ;;   weight  0..1, as for every connection
-(def force (id b at &key (signal (envelope)) (gain 0.05) (weight 1))
+(def force (id b at &key (signal (envelope)) (gain 0.05) (saturate false) (weight 1))
   (dict :id id :title "FORCE" :law :force :a nil :b b :a-at nil :b-at at :signal signal :weight weight
-        :params (append (list (pspec id "gain" gain 0 2 :title "Gain" :dec 3))
+        :saturate saturate
+        :params (append (list (pspec id "gain" gain 0.000001 2 :title "Gain" :taper :log :dec 6))
                         (signal-params id signal))))
 
 ;; Holds b's access point at the signal's value (a displacement) through a
@@ -652,6 +894,43 @@
                            (list (pspec id "bend" bend -2400 2400 :unit 'ct :title "Bend" :dec 0)
                                  (pspec id "diffraction" diffraction 0 3 :title "Spread"))))))
 
+;; The id of an object's k-th direction: the object itself for 0, its second
+;; direction (id_v) for 1 (see string's :planes).
+;;   id  the object's id
+;;   k   0 or 1
+(def plane (id k) (if (= k 0) id (nm id "v")))
+
+;; The symbol of one of obj's params: obj_name, or its first direction's
+;; for a second-direction copy, which has no params of its own.
+;;   obj   an object
+;;   name  the param's name
+(def pp (obj name) (nm (if (get obj :plane-of) (get obj :plane-of) (get obj :id)) name))
+
+;; An object and, for one with :planes 2, its second direction: a copy named
+;; id_v that reads the first's params.
+;;   o  an object
+(def expand-planes (o)
+  (if (= (get o :planes) 2)
+    (list o (merge o :id (plane (get o :id) 1) :plane-of (get o :id) :planes 1 :params (list)
+                   :shared-params (get o :params) :title (str (get o :title) " v")))
+    (list o)))
+
+;; The hidden contact a bow with :hair presses its string's second direction
+;; down with: a stop from above at the hair depth, faded with the bow, its
+;; point the bow's.
+;;   c  a bow connection with :hair
+(def hair-connection (c)
+  (dict :id (nm (get c :id) "hair") :title "HAIR" :law :stop :above true :a nil :b (plane (get c :b) 1)
+        :a-at nil :b-at (get c :b-at) :internal true :owner (get c :id) :coords-of (get c :id)
+        :weight-form `(* ,(nm (get c :id) "weight") ,(nm (get c :id) "env")) :params (list)))
+
+;; A patch's connections: lists (fingerboard's pair) flattened, and each
+;; bow with :hair followed by its hair contact.
+;;   connections  as given
+(def expand-connections (connections)
+  (concat-all (map (lambda (c) (if (and (bow? c) (get c :hair)) (list c (hair-connection c)) (list c)))
+                   (concat-all (map (lambda (c) (if (list? c) c (list c))) connections)))))
+
 ;; A whole patch.
 ;;   name         the instrument's name; what Save offers, and the folder
 ;;                eseq modal emit writes by default
@@ -660,8 +939,18 @@
 ;;   listens      a list of listens, mixed into the output
 ;;   level        an overall output trim
 (def patch (&key (name "modal") (objects nil) (connections nil) (listens nil) (level 1))
-  (dict :name name :objects (map (lambda (o) (compile-points o connections listens)) objects)
-        :connections connections :listens listens :level level))
+  (let ((conns (expand-connections connections)))
+    (let ((planed (concat-all (map expand-planes objects)))
+          (compiled (map (lambda (o) (compile-points o conns listens planed)) planed)))
+      (dict :name name
+            ;; a mix hybrid carries its part objects, for its ends and listens
+            :objects (map (lambda (o) (if (= (get o :kind) :mix)
+                                        (merge o :part-objs
+                                               (map (lambda (id) (first (filter (lambda (q) (= (get q :id) id)) compiled)))
+                                                    (get o :parts)))
+                                        o))
+                          compiled)
+            :connections conns :listens listens :level level))))
 
 ;; ── data objects' points ────────────────────────────────────────────────────
 ;; A data object's accesses address its points by index or by (x y z) (the
@@ -681,12 +970,8 @@
   (if (number? at) (clamp (round at) 0 (- (point-count obj) 1))
     (let ((pts (get obj :points)))
       (if (and (list? at) (= (len at) 3) (list? pts) (not (empty? pts)))
-        (let ((dist (lambda (k) (let ((q (nth pts k)))
-                                  (+ (pow (- (nth q 0) (nth at 0)) 2) (pow (- (nth q 1) (nth at 1)) 2)
-                                     (pow (- (nth q 2) (nth at 2)) 2))))))
-          ;; (best distance) carried, so each point is measured once
-          (first (reduce (lambda (best k) (let ((d (dist k))) (if (< d (nth best 1)) (list k d) best)))
-                         (list 0 (dist 0)) (range (len pts)))))
+        ;; native: a solid has thousands of points
+        (modal-nearest-point pts at)
         0))))
 
 ;; obj with :compiled, the points its DSP holds (in order), when obj is a
@@ -694,17 +979,39 @@
 ;;   obj          an object
 ;;   connections  the patch's connections
 ;;   listens      the patch's listens
-(def compile-points (obj connections listens)
+(def compile-points (obj connections listens objects)
+  (if (= (get obj :kind) :melt)
+    (merge obj :parts (map (lambda (part) (compile-points part connections listens objects)) (get obj :parts)))
   (if (not (= (get obj :kind) :data)) obj
     (if (<= (point-count obj) 64) (merge obj :compiled (range (point-count obj)))
-      (let ((id (get obj :id))
-            (ats (append (map (lambda (c) (if (= (get c :a) id) (get c :a-at) (get c :b-at)))
-                              (filter (lambda (c) (or (= (get c :a) id) (= (get c :b) id))) connections))
-                         (map (lambda (l) (get l :at)) (filter (lambda (l) (= (get l :obj) id)) listens))))
-            (used (map (lambda (at) (point-index obj at)) ats))
-            (unique (filter (lambda (k) (empty? (filter (lambda (j) (= (nth used j) (nth used k))) (range k))))
-                            (range (len used)))))
-        (merge obj :compiled (if (empty? unique) (list 0) (map (lambda (k) (nth used k)) unique)))))))
+      (let ((used (map (lambda (at) (point-index obj at)) (positions-on (get obj :id) connections listens objects)))
+            (unique (filter (lambda (k) (first-occurrence? used k)) (range (len used)))))
+        (merge obj :compiled (if (empty? unique) (list 0) (map (lambda (k) (nth used k)) unique))))))))
+
+;; Every position the patch puts on object id: its connections' ends and
+;; listens, the matching half of positions on a hybrid it is part of, and
+;; point taps on it.
+;;   id           an object id
+;;   connections  the patch's connections
+;;   listens      the patch's listens
+;;   objects      the patch's objects (for hybrids)
+(def positions-on (id connections listens objects)
+  (let ((on (lambda (target)
+              (append (map (lambda (c) (if (= (get c :a) target) (get c :a-at) (get c :b-at)))
+                           (filter (lambda (c) (or (= (get c :a) target) (= (get c :b) target))) connections))
+                      (map (lambda (l) (get l :at)) (filter (lambda (l) (= (get l :obj) target)) listens))))))
+    (append (on id)
+            (concat-all
+              (map (lambda (h)
+                     (let ((k (index-of (map (lambda (part) (if (map? part) (get part :id) part)) (get h :parts)) id)))
+                       (if (= k nil) nil
+                         (map (lambda (at) (if (list? at) (nth at k) at)) (on (get h :id))))))
+                   (filter hybrid? objects)))
+            (concat-all
+              (map (lambda (c) (map (lambda (sig) (nth (get sig :args) 1))
+                                    (filter (lambda (sig) (and (map? sig) (point-tap? sig) (= (first (get sig :args)) id)))
+                                            (signals-of (get c :signal)))))
+                   (filter (lambda (c) (get c :signal)) connections))))))
 
 ;; Where in a data object's compiled points the point at sits (0 if absent).
 ;;   obj  a data object (after compile-points)
@@ -748,6 +1055,12 @@
 ;;   obj  the object
 ;;   at   the position given for it
 (def at-errors (who obj at)
+  (if (hybrid? obj)
+    (if (and (list? at) (= (len at) 2))
+      (concat-all (map (lambda (k) (let ((part (nth (hybrid-part-objects obj) k)))
+                                     (if (map? part) (at-errors who part (nth at k)) nil)))
+                       (range 2)))
+      (list (str who ": hybrid " (source (get obj :id)) " takes (list at-a at-b), got " (source at))))
   (if (get obj :lumped) nil
     (if (= (get obj :kind) :data) (data-at-errors who obj at)
     (if (one-d? obj)
@@ -757,7 +1070,7 @@
       (if (number? at)
         (list (str who ": " (bare (get obj :kind)) " " (source (get obj :id)) " takes a position "
                    (if (rect? obj) "(list x y)" "(list r theta)") ", got " (source at)))
-        nil)))))
+        nil))))))
 
 ;; What is wrong with access point at on data object obj.
 ;;   who  the message prefix
@@ -792,6 +1105,28 @@
                                                         (len (nth (get obj :shapes) k)) " values for " n " modes"))))
                                (range (point-count obj)))))))))
 
+;; What is wrong with a hybrid: a melt's parts with different mode counts, a
+;; mix's parts missing or lumped.
+;;   patch  the patch
+;;   obj    a hybrid
+(def hybrid-errors (patch obj)
+  (let ((name (str (bare (get obj :kind)) " " (source (get obj :id)))))
+    (if (= (get obj :kind) :melt)
+      (let ((na (get (first (get obj :parts)) :modes)) (nb (get (nth (get obj :parts) 1) :modes)))
+        (append (concat-all (map (lambda (part) (if (or (get part :lumped) (hybrid? part))
+                                                  (list (str name ": " (source (get part :id)) " is not a modal object"))
+                                                  nil))
+                                 (get obj :parts)))
+                (if (= na nb) nil (list (str name ": its parts have " na " and " nb " modes; give them the same :modes")))))
+      (concat-all
+        (map (lambda (id)
+               (let ((part (find-object patch id)))
+                 (if (= part nil) (list (str name ": no object " (source id)))
+                   (if (or (get part :lumped) (hybrid? part))
+                     (list (str name ": " (source id) " is not a modal object a mix can share"))
+                     nil))))
+             (get obj :parts))))))
+
 ;; What is wrong with an object's spectral controls: a lumped object (a
 ;; finger, a mallet) has no spectrum to warp.
 ;;   obj  an object
@@ -818,6 +1153,11 @@
 ;;   c      the connection
 (def connection-errors (patch c)
   (append (if (= (get c :a) (get c :b)) (list (str (what c) ": both ends on " (source (get c :b)))) nil)
+          ;; these read their struck object's own wref / state, which a mix has none of
+          (if (and (member? (list :bow :felt) (get c :law)) (find-object patch (get c :b))
+                   (= (get (find-object patch (get c :b)) :kind) :mix))
+            (list (str (what c) ": cannot end on a mix; connect the parts, or use a melt"))
+            nil)
           (if (get c :a) (end-errors patch c "a" (get c :a) (get c :a-at)) nil)
           (end-errors patch c "b" (get c :b) (get c :b-at))))
 
@@ -830,15 +1170,16 @@
       (list (str "listen: no object " (source (get l :obj))))
       (append (at-errors "listen" obj (get l :at))
               (if (= (get l :modes) nil) nil
+              (if (= (get obj :kind) :mix) (list (str "listen " (source (get l :obj)) ": :modes is not for a mix"))
                 (map (lambda (k) (str "listen " (source (get l :obj)) ": no mode " k " (it has "
                                       (get obj :modes) ", from 0)"))
-                     (filter (lambda (k) (or (< k 0) (>= k (get obj :modes)))) (get l :modes))))))))
+                     (filter (lambda (k) (or (< k 0) (>= k (get obj :modes)))) (get l :modes)))))))))
 
 ;; One message per id used twice among objects and connections (their
 ;; generated names would collide).
 ;;   patch  the patch
 (def duplicate-ids (patch)
-  (let ((ids (append (map (lambda (o) (get o :id)) (get patch :objects))
+  (let ((ids (append (map (lambda (o) (get o :id)) (all-objects patch))
                      (map (lambda (c) (get c :id)) (get patch :connections)))))
     (map (lambda (k) (str "two things are called " (source (nth ids k))))
          (filter (lambda (k) (not (empty? (filter (lambda (j) (= (nth ids j) (nth ids k))) (range k)))))
@@ -888,7 +1229,14 @@
 ;; Every material problem in a patch.
 ;;   patch  the patch
 (def material-errors (patch)
-  (concat-all (map (lambda (o) (if (has-material? o) (made-of-errors o) nil)) (get patch :objects))))
+  (concat-all (map (lambda (o) (if (has-material? o) (made-of-errors o) nil)) (all-objects patch))))
+
+;; The patch's objects and its melts' parts (which are not listed itself),
+;; for the checks that look at every object.
+;;   patch  the patch
+(def all-objects (patch)
+  (append (get patch :objects)
+          (concat-all (map (lambda (o) (if (= (get o :kind) :melt) (get o :parts) nil)) (get patch :objects)))))
 
 ;; Everything wrong with a patch, as a list of messages; empty when it is
 ;; fine. dsp and ui assume a patch this finds nothing wrong with.
@@ -899,9 +1247,15 @@
           (if (empty? (get patch :listens)) (list "a patch needs at least one listen point") nil)
           (duplicate-ids patch)
           (material-errors patch)
-          (concat-all (map (lambda (o) (if (= (get o :kind) :data) (data-errors o) nil)) (get patch :objects)))
-          (concat-all (map spectral-errors (get patch :objects)))
-          (concat-all (map (lambda (c) (if (get c :signal) (signal-errors c) nil)) (get patch :connections)))
+          (concat-all (map (lambda (o) (if (= (get o :kind) :data) (data-errors o) nil)) (all-objects patch)))
+          (concat-all (map spectral-errors (all-objects patch)))
+          (concat-all (map (lambda (o) (hybrid-errors patch o)) (filter hybrid? (get patch :objects))))
+          (concat-all (map (lambda (c) (if (and (bow? c) (get c :hair) (= (find-object patch (plane (get c :b) 1)) nil))
+                                         (list (str (what c) ": :hair needs a string with :planes 2"))
+                                         nil))
+                           (get patch :connections)))
+          (concat-all (map (lambda (c) (if (get c :signal) (append (signal-errors c) (tap-errors patch c)) nil))
+                           (get patch :connections)))
           (concat-all (map (lambda (c) (connection-errors patch c)) (get patch :connections)))
           (concat-all (map (lambda (l) (listen-errors patch l)) (get patch :listens))))))
 
@@ -918,8 +1272,12 @@
 ;;   at     the position, giving the params' defaults
 ;;   label  what the panel titles call the point (default: the object's id)
 (def access-params (cid side obj at &key (label nil))
-  (let ((on (source (get obj :id))) (lb (if label label (source (get obj :id)))))
+  (let ((on (source (get obj :id)))
+        (lb (if label label (source (get obj :id)))))
     (if (get obj :lumped) nil
+      (if (hybrid? obj)
+        (concat-all (map (lambda (k) (access-params cid side (nth (hybrid-part-objects obj) k) (nth at k) :label label))
+                         (range 2)))
       (if (= (get obj :kind) :data)
         (if (<= (len (get obj :compiled)) 1) nil
           (list (pspec cid (str on "_pt") (compiled-slot obj at) 0 (- (len (get obj :compiled)) 1)
@@ -931,7 +1289,11 @@
           (list (pspec cid (str on "_x") (nth at 0) 0.01 0.99 :title (str lb " x"))
                 (pspec cid (str on "_y") (nth at 1) 0.01 0.99 :title (str lb " y")))
           (list (pspec cid (str on "_r") (nth at 0) 0 (if (= (get obj :kind) :circ-plate) 1 0.95) :title (str lb " r"))
-                (pspec cid (str on "_angle") (nth at 1) 0 3.14159 :title (str lb " angle")))))))))
+                (pspec cid (str on "_angle") (nth at 1) 0 3.14159 :title (str lb " angle"))))))))))
+
+;; A hybrid's two part objects: a melt's own, a mix's from the patch.
+;;   obj  a hybrid (a mix after the patch gave it :part-objs)
+(def hybrid-part-objects (obj) (if (= (get obj :kind) :melt) (get obj :parts) (get obj :part-objs)))
 
 ;; The symbols of those params, in coordinate order: what shape-defs reads
 ;; the point from at run time.
@@ -947,6 +1309,7 @@
 ;;   phi-sym  the symbol to define
 (def shape-defs (obj coords phi-sym)
   (let ((id (get obj :id)) (kind (get obj :kind)))
+    (if (= kind :melt) (melt-shape-defs obj coords phi-sym)
     (if (= kind :data) (data-shape-defs obj coords phi-sym)
     (if (= kind :bar) (bar-shape-defs obj (first coords) phi-sym)
     (if (= kind :circ-plate) (circ-plate-shape-defs obj coords phi-sym)
@@ -956,7 +1319,18 @@
         (list `(def ,phi-sym (* (rect-plate-shape ,(nm id "pm") ,(nm id "pn") ,(nth coords 0) ,(nth coords 1))
                                 ,(nm id "mask"))))
         (list `(def (,(nm phi-sym "ratios") ,(nm phi-sym "raw")) (circ-membrane ,(nth coords 0) ,(nth coords 1)))
-              `(def ,phi-sym (* ,(nm phi-sym "raw") ,(nm id "mask")))))))))))
+              `(def ,phi-sym (* ,(nm phi-sym "raw") ,(nm id "mask"))))))))))))
+
+;; shape-defs for a melt: each part's shape at its own point, blended.
+;;   obj      a melt
+;;   coords   the parts' coordinates, a's then b's
+;;   phi-sym  the symbol to define
+(def melt-shape-defs (obj coords phi-sym)
+  (let ((a (first (get obj :parts))) (b (nth (get obj :parts) 1)) (x (p obj "morph"))
+        (na (len (access-syms 'probe "b" (first (get obj :parts))))))
+    (append (shape-defs a (map (lambda (k) (nth coords k)) (range na)) (nm phi-sym "a"))
+            (shape-defs b (map (lambda (k) (nth coords (+ na k))) (range (- (len coords) na))) (nm phi-sym "b"))
+            (list `(def ,phi-sym (+ (* (- 1 ,x) ,(nm phi-sym "a")) (* ,x ,(nm phi-sym "b"))))))))
 
 ;; How many radial samples a circular plate's shape table holds.
 (def circ-samples () 64)
@@ -1071,7 +1445,7 @@
 ;; for several.
 ;;   obj  a string or plate
 (def material-defs (obj)
-  (let ((choices (material-choices (get obj :stuff))) (idx (p obj "material")))
+  (let ((choices (material-choices (get obj :stuff))) (idx (pp obj "material")))
     (list `(def ,(p obj "density") ,(pick-form idx (map (lambda (m) (get m :density)) choices)))
           `(def ,(p obj "young") ,(pick-form idx (map (lambda (m) (young-for obj m)) choices))))))
 
@@ -1082,6 +1456,8 @@
 ;;   obj  the object
 (def object-setup (obj)
   (let ((kind (get obj :kind)))
+    (if (= kind :melt) (melt-setup obj)
+    (if (= kind :mix) (list)
     (if (= kind :data) (data-setup obj)
     (if (= kind :bar) (bar-setup obj)
     (if (= kind :rect-membrane) (rect-membrane-setup obj)
@@ -1090,7 +1466,31 @@
     (if (= kind :plate) (plate-setup obj)
     (if (= kind :membrane) (membrane-setup obj)
     (if (= kind :two-mass) (finger-setup obj)
-      (mallet-setup obj)))))))))))
+      (mallet-setup obj)))))))))))))
+
+;; object-setup for a melt: both parts' setups (their coefficients are what
+;; it blends), then its own: log-blended frequencies, blended mask, losses,
+;; wref and mass, and its own state.
+;;   obj  a melt
+(def melt-setup (obj)
+  (let ((a (first (get obj :parts))) (b (nth (get obj :parts) 1)) (x (p obj "morph"))
+        (lerp (lambda (fa fb) `(+ (* (- 1 ,(p obj "morph")) ,fa) (* ,(p obj "morph") ,fb))))
+        (blend (lambda (name) (lerp (p a name) (p b name))))
+        ;; a part's release-mute factor (setup-tail's g), 1 when it has none
+        (mute-of (lambda (part) (if (muted? part) (p part "g") 1))))
+    (append (spectral-pass a (object-setup a)) (spectral-pass b (object-setup b))
+            (list `(def ,(p obj "freqs") (exp (+ (* (- 1 ,x) (log ,(p a "freqs"))) (* ,x (log ,(p b "freqs"))))))
+                  `(def ,(p obj "mask") ,(blend "mask"))
+                  `(def ,(p obj "sigma") ,(blend "sigma"))
+                  `(def ,(p obj "mass") ,(blend "mass"))
+                  `(def (,(p obj "a0") ,(p obj "b0")) (modal-coefs ,(p obj "freqs") ,(p obj "sigma")))
+                  `(def ,(p obj "g") ,(lerp (mute-of a) (mute-of b)))
+                  `(def ,(p obj "a") (* ,(p obj "a0") ,(p obj "g")))
+                  `(def ,(p obj "b") (* ,(p obj "b0") ,(p obj "g") ,(p obj "g")))
+                  `(def ,(p obj "wref") ,(blend "wref"))
+                  `(def ,(p obj "G") (/ (* ,(p obj "wref") ,(p obj "wref")) ,(p obj "mass")))
+                  `(make-history ,(p obj "s1") @shape [ ,(get obj :modes) ])
+                  `(make-history ,(p obj "s2") @shape [ ,(get obj :modes) ])))))
 
 ;; The coefficients and state every modal object ends with, from its
 ;; obj_freqs and obj_sigma: modal-coefs, wref (its reference angular frequency
@@ -1102,12 +1502,11 @@
 ;;   obj    the object
 ;;   pitch  a form for the pitch wref is taken at (Hz)
 (def setup-tail (obj pitch)
-  (let ((n (get obj :modes))
-        (muted (member? (map (lambda (spec) (get spec :sym)) (get obj :params)) (p obj "mute"))))
+  (let ((n (get obj :modes)) (muted (muted? obj)))
     (append
       (if muted
         (list `(def (,(p obj "a0") ,(p obj "b0")) (modal-coefs ,(p obj "freqs") ,(p obj "sigma")))
-              `(def ,(p obj "g") (exp (/ (* -1 ,(p obj "mute") (- 1 gate)) samplerate)))
+              `(def ,(p obj "g") (exp (/ (* -1 ,(pp obj "mute") (- 1 gate)) samplerate)))
               `(def ,(p obj "a") (* ,(p obj "a0") ,(p obj "g")))
               `(def ,(p obj "b") (* ,(p obj "b0") ,(p obj "g") ,(p obj "g"))))
         (list `(def (,(p obj "a") ,(p obj "b")) (modal-coefs ,(p obj "freqs") ,(p obj "sigma")))))
@@ -1115,6 +1514,12 @@
             `(def ,(p obj "G") (/ (* ,(p obj "wref") ,(p obj "wref")) ,(p obj "mass")))
             `(make-history ,(p obj "s1") @shape [ ,n ])
             `(make-history ,(p obj "s2") @shape [ ,n ])))))
+
+;; True when obj has a mute param (its own, or its first direction's).
+;;   obj  an object
+(def muted? (obj)
+  (member? (map (lambda (spec) (get spec :sym)) (if (get obj :plane-of) (get obj :shared-params) (get obj :params)))
+           (pp obj "mute")))
 
 ;; The mask of modes that sound: the first count modes, faded below Nyquist.
 ;;   obj    the object
@@ -1127,12 +1532,12 @@
 ;;   obj  a string
 (def string-setup (obj)
   (append (material-defs obj)
-          (list `(def ,(p obj "f0") (* f0 ,(p obj "tune")))
+          (list `(def ,(p obj "f0") (* f0 ,(pp obj "tune") ,@(if (get obj :plane-of) (list (pp obj "split")) (list))))
                 `(def ,(p obj "n") (+ (iota ,(get obj :modes)) 1))
                 `(def ,(p obj "freqs") (stiff-string-freqs ,(p obj "n") ,(p obj "f0") ,(p obj "young") ,(p obj "density")
-                                         (* ,(p obj "radius") 0.001) ,(p obj "length")))
+                                         (* ,(pp obj "radius") 0.001) ,(pp obj "length")))
                 (mask-def obj (get obj :modes))
-                `(def ,(p obj "sigma") (modal-loss ,(p obj "freqs") ,(p obj "loss") ,(p obj "hf_loss")))
+                `(def ,(p obj "sigma") (modal-loss ,(p obj "freqs") ,(pp obj "loss") ,(pp obj "hf_loss")))
                 `(def ,(p obj "mass") 1))
           (setup-tail obj (p obj "f0"))))
 
@@ -1319,11 +1724,18 @@
 ;;   f   the symbol holding c's force (cid_F, or one sweep's cid_F2)
 (def terms-with (c id f)
   (let ((cid (get c :id)))
-    (if (= (get c :b) id)
-      (list (if (get c :b-lumped) f `(* ,f ,(nm cid "phi_b"))))
-      (if (= (get c :a) id)
-        (list (if (get c :a-lumped) `(* -1 ,f) `(* -1 ,f ,(nm cid "phi_a"))))
-        nil))))
+    (append
+      (if (= (get c :b) id) (list (if (get c :b-lumped) f `(* ,f ,(nm cid "phi_b")))) nil)
+      (if (= (get c :a) id) (list (if (get c :a-lumped) `(* -1 ,f) `(* -1 ,f ,(nm cid "phi_a")))) nil)
+      ;; a part of a mix hybrid at either end: its share of the force
+      (concat-all
+        (map (lambda (side)
+               (let ((mix (get c (if (= side "a") :a-mix :b-mix))))
+                 (if (and mix (member? (get mix :parts) id))
+                   (let ((k (index-of (get mix :parts) id)) (x (nm (get mix :id) "morph")))
+                     (list `(* ,(if (= side "a") -1 1) ,(if (= k 0) `(- 1 ,x) x) ,f ,(nm cid (str "phi_" side "_" k)))))
+                   nil)))
+             (list "a" "b"))))))
 
 ;; terms-with c's final force, cid_F.
 ;;   c   a resolved connection
@@ -1347,26 +1759,55 @@
 ;;   tag       "" for exciters, the sweep number for springs and bows
 ;;   with-phi  true the first time this end is read (phi is defined once)
 (def end-forms (c side obj terms tag with-phi)
-  (let ((cid (get c :id)) (y (nm cid (str "y_" side tag))) (cs (nm cid (str "C_" side tag))))
+  (let ((cid (get c :id)) (y (nm cid (str "y_" side tag))) (cs (nm cid (str "C_" side tag)))
+        (coord-id (if (get c :coords-of) (get c :coords-of) cid))
+        ;; placed at another connection's point (on its object, maybe in the
+        ;; other direction): that point's params, named by its object
+        (named (if (and (get c :coords-of) (get obj :plane-of)) (merge obj :id (get obj :plane-of)) obj)))
+    (if (= (get obj :kind) :mix) (mix-end-forms c side obj terms tag with-phi)
     (if (get obj :lumped)
-      (list `(def ,y ,(displaced obj terms))
+      (list `(def ,y ,(displaced obj (terms (get obj :id))))
             `(def ,cs ,(p obj "C")))
-      (append (if with-phi (shape-defs obj (access-syms cid side obj) (nm cid (str "phi_" side))) nil)
-              (list `(def (,y ,cs) (modal-point ,(displaced obj terms) ,(nm cid (str "phi_" side)) ,(p obj "G"))))))))
+      (append (if with-phi (shape-defs obj (access-syms coord-id side named) (nm cid (str "phi_" side))) nil)
+              (list `(def (,y ,cs) (modal-point ,(displaced obj (terms (get obj :id))) ,(nm cid (str "phi_" side))
+                                                ,(p obj "G")))))))))
+
+;; end-forms for an end on a mix hybrid: each part's point (phi, y, C) as for
+;; any end, then the lever: y = (1 - x) ya + x yb, C = (1 - x)^2 Ca + x^2 Cb.
+;;   c, side, obj, terms, tag, with-phi  as for end-forms (obj the hybrid,
+;;                                       with its :part-objs)
+(def mix-end-forms (c side obj terms tag with-phi)
+  (let ((cid (get c :id)) (x (p obj "morph")) (parts (get obj :part-objs))
+        (coord-id (if (get c :coords-of) (get c :coords-of) (get c :id)))
+        (y (nm cid (str "y_" side tag))) (cs (nm cid (str "C_" side tag))))
+    (append
+      (concat-all
+        (map (lambda (k)
+               (let ((part (nth parts k)) (sfx (str side "_" k)))
+                 (append (if with-phi (shape-defs part (access-syms coord-id side part) (nm cid (str "phi_" sfx))) nil)
+                         (list `(def (,(nm cid (str "y_" sfx tag)) ,(nm cid (str "C_" sfx tag)))
+                                  (modal-point ,(displaced part (terms (get part :id))) ,(nm cid (str "phi_" sfx))
+                                               ,(p part "G")))))))
+             (range 2)))
+      (list `(def ,y (+ (* (- 1 ,x) ,(nm cid (str "y_" side "_0" tag))) (* ,x ,(nm cid (str "y_" side "_1" tag)))))
+            `(def ,cs (+ (* (- 1 ,x) (- 1 ,x) ,(nm cid (str "C_" side "_0" tag)))
+                         (* ,x ,x ,(nm cid (str "C_" side "_1" tag)))))))))
 
 ;; Protocol step 3 for an exciter (pluck, felt or force): forms defining cid_F from
 ;; the ends end-forms read (tag ""). Exciters keep state, so each is solved
 ;; once per sample. A pluck's release threshold scales with the hit's
 ;; velocity; a felt stiffens with last sample's squash.
 ;;   c  a resolved pluck or felt connection
-(def exciter-forms (c)
+(def exciter-forms (c patch)
   (let ((cid (get c :id)) (gap `(- ,(nm cid "y_a") ,(nm cid "y_b"))) (cc `(+ ,(nm cid "C_a") ,(nm cid "C_b"))))
     (if (= (get c :law) :pluck)
       (list `(def ,(nm cid "thr") (* ,(nm cid "thresh") (+ 0.25 (* 0.75 hit_velocity))))
             `(def ,(nm cid "F") (* ,(nm cid "weight") (pluck-contact ,gap ,cc hit ,(nm cid "stiff") ,(nm cid "thr")))))
     (if (= (get c :law) :force)
-      (append (signal-forms c)
-              (list `(def ,(nm cid "F") (* ,(nm cid "weight") ,(nm cid "gain") ,(nm cid "sig")))))
+      (append (signal-forms c patch)
+              (list `(def ,(nm cid "F") (* ,(nm cid "weight") ,(nm cid "gain")
+                                           ,(if (get c :saturate) `(tanh ,(nm cid "sig")) (nm cid "sig"))))))
+    (if (get c :stulov) (stulov-forms c gap cc)
       ;; felt: stiffens with last sample's squash, scaled by a full-speed
       ;; sample of mallet travel
       (list `(make-history ,(nm cid "squash"))
@@ -1375,7 +1816,48 @@
             `(def ,(nm cid "k") (* ,(nm cid "felt") (+ 1 (* ,(nm cid "hardness")
                                    (/ (read-history ,(nm cid "squash")) (/ ,(nm (get c :a) "speed") samplerate))))))
             `(def ,(nm cid "F") (* ,(nm cid "weight") (felt-contact ,(nm cid "gap") ,(nm cid "Cs") ,(nm cid "k"))))
-            `(write-history ,(nm cid "squash") (max 0 (* -1 (- ,(nm cid "gap") (* ,(nm cid "Cs") ,(nm cid "F")))))))))))
+            `(write-history ,(nm cid "squash") (max 0 (* -1 (- ,(nm cid "gap") (* ,(nm cid "Cs") ,(nm cid "F"))))))))))))
+
+;; Stulov's felt, solved inside the sample: the force magnitude f that
+;; equals law(f) = Q / C u0 (r^p - eps h) with r = u / u0 the compression it
+;; leaves, u = max(0, -gap - C f). g(f) = law(f) - f is convex and falling
+;; on [0, -gap / C], so Newton from f = 0 rises to the root without
+;; overshooting: 5 steps of f += g / (Q p r^(p-1) + 1), each one pow, clamped
+;; to the bracket. Then h follows r^p over tau. F = -f (felt-contact's sign).
+;;   c    a felt connection with :stulov
+;;   gap  the free gap form
+;;   cc   the summed compliance form
+(def stulov-forms (c gap cc)
+  (let ((n (lambda (suffix) (nm (get c :id) suffix)))
+        (steps 5)
+        ;; r^(p-1) and r at force f, as forms
+        (ratio (lambda (f) `(/ (max 0 (- (* -1 ,(nm (get c :id) "gap")) (* ,(nm (get c :id) "Cs") ,f))) 0.001))))
+    (append
+      (list `(make-history ,(n "h"))
+            `(def ,(n "gap") ,gap)
+            `(def ,(n "Cs") ,cc)
+            `(def ,(n "hi") (/ (max 0 (* -1 ,(n "gap"))) ,(n "Cs")))
+            `(def ,(n "f0") 0))
+      (concat-all
+        (map (lambda (k)
+               (let ((f (n (str "f" k))) (r (n (str "r" k))) (q (n (str "q" k))))
+                 (list `(def ,r ,(ratio f))
+                       ;; q = r^(p-1); r^p = q r
+                       `(def ,q (pow ,r (- ,(n "exponent") 1)))
+                       `(def ,(n (str "f" (+ k 1)))
+                          (clip (+ ,f (/ (- (* (/ ,(n "felt") ,(n "Cs")) 0.001
+                                                 (- (* ,q ,r) (* ,(n "hysteresis") (read-history ,(n "h")))))
+                                              ,f)
+                                           (+ (* ,(n "felt") ,(n "exponent") ,q) 1)))
+                                0 ,(n "hi"))))))
+             (range steps)))
+      (list `(def ,(n "f") ,(n (str "f" steps)))
+            `(def ,(n "F") (* -1 ,(n "weight") ,(n "f")))
+            `(def ,(n "rf") ,(ratio (n "f")))
+            `(write-history ,(n "h")
+               (+ (read-history ,(n "h"))
+                  (* (- (pow ,(n "rf") ,(n "exponent")) (read-history ,(n "h")))
+                     (- 1 (exp (/ -1000 (* (max ,(n "tau") 0.001) samplerate)))))))))))
 
 ;; Forms emitted once before the sweeps for a bow: its speed envelope
 ;; (cid_env, rising over attack while the gate is up and falling over
@@ -1384,30 +1866,39 @@
 ;;   c  a resolved bow connection
 (def bow-pre-forms (c)
   (let ((cid (get c :id)))
-    (list `(make-history ,(nm cid "env_h"))
-          `(def ,(nm cid "env") (max (min (+ (read-history ,(nm cid "env_h"))
-                                             (gswitch (gt gate 0.5) (/ 1000 (* ,(nm cid "attack") samplerate))
-                                                                    (/ -1000 (* ,(nm cid "release") samplerate))))
-                                          1) 0))
-          `(write-history ,(nm cid "env_h") ,(nm cid "env"))
-          `(def ,(nm cid "vmax") (/ ,(nm cid "speed") samplerate))
-          `(def ,(nm cid "vb") (* ,(nm cid "vmax") ,(nm cid "env") (+ 0.5 (* 0.5 velocity))))
-          `(make-history ,(nm cid "y_prev"))
-          `(make-history ,(nm cid "x_prev")))))
+    (append
+      (list `(make-history ,(nm cid "env_h"))
+            `(def ,(nm cid "env") (max (min (+ (read-history ,(nm cid "env_h"))
+                                               (gswitch (gt gate 0.5) (/ 1000 (* ,(nm cid "attack") samplerate))
+                                                                      (/ -1000 (* ,(nm cid "release") samplerate))))
+                                            1) 0))
+            `(write-history ,(nm cid "env_h") ,(nm cid "env"))
+            `(def ,(nm cid "vmax") (/ ,(nm cid "speed") samplerate))
+            `(def ,(nm cid "vb") (* ,(nm cid "vmax") ,(nm cid "env") (+ 0.5 (* 0.5 velocity))))
+            `(make-history ,(nm cid "y_prev"))
+            `(make-history ,(nm cid "x_prev")))
+      ;; the hair contact's stiffness and depth (see hair-connection)
+      (if (get c :hair)
+        (list `(make-history ,(nm cid "press_h"))
+              `(make-history ,(nm cid "avg_h"))
+              `(def ,(nm cid "hair_stiff") 300)
+              `(def ,(nm cid "hair_height") (* -1 ,(nm cid "hair"))))
+        (list)))))
 
 ;; Forms emitted once before the sweeps for a position or speed driver: its
 ;; signal and cid_anchor, the target its spring pulls the point toward (the
 ;; signal itself, or for speed its leaky integral).
 ;;   c  a position or speed driver
-(def driver-pre-forms (c)
+(def driver-pre-forms (c patch)
   (let ((cid (get c :id)))
-    (append (signal-forms c)
+    (append (signal-forms c patch)
+            (if (= (get c :law) :fingerboard) (list)
             (if (= (get c :law) :position)
               (list `(def ,(nm cid "anchor") ,(nm cid "sig")))
               (list `(make-history ,(nm cid "anchor_h"))
                     `(def ,(nm cid "anchor") (+ (* (exp (/ -0.5 samplerate)) (read-history ,(nm cid "anchor_h")))
                                                 (/ (* ,(nm cid "gain") ,(nm cid "sig")) samplerate)))
-                    `(write-history ,(nm cid "anchor_h") ,(nm cid "anchor")))))))
+                    `(write-history ,(nm cid "anchor_h") ,(nm cid "anchor"))))))))
 
 ;; Connection predicates. Springs, bows and position / speed drivers are
 ;; solved by the sweeps (sweeps?); plucks, felts and forces are exciters,
@@ -1415,8 +1906,8 @@
 ;;   c  a connection
 (def spring? (c) (= (get c :law) :spring))
 (def bow? (c) (= (get c :law) :bow))
-(def driver? (c) (member? (list :position :speed) (get c :law)))
-(def sweeps? (c) (or (spring? c) (bow? c) (driver? c)))
+(def driver? (c) (member? (list :position :speed :fingerboard) (get c :law)))
+(def sweeps? (c) (or (spring? c) (bow? c) (driver? c) (member? (list :strike :stop) (get c :law))))
 (def exciter? (c) (not (sweeps? c)))
 
 ;; The positions in conns of the connections pred accepts.
@@ -1460,31 +1951,56 @@
                                                            (terms-with (nth conns j) id (nm (get (nth conns j) :id) (str "F" (- s 1))))
                                                            nil))))
                                                    springs))))))
-                      (append (if (get c :a) (end-forms c "a" (find-object patch (get c :a)) (others (get c :a)) tag (= s 0)) nil)
-                              (end-forms c "b" (find-object patch (get c :b)) (others (get c :b)) tag (= s 0))
-                              (if (bow? c)
-                                (list `(def (,(nm cid (str "F" s)) ,(nm cid (str "x" s)))
-                                         (bow-contact ,(nm cid (str "y_b" tag)) (read-history ,(nm cid "y_prev"))
-                                                      (read-history ,(nm cid "x_prev")) ,(nm cid (str "C_b" tag)) ,(nm cid "vb")
-                                                      (* ,(nm cid "slip") ,(nm cid "vmax"))
-                                                      ;; the bow lifts as it slows
-                                                      (max 0.000001 (* ,(nm cid "pressure") ,(nm cid "env") ,(nm cid "weight"))))))
-                                (if (driver? c)
-                                  (list `(def ,(nm cid (str "F" s))
-                                           (* ,(nm cid "weight")
-                                              (spring-connection (- ,(nm cid "anchor") ,(nm cid (str "y_b" tag)))
-                                                                 ,(nm cid (str "C_b" tag)) ,(nm cid "stiff")))))
-                                  (list `(def ,(nm cid (str "F" s))
-                                           (* ,(nm cid "weight")
-                                              (spring-connection (- ,(nm cid (str "y_a" tag)) ,(nm cid (str "y_b" tag)))
-                                                                 (+ ,(nm cid (str "C_a" tag)) ,(nm cid (str "C_b" tag)))
-                                                                 ,(nm cid "stiff")))))))
+                      (append (if (get c :a) (end-forms c "a" (find-object patch (get c :a)) others tag (= s 0)) nil)
+                              (end-forms c "b" (find-object patch (get c :b)) others tag (= s 0))
+                              (sweep-law-forms c s tag)
                               (if (= s (- sweeps 1))
                                 (append (list `(def ,(nm cid "F") ,(nm cid (str "F" s))))
                                         (if (bow? c) (list `(write-history ,(nm cid "x_prev") ,(nm cid (str "x" s)))) nil))
                                 nil))))
                   springs)))
          (range sweeps))))
+
+;; One sweep of one swept connection: forms defining cid_F<s> from its ends
+;; as they stand this sweep (cid_y_a<tag> / C_a, y_b / C_b). A bow solves its
+;; friction; a position or speed driver pulls toward its anchor; a strike or
+;; stop pushes only while pressed in; a spring pulls the two points together.
+;;   c    a swept connection
+;;   s    the sweep number
+;;   tag  the sweep's name suffix
+(def sweep-law-forms (c s tag)
+  (let ((n (lambda (suffix) (nm (get c :id) suffix)))
+        (w (weight-of c))
+        (F (nm (get c :id) (str "F" s)))
+        (ya (nm (get c :id) (str "y_a" tag))) (yb (nm (get c :id) (str "y_b" tag)))
+        (ca (nm (get c :id) (str "C_a" tag))) (cb (nm (get c :id) (str "C_b" tag)))
+        (law (get c :law)))
+    (if (bow? c)
+      (list `(def (,F ,(n (str "x" s)))
+               (bow-contact ,yb (read-history ,(n "y_prev")) (read-history ,(n "x_prev")) ,cb ,(n "vb")
+                            (* ,(n "slip") ,(n "vmax"))
+                            ;; the bow lifts as it slows; with hair, the
+                            ;; pressure follows the hair contact's force
+                            (max 0.000001 (* ,(n "pressure") ,(n "env") ,w
+                                             ,@(if (get c :hair) (list `(read-history ,(n "press_h"))) (list)))))))
+    (if (= law :fingerboard)
+      (list `(def ,F (* ,w (max 0 ,(n "sig")) (spring-connection (- 0 ,yb) ,cb ,(n "stiff")))))
+    (if (driver? c)
+      (list `(def ,F (* ,w (spring-connection (- ,(n "anchor") ,yb) ,cb ,(n "stiff")))))
+    (if (= law :strike)
+      (list `(def ,F (* ,w (felt-contact (+ (- ,ya ,yb) ,(n "offset")) (+ ,ca ,cb) ,(n "stiff")))))
+    (if (= law :stop)
+      (if (get c :above)
+        ;; a stop above b: b is pushed down while above height
+        (list `(def ,F (* ,w (felt-contact (- ,(n "height") ,yb) ,cb ,(n "stiff")))))
+        ;; the stop is the lower end, fixed: b is pushed up by -felt-contact
+        (list `(def ,F (* -1 ,w (felt-contact (- ,yb ,(n "height")) ,cb ,(n "stiff"))))))
+      (list `(def ,F (* ,w (spring-connection (- ,ya ,yb) (+ ,ca ,cb) ,(n "stiff"))))))))))))
+
+;; A connection's weight form: its weight param, or the form a hidden
+;; connection is weighted by.
+;;   c  a connection
+(def weight-of (c) (if (get c :weight-form) (get c :weight-form) (nm (get c :id) "weight")))
 
 ;; Protocol steps 2 and 3 for every connection: each exciter in turn (reading
 ;; its ends with the earlier exciters' forces), then every bow's setup, then
@@ -1498,31 +2014,58 @@
       (concat-all
         (map (lambda (k)
                (let ((c (nth conns k)) (before (filter (lambda (j) (< j k)) exciters)))
-                 (append (if (get c :a) (end-forms c "a" (find-object patch (get c :a)) (terms-of conns before (get c :a)) "" true) nil)
-                         (end-forms c "b" (find-object patch (get c :b)) (terms-of conns before (get c :b)) "" true)
-                         (exciter-forms c))))
+                 (append (if (get c :a) (end-forms c "a" (find-object patch (get c :a)) (lambda (id) (terms-of conns before id)) "" true) nil)
+                         (end-forms c "b" (find-object patch (get c :b)) (lambda (id) (terms-of conns before id)) "" true)
+                         (exciter-forms c patch))))
              exciters))
       (concat-all (map (lambda (k) (bow-pre-forms (nth conns k))) (indices-where conns bow?)))
-      (concat-all (map (lambda (k) (driver-pre-forms (nth conns k))) (indices-where conns driver?)))
-      (spring-sweep-forms patch conns exciters springs (if (> (len springs) 1) 4 1)))))
+      (concat-all (map (lambda (k) (driver-pre-forms (nth conns k) patch)) (indices-where conns driver?)))
+      (spring-sweep-forms patch conns exciters springs (if (> (len springs) 1) 4 1))
+      ;; a bow with hair: its pressure next sample is the pressure param times
+      ;; the hair force over its 50 ms mean (clamped to 0..3), so the second
+      ;; direction's motion modulates the friction around the set pressure
+      (concat-all
+        (map (lambda (c)
+               (if (and (bow? c) (get c :hair))
+                 (let ((n (lambda (suffix) (nm (get c :id) suffix))))
+                   (list `(def ,(n "normal") (max 0 (* -1 ,(n "hair_F"))))
+                         ;; seeded with the force itself at first contact, so an
+                         ;; attack is not bowed at the clip
+                         `(def ,(n "normal_avg")
+                            (gswitch (lt (read-history ,(n "avg_h")) 0.0000000001) ,(n "normal")
+                                     (+ (read-history ,(n "avg_h"))
+                                        (* (- ,(n "normal") (read-history ,(n "avg_h")))
+                                           (- 1 (exp (/ -20 samplerate)))))))
+                         `(write-history ,(n "avg_h") ,(n "normal_avg"))
+                         `(write-history ,(n "press_h")
+                            (clip (/ ,(n "normal") (max ,(n "normal_avg") (* 0.5 ,(n "normal")) 0.0000000001)) 0 3))))
+                 (list)))
+             conns)))))
 
 ;; c with :a-lumped and :b-lumped added, whether each end's object is lumped
 ;; (a missing a end counts as not lumped).
 ;;   patch  the patch
 ;;   c      a connection
 (def resolve-connection (patch c)
-  (merge c :a-lumped (if (get c :a) (get (find-object patch (get c :a)) :lumped) false)
-           :b-lumped (get (find-object patch (get c :b)) :lumped)))
+  (let ((end (lambda (id) (if id (find-object patch id) nil))))
+    (merge c :a-lumped (if (get c :a) (get (end (get c :a)) :lumped) false)
+             :b-lumped (get (end (get c :b)) :lumped)
+             :a-mix (if (and (end (get c :a)) (= (get (end (get c :a)) :kind) :mix)) (end (get c :a)) nil)
+             :b-mix (if (= (get (end (get c :b)) :kind) :mix) (end (get c :b)) nil))))
 
 ;; Every param spec of a connection: its law's own, then its ends' access
 ;; points.
 ;;   patch  the patch
 ;;   c      a connection
 (def connection-params (patch c)
-  (append (get c :params)
-          (list (weight-param (get c :id) (get c :weight)))
-          (if (get c :a) (access-params (get c :id) "a" (find-object patch (get c :a)) (get c :a-at)) nil)
-          (access-params (get c :id) "b" (find-object patch (get c :b)) (get c :b-at))))
+  (if (get c :internal) (list)
+    (append (get c :params)
+            (list (weight-param (get c :id) (get c :weight)))
+            ;; a connection placed at another's point has no point params
+            (if (get c :coords-of) (list)
+              (append (if (get c :a) (access-params (get c :id) "a" (find-object patch (get c :a)) (get c :a-at)) nil)
+                      (access-params (get c :id) "b" (find-object patch (get c :b)) (get c :b-at))))
+            (if (get c :signal) (tap-params patch c) (list)))))
 
 ;; ── listening ───────────────────────────────────────────────────────────────
 
@@ -1538,13 +2081,35 @@
 ;;   k      its position in the patch's listens
 (def listen-forms (patch l k)
   (let ((obj (find-object patch (get l :obj))) (lid (mic k)))
-    (append (shape-defs obj (access-syms lid "mic" obj) (nm lid "phi"))
-     (list
-          `(make-history ,(nm lid "prev"))
-          ;; the param-rate factors first, so DGen can fold them once per block
-          `(def ,(nm lid "y") (sum (* ,(nm lid "phi") ,@(hearing-gains obj l) ,(p obj "next"))))
-          `(def ,(nm lid "v") (/ (* (- ,(nm lid "y") (read-history ,(nm lid "prev"))) ,(p obj "mass")) ,(p obj "wref")))
-          `(write-history ,(nm lid "prev") ,(nm lid "y"))))))
+    (if (= (get obj :kind) :mix) (mix-listen-forms patch obj l k)
+      (hearing-forms obj l lid lid))))
+
+;; Forms defining <s>_v, the velocity obj is heard with at listen l's point
+;; (normalised by its reference frequency and mass so that a light string
+;; and a heavy plate mix at similar levels).
+;;   obj   the heard object
+;;   l     the listen
+;;   lid   the listen's id (its point params' owner)
+;;   s     the symbol prefix of what is defined
+(def hearing-forms (obj l lid s)
+  (append (shape-defs obj (access-syms lid "mic" obj) (nm s "phi"))
+          (list `(make-history ,(nm s "prev"))
+                ;; the param-rate factors first, so DGen can fold them once per block
+                `(def ,(nm s "y") (sum (* ,(nm s "phi") ,@(hearing-gains obj l) ,(p obj "next"))))
+                `(def ,(nm s "v") (/ (* (- ,(nm s "y") (read-history ,(nm s "prev"))) ,(p obj "mass")) ,(p obj "wref")))
+                `(write-history ,(nm s "prev") ,(nm s "y")))))
+
+;; listen-forms on a mix hybrid: each part heard at its own point, mixed
+;; (1 - morph) and morph into mic<k>_v.
+;;   patch  the patch
+;;   obj    the mix hybrid
+;;   l      the listen
+;;   k      its position in the patch's listens
+(def mix-listen-forms (patch obj l k)
+  (let ((lid (mic k)) (x (p obj "morph")) (parts (get obj :part-objs)))
+    (append
+      (concat-all (map (lambda (j) (hearing-forms (nth parts j) l lid (nm lid j))) (range 2)))
+      (list `(def ,(nm lid "v") (+ (* (- 1 ,x) ,(nm (nm lid 0) "v")) (* ,x ,(nm (nm lid 1) "v"))))))))
 
 ;; Per-mode factors on what a listen hears: the object's spectral gains and
 ;; the listen's own mode selection, as tensors (none when neither is given).
@@ -1593,12 +2158,12 @@
                  (if (defines f "freqs")
                    (list `(def ,f0s ,(if (get sp :freq-scales) `(* ,(nth f 2) ,(per-mode-tensor (get sp :freq-scales) n 1)) (nth f 2)))
                          `(def ,(p obj "f1_0") ,(mode0 f0s n))
-                         `(def ,bent (* ,f0s (pow 2 (/ ,(p obj "bend") 1200))
+                         `(def ,bent (* ,f0s (pow 2 (/ ,(pp obj "bend") 1200))
                                         ;; ,@nil fails, so an empty splice is (list)
                                         ,@(if (get sp :follow) (list `(/ f0 ,(p obj "f1_0"))) (list))))
                          `(def ,(p obj "f1_b") ,(mode0 bent n))
                          `(def ,(p obj "freqs")
-                            (max 1 (+ (* (- ,bent ,(p obj "f1_b")) (log (+ (* ,(p obj "diffraction") 1.718281828) 1)))
+                            (max 1 (+ (* (- ,bent ,(p obj "f1_b")) (log (+ (* ,(pp obj "diffraction") 1.718281828) 1)))
                                       ,(p obj "f1_b")))))
                    (if (defines f "sigma")
                      (list (if (get sp :loss-scales)
@@ -1724,6 +2289,7 @@
 ;;   patch  a patch that checks clean
 (def patch-forms (patch)
   (let ((conns (map (lambda (c) (resolve-connection patch c)) (get patch :connections)))
+        (tapped (tapped-connections patch))
         (objects (get patch :objects))
         (listens (get patch :listens)))
     (concat-all
@@ -1731,9 +2297,13 @@
             (map param-form (all-params patch conns))
             (library-imports)
             (concat-all (map (lambda (o) (spectral-pass o (object-setup o))) objects))
-            (concat-all (map object-predict objects))
+            (concat-all (map object-predict (filter physical? objects)))
+            ;; the force histories feedback taps read
+            (map (lambda (id) `(make-history ,(nm id "F_h"))) tapped)
             (connection-forms patch conns)
-            (concat-all (map (lambda (o) (object-commit o (terms-of conns (range (len conns)) (get o :id)))) objects))
+            (map (lambda (id) `(write-history ,(nm id "F_h") ,(nm id "F"))) tapped)
+            (concat-all (map (lambda (o) (object-commit o (terms-of conns (range (len conns)) (get o :id))))
+                             (filter physical? objects)))
             ;; a bow needs its point's true position after every force
             (concat-all (map (lambda (c) (if (bow? c)
                                            (list `(write-history ,(nm (get c :id) "y_prev")
@@ -1780,10 +2350,10 @@
 ;; screen tab's label, and its param specs.
 ;;   patch  the patch
 (def sections (patch)
-  (let ((conns (map (lambda (c) (resolve-connection patch c)) (get patch :connections))))
+  (let ((conns (map (lambda (c) (resolve-connection patch c)) (shown-connections patch))))
     (append (map (lambda (o) (dict :title (str (get o :title) " " (source (get o :id))) :tab (source (get o :id))
                                    :params (get o :params)))
-                 (get patch :objects))
+                 (shown-objects patch))
             (map (lambda (c) (dict :title (str (get c :title) " " (source (get c :id))) :tab (source (get c :id))
                                    :params (connection-params patch c)))
                  conns)
@@ -1793,9 +2363,20 @@
 ;;   patch  the patch
 ;;   id     an object or connection id
 (def section-of (patch id)
-  (let ((ids (append (map (lambda (o) (get o :id)) (get patch :objects))
-                     (map (lambda (c) (get c :id)) (get patch :connections)))))
-    (first (filter (lambda (k) (= (nth ids k) id)) (range (len ids))))))
+  (let ((ids (append (map (lambda (o) (get o :id)) (shown-objects patch))
+                     (map (lambda (c) (get c :id)) (shown-connections patch))))
+        (shown (lambda (id)
+                 (let ((o (find-object patch id))
+                       (c (first (filter (lambda (c) (= (get c :id) id)) (get patch :connections)))))
+                   (if (and o (get o :plane-of)) (get o :plane-of)
+                     (if (and c (get c :owner)) (get c :owner) id))))))
+    (index-of ids (shown id))))
+
+;; The objects and connections with panel sections: not second directions
+;; (their params are the first's) nor hidden connections.
+;;   patch  the patch
+(def shown-objects (patch) (filter (lambda (o) (not (get o :plane-of))) (get patch :objects)))
+(def shown-connections (patch) (filter (lambda (c) (not (get c :internal))) (get patch :connections)))
 
 ;; The first n items of xs (all of them when there are fewer).
 ;;   xs  a list
@@ -1952,7 +2533,7 @@
 ;;   patch  the patch
 ;;   out    the OUTPUT section's number
 (def drawing-form (patch out)
-  (let ((rows (append (map (lambda (c) (link-row patch c)) (get patch :connections))
+  (let ((rows (append (map (lambda (c) (link-row patch c)) (shown-connections patch))
                       (mic-rows patch out))))
     (if (> (len rows) 4)
       `(h-stack :gap 0.6 :align :start
@@ -2001,19 +2582,35 @@
 ;;   patch  a patch that checks clean
 (def ui-forms (patch)
   (let ((secs (sections patch))
-        (n-obj (len (get patch :objects)))
+        (meshes (mesh-views patch))
+        (n-obj (len (shown-objects patch)))
         (columns (+ (ceil (/ n-obj 2)) (ceil (/ (- (len secs) n-obj) 2))))
         (knobs (if (> columns 3) 2 3))
         (width (if (> columns 3) 12.6 18.7))
         (panels (lambda (from to)
                   (map (lambda (pair) `(v-stack :gap 0.2 ,@pair))
                        (chunks (map (lambda (k) (panel-form k (nth secs k) knobs width)) (range from to)) 2)))))
-    (append (ui-helpers)
+    (append (if (empty? meshes) (list) (list '(import eseq.modal.mesh-view)))
+            (ui-helpers)
             (list `(defsynth-ui
                      (h-stack :height 9.8 :gap 0.3 :align :start
                        ,@(panels 0 n-obj)
                        ,(display-form patch secs)
-                       ,@(panels n-obj (len secs))))))))
+                       ,@(panels n-obj (len secs))
+                       ,@meshes))))))
+
+;; A 3-D view per object that has a mesh (a solid, or data from an
+;; eseq-modes file), moving through its lowest modes (mode-mesh-cycle);
+;; drag it to orbit.
+;;   patch  the patch
+(def mesh-views (patch)
+  (map (lambda (o)
+         `(box :width 18.7 :height 9.8 :padding 0.2 :background-color (mx-c)
+               (v-stack :gap 0.14
+                 (mx-label ,(str (get o :title) " " (source (get o :id))) 9)
+                 (eseq.modal.mesh-view/mode-mesh-cycle :src ,(get o :mesh-file) :width 18.3 :height 8.4
+                                                      :key ,(str "modal-mesh-" (source (get o :id)))))))
+       (filter (lambda (o) (string? (get o :mesh-file))) (get patch :objects))))
 
 ;; The instrument's ui.lisp source, pretty-printed.
 ;;   patch  a patch that checks clean
