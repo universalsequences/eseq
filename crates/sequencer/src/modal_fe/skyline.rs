@@ -64,9 +64,20 @@ impl Envelope {
         y
     }
 
-    /// In-place L Lᵀ factorization.
-    pub fn factor(&mut self) -> Result<(), String> {
+    /// In-place L Lᵀ factorization. `progress` hears how far through it is
+    /// (by work: row i costs about its length squared) before each row, and
+    /// stops it with [`super::CANCELLED`] when it answers false: a row is
+    /// thousands of multiply-adds, so asking costs nothing and a cancel takes
+    /// effect at once even on a factorization of minutes.
+    pub fn factor(&mut self, progress: &dyn Fn(f64) -> bool) -> Result<(), String> {
+        let work = |i: usize| ((i - self.first[i] + 1) as f64).powi(2);
+        let total: f64 = (0..self.len()).map(work).sum::<f64>().max(1.0);
+        let mut done = 0.0;
         for i in 0..self.len() {
+            if !progress(done / total) {
+                return Err(super::CANCELLED.to_string());
+            }
+            done += work(i);
             let fi = self.first[i];
             let si = self.start[i];
             let (head, tail) = self.data.split_at_mut(si);
@@ -229,7 +240,7 @@ mod tests {
         a.add(9, 2, 0.5);
         let x_true: Vec<f64> = (0..n).map(|i| (i as f64 * 0.7).sin()).collect();
         let mut b = a.mul(&x_true);
-        a.factor().unwrap();
+        a.factor(&|_| true).unwrap();
         a.solve(&mut b);
         for i in 0..n {
             assert!((b[i] - x_true[i]).abs() < 1e-12);

@@ -47,11 +47,12 @@ pub const CIRC_PLATE_NATIVE: &str = "modal-circ-plate-modes";
 /// The natives eseq.modal calls, by name, as (args) -> value or a
 /// user-facing error. The CLI and tests register them on a bare VM
 /// ([`register_modal_natives`]); the app on its runtime.
-pub fn modal_natives() -> [(&'static str, fn(&[Value]) -> Result<Value, String>); 4] {
+pub fn modal_natives() -> [(&'static str, fn(&[Value]) -> Result<Value, String>); 5] {
     [
         (READ_DATA_NATIVE, read_data_native),
         (CIRC_PLATE_NATIVE, circ_plate_native),
         (SOLVE_NATIVE, solve_native),
+        (MESH_NATIVE, mesh_native),
         (NEAREST_NATIVE, nearest_native),
     ]
 }
@@ -93,18 +94,27 @@ pub const SOLVE_NATIVE: &str = "modal-solve";
 /// dict `modal-read-data` returns for an
 /// eseq-modes file, with each mode's shape scaled to eseq.modal's unit modal
 /// mass (mean square 1/2 over the surface points; the solver's are
-/// mass-normalised in kg). Solutions are cached (see the key below), so only
+/// mass-normalised in kg). Solutions are cached ([`solve_solid_cached`]), so only
 /// the first evaluation of a solid pays for the solve.
 fn solve_native(args: &[Value]) -> Result<Value, String> {
-    use crate::modal_fe::{solve, spec_hash, SolidSpec};
     let script_dir = current_script_dir().unwrap_or_else(|| PathBuf::from("."));
-    let (spec, base) = match args.first() {
-        Some(Value::String(path)) => {
+    let (spec, base) = solid_spec(args.first().unwrap_or(&Value::Nil), &script_dir)?;
+    let (cache, text) = solve_solid_cached(&spec, &base, &crate::modal_fe::SolveProgress::default())?;
+    modes_json_value(&text).map(|(value, _)| with_file(value, &cache))
+}
+
+/// A solid spec given to [`SOLVE_NATIVE`] (a JSON file path, relative to
+/// `script_dir`, or a Lisp dict), and the folder its relative .obj paths
+/// resolve against.
+pub fn solid_spec(value: &Value, script_dir: &Path) -> Result<(crate::modal_fe::SolidSpec, PathBuf), String> {
+    use crate::modal_fe::SolidSpec;
+    match value {
+        Value::String(path) => {
             let path = if Path::new(path).is_relative() { script_dir.join(path) } else { PathBuf::from(path) };
-            let base = path.parent().map(Path::to_path_buf).unwrap_or_else(|| script_dir.clone());
-            (SolidSpec::load(&path)?, base)
+            let base = path.parent().map(Path::to_path_buf).unwrap_or_else(|| script_dir.to_path_buf());
+            Ok((SolidSpec::load(&path)?, base))
         }
-        Some(value @ Value::Map(_)) => {
+        Value::Map(_) => {
             let mut spec = lisp_to_json(value);
             if let Some(material) = spec.as_object_mut().and_then(|spec| spec.remove("made_of")) {
                 let pick = |key: &str| material.get(key).cloned().unwrap_or(serde_json::Value::Null);
@@ -112,14 +122,27 @@ fn solve_native(args: &[Value]) -> Result<Value, String> {
                     serde_json::json!({"density": pick("density"), "young": pick("young"), "poisson": pick("poisson")});
             }
             let json = spec.to_string();
-            (SolidSpec::from_json(&json).map_err(|error| format!("{error} in {json}"))?, script_dir)
+            Ok((SolidSpec::from_json(&json).map_err(|error| format!("{error} in {json}"))?, script_dir.to_path_buf()))
         }
-        _ => return Err(format!("{SOLVE_NATIVE} takes a spec file path or a spec dict")),
-    };
+        _ => Err(format!("{SOLVE_NATIVE} takes a spec file path or a spec dict")),
+    }
+}
+
+/// Solve `spec` at eseq.modal's unit modal mass, or read it from the cache
+/// [`SOLVE_NATIVE`] keeps: the cached eseq-modes file and its text. Safe on
+/// any thread, so an editor can solve in the background into the same cache
+/// a script's evaluation then reads, watching (or cancelling) it through
+/// `progress`.
+pub fn solve_solid_cached(
+    spec: &crate::modal_fe::SolidSpec,
+    base: &Path,
+    progress: &crate::modal_fe::SolveProgress,
+) -> Result<(PathBuf, String), String> {
+    use crate::modal_fe::{solve_watched, spec_hash};
     // The key: the spec, where its relative .obj paths resolve, the .obj
     // files' contents, and the solver's version (a fix re-solves).
-    let mut key = format!("{SOLVER_VERSION}\n{}\n{}\n", spec_hash(&spec), base.display());
-    let spec_json = serde_json::to_value(&spec).map_err(|error| error.to_string())?;
+    let mut key = format!("{SOLVER_VERSION}\n{}\n{}\n", spec_hash(spec), base.display());
+    let spec_json = serde_json::to_value(spec).map_err(|error| error.to_string())?;
     for path in obj_paths(&spec_json) {
         let bytes = std::fs::read(base.join(&path)).unwrap_or_default();
         key.push_str(&crate::sample_manifest::sha256_hex(&bytes));
@@ -129,21 +152,77 @@ fn solve_native(args: &[Value]) -> Result<Value, String> {
         .join(format!("{}.unit.modes.json", crate::sample_manifest::sha256_hex(key.as_bytes())));
     // A cached file is already at unit modal mass; one that does not parse
     // is solved again.
-    if let Ok((value, _)) = std::fs::read_to_string(&cache).map_err(|error| error.to_string()).and_then(|text| modes_json_value(&text)) {
-        return Ok(with_file(value, &cache));
+    if let Ok(text) = std::fs::read_to_string(&cache) {
+        if modes_json_value(&text).is_ok() {
+            return Ok((cache, text));
+        }
     }
-    let (mut solid, _) = solve(&spec, &base)?;
+    let (mut solid, _) = solve_watched(spec, base, progress)?;
     unit_modal_mass(&mut solid);
-    let text = solid.to_json(&spec);
+    let text = solid.to_json(spec);
     if let Some(dir) = cache.parent() {
         let _ = std::fs::create_dir_all(dir);
-        // write beside, then rename: a reader never sees half a file
-        let staging = dir.join(format!(".{}.tmp", std::process::id()));
+        // write beside, then rename: a reader never sees half a file (the
+        // thread id keeps two background solves apart)
+        let staging = dir.join(format!(".{}-{:?}.tmp", std::process::id(), std::thread::current().id()));
         if std::fs::write(&staging, &text).is_ok() {
             let _ = std::fs::rename(&staging, &cache);
         }
     }
-    modes_json_value(&text).map(|(value, _)| with_file(value, &cache))
+    Ok((cache, text))
+}
+
+/// The native a shape editor previews a solid with:
+/// `(modal-mesh spec [dir])`, spec as for [`SOLVE_NATIVE`] (relative .obj
+/// paths from `dir`), meshed but not solved. A mesh handle for
+/// `mode-mesh-view :geometry` with the mesh's `:nodes`, `:elements` and
+/// `:mass` (kg), and with a `:block`, the nodes it clamps (`:blocked`) and
+/// the node nearest its centre (`:block-nearest`, (x y z)); or
+/// `(dict :error message)`, as a shape being edited is often briefly
+/// invalid. Each preview replaces the last one's geometry.
+pub const MESH_NATIVE: &str = "modal-mesh";
+
+thread_local! {
+    static PREVIEW_GEOMETRY: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+fn mesh_native(args: &[Value]) -> Result<Value, String> {
+    use eseqlisp::widget_render::mesh_widget::{geometry_handle, replace_geometry, MeshGeometry};
+    let dir = match args.get(1) {
+        Some(Value::String(dir)) => PathBuf::from(dir),
+        _ => current_script_dir().unwrap_or_else(|| PathBuf::from(".")),
+    };
+    let preview = solid_spec(args.first().unwrap_or(&Value::Nil), &dir).and_then(|(spec, base)| {
+        let (solid, stats) = crate::modal_fe::preview(&spec, &base)?;
+        let points = solid.point_count();
+        let geometry = MeshGeometry::new(
+            solid.points,
+            Some(solid.normals),
+            solid.triangles,
+            vec![0.0; points],
+            1,
+            Vec::new(),
+            Some(solid.mass),
+        )?;
+        Ok((geometry, stats))
+    });
+    let (geometry, stats) = match preview {
+        Ok(preview) => preview,
+        Err(error) => return Ok(data_dict(vec![("error", Value::String(error))])),
+    };
+    let id = replace_geometry(PREVIEW_GEOMETRY.get(), geometry);
+    PREVIEW_GEOMETRY.set(Some(id));
+    let mut handle = geometry_handle(id);
+    if let Value::Map(map) = &mut handle {
+        map.insert("nodes".to_string(), cell(Value::Number(stats.nodes as f64)));
+        map.insert("elements".to_string(), cell(Value::Number(stats.elements as f64)));
+        if let Some(nearest) = stats.block_nearest {
+            map.insert("blocked".to_string(), cell(Value::Number(stats.blocked_nodes as f64)));
+            let xyz = nearest.iter().map(|&x| cell(Value::Number(x))).collect();
+            map.insert("block-nearest".to_string(), cell(Value::List(xyz)));
+        }
+    }
+    Ok(handle)
 }
 
 /// Bumped when the solver's output changes, so cached solves are redone.
@@ -710,6 +789,64 @@ mod tests {
         // its surface points, addressed by (x y z): the nearest point param
         assert!(squashed.contains("(def bar_shapes (tensor @shape ["), "{dsp}");
         assert!(squashed.contains("(param hit_bar_pt @group hit"), "{dsp}");
+    }
+
+    /// modal-mesh previews a spec without solving it: a handle to its surface
+    /// with the mesh's counts and its mass, and an error as data for a shape
+    /// that does not mesh. A new preview replaces the last one's geometry.
+    #[test]
+    fn previews_a_solid_without_solving_it() {
+        use eseqlisp::widget_render::mesh_widget::geometry;
+        let mut vm = modal_vm();
+        let mut preview = |shape: &str| {
+            vm.eval_str(&format!(
+                "(import eseq.modal.materials :as mat)
+                 (modal-mesh (dict :solid {shape} :modes 4 :made-of mat/steel :resolution (dict :cells 10)))"
+            ))
+            .unwrap()
+            .unwrap_or(Value::Nil)
+        };
+        let field = |value: &Value, key: &str| match value {
+            Value::Map(map) => map.get(key).map(|item| item.borrow().clone()),
+            _ => None,
+        };
+        let number = |value: &Value, key: &str| match field(value, key) {
+            Some(Value::Number(n)) => n,
+            other => panic!("{key}: {other:?} in {value:?}"),
+        };
+        let bar = preview("(dict :box (dict :size (list 0.3 0.03 0.01)))");
+        let first_id = number(&bar, "mesh-id") as u64;
+        assert!(geometry(first_id).is_some());
+        assert!(number(&bar, "elements") >= 10.0 && number(&bar, "points") > 10.0, "{bar:?}");
+        // 0.3 x 0.03 x 0.01 m of steel is 0.71 kg
+        let mass = number(&bar, "mass");
+        assert!((mass - 0.7065).abs() < 0.01, "{mass}");
+        let longer = preview("(dict :box (dict :size (list 0.4 0.03 0.01)))");
+        assert!(geometry(number(&longer, "mesh-id") as u64).is_some());
+        assert!(geometry(first_id).is_none(), "the previous preview's geometry stays registered");
+        let broken = preview("(dict :box (dict :size (list 0.4 0.03)))");
+        assert!(matches!(field(&broken, "error"), Some(Value::String(_))), "{broken:?}");
+
+        // a block reports what it holds and the node nearest its centre
+        let mut clamped = |at: &str| {
+            vm.eval_str(&format!(
+                "(modal-mesh (dict :solid (dict :box (dict :size (list 0.3 0.03 0.01))) :modes 4 :made-of eseq.modal.materials/steel
+                                   :resolution (dict :cells 10) :block (dict :sphere (dict :center (list {at}) :radius 0.02))))"
+            ))
+            .unwrap()
+            .unwrap_or(Value::Nil)
+        };
+        let held = clamped("0 0 0");
+        assert!(number(&held, "blocked") >= 1.0, "{held:?}");
+        let missed = clamped("0 0.1 0");  // 85 mm off the bar's side
+        assert_eq!(number(&missed, "blocked"), 0.0);
+        let Some(Value::List(nearest)) = field(&missed, "block-nearest") else { panic!("{missed:?}") };
+        let y = match &*nearest[1].borrow() {
+            Value::Number(y) => *y,
+            other => panic!("{other:?}"),
+        };
+        assert!((y - 0.015).abs() < 1e-9, "the nearest node is on the bar's edge: {y}");
+        assert!(field(&bar, "blocked").is_none(), "no block, no count");
     }
 
     #[test]

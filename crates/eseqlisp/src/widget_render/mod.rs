@@ -318,7 +318,8 @@ pub fn should_trigger_integer_haptic(
     max: f32,
 ) -> bool {
     let range = (max - min).abs();
-    if range <= 1.0 || !previous.is_finite() || !new_value.is_finite() {
+    // an open (relative) picker has no range to divide into steps
+    if range <= 1.0 || !range.is_finite() || !previous.is_finite() || !new_value.is_finite() {
         return false;
     }
     let quantum = haptic_quantum(min, max);

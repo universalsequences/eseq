@@ -2200,13 +2200,22 @@ impl Runtime {
                 }
             }
         });
-        // (mesh-geometry dict): geometry built in Lisp (:points :triangles
-        // and optionally :normals :shapes :freqs :modes :mass) checked and
-        // registered once, as a handle like mesh-load's.
+        // (mesh-geometry dict [previous]): geometry built in Lisp (:points
+        // :triangles and optionally :normals :shapes :freqs :modes :mass)
+        // checked and registered once, as a handle like mesh-load's. Given
+        // the handle it replaces (a view rebuilt on every edit), that one's
+        // geometry is dropped.
         runtime.vm.register_native_with_vm("mesh-geometry", |args, vm| {
-            use crate::widget_render::mesh_widget::{MeshGeometry, geometry_handle, register_geometry};
+            use crate::widget_render::mesh_widget::{MeshGeometry, geometry_handle, replace_geometry};
+            let previous = match args.get(1) {
+                Some(Value::Map(handle)) => match handle.get("mesh-id").map(|id| id.borrow().clone()) {
+                    Some(Value::Number(id)) => Some(id as u64),
+                    _ => None,
+                },
+                _ => None,
+            };
             match args.first().map(MeshGeometry::from_value) {
-                Some(Ok(geometry)) => geometry_handle(register_geometry(geometry)),
+                Some(Ok(geometry)) => geometry_handle(replace_geometry(previous, geometry)),
                 Some(Err(error)) => {
                     vm.fail_native_call(crate::vm::VMError::Instance(format!("mesh-geometry: {error}")));
                     Value::Nil

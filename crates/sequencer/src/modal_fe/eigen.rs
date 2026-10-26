@@ -229,11 +229,14 @@ const TOL: f64 = 1e-7;
 /// The `wanted` largest eigenvalues θ of A = (K − σM)⁻¹ M, i.e. the λ
 /// nearest σ. `solve` overwrites b with (K − σM)⁻¹ b; `deflate` are
 /// M-orthonormal vectors (rigid-body modes) kept out of the basis.
+/// `progress` hears an estimate of how far through it is after each step and
+/// stops it early (with what it has) when it answers false.
 pub(crate) fn shift_invert_lanczos(
     mass: &[f64],
     solve: &dyn Fn(&mut [f64]),
     deflate: &[Vec<f64>],
     wanted: usize,
+    progress: &dyn Fn(f64) -> bool,
 ) -> LanczosResult {
     let n = mass.len();
     let room = n.saturating_sub(deflate.len());
@@ -324,6 +327,10 @@ pub(crate) fn shift_invert_lanczos(
         }
         t.push(column);
         processed += 1;
+        // a run usually needs about three steps per wanted mode
+        if !progress((processed as f64 / (3 * wanted + 2 * p) as f64).min(0.99)) {
+            break;
+        }
 
         let exhausted = processed == basis.len();
         if processed >= next_check || exhausted {
@@ -449,7 +456,7 @@ mod tests {
                 b[i] /= k[i];
             }
         };
-        let result = shift_invert_lanczos(&mass, &solve, &[], 5);
+        let result = shift_invert_lanczos(&mass, &solve, &[], 5, &|_| true);
         let mut found: Vec<f64> = result.thetas.iter().map(|t| 1.0 / t).collect();
         found.sort_by(|a, b| a.total_cmp(b));
         let mut expected = lambda.clone();

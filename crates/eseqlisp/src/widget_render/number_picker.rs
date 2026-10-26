@@ -285,6 +285,26 @@ mod tests {
         near(relative_drag_event(&node, &gesture, 6.0, KeyModifiers::SHIFT), 2.2);
     }
 
+    /// The value a relative picker hands its :on-change keeps its open
+    /// bounds: it is not clamped to the 0..1 default of a ranged picker, and
+    /// a given :min still holds.
+    #[test]
+    fn a_relative_pickers_dispatched_value_is_not_clamped_to_zero_one() {
+        let dispatched = |props: HashMap<String, Value>, value: f64| -> Value {
+            let mut props = props;
+            props.insert("on-change".to_string(), Value::Keyword("cb".to_string()));
+            let node = test_number_picker_node(props);
+            let output = NUMBER_PICKER_WIDGET
+                .handle_event(&node, WidgetEvent::Custom(Value::Number(value)))
+                .expect("a callback");
+            output.args[0].clone()
+        };
+        assert_eq!(dispatched(relative_props(), 50.0), Value::Number(50.0));
+        let mut floored = relative_props();
+        floored.insert("min".to_string(), Value::Number(0.5));
+        assert_eq!(dispatched(floored, -3.0), Value::Number(0.5));
+    }
+
     /// Linear pickers keep their historical feel: no taper, no drag-rows,
     /// five rows of travel from a short strip spans the whole range.
     #[test]
@@ -1191,11 +1211,10 @@ cells by default. The -tri and -slider names are internal draw passes. Example: 
             return None;
         };
         let previous = get_f32_prop(&node.props, "value", 0.0);
-        let min = get_f32_prop(&node.props, "min", 0.0);
-        let max = get_f32_prop(&node.props, "max", 1.0);
+        let (min, max) = picker_bounds(&node.props);
         let decimals = get_f32_prop(&node.props, "decimals", 2.0) as u32;
         let step = quantize_step(&node.props, decimals);
-        let new_value = quantize_value(*new_value as f32, min, max, step);
+        let new_value = snap_value(&node.props, *new_value as f32, min, max, step);
         if should_trigger_integer_haptic(node.widget_id, previous, new_value, min, max) {
             trigger_level_change_haptic();
         }

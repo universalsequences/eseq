@@ -174,6 +174,13 @@ impl Region {
             Region::Sphere { center, radius } => dist(p, center) <= radius + tol,
         }
     }
+
+    pub fn center(&self) -> [f64; 3] {
+        match *self {
+            Region::Box { min, max } => [0, 1, 2].map(|i| 0.5 * (min[i] + max[i])),
+            Region::Sphere { center, .. } => center,
+        }
+    }
 }
 
 impl SolidSpec {

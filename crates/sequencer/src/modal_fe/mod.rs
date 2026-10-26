@@ -60,6 +60,9 @@ pub struct SolveStats {
     pub nodes: usize,
     pub elements: usize,
     pub blocked_nodes: usize,
+    /// The mesh node nearest the block region's centre (a preview's, for
+    /// an editor to move a block that holds nothing onto the shape).
+    pub block_nearest: Option<[f64; 3]>,
     pub dofs: usize,
     /// Stored entries of the factored envelope.
     pub envelope: usize,
@@ -144,7 +147,100 @@ const SHIFT: f64 = 1e-10;
 
 /// Solve a spec; relative .obj paths resolve against `base_dir`.
 pub fn solve(spec: &SolidSpec, base_dir: &Path) -> Result<(ModalSolid, SolveStats), String> {
-    solve_detailed(spec, base_dir).map(|d| (d.solid, d.stats))
+    solve_watched(spec, base_dir, &SolveProgress::default())
+}
+
+/// [`solve`], reporting its progress to (and stopping with [`CANCELLED`]
+/// when cancelled through) `progress`, which another thread may watch.
+pub fn solve_watched(spec: &SolidSpec, base_dir: &Path, progress: &SolveProgress) -> Result<(ModalSolid, SolveStats), String> {
+    solve_detailed(spec, base_dir, progress).map(|d| (d.solid, d.stats))
+}
+
+/// The error a cancelled solve returns.
+pub const CANCELLED: &str = "solve cancelled";
+
+/// Where a solve is, shared with whoever watches it: its phase, how far
+/// through the whole solve it is, and a flag that cancels it.
+#[derive(Default)]
+pub struct SolveProgress {
+    cancelled: std::sync::atomic::AtomicBool,
+    /// The phase (a [`SolvePhase`] as u8) and the whole solve's progress in
+    /// millionths.
+    phase: std::sync::atomic::AtomicU8,
+    done: std::sync::atomic::AtomicU32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SolvePhase {
+    Mesh,
+    Assemble,
+    Factor,
+    Modes,
+}
+
+impl SolvePhase {
+    /// Each phase's share of a solve's time, as fractions of the whole
+    /// (measured on voxel bars and the bell: factoring and the mode search
+    /// take nearly all of it).
+    fn span(self) -> (f64, f64) {
+        match self {
+            SolvePhase::Mesh => (0.0, 0.02),
+            SolvePhase::Assemble => (0.02, 0.08),
+            SolvePhase::Factor => (0.08, 0.5),
+            SolvePhase::Modes => (0.5, 1.0),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SolvePhase::Mesh => "meshing",
+            SolvePhase::Assemble => "assembling",
+            SolvePhase::Factor => "factoring",
+            SolvePhase::Modes => "finding modes",
+        }
+    }
+}
+
+impl SolveProgress {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// `fraction` (0..1) of the way through `phase`.
+    pub fn report(&self, phase: SolvePhase, fraction: f64) {
+        let (from, to) = phase.span();
+        let whole = from + (to - from) * fraction.clamp(0.0, 1.0);
+        self.phase.store(phase as u8, std::sync::atomic::Ordering::Relaxed);
+        self.done.store((whole * 1e6) as u32, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The phase and how far through the whole solve (0..1).
+    pub fn snapshot(&self) -> (SolvePhase, f64) {
+        let phase = match self.phase.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => SolvePhase::Mesh,
+            1 => SolvePhase::Assemble,
+            2 => SolvePhase::Factor,
+            _ => SolvePhase::Modes,
+        };
+        (phase, self.done.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6)
+    }
+
+    /// A step callback for `phase`: reports how far through it is and
+    /// answers whether to go on.
+    fn watch(&self, phase: SolvePhase) -> impl Fn(f64) -> bool + '_ {
+        move |fraction| {
+            self.report(phase, fraction);
+            !self.is_cancelled()
+        }
+    }
+
+    fn check(&self) -> Result<(), String> {
+        if self.is_cancelled() { Err(CANCELLED.to_string()) } else { Ok(()) }
+    }
 }
 
 /// A solve plus the full-mesh data tests check it against.
@@ -161,11 +257,14 @@ pub(crate) struct Detailed {
     pub stiffness: skyline::Envelope,
 }
 
-pub(crate) fn solve_detailed(spec: &SolidSpec, base_dir: &Path) -> Result<Detailed, String> {
+pub(crate) fn solve_detailed(spec: &SolidSpec, base_dir: &Path, progress: &SolveProgress) -> Result<Detailed, String> {
     let start = Instant::now();
     spec.validate()?;
+    progress.report(SolvePhase::Mesh, 0.0);
     let mut stats = SolveStats::default();
     let mesh = mesh::build_mesh(spec, base_dir)?;
+    progress.check()?;
+    progress.report(SolvePhase::Assemble, 0.0);
     stats.nodes = mesh.nodes.len();
     stats.elements = mesh.elements.len();
     stats.dropped_cells = mesh.dropped_cells;
@@ -174,10 +273,7 @@ pub(crate) fn solve_detailed(spec: &SolidSpec, base_dir: &Path) -> Result<Detail
     let assemble_start = Instant::now();
     let n_nodes = mesh.nodes.len();
     let extent = bounding_extent(&mesh.nodes);
-    let blocked: Vec<bool> = match &spec.block {
-        Some(region) => mesh.nodes.iter().map(|&p| region.contains(p, 1e-9 * extent)).collect(),
-        None => vec![false; n_nodes],
-    };
+    let blocked = blocked_nodes(spec, &mesh.nodes, extent);
     stats.blocked_nodes = blocked.iter().filter(|&&b| b).count();
     if spec.block.is_some() && stats.blocked_nodes == 0 {
         return Err("the block region contains no mesh node".into());
@@ -233,7 +329,7 @@ pub(crate) fn solve_detailed(spec: &SolidSpec, base_dir: &Path) -> Result<Detail
         }
     }
     let d = element::elasticity(spec.material.young, spec.material.poisson);
-    let (mut matrix, node_mass) = assemble(&mesh, &rank, &first, &d, spec.material.density)?;
+    let (mut matrix, node_mass) = assemble(&mesh, &rank, &first, &d, spec.material.density, progress)?;
     stats.envelope = matrix.stored();
     let mut dof_mass = vec![0.0; dofs];
     for v in 0..n_nodes {
@@ -247,6 +343,7 @@ pub(crate) fn solve_detailed(spec: &SolidSpec, base_dir: &Path) -> Result<Detail
     let deflate = rigid_modes(&mesh, &blocked, &rank, &node_mass, &dof_mass);
     stats.rigid_modes_deflated = deflate.len();
     stats.assemble_time = assemble_start.elapsed();
+    progress.check()?;
 
     let factor_start = Instant::now();
     #[cfg(test)]
@@ -259,15 +356,17 @@ pub(crate) fn solve_detailed(spec: &SolidSpec, base_dir: &Path) -> Result<Detail
         for i in 0..dofs {
             matrix.add(i, i, -sigma * dof_mass[i]);
         }
-        match matrix.factor() {
+        match matrix.factor(&progress.watch(SolvePhase::Factor)) {
             Ok(()) => break matrix,
+            Err(error) if progress.is_cancelled() => return Err(error),
             Err(_) if sigma > -1e-4 * lambda_scale => {
                 sigma *= 100.0;
-                matrix = assemble(&mesh, &rank, &first, &d, spec.material.density)?.0;
+                matrix = assemble(&mesh, &rank, &first, &d, spec.material.density, progress)?.0;
             }
             Err(error) => return Err(error),
         }
     };
+    progress.check()?;
     stats.factor_time = factor_start.elapsed();
 
     let eigen_start = Instant::now();
@@ -275,7 +374,9 @@ pub(crate) fn solve_detailed(spec: &SolidSpec, base_dir: &Path) -> Result<Detail
     // not deflated); ask for a few extra and filter them below.
     let spare = if spec.block.is_some() { 6 } else { 0 };
     let solve_op = |b: &mut [f64]| factor.solve(b);
-    let result = eigen::shift_invert_lanczos(&dof_mass, &solve_op, &deflate, spec.modes + spare);
+    let result =
+        eigen::shift_invert_lanczos(&dof_mass, &solve_op, &deflate, spec.modes + spare, &progress.watch(SolvePhase::Modes));
+    progress.check()?;
     stats.lanczos_steps = result.steps;
     stats.converged = result.converged.min(spec.modes);
     let mut modes: Vec<(f64, Vec<f64>)> = result
@@ -308,11 +409,9 @@ pub(crate) fn solve_detailed(spec: &SolidSpec, base_dir: &Path) -> Result<Detail
     }
     let solid = ModalSolid {
         freqs: modes.iter().map(|(l, _)| l.max(0.0).sqrt() / std::f64::consts::TAU).collect(),
-        points: surface.nodes.iter().flat_map(|&n| mesh.nodes[n as usize].map(|c| c as f32)).collect(),
-        normals: surface.normals.iter().flat_map(|n| n.map(|c| c as f32)).collect(),
-        triangles: surface.triangles.iter().flatten().copied().collect(),
         shapes,
         mass: node_mass.iter().sum(),
+        ..surface_solid(&mesh, &surface)
     };
     stats.total_time = start.elapsed();
     Ok(Detailed {
@@ -324,6 +423,57 @@ pub(crate) fn solve_detailed(spec: &SolidSpec, base_dir: &Path) -> Result<Detail
         #[cfg(test)]
         stiffness,
     })
+}
+
+/// A spec meshed but not solved, for a shape editor's live view: the mesh
+/// takes milliseconds where the solve takes seconds. The surface is the one
+/// a solve would return, with no modes (`freqs` and `shapes` empty); `mass`
+/// is the density times the elements' volume.
+pub fn preview(spec: &SolidSpec, base_dir: &Path) -> Result<(ModalSolid, SolveStats), String> {
+    let start = Instant::now();
+    spec.validate()?;
+    let mesh = mesh::build_mesh(spec, base_dir)?;
+    let volume: f64 = mesh
+        .elements
+        .iter()
+        .map(|element| 8.0 * element::center_jacobian_det(&element.map(|n| mesh.nodes[n as usize])))
+        .sum();
+    let solid = ModalSolid { mass: spec.material.density * volume, ..surface_solid(&mesh, &mesh::surface(&mesh)) };
+    let extent = bounding_extent(&mesh.nodes);
+    let stats = SolveStats {
+        nodes: mesh.nodes.len(),
+        elements: mesh.elements.len(),
+        blocked_nodes: blocked_nodes(spec, &mesh.nodes, extent).iter().filter(|&&b| b).count(),
+        block_nearest: spec.block.and_then(|region| {
+            let c = region.center();
+            mesh.nodes.iter().min_by(|a, b| spec::dist(**a, c).total_cmp(&spec::dist(**b, c))).copied()
+        }),
+        dropped_cells: mesh.dropped_cells,
+        mesh_time: start.elapsed(),
+        total_time: start.elapsed(),
+        ..SolveStats::default()
+    };
+    Ok((solid, stats))
+}
+
+/// Which of `nodes` the spec's block region clamps (none without one).
+fn blocked_nodes(spec: &SolidSpec, nodes: &[[f64; 3]], extent: f64) -> Vec<bool> {
+    match &spec.block {
+        Some(region) => nodes.iter().map(|&p| region.contains(p, 1e-9 * extent)).collect(),
+        None => vec![false; nodes.len()],
+    }
+}
+
+/// The surface of `mesh` as a solid with no modes.
+fn surface_solid(mesh: &mesh::HexMesh, surface: &mesh::Surface) -> ModalSolid {
+    ModalSolid {
+        freqs: Vec::new(),
+        points: surface.nodes.iter().flat_map(|&n| mesh.nodes[n as usize].map(|c| c as f32)).collect(),
+        normals: surface.normals.iter().flat_map(|n| n.map(|c| c as f32)).collect(),
+        triangles: surface.triangles.iter().flatten().copied().collect(),
+        shapes: Vec::new(),
+        mass: 0.0,
+    }
 }
 
 /// Load a spec file and solve it, resolving .obj paths beside the spec.
@@ -343,11 +493,16 @@ fn assemble(
     first: &[usize],
     d: &[[f64; 6]; 6],
     density: f64,
+    progress: &SolveProgress,
 ) -> Result<(skyline::Envelope, Vec<f64>), String> {
     let mut matrix = skyline::Envelope::new(first.to_vec());
     let mut node_mass = vec![0.0; mesh.nodes.len()];
     let mut cached: Option<([u64; 24], [f64; 576], [f64; 8])> = None;
-    for element in &mesh.elements {
+    for (e, element) in mesh.elements.iter().enumerate() {
+        if e % 1024 == 0 {
+            progress.check()?;
+            progress.report(SolvePhase::Assemble, e as f64 / mesh.elements.len() as f64);
+        }
         let corners = element.map(|n| mesh.nodes[n as usize]);
         let mut shape = [0u64; 24];
         for a in 0..8 {

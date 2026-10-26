@@ -386,6 +386,16 @@ pub fn register_geometry(geometry: MeshGeometry) -> u64 {
     id
 }
 
+/// Register `geometry` in place of `previous` (a live preview that changes
+/// on every edit): the previous mesh goes, as nothing else names its id.
+pub fn replace_geometry(previous: Option<u64>, geometry: MeshGeometry) -> u64 {
+    let id = register_geometry(geometry);
+    if let Some(old) = previous.filter(|old| *old != id) {
+        GEOMETRIES.with(|geometries| geometries.borrow_mut().remove(&old));
+    }
+    id
+}
+
 pub fn geometry(id: u64) -> Option<Rc<MeshGeometry>> {
     GEOMETRIES.with(|geometries| geometries.borrow().get(&id).cloned())
 }

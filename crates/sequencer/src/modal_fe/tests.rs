@@ -30,7 +30,7 @@ fn free_free_bar_bending_follows_euler_bernoulli() {
     // 0.6 × 0.02 × 0.02 m steel bar, 60 × 2 × 2 elements (L/b = 30). The
     // square section makes each bending mode a degenerate pair.
     let (length, side) = (0.6, 0.02);
-    let d = solve_detailed(&bar_spec(length, side, 0.01, None, 6), Path::new(".")).unwrap();
+    let d = solve_detailed(&bar_spec(length, side, 0.01, None, 6), Path::new("."), &SolveProgress::default()).unwrap();
     let f = &d.solid.freqs;
     assert_eq!(d.stats.rigid_modes_deflated, 6);
     for pair in [0, 2, 4] {
@@ -57,7 +57,7 @@ fn cantilever_first_frequency_matches_beam_theory() {
     // 0.3 × 0.01 × 0.01 m, 60 × 2 × 2 elements, the x = −L/2 face clamped.
     let (length, side) = (0.3, 0.01);
     let block = Region::Box { min: [-1.0, -1.0, -1.0], max: [-0.5 * length, 1.0, 1.0] };
-    let d = solve_detailed(&bar_spec(length, side, 0.005, Some(block), 4), Path::new(".")).unwrap();
+    let d = solve_detailed(&bar_spec(length, side, 0.005, Some(block), 4), Path::new("."), &SolveProgress::default()).unwrap();
     let f = &d.solid.freqs;
     assert_eq!(d.stats.blocked_nodes, 9);
     assert_eq!(d.stats.rigid_modes_deflated, 0);
@@ -78,7 +78,7 @@ fn free_cube_drops_rigid_modes_and_modes_are_mass_normalized() {
         modes: 10,
         mesh: MeshMode::Auto,
     };
-    let d = solve_detailed(&spec, Path::new(".")).unwrap();
+    let d = solve_detailed(&spec, Path::new("."), &SolveProgress::default()).unwrap();
     assert_eq!(d.stats.rigid_modes_deflated, 6);
     assert_eq!(d.solid.freqs.len(), 10);
     // A 10 cm steel cube's lowest elastic mode is near 20 kHz; anything
@@ -224,4 +224,63 @@ fn modes_json_round_trips_and_hash_is_stable() {
     assert_eq!(hash.len(), 64);
     let reparsed = SolidSpec::from_json(&serde_json::to_string(&spec).unwrap()).unwrap();
     assert_eq!(spec_hash(&reparsed), hash);
+}
+
+/// A tube with a hole through both walls keeps its mapped mesh, less the
+/// elements the hole covers (voxels could not follow a 2.5 mm wall), and
+/// still solves, its modes moved a little by the missing metal.
+#[test]
+fn a_drilled_tube_is_its_mapped_mesh_carved() {
+    let tube = Solid::Tube { outer_radius: 0.016, inner_radius: 0.0135, height: 0.3, center: [0.0; 3], axis: Axis::Z };
+    let spec = |solid: Solid| SolidSpec {
+        name: None,
+        solid,
+        resolution: Resolution::Cells(60),
+        material: STEEL,
+        block: None,
+        modes: 6,
+        mesh: MeshMode::Auto,
+    };
+    let whole = spec(tube.clone());
+    let drilled = spec(Solid::Difference(vec![
+        tube,
+        Solid::Cylinder { radius: 0.007, height: 0.05, center: [0.0, 0.0, 0.08], axis: Axis::X },
+    ]));
+    let full = mesh::build_mesh(&whole, Path::new(".")).unwrap();
+    let carved = mesh::build_mesh(&drilled, Path::new(".")).unwrap();
+    let removed = full.elements.len() - carved.elements.len();
+    assert!(removed > 0 && removed * 20 < full.elements.len(), "{removed} of {}", full.elements.len());
+    assert_eq!(carved.dropped_cells, 0);
+    let (a, _) = solve(&whole, Path::new(".")).unwrap();
+    let (b, _) = solve(&drilled, Path::new(".")).unwrap();
+    assert_eq!(b.freqs.len(), 6);
+    assert!(a.freqs[0] != b.freqs[0] && rel(b.freqs[0], a.freqs[0]) < 0.05, "{:?} vs {:?}", a.freqs, b.freqs);
+}
+
+/// A watched solve reports its phases as it goes and finishes at the mode
+/// search; cancelled mid-way, it stops promptly with CANCELLED.
+#[test]
+fn a_watched_solve_reports_progress_and_stops_when_cancelled() {
+    let small = bar_spec(0.3, 0.02, 0.01, None, 4);
+    let progress = SolveProgress::default();
+    solve_watched(&small, Path::new("."), &progress).unwrap();
+    let (phase, done) = progress.snapshot();
+    assert_eq!(phase, SolvePhase::Modes);
+    assert!(done > 0.5, "{done}");
+
+    // a solve that takes seconds, cancelled once it is factoring or later
+    let big = bar_spec(0.35, 0.04, 0.0025, None, 24);
+    let progress = std::sync::Arc::new(SolveProgress::default());
+    let watched = progress.clone();
+    let solving = std::thread::spawn(move || solve_watched(&big, Path::new("."), &watched).map(|_| ()));
+    let start = std::time::Instant::now();
+    while progress.snapshot().0 == SolvePhase::Mesh || progress.snapshot().0 == SolvePhase::Assemble {
+        assert!(start.elapsed() < std::time::Duration::from_secs(60), "never reached factoring");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let cancelled_at = std::time::Instant::now();
+    progress.cancel();
+    let outcome = solving.join().unwrap();
+    assert_eq!(outcome, Err(CANCELLED.to_string()));
+    assert!(cancelled_at.elapsed() < std::time::Duration::from_secs(2), "{:?}", cancelled_at.elapsed());
 }

@@ -60,6 +60,58 @@ seconds), then read from a cache keyed by the spec. Its shapes are scaled to
 the same unit modal mass as every other object. `examples/fe-bell.lisp`
 strikes a solved bronze bell; `:root` makes it follow the note.
 
+**The shape lab.** M-x Shape Lab in a script with solids opens `*shape-lab*`
+beside it (content/ui/modal/shape-lab.lisp), on the script's first solid
+(tabs pick another):
+
+- **Layers** (left): the shape as a tree, like Figma's: the body's parts
+  (bronze), the cuts (red: holes, slots, arches), and what holds it (a
+  clamp, or nothing). Selecting a layer selects it on the canvas; under
+  the tree are its actions (**Duplicate**, **Repeat** into a row of N,
+  **Delete**), its **Effect** (adds to the body or cuts into it: a union
+  or a difference in the script) and its size and position. A revolve
+  layer has **Edit profile**, which turns the canvas into its
+  cross-section: drag its points, or set a point's radius, height and
+  wall.
+- **Canvas** (middle): the parts seen from the **Top**, **Front** or
+  **Side**. A thin body is stretched to fill it (the toolbar says how
+  much); a revolve seen side on shows its cross-section. Under it,
+  **Move** drags parts and the clamp; **Hole**, **Slot**, **Block** and
+  **Arch** (a marimba bar's undercut) each place one part where you click
+  (straight through along your view, sized to the body; a new hole takes
+  the last hole's radius), then hand back to Move. The armed tool's
+  button is filled with its colour.
+- **3-D view** (right): the shape as meshed, then, once solved, swinging
+  through its lowest modes. Under it the mass, the lowest mode, and
+  **Mesh**, the element size: voxel cells for most shapes, but a revolve
+  with cuts keeps its fitted shell mesh (voxels cannot follow a thin wall)
+  with the elements inside each cut removed, and there Mesh scales its
+  `:segments`. A cut under two cells wide may vanish, and the lab says so.
+- **Clamp:** a solid's `:block`, the region the solver holds still (where
+  a cymbal sits on its stand), drawn green and dragged like a part. If an
+  edit leaves it in empty space, its layer says "not touching" at once
+  (the preview counts what it holds) instead of a solve failing, and
+  offers **Move onto shape** or **Remove**; a free solid offers **Add a
+  clamp**. Templates start free.
+- **Header:** the solid's tabs, **New shape…** (Bell, Bowl, Gong, Chime,
+  Bar, Shell, Drilled, Marimba, Fork, Plate), the material and the mode
+  count.
+
+The geometry is content/ui/modal/shape-parts.lisp. Each edit is meshed at
+once (`(modal-mesh spec)`, milliseconds) and solved in the background into
+the cache `modal-solve` reads.
+
+**Update draft** is one click: it writes `:shape`, `:made-of`, `:modes`,
+`:resolution` and `:block` (removed when freed) into the script's
+`(m/solid 'id …)` call as one edit (one undo takes it back), evaluates the
+script as C-c C-c does, and recompiles its draft; the button says
+"Compiling draft…" until the draft plays the new shape, and an error shows
+under the header. It waits for the solve, so the evaluation reads it from
+the cache: a debug build takes about 20 s on the bell (40 modes); a drilled
+bar 0.3 s at 32 cells, 2 s at 64, 9 s at 96 and 30 s at 128 (24 modes).
+Lab coordinates snap to 0.1 mm, so the script reads back exactly what was
+solved. A solid whose spec is a JSON file is shown but not written back.
+
 `(modal-read-data "file")` reads data for `m/modal-data :data`, relative to
 the script: an IRCAM resonance model (text: index, Hz, dB, bandwidth Hz per
 line) or an `eseq-modes` `.json` from `eseq modal solve`.

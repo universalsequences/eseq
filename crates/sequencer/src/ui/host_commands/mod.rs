@@ -25,6 +25,7 @@ mod lanes;
 mod learn;
 mod misc;
 pub(crate) mod drafts;
+pub(crate) mod shape_lab;
 pub(crate) mod notes;
 pub(crate) mod packages;
 mod panel;

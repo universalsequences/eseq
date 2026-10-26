@@ -30,6 +30,8 @@ mod resample_ui_tests;
 mod factory_promote_ui_tests;
 #[path = "draft_save_ui_tests.rs"]
 mod draft_save_ui_tests;
+#[path = "shape_lab_ui_tests.rs"]
+mod shape_lab_ui_tests;
 #[path = "midi_midimix_tests.rs"]
 mod midi_midimix_tests;
 #[path = "mixer_hit_tests.rs"]

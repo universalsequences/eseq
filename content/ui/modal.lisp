@@ -414,10 +414,12 @@
         ;; :made-of, not :material: a call quotes whatever follows :material
         (base (dict :solid shape :modes modes :made-of m))
         (with-res (if resolution (merge base :resolution resolution) base))
-        (data (modal-solve (if spec spec (if block (merge with-res :block block) with-res))))
+        (fe-spec (if spec spec (if block (merge with-res :block block) with-res)))
+        (data (modal-solve fe-spec))
         (losses (if (map? data) (map (lambda (f) (+ loss (* hf-loss f 0.01))) (get data :freqs)) nil)))
+    ;; :fe-spec and :data are for the shape lab (eseq.modal.shape-lab)
     (merge (modal-data id :data data :losses losses :root root :tune tune :decay decay :mute mute :mass mass)
-           :title "SOLID" :label "solid")))
+           :title "SOLID" :label "solid" :fe-spec fe-spec :data data)))
 
 ;; The positions of xs's numbers in increasing order (insertion sort; a few
 ;; hundred modes at most).

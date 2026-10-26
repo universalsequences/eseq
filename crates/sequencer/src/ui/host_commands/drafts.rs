@@ -75,6 +75,12 @@ pub(crate) fn is_script_buffer(buffer: &eseqlisp::buffer::Buffer, text: &str) ->
         && sequencer::agent::forms::declared_module(text).is_none()
 }
 
+/// Where a script buffer's relative files resolve from: its file, or for an
+/// unsaved buffer `<name>.lisp` in the working folder.
+pub(super) fn script_path(buffer: &eseqlisp::buffer::Buffer) -> PathBuf {
+    buffer.path.clone().unwrap_or_else(|| PathBuf::from(format!("{}.lisp", buffer.name)))
+}
+
 fn write_draft_files(dir: &Path, instrument: &GeneratedInstrument, script: &str) -> Result<(), String> {
     instrument.write_to(dir)?;
     std::fs::write(dir.join("source.lisp"), script)
@@ -90,42 +96,68 @@ pub(super) fn evaluate_script_buffer(
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) -> bool {
-    let buffer = editor.active_buffer();
+    let name = editor.active_buffer().name.clone();
+    match evaluate_script_buffer_named(app, editor, ctx, &name) {
+        ScriptEvaluation::NotAScript => false,
+        ScriptEvaluation::Failed(error) => {
+            editor_error(editor, error);
+            true
+        }
+        _ => true,
+    }
+}
+
+/// What evaluating a script buffer did.
+pub(super) enum ScriptEvaluation {
+    NotAScript,
+    /// A value that is not a program, reported in the status line.
+    Value,
+    /// A new draft track, ready.
+    Created,
+    /// The buffer's draft is recompiling (key as in [`Draft::key`]);
+    /// [`poll_draft_compiles`] reports when it is done.
+    Compiling(String),
+    Failed(String),
+}
+
+/// [`evaluate_script_buffer`] for the buffer named `name`, active or not
+/// (the shape lab evaluates the script it edits). The outcome goes to the
+/// caller; a failure is not also put in the status line.
+pub(super) fn evaluate_script_buffer_named(
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+    name: &str,
+) -> ScriptEvaluation {
+    let Some(buffer) = editor.buffers.iter().find(|buffer| buffer.name == name) else {
+        return ScriptEvaluation::NotAScript;
+    };
     let script = buffer.text();
     if !is_script_buffer(buffer, &script) {
-        return false;
+        return ScriptEvaluation::NotAScript;
     }
     let key = buffer_key(buffer);
-    let path = buffer
-        .path
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(format!("{}.lisp", buffer.name)));
+    let path = script_path(buffer);
     let value = match sequencer::lisp_host::eval_script(editor.runtime_mut(), path.clone(), &script) {
         Ok(value) => value.unwrap_or(Value::Nil),
-        Err(errors) => {
-            editor_error(editor, errors.join("; "));
-            return true;
-        }
+        Err(errors) => return ScriptEvaluation::Failed(errors.join("; ")),
     };
     if !sequencer::lisp_host::is_program(&value) {
         let shown: String = editor.runtime().format_value(&value).chars().take(160).collect();
         editor.handle_host_event(HostEvent::Status(format!("Evaluated: {shown}")));
-        return true;
+        return ScriptEvaluation::Value;
     }
     let instrument =
         match sequencer::lisp_host::generate_from_program(editor.runtime_mut(), path, value) {
             Ok(instrument) => instrument,
-            Err(errors) => {
-                editor_error(editor, format!("Program: {}", errors.join("; ")));
-                return true;
-            }
+            Err(errors) => return ScriptEvaluation::Failed(format!("Program: {}", errors.join("; "))),
         };
 
     let live = ctx.sessions.drafts.iter().position(|draft| {
         draft.key == key && app.graph.track_engine_ids.contains(&Some(draft.engine_id))
     });
-    match live {
-        Some(index) => update_draft(app, editor, ctx, index, instrument, &script),
+    let outcome = match live {
+        Some(index) => update_draft(app, editor, ctx, index, instrument, &script).map(ScriptEvaluation::Compiling),
         None => {
             // A draft whose track was deleted: drop it with its files.
             let mut replaced = false;
@@ -138,10 +170,10 @@ pub(super) fn evaluate_script_buffer(
                 false
             });
             sync_draft_panels(&ctx.sessions.drafts);
-            create_draft(app, editor, ctx, key, instrument, &script, replaced);
+            create_draft(app, editor, ctx, key, instrument, &script, replaced).map(|()| ScriptEvaluation::Created)
         }
-    }
-    true
+    };
+    outcome.unwrap_or_else(ScriptEvaluation::Failed)
 }
 
 fn update_draft(
@@ -151,12 +183,9 @@ fn update_draft(
     index: usize,
     instrument: GeneratedInstrument,
     script: &str,
-) {
+) -> Result<String, String> {
     let draft = &mut ctx.sessions.drafts[index];
-    if let Err(error) = write_draft_files(&draft.dir, &instrument, script) {
-        editor_error(editor, error);
-        return;
-    }
+    write_draft_files(&draft.dir, &instrument, script)?;
     draft.generation = draft.generation.wrapping_add(1);
     let receiver = spawn_preview_compile(
         PreviewSource::Source {
@@ -172,8 +201,9 @@ fn update_draft(
     let generation = draft.generation;
     let status = format!("Compiling draft '{}'...", instrument.name);
     ctx.sessions.pending_draft_compiles.retain(|pending| pending.key != key);
-    ctx.sessions.pending_draft_compiles.push(PendingDraftCompile { key, generation, instrument, receiver });
+    ctx.sessions.pending_draft_compiles.push(PendingDraftCompile { key: key.clone(), generation, instrument, receiver });
     editor.handle_host_event(HostEvent::Status(status));
+    Ok(key)
 }
 
 fn create_draft(
@@ -184,18 +214,11 @@ fn create_draft(
     instrument: GeneratedInstrument,
     script: &str,
     replaced: bool,
-) {
-    let dir = match create_new_instrument_draft_dir() {
-        Ok(dir) => dir,
-        Err(error) => {
-            editor_error(editor, error);
-            return;
-        }
-    };
+) -> Result<(), String> {
+    let dir = create_new_instrument_draft_dir()?;
     if let Err(error) = write_draft_files(&dir, &instrument, script) {
         let _ = std::fs::remove_dir_all(&dir);
-        editor_error(editor, error);
-        return;
+        return Err(error);
     }
     let track = match app.add_transient_instrument_track_sync(
         &draft_engine_name(&instrument.name),
@@ -205,16 +228,14 @@ fn create_draft(
         Ok(track) => track,
         Err(error) => {
             let _ = std::fs::remove_dir_all(&dir);
-            editor_error(editor, format!("Draft did not compile: {error}"));
-            return;
+            return Err(format!("Draft did not compile: {error}"));
         }
     };
     let _ = app.force_instrument_enabled(track);
     let Some(engine_id) = app.graph.track_engine_ids.get(track).and_then(|id| *id) else {
         let _ = app.graph_controller().delete_track(track);
         let _ = std::fs::remove_dir_all(&dir);
-        editor_error(editor, "Draft track has no engine binding");
-        return;
+        return Err("Draft track has no engine binding".into());
     };
     let status = format!(
         "{} draft track {}: {}",
@@ -239,19 +260,23 @@ fn create_draft(
         ctx.shared.lg_raw,
     );
     editor.handle_host_event(HostEvent::Status(status));
+    Ok(())
 }
 
 /// Apply finished draft recompiles. Knob values carry over by param name
 /// (the hot reload keeps them); a param whose default the script changed
 /// takes the new default, so editing `:pressure 0.4` in the script is heard.
+/// Each finished draft's key and outcome is returned (also reported in the
+/// status line), for a caller waiting on one.
 pub(crate) fn poll_draft_compiles(
     app: &mut app::App,
     editor: &mut Editor,
     sessions: &mut EditSessionState,
     ui_epoch: &AtomicUsize,
-) {
+) -> Vec<(String, Result<(), String>)> {
+    let mut outcomes = Vec::new();
     if sessions.pending_draft_compiles.is_empty() {
-        return;
+        return outcomes;
     }
     let mut finished = Vec::new();
     for pending in std::mem::take(&mut sessions.pending_draft_compiles) {
@@ -277,11 +302,14 @@ pub(crate) fn poll_draft_compiles(
         let compiled = match outcome.map(|outcome| outcome.result) {
             Some(Ok(compiled)) => compiled,
             Some(Err(error)) => {
-                editor_error(editor, format!("Draft did not compile: {error}"));
+                let error = format!("Draft did not compile: {error}");
+                editor_error(editor, error.clone());
+                outcomes.push((key, Err(error)));
                 continue;
             }
             None => {
                 editor_error(editor, "Draft compile thread crashed");
+                outcomes.push((key, Err("Draft compile thread crashed".into())));
                 continue;
             }
         };
@@ -305,7 +333,8 @@ pub(crate) fn poll_draft_compiles(
             &compiled.source,
             compiled.result,
         ) {
-            editor_error(editor, error);
+            editor_error(editor, error.clone());
+            outcomes.push((key, Err(error)));
             continue;
         }
         // The panel dispatches on the engine name, so a rename changes it too.
@@ -329,12 +358,14 @@ pub(crate) fn poll_draft_compiles(
         }
         ui_epoch.fetch_add(1, Ordering::Relaxed);
         editor.handle_host_event(HostEvent::Status(format!("Updated draft '{}'", draft.instrument.name)));
+        outcomes.push((key, Ok(())));
     }
     if panels_changed {
         sync_draft_panels(&sessions.drafts);
         reload_instrument_panels(editor);
         editor.refresh_visible_layouts_for_buffer_named("*fx*");
     }
+    outcomes
 }
 
 /// The `:track` of `payload` and the draft playing on it.

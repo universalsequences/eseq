@@ -24,18 +24,132 @@ const HEX_FACES: [[usize; 4]; 6] =
     [[0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]];
 
 pub(crate) fn build_mesh(spec: &SolidSpec, base_dir: &Path) -> Result<HexMesh, String> {
-    let mappable = mapped_profile(&spec.solid);
-    match (spec.mesh, mappable) {
-        (MeshMode::Mapped, None) => {
-            Err("mesh \"mapped\" needs a lone revolve (with a wall), tube, shell or cylinder".into())
+    let mapped = |(profile, center, axis, segments): (Profile, [f64; 3], Axis, Segments)| {
+        let e = profile.extent();
+        let largest = (2.0 * e[1]).max(e[3] - e[2]);
+        revolve_mesh(&profile, center, axis, segments, element_size(spec.resolution, largest))
+    };
+    if spec.mesh == MeshMode::Voxel {
+        return voxel_mesh(spec, base_dir);
+    }
+    if let Some(profile) = mapped_profile(&spec.solid) {
+        return mapped(profile);
+    }
+    // A mappable body with cuts (a drilled bell): its mapped mesh, carved.
+    // Voxels could not follow its thin walls.
+    if let Solid::Difference(parts) = &spec.solid {
+        if parts[1..].iter().all(|cut| contains(cut, [0.0; 3]).is_some()) {
+            if let Some(profile) = mapped_profile(&parts[0]) {
+                return carve(mapped(profile)?, &parts[1..]);
+            }
         }
-        (MeshMode::Auto | MeshMode::Mapped, Some((profile, center, axis, segments))) => {
-            let e = profile.extent();
-            let largest = (2.0 * e[1]).max(e[3] - e[2]);
-            revolve_mesh(&profile, center, axis, segments, element_size(spec.resolution, largest))
-        }
+    }
+    match spec.mesh {
+        MeshMode::Mapped => Err(
+            "mesh \"mapped\" needs a lone revolve (with a wall), tube, shell or cylinder, or one with cuts".into(),
+        ),
         _ => voxel_mesh(spec, base_dir),
     }
+}
+
+/// `mesh` without the elements whose centres are inside any of `cuts`
+/// (each a solid `contains` can test), kept to its largest face-connected
+/// piece.
+fn carve(mesh: HexMesh, cuts: &[Solid]) -> Result<HexMesh, String> {
+    let center = |element: &[u32; 8]| average(&element.map(|n| mesh.nodes[n as usize]));
+    let kept: Vec<[u32; 8]> = mesh
+        .elements
+        .iter()
+        .filter(|element| !cuts.iter().any(|cut| contains(cut, center(element)) == Some(true)))
+        .copied()
+        .collect();
+    if kept.is_empty() {
+        return Err("the cuts remove the whole solid".into());
+    }
+    // face-connected pieces, by union-find over shared faces
+    let mut parent: Vec<usize> = (0..kept.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut faces: HashMap<[u32; 4], usize> = HashMap::new();
+    for (e, element) in kept.iter().enumerate() {
+        for face in HEX_FACES {
+            let mut key = face.map(|k| element[k]);
+            key.sort_unstable();
+            if let Some(&other) = faces.get(&key) {
+                let (a, b) = (root(&mut parent, e), root(&mut parent, other));
+                parent[a] = b;
+            } else {
+                faces.insert(key, e);
+            }
+        }
+    }
+    let mut sizes: HashMap<usize, usize> = HashMap::new();
+    for e in 0..kept.len() {
+        *sizes.entry(root(&mut parent, e)).or_default() += 1;
+    }
+    let largest = sizes.iter().max_by_key(|(_, &n)| n).map(|(&r, _)| r).unwrap_or(0);
+    let mut renumber = vec![u32::MAX; mesh.nodes.len()];
+    let mut nodes = Vec::new();
+    let mut elements = Vec::new();
+    for (e, element) in kept.iter().enumerate() {
+        if root(&mut parent, e) != largest {
+            continue;
+        }
+        elements.push(element.map(|n| {
+            let slot = &mut renumber[n as usize];
+            if *slot == u32::MAX {
+                *slot = nodes.len() as u32;
+                nodes.push(mesh.nodes[n as usize]);
+            }
+            *slot
+        }));
+    }
+    let dropped_cells = mesh.dropped_cells + kept.len() - elements.len();
+    Ok(HexMesh { nodes, elements, dropped_cells })
+}
+
+/// Whether point `p` is inside `solid`; None for an .obj (voxelized only).
+fn contains(solid: &Solid, p: [f64; 3]) -> Option<bool> {
+    Some(match solid {
+        Solid::Box { size, center } => (0..3).all(|i| (p[i] - center[i]).abs() <= 0.5 * size[i]),
+        Solid::Cylinder { radius, height, center, axis } => {
+            let (r, z) = to_rz(p, *center, *axis);
+            r <= *radius && z.abs() <= 0.5 * height
+        }
+        Solid::Tube { outer_radius, inner_radius, height, center, axis } => {
+            let (r, z) = to_rz(p, *center, *axis);
+            r <= *outer_radius && r >= *inner_radius && z.abs() <= 0.5 * height
+        }
+        Solid::Sphere { radius, center } => dist(p, *center) <= *radius,
+        Solid::Shell { outer_radius, inner_radius, center } => {
+            let d = dist(p, *center);
+            d <= *outer_radius && d >= *inner_radius
+        }
+        Solid::Revolve { profile, thickness, center, axis, .. } => {
+            let (r, z) = to_rz(p, *center, *axis);
+            Profile::new(profile, *thickness).contains(r, z)
+        }
+        Solid::Union(parts) => {
+            let mut any = false;
+            for part in parts {
+                any |= contains(part, p)?;
+            }
+            any
+        }
+        Solid::Difference(parts) => {
+            let mut inside = contains(&parts[0], p)?;
+            for part in &parts[1..] {
+                inside &= !contains(part, p)?;
+            }
+            inside
+        }
+        Solid::Obj { .. } => return None,
+    })
 }
 
 fn element_size(resolution: Resolution, largest_extent: f64) -> f64 {
@@ -189,24 +303,12 @@ fn occupancy(solid: &Solid, grid: &Grid, objs: &Objs) -> Vec<bool> {
         cells
     };
     match solid {
-        Solid::Box { size, center } => point_test(&|p| {
-            (0..3).all(|i| (p[i] - center[i]).abs() <= 0.5 * size[i])
-        }),
-        Solid::Cylinder { radius, height, center, axis } => point_test(&|p| {
-            let (r, z) = to_rz(p, *center, *axis);
-            r <= *radius && z.abs() <= 0.5 * height
-        }),
-        Solid::Tube { outer_radius, inner_radius, height, center, axis } => point_test(&|p| {
-            let (r, z) = to_rz(p, *center, *axis);
-            r <= *outer_radius && r >= *inner_radius && z.abs() <= 0.5 * height
-        }),
-        Solid::Sphere { radius, center } => {
-            point_test(&|p| dist(p, *center) <= *radius)
-        }
-        Solid::Shell { outer_radius, inner_radius, center } => point_test(&|p| {
-            let d = dist(p, *center);
-            d <= *outer_radius && d >= *inner_radius
-        }),
+        Solid::Box { .. }
+        | Solid::Cylinder { .. }
+        | Solid::Tube { .. }
+        | Solid::Sphere { .. }
+        | Solid::Shell { .. } => point_test(&|p| contains(solid, p) == Some(true)),
+        // the profile once, not once per cell
         Solid::Revolve { profile, thickness, center, axis, .. } => {
             let profile = Profile::new(profile, *thickness);
             point_test(&|p| {
