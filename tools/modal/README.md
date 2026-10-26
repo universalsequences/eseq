@@ -85,9 +85,14 @@ factory instrument from it:
   act on the modes and the wash alike.
 - `(m/listen obj at :hear :position)` hears displacement as it is (what the
   residues are), not the normalised velocity.
+- `(m/listen obj at :radiate hz)` radiates less and less below hz (a
+  two-pole high-pass, knob `mic<k>_radiate`): a board or body is a poor
+  loudspeaker for wavelengths longer than itself, so a piano's lowest
+  fundamentals are far weaker in the room than on the board.
 - `(m/patch ... :voicing :one)` declares the host's voice mode (instrument.json
   `voice_controls`): every hit lands on one ringing plate. `:tone hz` adds an
-  output low-pass.
+  output low-pass. `:modulate :all` lets the host modulate every knob, at a
+  cost (see Modulation).
 - `(m/stroke-point data "Ride")` is the point where that stroke struck (the
   export infers each spot's mode shape from its residue), for physical
   connections there: `examples/ride-mallet.lisp` plays the measured plate with
@@ -270,6 +275,29 @@ shows one section per object, and the generated `ui.lisp` (addressing params
 as `str.str_length`) gives each a knob panel around a screen that draws the
 patch and lists the selected section's params.
 
+### Modulation
+
+The host's four modulation sources can drive a patch's knobs (`@mod true`,
+read as `(mod p)`). Which knobs depends on what they cost:
+
+- By default (`:modulate :cheap`), every knob whose work runs anyway when
+  it moves: a bow's pressure, a string's loss or length, a felt's
+  hardness, gains, envelopes, the amp, and the by-note knobs and a data
+  object's tune / decay, whose coefficients are worked out on a change tick
+  (`bynote_tick`, `coef_tick`). This costs nothing until a knob is
+  modulated (the examples are within a few percent of unmodulatable).
+  While a source moves, those ticks recompute every 32 samples (0.7 ms).
+- Not by default: knobs that only shape setup DGen works out once per block
+  from knobs alone (a plate's size, thickness, mass and loss; a point on a
+  plate, such as a mic's or a bridge's position), or that are mixed with a
+  latched coefficient. `(m/patch ... :modulate :all)` makes them
+  modulatable too: their setup reruns every 32 samples while a source
+  moves, and its results are latched every sample whether modulated or
+  not: the cello +9%, the piano +80%, the Ride Kit +110% of their
+  CPU.
+
+Modulating a knob by d sounds exactly like moving it by d (to the sample).
+
 ## What the generated DSP does
 
 Each sample follows the protocol of the `content/defmacros/modal-*` macros:
@@ -301,6 +329,15 @@ a second whatever their stiffness.
   plate of 4 mm spruce rings at 60 Hz and wolfs a cello's whole low octave.
 - Masses are relative to one modal mass; a 120-mode head's point is ~60x
   lighter, so useful mallets are 0.002..0.5.
+- Modulation and DGen's scheduling (mod-pass in `content/ui/modal.lisp`):
+  an event clock must not read `(mod p)` (each is gated on its routes being
+  active, and a clock in a gated cone miscompiles what it clocks), so the
+  ticks watch the knobs and the raw sources; work on a tick reads
+  `(event-hold (mod p) tick)`, never a bare `(mod p)` (it would run every
+  sample) nor another clock's latch (garbage between that clock's events: a
+  data bell clicked on release); and pure math over a latch is scheduled on
+  its trigger, so a modulated value mixed into it (a bell's G from its
+  latched wref and its mass) silences the instrument.
 
 ## Finite-element solids (mesh → modes)
 

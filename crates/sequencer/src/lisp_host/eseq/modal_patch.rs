@@ -551,6 +551,12 @@ fn string_list(value: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// A dsp source with its whitespace collapsed, for matching forms that
+    /// the pretty-printer may wrap.
+    fn squash(dsp: &str) -> String {
+        dsp.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
     use super::*;
 
     fn modal_vm() -> VM {
@@ -772,7 +778,7 @@ mod tests {
         let osc = struck_dsp("(m/oscillator 'o :tune 0.5)", "0", "0");
         assert!(osc.contains("(def o_hz (tensor @shape [2] @data [440 100000]))"), "{osc}");
         // following the note, its coefficients are held on the coefficient tick
-        assert!(osc.contains("(def o_ratio (event-hold (* o_tune (/ f0 440)) coef_tick))"), "{osc}");
+        assert!(osc.contains("(def o_ratio (event-hold (* (mod o_tune) (/ f0 440)) coef_tick))"), "{osc}");
     }
 
     #[test]
@@ -787,20 +793,20 @@ mod tests {
   :listens (list (m/listen 'str 0.2)))";
         let instrument =
             generate_modal_instrument(&mut modal_vm(), PathBuf::from("drivers.lisp"), script).unwrap();
-        let dsp = &instrument.dsp;
+        let dsp = &squash(&instrument.dsp);
         // The force is gain x envelope x sine, solved once like an exciter.
-        assert!(dsp.contains("(adsr gate hit ebow_env_attack ebow_env_decay ebow_env_sustain ebow_env_release)"), "{dsp}");
-        assert!(dsp.contains("(sin (* twopi (phasor (* f0 ebow_sine1_ratio))))"), "{dsp}");
-        assert!(dsp.contains("(def ebow_F (* ebow_weight ebow_gain ebow_sig))"), "{dsp}");
+        assert!(dsp.contains("(adsr gate hit (mod ebow_env_attack) (mod ebow_env_decay) (mod ebow_env_sustain) (mod ebow_env_release))"), "{dsp}");
+        assert!(dsp.contains("(sin (* twopi (phasor (* f0 (mod ebow_sine1_ratio)))))"), "{dsp}");
+        assert!(dsp.contains("(def ebow_F (* (mod ebow_weight) (mod ebow_gain) ebow_sig))"), "{dsp}");
         assert!(dsp.contains("(param ebow_env_sustain @group ebow @default 1"), "{dsp}");
         // Position pins to its signal; speed integrates it with a leak.
         assert!(dsp.contains("(def clamp_anchor clamp_sig)"), "{dsp}");
         assert!(dsp.contains("(def push_sig push_const_value)"), "{dsp}");
         assert!(dsp.contains("(* (exp (/ -0.5 samplerate)) (read-history push_anchor_h))"), "{dsp}");
-        assert!(dsp.contains("(spring-connection (- clamp_anchor clamp_y_b0) clamp_C_b0 clamp_stiff)"), "{dsp}");
+        assert!(dsp.contains("(spring-connection (- clamp_anchor clamp_y_b0) clamp_C_b0 (mod clamp_stiff))"), "{dsp}");
         // Every connection has a weight; the bow's scales its pressure.
         assert!(dsp.contains("(param bow_weight @group bow @default 0.5 @min 0 @max 1"), "{dsp}");
-        assert!(dsp.contains("(* bow_pressure bow_env bow_weight)"), "{dsp}");
+        assert!(dsp.contains("(* (mod bow_pressure) bow_env (mod bow_weight))"), "{dsp}");
     }
 
     #[test]
@@ -871,7 +877,7 @@ mod tests {
   :connections (list (m/felt 'hit 'mal 'bar (list 0.15 0 0.005)))
   :listens (list (m/listen 'bar (list -0.14 0 0.005))))";
         let dsp = generate_modal_instrument(&mut modal_vm(), PathBuf::from("solid.lisp"), script).unwrap().dsp;
-        let squashed = dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        let squashed = squash(&dsp);
         assert!(squashed.contains("(def bar_hz (tensor @shape [4] @data ["), "{dsp}");
         // its surface points, addressed by (x y z): the nearest point param
         assert!(squashed.contains("(def bar_shapes (tensor @shape ["), "{dsp}");
@@ -888,13 +894,13 @@ mod tests {
                      (m/strike 'rattle 'str 0.6 'pl (list 0.4 0.4) :offset 0.002))
   :listens (list (m/listen 'str 0.2)))";
         let dsp = generate_modal_instrument(&mut modal_vm(), PathBuf::from("contacts.lisp"), script).unwrap().dsp;
-        let squashed = dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        let squashed = squash(&dsp);
         // The stop pushes up from below; the strike pushes the points apart.
-        assert!(squashed.contains("(* -1 jaw_weight (felt-contact (- jaw_y_b0 jaw_height) jaw_C_b0 jaw_stiff))"), "{dsp}");
-        assert!(squashed.contains("(felt-contact (+ (- rattle_y_a0 rattle_y_b0) rattle_offset) (+ rattle_C_a0 rattle_C_b0) rattle_stiff)"), "{dsp}");
+        assert!(squashed.contains("(* -1 (mod jaw_weight) (felt-contact (- jaw_y_b0 (mod jaw_height)) jaw_C_b0 (mod jaw_stiff)))"), "{dsp}");
+        assert!(squashed.contains("(felt-contact (+ (- rattle_y_a0 rattle_y_b0) (mod rattle_offset)) (+ rattle_C_a0 rattle_C_b0) (mod rattle_stiff))"), "{dsp}");
         // Stulov: 5 Newton steps clamped to the bracket, then the remembered compression.
         assert!(squashed.contains("(def hit_f5 (clip "), "{dsp}");
-        assert!(squashed.contains("(def hit_F (* -1 hit_weight hit_f))"), "{dsp}");
+        assert!(squashed.contains("(def hit_F (* -1 (mod hit_weight) hit_f))"), "{dsp}");
         assert!(squashed.contains("(param hit_exponent @group hit @default 2.5"), "{dsp}");
     }
 
@@ -906,7 +912,7 @@ mod tests {
   :connections (list (m/bow 'bow 'str 0.12 :hair 0.002) (m/fingerboard 'fret 'str 0.3))
   :listens (list (m/listen (m/plane 'str 1) 0.8)))";
         let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("planes.lisp"), script).unwrap();
-        let squashed = instrument.dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        let squashed = squash(&instrument.dsp);
         // The second direction reads the first's params, detuned by split.
         assert!(squashed.contains("(def str_v_f0 (* f0 str_tune str_split))"), "{squashed}");
         assert!(squashed.contains("(* str_v_radius") == false, "{squashed}");
@@ -916,7 +922,7 @@ mod tests {
         assert!(squashed.contains("(def bow_hair_phi_b (* (sin (* str_v_n 3.14159265 bow_str_at)) str_v_mask))"), "{squashed}");
         assert!(squashed.contains("(read-history bow_press_h)"), "{squashed}");
         // The fingerboard clamps by its press signal, its board at the same point.
-        assert!(squashed.contains("(* fret_weight (max 0 fret_sig) (spring-connection (- 0 fret_y_b0) fret_C_b0 fret_stiff))"), "{squashed}");
+        assert!(squashed.contains("(* (mod fret_weight) (max 0 fret_sig) (spring-connection (- 0 fret_y_b0) fret_C_b0 (mod fret_stiff)))"), "{squashed}");
         assert!(squashed.contains("(sin (* str_n 3.14159265 fret_str_at))"), "{squashed}");
         // No panel section for the second direction or the hidden hair.
         assert!(!instrument.ui.contains("STRING v"), "{}", instrument.ui);
@@ -932,7 +938,7 @@ mod tests {
                      (m/force 'sym 'b 0.3 :saturate true :signal (list (m/tap-speed 'a 0.9) (m/tap-contact 'hit))))
   :listens (list (m/listen 'b 0.2)))";
         let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("taps.lisp"), script).unwrap();
-        let squashed = instrument.dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        let squashed = squash(&instrument.dsp);
         // The tap's point is its own param, its shape read from a's last state.
         assert!(squashed.contains("(param sym_tap_a_at @group sym_tap @default 0.9"), "{squashed}");
         assert!(squashed.contains("(- (read-history a_s1) (read-history a_s2))"), "{squashed}");
@@ -969,10 +975,10 @@ mod tests {
         let squashed = generate_modal_instrument(&mut modal_vm(), PathBuf::from("mix.lisp"), mix).unwrap().dsp
             .split_whitespace().collect::<Vec<_>>().join(" ");
         // The pluck sees the lever of both strings and pushes each by its share.
-        assert!(squashed.contains("(def pick_y_b (+ (* (- 1 pair_morph) pick_y_b_0) (* pair_morph pick_y_b_1)))"), "{squashed}");
-        assert!(squashed.contains("(* 1 (- 1 pair_morph) pick_F pick_phi_b_0)"), "{squashed}");
-        assert!(squashed.contains("(* 1 pair_morph pick_F pick_phi_b_1)"), "{squashed}");
-        assert!(squashed.contains("(def mic1_v (+ (* (- 1 pair_morph) mic1_0_v) (* pair_morph mic1_1_v)))"), "{squashed}");
+        assert!(squashed.contains("(def pick_y_b (+ (* (- 1 (mod pair_morph)) pick_y_b_0) (* (mod pair_morph) pick_y_b_1)))"), "{squashed}");
+        assert!(squashed.contains("(* 1 (- 1 (mod pair_morph)) pick_F pick_phi_b_0)"), "{squashed}");
+        assert!(squashed.contains("(* 1 (mod pair_morph) pick_F pick_phi_b_1)"), "{squashed}");
+        assert!(squashed.contains("(def mic1_v (+ (* (- 1 (mod pair_morph)) mic1_0_v) (* (mod pair_morph) mic1_1_v)))"), "{squashed}");
     }
 
     #[test]
@@ -985,21 +991,21 @@ mod tests {
                      (m/lips 'lips 'lip 'horn 0) (m/jet 'jet 'pipe 0.05))
   :listens (list (m/listen 'bore 0.5)))";
         let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("air.lisp"), script).unwrap();
-        let squashed = instrument.dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        let squashed = squash(&instrument.dsp);
         // Closed-open: odd harmonics, cos shapes; open-open: every harmonic, sin.
         assert!(squashed.contains("(* (tensor @shape [4] @data [1 3 5 7]) bore_f0)"), "{squashed}");
         assert!(squashed.contains("(def bore_wave (tensor @shape [4] @data [0.5 1.5 2.5 3.5]))"), "{squashed}");
         assert!(squashed.contains("(sin (* pipe_wave 3.14159265"), "{squashed}");
         // The reed: an implicit pressure solve, the tube driven by the flow's change.
-        assert!(squashed.contains("(def reed_F3 (* reed_weight reed_coupling (- reed_u_reed_F3 (read-history reed_u_h))))"), "{squashed}");
+        assert!(squashed.contains("(def reed_F3 (* (mod reed_weight) (mod reed_coupling) (- reed_u_reed_F3 (read-history reed_u_h))))"), "{squashed}");
         assert!(squashed.contains("(write-history reed_u_h reed_u_reed_F3)"), "{squashed}");
         // A tone hole is a weighted pressure release.
-        assert!(squashed.contains("(spring-connection (- hole_anchor hole_y_b0) hole_C_b0 hole_stiff)"), "{squashed}");
+        assert!(squashed.contains("(spring-connection (- hole_anchor hole_y_b0) hole_C_b0 (mod hole_stiff))"), "{squashed}");
         // The lips push the lip by their own force, the tube by the flow's.
         assert!(squashed.contains("(* -1 lips_F_a lips_phi_a)"), "{squashed}");
-        assert!(squashed.contains("(def lips_open0 (max 0 (+ 1 (/ lips_y_a0 lips_rest))))"), "{squashed}");
+        assert!(squashed.contains("(def lips_open0 (max 0 (+ 1 (/ lips_y_a0 (mod lips_rest)))))"), "{squashed}");
         // The jet: delayed by ratio periods, steered by the air's velocity at the mouth.
-        assert!(squashed.contains("(delay jet_in (/ (* jet_ratio samplerate) pipe_f0) @max-delay 9600)"), "{squashed}");
+        assert!(squashed.contains("(delay jet_in (/ (* (mod jet_ratio) samplerate) pipe_f0) @max-delay 9600)"), "{squashed}");
         assert!(squashed.contains("(def jet_mouth (sum (* (read-history pipe_s1) jet_grad)))"), "{squashed}");
         // Blowing into a non-tube, or at an open end, is a check error.
         for (bad, expected) in [
@@ -1036,13 +1042,13 @@ mod tests {
   :connections (list (m/strokes 'stick 'ride))
   :listens (list (m/listen 'ride 0 :hear :position)))";
         let instrument = generate_modal_instrument(&mut modal_vm(), dir.path().join("ride.lisp"), script).unwrap();
-        let squashed = instrument.dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        let squashed = squash(&instrument.dsp);
         // Modes and residues sorted together; measured losses get no air loss.
         assert!(squashed.contains("(def ride_hz (tensor @shape [3] @data [300 500 700]))"), "{squashed}");
         assert!(squashed.contains("(def stick_re_t (tensor @shape [2 3] @data [0.1 0.3 0.2 0.7 0.9 0.8]))"), "{squashed}");
         assert!(!squashed.contains("(modal-loss ride_freqs"), "{squashed}");
         // The octave transposes, held on the coefficient tick and latched back.
-        assert!(squashed.contains("(def ride_ratio (event-hold (* ride_tune key_transpose) coef_tick))"), "{squashed}");
+        assert!(squashed.contains("(def ride_ratio (event-hold (* (mod ride_tune) key_transpose) coef_tick))"), "{squashed}");
         assert!(squashed.contains("(def ride_a (latch ride_a_e coef_tick))"), "{squashed}");
         assert!(squashed.contains("(def stick_ref_pole (exp (/ -1 (* 0.0003 samplerate))))"), "{squashed}");
         // A hit pushes its residue straight into the modes, in two samples.
@@ -1050,9 +1056,9 @@ mod tests {
         assert!(squashed.contains("(def stick_push (+ (* hit stick_di) (read-history stick_pend)))"), "{squashed}");
         // Heard as position; the click and wash join the mix; the tone filter.
         assert!(squashed.contains("(def mic1_v mic1_y)"), "{squashed}");
-        assert!(squashed.contains("(def mix (+ (* mic1_v mic1_gain) stick_out))"), "{squashed}");
+        assert!(squashed.contains("(def mix (+ (* mic1_v (mod mic1_gain)) stick_out))"), "{squashed}");
         assert!(squashed.contains("(def stick_wash_fast_t (tensor @shape [2 2] @data [1 2 3 4]))"), "{squashed}");
-        assert!(squashed.contains("(min out_tone (* samplerate 0.43)) 0.707 0)"), "{squashed}");
+        assert!(squashed.contains("(min (mod out_tone) (* samplerate 0.43)) 0.707 0)"), "{squashed}");
         // One voice: the host's voice mode param, bound in instrument.json.
         assert!(squashed.contains("(param out_voice_mode @group out @default 1 @min 0 @max 3)"), "{squashed}");
         let out = dir.path().join("out");
@@ -1080,27 +1086,27 @@ mod tests {
   :listens (list (m/pickup 'str 0.92 :height 3))
   :amp (m/amp :drive 30))";
         let instrument = generate_modal_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), script).unwrap();
-        let squashed = instrument.dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        let squashed = squash(&instrument.dsp);
         // The pickup: speed times the flux gradient at the string's distance, through the coil.
-        assert!(squashed.contains("(def mic1_near (/ 1 (- 1 (clip (* (/ (* str_mass (/ 0.5 plk_thresh)) mic1_height) mic1_y) -0.9 0.6))))"), "{squashed}");
-        assert!(squashed.contains("mic1_near mic1_near mic1_near) (min mic1_coil_hz (* 0.45 samplerate)) mic1_coil_q 0)"), "{squashed}");
+        assert!(squashed.contains("(def mic1_near (/ 1 (- 1 (clip (* (/ (* str_mass (/ 0.5 plk_thresh)) (mod mic1_height)) mic1_y) -0.9 0.6))))"), "{squashed}");
+        assert!(squashed.contains("mic1_near mic1_near mic1_near) (min (mod mic1_coil_hz) (* 0.45 samplerate)) (mod mic1_coil_q) 0)"), "{squashed}");
         // The amp plays the mix and is what the output hears.
-        assert!(squashed.contains("(def amp_x (* (svf heard 80 0.5 2) amp_drive))"), "{squashed}");
-        assert!(squashed.contains("(def raw (* amp_speaker out_gain))"), "{squashed}");
-        assert!(squashed.contains("(param amp_drive @group amp @default 30 @min 1 @max 500)"), "{squashed}");
+        assert!(squashed.contains("(def amp_x (* (svf heard 80 0.5 2) (mod amp_drive)))"), "{squashed}");
+        assert!(squashed.contains("(def raw (* amp_speaker (mod out_gain)))"), "{squashed}");
+        assert!(squashed.contains("(param amp_drive @group amp @default 30 @min 1 @max 500 @mod true @mod-mode additive)"), "{squashed}");
         // The speaker's sound reaches the body a sample (at least) later, off axis.
         assert!(squashed.contains("(make-history amp_speaker_h)"), "{squashed}");
         assert!(squashed.contains("(write-history amp_speaker_h amp_speaker)"), "{squashed}");
-        assert!(squashed.contains("(def air_speaker_direct (delay (read-history amp_speaker_h) (max 0 (- (/ (* air_speaker_distance samplerate) 343) 1)) @max-delay 8192))"), "{squashed}");
-        assert!(squashed.contains("(sin (* air_speaker_angle 0.017453292519943295))"), "{squashed}");
+        assert!(squashed.contains("(def air_speaker_direct (delay (read-history amp_speaker_h) (max 0 (- (/ (* (mod air_speaker_distance) samplerate) 343) 1)) @max-delay 8192))"), "{squashed}");
+        assert!(squashed.contains("(sin (* (mod air_speaker_angle) 0.017453292519943295))"), "{squashed}");
         // The room: the floor's path among the reflections.
-        assert!(squashed.contains("(delay air_speaker_direct (/ (* (- (sqrt (+ (* air_speaker_distance air_speaker_distance) 2.56)) air_speaker_distance) samplerate) 343) @max-delay 1024)"), "{squashed}");
+        assert!(squashed.contains("(delay air_speaker_direct (/ (* (- (sqrt (+ (* (mod air_speaker_distance) (mod air_speaker_distance)) 2.56)) (mod air_speaker_distance)) samplerate) 343) @max-delay 1024)"), "{squashed}");
         // The mount: the body point's acceleration over a sample squared,
         // shared among the string's modes (alternating for the end at 1).
         assert!(squashed.contains("(def bridge_u1 (sum (* (read-history body_s2) bridge_phi_a)))"), "{squashed}");
         assert!(squashed.contains("(def bridge_d2 (+ (- bridge_u (* 2 bridge_u1)) (read-history bridge_u2)))"), "{squashed}");
         assert!(squashed.contains("(def bridge_share (tensor @shape [8] @data [0.6366"), "{squashed}");
-        assert!(squashed.contains("(def bridge_push (* bridge_d2 (* -1 bridge_weight bridge_gain bridge_share str_mask)))"), "{squashed}");
+        assert!(squashed.contains("(def bridge_push (* bridge_d2 (* -1 (mod bridge_weight) (mod bridge_gain) bridge_share str_mask)))"), "{squashed}");
         assert!(squashed.contains("(modal-advance str_free (+ (* str_G (* plk_F plk_phi_b)) bridge_push))"), "{squashed}");
         assert!(!squashed.contains("param bridge_str_"), "{squashed}");
         assert!(instrument.ui.contains("\"AMP\""), "{}", instrument.ui);
@@ -1130,19 +1136,32 @@ mod tests {
                      (m/spring 'bridge 'str 0.99 'board (list 0.4 0.5)))
   :listens (list (m/listen 'board (list 0.6 0.3))))";
         let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("unison.lisp"), script).unwrap();
-        let squashed = instrument.dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        let squashed = squash(&instrument.dsp);
         // One set of knobs: the copies read the first string's and connection's params.
         assert!(squashed.contains("(param str_detune @group str @default 1.5"), "{squashed}");
         assert!(!squashed.contains("(param str_u1_"), "{squashed}");
         assert!(squashed.contains("(def hit_u2_felt hit_felt)"), "{squashed}");
         assert!(squashed.contains("(def bridge_u1_stiff bridge_stiff)"), "{squashed}");
         // The copies sit +detune and -detune cents away.
-        assert!(squashed.contains("(def str_u1_f0 (* f0 str_tune (pow 2 (/ (* 1 str_detune) 1200))))"), "{squashed}");
-        assert!(squashed.contains("(def str_u2_f0 (* f0 str_tune (pow 2 (/ (* -1 str_detune) 1200))))"), "{squashed}");
+        assert!(squashed.contains("(def str_u1_ratio (pow 2 (/ (* 1 str_detune) 1200)))"), "{squashed}");
+        assert!(squashed.contains("(def str_u2_ratio (pow 2 (/ (* -1 str_detune) 1200)))"), "{squashed}");
         // Each copy has its own contact state and is bridged, centred in time.
         assert!(squashed.contains("(make-history hit_u2_h)"), "{squashed}");
         assert!(squashed.contains("(spring-centred (- bridge_u2_y_a0 bridge_u2_y_b0) bridge_u2_gap_old"), "{squashed}");
         assert!(!instrument.ui.contains("str_u1"), "{}", instrument.ui);
+        // The copies reuse the first string's modes, mask and losses, and
+        // their connections its points' shapes.
+        assert!(squashed.contains("(def str_u1_freqs (* str_freqs str_u1_ratio))"), "{squashed}");
+        assert!(squashed.contains("(def str_u2_sigma str_sigma)"), "{squashed}");
+        assert!(squashed.contains("(def bridge_u1_phi_b bridge_phi_b)"), "{squashed}");
+        assert!(squashed.contains("(def bridge_u1_old_b bridge_old_b)"), "{squashed}");
+        // A listen that radiates: a high-pass the mix hears.
+        let radiating = script.replace("(m/listen 'board (list 0.6 0.3))", "(m/listen 'board (list 0.6 0.3) :radiate 90)");
+        let radiated = generate_modal_instrument(&mut modal_vm(), PathBuf::from("unison.lisp"), &radiating).unwrap();
+        let radiated = squash(&radiated.dsp);
+        assert!(radiated.contains("(param mic1_radiate @group mic1 @default 90 @min 20 @max 2000 @unit Hz @mod true @mod-mode additive)"), "{radiated}");
+        assert!(radiated.contains("(def mic1_out (svf mic1_v (min (mod mic1_radiate) (* 0.45 samplerate)) 0.707 2))"), "{radiated}");
+        assert!(radiated.contains("(def mix (* mic1_out (mod mic1_gain)))"), "{radiated}");
         for (args, error) in [
             (":unison 2.5", "string str: :unison is a whole number of strings, got 2.5"),
             (":unison 2 :planes 2", "string str: :unison and :planes 2 do not combine"),
@@ -1154,6 +1173,46 @@ mod tests {
     }
 
     #[test]
+    fn knobs_are_modulatable_where_it_costs_nothing() {
+        let script = "(import eseq.modal :as m)
+(import eseq.modal.materials :as mat)
+(m/patch :name \"probe-mod\"
+  :objects (list (m/string 'str :made-of mat/nylon :radius-mm (m/by-note 65 0.15 523 1.2))
+                 (m/plate 'body :made-of mat/spruce :thick-mm 5 :width 0.5 :height 0.35))
+  :connections (list (m/bow 'bow 'str 0.12) (m/spring 'bridge 'str 0.999 'body (list 0.55 0.4)))
+  :listens (list (m/listen 'body (list 0.3 0.65))))";
+        let param = |dsp: &str, name: &str| {
+            let at = dsp.find(&format!("(param {name} ")).unwrap_or_else(|| panic!("no param {name}: {dsp}"));
+            dsp[at..at + dsp[at..].find(')').unwrap() + 1].to_string()
+        };
+        let cheap = squash(&generate_modal_instrument(&mut modal_vm(), PathBuf::from("mod.lisp"), script).unwrap().dsp);
+        assert!(cheap.contains("(def mod1 (in 6 @name mod1 @modulator 1))"), "{cheap}");
+        // Per-sample work reads the modulated value ...
+        assert!(param(&cheap, "bow_pressure").ends_with("@mod true @mod-mode additive)"), "{cheap}");
+        assert!(cheap.contains("(* (mod bow_pressure) bow_env (mod bow_weight))"), "{cheap}");
+        // ... work on a change tick holds it on the tick, whose change
+        // detection reads the knob and watches the sources itself ...
+        assert!(cheap.contains("(event-hold (mod str_radius_c4) bynote_tick)"), "{cheap}");
+        assert!(cheap.contains("(- str_radius_c4 (read-history bynote_in"), "{cheap}");
+        assert!(!cheap.contains("(- (mod str_radius_c4)"), "{cheap}");
+        assert!(cheap.contains("(gt (abs (- mod1 (read-history bynote_src0))) 0)"), "{cheap}");
+        // ... and a knob only setup reads (the plate's size, a point on it)
+        // is left alone, with no mod_tick.
+        assert!(!param(&cheap, "body_thick").contains("@mod"), "{cheap}");
+        assert!(!param(&cheap, "mic1_body_x").contains("@mod"), "{cheap}");
+        assert!(!cheap.contains("mod_tick"), "{cheap}");
+        // :modulate :all holds those on mod_tick: setup reads the held value,
+        // per-sample code its latched results.
+        let all = squash(&generate_modal_instrument(&mut modal_vm(), PathBuf::from("mod.lisp"),
+                                                    &script.replace("\"probe-mod\"", "\"probe-mod\" :modulate :all")).unwrap().dsp);
+        assert!(param(&all, "body_thick").ends_with("@mod true @mod-mode additive)"), "{all}");
+        assert!(all.contains("(def body_thick_modh (event-hold (mod body_thick) mod_tick))"), "{all}");
+        assert!(all.contains("(* body_thick_modh 0.001)"), "{all}");
+        assert!(all.contains("(def body_a_mod (latch body_a mod_tick))"), "{all}");
+        assert!(all.contains("(def mic1_phi_mod (latch mic1_phi mod_tick))"), "{all}");
+    }
+
+    #[test]
     fn by_note_values_follow_the_played_note() {
         let script = "(import eseq.modal :as m)
 (m/patch :name \"probe-scale\"
@@ -1162,16 +1221,16 @@ mod tests {
   :connections (list (m/felt 'hit 'ham 'str (m/by-note 27.5 0.12 4186 0.06)))
   :listens (list (m/listen 'str 0.3)))";
         let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("scale.lisp"), script).unwrap();
-        let squashed = instrument.dsp.split_whitespace().collect::<Vec<_>>().join(" ");
+        let squashed = squash(&instrument.dsp);
         // The knob is the value at C4 (log-interpolated between 27.5 and 262 Hz) ...
-        assert!(squashed.contains("(param str_length_c4 @group str @default 0.6605 @min 0.2 @max 20 @unit m)"), "{squashed}");
+        assert!(squashed.contains("(param str_length_c4 @group str @default 0.6605 @min 0.2 @max 20 @unit m @mod true @mod-mode additive)"), "{squashed}");
         assert!(instrument.ui.contains("\"str.str_length_c4\""), "{}", instrument.ui);
         // ... and the curve scales it at the note; a curve through 0 shifts it.
         // Worked out when the pitch or a knob changes, latched back to audio rate.
         assert!(squashed.contains("(def note_ln (log (event-hold f0 bynote_tick)))"), "{squashed}");
-        assert!(squashed.contains("(def str_length_e (* (event-hold str_length_c4 bynote_tick) (exp (+"), "{squashed}");
+        assert!(squashed.contains("(def str_length_e (* (event-hold (mod str_length_c4) bynote_tick) (exp (+"), "{squashed}");
         assert!(squashed.contains("(def str_length (latch str_length_e bynote_tick))"), "{squashed}");
-        assert!(squashed.contains("(def str_loss_e (+ (event-hold str_loss_c4 bynote_tick) (+ -0.448"), "{squashed}");
+        assert!(squashed.contains("(def str_loss_e (+ (event-hold (mod str_loss_c4) bynote_tick) (+ -0.448"), "{squashed}");
         // Access points follow too; the code reads the note's value.
         assert!(squashed.contains("(def hit_str_at (latch hit_str_at_e bynote_tick))"), "{squashed}");
         assert!(squashed.contains("(sin (* str_n 3.14159265 hit_str_at))"), "{squashed}");

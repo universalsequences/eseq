@@ -200,6 +200,11 @@
     (append `(param ,(get p :sym) @group ,(get p :group) @default ,(get p :default) @min ,(get p :min) @max ,(get p :max))
             (if (get p :unit) `(@unit ,(get p :unit)) nil))))
 
+;; True when the host may modulate a param (see mod-pass): every range
+;; param but the Voicing, which the host reads for itself.
+;;   p  a param spec
+(def modulatable? (p) (and (not (get p :options)) (not (= (get p :sym) 'out_voice_mode))))
+
 ;; What an object is made of, as given: one material (eseq.modal.materials)
 ;; or a list of them to choose between. The materials as a list either way.
 ;;   made-of  a material or a list of materials
@@ -1353,8 +1358,13 @@
 ;;   hear   :speed (normalised so objects of any pitch and mass mix at
 ;;          similar levels), or :position, the point's displacement as it
 ;;          is: what measured strokes were heard as
-(def listen (obj at &key (gain 1) (modes nil) (hear :speed))
-  (dict :obj obj :at at :gain gain :modes modes :hear hear))
+;;   radiate  nil, or a frequency (Hz) below which the object radiates less
+;;            and less (a two-pole high-pass): a soundboard or a body is a
+;;            poor loudspeaker for wavelengths longer than itself, so a
+;;            piano's lowest fundamentals are heard far weaker than its
+;;            board moves at them
+(def listen (obj at &key (gain 1) (modes nil) (hear :speed) (radiate nil))
+  (dict :obj obj :at at :gain gain :modes modes :hear hear :radiate radiate))
 
 ;; A magnetic pickup: a listen that hears obj the way a guitar's coil does.
 ;; The coil's voltage is the string's speed times how fast the magnet's flux
@@ -1508,8 +1518,12 @@
 ;;   amp          nil, or an amplifier (m/amp) the mix plays through before
 ;;                the output: inside the instrument, so m/speaker can feed
 ;;                its sound back into the objects
+;;   modulate     which knobs the host can modulate: :cheap (those costing
+;;                nothing until modulated) or :all (also those shaping
+;;                knob-only setup, such as a plate's size or a point on it,
+;;                for a fixed cost; see mod-pass)
 (def patch (&key (name "modal") (objects nil) (connections nil) (listens nil) (level 1) (voicing nil) (tone nil)
-                (amp nil))
+                (amp nil) (modulate :cheap))
   (let ((conns (expand-unison-connections (expand-connections connections) objects)))
     (let ((planed (concat-all (map expand-unison (concat-all (map expand-planes objects)))))
           (compiled (map (lambda (o) (compile-points o conns listens planed)) planed)))
@@ -1521,7 +1535,8 @@
                                                     (get o :parts)))
                                         o))
                           compiled)
-            :connections conns :listens listens :level level :voicing voicing :tone tone :amp amp))))
+            :connections conns :listens listens :level level :voicing voicing :tone tone :amp amp
+            :modulate modulate))))
 
 ;; ── data objects' points ────────────────────────────────────────────────────
 ;; A data object's accesses address its points by index or by (x y z) (the
@@ -1894,7 +1909,9 @@
           (if (or (= (get patch :amp) nil) (and (map? (get patch :amp)) (= (get (get patch :amp) :kind) :amp))) nil
             (list (str "patch: :amp is an m/amp, got " (source (get patch :amp)))))
           (if (member? (list nil :one :poly) (get patch :voicing)) nil
-            (list (str "patch: :voicing is :one or :poly, got " (source (get patch :voicing))))))))
+            (list (str "patch: :voicing is :one or :poly, got " (source (get patch :voicing)))))
+          (if (member? (list :cheap :all) (get patch :modulate)) nil
+            (list (str "patch: :modulate is :cheap or :all, got " (source (get patch :modulate))))))))
 
 ;; What is wrong with a patch's m/by-note values: each knob's curve (and its
 ;; value at C4 within the knob's range), and the curves given as access
@@ -2236,19 +2253,32 @@
 ;; material, radius and length.
 ;;   obj  a string
 (def string-setup (obj)
+  (if (get obj :unison-k) (unison-setup obj)
   (append (material-defs obj)
-          (list `(def ,(p obj "f0") (* f0 ,(pp obj "tune")
-                                         ,@(if (get obj :unison-k)
-                                             ;; a unison copy: +detune, -detune, +2 detune ... cents
-                                             (list `(pow 2 (/ (* ,(unison-sign (get obj :unison-k)) ,(pp obj "detune")) 1200)))
-                                             (if (get obj :plane-of) (list (pp obj "split")) (list)))))
+          (list `(def ,(p obj "f0") (* f0 ,(pp obj "tune") ,@(if (get obj :plane-of) (list (pp obj "split")) (list))))
                 `(def ,(p obj "n") (+ (iota ,(get obj :modes)) 1))
                 `(def ,(p obj "freqs") (stiff-string-freqs ,(p obj "n") ,(p obj "f0") ,(p obj "young") ,(p obj "density")
                                          (* ,(pp obj "radius") 0.001) ,(pp obj "length")))
                 (mask-def obj (get obj :modes))
                 `(def ,(p obj "sigma") (modal-loss ,(p obj "freqs") ,(pp obj "loss") ,(pp obj "hf_loss")))
                 `(def ,(p obj "mass") 1))
-          (setup-tail obj (p obj "f0"))))
+          (setup-tail obj (p obj "f0")))))
+
+;; object-setup for a unison copy: the first string's modes moved by its
+;; detuning (+detune, -detune, +2 detune ... cents), with the first's mask
+;; and losses (a few cents change neither audibly), so only its own
+;; coefficients are worked out.
+;;   obj  a string's unison copy
+(def unison-setup (obj)
+  (let ((first-of (lambda (name) (nm (get obj :plane-of) name))))
+    (append (list `(def ,(p obj "ratio") (pow 2 (/ (* ,(unison-sign (get obj :unison-k)) ,(pp obj "detune")) 1200)))
+                  `(def ,(p obj "f0") (* ,(first-of "f0") ,(p obj "ratio")))
+                  `(def ,(p obj "n") ,(first-of "n"))
+                  `(def ,(p obj "freqs") (* ,(first-of "freqs") ,(p obj "ratio")))
+                  `(def ,(p obj "mask") ,(first-of "mask"))
+                  `(def ,(p obj "sigma") ,(first-of "sigma"))
+                  `(def ,(p obj "mass") 1))
+            (setup-tail obj (p obj "f0")))))
 
 ;; object-setup for a rectangular plate: rect-plate over its mode grid, from
 ;; its material and size; wref at mode (1, 1).
@@ -2421,9 +2451,7 @@
 ;;   form  a form
 ;;   from  a symbol
 ;;   to    its replacement
-(def subst-form (form from to)
-  (if (= form from) to
-    (if (list? form) (map (lambda (x) (subst-form x from to)) form) form)))
+(def subst-form (form from to) (map-atoms form (lambda (a) (if (= a from) to a))))
 
 ;; True when a patch has an object holding its coefficients (see held-pass).
 ;;   patch  the patch
@@ -2470,19 +2498,36 @@
 (def coef-tick-forms (patch) (change-tick-forms "coef" (coef-inputs patch)))
 
 ;; Forms defining <name>_tick: 1 on a note's first sample, on the
-;; instrument's first, and whenever one of inputs changed since the last
-;; sample (each kept in a history <name>_in<k>).
+;; instrument's first, whenever one of inputs changed since the last sample
+;; (each kept in a history <name>_in<k>), and every mod-hold samples when a
+;; modulation source (mod1..mod4) has moved since the last tick or a note
+;; started since. The sources: what the tick's work reads may be modulated
+;; ((mod p), see mod-pass), and a clock must not read (mod p) itself. The
+;; refresh after a start: what the first tick computes can be stale (a held
+;; Ride Kit wash), and the next puts it right.
 ;;   name    the tick's prefix, a string
 ;;   inputs  forms to watch
 (def change-tick-forms (name inputs)
-  (let ((h (lambda (k) (symbol name "_in" k))) (started (symbol name "_started")))
-    (append (list `(make-history ,started))
-            (map (lambda (k) `(make-history ,(h k))) (range (len inputs)))
-            (list `(def ,(symbol name "_tick") (max hit (lte (read-history ,started) 0)
-                                                    ,@(map (lambda (k) `(gt (abs (- ,(nth inputs k) (read-history ,(h k)))) 0))
-                                                           (range (len inputs)))))
-                  `(write-history ,started 1))
-            (map (lambda (k) `(write-history ,(h k) ,(nth inputs k))) (range (len inputs))))))
+  (let ((n (lambda (suffix) (symbol name suffix)))
+        (h (lambda (k) (symbol name "_in" k)))
+        (src (lambda (k) (symbol name "_src" k)))
+        (sources mod-sources))
+    (let ((tick (n "_tick")) (first-sample (n "_first")) (phase (n "_phase")) (pending (n "_pending")))
+      (append (list `(make-history ,(n "_started")) `(make-history ,pending))
+              (map (lambda (k) `(make-history ,(h k))) (range (len inputs)))
+              (map (lambda (k) `(make-history ,(src k))) (range (len sources)))
+              (list `(def ,first-sample (lte (read-history ,(n "_started")) 0))
+                    `(def ,phase (eq (accum 1 0 0 ,mod-hold) 0))
+                    `(def ,tick (max hit ,first-sample
+                                     ,@(map (lambda (k) `(gt (abs (- ,(nth inputs k) (read-history ,(h k)))) 0))
+                                            (range (len inputs)))
+                                     (* ,phase (max (read-history ,pending)
+                                                    ,@(map (lambda (k) `(gt (abs (- ,(nth sources k) (read-history ,(src k)))) 0))
+                                                           (range (len sources)))))))
+                    `(write-history ,(n "_started") 1)
+                    `(write-history ,pending (max hit ,first-sample (* (- 1 ,phase) (read-history ,pending)))))
+              (map (lambda (k) `(write-history ,(h k) ,(nth inputs k))) (range (len inputs)))
+              (map (lambda (k) `(write-history ,(src k) (gswitch ,tick ,(nth sources k) (read-history ,(src k))))) (range (len sources)))))))
 
 ;; Protocol step 1: forms defining obj_free, where obj would be this sample
 ;; with no force on it (a finger's tip also follows its hand; a mallet also
@@ -2588,7 +2633,13 @@
     (if (get obj :lumped)
       (list `(def ,y ,(displaced obj (terms (get obj :id))))
             `(def ,cs ,(p obj "C")))
-      (append (if with-phi (shape-defs obj (access-syms coord-id side named) (nm cid (str "phi_" side))) nil)
+      (append (if with-phi
+                (if (get c :alias-of)
+                  ;; a unison copy's connection: its owner's point, on the same
+                  ;; object or on a copy with the same modes
+                  (list `(def ,(nm cid (str "phi_" side)) ,(nm (get c :alias-of) (str "phi_" side))))
+                  (shape-defs obj (access-syms coord-id side named) (nm cid (str "phi_" side))))
+                nil)
               (list `(def (,y ,cs) (modal-point ,(displaced obj (terms (get obj :id))) ,(nm cid (str "phi_" side))
                                                 ,(p obj "G")))))))))
 
@@ -2804,8 +2855,9 @@
                       (append (if (get c :a) (end-forms c "a" (find-object patch (get c :a)) others tag (= s 0)) nil)
                               (end-forms c "b" (find-object patch (get c :b)) others tag (= s 0))
                               (if (and (= s 0) centred)
-                                (list `(def ,(nm cid "gap_old") (- ,(old-point (find-object patch (get c :a)) (nm cid "phi_a"))
-                                                                   ,(old-point (find-object patch (get c :b)) (nm cid "phi_b")))))
+                                (append (old-point-forms c "a" (find-object patch (get c :a)))
+                                        (old-point-forms c "b" (find-object patch (get c :b)))
+                                        (list `(def ,(nm cid "gap_old") (- ,(nm cid "old_a") ,(nm cid "old_b")))))
                                 nil)
                               (sweep-law-forms (if centred (merge c :centred true) c) s tag)
                               (if (= s (- sweeps 1))
@@ -2878,13 +2930,24 @@
        (all? (lambda (id) (let ((o (find-object patch id))) (not (member? (list :mallet :mix) (get o :kind)))))
              (list (get c :a) (get c :b)))))
 
-;; A form for where obj's access point was the sample before last: its
-;; state two samples back through the point's shape (phi), or that state
-;; itself on a lumped object.
-;;   obj  an object other than a mallet or a mix
-;;   phi  the point's shape symbol
-(def old-point (obj phi)
-  (if (get obj :lumped) `(read-history ,(p obj "s2")) `(sum (* ,phi (read-history ,(p obj "s2"))))))
+;; Forms defining cid_old_<side>, where a centred spring's end was the
+;; sample before last: its object's state two samples back through the
+;; point's shape (that state itself on a lumped object); a unison copy's
+;; connection reads its owner's on the object they share.
+;;   c     a centred spring
+;;   side  "a" or "b"
+;;   obj   that end's object (not a mallet or a mix)
+(def old-point-forms (c side obj)
+  (list `(def ,(nm (get c :id) (str "old_" side))
+           ,(if (shared-end? c obj) (nm (get c :alias-of) (str "old_" side))
+              (if (get obj :lumped) `(read-history ,(p obj "s2"))
+                `(sum (* ,(nm (get c :id) (str "phi_" side)) (read-history ,(p obj "s2")))))))))
+
+;; True when obj is an end a unison copy's connection shares with its owner
+;; (the end that is not the copied string).
+;;   c    a connection
+;;   obj  one of its ends' objects
+(def shared-end? (c obj) (and (get c :alias-of) (not (get obj :unison-k))))
 
 ;; A blown flow law solved for the mouthpiece pressure. An air column's
 ;; modes are driven by the rate of change of the flow into it (its input
@@ -3310,8 +3373,26 @@
 ;;   k      its position in the patch's listens
 (def listen-forms (patch l k)
   (let ((obj (find-object patch (get l :obj))) (lid (mic k)))
-    (if (= (get obj :kind) :mix) (mix-listen-forms patch obj l k)
-      (hearing-forms obj l lid lid (excite-norm patch (get patch :connections))))))
+    (append (if (= (get obj :kind) :mix) (mix-listen-forms patch obj l k)
+              (hearing-forms obj l lid lid (excite-norm patch (get patch :connections))))
+            (if (get l :radiate)
+              (list `(def ,(nm lid "out") (svf ,(nm lid "v") ,(below-nyquist (nm lid "radiate")) 0.707 2)))
+              (list)))))
+
+;; The symbol the mix hears the k-th mic by: what it radiates (mic<k>_out)
+;; for a listen with :radiate, else its velocity (mic<k>_v).
+;;   patch  the patch
+;;   k      the listen's position, from 0
+(def mic-out (patch k) (nm (mic k) (if (get (nth (get patch :listens) k) :radiate) "out" "v")))
+
+;; A listen's radiation param (see listen's :radiate), none without it.
+;;   patch  the patch
+;;   k      the listen's position, from 0
+(def radiate-params (patch k)
+  (let ((l (nth (get patch :listens) k)))
+    (if (get l :radiate)
+      (list (pspec (mic k) "radiate" (get l :radiate) 20 2000 :unit 'Hz :title (str (source (mic k)) " radiate") :taper :log))
+      (list))))
 
 ;; Forms defining <s>_v, the velocity obj is heard with at listen l's point
 ;; (normalised by its reference frequency and mass so that a light string
@@ -3480,7 +3561,7 @@
 ;;   patch  the patch
 ;;   k      the listen's position, from 0
 (def listen-params (patch k)
-  (append (mic-at-params patch k) (list (mic-gain-param patch k)) (pickup-params patch k)))
+  (append (mic-at-params patch k) (list (mic-gain-param patch k)) (pickup-params patch k) (radiate-params patch k)))
 
 ;; A form for the output's level normalisation by what drives the patch (its
 ;; first pluck, felt or bow), so the output sits near the same level whatever
@@ -3616,16 +3697,25 @@
 
 ;; ── the whole program ───────────────────────────────────────────────────────
 
+;; The host's modulation sources, the voice inputs after clock: what every
+;; modulatable param reads (see mod-pass).
+(def mod-sources '(mod1 mod2 mod3 mod4))
+
 ;; The forms every modal instrument starts with: the voice inputs (gate,
-;; pitch, velocity, trigger, clock), and from them hit (1 on the sample a
-;; note starts), age (seconds since it did), hit_velocity (the velocity it
-;; started with) and f0 (the note's frequency, at least 20 Hz).
+;; pitch, velocity, trigger, clock, then mod-sources), and from them hit (1
+;; on the sample a note starts), age (seconds since it did), hit_velocity
+;; (the velocity it started with) and f0 (the note's frequency, at least
+;; 20 Hz).
 (def preamble ()
-  (list '(def gate (in 1 @name gate))
-        '(def pitch (in 2 @name pitch))
-        '(def velocity (in 3 @name velocity))
-        '(def trigger (in 4 @name trigger))
-        '(def clock (in 5 @name clock))
+  (append
+   (list '(def gate (in 1 @name gate))
+         '(def pitch (in 2 @name pitch))
+         '(def velocity (in 3 @name velocity))
+         '(def trigger (in 4 @name trigger))
+         '(def clock (in 5 @name clock)))
+   (map (lambda (k) `(def ,(nth mod-sources k) (in ,(+ k 6) @name ,(nth mod-sources k) @modulator ,(+ k 1))))
+        (range (len mod-sources)))
+   (list
         '(defmacro onset-of (trigger)
            (make-history previous)
            (def high (gt trigger 0.5))
@@ -3643,9 +3733,10 @@
         '(def hit (onset-of trigger))
         '(def age (seconds-since hit))
         '(def hit_velocity (latch velocity hit))
-        ;; per sample: note-following objects recompute their coefficients
-        ;; every sample (hop-hold silences an instrument; eseq-k0m2.31)
-        '(def f0 (max pitch 20))))
+        ;; note-following objects' coefficients follow f0 (no hop-hold: it
+        ;; silences an instrument, eseq-k0m2.31); DGen works them out again
+        ;; only when it changes (see slow-names)
+        '(def f0 (max pitch 20)))))
 
 ;; A (use-defmacro name) form for every protocol macro in content/defmacros
 ;; the generated code may call.
@@ -3680,11 +3771,12 @@
         (tapped (tapped-connections patch))
         (objects (get patch :objects))
         (listens (get patch :listens)))
-    (concat-all
+   (let ((params (all-params patch conns)))
+    (mod-pass (filter modulatable? params) (= (get patch :modulate) :all) (concat-all
       (list (preamble)
-            (map param-form (all-params patch conns))
+            (map param-form params)
             (library-imports)
-            (by-note-forms (all-params patch conns))
+            (by-note-forms params)
             (unison-alias-forms patch conns)
             (if (keyed? patch) (key-forms) (list))
             (if (or (any-held? patch) (any? strokes? conns)) (coef-tick-forms patch) (list))
@@ -3705,7 +3797,7 @@
                                            nil))
                              conns))
             (concat-all (map (lambda (k) (listen-forms patch (nth listens k) k)) (range (len listens))))
-            (list `(def mix ,(sum-form (append (map (lambda (k) `(* ,(nm (mic k) "v") ,(nm (mic k) "gain")))
+            (list `(def mix ,(sum-form (append (map (lambda (k) `(* ,(mic-out patch k) ,(nm (mic k) "gain")))
                                                     (range (len listens)))
                                                ;; strokes' click and wash
                                                (map (lambda (c) (nm (get c :id) "out")) (filter strokes? conns))))))
@@ -3722,7 +3814,244 @@
                   '(write-history dcy dc-out)
                   '(def voice_out (tanh dc-out))
                   '(out voice_out 1 @name audio)
-                  '(out (voice-amp (max (gt gate 0.5) (lt age 0.25)) voice_out voice_out) 2 @name amp @amp true))))))
+                  '(out (voice-amp (max (gt gate 0.5) (lt age 0.25)) voice_out voice_out) 2 @name amp @amp true))))))))
+
+;; ── modulation ──────────────────────────────────────────────────────────────
+;; Range params are modulatable: the host adds its sources (mod-sources),
+;; scaled by per-param depths, to the knob, read as (mod p) and gated off
+;; while a param has no route. A knob is constant within a block, so DGen
+;; works out what depends only on knobs (setup: a plate's modes from its
+;; size, a point's shape on it) once per block; read modulated, that work
+;; would run every sample. So by default only knobs no setup reads are
+;; modulatable, free until modulated: per-sample code reads (mod p), and
+;; the work on an event clock (a by-note's, held coefficients') reads
+;; (event-hold (mod p) clock), the clock itself watching the sources every
+;; mod-hold samples (change-tick-forms). With the patch's :modulate :all,
+;; the knobs setup reads are modulatable too, held: sampled on mod_tick,
+;; p_modh feeds the setup, which runs on that tick only, p_mod keeps it in a
+;; history for everything else, and each setup value other code reads is
+;; latched as <name>_mod, a cost every sample, modulated or not
+;; (eseq-k0m2.47: the cello +9%, the piano +80%, the Ride Kit +110%).
+
+;; Samples between reads of the modulation sources: 0.7 ms at 48 kHz.
+(def mod-hold 32)
+
+;; The heads of forms that keep state or read the voice's inputs: a def
+;; using one runs every sample, and so does anything that reads it (the
+;; patch's own defmacros count too: see setup-names).
+(def per-sample-heads
+  '(in read-history write-history make-history latch event-hold svf adsr noise delay phasor accum
+    voice-amp pluck-contact))
+
+;; Voice inputs that change only between notes (or under a glide): DGen
+;; works out what depends only on them and knobs once per block too, so
+;; setup-names treats them, and what a note's start latches (slow-def?), as
+;; not per-sample; mod_tick watches them.
+(def slow-names '(f0))
+
+;; True when a def is of a slow value: one of slow-names, a latch (what a
+;; note's start latches, the played key and its velocity; a held object's
+;; coefficients, latched on coef_tick), or what a note's start event-holds.
+;; DGen schedules pure math over latches on their trigger, and a modulated
+;; value mixed into it miscompiles (a data bell's G from its latched wref
+;; and its mass went silent), so a param read with one counts as setup.
+;;   f  a def form
+(def slow-def? (f)
+  (let ((e (nth f 2)))
+    (or (member? slow-names (nth f 1))
+        (head-of-3? e 'latch)
+        (and (head-of-3? e 'event-hold) (= (nth e 2) 'hit)))))
+
+;; True when f is a list whose first item is head.
+;;   f     a form
+;;   head  a symbol
+(def head? (f head) (and (list? f) (not (empty? f)) (= (first f) head)))
+
+;; True when f is a three-item (head x y) form: (latch x trigger),
+;; (event-hold x clock).
+;;   f     a form
+;;   head  a symbol
+(def head-of-3? (f head) (and (head? f head) (= (len f) 3)))
+
+;; True when f is a top-level (def ...) form.
+;;   f  a form
+(def def-form? (f) (head? f 'def))
+
+;; Every atom (symbol, number, keyword) in a form, nested lists flattened.
+;;   form  a form
+(def form-atoms (form) (if (list? form) (concat-all (map form-atoms form)) (list form)))
+
+;; The names a def form defines (one, or a list for (def (a b) ...)).
+;;   f  a (def target expr) form
+(def def-names (f) (let ((target (nth f 1))) (if (list? target) target (list target))))
+
+;; form with every atom a replaced by (f a).
+;;   form  a form
+;;   f     a function of an atom
+(def map-atoms (form f) (if (list? form) (map (lambda (x) (map-atoms x f)) form) (f form)))
+
+;; form with every symbol in names replaced by itself with suffix.
+;;   form    a form
+;;   names   the symbols to rename
+;;   suffix  a string
+(def rename-in (form names suffix)
+  (map-atoms form (lambda (a) (if (member? names a) (symbol a suffix) a))))
+
+;; A predicate: true for a def defining one of names.
+;;   names  symbols
+(def defines? (names) (lambda (f) (and (def-form? f) (any? (lambda (n) (member? names n)) (def-names f)))))
+
+;; The setup defs among forms: pure defs (no per-sample head, no per-sample
+;; name, no defmacro of the patch's own; slow-def? ones skipped) reading one
+;; of params or another setup def. Returns the names they define.
+;;   forms   the instrument's forms, in order
+;;   params  the params' symbols
+(def setup-names (forms params)
+  (if (empty? params) (list)
+    (let ((heads (append per-sample-heads (map (lambda (f) (nth f 1)) (filter (lambda (f) (head? f 'defmacro)) forms)))))
+      (get (reduce (lambda (acc f)
+                     (if (or (not (def-form? f)) (slow-def? f)) acc
+                       (let ((atoms (form-atoms (nth f 2))) (dynamic (get acc :dynamic)) (setup (get acc :setup)))
+                         (if (any? (lambda (a) (or (member? heads a) (member? dynamic a))) atoms)
+                           (merge acc :dynamic (append dynamic (def-names f)))
+                           (if (any? (lambda (a) (or (member? params a) (member? setup a))) atoms)
+                             (merge acc :setup (append setup (def-names f)))
+                             acc)))))
+                   (dict :dynamic (list) :setup (list))
+                   forms)
+           :setup))))
+
+;; Forms defining mod_tick, on which :modulate :all's held params are
+;; sampled (see change-tick-forms): their knobs and the slow inputs
+;; (slow-names) are watched every sample, the modulation sources every
+;; mod-hold samples.
+;;   params  the held params' symbols
+(def mod-tick-forms (params) (change-tick-forms "mod" (append slow-names params)))
+
+;; forms with specs' params modulatable (see above). A param no setup reads
+;; is read as (mod p), by the work on an event clock (event-cones) as
+;; (event-hold (mod p) clock); a clock's own change detection
+;; (clock-form?) keeps reading the knob. With all, a param setup reads is
+;; modulated too, held: setup defs read p_modh, other forms p_mod and the
+;; setup values' latches, and the tick and each held param's p_modh / p_mod
+;; follow the last param form. Each modulated param's form gets @mod.
+;;   specs  the modulatable param specs
+;;   all    true to modulate the params setup reads too
+;;   forms  the instrument's forms, in order
+(def mod-pass (specs all forms)
+  (let ((params (map (lambda (p) (get p :sym)) specs))
+        (param? (lambda (f) (head? f 'param)))
+        (clock? (clock-form? forms))
+        (cones (event-cones forms))
+        (read-in (lambda (names fs) (filter (lambda (a) (member? names a)) (concat-all (map form-atoms fs))))))
+    (let ((fed (read-in params (filter (defines? (setup-names forms params)) forms)))
+          (in-cone (lambda (f) (if (def-form? f) (cone-clock cones (first (def-names f))) nil))))
+      (let ((direct (filter (lambda (p) (not (member? fed p))) params))
+            (held (if all fed (list))))
+        ;; the setup the held params feed, which runs on mod_tick
+        (let ((hsetup (setup-names forms held)))
+          (let ((held-setup? (defines? hsetup))
+                ;; how other code reads a modulated param, nil for any other atom
+                (live (lambda (a) (if (member? direct a) (list 'mod a) (if (member? held a) (symbol a "_mod") nil)))))
+            (let ((latched (read-in hsetup (filter (lambda (f) (not (or (held-setup? f) (param? f)))) forms)))
+                  (last-param (reduce (lambda (k i) (if (param? (nth forms i)) i k)) 0 (range (len forms))))
+                  (read-live (lambda (a) (let ((r (live a))) (if r r a)))))
+              (concat-all
+                (map (lambda (i)
+                       (let ((f (nth forms i)) (clock (in-cone (nth forms i))))
+                         (append
+                           (if (param? f)
+                             (list (if (live (nth f 1)) (append f '(@mod true @mod-mode additive)) f))
+                             (if (clock? f) (list f)
+                               (if clock (list (clock-held (rename-in f hsetup "_mod") live read-live clock))
+                                 (if (held-setup? f)
+                                   (cons (rename-in f held "_modh")
+                                         (map (lambda (n) `(def ,(symbol n "_mod") (latch ,n mod_tick)))
+                                              (filter (lambda (n) (member? latched n)) (def-names f))))
+                                   (list (map-atoms (rename-in f hsetup "_mod") read-live))))))
+                           (if (and (= i last-param) (not (empty? held)))
+                             (append (mod-tick-forms held)
+                                     (map (lambda (p) `(def ,(symbol p "_modh") (event-hold (mod ,p) mod_tick))) held)
+                                     (concat-all (map held-value-forms held)))
+                             (list)))))
+                     (range (len forms)))))))))))
+
+;; form with each modulated param read as clock holds it, (event-hold v
+;; clock) with v how live reads it, for work DGen schedules on that clock: a
+;; (mod p) mixed into it bare would run it every sample. Inside an
+;; (event-hold x clock) already there a param is just v: holding twice
+;; silences the instrument. (Under :modulate :all this work can also read
+;; a setup value's mod_tick latch, the pattern held-value-forms avoids for
+;; params: correct in every example, but not proven safe in general.)
+;;   form       a form in clock's cone (see event-cones)
+;;   live       a param's read form, or nil for any other atom
+;;   read-live  an atom's read form: live's, or the atom
+;;   clock      the clock's symbol
+(def clock-held (form live read-live clock)
+  (if (list? form)
+    (if (head-of-3? form 'event-hold)
+      (list 'event-hold (map-atoms (nth form 1) read-live) (nth form 2))
+      (map (lambda (x) (clock-held x live read-live clock)) form))
+    (let ((r (live form))) (if r `(event-hold ,r ,clock) form))))
+
+;; The defs DGen computes on an event clock's schedule, as (name clock)
+;; pairs in order: a def holding an (event-hold x clock) or reading one
+;; already in a clock's cone, up to the (latch x clock) that brings it back
+;; to audio rate.
+;;   forms  the instrument's forms
+(def event-cones (forms)
+  (reduce (lambda (cones f)
+            (if (or (not (def-form? f)) (head? (nth f 2) 'latch)) cones
+              (let ((c (form-clock (nth f 2) cones)))
+                (if c (append cones (map (lambda (n) (list n c)) (def-names f))) cones))))
+          (list) forms))
+
+;; The clock of the first event-hold in a form, or of the first name it
+;; reads in one of cones; nil when none.
+;;   form   a form
+;;   cones  (name clock) pairs, from event-cones
+(def form-clock (form cones)
+  (if (list? form)
+    (if (head-of-3? form 'event-hold) (nth form 2)
+      (reduce (lambda (c x) (if c c (form-clock x cones))) nil form))
+    (cone-clock cones form)))
+
+;; The clock a name is in the cone of, or nil.
+;;   cones  (name clock) pairs
+;;   name   a symbol
+(def cone-clock (cones name)
+  (let ((hit (filter (lambda (pair) (= (first pair) name)) cones))) (if (empty? hit) nil (nth (first hit) 1))))
+
+;; The forms defining a held param's p_mod: p_modh, taken on mod_tick and
+;; kept in a history between ticks. A history, not a latch: DGen schedules a
+;; latch on its trigger, so another clock's work reading it between
+;; mod_ticks (a data bell's coefficients on release) gets garbage.
+;;   p  the param's symbol
+(def held-value-forms (p)
+  (let ((h (symbol p "_hold")) (v (symbol p "_mod")))
+    (list `(make-history ,h)
+          `(def ,v (gswitch mod_tick ,(symbol p "_modh") (read-history ,h)))
+          `(write-history ,h ,v))))
+
+;; A predicate: true for a form of an event clock's change detection: the
+;; def of one of forms' event-hold triggers (coef_tick, bynote_tick), or a
+;; write to a history that def reads. Such a form must not read (mod p):
+;; DGen gates each (mod p) on its routes being active, and a clock read in a
+;; gated cone miscompiles what it clocks (the Ride Kit's wash went wrong),
+;; so mod-pass leaves it reading the knobs.
+;;   forms  the instrument's forms
+(def clock-form? (forms)
+  (let ((clocks (concat-all (map event-clocks forms))))
+    (let ((clock-def? (defines? clocks)))
+      (let ((watched (concat-all (map form-atoms (filter clock-def? forms)))))
+        (lambda (f) (or (clock-def? f) (and (head-of-3? f 'write-history) (member? watched (nth f 1)))))))))
+
+;; The triggers of every (event-hold x trigger) in a form.
+;;   form  a form
+(def event-clocks (form)
+  (if (not (list? form)) (list)
+    (append (if (head-of-3? form 'event-hold) (list (nth form 2)) (list))
+            (concat-all (map event-clocks form)))))
 
 ;; The instrument's dsp.lisp source, pretty-printed.
 ;;   patch  a patch that checks clean
@@ -3747,7 +4076,8 @@
             (tone-params patch)
             (voicing-params patch)
             (concat-all (map (lambda (k) (mic-at-params patch k :label (source (mic k)))) ks))
-            (concat-all (map (lambda (k) (pickup-params patch k)) ks)))))
+            (concat-all (map (lambda (k) (pickup-params patch k)) ks))
+            (concat-all (map (lambda (k) (radiate-params patch k)) ks)))))
 
 ;; The panel's sections, in order: each object, each connection, OUTPUT.
 ;; Each is (dict :title :tab :params): the panel heading ("STRING str"), the
