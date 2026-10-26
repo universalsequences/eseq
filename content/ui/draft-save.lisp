@@ -5,7 +5,8 @@
 ;; (`draft-save-open`, src/ui/host_commands/drafts.rs) to activate this
 ;; mount's tile and `open` the form on the generated instrument's name.
 ;; Saving writes the running engine's dsp.lisp / ui.lisp / instrument.json
-;; into the user instrument folder; the track stays the script's draft.
+;; into the user instrument folder, and the track then plays the saved
+;; instrument (no longer a draft).
 ;;
 ;; Mounted by eseq.file-dialogs next to the other dialogs.
 (module eseq.draft-save)
@@ -45,7 +46,7 @@
 (def body ()
   (v-stack :width :fill :height :fill :gap 0.6
     (label "Save instrument" :key "title" :bg :transparent :font-size 16)
-    (label "Saves the draft's generated instrument to your library. The track stays the script's draft."
+    (label "Saves the draft's generated instrument to your library. The track then plays the saved one."
       :key "hint" :bg :transparent :font-size 10 :color :dim)
     (v-stack :width :fill :gap 0.3
       (label "Name" :bg :transparent :font-size 11)

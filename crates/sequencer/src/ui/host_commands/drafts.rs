@@ -4,7 +4,9 @@
 //! instrument plays on that buffer's own draft track: the first evaluation
 //! adds the track, later ones recompile it in place (a file-backed buffer
 //! keeps its track by path). The draft is an ordinary track in the normal
-//! layout; no editor session takes over the screen.
+//! layout; no editor session takes over the screen. Saving it turns the
+//! track into the saved instrument; the buffer's next evaluation starts a
+//! new draft.
 
 use crate::*;
 use sequencer::lisp_host::GeneratedInstrument;
@@ -357,10 +359,12 @@ fn draft_on_track<'a>(
 }
 
 /// Write the draft's running instrument into the user instrument folder as
-/// `name`. Replacing a saved one needs `overwrite`; the track stays the
-/// script's draft, so later evaluations keep recompiling it. An error
-/// carries the typed name when that name is already saved (Save becomes
-/// Replace), else "".
+/// `name`, then make the track play that saved instrument: its engine takes
+/// the saved id (what a project save writes), so the knob and modulation
+/// settings on it survive a project round trip. The track stops being a
+/// draft; the script's next evaluation starts a new one. Replacing a saved
+/// instrument needs `overwrite`. An error carries the typed name when that
+/// name is already saved (Save becomes Replace), else "".
 fn save_draft(
     app: &mut app::App,
     editor: &mut Editor,
@@ -369,6 +373,7 @@ fn save_draft(
 ) -> Result<String, (String, String)> {
     let (_, draft) = draft_on_track(app, &ctx.sessions.drafts, payload)
         .map_err(|error| (error, String::new()))?;
+    let engine_id = draft.engine_id;
     let raw = extract_string_from_payload(payload, "name").unwrap_or_default();
     if raw.trim().is_empty() {
         return Err(("Name the instrument".to_string(), String::new()));
@@ -392,11 +397,43 @@ fn save_draft(
         .write_to(&dir)
         .map_err(|error| (error, String::new()))?;
     sequencer::lisp_host::invalidate_instrument_release_index();
+    adopt_saved_instrument(app, ctx.sessions, ctx.track_names, engine_id, &slug);
+    ctx.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
     // Puts the saved instrument's panel in the catalog, as the instrument
-    // editor's saves do.
+    // editor's saves do; the track's panel is now that one.
+    sync_draft_panels(&ctx.sessions.drafts);
     reload_instrument_panels(editor);
+    editor.refresh_visible_layouts_for_buffer_named("*fx*");
     sync_sidebar_browser(app, app.ui.cursor_track);
     Ok(slug)
+}
+
+/// Turn draft engine `engine_id` into the user instrument `slug` just saved:
+/// drop the draft (and any recompile still pending for it) and rename the
+/// engine to the saved id, keeping its compiled state and every track's
+/// values. Tracks whose name was the draft's automatic one take the new name.
+fn adopt_saved_instrument(
+    app: &mut app::App,
+    sessions: &mut EditSessionState,
+    track_names: &mut Vec<String>,
+    engine_id: usize,
+    slug: &str,
+) {
+    let Some(index) = sessions.drafts.iter().position(|draft| draft.engine_id == engine_id) else {
+        return;
+    };
+    let draft = sessions.drafts.remove(index);
+    sessions.pending_draft_compiles.retain(|pending| pending.key != draft.key);
+    // The draft's directory stays: it is the running engine's asset base.
+    let user_id = sequencer::app_paths::ContentTier::User.qualify(slug);
+    let id = sequencer::lisp_host::qualify_instrument_id(&user_id).unwrap_or(user_id);
+    app.rename_instrument_engine(engine_id, &id);
+    for track in 0..app.tracks.len() {
+        if app.graph.track_engine_ids.get(track).copied().flatten() == Some(engine_id) {
+            app.set_automatic_track_name(track, slug.to_string());
+        }
+    }
+    super::refresh_track_names_cache(track_names, app);
 }
 
 pub(super) fn handle(
@@ -467,5 +504,73 @@ mod tests {
         script.read_only = false;
         script.widget_tree = Some(Value::Nil);
         assert!(!is_script_buffer(&script, "42"));
+    }
+
+    /// After Save the track plays the saved instrument: its engine answers to
+    /// the saved user id (what a project save writes), the draft is gone, and
+    /// the automatic track name follows the typed name.
+    #[test]
+    fn a_saved_draft_becomes_the_saved_instrument() {
+        let state = Arc::new(sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = app::App::new(
+            state,
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        let manifest = sequencer::lisp_host::parse_manifest(
+            r#"{"processAbi": "dgen-host-abi-v1", "outputs": [{"channel": 0}]}"#,
+        )
+        .expect("manifest parses");
+        let engine_id = app.editor.engine_registry.upsert(app::EngineDescriptor {
+            name: draft_engine_name("modal-eno-lead"),
+            source: "(out 0)".to_string(),
+            manifest,
+            lib_index: 0,
+            shared_runtime: true,
+        });
+        app.tracks = vec!["modal-eno-lead".to_string()];
+        app.graph.track_engine_ids = vec![Some(engine_id)];
+        let mut sessions = EditSessionState::default();
+        sessions.drafts.push(Draft {
+            key: "/scripts/modal-eno-lead.lisp".to_string(),
+            engine_id,
+            dir: std::env::temp_dir().join("eseq-draft-adopt-test-missing"),
+            generation: 0,
+            instrument: GeneratedInstrument {
+                name: "modal-eno-lead".to_string(),
+                dsp: "(out 0)".to_string(),
+                ui: None,
+                voice_mode: None,
+                assets: Vec::new(),
+            },
+        });
+        let mut track_names = app.tracks.clone();
+
+        let slug = "eno-lead-draft-adopt-test";
+        adopt_saved_instrument(&mut app, &mut sessions, &mut track_names, engine_id, slug);
+
+        let engine = app.editor.engine_registry.get(engine_id).expect("engine kept");
+        assert!(
+            engine.name.starts_with(&sequencer::app_paths::ContentTier::User.qualify(slug)),
+            "{}",
+            engine.name
+        );
+        assert!(sessions.drafts.is_empty());
+        assert_eq!(app.tracks, vec![slug.to_string()]);
+        assert_eq!(track_names, app.tracks);
     }
 }
