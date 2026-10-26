@@ -299,8 +299,8 @@ read as `(mod p)`). Which knobs depends on what they cost:
   latched coefficient. `(m/patch ... :modulate :all)` makes them
   modulatable too: their setup reruns every 32 samples while a source
   moves, and its results are latched every sample whether modulated or
-  not: the cello +9%, the piano +80%, the Ride Kit +110% of their
-  CPU.
+  not: the cello +20% (7.0% -> 8.4% of one core per voice), the piano
+  +80%, the Ride Kit +110% of their CPU.
 
 Modulating a knob by d sounds exactly like moving it by d (to the sample).
 
