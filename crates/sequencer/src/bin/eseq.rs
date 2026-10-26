@@ -15,7 +15,7 @@ const USAGE: &str = "usage: eseq run
        eseq run -noui [FILE]
        eseq paths
        eseq lisp run FILE...
-       eseq modal emit PATCH.lisp [DIR]
+       eseq generate SCRIPT.lisp [DIR]
        eseq modal solve SPEC.json OUT.modes.json
        eseq authoring seed [DIR]
        eseq authoring skill
@@ -39,15 +39,16 @@ fn core_vm() -> eseqlisp::vm::VM {
     vm
 }
 
-/// Generate an instrument from a modal patch script (its last form is an
-/// `eseq.modal` patch) into DIR, by default the user instrument folder under
-/// the patch's :name. Writes dsp.lisp, ui.lisp and instrument.json.
-fn emit_modal(script: &str, dir: Option<&String>) -> Result<(), String> {
+/// Generate an instrument from a script whose last value is a program (an
+/// `eseq.modal` patch, or any eseq.gen program) into DIR, by default the user
+/// instrument folder under the instrument's name. Writes dsp.lisp, ui.lisp
+/// and instrument.json.
+fn generate(script: &str, dir: Option<&String>) -> Result<(), String> {
     let path = PathBuf::from(script);
     let source =
         std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
     let mut vm = core_vm();
-    let instrument = sequencer::lisp_host::generate_modal_instrument(&mut vm, path.clone(), &source)
+    let instrument = sequencer::lisp_host::generate_instrument(&mut vm, path.clone(), &source)
         .map_err(|errors| format!("{}:\n  {}", path.display(), errors.join("\n  ")))?;
     let dir = match dir {
         Some(dir) => PathBuf::from(dir),
@@ -113,7 +114,7 @@ fn solve_modal(spec_path: &str, out: &str) -> Result<(), String> {
 /// native, so app UI code cannot write files.
 fn run_lisp(files: &[String]) -> Result<(), String> {
     use eseqlisp::vm::Value;
-    use sequencer::lisp_host::ModalScriptHost;
+    use sequencer::lisp_host::ScriptHost;
     let mut vm = core_vm();
     vm.register_native("write-text-file", |args| match args.as_slice() {
         [Value::String(path), Value::String(text)] => {
@@ -172,8 +173,13 @@ fn run(args: Vec<String>) -> Result<(), String> {
         [lisp, run, files @ ..] if lisp == "lisp" && run == "run" && !files.is_empty() => {
             run_lisp(files)
         }
+        [generate_cmd, script, dir @ ..] if generate_cmd == "generate" && dir.len() <= 1 => {
+            generate(script, dir.first())
+        }
+        // The spelling from before generators were generic.
         [modal, emit, script, dir @ ..] if modal == "modal" && emit == "emit" && dir.len() <= 1 => {
-            emit_modal(script, dir.first())
+            eprintln!("eseq: `eseq modal emit` is now `eseq generate`");
+            generate(script, dir.first())
         }
         [modal, solve, spec, out] if modal == "modal" && solve == "solve" => solve_modal(spec, out),
         [authoring, seed, dir @ ..] if authoring == "authoring" && seed == "seed" && dir.len() <= 1 => {

@@ -7,6 +7,7 @@ runtime, and MIDI-FX event scripting. Everything is surfaced through the
 
 pub mod expr_process;
 pub mod expr_promote;
+pub mod generator;
 pub mod graph_authoring;
 pub mod graph_dsl;
 pub mod graph_manifest;

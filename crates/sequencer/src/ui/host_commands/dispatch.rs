@@ -56,7 +56,7 @@ pub(crate) fn dispatch_custom_host_command(
         n if super::packages::COMMANDS.contains(&n) => super::packages::handle(name, payload, app, editor, ctx),
         n if super::audio_settings::COMMANDS.contains(&n) => super::audio_settings::handle(name, payload, app, editor, ctx),
         n if super::customize::COMMANDS.contains(&n) => super::customize::handle(name, payload, app, editor, ctx),
-        n if super::modal_drafts::COMMANDS.contains(&n) => super::modal_drafts::handle(name, payload, app, editor, ctx),
+        n if super::drafts::COMMANDS.contains(&n) => super::drafts::handle(name, payload, app, editor, ctx),
         n if super::agent::COMMANDS.contains(&n) => super::agent::handle(name, payload, app, editor, ctx),
         n if crate::agent_pane::COMMANDS.contains(&n) => {
             let host_views: Vec<_> = crate::edit_sessions::agent_pane_view(&ctx.sessions).into_iter().collect();

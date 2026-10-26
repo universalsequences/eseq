@@ -1,7 +1,6 @@
-//! Modal patch scripts: an eseqlisp buffer whose last form is an
-//! `(eseq.modal/patch ...)` turned into DGenLisp instrument source by the
-//! `eseq.modal` module (`content/ui/modal.lisp`). Shared by `eseq modal emit`
-//! and the app's draft evaluation, so both report the same errors.
+//! The natives `eseq.modal` (`content/ui/modal.lisp`) calls: modal data
+//! files, circular plates, finite-element solids and nearest points. A patch
+//! script is generated like any program (see [`super::generator`]).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -10,90 +9,7 @@ use std::rc::Rc;
 
 use eseqlisp::vm::{Value, VM};
 
-use crate::sequencer::CustomInstrumentRunMode;
-
-/// Where the evaluated patch is parked while `eseq.modal/generate` runs; a
-/// plain host-owned global, overwritten on every call.
-const PATCH_SLOT: &str = "eseq-modal-patch-under-generation";
-
-/// The param eseq.modal declares for a patch's :voicing, bound to the host's
-/// voice mode in instrument.json.
-const VOICE_MODE_PARAM: &str = "out_voice_mode";
-
-/// A generated instrument: the name the patch asked for, its dsp.lisp and
-/// its ui.lisp panel.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ModalInstrument {
-    pub name: String,
-    pub dsp: String,
-    pub ui: String,
-}
-
-impl ModalInstrument {
-    /// Write dsp.lisp, ui.lisp and instrument.json into `dir`, creating it;
-    /// instrument.json binds the voice-mode param when the patch has one.
-    /// The eseq-modes files ui.lisp's mesh views read (`:src "….modes.json"`)
-    /// are copied beside them and ui.lisp points at the copies, so the folder
-    /// does not depend on the solve cache or a draft folder.
-    pub fn write_to(&self, dir: &Path) -> Result<(), String> {
-        std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
-        let mut metadata = serde_json::json!({
-            "version": 1,
-            "run_mode": CustomInstrumentRunMode::Instrument.as_str(),
-        });
-        // a patch with :voicing declares the host's voice-mode param (the
-        // draft save path rebuilds a ModalInstrument from the dsp alone, so
-        // the dsp is what says so)
-        if self.dsp.contains(&format!("(param {VOICE_MODE_PARAM} ")) {
-            metadata["voice_controls"] = serde_json::json!({ "mode": VOICE_MODE_PARAM });
-        }
-        let metadata = format!("{metadata}\n");
-        let mut ui = self.ui.clone();
-        for from in mesh_sources(&self.ui) {
-            let from = PathBuf::from(from);
-            let Some(name) = from.file_name() else { continue };
-            let to = dir.join(name);
-            if from != to {
-                std::fs::copy(&from, &to).map_err(|error| format!("{}: {error}", from.display()))?;
-            }
-            ui = ui.replace(&from.display().to_string(), &to.display().to_string());
-        }
-        for (name, text) in [("dsp.lisp", &self.dsp), ("ui.lisp", &ui), ("instrument.json", &metadata)] {
-            let file = dir.join(name);
-            std::fs::write(&file, text).map_err(|error| format!("{}: {error}", file.display()))?;
-        }
-        Ok(())
-    }
-}
-
-/// The absolute eseq-modes paths a ui.lisp's mesh views read: every
-/// `:src "…"` naming a .modes.json file.
-fn mesh_sources(ui: &str) -> Vec<String> {
-    ui.match_indices(":src \"")
-        .filter_map(|(at, needle)| {
-            let rest = &ui[at + needle.len()..];
-            let path = &rest[..rest.find('"')?];
-            (path.ends_with(".modes.json") && Path::new(path).is_absolute()).then(|| path.to_string())
-        })
-        .collect()
-}
-
-/// True when `source` imports `eseq.modal` (not a longer module name such as
-/// `eseq.modal-x`). Cheap textual test for routing an evaluation.
-pub fn is_modal_patch_script(source: &str) -> bool {
-    source.match_indices("(import eseq.modal").any(|(at, needle)| {
-        source[at + needle.len()..]
-            .chars()
-            .next()
-            .is_some_and(|next| next.is_whitespace() || next == ')')
-    })
-}
-
-thread_local! {
-    /// The folder of the script being generated, which relative data files
-    /// (`modal-read-data`) resolve against.
-    static SCRIPT_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-}
+use super::generator::current_script_dir;
 
 /// The native a patch script reads modal data with:
 /// `(modal-read-data "bell.modes.json")` or `(modal-read-data "bell.txt")`.
@@ -111,10 +27,10 @@ pub const READ_DATA_NATIVE: &str = "modal-read-data";
 ///   line: index, frequency Hz, amplitude dB, bandwidth Hz; `;` comments):
 ///   `:freqs`, `:amps` (linear), `:bandwidths`.
 pub fn read_modal_data_file(path: &str) -> Result<Value, String> {
-    let path = SCRIPT_DIR.with(|dir| match dir.borrow().as_ref() {
+    let path = match current_script_dir() {
         Some(dir) if Path::new(path).is_relative() => dir.join(path),
         _ => PathBuf::from(path),
-    });
+    };
     let text = std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
     let parsed = if path.extension().is_some_and(|ext| ext == "json") {
         modes_json_value(&text).map(|(value, mesh)| if mesh { with_file(value, &path) } else { value })
@@ -181,7 +97,7 @@ pub const SOLVE_NATIVE: &str = "modal-solve";
 /// the first evaluation of a solid pays for the solve.
 fn solve_native(args: &[Value]) -> Result<Value, String> {
     use crate::modal_fe::{solve, spec_hash, SolidSpec};
-    let script_dir = SCRIPT_DIR.with(|dir| dir.borrow().clone()).unwrap_or_else(|| PathBuf::from("."));
+    let script_dir = current_script_dir().unwrap_or_else(|| PathBuf::from("."));
     let (spec, base) = match args.first() {
         Some(Value::String(path)) => {
             let path = if Path::new(path).is_relative() { script_dir.join(path) } else { PathBuf::from(path) };
@@ -449,106 +365,6 @@ fn modres_value(text: &str) -> Result<Value, String> {
     Ok(data_dict(vec![("freqs", numbers(freqs)), ("amps", numbers(amps)), ("bandwidths", numbers(bandwidths))]))
 }
 
-/// Evaluate `script` (attributed to `path`) in `vm`, then check and generate
-/// the patch its last form returns. Errors are user-facing lines: a script
-/// that fails to evaluate, a last form that is not a patch, or every problem
-/// `eseq.modal/check` finds.
-pub fn generate_modal_instrument(
-    host: &mut impl ModalScriptHost,
-    path: PathBuf,
-    script: &str,
-) -> Result<ModalInstrument, Vec<String>> {
-    let dir = path.parent().map(Path::to_path_buf);
-    let previous = SCRIPT_DIR.with(|cell| cell.replace(dir));
-    let value = host.eval_at(path, script);
-    SCRIPT_DIR.with(|cell| *cell.borrow_mut() = previous);
-    let value = value?;
-    if !is_patch(value.as_ref()) {
-        return Err(vec![
-            "the script's last form must be a patch: (m/patch :objects ... :listens ...)".to_string(),
-        ]);
-    }
-    host.set_global(PATCH_SLOT, value.unwrap_or(Value::Nil));
-    let generated = host.eval_at(
-        PathBuf::from("<eseq.modal generate>"),
-        &format!("(import eseq.modal)\n(eseq.modal/generate {PATCH_SLOT})"),
-    )?;
-    let Some(Value::Map(map)) = generated else {
-        return Err(vec!["eseq.modal returned no instrument".to_string()]);
-    };
-    if let Some(errors) = map.get("errors") {
-        return Err(string_list(&errors.borrow()));
-    }
-    let text = |key: &str| match map.get(key).map(|cell| cell.borrow().clone()) {
-        Some(Value::String(text)) => Some(text),
-        _ => None,
-    };
-    match (text("dsp"), text("ui")) {
-        (Some(dsp), Some(ui)) => Ok(ModalInstrument {
-            name: text("name").unwrap_or_else(|| "modal".to_string()),
-            dsp,
-            ui,
-        }),
-        _ => Err(vec!["eseq.modal returned no dsp or ui source".to_string()]),
-    }
-}
-
-/// Where a modal script runs: the CLI's bare VM or the app's runtime.
-pub trait ModalScriptHost {
-    /// Evaluate `source` as the file `path`; errors are user-facing lines.
-    fn eval_at(&mut self, path: PathBuf, source: &str) -> Result<Option<Value>, Vec<String>>;
-    fn set_global(&mut self, name: &str, value: Value);
-}
-
-impl ModalScriptHost for VM {
-    fn eval_at(&mut self, path: PathBuf, source: &str) -> Result<Option<Value>, Vec<String>> {
-        let seen = self.source_manager.diagnostics_len();
-        self.eval_module_source(path.clone(), source, 0).map_err(|error| {
-            let mut lines = vec![format!("{}: {error:?}", path.display())];
-            lines.extend(self.take_source_load_errors());
-            lines.extend(self.source_manager.diagnostics_since(seen));
-            lines
-        })
-    }
-
-    fn set_global(&mut self, name: &str, value: Value) {
-        self.set_global_value(name, value);
-    }
-}
-
-impl ModalScriptHost for eseqlisp::Runtime {
-    fn eval_at(&mut self, path: PathBuf, source: &str) -> Result<Option<Value>, Vec<String>> {
-        // eval_source_at_path moves its load errors into the diagnostics.
-        let seen = self.source_diagnostics_len();
-        self.eval_source_at_path(path.clone(), source).map_err(|error| {
-            let mut lines = vec![format!("{}: {error:?}", path.display())];
-            lines.extend(self.source_diagnostics_since(seen));
-            lines
-        })
-    }
-
-    fn set_global(&mut self, name: &str, value: Value) {
-        self.set_global_value(name, value);
-    }
-}
-
-fn is_patch(value: Option<&Value>) -> bool {
-    matches!(value, Some(Value::Map(map)) if map.contains_key("objects") && map.contains_key("listens"))
-}
-
-fn string_list(value: &Value) -> Vec<String> {
-    match value {
-        Value::List(items) => items
-            .iter()
-            .map(|item| match &*item.borrow() {
-                Value::String(text) => text.clone(),
-                other => format!("{other:?}"),
-            })
-            .collect(),
-        other => vec![format!("{other:?}")],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     /// A dsp source with its whitespace collapsed, for matching forms that
@@ -558,14 +374,16 @@ mod tests {
     }
 
     use super::*;
+    use crate::lisp_host::eseq::generator::generate_instrument;
+
+    /// A generated instrument's panel source.
+    fn ui(instrument: &crate::lisp_host::eseq::generator::GeneratedInstrument) -> &str {
+        instrument.ui.as_deref().expect("a modal patch has a panel")
+    }
 
     fn modal_vm() -> VM {
-        let mut vm = VM::new(Vec::new());
-        eseqlisp::vm::register_core_natives(&mut vm);
-        eseqlisp::vm::register_math_natives(&mut vm);
+        let mut vm = crate::lisp_host::eseq::generator::tests::gen_vm();
         register_modal_natives(&mut vm);
-        let content = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content");
-        vm.source_manager.set_module_load_roots(vec![content]);
         vm
     }
 
@@ -581,13 +399,13 @@ mod tests {
     fn generates_grouped_dsp_from_a_patch_script() {
         let mut vm = modal_vm();
         let instrument =
-            generate_modal_instrument(&mut vm, PathBuf::from("cello.lisp"), CELLO).unwrap();
+            generate_instrument(&mut vm, PathBuf::from("cello.lisp"), CELLO).unwrap();
         assert_eq!(instrument.name, "probe-cello");
         assert!(instrument.dsp.contains("(param str_length @group str"), "{}", instrument.dsp);
         assert!(instrument.dsp.contains("(param bow_pressure @group bow"));
         assert!(instrument.dsp.contains("bow-contact"));
-        assert!(instrument.ui.contains("(defsynth-ui"), "{}", instrument.ui);
-        assert!(instrument.ui.contains("\"bow.bow_pressure\""), "{}", instrument.ui);
+        assert!(ui(&instrument).contains("(defsynth-ui"), "{}", ui(&instrument));
+        assert!(ui(&instrument).contains("\"bow.bow_pressure\""), "{}", ui(&instrument));
     }
 
     #[test]
@@ -606,7 +424,7 @@ mod tests {
                     (range (len ratios)))
   :listens (list (m/listen 'body (list 0.3 0.6))))";
         let instrument =
-            generate_modal_instrument(&mut runtime, PathBuf::from("drones.lisp"), script).unwrap();
+            generate_instrument(&mut runtime, PathBuf::from("drones.lisp"), script).unwrap();
         assert_eq!(instrument.name, "drones");
         assert!(instrument.dsp.contains("(param sym1_tune @group sym1 @default 2"), "{}", instrument.dsp);
         assert!(instrument.dsp.contains("(param b0_stiff @group b0"));
@@ -617,7 +435,7 @@ mod tests {
         let mut vm = modal_vm();
         let script = CELLO.replace("'bridge 'str 0.99 'body", "'bridge 'str 0.99 'bdy");
         let errors =
-            generate_modal_instrument(&mut vm, PathBuf::from("cello.lisp"), &script).unwrap_err();
+            generate_instrument(&mut vm, PathBuf::from("cello.lisp"), &script).unwrap_err();
         assert_eq!(errors, vec!["spring bridge: no object bdy".to_string()]);
     }
 
@@ -629,7 +447,7 @@ mod tests {
             "(m/plate 'body :made-of (list mat/spruce mat/maple (mat/material :name \"cedar\" :density 380 :young 9e9)))",
         );
         let instrument =
-            generate_modal_instrument(&mut vm, PathBuf::from("cello.lisp"), &script).unwrap();
+            generate_instrument(&mut vm, PathBuf::from("cello.lisp"), &script).unwrap();
         let dsp = &instrument.dsp;
         // One material: its numbers, and no menu.
         assert!(dsp.contains("(def str_density 1140)"), "{dsp}");
@@ -638,7 +456,7 @@ mod tests {
         // Several: a menu param named after them, picked by its index.
         assert!(dsp.contains("(param body_material @group body @options [\"spruce\" \"maple\" \"cedar\"]"), "{dsp}");
         assert!(dsp.contains("(selector (+ 1 (clip (round body_material) 0 2)) 450 650 380)"), "{dsp}");
-        assert!(instrument.ui.contains("\"body.body_material\""), "{}", instrument.ui);
+        assert!(ui(&instrument).contains("\"body.body_material\""), "{}", ui(&instrument));
     }
 
     #[test]
@@ -646,7 +464,7 @@ mod tests {
         let mut vm = modal_vm();
         let script = CELLO.replace("mat/nylon", ":nylon");
         let errors =
-            generate_modal_instrument(&mut vm, PathBuf::from("cello.lisp"), &script).unwrap_err();
+            generate_instrument(&mut vm, PathBuf::from("cello.lisp"), &script).unwrap_err();
         assert_eq!(
             errors,
             vec!["string str: :made-of takes a material such as mat/steel, or a list of them; got :nylon".to_string()]
@@ -662,7 +480,7 @@ mod tests {
             ("(list mat/nylon (merge mat/steel :name \"nylon\"))", "string str: two materials are called nylon"),
         ] {
             let script = CELLO.replace("mat/nylon)", &format!("{made_of})"));
-            let errors = generate_modal_instrument(&mut vm, PathBuf::from("cello.lisp"), &script).unwrap_err();
+            let errors = generate_instrument(&mut vm, PathBuf::from("cello.lisp"), &script).unwrap_err();
             assert_eq!(errors, vec![expected.to_string()], "{made_of}");
         }
     }
@@ -685,7 +503,7 @@ mod tests {
         std::fs::write(dir.path().join("bell.txt"), "; a bell\n1 110 -6 0.5\n2 220 0 1.0\n").unwrap();
         let script = data_patch("(modal-read-data \"bell.txt\")", "0", "0");
         let instrument =
-            generate_modal_instrument(&mut modal_vm(), dir.path().join("bell.lisp"), &script).unwrap();
+            generate_instrument(&mut modal_vm(), dir.path().join("bell.lisp"), &script).unwrap();
         let dsp = &instrument.dsp;
         assert!(dsp.contains("(def obj_hz (tensor @shape [2] @data [110 220]))"), "{dsp}");
         // Bandwidths become decay rates pi bw; one point, so no point param.
@@ -700,17 +518,27 @@ mod tests {
         let modes = serde_json::json!({
             "format": "eseq-modes", "version": 1, "freqs": [100.0, 250.0],
             "points": [0, 0, 0, 0.5, 0, 0, 1, 0, 0], "normals": [0, 0, 1, 0, 0, 1, 0, 0, 1],
-            "triangles": [], "shapes": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6], "mass": 0.2
+            "triangles": [0, 1, 2], "shapes": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6], "mass": 0.2
         });
         std::fs::write(dir.path().join("bar.modes.json"), modes.to_string()).unwrap();
         let script = data_patch("(modal-read-data \"bar.modes.json\")", "(list 0.9 0 0)", "1");
         let instrument =
-            generate_modal_instrument(&mut modal_vm(), dir.path().join("bar.lisp"), &script).unwrap();
+            generate_instrument(&mut modal_vm(), dir.path().join("bar.lisp"), &script).unwrap();
         let dsp = &instrument.dsp;
         assert!(dsp.contains("(def obj_shapes (tensor @shape [3 2] @data [0.1 0.2 0.3 0.4 0.5 0.6]))"), "{dsp}");
         // (0.9 0 0) is nearest point 2; the mic sits on point 1.
         assert!(dsp.contains("(param hit_obj_pt @group hit @default 2 @min 0 @max 2"), "{dsp}");
         assert!(dsp.contains("(param mic1_obj_pt @group mic1 @default 1 @min 0 @max 2"), "{dsp}");
+        // Its mesh view reads the file, an asset the instrument's folder
+        // gets a copy of.
+        let file = dir.path().join("bar.modes.json");
+        assert_eq!(instrument.assets, vec![file.clone()]);
+        assert!(ui(&instrument).contains(&format!(":src \"{}\"", file.display())), "{}", ui(&instrument));
+        let out = dir.path().join("out");
+        instrument.write_to(&out).unwrap();
+        let saved = std::fs::read_to_string(out.join("ui.lisp")).unwrap();
+        assert!(saved.contains(&format!(":src \"{}\"", out.join("bar.modes.json").display())), "{saved}");
+        assert!(out.join("bar.modes.json").exists());
     }
 
     #[test]
@@ -718,7 +546,7 @@ mod tests {
         let shapes: Vec<String> = (0..100).map(|k| format!("(list {k} 1)")).collect();
         let data = format!("(dict :freqs (list 100 200) :shapes (list {}))", shapes.join(" "));
         let instrument =
-            generate_modal_instrument(&mut modal_vm(), PathBuf::from("big.lisp"), &data_patch(&data, "70", "30"))
+            generate_instrument(&mut modal_vm(), PathBuf::from("big.lisp"), &data_patch(&data, "70", "30"))
                 .unwrap();
         let dsp = &instrument.dsp;
         assert!(dsp.contains("(def obj_shapes (tensor @shape [2 2] @data [70 1 30 1]))"), "{dsp}");
@@ -734,7 +562,7 @@ mod tests {
             ("(dict :freqs (list 100) :shapes (list (list 1) (list 1)))", "5", "felt hit b: modal-data obj has points 0..1, got 5"),
             ("(dict :freqs (list 100))", "(list 1 2 3)", "felt hit b: modal-data obj has no :points to find (1 2 3) among"),
         ] {
-            let errors = generate_modal_instrument(&mut vm, PathBuf::from("x.lisp"), &data_patch(data, at, "0"))
+            let errors = generate_instrument(&mut vm, PathBuf::from("x.lisp"), &data_patch(data, at, "0"))
                 .unwrap_err();
             assert_eq!(errors, vec![expected.to_string()], "{data}");
         }
@@ -751,7 +579,7 @@ mod tests {
   :connections (list (m/felt 'hit 'mal 'o {at}))
   :listens (list (m/listen 'o {listen})))"
         );
-        generate_modal_instrument(&mut modal_vm(), PathBuf::from("probe.lisp"), &script).unwrap().dsp
+        generate_instrument(&mut modal_vm(), PathBuf::from("probe.lisp"), &script).unwrap().dsp
     }
 
     #[test]
@@ -792,7 +620,7 @@ mod tests {
                      (m/bow 'bow 'str 0.12 :weight 0.5))
   :listens (list (m/listen 'str 0.2)))";
         let instrument =
-            generate_modal_instrument(&mut modal_vm(), PathBuf::from("drivers.lisp"), script).unwrap();
+            generate_instrument(&mut modal_vm(), PathBuf::from("drivers.lisp"), script).unwrap();
         let dsp = &squash(&instrument.dsp);
         // The force is gain x envelope x sine, solved once like an exciter.
         assert!(dsp.contains("(adsr gate hit (mod ebow_env_attack) (mod ebow_env_decay) (mod ebow_env_sustain) (mod ebow_env_release))"), "{dsp}");
@@ -818,7 +646,7 @@ mod tests {
   :connections (list (m/pluck 'pick 'fin 'pl (list 0.3 0.4)))
   :listens (list (m/listen 'pl (list 0.2 0.7) :modes (list 0 3))))";
         let instrument =
-            generate_modal_instrument(&mut modal_vm(), PathBuf::from("spectral.lisp"), script).unwrap();
+            generate_instrument(&mut modal_vm(), PathBuf::from("spectral.lisp"), script).unwrap();
         let dsp = &instrument.dsp;
         assert!(dsp.contains("(param pl_bend @group pl @default 0 @min -2400 @max 2400 @unit ct)"), "{dsp}");
         assert!(dsp.contains("(param pl_diffraction @group pl @default 1"), "{dsp}");
@@ -849,11 +677,11 @@ mod tests {
             ("(m/modal-data 'o :freqs (list 100) :shapes (list (list 1) (list 1)) :points (list (list 0 0 0)))",
              "(m/listen 'o 0)", "modal-data o: 1 points for 2 shape rows"),
         ] {
-            let errors = generate_modal_instrument(&mut vm, PathBuf::from("x.lisp"), &patch(objects, listen)).unwrap_err();
+            let errors = generate_instrument(&mut vm, PathBuf::from("x.lisp"), &patch(objects, listen)).unwrap_err();
             assert!(errors.iter().any(|error| error.contains(expected)), "{objects}: {errors:?}");
         }
         // Data modes are sorted by frequency, losses and shape columns with them.
-        let dsp = generate_modal_instrument(
+        let dsp = generate_instrument(
             &mut vm,
             PathBuf::from("x.lisp"),
             &patch("(m/modal-data 'o :freqs (list 300 100 200) :losses (list 3 1 2) :amps (list 0.3 0.1 0.2))", "(m/listen 'o 0)"),
@@ -876,7 +704,7 @@ mod tests {
                           :shape (dict :box (dict :size (list 0.3 0.03 0.01)))))
   :connections (list (m/felt 'hit 'mal 'bar (list 0.15 0 0.005)))
   :listens (list (m/listen 'bar (list -0.14 0 0.005))))";
-        let dsp = generate_modal_instrument(&mut modal_vm(), PathBuf::from("solid.lisp"), script).unwrap().dsp;
+        let dsp = generate_instrument(&mut modal_vm(), PathBuf::from("solid.lisp"), script).unwrap().dsp;
         let squashed = squash(&dsp);
         assert!(squashed.contains("(def bar_hz (tensor @shape [4] @data ["), "{dsp}");
         // its surface points, addressed by (x y z): the nearest point param
@@ -893,7 +721,7 @@ mod tests {
                      (m/stop 'jaw 'str 0.03 :height -0.001)
                      (m/strike 'rattle 'str 0.6 'pl (list 0.4 0.4) :offset 0.002))
   :listens (list (m/listen 'str 0.2)))";
-        let dsp = generate_modal_instrument(&mut modal_vm(), PathBuf::from("contacts.lisp"), script).unwrap().dsp;
+        let dsp = generate_instrument(&mut modal_vm(), PathBuf::from("contacts.lisp"), script).unwrap().dsp;
         let squashed = squash(&dsp);
         // The stop pushes up from below; the strike pushes the points apart.
         assert!(squashed.contains("(* -1 (mod jaw_weight) (felt-contact (- jaw_y_b0 (mod jaw_height)) jaw_C_b0 (mod jaw_stiff)))"), "{dsp}");
@@ -911,7 +739,7 @@ mod tests {
   :objects (list (m/string 'str :planes 2))
   :connections (list (m/bow 'bow 'str 0.12 :hair 0.002) (m/fingerboard 'fret 'str 0.3))
   :listens (list (m/listen (m/plane 'str 1) 0.8)))";
-        let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("planes.lisp"), script).unwrap();
+        let instrument = generate_instrument(&mut modal_vm(), PathBuf::from("planes.lisp"), script).unwrap();
         let squashed = squash(&instrument.dsp);
         // The second direction reads the first's params, detuned by split.
         assert!(squashed.contains("(def str_v_f0 (* f0 str_tune str_split))"), "{squashed}");
@@ -925,8 +753,8 @@ mod tests {
         assert!(squashed.contains("(* (mod fret_weight) (max 0 fret_sig) (spring-connection (- 0 fret_y_b0) fret_C_b0 (mod fret_stiff)))"), "{squashed}");
         assert!(squashed.contains("(sin (* str_n 3.14159265 fret_str_at))"), "{squashed}");
         // No panel section for the second direction or the hidden hair.
-        assert!(!instrument.ui.contains("STRING v"), "{}", instrument.ui);
-        assert!(!instrument.ui.contains("HAIR"), "{}", instrument.ui);
+        assert!(!ui(&instrument).contains("STRING v"), "{}", ui(&instrument));
+        assert!(!ui(&instrument).contains("HAIR"), "{}", ui(&instrument));
     }
 
     #[test]
@@ -937,7 +765,7 @@ mod tests {
   :connections (list (m/felt 'hit 'mal 'a 0.1)
                      (m/force 'sym 'b 0.3 :saturate true :signal (list (m/tap-speed 'a 0.9) (m/tap-contact 'hit))))
   :listens (list (m/listen 'b 0.2)))";
-        let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("taps.lisp"), script).unwrap();
+        let instrument = generate_instrument(&mut modal_vm(), PathBuf::from("taps.lisp"), script).unwrap();
         let squashed = squash(&instrument.dsp);
         // The tap's point is its own param, its shape read from a's last state.
         assert!(squashed.contains("(param sym_tap_a_at @group sym_tap @default 0.9"), "{squashed}");
@@ -948,7 +776,7 @@ mod tests {
         assert!(squashed.contains("(gt (abs (read-history hit_F_h)) 0.0000001)"), "{squashed}");
         assert!(squashed.contains("(tanh sym_sig)"), "{squashed}");
         let bad = script.replace("(m/tap-contact 'hit)", "(m/tap-contact 'nope)");
-        let errors = generate_modal_instrument(&mut modal_vm(), PathBuf::from("taps.lisp"), &bad).unwrap_err();
+        let errors = generate_instrument(&mut modal_vm(), PathBuf::from("taps.lisp"), &bad).unwrap_err();
         assert_eq!(errors, vec!["force sym: tap on no connection nope".to_string()]);
     }
 
@@ -959,12 +787,12 @@ mod tests {
   :objects (list (m/mallet 'mal) (m/melt 'h (m/string 'str :modes 16) (m/rect-membrane 'skin :grid 4)))
   :connections (list (m/felt 'hit 'mal 'h (list 0.1 (list 0.3 0.4))))
   :listens (list (m/listen 'h (list 0.7 (list 0.6 0.6)))))";
-        let squashed = generate_modal_instrument(&mut modal_vm(), PathBuf::from("melt.lisp"), melt).unwrap().dsp
+        let squashed = generate_instrument(&mut modal_vm(), PathBuf::from("melt.lisp"), melt).unwrap().dsp
             .split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(squashed.contains("(def h_freqs (exp (+ (* (- 1 h_morph) (log str_freqs)) (* h_morph (log skin_freqs)))))"), "{squashed}");
         assert!(squashed.contains("(def hit_phi_b (+ (* (- 1 h_morph) hit_phi_b_a) (* h_morph hit_phi_b_b)))"), "{squashed}");
         let unequal = melt.replace(":modes 16", ":modes 12");
-        let errors = generate_modal_instrument(&mut modal_vm(), PathBuf::from("melt.lisp"), &unequal).unwrap_err();
+        let errors = generate_instrument(&mut modal_vm(), PathBuf::from("melt.lisp"), &unequal).unwrap_err();
         assert_eq!(errors, vec!["melt h: its parts have 12 and 16 modes; give them the same :modes".to_string()]);
 
         let mix = "(import eseq.modal :as m)
@@ -972,7 +800,7 @@ mod tests {
   :objects (list (m/finger 'fin) (m/string 'lo) (m/string 'hi :tune 1.5) (m/mix-hybrid 'pair 'lo 'hi))
   :connections (list (m/pluck 'pick 'fin 'pair (list 0.2 0.2)))
   :listens (list (m/listen 'pair (list 0.8 0.8))))";
-        let squashed = generate_modal_instrument(&mut modal_vm(), PathBuf::from("mix.lisp"), mix).unwrap().dsp
+        let squashed = generate_instrument(&mut modal_vm(), PathBuf::from("mix.lisp"), mix).unwrap().dsp
             .split_whitespace().collect::<Vec<_>>().join(" ");
         // The pluck sees the lever of both strings and pushes each by its share.
         assert!(squashed.contains("(def pick_y_b (+ (* (- 1 (mod pair_morph)) pick_y_b_0) (* (mod pair_morph) pick_y_b_1)))"), "{squashed}");
@@ -990,7 +818,7 @@ mod tests {
   :connections (list (m/reed 'reed 'bore 0) (m/tone-hole 'hole 'bore 0.66)
                      (m/lips 'lips 'lip 'horn 0) (m/jet 'jet 'pipe 0.05))
   :listens (list (m/listen 'bore 0.5)))";
-        let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("air.lisp"), script).unwrap();
+        let instrument = generate_instrument(&mut modal_vm(), PathBuf::from("air.lisp"), script).unwrap();
         let squashed = squash(&instrument.dsp);
         // Closed-open: odd harmonics, cos shapes; open-open: every harmonic, sin.
         assert!(squashed.contains("(* (tensor @shape [4] @data [1 3 5 7]) bore_f0)"), "{squashed}");
@@ -1013,7 +841,7 @@ mod tests {
             ("(m/jet 'jet 'lip 0)", "jet jet: blows into a tube (m/tube), not lip"),
         ] {
             let script = script.replace("(m/reed 'reed 'bore 0)", bad);
-            let errors = generate_modal_instrument(&mut modal_vm(), PathBuf::from("air.lisp"), &script).unwrap_err();
+            let errors = generate_instrument(&mut modal_vm(), PathBuf::from("air.lisp"), &script).unwrap_err();
             assert!(errors.contains(&expected.to_string()), "{errors:?}");
         }
         // A one-mode oscillator carries a silent second mode (eseq-k0m2.32).
@@ -1041,7 +869,7 @@ mod tests {
   :objects (list (m/modal-data 'ride :data (modal-read-data \"ride.modes.json\") :follow :octave))
   :connections (list (m/strokes 'stick 'ride))
   :listens (list (m/listen 'ride 0 :hear :position)))";
-        let instrument = generate_modal_instrument(&mut modal_vm(), dir.path().join("ride.lisp"), script).unwrap();
+        let instrument = generate_instrument(&mut modal_vm(), dir.path().join("ride.lisp"), script).unwrap();
         let squashed = squash(&instrument.dsp);
         // Modes and residues sorted together; measured losses get no air loss.
         assert!(squashed.contains("(def ride_hz (tensor @shape [3] @data [300 500 700]))"), "{squashed}");
@@ -1067,10 +895,10 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(out.join("instrument.json")).unwrap()).unwrap();
         assert_eq!(metadata["voice_controls"]["mode"], "out_voice_mode");
         // No mesh to view in a one-point identified model.
-        assert!(!instrument.ui.contains("mode-mesh-cycle"), "{}", instrument.ui);
+        assert!(!ui(&instrument).contains("mode-mesh-cycle"), "{}", ui(&instrument));
         // Strokes need a data object with strokes.
         let bad = script.replace("(m/strokes 'stick 'ride)", "(m/strokes 'stick 'nope)");
-        let errors = generate_modal_instrument(&mut modal_vm(), dir.path().join("ride.lisp"), &bad).unwrap_err();
+        let errors = generate_instrument(&mut modal_vm(), dir.path().join("ride.lisp"), &bad).unwrap_err();
         assert!(errors.contains(&"strokes stick: no object nope".to_string()), "{errors:?}");
     }
 
@@ -1085,7 +913,7 @@ mod tests {
                      (m/mount 'bridge 'body (list 0.5 0.45) 'str 1))
   :listens (list (m/pickup 'str 0.92 :height 3))
   :amp (m/amp :drive 30))";
-        let instrument = generate_modal_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), script).unwrap();
+        let instrument = generate_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), script).unwrap();
         let squashed = squash(&instrument.dsp);
         // The pickup: speed times the flux gradient at the string's distance, through the coil.
         assert!(squashed.contains("(def mic1_near (/ 1 (- 1 (clip (* (/ (* str_mass (/ 0.5 plk_thresh)) (mod mic1_height)) mic1_y) -0.9 0.6))))"), "{squashed}");
@@ -1109,21 +937,21 @@ mod tests {
         assert!(squashed.contains("(def bridge_push (* bridge_d2 (* -1 (mod bridge_weight) (mod bridge_gain) bridge_share str_mask)))"), "{squashed}");
         assert!(squashed.contains("(modal-advance str_free (+ (* str_G (* plk_F plk_phi_b)) bridge_push))"), "{squashed}");
         assert!(!squashed.contains("param bridge_str_"), "{squashed}");
-        assert!(instrument.ui.contains("\"AMP\""), "{}", instrument.ui);
+        assert!(ui(&instrument).contains("\"AMP\""), "{}", ui(&instrument));
         // m/speaker needs an amp; :amp must be one.
         let no_amp = script.replace(":amp (m/amp :drive 30)", "");
-        let errors = generate_modal_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &no_amp).unwrap_err();
+        let errors = generate_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &no_amp).unwrap_err();
         assert!(errors.contains(&"force air: m/speaker needs the patch's :amp".to_string()), "{errors:?}");
         let bad_mount = script.replace("(m/mount 'bridge 'body (list 0.5 0.45) 'str 1)", "(m/mount 'bridge 'str 0.5 'body 2)");
-        let errors = generate_modal_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &bad_mount).unwrap_err();
+        let errors = generate_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &bad_mount).unwrap_err();
         assert!(errors.contains(&"mount bridge: body is not a string".to_string()), "{errors:?}");
         assert!(errors.contains(&"mount bridge: end is 0 or 1, got 2".to_string()), "{errors:?}");
         // A mount reads its object's displacement: not a lumped finger's.
         let lumped = script.replace("(m/mount 'bridge 'body (list 0.5 0.45) 'str 1)", "(m/mount 'bridge 'pick 0 'str 1)");
-        let errors = generate_modal_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &lumped).unwrap_err();
+        let errors = generate_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &lumped).unwrap_err();
         assert!(errors.contains(&"mount bridge: the mount needs a modal object, not pick".to_string()), "{errors:?}");
         let bad_amp = script.replace(":amp (m/amp :drive 30)", ":amp 3");
-        let errors = generate_modal_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &bad_amp).unwrap_err();
+        let errors = generate_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &bad_amp).unwrap_err();
         assert!(errors.contains(&"patch: :amp is an m/amp, got 3".to_string()), "{errors:?}");
     }
 
@@ -1135,7 +963,7 @@ mod tests {
   :connections (list (m/felt 'hit 'ham 'str 0.12 :exponent 3)
                      (m/spring 'bridge 'str 0.99 'board (list 0.4 0.5)))
   :listens (list (m/listen 'board (list 0.6 0.3))))";
-        let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("unison.lisp"), script).unwrap();
+        let instrument = generate_instrument(&mut modal_vm(), PathBuf::from("unison.lisp"), script).unwrap();
         let squashed = squash(&instrument.dsp);
         // One set of knobs: the copies read the first string's and connection's params.
         assert!(squashed.contains("(param str_detune @group str @default 1.5"), "{squashed}");
@@ -1148,7 +976,7 @@ mod tests {
         // Each copy has its own contact state and is bridged, centred in time.
         assert!(squashed.contains("(make-history hit_u2_h)"), "{squashed}");
         assert!(squashed.contains("(spring-centred (- bridge_u2_y_a0 bridge_u2_y_b0) bridge_u2_gap_old"), "{squashed}");
-        assert!(!instrument.ui.contains("str_u1"), "{}", instrument.ui);
+        assert!(!ui(&instrument).contains("str_u1"), "{}", ui(&instrument));
         // The copies reuse the first string's modes, mask and losses, and
         // their connections its points' shapes.
         assert!(squashed.contains("(def str_u1_freqs (* str_freqs str_u1_ratio))"), "{squashed}");
@@ -1157,7 +985,7 @@ mod tests {
         assert!(squashed.contains("(def bridge_u1_old_b bridge_old_b)"), "{squashed}");
         // A listen that radiates: a high-pass the mix hears.
         let radiating = script.replace("(m/listen 'board (list 0.6 0.3))", "(m/listen 'board (list 0.6 0.3) :radiate 90)");
-        let radiated = generate_modal_instrument(&mut modal_vm(), PathBuf::from("unison.lisp"), &radiating).unwrap();
+        let radiated = generate_instrument(&mut modal_vm(), PathBuf::from("unison.lisp"), &radiating).unwrap();
         let radiated = squash(&radiated.dsp);
         assert!(radiated.contains("(param mic1_radiate @group mic1 @default 90 @min 20 @max 2000 @unit Hz @mod true @mod-mode additive)"), "{radiated}");
         assert!(radiated.contains("(def mic1_out (svf mic1_v (min (mod mic1_radiate) (* 0.45 samplerate)) 0.707 2))"), "{radiated}");
@@ -1167,7 +995,7 @@ mod tests {
             (":unison 2 :planes 2", "string str: :unison and :planes 2 do not combine"),
         ] {
             let bad = script.replace(":unison 3 :detune 1.5", args);
-            let errors = generate_modal_instrument(&mut modal_vm(), PathBuf::from("unison.lisp"), &bad).unwrap_err();
+            let errors = generate_instrument(&mut modal_vm(), PathBuf::from("unison.lisp"), &bad).unwrap_err();
             assert!(errors.contains(&error.to_string()), "{errors:?}");
         }
     }
@@ -1185,7 +1013,7 @@ mod tests {
             let at = dsp.find(&format!("(param {name} ")).unwrap_or_else(|| panic!("no param {name}: {dsp}"));
             dsp[at..at + dsp[at..].find(')').unwrap() + 1].to_string()
         };
-        let cheap = squash(&generate_modal_instrument(&mut modal_vm(), PathBuf::from("mod.lisp"), script).unwrap().dsp);
+        let cheap = squash(&generate_instrument(&mut modal_vm(), PathBuf::from("mod.lisp"), script).unwrap().dsp);
         assert!(cheap.contains("(def mod1 (in 6 @name mod1 @modulator 1))"), "{cheap}");
         // Per-sample work reads the modulated value ...
         assert!(param(&cheap, "bow_pressure").ends_with("@mod true @mod-mode additive)"), "{cheap}");
@@ -1203,7 +1031,7 @@ mod tests {
         assert!(!cheap.contains("mod_tick"), "{cheap}");
         // :modulate :all holds those on mod_tick: setup reads the held value,
         // per-sample code its latched results.
-        let all = squash(&generate_modal_instrument(&mut modal_vm(), PathBuf::from("mod.lisp"),
+        let all = squash(&generate_instrument(&mut modal_vm(), PathBuf::from("mod.lisp"),
                                                     &script.replace("\"probe-mod\"", "\"probe-mod\" :modulate :all")).unwrap().dsp);
         assert!(param(&all, "body_thick").ends_with("@mod true @mod-mode additive)"), "{all}");
         assert!(all.contains("(def body_thick_modh (event-hold (mod body_thick) mod_tick))"), "{all}");
@@ -1220,11 +1048,11 @@ mod tests {
                                                :const-loss (m/by-note 27.5 0 4186 1)))
   :connections (list (m/felt 'hit 'ham 'str (m/by-note 27.5 0.12 4186 0.06)))
   :listens (list (m/listen 'str 0.3)))";
-        let instrument = generate_modal_instrument(&mut modal_vm(), PathBuf::from("scale.lisp"), script).unwrap();
+        let instrument = generate_instrument(&mut modal_vm(), PathBuf::from("scale.lisp"), script).unwrap();
         let squashed = squash(&instrument.dsp);
         // The knob is the value at C4 (log-interpolated between 27.5 and 262 Hz) ...
         assert!(squashed.contains("(param str_length_c4 @group str @default 0.6605 @min 0.2 @max 20 @unit m @mod true @mod-mode additive)"), "{squashed}");
-        assert!(instrument.ui.contains("\"str.str_length_c4\""), "{}", instrument.ui);
+        assert!(ui(&instrument).contains("\"str.str_length_c4\""), "{}", ui(&instrument));
         // ... and the curve scales it at the note; a curve through 0 shifts it.
         // Worked out when the pitch or a knob changes, latched back to audio rate.
         assert!(squashed.contains("(def note_ln (log (event-hold f0 bynote_tick)))"), "{squashed}");
@@ -1235,37 +1063,29 @@ mod tests {
         assert!(squashed.contains("(def hit_str_at (latch hit_str_at_e bynote_tick))"), "{squashed}");
         assert!(squashed.contains("(sin (* str_n 3.14159265 hit_str_at))"), "{squashed}");
         for (curve, error) in [
-            ("(m/by-note 27.5 2.0)", "str_length: m/by-note takes pitch value pairs, at least two, got (27.5 2)"),
-            ("(m/by-note 262 0.66 27.5 2.0)", "str_length: m/by-note's pitches must be positive and rising, got (262 27.5)"),
+            ("(m/by-note 27.5 2.0)", "str_length: by-note takes pitch value pairs, at least two, got (27.5 2)"),
+            ("(m/by-note 262 0.66 27.5 2.0)", "str_length: by-note's pitches must be positive and rising, got (262 27.5)"),
             ("(m/by-note 27.5 40 4186 30)", "str_length: m/by-note is 35.16 at C4, outside its knob's 0.2..20"),
         ] {
             let bad = script.replace("(m/by-note 27.5 2.0 262 0.66 4186 0.05)", curve);
-            let errors = generate_modal_instrument(&mut modal_vm(), PathBuf::from("scale.lisp"), &bad).unwrap_err();
+            let errors = generate_instrument(&mut modal_vm(), PathBuf::from("scale.lisp"), &bad).unwrap_err();
             assert!(errors.contains(&error.to_string()), "{errors:?}");
         }
         // A curve given as a point is checked too.
         let bad_at = script.replace("(m/by-note 27.5 0.12 4186 0.06)", "(m/by-note 27.5 0.12)");
-        let errors = generate_modal_instrument(&mut modal_vm(), PathBuf::from("scale.lisp"), &bad_at).unwrap_err();
-        assert!(errors.contains(&"felt hit b: m/by-note takes pitch value pairs, at least two, got (27.5 0.12)".to_string()), "{errors:?}");
+        let errors = generate_instrument(&mut modal_vm(), PathBuf::from("scale.lisp"), &bad_at).unwrap_err();
+        assert!(errors.contains(&"felt hit b: by-note takes pitch value pairs, at least two, got (27.5 0.12)".to_string()), "{errors:?}");
     }
 
     #[test]
-    fn routes_only_scripts_that_import_eseq_modal() {
-        assert!(is_modal_patch_script("(import eseq.modal :as m)\n(m/patch)"));
-        assert!(is_modal_patch_script("(import eseq.modal)"));
-        assert!(!is_modal_patch_script("(import eseq.modal-tools :as t)"));
-        assert!(!is_modal_patch_script("(def x 1)"));
-    }
-
-    #[test]
-    fn rejects_a_script_that_does_not_end_in_a_patch() {
+    fn rejects_a_script_that_does_not_end_in_a_program() {
         let mut vm = modal_vm();
-        let errors = generate_modal_instrument(
+        let errors = generate_instrument(
             &mut vm,
             PathBuf::from("x.lisp"),
             "(import eseq.modal :as m)\n42",
         )
         .unwrap_err();
-        assert!(errors[0].contains("last form must be a patch"), "{errors:?}");
+        assert!(errors[0].contains("must be a program"), "{errors:?}");
     }
 }

@@ -35,6 +35,15 @@
 (module eseq.modal)
 
 (import eseq.modal.materials :as mat)
+(import eseq.gen.modulate :refer (mod-pass))
+(import eseq.gen.panel :refer (ui-helpers panel-form screen-form))
+(import eseq.gen :as gen :refer (concat-all index-of member? any? all? first-occurrence?
+  every-other take head? head-of-3? def-form? form-atoms def-names map-atoms rename-in defines?
+  nm sum-form pick-form tensor-form table-form table-row-form pole-form below-nyquist
+  white-noise-form sig-figs by-note-ref by-note? by-note-hz by-note-values by-note-log?
+  by-note-errors by-note-segments by-note-raw by-note-at by-note-forms pspec spec-ref param-form
+  host-name modulatable? mod-sources preamble mod-hold change-tick-forms voice-mode-sym
+  voice-mode-params voice-mode))
 
 (export string plate membrane finger mallet modal-data bar rect-membrane oscillator circ-plate solid
         melt mix-hybrid tube
@@ -46,164 +55,10 @@
 
 ;; ── small helpers ───────────────────────────────────────────────────────────
 
-;; The symbol id_suffix, the name of everything an object or connection
-;; introduces: (nm 'str "freqs") -> str_freqs.
-;;   id      the owning object's or connection's id (a symbol)
-;;   suffix  what the name is, as a string or symbol
-(def nm (id suffix) (symbol id "_" suffix))
-
-;; Append a list of lists into one list.
-;;   lists  a list whose items are lists
-(def concat-all (lists) (apply append lists))
-
-;; A form summing terms: 0 for none, the term itself for one, else (+ ...).
-;;   terms  a list of forms
-(def sum-form (terms)
-  (if (empty? terms) 0 (if (= (len terms) 1) (first terms) (cons '+ terms))))
-
-;; ── values that follow the note ─────────────────────────────────────────────
-;; Any knob argument can follow the played note instead of being one number,
-;; as a piano's strings shorten and thin up the keyboard:
+;; A value following the played note (eseq.gen's by-note), as a knob argument:
 ;;   (m/string 'str :length (m/by-note 27.5 2.0 262 0.66 4186 0.05))
-;; Between the given pitches it is interpolated over log frequency: of the
-;; logs of the values when all are positive (so a length halves smoothly
-;; over an octave), of the values themselves otherwise; outside them it holds
-;; the end value. The knob sets the value at C4 and moves the whole curve
-;; with it: it scales a positive curve and shifts any other.
-
-;; The pitch a by-note knob shows its value at, Hz.
-(def by-note-ref 261.63)
-
-;; A value following the played note.
 ;;   points  pitch value pitch value ...: pitches in Hz, rising
-(def by-note (&rest points) (dict :kind :by-note :points points))
-
-;; True when x is a by-note value.
-;;   x  anything
-(def by-note? (x) (and (map? x) (= (get x :kind) :by-note)))
-
-;; Every other item of xs, from start (0 or 1).
-;;   xs     a list
-;;   start  the first index
-(def every-other (xs start) (map (lambda (k) (nth xs (+ start (* 2 k)))) (range (floor (/ (len xs) 2)))))
-
-;; A by-note's pitches and values, as two lists.
-;;   curve  a by-note
-(def by-note-hz (curve) (every-other (get curve :points) 0))
-(def by-note-values (curve) (every-other (get curve :points) 1))
-
-;; True when a by-note interpolates logs of its values (all positive).
-;;   curve  a by-note
-(def by-note-log? (curve) (all? (lambda (v) (> v 0)) (by-note-values curve)))
-
-;; What is wrong with a by-note as an argument: pairs of numbers, at least
-;; two, pitches positive and rising.
-;;   what   the param, for messages ("str_length")
-;;   curve  a by-note
-(def by-note-errors (what curve)
-  (let ((pts (get curve :points)))
-    (if (or (< (len pts) 4) (not (= (mod (len pts) 2) 0)) (not (all? number? pts)))
-      (list (str what ": m/by-note takes pitch value pairs, at least two, got " (source pts)))
-      (let ((hz (by-note-hz curve)))
-        (if (and (> (first hz) 0) (all? (lambda (k) (< (nth hz k) (nth hz (+ k 1)))) (range (- (len hz) 1)))) nil
-          (list (str what ": m/by-note's pitches must be positive and rising, got " (source hz))))))))
-
-;; A by-note in the domain it is interpolated in (log pitch; log value when
-;; all are positive): its first value and each segment as (x0 width slope).
-;; The curve at log pitch x is y0 plus every slope times clamp(x - x0, 0,
-;; width).
-;;   curve  a by-note that by-note-errors finds nothing wrong with
-(def by-note-segments (curve)
-  (let ((xs (map log (by-note-hz curve))) (lg (by-note-log? curve)))
-    (let ((ys (map (lambda (v) (if lg (log v) v)) (by-note-values curve))))
-      (dict :y0 (first ys)
-            :segs (map (lambda (k) (let ((w (- (nth xs (+ k 1)) (nth xs k))))
-                                     (list (nth xs k) w (/ (- (nth ys (+ k 1)) (nth ys k)) w))))
-                       (range (- (len xs) 1)))))))
-
-;; The curve at pitch hz, in its interpolation domain.
-;;   curve  a by-note
-;;   hz     a pitch, Hz
-(def by-note-raw (curve hz)
-  (let ((sg (by-note-segments curve)) (x (log hz)))
-    (reduce (lambda (y sv) (+ y (* (nth sv 2) (clamp (- x (nth sv 0)) 0 (nth sv 1))))) (get sg :y0) (get sg :segs))))
-
-;; The curve at pitch hz, as the generated code interpolates it.
-;;   curve  a by-note
-;;   hz     a pitch, Hz
-(def by-note-at (curve hz) (let ((y (by-note-raw curve hz))) (if (by-note-log? curve) (exp y) y)))
-
-;; Forms defining every by-note param's value from its knob: the curve at
-;; the note, scaled or shifted so it passes through the knob's value at C4.
-;; It changes only when the pitch or a knob does, so it is worked out on
-;; bynote_tick (see change-tick-forms) and latched back to audio rate.
-;;   specs  every param spec
-(def by-note-forms (specs)
-  (let ((curved (filter (lambda (p) (get p :by-note)) specs)))
-    (if (empty? curved) (list)
-      (append
-        (change-tick-forms "bynote" (cons 'f0 (map (lambda (p) (get p :sym)) curved)))
-        (list '(def note_ln (log (event-hold f0 bynote_tick))))
-        (concat-all
-          (map (lambda (p)
-                 (let ((curve (get p :by-note)) (sg (by-note-segments (get p :by-note))))
-                   (let ((offset (sum-form (cons (- (get sg :y0) (by-note-raw curve by-note-ref))
-                                                 (map (lambda (sv) `(* ,(nth sv 2) (clip (- note_ln ,(nth sv 0)) 0 ,(nth sv 1))))
-                                                      (get sg :segs)))))
-                         (knob `(event-hold ,(get p :sym) bynote_tick)))
-                     (list `(def ,(symbol (get p :uses) "_e") ,(if (by-note-log? curve) `(* ,knob (exp ,offset)) `(+ ,knob ,offset)))
-                           `(def ,(get p :uses) (latch ,(symbol (get p :uses) "_e") bynote_tick))))))
-               curved))))))
-
-;; The symbol generated code reads a param by: its knob's, or for a by-note
-;; param the value at the note its knob scales.
-;;   p  a param spec
-(def spec-ref (p) (if (get p :uses) (get p :uses) (get p :sym)))
-
-;; A param spec: one DGenLisp param of an object, connection or mic, plus
-;; how the generated panel shows it.
-;;   id       the owner's id; the param is named id_name and grouped by id
-;;   name     the param's own name, a string ("length")
-;;   default  its initial value (for a menu, the option's index), or an
-;;            m/by-note: the param id_name then follows the note and its
-;;            knob, id_name_c4, is the value at C4
-;;   lo, hi   its range
-;;   options  a list of option strings: makes the param a menu
-;;   unit     a unit symbol for @unit ('m, 'mm, 'Hz, 'ms), or nil
-;;   title    the panel label (default: name)
-;;   taper    the panel knob's taper, :linear or :log
-;;   dec      decimals shown (default: picked from hi, 2 / 1 / 0)
-(def pspec (id name default lo hi &key (options nil) (unit nil) (title nil) (taper :linear) (dec nil))
-  (let ((curve (if (by-note? default) default nil)))
-    (dict :sym (if curve (nm id (str name "_c4")) (nm id name)) :uses (if curve (nm id name) nil) :by-note curve
-          :name name :group id
-          ;; a malformed curve (check reports it) shows its first value
-          :default (if curve (if (empty? (by-note-errors "" curve)) (sig-figs (by-note-at curve by-note-ref) 4) lo) default)
-          :min lo :max hi :options options :unit unit
-          :title (if title title name) :taper taper
-          :dec (if dec dec (if (<= hi 10) 2 (if (<= hi 100) 1 0))))))
-
-;; x rounded to n significant figures (a knob default that prints short).
-;;   x  a number
-;;   n  how many figures
-(def sig-figs (x n)
-  (if (= x 0) 0
-    (let ((k (pow 10 (- (- n 1) (floor (/ (log (abs x)) (log 10)))))))
-      (/ (round (* x k)) k))))
-
-;; The DGenLisp (param ...) form declaring a param spec: a menu with
-;; @options when it has options, else a range with @min / @max (and @unit).
-;;   p  a param spec
-(def param-form (p)
-  (if (get p :options)
-    `(param ,(get p :sym) @group ,(get p :group) @options [ ,@(get p :options) ] @default ,(get p :default))
-    (append `(param ,(get p :sym) @group ,(get p :group) @default ,(get p :default) @min ,(get p :min) @max ,(get p :max))
-            (if (get p :unit) `(@unit ,(get p :unit)) nil))))
-
-;; True when the host may modulate a param (see mod-pass): every range
-;; param but the Voicing, which the host reads for itself.
-;;   p  a param spec
-(def modulatable? (p) (and (not (get p :options)) (not (= (get p :sym) 'out_voice_mode))))
+(def by-note (&rest points) (apply gen/by-note points))
 
 ;; What an object is made of, as given: one material (eseq.modal.materials)
 ;; or a list of them to choose between. The materials as a list either way.
@@ -220,72 +75,11 @@
       (list (pspec id "material" 0 0 (- (len choices) 1)
                    :options (map (lambda (m) (get m :name)) choices) :title "Material")))))
 
-;; A form choosing among values by a menu param's index: values[idx], with
-;; DGenLisp's selector (1-based; the index is a param, so it can change
-;; while playing). A single value is just itself.
-;;   idx     the menu param's symbol
-;;   values  one number per menu option
-(def pick-form (idx values)
-  (if (= (len values) 1) (first values)
-    `(selector (+ 1 (clip (round ,idx) 0 ,(- (len values) 1))) ,@values)))
-
-;; A tensor literal of values (one per mode, usually).
-;;   values  a list of numbers
-(def tensor-form (values) `(tensor @shape [ ,(len values) ] @data [ ,@values ]))
-
-;; A tensor literal of rows (a list of equal-length lists).
-;;   rows  the rows
-(def table-form (rows)
-  `(tensor @shape [ ,(len rows) ,(len (first rows)) ] @data [ ,@(concat-all rows) ]))
-
-;; A form for row k of a table tensor of rows n wide.
-;;   table  the table's symbol
-;;   n      its row width
-;;   k      a form for the row
-(def table-row-form (table n k) `(gather ,table (+ (iota ,n) (* ,k ,n))))
-
 ;; strokes with f applied to each one's residues (:re and :im).
 ;;   f        a function from a list of values to a list
 ;;   strokes  a list of strokes
 (def map-residues (f strokes) (map (lambda (st) (merge st :re (f (get st :re)) :im (f (get st :im)))) strokes))
 
-;; A form for a one-pole decay's per-sample pole: e^(-1 / (seconds sr)).
-;;   seconds  a form for the time constant, s
-(def pole-form (seconds) `(exp (/ -1 (* ,seconds samplerate))))
-
-;; A form for hz kept below Nyquist (at 0.45 of the sample rate), for filters.
-;;   hz  a form
-(def below-nyquist (hz) `(min ,hz (* 0.45 samplerate)))
-
-;; White noise in -1..1 (DGenLisp's noise is 0..1).
-(def white-noise-form () '(- (* 2 (noise)) 1))
-
-;; The first position of x in xs, or nil.
-;;   xs  a list
-;;   x   a value
-(def index-of (xs x)
-  (reduce (lambda (found k) (if (= found nil) (if (= (nth xs k) x) k nil) found)) nil (range (len xs))))
-
-;; True when xs holds x.
-;;   xs  a list
-;;   x   a value
-(def member? (xs x) (not (= (index-of xs x) nil)))
-
-;; True when pred holds for some item of xs.
-;;   pred  a predicate
-;;   xs    a list
-(def any? (pred xs) (not (empty? (filter pred xs))))
-
-;; True when pred holds for every item of xs.
-;;   pred  a predicate
-;;   xs    a list
-(def all? (pred xs) (= (len (filter pred xs)) (len xs)))
-
-
-;; True when xs[k] appears nowhere before k.
-;;   xs  a list
-;;   k   a position in it
-(def first-occurrence? (xs k) (= (index-of xs (nth xs k)) k))
 
 ;; The params every note-following object ends with: mute (extra damping
 ;; while the note is released), tune (a frequency ratio) and mass (relative
@@ -1505,7 +1299,7 @@
 
 ;; A whole patch.
 ;;   name         the instrument's name; what Save offers, and the folder
-;;                eseq modal emit writes by default
+;;                eseq generate writes by default
 ;;   objects      a list of objects
 ;;   connections  a list of connections, solved in this order
 ;;   listens      a list of listens, mixed into the output
@@ -1521,7 +1315,7 @@
 ;;   modulate     which knobs the host can modulate: :cheap (those costing
 ;;                nothing until modulated) or :all (also those shaping
 ;;                knob-only setup, such as a plate's size or a point on it,
-;;                for a fixed cost; see mod-pass)
+;;                for a fixed cost; see eseq.gen.modulate)
 (def patch (&key (name "modal") (objects nil) (connections nil) (listens nil) (level 1) (voicing nil) (tone nil)
                 (amp nil) (modulate :cheap))
   (let ((conns (expand-unison-connections (expand-connections connections) objects)))
@@ -1536,7 +1330,9 @@
                                         o))
                           compiled)
             :connections conns :listens listens :level level :voicing voicing :tone tone :amp amp
-            :modulate modulate))))
+            :modulate modulate
+            ;; a patch is an eseq.gen program
+            :generator generate))))
 
 ;; ── data objects' points ────────────────────────────────────────────────────
 ;; A data object's accesses address its points by index or by (x y z) (the
@@ -2496,38 +2292,6 @@
 ;; sample while it moves; a still one costs nothing.
 ;;   patch  the patch
 (def coef-tick-forms (patch) (change-tick-forms "coef" (coef-inputs patch)))
-
-;; Forms defining <name>_tick: 1 on a note's first sample, on the
-;; instrument's first, whenever one of inputs changed since the last sample
-;; (each kept in a history <name>_in<k>), and every mod-hold samples when a
-;; modulation source (mod1..mod4) has moved since the last tick or a note
-;; started since. The sources: what the tick's work reads may be modulated
-;; ((mod p), see mod-pass), and a clock must not read (mod p) itself. The
-;; refresh after a start: what the first tick computes can be stale (a held
-;; Ride Kit wash), and the next puts it right.
-;;   name    the tick's prefix, a string
-;;   inputs  forms to watch
-(def change-tick-forms (name inputs)
-  (let ((n (lambda (suffix) (symbol name suffix)))
-        (h (lambda (k) (symbol name "_in" k)))
-        (src (lambda (k) (symbol name "_src" k)))
-        (sources mod-sources))
-    (let ((tick (n "_tick")) (first-sample (n "_first")) (phase (n "_phase")) (pending (n "_pending")))
-      (append (list `(make-history ,(n "_started")) `(make-history ,pending))
-              (map (lambda (k) `(make-history ,(h k))) (range (len inputs)))
-              (map (lambda (k) `(make-history ,(src k))) (range (len sources)))
-              (list `(def ,first-sample (lte (read-history ,(n "_started")) 0))
-                    `(def ,phase (eq (accum 1 0 0 ,mod-hold) 0))
-                    `(def ,tick (max hit ,first-sample
-                                     ,@(map (lambda (k) `(gt (abs (- ,(nth inputs k) (read-history ,(h k)))) 0))
-                                            (range (len inputs)))
-                                     (* ,phase (max (read-history ,pending)
-                                                    ,@(map (lambda (k) `(gt (abs (- ,(nth sources k) (read-history ,(src k)))) 0))
-                                                           (range (len sources)))))))
-                    `(write-history ,(n "_started") 1)
-                    `(write-history ,pending (max hit ,first-sample (* (- 1 ,phase) (read-history ,pending)))))
-              (map (lambda (k) `(write-history ,(h k) ,(nth inputs k))) (range (len inputs)))
-              (map (lambda (k) `(write-history ,(src k) (gswitch ,tick ,(nth sources k) (read-history ,(src k))))) (range (len sources)))))))
 
 ;; Protocol step 1: forms defining obj_free, where obj would be this sample
 ;; with no force on it (a finger's tip also follows its hand; a mallet also
@@ -3530,14 +3294,10 @@
 ;; The output gain param spec, out_gain.
 (def out-gain-param () (pspec 'out "gain" 0.5 0 2 :title "Gain"))
 
-;; The host's Voicing param, out_voice_mode (bound in instrument.json; the
-;; host finds it by that name, modal_patch.rs's VOICE_MODE_PARAM), when
-;; the patch has :voicing: 0 poly, 1 one voice (retriggered), as the host's
-;; voice modes; none otherwise.
+;; The host's Voicing param when the patch has :voicing (see
+;; voice-mode-params); none otherwise.
 ;;   patch  the patch
-(def voicing-params (patch)
-  (let ((v (get patch :voicing)))
-    (if (= v nil) (list) (list (pspec 'out "voice_mode" (if (= v :poly) 0 1) 0 3 :title "Voicing" :dec 0)))))
+(def voicing-params (patch) (voice-mode-params (get patch :voicing)))
 
 ;; The output Tone param, out_tone, when the patch has :tone; none otherwise.
 ;;   patch  the patch
@@ -3697,47 +3457,6 @@
 
 ;; ── the whole program ───────────────────────────────────────────────────────
 
-;; The host's modulation sources, the voice inputs after clock: what every
-;; modulatable param reads (see mod-pass).
-(def mod-sources '(mod1 mod2 mod3 mod4))
-
-;; The forms every modal instrument starts with: the voice inputs (gate,
-;; pitch, velocity, trigger, clock, then mod-sources), and from them hit (1
-;; on the sample a note starts), age (seconds since it did), hit_velocity
-;; (the velocity it started with) and f0 (the note's frequency, at least
-;; 20 Hz).
-(def preamble ()
-  (append
-   (list '(def gate (in 1 @name gate))
-         '(def pitch (in 2 @name pitch))
-         '(def velocity (in 3 @name velocity))
-         '(def trigger (in 4 @name trigger))
-         '(def clock (in 5 @name clock)))
-   (map (lambda (k) `(def ,(nth mod-sources k) (in ,(+ k 6) @name ,(nth mod-sources k) @modulator ,(+ k 1))))
-        (range (len mod-sources)))
-   (list
-        '(defmacro onset-of (trigger)
-           (make-history previous)
-           (def high (gt trigger 0.5))
-           (def rising (* high (lte (read-history previous) 0.5)))
-           (write-history previous high)
-           rising)
-        '(defmacro seconds-since (onset)
-           (make-history elapsed)
-           (make-history armed)
-           (def played (max onset (read-history armed)))
-           (write-history armed played)
-           (def samples (gswitch onset 0 (min (* 8 samplerate) (+ 1 (read-history elapsed)))))
-           (write-history elapsed samples)
-           (gswitch played (/ samples samplerate) 8))
-        '(def hit (onset-of trigger))
-        '(def age (seconds-since hit))
-        '(def hit_velocity (latch velocity hit))
-        ;; note-following objects' coefficients follow f0 (no hop-hold: it
-        ;; silences an instrument, eseq-k0m2.31); DGen works them out again
-        ;; only when it changes (see slow-names)
-        '(def f0 (max pitch 20)))))
-
 ;; A (use-defmacro name) form for every protocol macro in content/defmacros
 ;; the generated code may call.
 (def library-imports ()
@@ -3746,6 +3465,10 @@
          modal-band modal-loss modal-coefs modal-predict modal-point modal-advance
          two-mass-coefs mallet-predict mallet-advance pluck-contact spring-connection spring-centred
          felt-contact bow-contact voice-amp)))
+
+;; The library defmacros above that keep state, so run every sample (see
+;; eseq.gen.modulate's mod-pass).
+(def stateful-macros '(voice-amp pluck-contact))
 
 ;; Every param spec of the instrument, in declaration order: the objects',
 ;; the connections', the mics', then the output gain.
@@ -3814,244 +3537,7 @@
                   '(write-history dcy dc-out)
                   '(def voice_out (tanh dc-out))
                   '(out voice_out 1 @name audio)
-                  '(out (voice-amp (max (gt gate 0.5) (lt age 0.25)) voice_out voice_out) 2 @name amp @amp true))))))))
-
-;; ── modulation ──────────────────────────────────────────────────────────────
-;; Range params are modulatable: the host adds its sources (mod-sources),
-;; scaled by per-param depths, to the knob, read as (mod p) and gated off
-;; while a param has no route. A knob is constant within a block, so DGen
-;; works out what depends only on knobs (setup: a plate's modes from its
-;; size, a point's shape on it) once per block; read modulated, that work
-;; would run every sample. So by default only knobs no setup reads are
-;; modulatable, free until modulated: per-sample code reads (mod p), and
-;; the work on an event clock (a by-note's, held coefficients') reads
-;; (event-hold (mod p) clock), the clock itself watching the sources every
-;; mod-hold samples (change-tick-forms). With the patch's :modulate :all,
-;; the knobs setup reads are modulatable too, held: sampled on mod_tick,
-;; p_modh feeds the setup, which runs on that tick only, p_mod keeps it in a
-;; history for everything else, and each setup value other code reads is
-;; latched as <name>_mod, a cost every sample, modulated or not
-;; (eseq-k0m2.47: the cello +9%, the piano +80%, the Ride Kit +110%).
-
-;; Samples between reads of the modulation sources: 0.7 ms at 48 kHz.
-(def mod-hold 32)
-
-;; The heads of forms that keep state or read the voice's inputs: a def
-;; using one runs every sample, and so does anything that reads it (the
-;; patch's own defmacros count too: see setup-names).
-(def per-sample-heads
-  '(in read-history write-history make-history latch event-hold svf adsr noise delay phasor accum
-    voice-amp pluck-contact))
-
-;; Voice inputs that change only between notes (or under a glide): DGen
-;; works out what depends only on them and knobs once per block too, so
-;; setup-names treats them, and what a note's start latches (slow-def?), as
-;; not per-sample; mod_tick watches them.
-(def slow-names '(f0))
-
-;; True when a def is of a slow value: one of slow-names, a latch (what a
-;; note's start latches, the played key and its velocity; a held object's
-;; coefficients, latched on coef_tick), or what a note's start event-holds.
-;; DGen schedules pure math over latches on their trigger, and a modulated
-;; value mixed into it miscompiles (a data bell's G from its latched wref
-;; and its mass went silent), so a param read with one counts as setup.
-;;   f  a def form
-(def slow-def? (f)
-  (let ((e (nth f 2)))
-    (or (member? slow-names (nth f 1))
-        (head-of-3? e 'latch)
-        (and (head-of-3? e 'event-hold) (= (nth e 2) 'hit)))))
-
-;; True when f is a list whose first item is head.
-;;   f     a form
-;;   head  a symbol
-(def head? (f head) (and (list? f) (not (empty? f)) (= (first f) head)))
-
-;; True when f is a three-item (head x y) form: (latch x trigger),
-;; (event-hold x clock).
-;;   f     a form
-;;   head  a symbol
-(def head-of-3? (f head) (and (head? f head) (= (len f) 3)))
-
-;; True when f is a top-level (def ...) form.
-;;   f  a form
-(def def-form? (f) (head? f 'def))
-
-;; Every atom (symbol, number, keyword) in a form, nested lists flattened.
-;;   form  a form
-(def form-atoms (form) (if (list? form) (concat-all (map form-atoms form)) (list form)))
-
-;; The names a def form defines (one, or a list for (def (a b) ...)).
-;;   f  a (def target expr) form
-(def def-names (f) (let ((target (nth f 1))) (if (list? target) target (list target))))
-
-;; form with every atom a replaced by (f a).
-;;   form  a form
-;;   f     a function of an atom
-(def map-atoms (form f) (if (list? form) (map (lambda (x) (map-atoms x f)) form) (f form)))
-
-;; form with every symbol in names replaced by itself with suffix.
-;;   form    a form
-;;   names   the symbols to rename
-;;   suffix  a string
-(def rename-in (form names suffix)
-  (map-atoms form (lambda (a) (if (member? names a) (symbol a suffix) a))))
-
-;; A predicate: true for a def defining one of names.
-;;   names  symbols
-(def defines? (names) (lambda (f) (and (def-form? f) (any? (lambda (n) (member? names n)) (def-names f)))))
-
-;; The setup defs among forms: pure defs (no per-sample head, no per-sample
-;; name, no defmacro of the patch's own; slow-def? ones skipped) reading one
-;; of params or another setup def. Returns the names they define.
-;;   forms   the instrument's forms, in order
-;;   params  the params' symbols
-(def setup-names (forms params)
-  (if (empty? params) (list)
-    (let ((heads (append per-sample-heads (map (lambda (f) (nth f 1)) (filter (lambda (f) (head? f 'defmacro)) forms)))))
-      (get (reduce (lambda (acc f)
-                     (if (or (not (def-form? f)) (slow-def? f)) acc
-                       (let ((atoms (form-atoms (nth f 2))) (dynamic (get acc :dynamic)) (setup (get acc :setup)))
-                         (if (any? (lambda (a) (or (member? heads a) (member? dynamic a))) atoms)
-                           (merge acc :dynamic (append dynamic (def-names f)))
-                           (if (any? (lambda (a) (or (member? params a) (member? setup a))) atoms)
-                             (merge acc :setup (append setup (def-names f)))
-                             acc)))))
-                   (dict :dynamic (list) :setup (list))
-                   forms)
-           :setup))))
-
-;; Forms defining mod_tick, on which :modulate :all's held params are
-;; sampled (see change-tick-forms): their knobs and the slow inputs
-;; (slow-names) are watched every sample, the modulation sources every
-;; mod-hold samples.
-;;   params  the held params' symbols
-(def mod-tick-forms (params) (change-tick-forms "mod" (append slow-names params)))
-
-;; forms with specs' params modulatable (see above). A param no setup reads
-;; is read as (mod p), by the work on an event clock (event-cones) as
-;; (event-hold (mod p) clock); a clock's own change detection
-;; (clock-form?) keeps reading the knob. With all, a param setup reads is
-;; modulated too, held: setup defs read p_modh, other forms p_mod and the
-;; setup values' latches, and the tick and each held param's p_modh / p_mod
-;; follow the last param form. Each modulated param's form gets @mod.
-;;   specs  the modulatable param specs
-;;   all    true to modulate the params setup reads too
-;;   forms  the instrument's forms, in order
-(def mod-pass (specs all forms)
-  (let ((params (map (lambda (p) (get p :sym)) specs))
-        (param? (lambda (f) (head? f 'param)))
-        (clock? (clock-form? forms))
-        (cones (event-cones forms))
-        (read-in (lambda (names fs) (filter (lambda (a) (member? names a)) (concat-all (map form-atoms fs))))))
-    (let ((fed (read-in params (filter (defines? (setup-names forms params)) forms)))
-          (in-cone (lambda (f) (if (def-form? f) (cone-clock cones (first (def-names f))) nil))))
-      (let ((direct (filter (lambda (p) (not (member? fed p))) params))
-            (held (if all fed (list))))
-        ;; the setup the held params feed, which runs on mod_tick
-        (let ((hsetup (setup-names forms held)))
-          (let ((held-setup? (defines? hsetup))
-                ;; how other code reads a modulated param, nil for any other atom
-                (live (lambda (a) (if (member? direct a) (list 'mod a) (if (member? held a) (symbol a "_mod") nil)))))
-            (let ((latched (read-in hsetup (filter (lambda (f) (not (or (held-setup? f) (param? f)))) forms)))
-                  (last-param (reduce (lambda (k i) (if (param? (nth forms i)) i k)) 0 (range (len forms))))
-                  (read-live (lambda (a) (let ((r (live a))) (if r r a)))))
-              (concat-all
-                (map (lambda (i)
-                       (let ((f (nth forms i)) (clock (in-cone (nth forms i))))
-                         (append
-                           (if (param? f)
-                             (list (if (live (nth f 1)) (append f '(@mod true @mod-mode additive)) f))
-                             (if (clock? f) (list f)
-                               (if clock (list (clock-held (rename-in f hsetup "_mod") live read-live clock))
-                                 (if (held-setup? f)
-                                   (cons (rename-in f held "_modh")
-                                         (map (lambda (n) `(def ,(symbol n "_mod") (latch ,n mod_tick)))
-                                              (filter (lambda (n) (member? latched n)) (def-names f))))
-                                   (list (map-atoms (rename-in f hsetup "_mod") read-live))))))
-                           (if (and (= i last-param) (not (empty? held)))
-                             (append (mod-tick-forms held)
-                                     (map (lambda (p) `(def ,(symbol p "_modh") (event-hold (mod ,p) mod_tick))) held)
-                                     (concat-all (map held-value-forms held)))
-                             (list)))))
-                     (range (len forms)))))))))))
-
-;; form with each modulated param read as clock holds it, (event-hold v
-;; clock) with v how live reads it, for work DGen schedules on that clock: a
-;; (mod p) mixed into it bare would run it every sample. Inside an
-;; (event-hold x clock) already there a param is just v: holding twice
-;; silences the instrument. (Under :modulate :all this work can also read
-;; a setup value's mod_tick latch, the pattern held-value-forms avoids for
-;; params: correct in every example, but not proven safe in general.)
-;;   form       a form in clock's cone (see event-cones)
-;;   live       a param's read form, or nil for any other atom
-;;   read-live  an atom's read form: live's, or the atom
-;;   clock      the clock's symbol
-(def clock-held (form live read-live clock)
-  (if (list? form)
-    (if (head-of-3? form 'event-hold)
-      (list 'event-hold (map-atoms (nth form 1) read-live) (nth form 2))
-      (map (lambda (x) (clock-held x live read-live clock)) form))
-    (let ((r (live form))) (if r `(event-hold ,r ,clock) form))))
-
-;; The defs DGen computes on an event clock's schedule, as (name clock)
-;; pairs in order: a def holding an (event-hold x clock) or reading one
-;; already in a clock's cone, up to the (latch x clock) that brings it back
-;; to audio rate.
-;;   forms  the instrument's forms
-(def event-cones (forms)
-  (reduce (lambda (cones f)
-            (if (or (not (def-form? f)) (head? (nth f 2) 'latch)) cones
-              (let ((c (form-clock (nth f 2) cones)))
-                (if c (append cones (map (lambda (n) (list n c)) (def-names f))) cones))))
-          (list) forms))
-
-;; The clock of the first event-hold in a form, or of the first name it
-;; reads in one of cones; nil when none.
-;;   form   a form
-;;   cones  (name clock) pairs, from event-cones
-(def form-clock (form cones)
-  (if (list? form)
-    (if (head-of-3? form 'event-hold) (nth form 2)
-      (reduce (lambda (c x) (if c c (form-clock x cones))) nil form))
-    (cone-clock cones form)))
-
-;; The clock a name is in the cone of, or nil.
-;;   cones  (name clock) pairs
-;;   name   a symbol
-(def cone-clock (cones name)
-  (let ((hit (filter (lambda (pair) (= (first pair) name)) cones))) (if (empty? hit) nil (nth (first hit) 1))))
-
-;; The forms defining a held param's p_mod: p_modh, taken on mod_tick and
-;; kept in a history between ticks. A history, not a latch: DGen schedules a
-;; latch on its trigger, so another clock's work reading it between
-;; mod_ticks (a data bell's coefficients on release) gets garbage.
-;;   p  the param's symbol
-(def held-value-forms (p)
-  (let ((h (symbol p "_hold")) (v (symbol p "_mod")))
-    (list `(make-history ,h)
-          `(def ,v (gswitch mod_tick ,(symbol p "_modh") (read-history ,h)))
-          `(write-history ,h ,v))))
-
-;; A predicate: true for a form of an event clock's change detection: the
-;; def of one of forms' event-hold triggers (coef_tick, bynote_tick), or a
-;; write to a history that def reads. Such a form must not read (mod p):
-;; DGen gates each (mod p) on its routes being active, and a clock read in a
-;; gated cone miscompiles what it clocks (the Ride Kit's wash went wrong),
-;; so mod-pass leaves it reading the knobs.
-;;   forms  the instrument's forms
-(def clock-form? (forms)
-  (let ((clocks (concat-all (map event-clocks forms))))
-    (let ((clock-def? (defines? clocks)))
-      (let ((watched (concat-all (map form-atoms (filter clock-def? forms)))))
-        (lambda (f) (or (clock-def? f) (and (head-of-3? f 'write-history) (member? watched (nth f 1)))))))))
-
-;; The triggers of every (event-hold x trigger) in a form.
-;;   form  a form
-(def event-clocks (form)
-  (if (not (list? form)) (list)
-    (append (if (head-of-3? form 'event-hold) (list (nth form 2)) (list))
-            (concat-all (map event-clocks form)))))
+                  '(out (voice-amp (max (gt gate 0.5) (lt age 0.25)) voice_out voice_out) 2 @name amp @amp true)))) :stateful stateful-macros))))
 
 ;; The instrument's dsp.lisp source, pretty-printed.
 ;;   patch  a patch that checks clean
@@ -4113,129 +3599,6 @@
 (def shown-objects (patch) (filter (lambda (o) (not (get o :plane-of))) (get patch :objects)))
 (def shown-connections (patch) (filter (lambda (c) (not (get c :internal))) (get patch :connections)))
 
-;; The first n items of xs (all of them when there are fewer).
-;;   xs  a list
-;;   n   how many
-(def take (xs n) (map (lambda (i) (nth xs i)) (range (min n (len xs)))))
-
-;; The definitions every generated panel starts with, as forms. They are
-;; named mx-* to keep them apart from the user's own code when they edit the
-;; result. In them, section is a section number, name a param's host name
-;; (see host-name), title a label, and width a size in panel units.
-;;   mx-c        the panel's one accent colour
-;;   mx-section  the selected section's number
-;;   mx-p        the host's param record for name
-;;   mx-select   a callback selecting section
-;;   mx-knob     a knob (decimals shown, :linear / :log taper)
-;;   mx-label    a panel's heading strip
-;;   mx-panel    a section's panel holding body; clicking it selects section
-;;   mx-option   a dropdown for a menu param (options: its option strings)
-;;   mx-num      a number field for the screen's param page
-;;   mx-chip     an object in the screen's patch drawing
-;;   mx-link     a connection or mic in the drawing
-;;   mx-tab      a tab under the screen selecting section
-(def ui-helpers ()
-  '((def mx-c () (eseq.effects.custom-ui-lego/ui-accent-cyan))
-    (def mx-section () eseq.vanilla/custom-ui-selected-section)
-    (def mx-p (name) (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
-    (def mx-select (section) (eseq.effects.custom-ui-sections/ui-section-select-callback section))
-    (def mx-knob (section name title decimals taper)
-      (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title 5.6 3.45 2.15
-        (mx-c) decimals taper :widget-knob-track 8.5 8 :center))
-    (def mx-label (title width)
-      (box :width width :height 0.72 :background-color (mx-c)
-        (label title :width width :height 0.72 :h-align :center :v-align :center
-          :font-size 8.2 :color :black :bg :transparent)))
-    (def mx-panel (section title width body)
-      (box :width width :height 4.8 :padding 0.18
-        :background-color (if (= (mx-section) section) :instrument-panel-bg :instrument-group-bg)
-        :debug-name (str "modal-panel-" section)
-        :on-click (mx-select section)
-        (v-stack :gap 0.14 (mx-label title (min width 9)) body)))
-    (def mx-option (section name title options)
-      (let ((p (mx-p name)) (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-        (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "modal-opt-mod-" name)
-          (box :width 6.6 :height 3.45 :v-align :center
-            (v-stack :width 6.6 :height 1.4 :gap 0.12
-              (label title :width 6.6 :height 0.5 :h-align :center :v-align :center
-                :font-size 8.5 :bg :transparent)
-              (dropdown :debug-name (str "modal-" name) :width 6.6 :height 0.7 :font-size 7.2
-                :options options
-                :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
-                :text-color (mx-c) :chevron-color (mx-c) :bg-color :instrument-control-bg :border-color :transparent
-                :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
-                :on-change (lambda (v)
-                  (do
-                    (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope section)
-                    (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p
-                      (eseq.effects.param-controls/custom-ui-option-index options v))))))))))
-    (def mx-num (section name title width decimals)
-      (let ((p (mx-p name))
-            (ink (if (eseq.effects.custom-ui-runtime/custom-ui-param-mod-highlighted? p) :white :black)))
-        (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "modal-mod-" name)
-          (subtree :key (str "modal-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
-              (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
-            (v-stack :width width :height 1.15 :gap 0.08
-              (label title :height 0.5 :v-align :center :font-size 9.5 :color ink :bg :transparent)
-              (number-picker :width width :height 0.55 :noui true :font-size 10 :decimals decimals
-                :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
-                :step (pow 10 (- 0 decimals))
-                :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
-                :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
-                :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
-                :text-align :left
-                :text-color ink :edit-color ink :cursor-color ink
-                :plock-style :underline
-                :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
-                :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)))))))
-    ;; the screen's patch drawing: objects as chips, connections as links
-    (def mx-chip (section title)
-      (button title :width (+ 1.4 (* 0.62 (len title))) :height 0.8 :padding 0 :font-size 8.5
-        :color (if (= (mx-section) section) (mx-c) :black)
-        :border-color :black
-        :background-color (if (= (mx-section) section) :black (mx-c))
-        :on-click (mx-select section)))
-    (def mx-link (section title)
-      (button title :width (+ 1 (* 0.55 (len title))) :height 0.8 :padding 0 :font-size 7.5
-        :color (if (= (mx-section) section) (mx-c) :black)
-        :border-color :transparent
-        :background-color (if (= (mx-section) section) :black :transparent)
-        :on-click (mx-select section)))
-    (def mx-tab (section title width)
-      (button title :width width :height 0.8 :padding 0 :font-size 8
-        :color (if (= (mx-section) section) (mx-c) :black)
-        :border-color :transparent
-        :background-color (if (= (mx-section) section) :black (mx-c))
-        :on-click (mx-select section)))))
-
-;; The name the host knows a grouped param by, group.name: "str.str_length".
-;;   p  a param spec
-(def host-name (p) (str (source (get p :group)) "." (source (get p :sym))))
-
-;; A panel control form for a param: a dropdown for a menu, else a knob.
-;;   k  the section number
-;;   p  a param spec
-(def control-form (k p)
-  (if (get p :options)
-    `(mx-option ,k ,(host-name p) ,(get p :title) (quote ,(get p :options)))
-    `(mx-knob ,k ,(host-name p) ,(get p :title) ,(get p :dec) ,(get p :taper))))
-
-;; A number field form for a param on the screen's page.
-;;   k      the section number
-;;   p      a param spec
-;;   width  the field's width
-(def num-form (k p width)
-  `(mx-num ,k ,(host-name p) ,(get p :title) ,width ,(get p :dec)))
-
-;; A section's panel form, holding controls for its first params.
-;;   k      the section number
-;;   sec    the section
-;;   knobs  how many params get a control
-;;   width  the panel's width
-(def panel-form (k sec knobs width)
-  `(mx-panel ,k ,(get sec :title) ,width
-     (h-stack :gap 0.15 ,@(map (lambda (p) (control-form k p)) (take (get sec :params) knobs)))))
-
 ;; One line of the drawing for a connection: a -law id-> b (a bow has no a).
 ;; Clicking either object or the link selects its section.
 ;;   patch  the patch
@@ -4275,40 +3638,11 @@
          ,@(map (lambda (col) `(v-stack :gap 0.12 ,@col)) (chunks rows (ceil (/ (len rows) 2)))))
       `(v-stack :gap 0.12 ,@rows))))
 
-;; The screen's page for one section: a number field for every param, six to
-;; a row. Menu params are left out; their dropdown is on the panel.
-;;   k    the section number
-;;   sec  the section
-(def page-form (k sec)
-  `(v-stack :gap 0.12
-     ,@(map (lambda (row) `(h-stack :gap 0.35 ,@(map (lambda (p) (num-form k p 5.3)) row)))
-            (chunks (filter (lambda (p) (not (get p :options))) (get sec :params)) 6))))
-
-;; A form showing the selected section's page: nested ifs over the sections
-;; from k on, the last one shown when none before it is selected.
-;;   secs  the sections
-;;   k     the first section number to test
-(def pages-from (secs k)
-  (if (= k (- (len secs) 1))
-    (page-form k (nth secs k))
-    `(if (= (mx-section) ,k) ,(page-form k (nth secs k)) ,(pages-from secs (+ k 1)))))
-
-;; The screen form: a title naming the patch and the selected section, the
-;; patch drawing, the selected section's page, and a tab per section.
+;; The screen form (eseq.gen.panel's) with the patch drawing above the page.
 ;;   patch  the patch
 ;;   secs   its sections
 (def display-form (patch secs)
-  (let ((out (- (len secs) 1))
-        (tab-w (/ (- 35.2 (* 0.18 (- (len secs) 1))) (len secs))))
-    `(box :debug-name "modal-display" :part "instrument/screen" :width 35.8 :height 9.8 :padding 0.3
-          :background-color (mx-c)
-       (v-stack :gap 0.15
-         (label (str ,(str (get patch :name) " / ") (nth (quote ,(map (lambda (s) (get s :title)) secs)) (mx-section)))
-           :width 35.2 :height 0.7 :h-align :center :v-align :center :font-size 8 :color (mx-c) :bg :black)
-         (box :width 35.2 :height 4.1 ,(drawing-form patch out))
-         (box :width 35.2 :height 2.6 ,(pages-from secs 0))
-         (h-stack :gap 0.18
-           ,@(map (lambda (k) `(mx-tab ,k ,(get (nth secs k) :tab) ,tab-w)) (range (len secs))))))))
+  (screen-form (get patch :name) secs :drawing (drawing-form patch (- (len secs) 1))))
 
 ;; Every form of the instrument's ui.lisp: the mx-* helpers, then the
 ;; defsynth-ui. Objects' panels go to the left of the screen, connections'
@@ -4353,12 +3687,14 @@
   (str ";; generated by eseq.modal; edit the patch script, not this file\n"
        (pp-forms (ui-forms patch))))
 
-;; What a host runs on a script's patch: (dict :name :dsp :ui), or
-;; (dict :errors messages) when check finds problems. eseq modal emit and
-;; the app's C-c C-c drafts both call this.
+;; A patch's generator (see eseq.gen): the instrument's source, the Voicing
+;; param when the patch has :voicing, and the eseq-modes files its mesh views
+;; read; or (dict :errors messages) when check finds problems.
 ;;   patch  the patch a script returned
 (def generate (patch)
   (let ((errors (check patch)))
     (if (empty? errors)
-      (dict :name (get patch :name) :dsp (dsp patch) :ui (ui patch))
+      (dict :kind :instrument :name (get patch :name) :dsp (dsp patch) :ui (ui patch)
+            :voice-mode (voice-mode (get patch :voicing))
+            :assets (filter string? (map (lambda (o) (get o :mesh-file)) (get patch :objects))))
       (dict :errors errors))))

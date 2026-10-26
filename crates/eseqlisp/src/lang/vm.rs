@@ -1055,7 +1055,7 @@ pub struct ReactiveDag {
 
 /// Whether [`VM::invoke`] can call `value`: a closure, a native, a host
 /// handle or an override dispatcher/original.
-pub(crate) fn is_callable(value: &Value) -> bool {
+pub fn is_callable(value: &Value) -> bool {
     matches!(
         value,
         Value::Closure(..)

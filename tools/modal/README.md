@@ -5,13 +5,19 @@ written as eseqlisp data with the `eseq.modal` module
 (`content/ui/modal.lisp`) and compiled to an ordinary DGenLisp instrument.
 
 ```sh
-eseq modal emit tools/modal/examples/cello.lisp [DIR]
+eseq generate tools/modal/examples/cello.lisp [DIR]
 ```
 
 This writes `dsp.lisp`, `ui.lisp` and `instrument.json` into DIR, by default
 the user instrument folder under the patch's `:name`
 (`.local/instruments/modal-cello` in a dev checkout). Check the result with
 `eseq instrument check DIR`.
+
+A patch is one kind of eseq.gen program, so C-c C-c in its buffer plays it on
+a draft track, as any program does. The param, note-following, modulation
+and panel machinery the generated code uses lives in `eseq.gen`,
+`eseq.gen.modulate` and `eseq.gen.panel`, shared with other generators (see
+tools/gen/README.md).
 
 ## A patch script
 
@@ -266,7 +272,7 @@ pick from on the panel (the first is the default):
 `:material`, which carries shader code for widgets.)
 
 `(m/check patch)` lists what is wrong with a patch by name (`spring bridge:
-no object bdy`); `eseq modal emit` prints the same list instead of writing
+no object bdy`); `eseq generate` prints the same list instead of writing
 anything.
 
 Every param is named after its object or connection (`str_length`,

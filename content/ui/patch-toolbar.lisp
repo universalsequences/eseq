@@ -339,7 +339,8 @@
       :variant :secondary
       :height 1.4
       :font-size 10.5
-      :on-click |x y r| (host-command "evaluate-editor-source" (dict))
+      ;; :session: compile the code session, never a focused script buffer
+      :on-click |x y r| (host-command "evaluate-editor-source" (dict :session true))
       :color :fg)
     (box :width 0 :height 0)))
 

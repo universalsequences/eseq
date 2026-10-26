@@ -28,8 +28,8 @@ mod retrospective_ui_tests;
 mod resample_ui_tests;
 #[path = "factory_promote_ui_tests.rs"]
 mod factory_promote_ui_tests;
-#[path = "modal_draft_save_ui_tests.rs"]
-mod modal_draft_save_ui_tests;
+#[path = "draft_save_ui_tests.rs"]
+mod draft_save_ui_tests;
 #[path = "midi_midimix_tests.rs"]
 mod midi_midimix_tests;
 #[path = "mixer_hit_tests.rs"]
@@ -27928,11 +27928,11 @@ use panel_kinds_seed::*;
         );
     }
 
-    /// A modal patch draft (`modal-draft/<name>`) has no saved instrument to
+    /// A program script's draft (`draft/<name>`) has no saved instrument to
     /// hold presets: its header offers Save instrument in place of the
     /// preset save icon, and the button asks the host to open the save modal.
     #[test]
-    fn metal_seq_fx_modal_draft_header_saves_the_instrument_not_a_preset() {
+    fn metal_seq_fx_draft_header_saves_the_instrument_not_a_preset() {
         let header = |name: &str| {
             let mut editor = full_grid_editor_for_scroll_tests();
             let mut instrument = test_instrument_map();
@@ -27952,11 +27952,11 @@ use panel_kinds_seed::*;
 
         let (_, saved) = header("test-instrument");
         assert!(find_layout_node_by_debug_name(&saved, "instrument-preset-button").is_some());
-        assert!(find_layout_node_by_debug_name(&saved, "modal-draft-save-button").is_none());
+        assert!(find_layout_node_by_debug_name(&saved, "draft-save-button").is_none());
 
-        let (mut editor, draft) = header("modal-draft/modal-banjo");
+        let (mut editor, draft) = header("draft/modal-banjo");
         assert!(find_layout_node_by_debug_name(&draft, "instrument-preset-button").is_none());
-        let button = find_layout_node_by_debug_name(&draft, "modal-draft-save-button")
+        let button = find_layout_node_by_debug_name(&draft, "draft-save-button")
             .expect("draft header shows Save instrument");
         assert_finite_nonzero_rect(button, "Save instrument button");
         let on_click = button.props.get("on-click").cloned().expect("button click");
@@ -27970,7 +27970,7 @@ use panel_kinds_seed::*;
             matches!(
                 commands.as_slice(),
                 [eseqlisp::host::HostCommand::Custom { name, payload }]
-                    if name == "modal-draft-save-open"
+                    if name == "draft-save-open"
                         && extract_usize_from_payload(payload, "track") == Some(0)
             ),
             "unexpected commands: {commands:?}"

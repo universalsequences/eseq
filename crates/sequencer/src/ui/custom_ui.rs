@@ -1072,13 +1072,13 @@ mod tests {
     #[test]
     fn draft_instrument_ui_dispatches_on_its_exact_engine_name() {
         set_draft_instrument_uis(BTreeMap::from([(
-            "modal-draft/probe-draft-ui".to_string(),
+            "draft/probe-draft-ui".to_string(),
             ("probe/ui.lisp".to_string(), "(defsynth-ui (label \"draft panel\"))".to_string()),
         )]));
         let source = build_custom_instrument_ui_source_with_overlay(None);
         set_draft_instrument_uis(BTreeMap::new());
         assert!(source.contains("draft panel"), "{source}");
-        assert!(source.contains(r#"(= (get inst :name) "modal-draft/probe-draft-ui")"#), "{source}");
+        assert!(source.contains(r#"(= (get inst :name) "draft/probe-draft-ui")"#), "{source}");
         // No short-name match: a saved probe-draft-ui keeps its own panel.
         assert!(!source.contains(r#"(= (get inst :name) "probe-draft-ui")"#), "{source}");
         assert!(!source.contains(r#""/probe-draft-ui""#), "{source}");

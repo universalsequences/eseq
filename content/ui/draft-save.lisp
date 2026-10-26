@@ -1,13 +1,14 @@
-;; eseq.modal.save — "Save instrument" for a modal patch draft track. The
-;; draft's instrument panel header shows the button in place of the preset
-;; save icon (a draft has no saved instrument to hold presets); it asks the
-;; host (`modal-draft-save-open`, src/ui/host_commands/modal_drafts.rs) to
-;; activate this mount's tile and `open` the form on the patch's :name.
+;; eseq.draft-save — "Save instrument" for a draft track, the instrument a
+;; program script generates (docs/program-generators-spec.md). The draft's
+;; instrument panel header shows the button in place of the preset save icon
+;; (a draft has no saved instrument to hold presets); it asks the host
+;; (`draft-save-open`, src/ui/host_commands/drafts.rs) to activate this
+;; mount's tile and `open` the form on the generated instrument's name.
 ;; Saving writes the running engine's dsp.lisp / ui.lisp / instrument.json
 ;; into the user instrument folder; the track stays the script's draft.
 ;;
 ;; Mounted by eseq.file-dialogs next to the other dialogs.
-(module eseq.modal.save)
+(module eseq.draft-save)
 (export panel open close commit fail save-form)
 
 (def-kind save-form
@@ -38,7 +39,7 @@
   (and (not (= save-form.taken "")) (= save-form.taken save-form.name)))
 
 (def commit ()
-  (host-command "modal-draft-save"
+  (host-command "draft-save"
     (dict :track save-form.track :name save-form.name :overwrite (replacing?))))
 
 (def body ()
@@ -63,6 +64,6 @@
         :on-click |event| (commit)))))
 
 (def panel ()
-  (modal :key "modal-save-modal" :is-open save-form.open :on-close (lambda () (close))
+  (modal :key "draft-save-modal" :is-open save-form.open :on-close (lambda () (close))
     :title "Save instrument" :width-px 520 :height-px 300
     (if save-form.open (body) (box :height 0 :width 0))))

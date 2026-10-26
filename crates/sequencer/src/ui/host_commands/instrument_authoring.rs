@@ -1542,8 +1542,10 @@ pub(super) fn handle(
         }
 
         "evaluate-editor-source" => {
-            // A modal patch script (any buffer importing eseq.modal, other
-            // than an open code session's own buffer) drives its draft track.
+            // A script buffer (other than an open code session's own) is
+            // evaluated; a program it ends in drives its draft track. The
+            // Eval button and the agent pane (:session true) always mean
+            // the code session.
             let session_buffer = ctx
                 .sessions
                 .instrument_edit_session
@@ -1552,8 +1554,9 @@ pub(super) fn handle(
                 .or_else(|| {
                     ctx.sessions.effect_edit_session.as_ref().map(|session| session.buffer_name.clone())
                 });
-            if session_buffer.as_deref() != Some(editor.active_buffer().name.as_str())
-                && super::modal_drafts::evaluate_modal_buffer(&mut *app, &mut *editor, ctx)
+            if !extract_bool_from_payload(&payload, "session")
+                && session_buffer.as_deref() != Some(editor.active_buffer().name.as_str())
+                && super::drafts::evaluate_script_buffer(&mut *app, &mut *editor, ctx)
             {
                 return;
             }
