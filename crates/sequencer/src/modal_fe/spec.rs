@@ -36,16 +36,57 @@ fn default_modes() -> usize {
 #[serde(deny_unknown_fields)]
 pub struct Material {
     pub density: f64,
+    /// Young's modulus; with a grain, along it (E_L).
     pub young: f64,
+    /// Poisson's ratio; unused with a grain (its ratios replace it).
     pub poisson: f64,
+    /// An orthotropic material (wood): stiff along its grain, soft across.
+    /// Isotropic when absent, so an isotropic spec hashes as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grain: Option<Grain>,
 }
 
-/// Target element size. `cells` divides the largest bounding-box extent.
+/// Wood's three axes: L along the grain (the `along` axis), R (radial,
+/// `across`) and T (tangential, the remaining axis), with the moduli and
+/// ratios the Wood Handbook tabulates. `poisson_ij` is the contraction
+/// along j under stress along i.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Grain {
+    pub along: Axis,
+    pub across: Axis,
+    pub young_r: f64,
+    pub young_t: f64,
+    pub shear_lr: f64,
+    pub shear_lt: f64,
+    pub shear_rt: f64,
+    pub poisson_lr: f64,
+    pub poisson_lt: f64,
+    pub poisson_rt: f64,
+}
+
+impl Grain {
+    /// The global axes (0 x, 1 y, 2 z) L, R and T lie along.
+    pub fn axes(&self) -> [usize; 3] {
+        let index = |axis: Axis| match axis {
+            Axis::X => 0,
+            Axis::Y => 1,
+            Axis::Z => 2,
+        };
+        let (l, r) = (index(self.along), index(self.across));
+        [l, r, 3 - l - r]
+    }
+}
+
+/// Target element size. `cells` divides the largest bounding-box extent;
+/// `cell_size` gives one per axis (x y z), so a thin plate or top can be
+/// several elements through its thickness without as many across it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Resolution {
     Cells(usize),
     ElementSize(f64),
+    CellSize([f64; 3]),
 }
 
 impl Default for Resolution {
@@ -204,10 +245,25 @@ impl SolidSpec {
         if !(m.poisson > -1.0 && m.poisson < 0.5) {
             return Err("material poisson must be in (-1, 0.5)".into());
         }
+        if let Some(grain) = &m.grain {
+            if grain.along == grain.across {
+                return Err("a grain's along and across axes must differ".into());
+            }
+            let moduli = [grain.young_r, grain.young_t, grain.shear_lr, grain.shear_lt, grain.shear_rt];
+            if moduli.iter().any(|&e| !(e > 0.0)) {
+                return Err("a grain's moduli must be positive".into());
+            }
+            if !super::element::compliance_is_positive(m) {
+                return Err("a grain's Poisson ratios make it unstable (its compliance is not positive definite)".into());
+            }
+        }
         match self.resolution {
             Resolution::Cells(0) => return Err("resolution cells must be positive".into()),
             Resolution::ElementSize(h) if !(h > 0.0) => {
                 return Err("resolution element_size must be positive".into())
+            }
+            Resolution::CellSize(h) if !h.iter().all(|&h| h > 0.0) => {
+                return Err("resolution cell_size must be three positive sizes".into())
             }
             _ => {}
         }

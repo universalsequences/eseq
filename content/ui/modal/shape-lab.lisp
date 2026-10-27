@@ -62,8 +62,9 @@
 ;; A revolve's editor: :profile (its points) or :parts (cut it, add to it).
 (defstate lab-editor :profile)
 ;; The parts editor: the selected part, the view plane (:top :front :side),
-;; the pointer tool (:select moves parts; :hole, :slot, :block or :arch
-;; places one where you click, then hands back to :select), where a dragged part was grabbed (its centre minus the
+;; the pointer tool (:select moves parts and points; :hole, :slot, :block
+;; or :arch places one where you click, :point a named point, then hands
+;; back to :select), where a dragged part was grabbed (its centre minus the
 ;; pointer) and whether it moved, and the radius of the hole last sized
 ;; (new holes take it).
 (defstate lab-part 0)
@@ -75,6 +76,24 @@
 ;; Whether a canvas drag is moving the clamp (the spec's :block) instead of
 ;; a point or part.
 (defstate lab-drag-clamp false)
+;; The solid's named points, (dict :name (x y z)) (m/solid's :points: what
+;; the script's connections and listens name), the selected one's name
+;; (while lab-part is point-layer), whether a canvas drag is moving it, and
+;; the name being typed for it.
+(defstate lab-points (dict))
+(defstate lab-named nil)
+(defstate lab-drag-point false)
+(defstate lab-point-draft "")
+
+;; The instrument view: the patch's strings, connections and listens
+;; (from the host), each solid's place as edited here ((id place) pairs,
+;; the script's until moved), which view the 3-D panel shows (:solid or
+;; :instrument), and the instrument's mesh handle.
+(defstate lab-wiring nil)
+(defstate lab-places (list))
+(defstate lab-look :solid)
+(defstate lab-assembly nil)
+(defstate lab-zoom 1.7)
 ;; Update draft's progress (draft-status): :idle, :compiling, :done or
 ;; :failed, and the error.
 (defstate lab-draft :idle)
@@ -83,7 +102,7 @@
 (def materials
   (list mat/steel mat/brass mat/bronze mat/copper mat/aluminium mat/titanium mat/silver mat/gold
         mat/lead mat/uranium mat/glass mat/granite mat/ice mat/carbon mat/diamond mat/nylon
-        mat/spruce mat/maple mat/rosewood))
+        mat/spruce mat/maple mat/rosewood mat/mahogany))
 
 (def material-named (name) (or (find-by-key materials :name name) mat/steel))
 
@@ -117,16 +136,20 @@
     (dict :buffer (if (= (current-buffer-name) "*shape-lab*") lab-buffer (current-buffer-name)))))
 
 ;; The host's answer to shape-lab-load.
-(def loaded (buffer dir solids)
+(def loaded (buffer dir solids &rest wiring)
   (set! lab-buffer buffer)
   (set! lab-dir dir)
   (set! lab-solids solids)
+  (set! lab-wiring (if (empty? wiring) nil (first wiring)))
+  (set! lab-places (map (lambda (s) (list (get s :id) (get s :place))) solids))
   (select-solid (if (< lab-index (len solids)) lab-index 0)))
 
 (def select-solid (i)
   (set! lab-index i)
   (let ((s (current-solid)))
     (set! lab-spec (if (= s nil) nil (get s :spec)))
+    (set! lab-points (if (and (not (= s nil)) (map? (get s :points))) (get s :points) (dict)))
+    (set! lab-named nil)
     (set! lab-edited false)
     (set! lab-point 0)
     (set! lab-part 0)
@@ -144,7 +167,8 @@
     (when (and (= lab-solved nil) (map? lab-spec)) (request-solve))))
 
 (def refresh-preview ()
-  (set! lab-preview (if (map? lab-spec) (modal-mesh lab-spec lab-dir) nil)))
+  (set! lab-preview (if (map? lab-spec) (modal-mesh lab-spec lab-dir) nil))
+  (rebuild-assembly))
 
 ;; Ask for a background solve of the spec as it is now; an earlier one's
 ;; result is then ignored. A shape its clamp misses is not sent: the solver
@@ -202,7 +226,8 @@
 (def solved (ticket result)
   (when (= ticket lab-ticket)
     (set! lab-solve-progress nil)
-    (set! lab-solved result)))
+    (set! lab-solved result)
+    (rebuild-assembly)))
 
 ;; The spec with `s` as its shape: previewed now, solved when `solve`.
 (def edit-shape! (s solve) (edit-spec! :solid s solve))
@@ -232,7 +257,8 @@
     (host-command "shape-lab-apply"
       (dict :buffer lab-buffer :id (get (current-solid) :id) :shape (shape)
             :made-of (get (get lab-spec :made-of) :name) :modes (get lab-spec :modes)
-            :resolution (get lab-spec :resolution) :block (or (held-by) :free)))))
+            :resolution (get lab-spec :resolution) :block (or (held-by) :free) :points lab-points
+            :place (or (place-of (get (current-solid) :id)) (dict))))))
 
 ;; ── Templates ──
 
@@ -509,6 +535,112 @@
   (fit-view)
   (rebuild-canvas))
 
+;; ── Named points ──
+;; Spots on the solid with names, written to its :points: a script names
+;; them where a mallet strikes, a string's bridge sits or a mic listens
+;; ((m/listen 'bell :lip)). The Point tool places one on the surface under
+;; the click, seen from the view's side; Move drags it across the view and
+;; drops it back onto the surface.
+
+(def point-layer -2)
+
+(def point-selected? () (and (= lab-part point-layer) (not (= lab-named nil)) (get lab-points lab-named)))
+
+(def set-points! (pts)
+  (set! lab-points pts)
+  (set! lab-edited true)
+  (rebuild-canvas)
+  (rebuild-assembly))
+
+(def set-point! (name xyz) (set-points! (merge lab-points name xyz)))
+
+(def without-point (name)
+  (apply dict (apply append (map (lambda (k) (list k (get lab-points k)))
+                                 (filter (lambda (k) (not (= k name))) (keys lab-points))))))
+
+(def select-point! (name)
+  (set! lab-part point-layer)
+  (set! lab-named name)
+  (set! lab-point-draft (bare-name name))
+  (rebuild-canvas))
+
+(def delete-point ()
+  (when (point-selected?)
+    (set-points! (without-point lab-named))
+    (set! lab-named nil)
+    (set! lab-part 0)
+    (rebuild-canvas)))
+
+;; :tip -> "tip"
+(def bare-name (k) (let ((s (source k))) (substring s 1 (len s))))
+
+;; The keyword a typed name stands for, or nil when it is not one.
+(def name-keyword (text)
+  (let ((k (if (= text "") nil (read-string (str ":" text)))))
+    (if (and (not (= k nil)) (= (source k) (str ":" text))) k nil)))
+
+;; :p1, :p2, … the first not taken.
+(def fresh-point-name ()
+  (let ((taken (map source (keys lab-points)))
+        (free (filter (lambda (n) (empty? (filter (lambda (t) (= t (str ":p" n))) taken))) (range 1 (+ 2 (len taken))))))
+    (read-string (str ":p" (first free)))))
+
+;; Rename the selected point to what was typed (a free, valid name).
+(def rename-point ()
+  (let ((k (name-keyword lab-point-draft)))
+    (when (and (point-selected?) (not (= k nil)) (not (= k lab-named)) (= (get lab-points k) nil))
+      (let ((xyz (get lab-points lab-named)))
+        (set-points! (merge (without-point lab-named) k xyz))
+        (set! lab-named k)))))
+
+;; The surface point under (u v) in the view plane, seen from the view's
+;; side (modal-mesh-pick on the preview mesh); without a mesh, the point on
+;; the body's bounds toward the viewer.
+(def surface-at (u v)
+  (let ((axes (plane-axes))
+        (id (if (map? lab-preview) (get lab-preview :mesh-id) nil))
+        (picked (if (= id nil) nil (modal-mesh-pick id (first axes) (nth axes 1) (nth axes 2) u v))))
+    (if (list? picked) (map snap picked)
+      (set-nth (set-nth (set-nth (list 0 0 0) (first axes) (snap u)) (nth axes 1) (snap v))
+               (nth axes 2) (nth (nth (body-bounds) 1) (nth axes 2))))))
+
+(def place-point! (u v)
+  (let ((name (fresh-point-name)))
+    (set-point! name (surface-at u v))
+    (select-point! name)))
+
+;; Drop the selected point back onto the surface under it.
+(def snap-point ()
+  (when (point-selected?)
+    (let ((axes (plane-axes)) (xyz (get lab-points lab-named)))
+      (set-point! lab-named (surface-at (nth xyz (first axes)) (nth xyz (nth axes 1)))))))
+
+;; A marker's half-size on the canvas (u and v), square on screen.
+(def marker-half ()
+  (let ((v lab-view) (hu (* 0.028 (get v :hr))))
+    (list hu (* hu (/ (get v :hz) (get v :hr)) canvas-aspect))))
+
+;; The named points as markers (kind 6, the selected one 7).
+(def point-polygons (a b)
+  (let ((h (marker-half)))
+    (map (lambda (k)
+           (let ((xyz (get lab-points k)) (u (nth xyz a)) (v (nth xyz b)))
+             (list (list (list (- u (first h)) (- v (nth h 1))) (list (+ u (first h)) (- v (nth h 1)))
+                         (list (+ u (first h)) (+ v (nth h 1))) (list (- u (first h)) (+ v (nth h 1))))
+                   (if (and (= lab-part point-layer) (= k lab-named)) 7 6)
+                   0.04)))
+         (keys lab-points))))
+
+;; The named point under (u v), or nil.
+(def point-hit (u v)
+  (let ((axes (plane-axes))
+        (h (marker-half))
+        (hits (filter (lambda (k) (let ((xyz (get lab-points k)))
+                                    (and (<= (abs (- (nth xyz (first axes)) u)) (* 1.6 (first h)))
+                                         (<= (abs (- (nth xyz (nth axes 1)) v)) (* 1.6 (nth h 1))))))
+                      (keys lab-points))))
+    (if (empty? hits) nil (first hits))))
+
 ;; ── The parts editor ──
 ;; A shape as parts (eseq.modal.shape-parts) drawn in one view plane: x
 ;; across and y up for :top, x and z for :front, y and z for :side. Added
@@ -653,6 +785,7 @@
                       (or (sp/footprint (get p :shape) (first axes) (nth axes 1)) (list)))))
              (range (len ps))))
       (clamp-polygons (first axes) (nth axes 1))
+      (point-polygons (first axes) (nth axes 1))
       (list (quad (list left (* -1 tv)) (list right (* -1 tv)) (list right tv) (list left tv) 4 0.9)
             (quad (list (* -1 tu) bottom) (list tu bottom) (list tu top) (list (* -1 tu) top) 4 0.9)))))
 
@@ -688,7 +821,8 @@
       (if (< kind 2.5) (rgba 0.5 0.2 0.19 0.92)
         (if (< kind 3.5) (rgba 0.95 0.38 0.32 0.95)
           (if (< kind 4.5) (rgba 0.3 0.32 0.36 1.0)
-            (rgba 0.36 0.85 0.52 0.9)))))))
+            (if (< kind 5.5) (rgba 0.36 0.85 0.52 0.9)
+              (if (< kind 6.5) (rgba 0.33 0.6 1.0 1.0) (rgba 0.8 0.9 1.0 1.0)))))))))
 
 ;; The parts topmost first: cuts, then added parts, later ones over earlier.
 (def parts-hit (u v)
@@ -713,11 +847,22 @@
         (b (nth axes 1)))
     (set! lab-moved false)
     (set! lab-drag-clamp false)
+    (set! lab-drag-point false)
+    (if (= lab-tool :point)
+      (do (place-point! (first at) (nth at 1))
+          (set! lab-tool :select)
+          (set! lab-dragging false))
     (if (not (= lab-tool :select))
       (do (add-part! (placed-part lab-tool (first at) (nth at 1)) false)
           (set! lab-tool :select)
           (set! lab-moved true)
           (grab! at))
+      (if (point-hit (first at) (nth at 1))
+        (let ((name (point-hit (first at) (nth at 1))) (xyz (get lab-points name)))
+          (select-point! name)
+          (set! lab-grab (list (- (nth xyz a) (first at)) (- (nth xyz b) (nth at 1))))
+          (set! lab-drag-point true)
+          (set! lab-dragging true))
       (if (clamp-hit? a b (first at) (nth at 1))
         (let ((c (sp/region-center (held-by)))) (grab-clamp! at (nth c a) (nth c b)))
         (let ((hit (parts-hit (first at) (nth at 1))))
@@ -725,7 +870,7 @@
             (set! lab-dragging false)
             (do (set! lab-part hit)
                 (grab! at)
-                (rebuild-canvas))))))))
+                (rebuild-canvas))))))))))
 
 (def parts-drag (sx sy region)
   (when lab-dragging
@@ -733,16 +878,23 @@
           (axes (plane-axes))
           (place (lambda (c) (set-nth (set-nth c (first axes) (+ (first at) (first lab-grab)))
                                           (nth axes 1) (+ (nth at 1) (nth lab-grab 1))))))
+      (if lab-drag-point
+        (do (set! lab-moved true)
+            (set-point! lab-named (place (get lab-points lab-named))))
       (if lab-drag-clamp
         (drag-clamp! at (place (sp/region-center (held-by))))
         (let ((p (selected-part)))
           (set! lab-moved true)
-          (set-selected! (merge p :shape (sp/with-center (get p :shape) (place (sp/center-of (get p :shape))))) false))))))
+          (set-selected! (merge p :shape (sp/with-center (get p :shape) (place (sp/center-of (get p :shape))))) false)))))))
 
 (def parts-up (sx sy region)
   (when lab-dragging
     (set! lab-dragging false)
-    (when lab-moved (request-solve))))
+    ;; a point is not part of the solve: it lands back on the surface
+    (if lab-drag-point
+      (do (set! lab-drag-point false)
+          (when lab-moved (snap-point)))
+      (when lab-moved (request-solve)))))
 
 ;; Mesh detail. A revolve body with :segments (the bell templates) keeps
 ;; its body-fitted mesh under cuts, its elements set by those counts: Detail
@@ -798,7 +950,9 @@
                          0 (range (- (len pts) 1))))
             (rmax (reduce (lambda (m p) (max m (first p))) 0 pts)))
         (max (/ (* 6.283185307179586 rmax) (get seg :around)) (/ arc (or (get seg :along) 16))))
-      (/ (body-extent) (detail)))))
+      (let ((sizes (get (get lab-spec :resolution) :cell-size)))
+        ;; per-axis cells: the thinnest (through a top)
+        (if (list? sizes) (reduce (lambda (m h) (min m h)) (first sizes) sizes) (/ (body-extent) (detail)))))))
 
 (def set-detail! (cells) (edit-spec! :resolution (dict :cells cells) true))
 
@@ -969,6 +1123,10 @@
 (def solid-swatch "#b8874c")
 (def cut-swatch "#c8524a")
 (def clamp-swatch "#5cd985")
+(def point-swatch "#5499ff")
+
+;; A point's place in the tree: x, y, z in mm.
+(def xyz-detail (xyz) (str (mm (first xyz)) ", " (mm (nth xyz 1)) ", " (mm (nth xyz 2)) " mm"))
 
 ;; A part's size in the tree: a hole's diameter, a box's sides.
 (def layer-detail (s)
@@ -993,6 +1151,11 @@
     (append (list (dict :label "Body" :kind "header"))
             (map row adds)
             (if (empty? cuts) (list) (cons (dict :label "Cuts" :kind "header") (map row cuts)))
+            (if (empty? (keys lab-points)) (list)
+              (cons (dict :label "Points" :kind "header")
+                    (map (lambda (k) (dict :label (bare-name k) :path (str "point" (source k)) :swatch point-swatch
+                                           :detail (xyz-detail (get lab-points k))))
+                         (keys lab-points))))
             (list (dict :label "Held by" :kind "header")
                   (if (= (held-by) nil)
                     (dict :label "Nothing (free)" :path "clamp")
@@ -1005,12 +1168,15 @@
 (def layers ()
   (tree :key "lab-layers" :width :fill :font-size 11
         :items (layer-items)
-        :selected-path (if (clamp-selected?) "clamp" (str lab-part))
+        :selected-path (if (clamp-selected?) "clamp"
+                         (if (point-selected?) (str "point" (source lab-named)) (str lab-part)))
         :selection-follows-external true
         :on-select (lambda (item)
                      (let ((path (get item :path))
+                           (point (filter (lambda (k) (= (str "point" (source k)) path)) (keys lab-points)))
                            (hit (filter (lambda (i) (= (str i) path)) (range (len (layer-parts))))))
-                       (select-layer! (if (= path "clamp") clamp-layer (if (empty? hit) 0 (first hit))))))))
+                       (if (not (empty? point)) (select-point! (first point))
+                         (select-layer! (if (= path "clamp") clamp-layer (if (empty? hit) 0 (first hit)))))))))
 
 (def repeat-counts (list 2 3 4 5 6 8))
 (def repeat-options (cons "Repeat…" (map (lambda (n) (str n " in a row")) repeat-counts)))
@@ -1069,11 +1235,36 @@
           (position-knobs (sp/center-of s)
                           (lambda (c) (set-selected! (merge (selected-part) :shape (sp/with-center s c)) true))))))))
 
+;; A named point: its name (Enter renames it), where it is, and how a script
+;; uses it.
+(def point-properties ()
+  (let ((xyz (get lab-points lab-named)) (name (bare-name lab-named)))
+    (v-stack :gap 0.4 :width :fill
+      (h-stack :gap 0.4 :align :center :width :fill
+        (section-label "NAME")
+        (text-input :key "lab-point-name" :width 10 :height 1.3 :font-size 10
+                    :value lab-point-draft
+                    :on-change (lambda (value) (set! lab-point-draft value))
+                    :on-submit (lambda () (rename-point))
+                    :on-cancel (lambda () (set! lab-point-draft name)))
+        (box :flex 1)
+        (small-button "lab-point-snap" "Snap" snap-point)
+        (small-button "lab-point-delete" "Delete" delete-point))
+      (if (and (not (= lab-point-draft name)) (= (name-keyword lab-point-draft) nil))
+        (label "A name is letters, digits and -." :font-size 9.5 :color :yellow :bg :transparent)
+        (label "" :height 0.1 :bg :transparent))
+      (section-label "POSITION")
+      (position-knobs xyz (lambda (c) (set-point! lab-named c)))
+      (label (str "In the script: (m/listen '" (get (current-solid) :id) " :" name ")")
+             :font-size 9.5 :color :dim :bg :transparent :width :fill))))
+
 (def layers-panel ()
   (v-stack :gap 0.5 :width 25
     (box :width :fill :corner-radius 6 :padding 0.3 :background-color :buffer-bg
       (layers))
-    (if (clamp-selected?) (clamp-properties) (if (= (selected-part) nil) (label "" :bg :transparent) (part-properties)))))
+    (if (clamp-selected?) (clamp-properties)
+      (if (point-selected?) (point-properties)
+        (if (= (selected-part) nil) (label "" :bg :transparent) (part-properties))))))
 
 ;; ── The canvas ──
 
@@ -1085,7 +1276,7 @@
 ;; part, then hands back to Move.
 (def tools
   (list (list :select "Move" nil) (list :hole "Hole" cut-swatch) (list :slot "Slot" cut-swatch)
-        (list :block "Block" solid-swatch) (list :arch "Arch" cut-swatch)))
+        (list :block "Block" solid-swatch) (list :arch "Arch" cut-swatch) (list :point "Point" point-swatch)))
 
 (def canvas-toolbar ()
   (h-stack :gap 0.4 :align :center :width canvas-cols
@@ -1103,7 +1294,7 @@
 (def tool-row ()
   (h-stack :gap 0.3 :align :center :width canvas-cols
     (each tools |t|
-      (box :width 5.6
+      (box :width 4.7
         (choice-button (str "lab-tool-" (nth t 1)) (nth t 1) (= lab-tool (first t)) (or (nth t 2) "#2f6fe0")
                        (lambda () (set! lab-tool (if (= lab-tool (first t)) :select (first t)))))))))
 
@@ -1127,6 +1318,310 @@
                       :on-mouse-down canvas-down :on-drag canvas-drag :on-mouse-up canvas-up)))
     (if (parts-mode?) (tool-row) (revolve-controls))))
 
+;; ── The instrument ──
+;; Every solid where it sits, drawn together: each solid at its :place (as
+;; moved here), or seated by its glue (a spring from one of its named
+;; points to a placed solid's puts the two points together), else at the
+;; origin. Strings run between their two attachments, lifted off the
+;; surface; pickups sit under them, the pluck over them; named points and
+;; mics are markers. Only the solid being edited is written back.
+
+(def deg 0.0174532925199433)
+
+;; An id (a symbol from the patch, a string from the host) as a string.
+(def id-name (x) (if (string? x) x (source x)))
+
+(def place-of (id)
+  (let ((hit (filter (lambda (p) (= (first p) (id-name id))) lab-places)))
+    (if (empty? hit) nil (nth (first hit) 1))))
+
+(def set-place! (id place)
+  (set! lab-places (map (lambda (p) (if (= (first p) (id-name id)) (list (first p) place) p)) lab-places))
+  (when (= (id-name id) (get (current-solid) :id)) (set! lab-edited true))
+  (rebuild-assembly))
+
+(def solid-named (id)
+  (let ((hit (filter (lambda (s) (= (get s :id) (id-name id))) lab-solids)))
+    (if (empty? hit) nil (first hit))))
+
+;; A solid's named points: the edited ones for the solid being edited.
+(def points-of (id)
+  (if (= (id-name id) (get (current-solid) :id)) lab-points
+    (let ((pts (get (solid-named id) :points))) (if (map? pts) pts (dict)))))
+
+;; p turned rx, ry then rz degrees about x, y and z (turn a list of three).
+(def turn-point (turn p)
+  (let ((ax (* deg (nth turn 0))) (ay (* deg (nth turn 1))) (az (* deg (nth turn 2)))
+        (x (nth p 0)) (y (nth p 1)) (z (nth p 2))
+        (y1 (- (* y (cos ax)) (* z (sin ax)))) (z1 (+ (* y (sin ax)) (* z (cos ax))))
+        (x2 (+ (* x (cos ay)) (* z1 (sin ay)))) (z2 (- (* z1 (cos ay)) (* x (sin ay)))))
+    (list (- (* x2 (cos az)) (* y1 (sin az))) (+ (* x2 (sin az)) (* y1 (cos az))) z2)))
+
+(def add3 (a b) (map (lambda (i) (+ (nth a i) (nth b i))) (range 3)))
+(def sub3 (a b) (map (lambda (i) (- (nth a i) (nth b i))) (range 3)))
+(def scale3 (a k) (map (lambda (x) (* x k)) a))
+(def lerp3 (a b t) (add3 a (scale3 (sub3 b a) t)))
+(def len3 (a) (sqrt (+ (* (nth a 0) (nth a 0)) (* (nth a 1) (nth a 1)) (* (nth a 2) (nth a 2)))))
+(def zero3 (list 0 0 0))
+
+;; A connection or listen position on a solid as a local (x y z): a named
+;; point, or a position; nil for an index.
+(def local-at (id at)
+  (if (list? at) at
+    (if (= at nil) nil
+      (if (number? at) nil (get (points-of id) at)))))
+
+;; place: (dict :at :turn), both filled in.
+(def full-place (p)
+  (dict :at (or (if (map? p) (get p :at) nil) zero3) :turn (or (if (map? p) (get p :turn) nil) zero3)))
+
+(def world-at (place local) (add3 (get place :at) (turn-point (get place :turn) local)))
+
+(def wiring (key) (if (map? lab-wiring) (or (get lab-wiring key) (list)) (list)))
+(def connections () (wiring :connections))
+(def listens () (wiring :listens))
+(def string-ids () (map id-name (wiring :strings)))
+
+(def solid-id? (x) (not (= (solid-named x) nil)))
+
+;; The springs between named points of two solids: (from-id from-at to-id
+;; to-at), both ways round.
+(def glue-pairs ()
+  (apply append
+    (map (lambda (c)
+           (if (and (= (get c :law) :spring) (solid-id? (get c :a)) (solid-id? (get c :b)))
+             (list (list (id-name (get c :a)) (get c :a-at) (id-name (get c :b)) (get c :b-at))
+                   (list (id-name (get c :b)) (get c :b-at) (id-name (get c :a)) (get c :a-at)))
+             (list)))
+         (connections))))
+
+;; ((id (dict :at :turn :how)) …) for every solid; :how is :placed (its
+;; place has an :at), :seated (with :on, the solid it is glued to; a turn
+;; it was given stays) or :origin.
+(def resolve-places ()
+  (let ((given (filter (lambda (s) (let ((p (place-of (get s :id)))) (and (map? p) (get p :at)))) lab-solids))
+        (start (if (and (empty? given) (not (empty? lab-solids)))
+                 (list (list (get (first lab-solids) :id) (merge (full-place nil) :how :origin)))
+                 (map (lambda (s) (list (get s :id) (merge (full-place (place-of (get s :id))) :how :placed))) given))))
+    (seat-all start (len lab-solids))))
+
+(def placed-in (placed id)
+  (let ((hit (filter (lambda (p) (= (first p) id)) placed))) (if (empty? hit) nil (nth (first hit) 1))))
+
+(def seat-all (placed rounds)
+  (let ((pairs (glue-pairs))
+        (more (apply append
+                (map (lambda (s)
+                       (let ((id (get s :id)))
+                         (if (placed-in placed id) (list)
+                           (let ((glue (filter (lambda (g) (and (= (first g) id) (placed-in placed (nth g 2))
+                                                                (local-at id (nth g 1)) (local-at (nth g 2) (nth g 3))))
+                                               pairs)))
+                             (if (empty? glue) (list)
+                               (let ((g (first glue))
+                                     (turn (get (full-place (place-of id)) :turn))
+                                     (there (world-at (placed-in placed (nth g 2)) (local-at (nth g 2) (nth g 3)))))
+                                 (list (list id (dict :at (sub3 there (turn-point turn (local-at id (nth g 1))))
+                                                      :turn turn :how :seated :on (nth g 2))))))))))
+                     lab-solids))))
+    (if (or (empty? more) (< rounds 1))
+      (append placed (map (lambda (s) (list (get s :id) (merge (full-place nil) :how :origin)))
+                          (filter (lambda (s) (= (placed-in placed (get s :id)) nil)) lab-solids)))
+      ;; one seat per round, so a chain seats in order
+      (seat-all (append placed (list (first more))) (- rounds 1)))))
+
+;; Tints (assembly-face's palette, r g b per tint).
+(def palette
+  (list 0.70 0.72 0.76   0.88 0.66 0.40   0.56 0.27 0.16   0.93 0.83 0.62   0.32 0.18 0.13
+        0.74 0.76 0.80   0.33 0.60 1.00   0.62 0.92 1.00   0.88 0.88 0.84   0.13 0.13 0.14
+        0.96 0.56 0.16   0.36 0.86 0.52   0.86 0.69 0.30))
+(def tint-point 6)
+(def tint-picked 7)
+(def tint-string 8)
+(def tint-pickup 9)
+(def tint-pick 10)
+(def tint-mic 11)
+(def tint-metal 5)
+
+(def material-tints
+  (list (list "maple" 1) (list "mahogany" 2) (list "spruce" 3) (list "rosewood" 4)
+        (list "brass" 12) (list "bronze" 12) (list "copper" 12) (list "gold" 12)))
+
+(def material-tint (name)
+  (let ((hit (filter (lambda (t) (= (first t) name)) material-tints)))
+    (if (empty? hit) tint-metal (nth (first hit) 1))))
+
+(def solid-material (s)
+  (if (= (get s :id) (get (current-solid) :id)) (get (get lab-spec :made-of) :name)
+    (get (get (get s :spec) :made-of) :name)))
+
+;; How far strings sit off the surface they are mounted on (m).
+(def string-lift 0.007)
+
+;; Where along string sid each attachment is, (fraction world-point).
+(def string-ends (sid places)
+  (let ((on (lambda (id at) (let ((pl (placed-in places (id-name id))) (local (local-at id at)))
+                                  (if (and pl local) (world-at pl local) nil)))))
+    (filter (lambda (e) (not (= (nth e 1) nil)))
+      (apply append
+        (map (lambda (c)
+               (let ((law (get c :law)) (a (id-name (get c :a))) (b (id-name (get c :b))))
+                 (if (and (= law :spring) (= a sid) (number? (get c :a-at)) (solid-id? b))
+                   (list (list (get c :a-at) (on b (get c :b-at))))
+                   (if (and (= law :spring) (= b sid) (number? (get c :b-at)) (solid-id? a))
+                     (list (list (get c :b-at) (on a (get c :a-at))))
+                     (if (and (= law :mount) (= b sid) (solid-id? a))
+                       (list (list (get c :end) (on a (get c :a-at))))
+                       (list))))))
+             (connections))))))
+
+;; String sid as (from-fraction from-point to-fraction to-point), its two
+;; outermost attachments, lifted; nil unless it has two.
+(def string-line (sid places)
+  (let ((ends (string-ends sid places)))
+    (if (< (len ends) 2) nil
+      (let ((lo (reduce (lambda (b e) (if (< (first e) (first b)) e b)) (first ends) ends))
+            (hi (reduce (lambda (b e) (if (> (first e) (first b)) e b)) (first ends) ends))
+            (up (list 0 0 string-lift)))
+        (if (= (first lo) (first hi)) nil
+          (list (first lo) (add3 (nth lo 1) up) (first hi) (add3 (nth hi 1) up)))))))
+
+(def along (line s)
+  (lerp3 (nth line 1) (nth line 3) (/ (- s (nth line 0)) (- (nth line 2) (nth line 0)))))
+
+;; A unit vector across the string, level.
+(def across (line)
+  (let ((d (sub3 (nth line 3) (nth line 1)))
+        (flat (sqrt (+ (* (nth d 0) (nth d 0)) (* (nth d 1) (nth d 1))))))
+    (if (< flat 0.000001) (list 0 1 0) (list (/ (- 0 (nth d 1)) flat) (/ (nth d 0) flat) 0))))
+
+(def rod (from to radius tint) (dict :from from :to to :radius radius :tint tint))
+(def mark (at size tint) (dict :at at :size size :tint tint))
+
+;; The parts, rods and marks of the whole instrument.
+(def assembly-parts (places)
+  (filter (lambda (p) (not (= p nil)))
+    (map (lambda (s)
+           (let ((pl (placed-in places (get s :id)))
+                 (editing (= (get s :id) (get (current-solid) :id)))
+                 (tint (+ (material-tint (solid-material s)) (if editing 0.5 0)))
+                 (src (if editing (if (solved?) (get lab-solved :file) nil) (get s :mesh-file)))
+                 (where (dict :at (get pl :at) :turn (get pl :turn) :tint tint)))
+             (if (string? src) (merge where :src src)
+               (if (and editing (map? lab-preview) (get lab-preview :mesh-id))
+                 (merge where :mesh-id (get lab-preview :mesh-id))
+                 (if (and (not editing) (map? (get s :spec)))
+                   (merge where :spec (get s :spec) :dir lab-dir)
+                   nil)))))
+         lab-solids)))
+
+(def assembly-rods (places)
+  (apply append
+    (map (lambda (sid)
+           (let ((line (string-line sid places)))
+             (if (= line nil) (list)
+               (append
+                 (list (rod (nth line 1) (nth line 3) 0.0009 tint-string)
+                       ;; the saddle and nut under the lifted ends
+                       (rod (sub3 (nth line 1) (list 0 0 string-lift)) (nth line 1) 0.0022 tint-metal)
+                       (rod (sub3 (nth line 3) (list 0 0 string-lift)) (nth line 3) 0.0022 tint-metal))
+                 ;; a pickup is a bar across the string, below it
+                 (map (lambda (l)
+                        (let ((at (add3 (along line (get l :at)) (list 0 0 -0.0045))) (w (scale3 (across line) 0.022)))
+                          (rod (sub3 at w) (add3 at w) 0.0042 (if (= (get l :hear) :pickup) tint-pickup tint-mic))))
+                      (filter (lambda (l) (and (= (id-name (get l :obj)) sid) (number? (get l :at)))) (listens)))))))
+         (string-ids))))
+
+(def assembly-marks (places)
+  (append
+    ;; every solid's named points
+    (apply append
+      (map (lambda (s)
+             (let ((pl (placed-in places (get s :id))) (pts (points-of (get s :id)))
+                   (editing (= (get s :id) (get (current-solid) :id))))
+               (map (lambda (k) (mark (world-at pl (get pts k)) 0.0045
+                                      (if (and editing (= k lab-named)) tint-picked tint-point)))
+                    (keys pts))))
+           lab-solids))
+    ;; mics on solids
+    (apply append
+      (map (lambda (l) (let ((id (id-name (get l :obj))) (pl (placed-in places (id-name (get l :obj)))))
+                         (if (and pl (local-at id (get l :at))) (list (mark (world-at pl (local-at id (get l :at))) 0.008 tint-mic)) (list))))
+           (listens)))
+    ;; plucks over strings, strikes on solids
+    (apply append
+      (map (lambda (c)
+             (let ((b (id-name (get c :b))) (pl (placed-in places (id-name (get c :b)))))
+               (if (and (= (get c :law) :pluck) (number? (get c :b-at)) (string-line b places))
+                 (let ((line (string-line b places)))
+                   (list (mark (add3 (along line (get c :b-at)) (list 0 0 0.006)) 0.006 tint-pick)))
+                 (if (and (= (get c :law) :felt) pl (local-at b (get c :b-at)))
+                   (list (mark (world-at pl (local-at b (get c :b-at))) 0.009 tint-pick))
+                   (list)))))
+           (connections)))))
+
+;; Rebuild the instrument's mesh (only while it is shown).
+(def rebuild-assembly ()
+  (when (= lab-look :instrument)
+    (let ((places (resolve-places)))
+      (set! lab-assembly (modal-assembly-mesh (assembly-parts places) (assembly-rods places) (assembly-marks places))))))
+
+(def set-look! (look)
+  (set! lab-look look)
+  (rebuild-assembly))
+
+;; The solid being edited's place, filled in, as resolved.
+(def current-place ()
+  (placed-in (resolve-places) (get (current-solid) :id)))
+
+;; Move the solid being edited: key :at or :turn, axis i, to v. Moving a
+;; seated solid places it where it is seated, then moves it.
+(def nudge-place! (key i v)
+  (let ((pl (current-place)) (now (if (= pl nil) zero3 (get pl key))))
+    (set-place! (get (current-solid) :id)
+                (merge (dict :at (get pl :at) :turn (get pl :turn)) key (set-nth now i v)))))
+
+;; Seat the solid being edited by its glue again: drop its :at (a turn it
+;; was given stays).
+(def reseat ()
+  (let ((p (place-of (get (current-solid) :id))))
+    (set-place! (get (current-solid) :id)
+                (if (and (map? p) (get p :turn) (not (= (get p :turn) zero3))) (dict :turn (get p :turn)) nil))))
+
+(def place-summary (pl)
+  (match (get pl :how)
+    :seated (str "Seated on " (get pl :on) " by its glue")
+    :placed "Placed"
+    _ "At the origin"))
+
+(def degree-field (key title value on-set)
+  (v-stack :width 5.6 :gap 0.08
+    (label title :font-size 8.5 :color :dim :bg :transparent)
+    (number-picker :key key :value value :min -180 :max 180
+                   :drag :relative :drag-step 0.5 :step 0.5 :decimals 1 :unit "°"
+                   :noui true :font-size 10.2 :text-color :accent :edit-color :yellow :text-align :left
+                   :width 5.6 :height 0.9 :on-change (lambda (v) (on-set (clamp v -180 180))))))
+
+;; Under the instrument view: where the solid being edited sits.
+(def place-controls ()
+  (let ((pl (current-place)))
+    (if (= pl nil) (label "" :bg :transparent)
+      (v-stack :gap 0.3 :width :fill
+        (h-stack :gap 0.5 :align :center :width :fill
+          (section-label (str "PLACE · " (get (current-solid) :id)))
+          (label (place-summary pl) :key "lab-place-how" :font-size 9.5 :color :dim :bg :transparent)
+          (box :flex 1)
+          (if (map? (place-of (get (current-solid) :id)))
+            (small-button "lab-reseat" (if (empty? (glue-pairs)) "Origin" "Seat by glue") reseat)
+            (label "" :bg :transparent)))
+        (h-stack :gap 0.5
+          (each (range 3) |i|
+            (mm-field (str "lab-place-at-" i) (nth (list "X" "Y" "Z") i) (nth (get pl :at) i) -2 2
+                      (lambda (v) (nudge-place! :at i (snap v)))))
+          (each (range 3) |i|
+            (degree-field (str "lab-place-turn-" i) (nth (list "Turn X" "Turn Y" "Turn Z") i) (nth (get pl :turn) i)
+                          (lambda (v) (nudge-place! :turn i v)))))))))
+
 ;; ── 3-D view ──
 
 (def view-background "#1b1d22")
@@ -1136,16 +1631,21 @@
 (def view-rows (+ canvas-rows 2))
 
 ;; The solved shape swings through its lowest modes; until then, the shape
-;; as meshed.
+;; as meshed. In the instrument look, every part where it sits.
 (def view-3d ()
   (box :width :fill :height view-rows :corner-radius 6
+    (if (= lab-look :instrument)
+      (if (and (map? lab-assembly) (get lab-assembly :mesh-id))
+        (mv/assembly-view :key "lab-assembly" :geometry lab-assembly :palette palette :zoom lab-zoom
+                          :width :fill :height view-rows :yaw -0.9 :pitch 0.75 :background view-background)
+        (label (str "  " (if (map? lab-assembly) (or (get lab-assembly :error) "") "")) :font-size 10 :color :dim :bg :transparent))
     (if (solved?)
       (mv/mode-mesh-cycle :key "lab-cycle" :src (get lab-solved :file) :width :fill :height view-rows
                           :background view-background)
       (if (and (map? lab-preview) (not (= (get lab-preview :mesh-id) nil)))
         (mv/mode-mesh-view :key "lab-preview" :geometry lab-preview :amps (list 0)
                            :width :fill :height view-rows :yaw 0.6 :pitch 0.55 :background view-background)
-        (label "" :bg :transparent)))))
+        (label "" :bg :transparent))))))
 
 (def status-text ()
   (let ((p lab-preview))
@@ -1177,8 +1677,24 @@
         (small-button "lab-solve-again" "Solve" request-solve))
       (label (status-text) :key "lab-status" :font-size 10 :color :dim :bg :transparent))))
 
+(def looks (list (list :solid "This solid") (list :instrument "Instrument")))
+
+(def look-toggle ()
+  (h-stack :gap 0.3 :align :center :width :fill
+    (each looks |l|
+      (choice-button (str "lab-look-" (nth l 1)) (nth l 1) (= lab-look (first l)) "#2f6fe0"
+                     (lambda () (set-look! (first l)))))
+    (box :flex 1)
+    (if (= lab-look :instrument)
+      (h-stack :gap 0.3 :align :center
+        (label "Zoom" :font-size 10 :color :dim :bg :transparent)
+        (narrow-button "lab-zoom-out" "−" (lambda () (set! lab-zoom (max 0.5 (/ lab-zoom 1.25)))))
+        (narrow-button "lab-zoom-in" "+" (lambda () (set! lab-zoom (min 8 (* lab-zoom 1.25))))))
+      (label "" :bg :transparent))))
+
 (def view-panel ()
   (v-stack :flex 1 :gap 0.4
+    (look-toggle)
     (view-3d)
     (h-stack :gap 0.5 :align :center :width :fill
       (solve-status)
@@ -1189,7 +1705,8 @@
       (narrow-button "lab-finer" "+" (lambda () (step-detail 1))))
     (if (parts-mode?)
       (label (detail-warning) :key "lab-detail-warning" :font-size 10 :color :yellow :bg :transparent :width :fill)
-      (label "" :bg :transparent))))
+      (label "" :bg :transparent))
+    (if (= lab-look :instrument) (place-controls) (label "" :bg :transparent))))
 
 ;; ── Header ──
 

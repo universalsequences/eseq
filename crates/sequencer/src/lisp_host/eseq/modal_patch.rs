@@ -47,14 +47,55 @@ pub const CIRC_PLATE_NATIVE: &str = "modal-circ-plate-modes";
 /// The natives eseq.modal calls, by name, as (args) -> value or a
 /// user-facing error. The CLI and tests register them on a bare VM
 /// ([`register_modal_natives`]); the app on its runtime.
-pub fn modal_natives() -> [(&'static str, fn(&[Value]) -> Result<Value, String>); 5] {
+pub fn modal_natives() -> [(&'static str, fn(&[Value]) -> Result<Value, String>); 7] {
     [
         (READ_DATA_NATIVE, read_data_native),
         (CIRC_PLATE_NATIVE, circ_plate_native),
         (SOLVE_NATIVE, solve_native),
         (MESH_NATIVE, mesh_native),
         (NEAREST_NATIVE, nearest_native),
+        (PICK_NATIVE, pick_native),
+        (super::modal_assembly::ASSEMBLY_NATIVE, super::modal_assembly::assembly_native),
     ]
+}
+
+/// `(modal-mesh-pick mesh-id a b n u v)`: the surface point of a registered
+/// mesh (a `modal-mesh` preview) under (u v) in the view plane whose across
+/// and up axes are a and b (0 x, 1 y, 2 z), seen from +n: of the vertices
+/// nearest the line through (u v) along n, the one furthest toward +n, as
+/// (x y z); nil for an unknown mesh. What a click on the shape lab's canvas
+/// places a named point on.
+pub const PICK_NATIVE: &str = "modal-mesh-pick";
+
+fn pick_native(args: &[Value]) -> Result<Value, String> {
+    let number = |k: usize| match args.get(k) {
+        Some(Value::Number(x)) => Some(*x),
+        _ => None,
+    };
+    let (Some(id), Some(a), Some(b), Some(n), Some(u), Some(v)) =
+        (number(0), number(1), number(2), number(3), number(4), number(5))
+    else {
+        return Err(format!("{PICK_NATIVE} takes a mesh id, axes a b n and a point u v"));
+    };
+    let (a, b, n) = (a as usize % 3, b as usize % 3, n as usize % 3);
+    let Some(geometry) = eseqlisp::widget_render::mesh_widget::geometry(id as u64) else {
+        return Ok(Value::Nil);
+    };
+    let vertices: Vec<[f64; 3]> =
+        geometry.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+    let off_line = |p: &[f64; 3]| ((p[a] - u).powi(2) + (p[b] - v).powi(2)).sqrt();
+    let Some(nearest) = vertices.iter().map(off_line).min_by(f64::total_cmp) else {
+        return Ok(Value::Nil);
+    };
+    // the vertices about as near the line as the nearest (within 2% of the
+    // mesh), so the front face wins over the back one
+    let reach = nearest + 0.02 * geometry.radius as f64;
+    let front = vertices
+        .iter()
+        .filter(|p| off_line(p) <= reach)
+        .max_by(|p, q| p[n].total_cmp(&q[n]))
+        .expect("the nearest vertex is within reach");
+    Ok(Value::List(front.iter().map(|&x| cell(Value::Number(x))).collect()))
 }
 
 /// `(modal-nearest-point points (x y z))`: the index of the nearest of a
@@ -116,10 +157,31 @@ pub fn solid_spec(value: &Value, script_dir: &Path) -> Result<(crate::modal_fe::
         }
         Value::Map(_) => {
             let mut spec = lisp_to_json(value);
+            // a solid's :grain (along, across) with its material's :wood
+            // constants make the spec's orthotropic grain
+            let grain = spec.as_object_mut().and_then(|spec| spec.remove("grain"));
             if let Some(material) = spec.as_object_mut().and_then(|spec| spec.remove("made_of")) {
                 let pick = |key: &str| material.get(key).cloned().unwrap_or(serde_json::Value::Null);
                 spec["material"] =
                     serde_json::json!({"density": pick("density"), "young": pick("young"), "poisson": pick("poisson")});
+                if let Some(grain) = grain.filter(|grain| !grain.is_null()) {
+                    let axes = match &grain {
+                        serde_json::Value::Array(axes) => axes.clone(),
+                        axis => vec![axis.clone()],
+                    };
+                    let along = axes.first().and_then(|a| a.as_str()).unwrap_or("x").trim_start_matches(':').to_string();
+                    // across defaults to the next axis round (x -> y -> z -> x)
+                    let next = match along.as_str() { "x" => "y", "y" => "z", _ => "x" };
+                    let across = axes.get(1).and_then(|a| a.as_str()).map_or(next.to_string(), |a| a.trim_start_matches(':').to_string());
+                    let wood = pick("wood");
+                    if !wood.is_object() {
+                        return Err(format!("a solid with :grain must be made of a wood (a material with :wood), got {material}"));
+                    }
+                    let mut grain = wood;
+                    grain["along"] = serde_json::Value::String(along);
+                    grain["across"] = serde_json::Value::String(across);
+                    spec["material"]["grain"] = grain;
+                }
             }
             let json = spec.to_string();
             Ok((SolidSpec::from_json(&json).map_err(|error| format!("{error} in {json}"))?, script_dir.to_path_buf()))
@@ -139,22 +201,46 @@ pub fn solve_solid_cached(
     progress: &crate::modal_fe::SolveProgress,
 ) -> Result<(PathBuf, String), String> {
     use crate::modal_fe::{solve_watched, spec_hash};
-    // The key: the spec, where its relative .obj paths resolve, the .obj
-    // files' contents, and the solver's version (a fix re-solves).
-    let mut key = format!("{SOLVER_VERSION}\n{}\n{}\n", spec_hash(spec), base.display());
+    // The key: the spec, the solver's version (a fix re-solves) and, for a
+    // spec with .obj files, their contents and the folder their relative
+    // paths resolve from (canonical). A spec without them is the same solid
+    // wherever its script is (a relative or absolute path, a draft's copy).
     let spec_json = serde_json::to_value(spec).map_err(|error| error.to_string())?;
-    for path in obj_paths(&spec_json) {
-        let bytes = std::fs::read(base.join(&path)).unwrap_or_default();
-        key.push_str(&crate::sample_manifest::sha256_hex(&bytes));
-    }
-    let cache = crate::app_paths::app_paths()
-        .modal_solid_cache_dir()
-        .join(format!("{}.unit.modes.json", crate::sample_manifest::sha256_hex(key.as_bytes())));
+    let objs = obj_paths(&spec_json);
+    let obj_hashes: String = objs
+        .iter()
+        .map(|path| crate::sample_manifest::sha256_hex(&std::fs::read(base.join(path)).unwrap_or_default()))
+        .collect();
+    let keyed = |dir: Option<String>| {
+        let mut key = format!("{SOLVER_VERSION}\n{}\n", spec_hash(spec));
+        if let Some(dir) = dir {
+            key.push_str(&format!("{dir}\n"));
+        }
+        key.push_str(&obj_hashes);
+        crate::app_paths::app_paths()
+            .modal_solid_cache_dir()
+            .join(format!("{}.unit.modes.json", crate::sample_manifest::sha256_hex(key.as_bytes())))
+    };
+    let canonical = cache_dir_key(base).display().to_string();
+    let cache = keyed(if objs.is_empty() { None } else { Some(canonical.clone()) });
     // A cached file is already at unit modal mass; one that does not parse
     // is solved again.
-    if let Ok(text) = std::fs::read_to_string(&cache) {
-        if modes_json_value(&text).is_ok() {
-            return Ok((cache, text));
+    let read = |path: &Path| std::fs::read_to_string(path).ok().filter(|text| modes_json_value(text).is_ok());
+    if let Some(text) = read(&cache) {
+        return Ok((cache, text));
+    }
+    // a solve cached under an earlier key (keyed by the folder as given, or
+    // canonical) is moved to this one, rather than solved again
+    let mut legacy = vec![keyed(Some(base.display().to_string()))];
+    if objs.is_empty() {
+        legacy.push(keyed(Some(canonical)));
+    }
+    for old in legacy {
+        if let Some(text) = read(&old) {
+            if std::fs::rename(&old, &cache).is_ok() {
+                return Ok((cache, text));
+            }
+            return Ok((old, text));
         }
     }
     let (mut solid, _) = solve_watched(spec, base, progress)?;
@@ -170,6 +256,12 @@ pub fn solve_solid_cached(
         }
     }
     Ok((cache, text))
+}
+
+/// A script folder as a solve's cache key names it: absolute and without
+/// symlinks, else as given (a folder that does not exist).
+fn cache_dir_key(base: &Path) -> PathBuf {
+    base.canonicalize().unwrap_or_else(|_| base.to_path_buf())
 }
 
 /// The native a shape editor previews a solid with:
@@ -349,7 +441,7 @@ fn rows(values: &[f64], width: usize) -> Value {
     Value::List(values.chunks(width.max(1)).map(|row| cell(numbers(row.iter().copied()))).collect())
 }
 
-fn data_dict(fields: Vec<(&str, Value)>) -> Value {
+pub(super) fn data_dict(fields: Vec<(&str, Value)>) -> Value {
     Value::Map(fields.into_iter().map(|(key, value)| (key.to_string(), cell(value))).collect::<HashMap<_, _>>())
 }
 
@@ -633,6 +725,50 @@ mod tests {
         assert!(dsp.contains("(param mic1_obj_pt @group mic1 @default 1 @min 0 @max 1"), "{dsp}");
     }
 
+    /// Named points (a solid's :points): accesses name them, and every one is
+    /// compiled, so the point knobs step through all of them in name order.
+    #[test]
+    fn named_points_are_referenced_by_name_and_all_compiled() {
+        let shapes: Vec<String> = (0..100).map(|k| format!("(list {k} 1)")).collect();
+        let points: Vec<String> = (0..100).map(|k| format!("(list {k} 0 0)")).collect();
+        let named = |names: &str| {
+            format!(
+                "(merge (m/modal-data 'obj :data (dict :freqs (list 100 200) :shapes (list {}) :points (list {})))
+                        :named-points (dict {names}))",
+                shapes.join(" "),
+                points.join(" ")
+            )
+        };
+        let script = |names: &str, at: &str, listen: &str| {
+            format!(
+                "(import eseq.modal :as m)
+(m/patch :name \"probe-named\"
+  :objects (list (m/mallet 'mal) {})
+  :connections (list (m/felt 'hit 'mal 'obj {at}))
+  :listens (list (m/listen 'obj {listen})))",
+                named(names)
+            )
+        };
+        let names = ":tip (list 70.2 0 0) :end (list 29.8 0 0) :mid (list 50 0 0)";
+        let dsp = generate_instrument(&mut modal_vm(), PathBuf::from("named.lisp"), &script(names, ":tip", ":end"))
+            .unwrap()
+            .dsp;
+        // the two in use first, then the unused :mid
+        assert!(dsp.contains("(def obj_shapes (tensor @shape [3 2] @data [70 1 30 1 50 1]))"), "{dsp}");
+        assert!(dsp.contains("(param hit_obj_pt @group hit @default 0 @min 0 @max 2"), "{dsp}");
+        assert!(dsp.contains("(param mic1_obj_pt @group mic1 @default 1 @min 0 @max 2"), "{dsp}");
+
+        let mut vm = modal_vm();
+        for (names, at, expected) in [
+            (":tip (list 70 0 0)", ":tap", "felt hit b: modal-data obj has no point named :tap (it has :tip)"),
+            (":tip (list 70 0)", ":tip", "modal-data obj: point :tip is (list x y z), got (70 0)"),
+        ] {
+            let errors =
+                generate_instrument(&mut vm, PathBuf::from("x.lisp"), &script(names, at, "0")).unwrap_err();
+            assert!(errors.contains(&expected.to_string()), "{errors:?}");
+        }
+    }
+
     #[test]
     fn checks_data_objects() {
         let mut vm = modal_vm();
@@ -789,6 +925,48 @@ mod tests {
         // its surface points, addressed by (x y z): the nearest point param
         assert!(squashed.contains("(def bar_shapes (tensor @shape ["), "{dsp}");
         assert!(squashed.contains("(param hit_bar_pt @group hit"), "{dsp}");
+    }
+
+    /// The cache folder key is canonical: a relative and an absolute path
+    /// to one folder are the same key.
+    #[test]
+    fn a_relative_and_an_absolute_script_folder_share_a_solve() {
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(cache_dir_key(Path::new(".")), here.canonicalize().unwrap());
+        assert_eq!(cache_dir_key(Path::new("src")), cache_dir_key(&here.join("src")));
+        assert_eq!(cache_dir_key(Path::new("/no/such/dir")), PathBuf::from("/no/such/dir"));
+    }
+
+    /// modal-mesh-pick finds the surface under a point of a view plane, on
+    /// the side the view looks from.
+    #[test]
+    fn picks_the_front_surface_of_a_preview() {
+        let mut vm = modal_vm();
+        let mut eval = |source: &str| vm.eval_str(source).unwrap().unwrap_or(Value::Nil);
+        let preview = eval(
+            "(import eseq.modal.materials :as mat)
+             (def bar (modal-mesh (dict :solid (dict :box (dict :size (list 0.3 0.04 0.01))) :modes 4
+                                        :made-of mat/steel :resolution (dict :cells 30))))
+             (get bar :mesh-id)",
+        );
+        assert!(matches!(preview, Value::Number(_)), "{preview:?}");
+        let xyz = |value: Value| match value {
+            Value::List(items) => items
+                .iter()
+                .map(|item| match &*item.borrow() {
+                    Value::Number(x) => *x,
+                    other => panic!("{other:?}"),
+                })
+                .collect::<Vec<f64>>(),
+            other => panic!("{other:?}"),
+        };
+        // the front view (x across, z up, along y): the +y face
+        let front = xyz(eval("(modal-mesh-pick (get bar :mesh-id) 0 2 1 0.1 0)"));
+        assert!((front[1] - 0.02).abs() < 1e-6 && (front[0] - 0.1).abs() < 0.011, "{front:?}");
+        // the top view (x across, y up, along z): the +z face
+        let top = xyz(eval("(modal-mesh-pick (get bar :mesh-id) 0 1 2 -0.05 0.01)"));
+        assert!((top[2] - 0.005).abs() < 1e-6, "{top:?}");
+        assert!(matches!(eval("(modal-mesh-pick 999999 0 1 2 0 0)"), Value::Nil));
     }
 
     /// modal-mesh previews a spec without solving it: a handle to its surface
@@ -1074,6 +1252,14 @@ mod tests {
         assert!(squashed.contains("(def bridge_push (* bridge_d2 (* -1 (mod bridge_weight) (mod bridge_gain) bridge_share str_mask)))"), "{squashed}");
         assert!(squashed.contains("(modal-advance str_free (+ (* str_G (* plk_F plk_phi_b)) bridge_push))"), "{squashed}");
         assert!(!squashed.contains("param bridge_str_"), "{squashed}");
+        // One way by default; with :back the string's end force (last
+        // sample but one, where d2 is centred) pushes the body.
+        assert!(!squashed.contains("bridge_R"), "{squashed}");
+        let two_way = script.replace("'str 1))", "'str 1 :back 1))");
+        let back = squash(&generate_instrument(&mut modal_vm(), dir.path().join("lead.lisp"), &two_way).unwrap().dsp);
+        assert!(back.contains("(param bridge_back @group bridge @default 1 @min 0 @max 4"), "{back}");
+        assert!(back.contains("(def bridge_R (* (mod bridge_weight) (mod bridge_gain) (mod bridge_back) str_mass (sum (* bridge_share str_mask (read-history str_s2) (pow (/ (* twopi str_freqs) (* samplerate body_wref)) 2)))))"), "{back}");
+        assert!(back.contains("(* bridge_R bridge_phi_a)"), "{back}");
         assert!(ui(&instrument).contains("\"AMP\""), "{}", ui(&instrument));
         // m/speaker needs an amp; :amp must be one.
         let no_amp = script.replace(":amp (m/amp :drive 30)", "");

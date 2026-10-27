@@ -326,7 +326,7 @@
 ;;               heard at once, :re a quarter cycle on), :name, and
 ;;               :click (dict :rms :decay-s :hz); played by m/strokes
 ;;   tune        frequency ratio (to the note when root is given)
-;;   decay       multiplies every loss (panel "Decay x")
+;;   decay       multiplies every loss (panel "Damping x": higher dies sooner)
 ;;   muffle      tape or a resting hand: loss growing with sqrt(f), up to
 ;;               40/s at 1 kHz (panel "Muffle")
 ;;   mute        extra damping while the note is released (a choke)
@@ -374,7 +374,7 @@
           :follow follow
           :fixed-pitch (not held)
           :held held
-          :params (append (list (pspec id "decay" decay 0.05 20 :title "Decay x" :taper :log)
+          :params (append (list (pspec id "decay" decay 0.05 20 :title "Damping x" :taper :log)
                                 (pspec id "muffle" muffle 0 1 :title "Muffle"))
                           (note-params id tune mute (if mass mass (if (given nil :mass) (given nil :mass) 1))))))))
 
@@ -407,19 +407,45 @@
 ;;   block       a region clamped in place, as in a spec; free when nil
 ;;   loss        damping at every frequency, 1/s
 ;;   hf-loss     damping that rises with frequency (as the string's)
+;;   damping     the material's loss factor (eta): each mode also loses
+;;               pi * eta * f per second, so a mode rings about 2.2 / (pi
+;;               eta f) seconds, ten times shorter ten times higher, as wood
+;;               does. Nil takes the material's :damping (the woods have
+;;               one; metals ring on their loss and hf-loss alone). A
+;;               built instrument loses more than its wood: glue joints and
+;;               sound radiated from a top add to it
+;;   points      named spots on it, (dict :bridge (list x y z) ...) in
+;;               metres: a connection or listen on this solid may give a
+;;               name (:bridge) for its position, and every named point is
+;;               compiled, so a point knob steps through them all (in name
+;;               order); each snaps to the nearest surface node
+;;   grain       for a wood (a material with :wood), the axis its grain
+;;               runs along, :x, or (list :x :z) for the grain along x and
+;;               the growth rings' radial direction along z (quartersawn,
+;;               as a guitar top is); else the next axis round. The solid is
+;;               then orthotropic: stiff along the grain, many times softer
+;;               across it, as wood is. Without it, isotropic at :young
+;;   place       where it sits in the instrument, (dict :at (list x y z)
+;;               :turn (list rx ry rz)): moved by :at metres after turning
+;;               rx, ry then rz degrees about x, y and z. Drawn by the shape
+;;               lab's instrument view; a solid without one is seated by its
+;;               glue (a spring between its named point and a placed
+;;               solid's puts the two together). It does not change the sound
 ;;   root, tune, decay, mute, mass  as for modal-data
 (def solid (id &key (shape nil) (spec nil) (made-of mat/steel) (modes 40) (resolution nil) (block nil)
-               (loss 2) (hf-loss 0.3) (root nil) (tune 1) (decay 1) (mute 0) (mass nil))
+               (loss 2) (hf-loss 0.3) (damping nil) (grain nil) (points nil) (place nil) (root nil) (tune 1) (decay 1) (mute 0) (mass nil))
   (let ((m (first (material-choices made-of)))
         ;; :made-of, not :material: a call quotes whatever follows :material
         (base (dict :solid shape :modes modes :made-of m))
-        (with-res (if resolution (merge base :resolution resolution) base))
+        (with-grain (if grain (merge base :grain grain) base))
+        (with-res (if resolution (merge with-grain :resolution resolution) with-grain))
         (fe-spec (if spec spec (if block (merge with-res :block block) with-res)))
         (data (modal-solve fe-spec))
-        (losses (if (map? data) (map (lambda (f) (+ loss (* hf-loss f 0.01))) (get data :freqs)) nil)))
+        (eta (or damping (get m :damping) 0))
+        (losses (if (map? data) (map (lambda (f) (+ loss (* hf-loss f 0.01) (* 3.14159265 eta f))) (get data :freqs)) nil)))
     ;; :fe-spec and :data are for the shape lab (eseq.modal.shape-lab)
     (merge (modal-data id :data data :losses losses :root root :tune tune :decay decay :mute mute :mass mass)
-           :title "SOLID" :label "solid" :fe-spec fe-spec :data data)))
+           :title "SOLID" :label "solid" :fe-spec fe-spec :data data :named-points points :place place)))
 
 ;; The positions of xs's numbers in increasing order (insertion sort; a few
 ;; hundred modes at most).
@@ -565,10 +591,16 @@
 ;;           two-direction string's second), as the mount's point moves in one
 ;;   end     which end is mounted: 0 or 1
 ;;   gain    the coupling, 1 as rigid
+;;   back    EXPERIMENTAL, off by default: the string's end force on the
+;;           mount (panel "Back"), m sum_k s_k w_k^2 q_k with s_k the share
+;;           above. The explicit exchange is not energy-conserving: it
+;;           pumps partials near the body's modes and runs away on high
+;;           notes (eseq-lojj.22)
 ;;   weight  0..1
-(def mount (id a a-at b end &key (gain 1) (weight 1))
-  (dict :id id :title "MOUNT" :law :mount :a a :b b :a-at a-at :b-at nil :end end :weight weight
-        :params (list (pspec id "gain" gain 0 4 :title "Coupling"))))
+(def mount (id a a-at b end &key (gain 1) (back nil) (weight 1))
+  (dict :id id :title "MOUNT" :law :mount :a a :b b :a-at a-at :b-at nil :end end :weight weight :back back
+        :params (append (list (pspec id "gain" gain 0 4 :title "Coupling"))
+                        (if back (list (pspec id "back" back 0 4 :title "Back")) (list)))))
 
 ;; True when c is a mount.
 ;;   c  a connection
@@ -1351,12 +1383,31 @@
 ;;   obj  a data object
 ;;   at   the position
 (def point-index (obj at)
-  (if (number? at) (clamp (round at) 0 (- (point-count obj) 1))
-    (let ((pts (get obj :points)))
-      (if (and (list? at) (= (len at) 3) (list? pts) (not (empty? pts)))
-        ;; native: a solid has thousands of points
-        (modal-nearest-point pts at)
-        0))))
+  (let ((at (named-at obj at)))
+    (if (number? at) (clamp (round at) 0 (- (point-count obj) 1))
+      (let ((pts (get obj :points)))
+        (if (and (list? at) (= (len at) 3) (list? pts) (not (empty? pts)))
+          ;; native: a solid has thousands of points
+          (modal-nearest-point pts at)
+          0)))))
+
+;; True when at names a point (:bridge) rather than giving one.
+;;   at  an access position
+(def point-name? (at) (not (or (= at nil) (number? at) (list? at) (map? at) (string? at))))
+
+;; The (x y z) a data object's named point stands for, when at names one
+;; of its :named-points; at itself otherwise.
+;;   obj  a data object
+;;   at   an access position
+(def named-at (obj at)
+  (let ((named (get obj :named-points)))
+    (if (and (point-name? at) (map? named) (get named at)) (get named at) at)))
+
+;; A data object's named points' positions, in name order.
+;;   obj  a data object
+(def named-positions (obj)
+  (let ((named (get obj :named-points)))
+    (if (map? named) (map (lambda (k) (get named k)) (keys named)) (list))))
 
 ;; obj with :compiled, the points its DSP holds (in order), when obj is a
 ;; data object; any other object unchanged.
@@ -1368,7 +1419,9 @@
     (merge obj :parts (map (lambda (part) (compile-points part connections listens objects)) (get obj :parts)))
   (if (not (= (get obj :kind) :data)) obj
     (if (<= (point-count obj) 64) (merge obj :compiled (range (point-count obj)))
-      (let ((used (map (lambda (at) (point-index obj at)) (positions-on (get obj :id) connections listens objects)))
+      ;; every named point too, so a point knob steps through them all
+      (let ((used (map (lambda (at) (point-index obj at))
+                       (append (positions-on (get obj :id) connections listens objects) (named-positions obj))))
             (unique (filter (lambda (k) (first-occurrence? used k)) (range (len used)))))
         (merge obj :compiled (if (empty? unique) (list 0) (map (lambda (k) (nth used k)) unique))))))))
 
@@ -1467,16 +1520,24 @@
 ;; What is wrong with access point at on data object obj.
 ;;   who  the message prefix
 ;;   obj  a data object
-;;   at   a point index, or (x y z) when obj has :points
+;;   at   a point index, (x y z) when obj has :points, or one of its
+;;        :named-points' names
 (def data-at-errors (who obj at)
-  (let ((name (str (get obj :label) " " (source (get obj :id)))))
+  (let ((name (str (get obj :label) " " (source (get obj :id))))
+        (named (get obj :named-points)))
+    (if (point-name? at)
+      (if (and (map? named) (get named at)) (data-at-errors who obj (get named at))
+        (list (str who ": " name " has no point named " (source at)
+                   (if (and (map? named) (not (empty? (keys named))))
+                     (str " (it has" (reduce (lambda (acc k) (str acc " " (source k))) "" (keys named)) ")")
+                     " (give it :points (dict :name (list x y z)))"))))
     (if (number? at)
       (if (and (>= at 0) (< at (point-count obj))) nil
         (list (str who ": " name " has points 0.." (- (point-count obj) 1) ", got " (source at))))
       (if (and (list? at) (= (len at) 3))
         (if (list? (get obj :points)) nil
           (list (str who ": " name " has no :points to find " (source at) " among")))
-        (list (str who ": " name " takes a point index or (list x y z), got " (source at)))))))
+        (list (str who ": " name " takes a point index, (list x y z) or a point's name, got " (source at))))))))
 
 ;; What is wrong with a data object's numbers: no modes, or a losses or
 ;; shape row that does not have one value per mode.
@@ -1494,12 +1555,44 @@
       (list (str name ": needs :freqs, a list of mode frequencies"))
       (append (if (or (= points nil) (and (list? points) (= (len points) (point-count obj)))) nil
                 (list (str name ": " (len points) " points for " (point-count obj) " shape rows")))
+              (named-point-errors obj name)
+              (place-errors obj name)
               (if (= (len (get obj :losses)) n) nil
                 (list (str name ": " (len (get obj :losses)) " losses for " n " modes")))
               (concat-all (map (lambda (k) (if (= (len (nth (get obj :shapes) k)) n) nil
                                              (list (str name ": shape row " k " has "
                                                         (len (nth (get obj :shapes) k)) " values for " n " modes"))))
                                (range (point-count obj)))))))))))
+
+;; Is v a (list x y z) of numbers?
+(def xyz? (v) (and (list? v) (= (len v) 3) (all? number? v)))
+
+;; What is wrong with a data object's named points: :points not a dict, or
+;; a point that is not (x y z).
+;;   obj   a data object
+;;   name  how messages name it
+(def named-point-errors (obj name)
+  (let ((named (get obj :named-points)))
+    (if (= named nil) nil
+      (if (not (map? named))
+        (list (str name ": :points is a dict of named (list x y z), got " (source named)))
+        (concat-all (map (lambda (k) (let ((at (get named k)))
+                                       (if (xyz? at) nil
+                                         (list (str name ": point " (source k) " is (list x y z), got " (source at))))))
+                         (keys named)))))))
+
+;; What is wrong with a solid's :place: a dict whose :at and :turn, each
+;; optional, are (list x y z).
+;;   obj   a data object
+;;   name  how errors name it
+(def place-errors (obj name)
+  (let ((place (get obj :place)))
+    (if (= place nil) nil
+      (if (not (map? place))
+        (list (str name ": :place is (dict :at (list x y z) :turn (list rx ry rz)), got " (source place)))
+        (concat-all (map (lambda (k) (if (or (= (get place k) nil) (xyz? (get place k))) nil
+                                       (list (str name ": :place " (source k) " is (list x y z), got " (source (get place k))))))
+                         (list :at :turn)))))))
 
 ;; What is wrong with a hybrid: a melt's parts with different mode counts, a
 ;; mix's parts missing or lumped.
@@ -2368,10 +2461,15 @@
              (list "a" "b")))))))
 
 ;; terms-with c's final force, cid_F (none for strokes and mounts, which
-;; push the modes' state directly: see pushes-on).
+;; push the modes' state directly: see pushes-on; a mount with :back also
+;; pushes its body by the string's reaction, cid_R).
 ;;   c   a resolved connection
 ;;   id  an object id
-(def terms-on (c id) (if (pusher? c) nil (terms-with c id (nm (get c :id) "F"))))
+(def terms-on (c id)
+  (if (pusher? c)
+    ;; a mount with :back pushes its body by the string's reaction
+    (if (and (mount? c) (get c :back) (= (get c :a) id)) (list `(* ,(nm (get c :id) "R") ,(nm (get c :id) "phi_a"))) nil)
+    (terms-with c id (nm (get c :id) "F"))))
 
 ;; Every final force term on object id from the connections at indices.
 ;;   conns    the resolved connections
@@ -2884,7 +2982,17 @@
                                                                        (* 3.14159265 (+ k 1))))
                                                         (range (get strung :modes)))))
                   ;; the per-mode factors together, so only d2 is per sample
-                  `(def ,(n "push") (* ,(n "d2") (* -1 ,(weight-of c) ,(n "gain") ,(n "share") ,(p strung "mask"))))))))
+                  `(def ,(n "push") (* ,(n "d2") (* -1 ,(weight-of c) ,(n "gain") ,(n "share") ,(p strung "mask")))))
+            ;; with :back, the string's reaction on the body: m sum s_k
+            ;; w_k^2 q_k, in the body's force units (its G is (wref dt)^2 /
+            ;; mass, so w_k is taken over the body's wref). Its string is the
+            ;; one a sample before last, the same instant d2 (centred on
+            ;; u1) measures the body at, so the exchange conserves energy
+            (if (get c :back)
+              (list `(def ,(n "R") (* ,(weight-of c) ,(n "gain") ,(n "back") ,(p strung "mass")
+                                      (sum (* ,(n "share") ,(p strung "mask") (read-history ,(p strung "s2"))
+                                              (pow (/ (* twopi ,(p strung "freqs")) (* samplerate ,(p body "wref"))) 2))))))
+              (list)))))
 
 ;; ── measured strokes ────────────────────────────────────────────────────────
 

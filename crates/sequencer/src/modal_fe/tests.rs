@@ -2,7 +2,7 @@ use std::path::Path;
 
 use super::*;
 
-const STEEL: Material = Material { density: 7850.0, young: 2.0e11, poisson: 0.3 };
+const STEEL: Material = Material { density: 7850.0, young: 2.0e11, poisson: 0.3, grain: None };
 
 fn bar_spec(length: f64, side: f64, element: f64, block: Option<Region>, modes: usize) -> SolidSpec {
     SolidSpec {
@@ -283,4 +283,79 @@ fn a_watched_solve_reports_progress_and_stops_when_cancelled() {
     let outcome = solving.join().unwrap();
     assert_eq!(outcome, Err(CANCELLED.to_string()));
     assert!(cancelled_at.elapsed() < std::time::Duration::from_secs(2), "{:?}", cancelled_at.elapsed());
+}
+
+/// Sugar maple's constants (Wood Handbook ratios), the grain along `along`.
+fn maple(along: Axis, across: Axis) -> Material {
+    let e = 1.2e10;
+    Material {
+        density: 650.0,
+        young: e,
+        poisson: 0.35,
+        grain: Some(Grain {
+            along,
+            across,
+            young_r: 0.132 * e,
+            young_t: 0.065 * e,
+            shear_lr: 0.111 * e,
+            shear_lt: 0.063 * e,
+            shear_rt: 0.021 * e,
+            poisson_lr: 0.424,
+            poisson_lt: 0.476,
+            poisson_rt: 0.774,
+        }),
+    }
+}
+
+#[test]
+fn a_wooden_bar_bends_by_the_modulus_along_its_length() {
+    // 0.3 × 0.03 × 0.01 m: its first mode bends about y, through z, with
+    // E along x. Grain along x: E_L. Grain along y (R along z, so T along
+    // x): E_T, about 1/15 as stiff, so ~sqrt(1/0.065) = 3.9 times lower.
+    let spec = |material: Material| SolidSpec {
+        name: None,
+        solid: Solid::Box { size: [0.3, 0.03, 0.01], center: [0.0; 3] },
+        resolution: Resolution::ElementSize(0.005),
+        material,
+        block: None,
+        modes: 2,
+        mesh: MeshMode::Auto,
+    };
+    let solve = |material| solve_detailed(&spec(material), Path::new("."), &SolveProgress::default()).unwrap().solid.freqs[0];
+    let along = solve(maple(Axis::X, Axis::Y));
+    let across = solve(maple(Axis::Y, Axis::Z));
+    let isotropic = solve(Material { grain: None, ..maple(Axis::X, Axis::Y) });
+    eprintln!("maple bar: grain along {along:.1} Hz, across {across:.1} Hz, isotropic {isotropic:.1} Hz");
+    // along the grain it is nearly the isotropic bar (shear is softer)
+    assert!(along < isotropic && along > 0.9 * isotropic, "{along} vs {isotropic}");
+    let ratio = along / across;
+    assert!(ratio > 3.3 && ratio < 4.2, "{ratio}");
+    // a grain whose ratios are unstable is refused
+    let mut bad = maple(Axis::X, Axis::Y);
+    bad.grain.as_mut().unwrap().poisson_rt = 3.0;
+    assert!(spec(bad).validate().is_err());
+}
+
+#[test]
+fn flat_cells_through_a_thin_bar_match_fine_cubes() {
+    // 0.3 × 0.03 × 0.01 m steel: 4 layers through its thickness either way,
+    // as 10 mm × 10 mm × 2.5 mm cells or 2.5 mm cubes (16 times as many).
+    let spec = |resolution| SolidSpec {
+        name: None,
+        solid: Solid::Box { size: [0.3, 0.03, 0.01], center: [0.0; 3] },
+        resolution,
+        material: STEEL,
+        block: None,
+        modes: 3,
+        mesh: MeshMode::Voxel,
+    };
+    let solve = |resolution| solve_detailed(&spec(resolution), Path::new("."), &SolveProgress::default()).unwrap();
+    let flat = solve(Resolution::CellSize([0.01, 0.01, 0.0025]));
+    let cubes = solve(Resolution::ElementSize(0.0025));
+    assert_eq!(flat.stats.elements * 16, cubes.stats.elements);
+    for k in 0..3 {
+        assert!(rel(flat.solid.freqs[k], cubes.solid.freqs[k]) < 0.02, "{:?} vs {:?}", flat.solid.freqs, cubes.solid.freqs);
+    }
+    let bad = spec(Resolution::CellSize([0.01, 0.0, 0.001]));
+    assert!(bad.validate().is_err());
 }

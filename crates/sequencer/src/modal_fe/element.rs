@@ -1,4 +1,5 @@
-//! The hex8 element: isotropic linear elasticity, 2×2×2 Gauss, with Wilson's
+//! The hex8 element: linear elasticity (isotropic, or orthotropic along a
+//! wood's grain), 2×2×2 Gauss, with Wilson's
 //! nine incompatible modes in Taylor's patch-test-passing form (QM6 / the
 //! element Abaqus calls C3D8I), statically condensed.
 //!
@@ -90,6 +91,70 @@ pub(crate) fn center_jacobian_det(x: &[[f64; 3]; 8]) -> f64 {
 /// Physical gradients ∂/∂xᵢ = Σⱼ (J⁻¹)ⱼᵢ ∂/∂ξⱼ.
 fn physical(inv: &[[f64; 3]; 3], d: [f64; 3]) -> [f64; 3] {
     [0, 1, 2].map(|i| inv[0][i] * d[0] + inv[1][i] * d[1] + inv[2][i] * d[2])
+}
+
+/// A material's elasticity matrix (Voigt order as [`elasticity`]):
+/// isotropic, or orthotropic along its grain.
+pub(crate) fn material_elasticity(m: &super::spec::Material) -> [[f64; 6]; 6] {
+    match &m.grain {
+        None => elasticity(m.young, m.poisson),
+        Some(grain) => orthotropic(m.young, grain),
+    }
+}
+
+/// The normal-strain compliance (3×3, global axes) of a grained material.
+fn normal_compliance(young_l: f64, grain: &super::spec::Grain) -> [[f64; 3]; 3] {
+    let e = [young_l, grain.young_r, grain.young_t];
+    // nu[i][j]: contraction along j under stress along i (local L R T)
+    let mut nu = [[0.0; 3]; 3];
+    nu[0][1] = grain.poisson_lr;
+    nu[0][2] = grain.poisson_lt;
+    nu[1][2] = grain.poisson_rt;
+    // reciprocity: nu_ji / E_j = nu_ij / E_i
+    for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+        nu[j][i] = nu[i][j] * e[j] / e[i];
+    }
+    let axes = grain.axes();
+    let mut s = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            s[axes[i]][axes[j]] = if i == j { 1.0 / e[i] } else { -nu[i][j] / e[i] };
+        }
+    }
+    s
+}
+
+/// Orthotropic elasticity: the inverse of the compliance, its axes laid
+/// along the grain's (a permutation of x y z, so shear stays diagonal).
+fn orthotropic(young_l: f64, grain: &super::spec::Grain) -> [[f64; 6]; 6] {
+    let s = normal_compliance(young_l, grain);
+    let det = det3(&s);
+    let c = inverse3(&s, det);
+    let mut d = [[0.0; 6]; 6];
+    for i in 0..3 {
+        for j in 0..3 {
+            d[i][j] = c[i][j];
+        }
+    }
+    // Voigt shear slots: 3 xy, 4 yz, 5 zx
+    let slot = |a: usize, b: usize| match (a.min(b), a.max(b)) {
+        (0, 1) => 3,
+        (1, 2) => 4,
+        _ => 5,
+    };
+    let [l, r, t] = grain.axes();
+    d[slot(l, r)][slot(l, r)] = grain.shear_lr;
+    d[slot(l, t)][slot(l, t)] = grain.shear_lt;
+    d[slot(r, t)][slot(r, t)] = grain.shear_rt;
+    d
+}
+
+/// Whether a material's normal compliance is positive definite (its
+/// leading minors are), as a stable elastic material's must be.
+pub(crate) fn compliance_is_positive(m: &super::spec::Material) -> bool {
+    let Some(grain) = &m.grain else { return true };
+    let s = normal_compliance(m.young, grain);
+    s[0][0] > 0.0 && s[0][0] * s[1][1] - s[0][1] * s[1][0] > 0.0 && det3(&s) > 0.0
 }
 
 /// Strain-displacement columns for one vector DOF set with gradient g.
@@ -232,6 +297,7 @@ fn solve9(l: &[f64; 81], mut b: [f64; 9]) -> [f64; 9] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modal_fe::spec::Axis;
 
     fn skewed_hex() -> [[f64; 3]; 8] {
         let mut x = CORNERS.map(|c| [0.5 * (c[0] + 1.0) * 0.3, 0.5 * (c[1] + 1.0) * 0.1, 0.5 * (c[2] + 1.0) * 0.05]);
@@ -247,6 +313,53 @@ mod tests {
             f[r] = (0..24).map(|c| k[r * 24 + c] * u[c]).sum();
         }
         f
+    }
+
+    fn maple_grain(along: Axis, across: Axis) -> crate::modal_fe::spec::Material {
+        crate::modal_fe::spec::Material {
+            density: 700.0,
+            young: 1.26e10,
+            poisson: 0.35,
+            grain: Some(crate::modal_fe::spec::Grain {
+                along,
+                across,
+                young_r: 1.66e9,
+                young_t: 0.82e9,
+                shear_lr: 1.4e9,
+                shear_lt: 0.79e9,
+                shear_rt: 0.26e9,
+                poisson_lr: 0.424,
+                poisson_lt: 0.476,
+                poisson_rt: 0.774,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_grained_material_is_stiff_along_its_grain_and_soft_across() {
+        let m = maple_grain(Axis::X, Axis::Y);
+        assert!(compliance_is_positive(&m));
+        let d = material_elasticity(&m);
+        // uniaxial stress along each axis: strain = S e_i, so E_i = 1 / S_ii
+        let s = normal_compliance(m.young, m.grain.as_ref().unwrap());
+        assert!((1.0 / s[0][0] - 1.26e10).abs() < 1.0);
+        assert!((1.0 / s[1][1] - 1.66e9).abs() < 1.0);
+        assert!((1.0 / s[2][2] - 0.82e9).abs() < 1.0);
+        // D inverts S on the normal block, and is symmetric
+        for i in 0..3 {
+            for j in 0..3 {
+                let product: f64 = (0..3).map(|k| d[i][k] * s[k][j]).sum();
+                assert!((product - if i == j { 1.0 } else { 0.0 }).abs() < 1e-9, "{i}{j} {product}");
+                assert!((d[i][j] - d[j][i]).abs() < 1e-3 * d[i][i]);
+            }
+        }
+        assert_eq!((d[3][3], d[4][4], d[5][5]), (1.4e9, 0.26e9, 0.79e9));
+        // along z, across x: L is z, R x, T y
+        let d = material_elasticity(&maple_grain(Axis::Z, Axis::X));
+        assert_eq!((d[3][3], d[4][4], d[5][5]), (0.26e9, 0.79e9, 1.4e9));
+        let mut unstable = maple_grain(Axis::X, Axis::Y);
+        unstable.grain.as_mut().unwrap().poisson_rt = 3.0;
+        assert!(!compliance_is_positive(&unstable));
     }
 
     #[test]

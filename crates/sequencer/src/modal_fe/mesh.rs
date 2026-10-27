@@ -152,10 +152,19 @@ fn contains(solid: &Solid, p: [f64; 3]) -> Option<bool> {
     })
 }
 
+/// One element size: per-axis sizes give their smallest (a mapped mesh's
+/// element counts come from one size).
 fn element_size(resolution: Resolution, largest_extent: f64) -> f64 {
+    let [x, y, z] = cell_sizes(resolution, largest_extent);
+    x.min(y).min(z)
+}
+
+/// The voxel cell's size along x, y and z.
+fn cell_sizes(resolution: Resolution, largest_extent: f64) -> [f64; 3] {
     match resolution {
-        Resolution::Cells(n) => largest_extent / n as f64,
-        Resolution::ElementSize(h) => h,
+        Resolution::Cells(n) => [largest_extent / n as f64; 3],
+        Resolution::ElementSize(h) => [h; 3],
+        Resolution::CellSize(h) => h,
     }
 }
 
@@ -365,10 +374,10 @@ fn voxel_mesh(spec: &SolidSpec, base_dir: &Path) -> Result<HexMesh, String> {
     if !(largest > 0.0) {
         return Err("solid has an empty bounding box".into());
     }
-    let h = element_size(spec.resolution, largest);
+    let h = cell_sizes(spec.resolution, largest);
     // Cells per axis fit the bounding box exactly (cells are boxes of about
     // h on a side), so a box primitive keeps its exact dimensions.
-    let n = extent.map(|e| ((e / h).round() as usize).max(1));
+    let n = [0, 1, 2].map(|i| ((extent[i] / h[i]).round() as usize).max(1));
     if n.iter().product::<usize>() > 8_000_000 {
         return Err(format!("voxel grid {}x{}x{} is too large; coarsen the resolution", n[0], n[1], n[2]));
     }
@@ -690,7 +699,7 @@ pub(crate) fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+pub(crate) fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 

@@ -24,7 +24,7 @@
 
 mod eigen;
 mod element;
-mod mesh;
+pub(crate) mod mesh;
 mod obj;
 mod skyline;
 mod spec;
@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-pub use spec::{Axis, Material, MeshMode, Region, Resolution, Segments, Solid, SolidSpec};
+pub use spec::{Axis, Grain, Material, MeshMode, Region, Resolution, Segments, Solid, SolidSpec};
 
 /// A solid's elastic modes over its boundary surface. Arrays are flat:
 /// `points` and `normals` are P×3, `triangles` T×3, and `shapes` P×N
@@ -328,7 +328,7 @@ pub(crate) fn solve_detailed(spec: &SolidSpec, base_dir: &Path, progress: &Solve
             }
         }
     }
-    let d = element::elasticity(spec.material.young, spec.material.poisson);
+    let d = element::material_elasticity(&spec.material);
     let (mut matrix, node_mass) = assemble(&mesh, &rank, &first, &d, spec.material.density, progress)?;
     stats.envelope = matrix.stored();
     let mut dof_mass = vec![0.0; dofs];

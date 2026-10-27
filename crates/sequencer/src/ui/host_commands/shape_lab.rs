@@ -12,7 +12,7 @@
 //!   one. The lab hears each solve's progress.
 //! - `shape-lab-cancel` cancels the running solve and the waiting one.
 //! - `shape-lab-apply` rewrites the `:shape`, `:made-of`, `:modes`,
-//!   `:resolution` and `:block` arguments of the script's `(… solid 'id …)`
+//!   `:resolution`, `:block` and `:points` arguments of the script's `(… solid 'id …)`
 //!   call (one undoable edit) and then evaluates the script as C-c C-c does,
 //!   which updates its draft.
 
@@ -194,8 +194,10 @@ fn script_buffer(editor: &Editor, payload: &Value) -> Result<(String, PathBuf, S
     Ok((name, super::drafts::script_path(buffer), text))
 }
 
-/// Evaluate the script and send the lab `(loaded buffer dir solids)`: one
-/// `(dict :id :spec :mesh-file :freqs :mass :editable)` per `m/solid`,
+/// Evaluate the script and send the lab `(loaded buffer dir solids wiring)`:
+/// one `(dict :id :spec :mesh-file :freqs :mass :points :place :editable)` per
+/// `m/solid` (`:points` its named points, a dict, or nil; `:place` where it
+/// sits, or nil), `wiring` the patch's `(dict :strings :connections :listens)`,
 /// `:editable` when the script has a `(… solid 'id …)` call to write into.
 /// Then show the lab beside the script.
 pub(crate) fn load(editor: &mut Editor, payload: &Value) -> Result<(), String> {
@@ -225,15 +227,37 @@ pub(crate) fn load(editor: &mut Editor, payload: &Value) -> Result<(), String> {
                 ("mesh-file", field(&object, "mesh-file").unwrap_or(Value::Nil)),
                 ("freqs", field(&data, "freqs").unwrap_or(Value::Nil)),
                 ("mass", field(&data, "mass").unwrap_or(Value::Nil)),
+                ("points", field(&object, "named-points").unwrap_or(Value::Nil)),
+                ("place", field(&object, "place").unwrap_or(Value::Nil)),
             ]))
         })
         .collect();
+    // what the instrument view draws besides the solids: the strings, and
+    // the connections and listens that place them and sit on them
+    let strings: Vec<Value> = objects
+        .iter()
+        .filter_map(|object| {
+            let object = object.borrow();
+            let is_string = matches!(field(&object, "kind"), Some(Value::Keyword(kind)) if kind.trim_start_matches(':') == "string");
+            is_string.then(|| field(&object, "id")).flatten()
+        })
+        .collect();
+    let wiring = crate::values::map_value([
+        ("strings", crate::values::list_value(strings)),
+        ("connections", field(&value, "connections").unwrap_or(Value::Nil)),
+        ("listens", field(&value, "listens").unwrap_or(Value::Nil)),
+    ]);
     let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
     editor
         .runtime_mut()
         .invoke_global(
             LOADED,
-            vec![Value::String(name.clone()), Value::String(dir.display().to_string()), crate::values::list_value(solids)],
+            vec![
+                Value::String(name.clone()),
+                Value::String(dir.display().to_string()),
+                crate::values::list_value(solids),
+                wiring,
+            ],
         )
         .map_err(|error| format!("{error:?}"))?;
     if !editor.buffer_named_is_showing(LAB_BUFFER) && !editor.show_buffer_beside(&name, LAB_BUFFER) {
@@ -261,9 +285,10 @@ pub(crate) fn solve(solves: &mut ShapeSolves, payload: &Value) -> Result<(), Str
     Ok(())
 }
 
-/// Write `(dict :buffer :id :shape :made-of :modes :resolution :block)`
-/// into the script's call for solid `id` (`:made-of` a material name; all
-/// but `:shape` optional; `:block :free` removes the call's block), then
+/// Write `(dict :buffer :id :shape :made-of :modes :resolution :block :points
+/// :place)` into the script's call for solid `id` (`:made-of` a material
+/// name; all but `:shape` optional; `:block :free` removes the call's block,
+/// and an empty `:points` or `:place` dict its points or place), then
 /// evaluate the script, updating its draft.
 fn apply(app: &mut app::App, editor: &mut Editor, ctx: &mut LoopCtx<'_>, payload: &Value) -> Result<(), String> {
     use super::drafts::ScriptEvaluation;
@@ -306,12 +331,22 @@ pub(crate) fn write_back(editor: &mut Editor, payload: &Value) -> Result<String,
             Value::Keyword(k) if k.trim_start_matches(':') == "free" => None,
             block => Some(block),
         }),
+        points: removable(given("points")),
+        place: removable(given("place")),
     };
     let text = rewrite_solid(&script, &id, &edit)?;
     if text != script && !editor.replace_buffer_text_undoable(&name, &text) {
         return Err(format!("Could not edit {name}"));
     }
     Ok(name)
+}
+
+/// A dict field to write: an empty dict removes it.
+fn removable(value: Option<Value>) -> Option<Option<Value>> {
+    value.map(|value| match &value {
+        Value::Map(map) if map.is_empty() => None,
+        _ => Some(value),
+    })
 }
 
 /// What `shape-lab-apply` writes into a solid's call; `None` leaves an
@@ -323,6 +358,10 @@ struct SolidEdit {
     resolution: Option<Value>,
     /// `Some(None)` removes the call's `:block` (the solid is free).
     block: Option<Option<Value>>,
+    /// Its named points; `Some(None)` removes the call's `:points`.
+    points: Option<Option<Value>>,
+    /// Where it sits; `Some(None)` removes the call's `:place`.
+    place: Option<Option<Value>>,
 }
 
 /// A `(… solid 'id …)` call in a script: its id, its span, and its keyword
@@ -400,6 +439,26 @@ fn rewrite_solid(source: &str, id: &str, edit: &SolidEdit) -> Result<String, Str
     if let Some(block) = &edit.block {
         edits.push(("block", block.as_ref().map(|block| shape_source(block, 0))));
     }
+    // a call without points (or a place) gets them on a line of their own
+    // under :shape
+    let column_of = |at: usize| at - source[..at].rfind('\n').map_or(0, |at| at + 1);
+    let shape_key_column = call.args.iter().position(|(name, _)| name == "shape").map(|k| column_of(call.keys_at[k]));
+    let mut new_lines = Vec::new();
+    let line_args: [(&str, &Option<Option<Value>>, fn(&Value, usize) -> String); 2] =
+        [("points", &edit.points, points_source), ("place", &edit.place, shape_source)];
+    for (key, value, to_source) in line_args {
+        let Some(value) = value else { continue };
+        match (span(key), value, shape_key_column) {
+            (None, Some(value), Some(key_column)) => {
+                let text = to_source(value, key_column + key.len() + 2);
+                new_lines.push(format!("\n{}:{key} {text}", " ".repeat(key_column)));
+            }
+            (span, value, _) => {
+                let column = span.map_or(shape_indent, |span| column_of(span.start));
+                edits.push((key, value.as_ref().map(|value| to_source(value, column))));
+            }
+        }
+    }
     // apply from the end of the source back, so earlier spans stay valid;
     // additions at the same place go in in order
     let mut placed: Vec<(usize, std::ops::Range<usize>, String)> = edits
@@ -416,6 +475,9 @@ fn rewrite_solid(source: &str, id: &str, edit: &SolidEdit) -> Result<String, Str
             (None, None) => None,
         })
         .collect();
+    for (k, line) in new_lines.into_iter().enumerate() {
+        placed.push((usize::MAX - 2 + k, call.insert_at..call.insert_at, line));
+    }
     placed.sort_by_key(|(order, span, _)| std::cmp::Reverse((span.start, *order)));
     let mut text = source.to_string();
     for (_, span, replacement) in placed {
@@ -468,6 +530,19 @@ fn shape_source(value: &Value, indent: usize) -> String {
     }
 }
 
+/// Named points as source: `(dict :name (list x y z)` one point per line,
+/// in name order. `indent` is the column the form starts at.
+fn points_source(points: &Value, indent: usize) -> String {
+    let Value::Map(map) = points else { return shape_source(points, indent) };
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    let pairs: Vec<String> = keys
+        .iter()
+        .map(|key| format!(":{} {}", key.trim_start_matches(':'), shape_source(&map[*key].borrow(), 0)))
+        .collect();
+    format!("(dict {})", pairs.join(&format!("\n{}", " ".repeat(indent + "(dict ".len()))))
+}
+
 /// A number as the shortest source that reads back as it (to 6 significant
 /// figures: a dragged value carries float noise).
 fn number_source(n: f64) -> String {
@@ -496,7 +571,15 @@ mod tests {
   :listens (list (m/listen 'bell (list 0.09 0.05 0.2))))";
 
     fn edit(shape: &Value, material: Option<&str>, modes: Option<f64>) -> SolidEdit {
-        SolidEdit { shape: shape.clone(), material: material.map(str::to_string), modes, resolution: None, block: None }
+        SolidEdit {
+            shape: shape.clone(),
+            material: material.map(str::to_string),
+            modes,
+            resolution: None,
+            block: None,
+            points: None,
+            place: None,
+        }
     }
 
     fn eval(source: &str) -> Value {
@@ -611,6 +694,56 @@ mod tests {
         // freeing a solid with no block changes nothing else
         let free = "(m/patch :objects (list (m/solid 'bar :shape (dict :box (dict :size (list 0.3 0.04 0.012))))))";
         assert_eq!(rewrite_solid(free, "bar", &SolidEdit { block: Some(None), ..edit(&shape, None, None) }).unwrap(), free);
+    }
+
+    /// Named points are written one per line under :shape, replaced in
+    /// place, and removed with an empty dict.
+    #[test]
+    fn writes_a_solids_named_points() {
+        let script = "(m/patch :objects (list (m/solid 'bar :made-of mat/steel\n                          :shape (dict :box (dict :size (list 0.3 0.04 0.012))))))";
+        let shape = eval("(dict :box (dict :size (list 0.3 0.04 0.012)))");
+        let points = eval("(dict :tip (list 0.15 0 0.006) :mid (list 0 0 0.006))");
+        let with = |points: Option<Option<Value>>, source: &str| {
+            rewrite_solid(source, "bar", &SolidEdit { points, ..edit(&shape, None, None) }).unwrap()
+        };
+        let added = with(Some(Some(points)), script);
+        let pad = " ".repeat(26);
+        assert_eq!(
+            added,
+            format!(
+                "(m/patch :objects (list (m/solid 'bar :made-of mat/steel\n{pad}:shape (dict :box (dict :size (list 0.3 0.04 0.012)))\n{pad}:points (dict :mid (list 0 0 0.006)\n{pad}              :tip (list 0.15 0 0.006)))))"
+            )
+        );
+        let calls = solid_calls(&added).unwrap();
+        let span = calls[0].args.iter().find(|(key, _)| key == "points").unwrap().1.clone();
+        assert_eq!(shape_source(&eval(&added[span]), 0), "(dict :mid (list 0 0 0.006) :tip (list 0.15 0 0.006))");
+        let moved = with(Some(Some(eval("(dict :tip (list 0.1 0 0.006))"))), &added);
+        assert!(moved.contains(&format!("\n{pad}:points (dict :tip (list 0.1 0 0.006)))))")), "{moved}");
+        assert_eq!(with(Some(None), &added), script);
+        assert_eq!(with(None, &added), added);
+    }
+
+    #[test]
+    fn writes_a_solids_place_after_its_points() {
+        let script = "(m/patch :objects (list (m/solid 'neck :made-of mat/steel\n                          :shape (dict :box (dict :size (list 0.4 0.05 0.02))))))";
+        let shape = eval("(dict :box (dict :size (list 0.4 0.05 0.02)))");
+        let place = eval("(dict :at (list 0.24 0 0.011) :turn (list 0 -3 0))");
+        let points = eval("(dict :heel (list 0 0 -0.01))");
+        let with = |points: Option<Option<Value>>, place: Option<Option<Value>>, source: &str| {
+            rewrite_solid(source, "neck", &SolidEdit { points, place, ..edit(&shape, None, None) }).unwrap()
+        };
+        let added = with(Some(Some(points)), Some(Some(place)), script);
+        let pad = " ".repeat(26);
+        assert!(
+            added.ends_with(&format!(
+                "\n{pad}:points (dict :heel (list 0 0 -0.01))\n{pad}:place (dict :at (list 0.24 0 0.011) :turn (list 0 -3 0)))))"
+            )),
+            "{added}"
+        );
+        let moved = with(None, Some(Some(eval("(dict :at (list 0.3 0 0))"))), &added);
+        assert!(moved.ends_with(&format!("\n{pad}:place (dict :at (list 0.3 0 0)))))")), "{moved}");
+        let removed = with(None, Some(None), &moved);
+        assert!(!removed.contains(":place") && removed.contains(":points"), "{removed}");
     }
 
     #[test]

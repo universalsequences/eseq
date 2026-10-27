@@ -25,7 +25,7 @@
 (import eseq.view-kit :refer (without))
 
 (export mode-mesh-view mode-mesh-face mode-mesh-cycle mode-mesh-cycle-face
-        string-geometry plate-geometry membrane-geometry)
+        assembly-face assembly-view string-geometry plate-geometry membrane-geometry)
 
 (def pi-num 3.14159265358979)
 
@@ -109,6 +109,36 @@
 (def mode-mesh-cycle (&rest props &key (scale 0.1) (yaw 0.6) (pitch 0.5) (zoom 1) &allow-other-keys)
   (apply mode-mesh-cycle-face :scale scale :yaw yaw :pitch pitch :zoom zoom
          (without props (list :scale :yaw :pitch :zoom))))
+
+;; ── an instrument's parts ──────────────────────────────────────────────────
+;; assembly-face draws a (modal-assembly-mesh …) geometry: each vertex's
+;; table value is its tint, k + 0.5 for a selected part's k. Tint k is
+;; colour k of :palette, three floats (r g b, 0..1) per tint; a selected
+;; part is drawn lighter. Lit like mode-mesh-face, without displacement.
+(defwidget assembly-face
+  :width 24 :height 14
+  :state (yaw pitch zoom (palette :floats 96))
+  :vertex
+  (let ((turn (+ yaw orbit-yaw))
+        (tilt (+ pitch orbit-pitch)))
+    (out :position (orbit-project position turn tilt zoom)
+         :varyings ((tint (table vertex-id 0))
+                    (view (orbit-rotate position turn tilt)))))
+  :shader
+  (let ((n (normalize (cross (dfdx view) (dfdy view))))
+        (diffuse (abs (dot n (normalize (vec3 -0.4 0.6 0.7)))))
+        (spec (pow (abs (dot n (normalize (vec3 -0.2 0.3 1.0)))) 24.0))
+        (k (floor (+ tint 0.25)))
+        (lift (if (> (- tint k) 0.25) 0.22 0.0))
+        (base (rgba (palette (* 3.0 k)) (palette (+ (* 3.0 k) 1.0)) (palette (+ (* 3.0 k) 2.0)) 1.0))
+        (lit (mix base (rgba 1.0 1.0 1.0 1.0) lift))
+        (shade (+ 0.3 (* 0.7 diffuse))))
+    (+ (* lit (rgba shade shade shade 1.0)) (rgba (* 0.2 spec) (* 0.2 spec) (* 0.2 spec) 0.0))))
+
+;; An assembly-face with defaults (:yaw 0.6, :pitch 0.5, :zoom 1); takes
+;; :geometry (a modal-assembly-mesh handle), :palette and other widget props.
+(def assembly-view (&rest props &key (yaw 0.6) (pitch 0.5) (zoom 1) &allow-other-keys)
+  (apply assembly-face :yaw yaw :pitch pitch :zoom zoom (without props (list :yaw :pitch :zoom))))
 
 ;; ── generated geometry ──────────────────────────────────────────────────────
 ;; Each returns a geometry dict with the eseq-modes keys (:points :normals

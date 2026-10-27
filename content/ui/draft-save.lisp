@@ -45,11 +45,7 @@
 
 (def body ()
   (v-stack :width :fill :height :fill :gap 0.6
-    (label "Save instrument" :key "title" :bg :transparent :font-size 16)
-    (label "Saves the draft's generated instrument to your library. The track then plays the saved one."
-      :key "hint" :bg :transparent :font-size 10 :color :dim)
     (v-stack :width :fill :gap 0.3
-      (label "Name" :bg :transparent :font-size 11)
       (text-input :key "name" :width :fill :height 1.35 :font-size 11
         :value save-form.name :placeholder "instrument name"
         :on-change (lambda (v) (set! save-form.name v))

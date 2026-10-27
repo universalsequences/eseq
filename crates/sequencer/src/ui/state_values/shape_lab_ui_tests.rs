@@ -543,3 +543,127 @@ fn a_running_solve_shows_progress_and_can_be_cancelled() {
     eval(&mut editor, "(eseq.modal.shape-lab/request-solve)");
     assert_eq!(host_commands(&mut editor, "shape-lab-solve").len(), 1);
 }
+
+/// Named points: loaded with the solid and listed as layers; the Point tool
+/// drops one on the surface the view looks at; it renames, drags back onto
+/// the surface without a solve, deletes, and Update draft sends them all.
+#[test]
+fn named_points_are_placed_renamed_dragged_and_applied() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    eval(
+        &mut editor,
+        r#"(eseq.modal.shape-lab/loaded "bar.lisp" "/tmp"
+  (list (dict :id "bar" :editable true :points (dict :tip (list 0.1 0 0.006))
+              :spec (dict :solid (dict :box (dict :size (list 0.3 0.04 0.012)))
+                          :modes 8 :made-of eseq.modal.materials/steel))))"#,
+    );
+    eval(&mut editor, "(eseq.modal.shape-lab/set-plane! :front)");
+    let layout = lab_layout(&mut editor);
+    assert_finite_nonzero_rect(find_by_key_suffix(&layout, "lab-tool-Point").expect("Point tool"), "lab-tool-Point");
+    editor.drain_host_commands();
+
+    // the front view looks along y: a point lands on the +y face
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-tool :point)");
+    let (sx, sy) = pointer_at(&mut editor, -0.1, 0.0);
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-down {sx} {sy} 0)"));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-named"), Value::Keyword("p1".into()));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-tool"), Value::Keyword("select".into()));
+    assert_eq!(eval(&mut editor, "(nth (get eseq.modal.shape-lab/lab-points :p1) 1)"), Value::Number(0.02));
+    let layout = lab_layout(&mut editor);
+    assert_finite_nonzero_rect(find_by_key_suffix(&layout, "lab-point-name").expect("name field"), "lab-point-name");
+
+    // renamed; a taken or invalid name is refused
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-point-draft \"tip\")");
+    eval(&mut editor, "(eseq.modal.shape-lab/rename-point)");
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-named"), Value::Keyword("p1".into()));
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-point-draft \"neck mic\")");
+    eval(&mut editor, "(eseq.modal.shape-lab/rename-point)");
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-named"), Value::Keyword("p1".into()));
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-point-draft \"neck-mic\")");
+    eval(&mut editor, "(eseq.modal.shape-lab/rename-point)");
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-named"), Value::Keyword("neck-mic".into()));
+
+    // Move drags the tip across the view, then drops it onto the surface,
+    // without solving (a point is not part of the shape)
+    let (sx, sy) = pointer_at(&mut editor, 0.1, 0.006);
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-down {sx} {sy} 0)"));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-named"), Value::Keyword("tip".into()));
+    let (sx, sy) = pointer_at(&mut editor, 0.05, 0.003);
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-drag {sx} {sy} 0)"));
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-up {sx} {sy} 0)"));
+    assert!(host_commands(&mut editor, "shape-lab-solve").is_empty());
+    assert_eq!(eval(&mut editor, "(nth (get eseq.modal.shape-lab/lab-points :tip) 1)"), Value::Number(0.02), "on the +y face");
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-edited"), Value::Bool(true));
+
+    eval(&mut editor, "(eseq.modal.shape-lab/solved eseq.modal.shape-lab/lab-ticket (dict :file \"/tmp/x.modes.json\" :freqs (list 440) :mass 2))");
+    eval(&mut editor, "(eseq.modal.shape-lab/update-draft)");
+    let applies = host_commands(&mut editor, "shape-lab-apply");
+    let points = field(&applies[0], "points");
+    assert!(matches!(field(&points, "tip"), Value::List(_)) && matches!(field(&points, "neck-mic"), Value::List(_)), "{points:?}");
+
+    eval(&mut editor, "(eseq.modal.shape-lab/delete-point)");
+    assert_eq!(eval(&mut editor, "(len (keys eseq.modal.shape-lab/lab-points))"), Value::Number(1.0));
+    lab_layout(&mut editor);
+}
+
+/// A body, a neck glued to it at named points, and a string between them.
+const LOADED_GUITAR: &str = r#"(eseq.modal.shape-lab/loaded "guitar.lisp" "/tmp"
+  (list (dict :id "body" :editable true :points (dict :joint (list 0.2 0 0) :bridge (list -0.1 0 0.02))
+              :spec (dict :solid (dict :box (dict :size (list 0.4 0.3 0.04)))
+                          :resolution (dict :cell-size (list 0.02 0.02 0.01)) :grain (list :x :y)
+                          :modes 8 :made-of eseq.modal.materials/maple))
+        (dict :id "neck" :editable true :points (dict :heel (list 0 0 -0.01) :nut (list 0.28 0 0.01))
+              :spec (dict :solid (dict :box (dict :center (list 0.15 0 0) :size (list 0.3 0.05 0.02)))
+                          :modes 8 :made-of eseq.modal.materials/mahogany)))
+  (dict :strings (list 'str)
+        :connections (list (dict :law :spring :a 'neck :a-at :heel :b 'body :b-at :joint)
+                           (dict :law :spring :a 'str :a-at 0.98 :b 'body :b-at :bridge)
+                           (dict :law :spring :a 'str :a-at 0.02 :b 'neck :b-at :nut)
+                           (dict :law :pluck :a 'pick :b 'str :b-at 0.8))
+        :listens (list (dict :obj 'str :at 0.9 :hear :pickup) (dict :obj 'body :at :bridge :hear :speed))))"#;
+
+#[test]
+fn the_instrument_view_seats_glued_parts_and_writes_a_moved_place() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    eval(&mut editor, LOADED_GUITAR);
+    eval(&mut editor, "(eseq.modal.shape-lab/set-look! :instrument)");
+    let assembly = eval(&mut editor, "eseq.modal.shape-lab/lab-assembly");
+    assert!(matches!(field(&assembly, "mesh-id"), Value::Number(_)), "{assembly:?}");
+
+    // the body is at the origin; the neck is seated by its glue, its heel
+    // on the body's joint
+    let place = |editor: &mut Editor, id: &str, key: &str| {
+        eval(editor, &format!("(get (eseq.modal.shape-lab/placed-in (eseq.modal.shape-lab/resolve-places) \"{id}\") {key})"))
+    };
+    assert_eq!(place(&mut editor, "neck", ":how"), Value::Keyword("seated".into()));
+    assert_eq!(eval(&mut editor, "(nth (get (eseq.modal.shape-lab/placed-in (eseq.modal.shape-lab/resolve-places) \"neck\") :at) 2)"), Value::Number(0.01));
+    // the string runs from the neck's nut to the body's bridge, lifted
+    let line = eval(&mut editor, "(eseq.modal.shape-lab/string-line \"str\" (eseq.modal.shape-lab/resolve-places))");
+    let Value::List(line) = line else { panic!("no string line: {line:?}") };
+    assert_eq!(line[0].borrow().clone(), Value::Number(0.02));
+    let layout = lab_layout(&mut editor);
+    assert_finite_nonzero_rect(find_by_key_suffix(&layout, "lab-assembly").expect("instrument view"), "lab-assembly");
+    assert_finite_nonzero_rect(find_by_key_suffix(&layout, "lab-place-at-0").expect("place fields"), "lab-place-at-0");
+    // flat cells: the mesh size shown is the thinnest
+    assert_eq!(eval(&mut editor, "(eseq.modal.shape-lab/cell-size)"), Value::Number(0.01));
+
+    // tilting the neck places it where it was seated, with the turn
+    eval(&mut editor, "(eseq.modal.shape-lab/select-solid 1)");
+    eval(&mut editor, "(eseq.modal.shape-lab/nudge-place! :turn 1 -3)");
+    assert_eq!(place(&mut editor, "neck", ":how"), Value::Keyword("placed".into()));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-edited"), Value::Bool(true));
+    eval(&mut editor, "(eseq.modal.shape-lab/solved eseq.modal.shape-lab/lab-ticket (dict :file \"/tmp/no.modes.json\" :freqs (list 200) :mass 1))");
+    eval(&mut editor, "(eseq.modal.shape-lab/update-draft)");
+    let applies = host_commands(&mut editor, "shape-lab-apply");
+    let written = field(&applies[0], "place");
+    assert_eq!(field(&written, "turn"), eval(&mut editor, "(list 0 -3 0)"));
+    assert_eq!(field(&written, "at"), eval(&mut editor, "(list 0.2 0 0.01)"));
+
+    // seated again, it keeps the turn and puts the turned heel on the joint
+    eval(&mut editor, "(eseq.modal.shape-lab/reseat)");
+    assert_eq!(place(&mut editor, "neck", ":how"), Value::Keyword("seated".into()));
+    assert_eq!(eval(&mut editor, "(get (eseq.modal.shape-lab/place-of \"neck\") :at)"), Value::Nil);
+    lab_layout(&mut editor);
+}
+
+

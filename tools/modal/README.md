@@ -60,6 +60,50 @@ seconds), then read from a cache keyed by the spec. Its shapes are scaled to
 the same unit modal mass as every other object. `examples/fe-bell.lisp`
 strikes a solved bronze bell; `:root` makes it follow the note.
 
+**Named points.** A solid's `:points` names spots on it, in metres:
+`:points (dict :bridge (list -0.06 0 0.0225) :lip (list 0 0.1 0.24))`. Any
+connection or listen on that solid may then give a name for its position,
+`(m/spring 'bridge 'str 0.985 'body :bridge)` or `(m/listen 'bell :lip)`,
+and each snaps to the nearest surface node. Every named point is compiled
+into the instrument, so a connection's or mic's "point" knob steps through
+all of them (in name order), not only the ones the script uses. An unknown
+name is reported by check with the names the solid has. Solids are composed
+like any other objects: `examples/fe-bottle-guitar.lisp` glues a string to
+fe-bottle's drilled bottle, and `examples/fe-hollow-body.lisp` builds a
+semi-hollow electric guitar from a body and a neck solid joined at named
+points, with pickups and a clean amp.
+
+**Wood.** A solid made of a wood (`mat/maple`, `mat/mahogany`, `mat/spruce`,
+`mat/rosewood`: materials with `:wood` constants) and given `:grain` is
+orthotropic, as wood is: stiff along the grain and 10 to 20 times softer
+across it. `:grain :x` runs the grain along x; `(list :x :z)` also puts
+the growth rings' radial direction along z (quartersawn, as a guitar top
+is). Without `:grain` a wood is isotropic at its along-the-grain modulus,
+which makes a wooden plate ring several times too high. A bar solved both
+ways comes out sqrt(E_L/E_T) = 3.9 times lower with the grain across it.
+Woods also carry a loss factor (`:damping`, eta: maple 0.012, spruce 0.008):
+a solid made of one loses pi·eta·f per second in each mode on top of `:loss`
+and `:hf-loss`, so its high modes die ten times sooner than modes ten times
+lower, as wood's do; metals have none and ring on `:loss`/`:hf-loss`. A
+built instrument loses more than its wood (glue joints, radiation from the
+top): give the solid its own `:damping` (the hollow body uses 0.03). Wood
+damped like metal sounds like a bell. The "Damping x" knob multiplies all of
+a solid's losses: higher dies sooner.
+
+**Thin parts.** `:resolution (dict :cell-size (list x y z))` gives the voxel
+cell's size along each axis, so a 3 mm top can be two cells thick at 6 mm
+across: the element bends correctly in flat cells, and a bar meshed that
+way matches cubes a quarter the size to 2%, with 1/16 the elements. A wall
+thinner than one cell across (a 2 mm rim at 6 mm) still falls through.
+
+**Where a solid sits.** `:place (dict :at (list x y z) :turn (list rx ry
+rz))` puts a solid in the instrument: turned rx, ry then rz degrees about
+x, y and z, then moved by `:at` metres. A solid without one is seated by
+its glue: a spring between one of its named points and a placed solid's
+puts the two points together (the hollow body's neck sits on the body this
+way). Placement is geometry only for now: it draws the instrument and does
+not change the sound.
+
 **The shape lab.** M-x Shape Lab in a script with solids opens `*shape-lab*`
 beside it (content/ui/modal/shape-lab.lisp), on the script's first solid
 (tabs pick another):
@@ -79,8 +123,12 @@ beside it (content/ui/modal/shape-lab.lisp), on the script's first solid
   **Move** drags parts and the clamp; **Hole**, **Slot**, **Block** and
   **Arch** (a marimba bar's undercut) each place one part where you click
   (straight through along your view, sized to the body; a new hole takes
-  the last hole's radius), then hand back to Move. The armed tool's
-  button is filled with its colour.
+  the last hole's radius), then hand back to Move. **Point** drops a named
+  point on the surface under the click, on the side the view looks from;
+  points are listed under **Points** in the layers, where you rename (Enter),
+  snap, move or delete them, and Move drags one across the view and drops
+  it back onto the surface (no re-solve: a point is not part of the shape).
+  The armed tool's button is filled with its colour.
 - **3-D view** (right): the shape as meshed, then, once solved, swinging
   through its lowest modes. Under it the mass, the lowest mode, and
   **Mesh**, the element size: voxel cells for most shapes, but a revolve
@@ -93,6 +141,14 @@ beside it (content/ui/modal/shape-lab.lisp), on the script's first solid
   (the preview counts what it holds) instead of a solve failing, and
   offers **Move onto shape** or **Remove**; a free solid offers **Add a
   clamp**. Templates start free.
+- **Instrument** (above the 3-D view; **This solid** goes back): every
+  solid where it sits, tinted by material (the one being edited lighter),
+  each string drawn between its two attachments and lifted off the
+  surface, with pickups as bars under it, the pluck over it, mics and
+  named points as markers. Drag to orbit; **Zoom** −/+. Under it, **Place**
+  sets where the solid being edited sits (X Y Z, Turn X Y Z) and says
+  whether it is placed, seated by its glue or at the origin; **Seat by
+  glue** drops its position again.
 - **Header:** the solid's tabs, **New shape…** (Bell, Bowl, Gong, Chime,
   Bar, Shell, Drilled, Marimba, Fork, Plate), the material and the mode
   count.
@@ -102,7 +158,7 @@ once (`(modal-mesh spec)`, milliseconds) and solved in the background into
 the cache `modal-solve` reads.
 
 **Update draft** is one click: it writes `:shape`, `:made-of`, `:modes`,
-`:resolution` and `:block` (removed when freed) into the script's
+`:resolution`, `:block` (removed when freed), `:points` and `:place` into the script's
 `(m/solid 'id …)` call as one edit (one undo takes it back), evaluates the
 script as C-c C-c does, and recompiles its draft; the button says
 "Compiling draft…" until the draft plays the new shape, and an error shows
@@ -116,7 +172,8 @@ solved. A solid whose spec is a JSON file is shown but not written back.
 the script: an IRCAM resonance model (text: index, Hz, dB, bandwidth Hz per
 line) or an `eseq-modes` `.json` from `eseq modal solve`.
 `examples/bell-data.lisp` strikes a resonance-model bell. A data object with
-more than 64 points keeps only the points its connections and listens use.
+more than 64 points keeps only the points its connections and listens use
+(and its named points).
 
 **Identified models.** A model fitted from a recording plays its measured
 strokes instead of being struck. `tools/pm-ride/export_modes.py` writes the
@@ -285,6 +342,11 @@ the guitar, so the amp's sound can drive the strings (feedback):
   fast-decaying high partials; a force from the body's displacement leaks
   the body's own resonance to the pickup, which then howls on through a
   muted string.)
+  `:back` (experimental) adds the string's end force on the body (its
+  tension along its end's slope, m Σ s_k ω_k² q_k). It is not yet
+  energy-conserving: with a hollow body's masses it pumps partials near
+  the body's or neck's modes and runs away on high notes (eseq-lojj.22),
+  so leave it off.
 
 `examples/eno-lead.lisp` sustains held notes and then blooms into
 feedback. Air > Distance picks the partial (fundamental, octave, twelfth,
@@ -407,8 +469,10 @@ Samples: `fe/bar.json` (free aluminium bar, voxel mesh) and `fe/bell.json`
 A spec names a `solid` (`box`, `cylinder`, `tube`, `sphere`, `shell`,
 `revolve` from `[r, z]` / `[r, z, wall]` profile points, `union`,
 `difference`, or an `obj` file), a `resolution` (`{"cells": N}` along the
-largest extent or `{"element_size": metres}`), a `material`
-(`density`, `young`, `poisson`), an optional `block` region (`box` min/max
+largest extent, `{"element_size": metres}`, or `{"cell_size": [x, y, z]}`),
+a `material` (`density`, `young`, `poisson`, and for wood a `grain`:
+`along` and `across` axes with `young_r`, `young_t`, `shear_lr`,
+`shear_lt`, `shear_rt`, `poisson_lr`, `poisson_lt`, `poisson_rt`), an optional `block` region (`box` min/max
 or `sphere` center/radius) whose nodes are clamped, and the number of
 `modes`. A lone revolve with a wall, tube, shell or cylinder gets a
 body-fitted mesh (`"segments": {"along", "around", "through"}` override its
