@@ -156,10 +156,22 @@ pub fn solve_watched(spec: &SolidSpec, base_dir: &Path, progress: &SolveProgress
     solve_detailed(spec, base_dir, progress).map(|d| (d.solid, d.stats))
 }
 
-/// Most entries the stiffness envelope (and so its factor) may hold: 2 GB.
-/// A 0.35 m bar at 2.5 mm elements needs 120M and factors in about 20 s; a
-/// chunky solid at the lab's finer details would need tens of GB.
-const MAX_ENVELOPE: usize = 250_000_000;
+/// Most bytes the stiffness envelope (and so its factor) may take: a
+/// quarter of the machine's memory, leaving room for the rest of the solve
+/// and the app (2 GB where the memory can't be read). A 0.35 m bar at
+/// 2.5 mm elements needs 1 GB; the hollow-body guitar's body 4.9 GB; a
+/// chunky solid at the lab's finer details tens of GB.
+fn max_envelope_bytes() -> f64 {
+    #[cfg(unix)]
+    {
+        // SAFETY: sysconf only reads system configuration.
+        let (pages, page) = unsafe { (libc::sysconf(libc::_SC_PHYS_PAGES), libc::sysconf(libc::_SC_PAGESIZE)) };
+        if pages > 0 && page > 0 {
+            return pages as f64 * page as f64 / 4.0;
+        }
+    }
+    2e9
+}
 
 /// The error a cancelled solve returns.
 pub const CANCELLED: &str = "solve cancelled";
@@ -336,12 +348,13 @@ pub(crate) fn solve_detailed(spec: &SolidSpec, base_dir: &Path, progress: &Solve
     // The factor's envelope grows about as the fifth power of the
     // resolution on a chunky solid; refuse one the app could not hold
     // rather than abort on the allocation.
-    let envelope = skyline::envelope_size(&first);
-    if envelope > MAX_ENVELOPE {
+    let envelope = skyline::envelope_size(&first) as f64 * 8.0;
+    let max = max_envelope_bytes();
+    if envelope > max {
         return Err(format!(
-            "this solid is too fine to solve ({:.1} GB of stiffness envelope, at most {:.1}); coarsen its resolution",
-            envelope as f64 * 8e-9,
-            MAX_ENVELOPE as f64 * 8e-9,
+            "this solid is too fine to solve: its stiffness envelope needs {:.1} GB, and this machine allows {:.1} GB; coarsen its resolution",
+            envelope * 1e-9,
+            max * 1e-9,
         ));
     }
     let d = element::material_elasticity(&spec.material);

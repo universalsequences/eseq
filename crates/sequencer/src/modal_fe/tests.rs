@@ -261,7 +261,7 @@ fn oversized_meshes_and_mode_counts_are_refused() {
     // a chunky cube meshes within the element cap, but its factor would
     // not fit: refused before anything is assembled
     let mut cube = bar_spec(0.1, 0.1, 0.01, None, 4);
-    cube.resolution = Resolution::Cells(32);
+    cube.resolution = Resolution::Cells(96);
     let error = solve_detailed(&cube, Path::new("."), &SolveProgress::default()).err().unwrap();
     assert!(error.contains("too fine"), "{error}");
 
