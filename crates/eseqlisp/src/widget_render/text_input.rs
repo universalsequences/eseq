@@ -704,6 +704,14 @@ fn closest_char_index_for_textbox(
     closest_char_index_in_range_for_x(&text, font_size, line.start, line.end, target_x, cell_w)
 }
 
+/// The round clear button a `:clearable` field draws at its right edge
+/// while it holds text, sized and placed like the command palette's.
+fn clear_button_rect(node: &LayoutNode, cell_w: f32, cell_h: f32) -> Option<Rect> {
+    let has_text = matches!(node.props.get("value"), Some(Value::String(s)) if !s.is_empty());
+    (has_text && super::get_bool_prop(&node.props, "clearable", false))
+        .then(|| super::menu_style::clear_button_rect(node.rect, TEXT_PADDING_H, cell_w, cell_h))
+}
+
 // ── Widget definition ───────────────────────────────────────────────────────
 
 pub struct TextInputWidget;
@@ -733,10 +741,12 @@ text, so store it and pass it back as :value. Enter calls :on-submit and Esc cal
 ordinary edits), and :on-blur (no arguments) fires when focus leaves. Click to \
 place the caret, drag to select; the usual editing keys work. :auto-focus true \
 focuses it when it appears and :select-all-on-focus true selects the text on \
-focus, handy for rename fields. A child widget (e.g. an icon label) is drawn as a \
-leading icon. Colours: :text-color, :placeholder-color, :bg-color (or :bg \
-:transparent), :cursor-color, :ring-color; :font-size. It fills the available \
-width (20 cells when unconstrained) and is 1.5 tall. Example: \
+focus, handy for rename fields. :clearable true draws a round × button at the \
+right edge while there is text; clicking it calls :on-change with \"\". A child \
+widget (e.g. an icon label) is drawn as a leading icon. Colours: :text-color, \
+:placeholder-color, :bg-color (or :bg :transparent), :cursor-color, :ring-color; \
+:font-size. It fills the available width (20 cells when unconstrained) and is \
+1.5 tall. Example: \
 (text-input :value name :placeholder \"Preset name\" :width 24 \
 :on-change (lambda (s) (set! name s)) :on-submit (lambda () (save-as name)))"
     }
@@ -745,7 +755,7 @@ width (20 cells when unconstrained) and is 1.5 tall. Example: \
         &[
             "value", "placeholder", "width", "height", "font-size", "text-color",
             "placeholder-color", "bg", "bg-color", "cursor-color", "ring-color", "on-change",
-            "on-submit", "on-cancel", "on-blur", "auto-focus", "select-all-on-focus",
+            "on-submit", "on-cancel", "on-blur", "auto-focus", "select-all-on-focus", "clearable",
         ]
     }
 
@@ -822,13 +832,22 @@ width (20 cells when unconstrained) and is 1.5 tall. Example: \
         node: &LayoutNode,
         mouse_kind: MouseEventKind,
         local_col: f32,
-        _local_row: f32,
+        local_row: f32,
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
         _modifiers: KeyModifiers,
-        _cell_w: f32,
-        _cell_h: f32,
+        cell_w: f32,
+        cell_h: f32,
     ) -> MouseEventOutcome {
+        if let Some(button) = clear_button_rect(node, cell_w, cell_h)
+            && button.contains(local_col, local_row)
+        {
+            if matches!(mouse_kind, MouseEventKind::Down(MouseButton::Left)) {
+                set_state(node.widget_id, TextInputState::default());
+                return MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::String(String::new())));
+            }
+            return MouseEventOutcome::Consume;
+        }
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
         let cursor_pos = closest_char_index_for_text_input(node, local_col, font_size, 10.0);
         match mouse_kind {
@@ -1048,6 +1067,19 @@ width (20 cells when unconstrained) and is 1.5 tall. Example: \
             a: 0.0,
         };
 
+        // ── Clear button; the text is clipped short of it ──
+        let clear = clear_button_rect(node, viewport.cell_w, viewport.cell_h);
+        if let Some(button) = clear {
+            let field_bg = if bg_transparent { crate::theme::TEXT_INPUT_BG() } else { bg_color };
+            prims.extend(super::menu_style::clear_button_primitives(
+                button, text_color, field_bg, font_size, viewport,
+            ));
+            prims.push(GpuPrimitive::PushClipRect(Rect {
+                width: (button.col - ICON_GAP - node.rect.col).max(0.0),
+                ..node.rect
+            }));
+        }
+
         // ── Display text or placeholder ──
         let (display_text, display_color) = if text.is_empty() {
             (placeholder.clone(), placeholder_color)
@@ -1114,6 +1146,9 @@ width (20 cells when unconstrained) and is 1.5 tall. Example: \
                 rect: cursor_rect,
                 color: cursor_color,
             }));
+        }
+        if clear.is_some() {
+            prims.push(GpuPrimitive::PopClipRect);
         }
 
         prims
@@ -1585,6 +1620,47 @@ mod tests {
             (sel_width - expected_end).abs() < 1e-4,
             "selection highlight must cover the full rendered text width"
         );
+    }
+
+    fn clearable_field(value: &str) -> LayoutNode {
+        let props = HashMap::from([
+            ("value".to_string(), Value::String(value.to_string())),
+            ("clearable".to_string(), Value::Bool(true)),
+        ]);
+        LayoutNode {
+            widget_id: u64::MAX - 42,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "text-input".to_string(),
+            rect: Rect { row: 0.0, col: 0.0, width: 20.0, height: 1.5 },
+            props,
+            children: Vec::new(),
+            focusable: true,
+            animation: Default::default(),
+        }
+    }
+
+    #[test]
+    fn clearable_field_clears_from_its_button_only_while_it_has_text() {
+        let node = clearable_field("kick");
+        let button = clear_button_rect(&node, 10.0, 20.0).expect("button while there is text");
+        assert!(button.col + button.width <= node.rect.width, "button sits inside the field");
+        let (col, row) = (button.col + button.width * 0.5, button.row + button.height * 0.5);
+        let down = MouseEventKind::Down(MouseButton::Left);
+        let outcome = TEXT_INPUT_WIDGET.mouse_event(
+            &node, down, col, row, None, None, KeyModifiers::NONE, 10.0, 20.0,
+        );
+        let MouseEventOutcome::Dispatch(event) = outcome else {
+            panic!("a click on the button dispatches a clear");
+        };
+        assert!(matches!(&event, WidgetEvent::Custom(Value::String(text)) if text.is_empty()));
+
+        assert!(clear_button_rect(&clearable_field(""), 10.0, 20.0).is_none(), "no button when empty");
+        let mut plain = clearable_field("kick");
+        plain.props.remove("clearable");
+        assert!(clear_button_rect(&plain, 10.0, 20.0).is_none(), "opt-in only");
     }
 
     #[test]

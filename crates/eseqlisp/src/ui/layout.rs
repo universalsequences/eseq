@@ -16,6 +16,12 @@ pub struct Rect {
     pub height: f32,
 }
 
+impl Rect {
+    pub fn contains(&self, col: f32, row: f32) -> bool {
+        col >= self.col && col < self.col + self.width && row >= self.row && row < self.row + self.height
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Size {
     pub width: f32,

@@ -900,6 +900,7 @@
         :width :fill
         :value browser-view.search
         :placeholder (search-placeholder)
+        :clearable true
         :on-change (lambda (v) (set-search-filter v))
         :height 1.5
         :font-size 12
@@ -929,6 +930,7 @@
           :flex 1
           :value browser-view.search
           :placeholder "Search projects..."
+          :clearable true
           :on-change (lambda (v) (set-search-filter v))
           :height 1.5
           :font-size 12
@@ -1395,6 +1397,7 @@ Previews each preset as you move through the list; Esc puts the loaded one back.
         :width :fill
         :value kit-save.name
         :placeholder "kit name..."
+        :clearable true
         :on-change (lambda (value) (set! kit-save.name value))
         :height 1.5
         :font-size 12)
@@ -1982,6 +1985,7 @@ then creates the instance and opens its tab."
         :width :fill
         :value instance-rename.draft
         :placeholder "instance name..."
+        :clearable true
         :auto-focus true
         :select-all-on-focus true
         :on-change (lambda (value) (set! instance-rename.draft value))
@@ -2099,6 +2103,7 @@ then creates the instance and opens its tab."
         :width :fill
         :value package-draft.name
         :placeholder "name (euclid or my.euclid.sparse)..."
+        :clearable true
         :auto-focus true
         :on-change (lambda (value) (set! package-draft.name value))
         :on-submit (lambda () (create-new-package))
@@ -2238,6 +2243,7 @@ then creates the instance and opens its tab."
         :flex 1
         :value browser-view.preset-search
         :placeholder "Search presets..."
+        :clearable true
         :on-change (lambda (v) (set! browser-view.preset-search v))
         :height 1.5
         :font-size 12
@@ -2312,6 +2318,7 @@ then creates the instance and opens its tab."
         :width :fill
         :value preset-save.name
         :placeholder "preset name..."
+        :clearable true
         :on-change (lambda (v) (set! preset-save.name v))
         :height 1.5
         :font-size 12)

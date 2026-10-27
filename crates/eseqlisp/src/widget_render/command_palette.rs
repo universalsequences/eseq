@@ -11,7 +11,7 @@
 use super::dropdown::{render_text_width_cells, truncate_text_to_width};
 use super::menu_style::{
     ICON_SLOT_COLS, checkmark_primitive_at, icon_primitive, panel_chrome_primitives, rounded_rect_primitive,
-    row_highlight_primitive, search_field_primitives, text_primitive,
+    clear_button_primitives, clear_button_rect, row_highlight_primitive, search_field_primitives, text_primitive,
 };
 use super::{
     GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive, GpuTrianglePrimitive, WidgetViewport,
@@ -170,16 +170,12 @@ pub enum PaletteHit {
     Row(usize),
 }
 
-fn contains(rect: Rect, col: f32, row: f32) -> bool {
-    col >= rect.col && col < rect.col + rect.width && row >= rect.row && row < rect.row + rect.height
-}
-
 impl PaletteHitMap {
     pub fn hit(&self, col: f32, row: f32) -> PaletteHit {
-        if !contains(self.panel, col, row) {
+        if !self.panel.contains(col, row) {
             return PaletteHit::Outside;
         }
-        if self.clear.is_some_and(|clear| contains(clear, col, row)) {
+        if self.clear.is_some_and(|clear| clear.contains(col, row)) {
             return PaletteHit::Clear;
         }
         let offset = row - self.list_top;
@@ -316,27 +312,9 @@ pub fn primitives(frame: &PaletteFrame, viewport: WidgetViewport) -> Vec<GpuPrim
         prims.push(rounded_rect_primitive(pill, lift(field_bg, 0.16), FIELD_RADIUS_PX - 4.0, viewport));
         prims.push(text(text_row(pill), start + 0.8, badge.clone(), FONT_SIZE, fg));
     }
-    let clear = (!frame.input.is_empty()).then(|| {
-        let height = field.height * 0.56;
-        let width = height * viewport.cell_h / viewport.cell_w.max(1.0);
-        Rect {
-            row: field.row + (field.height - height) * 0.5,
-            col: field.col + field.width - width - 0.7,
-            width,
-            height,
-        }
-    });
+    let clear = (!frame.input.is_empty()).then(|| clear_button_rect(field, 0.7, viewport.cell_w, viewport.cell_h));
     if let Some(button) = clear {
-        prims.push(rounded_rect_primitive(button, fg.with_alpha(0.45), 100.0, viewport));
-        prims.push(aligned_text(
-            text_row(button),
-            button.col + button.width,
-            button.width,
-            0.5,
-            "×".to_string(),
-            FONT_SIZE,
-            field_bg,
-        ));
+        prims.extend(clear_button_primitives(button, fg, field_bg, FONT_SIZE, viewport));
     }
 
     // ── Rows.

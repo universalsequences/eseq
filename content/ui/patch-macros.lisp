@@ -176,6 +176,7 @@
       :width :fill
       :value macro-sidebar.filter
       :placeholder "Search macros and assets..."
+      :clearable true
       :on-change (lambda (v) (set! macro-sidebar.filter v))
       :height 1.5
       :font-size 11

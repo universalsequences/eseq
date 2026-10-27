@@ -256,6 +256,33 @@ pub(crate) fn text_primitive(
 /// The recessed fill filterable dropdowns give their search field.
 pub(crate) const RECESSED_FIELD_FILL: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.28 };
 
+/// The round clear button at the right edge of a search `field`, `inset`
+/// columns in: shared by the command palette and `:clearable` text inputs.
+pub(crate) fn clear_button_rect(field: Rect, inset: f32, cell_w: f32, cell_h: f32) -> Rect {
+    let height = field.height * 0.56;
+    let width = height * cell_h / cell_w.max(1.0);
+    Rect {
+        row: field.row + (field.height - height) * 0.5,
+        col: field.col + field.width - width - inset,
+        width,
+        height,
+    }
+}
+
+/// A `fg` pill with a × cut out in the field's own `field_bg`.
+pub(crate) fn clear_button_primitives(
+    button: Rect, fg: Color, field_bg: Color, font_size: f32, viewport: WidgetViewport,
+) -> [GpuPrimitive; 2] {
+    [
+        rounded_rect_primitive(button, fg.with_alpha(0.45), 100.0, viewport),
+        GpuPrimitive::ProportionalText(super::GpuProportionalTextPrimitive {
+            align_width: button.width,
+            h_align: 0.5,
+            ..text_primitive(button.row + (button.height - 1.0) * 0.5, button.col, "×".to_string(), font_size, field_bg)
+        }),
+    ]
+}
+
 /// A popup search field: a `fill`ed rounded field, an optional magnifier at
 /// `icon_col`, then the input (or a dim placeholder) at `text_col` with a
 /// caret — after the input, or before the placeholder when empty. Shared by
