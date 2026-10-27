@@ -46,9 +46,23 @@ impl GeneratedInstrument {
             metadata["voice_controls"] = serde_json::json!({ "mode": param });
         }
         let mut ui = self.ui.clone();
+        // two assets of one file name from different folders get a numbered
+        // copy each, not one copy both point at
+        let mut taken: std::collections::HashMap<PathBuf, &Path> = std::collections::HashMap::new();
         for from in self.assets.iter().filter(|path| path.is_absolute()) {
             let Some(name) = from.file_name() else { continue };
-            let to = dir.join(name);
+            let mut to = dir.join(name);
+            for k in 2.. {
+                match taken.get(&to) {
+                    Some(source) if *source != from.as_path() => {
+                        to = dir.join(format!("{k}-{}", name.to_string_lossy()));
+                    }
+                    _ => break,
+                }
+            }
+            if taken.insert(to.clone(), from).is_some() {
+                continue;
+            }
             if *from != to {
                 std::fs::copy(from, &to).map_err(|error| format!("{}: {error}", from.display()))?;
             }
@@ -157,9 +171,15 @@ pub fn generate_from_program(
             .collect(),
         _ => Vec::new(),
     };
-    // eseq.gen/generate checked the result's shape.
+    // eseq.gen/generate checked the result's shape; the name is also the
+    // instrument's folder, so it must be one plain path component.
+    let name = text("name").unwrap_or_default();
+    let mut components = Path::new(&name).components();
+    if !matches!((components.next(), components.next()), (Some(std::path::Component::Normal(_)), None)) {
+        return Err(vec![format!("the generator's :name {name:?} must be a file name, not a path")]);
+    }
     Ok(GeneratedInstrument {
-        name: text("name").unwrap_or_default(),
+        name,
         dsp: text("dsp").unwrap_or_default(),
         ui: text("ui"),
         voice_mode: text("voice-mode"),
@@ -320,5 +340,41 @@ pub(crate) mod tests {
         bare.write_to(&out).unwrap();
         assert!(!out.join("ui.lisp").exists());
         assert!(!std::fs::read_to_string(out.join("instrument.json")).unwrap().contains("voice_controls"));
+    }
+
+    /// Two assets of one file name from different folders each keep their
+    /// own copy, and ui.lisp points at each.
+    #[test]
+    fn assets_sharing_a_file_name_both_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a/ride.modes.json"), dir.path().join("b/ride.modes.json"));
+        for (path, text) in [(&a, "a"), (&b, "b")] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let instrument = GeneratedInstrument {
+            name: "x".to_string(),
+            dsp: String::new(),
+            ui: Some(format!("{}|{}", a.display(), b.display())),
+            voice_mode: None,
+            assets: vec![a.clone(), b.clone(), a.clone()],
+        };
+        let out = dir.path().join("out");
+        instrument.write_to(&out).unwrap();
+        let (first, second) = (out.join("ride.modes.json"), out.join("2-ride.modes.json"));
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "b");
+        let ui = std::fs::read_to_string(out.join("ui.lisp")).unwrap();
+        assert_eq!(ui, format!("{}|{}", first.display(), second.display()));
+    }
+
+    /// The name is the instrument's folder: a path is refused.
+    #[test]
+    fn refuses_a_name_that_is_a_path() {
+        for name in ["../up", "/tmp/x", "a/b", ".."] {
+            let script = format!("(import eseq.gen :as gen)\n(gen/program (lambda (p) (dict :name {name:?} :dsp \"\")))");
+            let errors = generate_instrument(&mut gen_vm(), PathBuf::from("x.lisp"), &script).unwrap_err();
+            assert!(errors[0].contains("must be a file name"), "{name}: {errors:?}");
+        }
     }
 }

@@ -145,7 +145,8 @@ pub use eseq::generator::{
     eval_script, generate_from_program, generate_instrument, is_program, GeneratedInstrument, ScriptHost,
 };
 pub use eseq::modal_patch::{
-    modal_natives, read_modal_data_file, register_modal_natives, solid_spec, solve_solid_cached,
+    deferring_solves, modal_natives, read_modal_data_file, register_modal_natives, solid_spec, solve_solid_cached,
+    DeferredSolve,
     CIRC_PLATE_NATIVE, MESH_NATIVE, NEAREST_NATIVE, READ_DATA_NATIVE, SOLVE_NATIVE,
 };
 pub use eseq::sequencer_natives::*;

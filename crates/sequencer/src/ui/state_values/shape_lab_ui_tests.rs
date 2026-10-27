@@ -139,6 +139,22 @@ fn a_solve_answer_plays_its_modes_and_a_stale_one_is_ignored() {
     assert!(find_by_key_suffix(&layout, "lab-mode-0").is_none(), "no modes list");
 }
 
+/// The lab's load as the app runs it: the solids the script waits on are
+/// solved (here, at once), then it loads again from the cache.
+fn load_solved(editor: &mut Editor, payload: &Value) {
+    loop {
+        let deferred = crate::host_commands::shape_lab::load(editor, payload).unwrap();
+        if deferred.is_empty() {
+            return;
+        }
+        for solve in deferred {
+            let progress = sequencer::modal_fe::SolveProgress::default();
+            // a failure is remembered: the next load answers with it
+            let _ = sequencer::lisp_host::solve_solid_cached(&solve.spec, &solve.base, &progress);
+        }
+    }
+}
+
 /// The host's load: a real modal script in a buffer is evaluated, its solid
 /// (a coarse bar, solved on evaluation) reaches the lab with the spec it was
 /// solved from and its solve, and the lab opens.
@@ -155,7 +171,7 @@ fn loading_a_modal_script_hands_the_lab_its_solid() {
   :listens (list (m/listen 'bar (list -0.14 0 0.005))))";
     editor.open_scratch_buffer("probe-lab.lisp", script);
     let payload = eval(&mut editor, "(dict :buffer \"probe-lab.lisp\")");
-    crate::host_commands::shape_lab::load(&mut editor, &payload).unwrap();
+    load_solved(&mut editor, &payload);
     assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-buffer"), Value::String("probe-lab.lisp".into()));
     assert_eq!(eval(&mut editor, "(len eseq.modal.shape-lab/lab-solids)"), Value::Number(1.0));
     assert_eq!(eval(&mut editor, "(get (first eseq.modal.shape-lab/lab-solids) :editable)"), Value::Bool(true));
@@ -197,6 +213,40 @@ fn background_solves_queue_the_latest_and_answer_the_lab() {
     let solved = eval(&mut editor, "eseq.modal.shape-lab/lab-solved");
     assert!(matches!(field(&solved, "file"), Value::String(_)), "{solved:?}");
     assert_eq!(eval(&mut editor, "(len (get eseq.modal.shape-lab/lab-solved :freqs))"), Value::Number(3.0));
+}
+
+/// A spec the host refuses (grain on a metal) answers the lab as a failed
+/// solve, so it does not sit on "Solving…".
+#[test]
+fn a_refused_solve_answers_the_lab() {
+    use crate::host_commands::shape_lab::{solve, solve_refused, ShapeSolves};
+    let mut editor = full_grid_editor_for_scroll_tests();
+    let payload = eval(
+        &mut editor,
+        "(dict :ticket 4 :dir \"/tmp\" :spec (dict :solid (dict :box (dict :size (list 0.2 0.02 0.01))) :modes 3
+                                                :grain (list :x :y) :made-of eseq.modal.materials/steel))",
+    );
+    let mut solves = ShapeSolves::default();
+    let error = solve(&mut solves, &payload).expect_err("grain on steel is refused");
+    assert!(!solves.busy());
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-ticket 4)");
+    solve_refused(&mut editor, &payload, error.clone()).unwrap();
+    assert_eq!(eval(&mut editor, "(get eseq.modal.shape-lab/lab-solved :error)"), Value::String(error));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-solve-progress"), Value::Nil);
+}
+
+/// An Update draft whose compile was dropped without an outcome (the draft
+/// saved or its track deleted) fails, so the lab and the loop stop waiting.
+#[test]
+fn a_dropped_draft_compile_fails_the_update() {
+    use crate::host_commands::shape_lab::{poll_draft_outcomes, ShapeSolves};
+    let mut editor = full_grid_editor_for_scroll_tests();
+    let mut solves = ShapeSolves::default();
+    solves.set_applying("/scripts/body.lisp");
+    eval(&mut editor, "(eseq.modal.shape-lab/draft-status :compiling nil)");
+    poll_draft_outcomes(&mut editor, &mut solves, Vec::new(), &[]);
+    assert!(!solves.busy());
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-draft"), Value::Keyword("failed".into()));
 }
 
 /// What shape_lab.rs `load` sends for a script with one steel bar.
@@ -440,7 +490,7 @@ fn an_applied_shape_still_evaluates_to_an_instrument() {
   :listens (list (m/listen 'bar (list -0.14 0 0.006))))";
     editor.open_scratch_buffer("probe-lab-apply.lisp", script);
     let payload = eval(&mut editor, "(dict :buffer \"probe-lab-apply.lisp\")");
-    crate::host_commands::shape_lab::load(&mut editor, &payload).unwrap();
+    load_solved(&mut editor, &payload);
     eval(&mut editor, "(eseq.modal.shape-lab/free-it)");
     eval(&mut editor, "(eseq.modal.shape-lab/set-plane! :top)");
     eval(&mut editor, "(eseq.modal.shape-lab/add-part! (eseq.modal.shape-lab/placed-part :hole 0.06 0) true)");
@@ -461,7 +511,7 @@ fn an_applied_shape_still_evaluates_to_an_instrument() {
     // the script now builds exactly the spec the lab solved, so its
     // evaluation reads that solve from the cache instead of solving again
     let solved_spec = eval(&mut editor, "eseq.modal.shape-lab/lab-spec");
-    crate::host_commands::shape_lab::load(&mut editor, &payload).unwrap();
+    load_solved(&mut editor, &payload);
     let script_spec = eval(&mut editor, "(get (first eseq.modal.shape-lab/lab-solids) :spec)");
     let hash = |spec: &Value| {
         let (spec, _) = sequencer::lisp_host::solid_spec(spec, std::path::Path::new("/tmp")).unwrap();
@@ -667,3 +717,43 @@ fn the_instrument_view_seats_glued_parts_and_writes_a_moved_place() {
 }
 
 
+
+/// An evaluation that stopped on an uncached solid: the solid solves on a
+/// worker thread while the loop polls, and then the evaluation is queued to
+/// run again, now reading it from the cache.
+#[test]
+fn deferred_solids_solve_in_the_background_then_resume() {
+    use crate::host_commands::script_solves::{poll_script_solves, start, Resume, ScriptSolves};
+    let mut editor = full_grid_editor_for_scroll_tests();
+    // two new solids: one evaluation finds both
+    let source = format!("(import eseq.modal.materials :as mat) (list {} {})", uncached_solve_source(), uncached_solve_source());
+    let path = std::path::PathBuf::from("/tmp/probe-deferred.lisp");
+    let evaluate = |editor: &mut Editor| {
+        sequencer::lisp_host::deferring_solves(|| sequencer::lisp_host::eval_script(editor.runtime_mut(), path.clone(), &source)).1
+    };
+    let deferred = evaluate(&mut editor);
+    assert_eq!(deferred.len(), 2);
+    let mut solves = ScriptSolves::default();
+    start(&mut editor, &mut solves, Resume::Evaluate("probe-deferred.lisp".into()), deferred).unwrap();
+    let started = std::time::Instant::now();
+    while host_commands(&mut editor, "script-solves-resume").is_empty() {
+        assert!(started.elapsed() < std::time::Duration::from_secs(60), "never solved");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        poll_script_solves(&mut editor, &mut solves);
+    }
+    assert!(solves.busy(), "the evaluation waits to run again");
+    assert!(evaluate(&mut editor).is_empty(), "solved into the cache");
+}
+
+/// A `modal-solve` call (materials imported as `mat`) for a bar no earlier
+/// run has cached (its length carries the clock and a call count).
+fn uncached_solve_source() -> String {
+    static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
+    let unique = nanos % 1_000_000 + 1_000_000 * CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let length = 0.3 + f64::from(unique) * 1e-10;
+    format!(
+        "(modal-solve (dict :solid (dict :box (dict :size (list {length} 0.03 0.01))) :modes 4
+                            :made-of mat/steel :resolution (dict :cells 8)))"
+    )
+}

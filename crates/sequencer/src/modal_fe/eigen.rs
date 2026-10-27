@@ -308,6 +308,13 @@ pub(crate) fn shift_invert_lanczos(
     let mut next_check = wanted + p;
     let mut result = None;
     while processed < basis.len() {
+        // A full basis has no row left for the next column's remainder, so
+        // its residual would go uncounted and overstate `converged`. Stop
+        // here instead; when the basis spans the whole space the remainder
+        // is roundoff and the run may finish.
+        if basis.len() >= max_basis && max_basis < room {
+            break;
+        }
         let j = processed;
         let mut w: Vec<f64> = (0..n).map(|i| mass[i] * basis[j][i]).collect();
         solve(&mut w);
@@ -465,5 +472,26 @@ mod tests {
             assert!((f - e).abs() < 1e-9 * e, "{found:?} vs {expected:?}");
         }
         assert_eq!(result.converged, 5);
+    }
+
+    #[test]
+    fn a_run_that_fills_its_basis_counts_only_true_convergence() {
+        // A tightly clustered spectrum the basis budget cannot resolve: every
+        // pair counted as converged must really meet the residual tolerance.
+        let n = 600;
+        let mass = vec![1.0; n];
+        let lambda: Vec<f64> = (0..n).map(|i| 1.0 + 1e-6 * i as f64).collect();
+        let solve = |b: &mut [f64]| {
+            for i in 0..b.len() {
+                b[i] /= lambda[i];
+            }
+        };
+        let wanted = 20;
+        let result = shift_invert_lanczos(&mass, &solve, &[], wanted, &|_| true);
+        assert!(result.converged < wanted, "the cluster should not resolve: {}", result.converged);
+        for (theta, x) in result.thetas.iter().zip(&result.vectors).take(result.converged) {
+            let residual: f64 = (0..n).map(|i| (x[i] / lambda[i] - theta * x[i]).powi(2)).sum::<f64>().sqrt();
+            assert!(residual <= 10.0 * TOL * theta.abs(), "residual {residual} for theta {theta}");
+        }
     }
 }

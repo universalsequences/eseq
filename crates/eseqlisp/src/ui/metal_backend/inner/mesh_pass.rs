@@ -90,6 +90,9 @@ impl MetalBackend {
         if state.targets.len() != before {
             let targets = &state.targets;
             mesh_widget::retain_mesh_draw_jobs(|widget_id| targets.contains_key(&widget_id));
+            // A job is only made when its widget's scene is built, so a cached
+            // scene replaying a dropped job's image would draw nothing.
+            self.clear_widget_scene_caches();
         }
     }
 

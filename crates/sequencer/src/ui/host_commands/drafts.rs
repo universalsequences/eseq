@@ -29,7 +29,7 @@ pub(crate) struct Draft {
 }
 
 pub(crate) struct PendingDraftCompile {
-    key: String,
+    pub(crate) key: String,
     generation: u64,
     /// Recorded on the draft once the compile applies.
     instrument: GeneratedInstrument,
@@ -97,13 +97,33 @@ pub(super) fn evaluate_script_buffer(
     ctx: &mut LoopCtx<'_>,
 ) -> bool {
     let name = editor.active_buffer().name.clone();
-    match evaluate_script_buffer_named(app, editor, ctx, &name) {
-        ScriptEvaluation::NotAScript => false,
-        ScriptEvaluation::Failed(error) => {
-            editor_error(editor, error);
-            true
+    let evaluation = evaluate_script_buffer_named(app, editor, ctx, &name);
+    if matches!(evaluation, ScriptEvaluation::NotAScript) {
+        return false;
+    }
+    if let Err(error) = settle(editor, ctx, &name, evaluation) {
+        editor_error(editor, error);
+    }
+    true
+}
+
+/// [`evaluate_script_buffer`] for the buffer named `name` (run again once
+/// the solids it waited on are solved): a failure is the error.
+pub(super) fn evaluate_named(app: &mut app::App, editor: &mut Editor, ctx: &mut LoopCtx<'_>, name: &str) -> Result<(), String> {
+    let evaluation = evaluate_script_buffer_named(app, editor, ctx, name);
+    settle(editor, ctx, name, evaluation)
+}
+
+/// What C-c C-c does with an evaluation: solids it waits on are solved in
+/// the background, and then the script is evaluated again.
+fn settle(editor: &mut Editor, ctx: &mut LoopCtx<'_>, name: &str, evaluation: ScriptEvaluation) -> Result<(), String> {
+    use super::script_solves::{start, Resume};
+    match evaluation {
+        ScriptEvaluation::Failed(error) => Err(error),
+        ScriptEvaluation::Solving(deferred) => {
+            start(editor, &mut ctx.sessions.script_solves, Resume::Evaluate(name.to_string()), deferred)
         }
-        _ => true,
+        _ => Ok(()),
     }
 }
 
@@ -117,6 +137,8 @@ pub(super) enum ScriptEvaluation {
     /// The buffer's draft is recompiling (key as in [`Draft::key`]);
     /// [`poll_draft_compiles`] reports when it is done.
     Compiling(String),
+    /// Stopped on solids not solved yet (see `script_solves`).
+    Solving(Vec<sequencer::lisp_host::DeferredSolve>),
     Failed(String),
 }
 
@@ -138,7 +160,13 @@ pub(super) fn evaluate_script_buffer_named(
     }
     let key = buffer_key(buffer);
     let path = script_path(buffer);
-    let value = match sequencer::lisp_host::eval_script(editor.runtime_mut(), path.clone(), &script) {
+    let (evaluated, deferred) = sequencer::lisp_host::deferring_solves(|| {
+        sequencer::lisp_host::eval_script(editor.runtime_mut(), path.clone(), &script)
+    });
+    if !deferred.is_empty() {
+        return ScriptEvaluation::Solving(deferred);
+    }
+    let value = match evaluated {
         Ok(value) => value.unwrap_or(Value::Nil),
         Err(errors) => return ScriptEvaluation::Failed(errors.join("; ")),
     };
@@ -422,6 +450,11 @@ fn save_draft(
     // A replaced patcher-built instrument's layout sidecar would mark the
     // generated dsp as patch-authored.
     let _ = std::fs::remove_file(patcher_layout_sidecar_path_for_dsp(&dir.join("dsp.lisp")));
+    // A draft without a panel writes no ui.lisp: the replaced instrument's
+    // would stay beside the new dsp, its knobs bound to params it lacks.
+    if draft.instrument.ui.is_none() {
+        let _ = std::fs::remove_file(dir.join("ui.lisp"));
+    }
     // What the running engine was generated as: the draft's own files may
     // hold a recompile that failed or is still pending.
     GeneratedInstrument { name: slug.clone(), ..draft.instrument.clone() }

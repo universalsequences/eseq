@@ -150,7 +150,7 @@
     (set! lab-spec (if (= s nil) nil (get s :spec)))
     (set! lab-points (if (and (not (= s nil)) (map? (get s :points))) (get s :points) (dict)))
     (set! lab-named nil)
-    (set! lab-edited false)
+    (set! lab-edited (and (not (= s nil)) (= (get s :edited) true)))
     (set! lab-point 0)
     (set! lab-part 0)
     (set! lab-editor :profile)
@@ -165,6 +165,25 @@
     (fit-view)
     (rebuild-canvas)
     (when (and (= lab-solved nil) (map? lab-spec)) (request-solve))))
+
+;; Keep the solid being edited in lab-solids, as it now is: what its tab
+;; shows when it is picked again and what the instrument view draws while
+;; another solid is edited. Its solve goes with it only if it is current;
+;; :edited marks a spec not yet written to the script.
+(def keep-solid! ()
+  (let ((s (current-solid)))
+    (when (not (= s nil))
+      (set! lab-solids
+        (set-nth lab-solids lab-index
+          (merge s :spec lab-spec :points lab-points :edited lab-edited
+                   :mesh-file (if (solved?) (get lab-solved :file) nil)
+                   :freqs (if (solved?) (get lab-solved :freqs) nil)
+                   :mass (if (solved?) (get lab-solved :mass) nil)))))))
+
+;; A solid's tab: the one left keeps its edits.
+(def switch-solid (i)
+  (keep-solid!)
+  (select-solid i))
 
 (def refresh-preview ()
   (set! lab-preview (if (map? lab-spec) (modal-mesh lab-spec lab-dir) nil))
@@ -233,9 +252,15 @@
 (def edit-shape! (s solve) (edit-spec! :solid s solve))
 
 ;; The spec with `key` set: previewed and redrawn now, solved when `solve`.
+;; An unsolved edit (a drag) makes the last solve stale: the 3-D view shows
+;; the preview until the release solves again.
 (def edit-spec! (key value solve)
   (set! lab-spec (merge lab-spec key value))
   (set! lab-edited true)
+  (when (not solve)
+    (set! lab-ticket (+ lab-ticket 1))
+    (set! lab-solve-progress nil)
+    (set! lab-solved nil))
   (refresh-preview)
   (rebuild-canvas)
   (when solve (request-solve)))
@@ -258,7 +283,8 @@
       (dict :buffer lab-buffer :id (get (current-solid) :id) :shape (shape)
             :made-of (get (get lab-spec :made-of) :name) :modes (get lab-spec :modes)
             :resolution (get lab-spec :resolution) :block (or (held-by) :free) :points lab-points
-            :place (or (place-of (get (current-solid) :id)) (dict))))))
+            :place (or (place-of (get (current-solid) :id)) (dict))))
+    (keep-solid!)))
 
 ;; ── Templates ──
 
@@ -499,9 +525,11 @@
     (request-solve)))
 
 ;; Set field k (0 r, 1 z, 2 wall) of the selected point.
+;; Only a wall gives a 2-element point a third value: one on a filled
+;; profile would make the whole profile walled.
 (def set-point-field! (k value)
   (let ((p (nth (profile) lab-point))
-        (full (if (> (len p) 2) p (list (first p) (nth p 1) (or (wall-of p) 0.005)))))
+        (full (if (or (> (len p) 2) (not (= k 2))) p (list (first p) (nth p 1) (or (wall-of p) 0.005)))))
     (set-part! :profile (set-nth (profile) lab-point (set-nth full k (snap value))) true)))
 
 ;; A new point halfway to the next one (or past the last), selected.
@@ -1222,7 +1250,8 @@
     (v-stack :gap 0.5 :width :fill
       (part-actions)
       (part-effect p)
-      (if (= (kind-of s) :revolve)
+      ;; the profile editor reads the shape's own :revolve, not a body under cuts
+      (if (and (= (kind-of s) :revolve) (= (kind-of (shape)) :revolve))
         (small-button "lab-edit-profile" (if (= lab-editor :profile) "Done editing profile" "Edit profile")
                       (lambda () (set-editor! (if (= lab-editor :profile) :parts :profile))))
         (label "" :height 0.1 :bg :transparent))
@@ -1714,7 +1743,7 @@
   (h-stack :gap 0.4
     (each lab-solids |s i|
       (button (str (get s :id)) :key (str "lab-solid-" i) :height 1.3 :font-size 9.5 :shape :tab
-              :active (= i lab-index) :on-click (lambda (e) (select-solid i))))))
+              :active (= i lab-index) :on-click (lambda (e) (switch-solid i))))))
 
 ;; Replaces the shape with a template's.
 (def template-menu ()

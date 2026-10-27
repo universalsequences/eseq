@@ -156,6 +156,11 @@ pub fn solve_watched(spec: &SolidSpec, base_dir: &Path, progress: &SolveProgress
     solve_detailed(spec, base_dir, progress).map(|d| (d.solid, d.stats))
 }
 
+/// Most entries the stiffness envelope (and so its factor) may hold: 2 GB.
+/// A 0.35 m bar at 2.5 mm elements needs 120M and factors in about 20 s; a
+/// chunky solid at the lab's finer details would need tens of GB.
+const MAX_ENVELOPE: usize = 250_000_000;
+
 /// The error a cancelled solve returns.
 pub const CANCELLED: &str = "solve cancelled";
 
@@ -328,6 +333,17 @@ pub(crate) fn solve_detailed(spec: &SolidSpec, base_dir: &Path, progress: &Solve
             }
         }
     }
+    // The factor's envelope grows about as the fifth power of the
+    // resolution on a chunky solid; refuse one the app could not hold
+    // rather than abort on the allocation.
+    let envelope = skyline::envelope_size(&first);
+    if envelope > MAX_ENVELOPE {
+        return Err(format!(
+            "this solid is too fine to solve ({:.1} GB of stiffness envelope, at most {:.1}); coarsen its resolution",
+            envelope as f64 * 8e-9,
+            MAX_ENVELOPE as f64 * 8e-9,
+        ));
+    }
     let d = element::material_elasticity(&spec.material);
     let (mut matrix, node_mass) = assemble(&mesh, &rank, &first, &d, spec.material.density, progress)?;
     stats.envelope = matrix.stored();
@@ -375,7 +391,7 @@ pub(crate) fn solve_detailed(spec: &SolidSpec, base_dir: &Path, progress: &Solve
     let spare = if spec.block.is_some() { 6 } else { 0 };
     let solve_op = |b: &mut [f64]| factor.solve(b);
     let result =
-        eigen::shift_invert_lanczos(&dof_mass, &solve_op, &deflate, spec.modes + spare, &progress.watch(SolvePhase::Modes));
+        eigen::shift_invert_lanczos(&dof_mass, &solve_op, &deflate, spec.modes.saturating_add(spare), &progress.watch(SolvePhase::Modes));
     progress.check()?;
     stats.lanczos_steps = result.steps;
     stats.converged = result.converged.min(spec.modes);

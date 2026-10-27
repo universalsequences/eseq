@@ -17,14 +17,18 @@
 ; mu falls no faster than 0.428 per unit x, so h rises everywhere and its root
 ; is unique below pressure 2.33 (the knob's range ends at 2): the stick / slip
 ; hysteresis of Helmholtz motion comes from the string, not from choosing
-; between roots. mu is odd, so the root has xfree's sign and the macro solves
+; between roots. A bow with :hair scales the knob by its hair force ratio (up
+; to 2x), so its pressure can pass 2.33; there h has up to three roots and the
+; solve returns one of them, not the one nearest last sample's (x-prev is not
+; consulted). mu is odd, so the root has xfree's sign and the macro solves
 ; for a = |xfree| on [0, a] (h(0) = -a, h(a) >= 0). It starts at the larger of
 ; the stick line's root (tanh(20x) <= 20x, a lower bound) and the slip
 ; curve's (tanh = 1, a quadratic; near the knob's top pressure it can land
 ; just past the root), then takes three Newton steps, each kept inside the
 ; shrinking bracket (a step leaving it bisects instead). That is more
 ; accurate than a 64-bracket scan plus a regula falsi step (force error under
-; 0.5% of pressure against 13%) at a twentieth of its cost, which matters: a
+; 0.1% of pressure up to pressure 1, about 1.4% near 2, against 13%) at a
+; twentieth of its cost, which matters: a
 ; patch solves its bow inside every Gauss-Seidel sweep. x-prev is unused, kept
 ; so patches written against the scanning version still compile.
 ; Returns (F x): push the object by +F. The macro keeps no state, so a patch can solve it inside

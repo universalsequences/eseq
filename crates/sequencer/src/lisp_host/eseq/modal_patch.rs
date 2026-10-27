@@ -90,11 +90,10 @@ fn pick_native(args: &[Value]) -> Result<Value, String> {
     // the vertices about as near the line as the nearest (within 2% of the
     // mesh), so the front face wins over the back one
     let reach = nearest + 0.02 * geometry.radius as f64;
-    let front = vertices
-        .iter()
-        .filter(|p| off_line(p) <= reach)
-        .max_by(|p, q| p[n].total_cmp(&q[n]))
-        .expect("the nearest vertex is within reach");
+    // none is within reach only when (u v) is not finite
+    let Some(front) = vertices.iter().filter(|p| off_line(p) <= reach).max_by(|p, q| p[n].total_cmp(&q[n])) else {
+        return Ok(Value::Nil);
+    };
     Ok(Value::List(front.iter().map(|&x| cell(Value::Number(x))).collect()))
 }
 
@@ -136,12 +135,15 @@ pub const SOLVE_NATIVE: &str = "modal-solve";
 /// eseq-modes file, with each mode's shape scaled to eseq.modal's unit modal
 /// mass (mean square 1/2 over the surface points; the solver's are
 /// mass-normalised in kg). Solutions are cached ([`solve_solid_cached`]), so only
-/// the first evaluation of a solid pays for the solve.
+/// the first evaluation of a solid pays for the solve; the app never pays it
+/// on its event loop ([`deferring_solves`]).
 fn solve_native(args: &[Value]) -> Result<Value, String> {
     let script_dir = current_script_dir().unwrap_or_else(|| PathBuf::from("."));
     let (spec, base) = solid_spec(args.first().unwrap_or(&Value::Nil), &script_dir)?;
-    let (cache, text) = solve_solid_cached(&spec, &base, &crate::modal_fe::SolveProgress::default())?;
-    modes_json_value(&text).map(|(value, _)| with_file(value, &cache))
+    // the cache check's parse is the value: a hit parses the file once
+    let (cache, (value, _)) =
+        solve_solid_cached_as(&spec, &base, &crate::modal_fe::SolveProgress::default(), modes_json_value)?;
+    Ok(with_file(value, &cache))
 }
 
 /// A solid spec given to [`SOLVE_NATIVE`] (a JSON file path, relative to
@@ -200,6 +202,17 @@ pub fn solve_solid_cached(
     base: &Path,
     progress: &crate::modal_fe::SolveProgress,
 ) -> Result<(PathBuf, String), String> {
+    solve_solid_cached_as(spec, base, progress, |text| modes_json_value(text).map(|_| text.to_string()))
+}
+
+/// [`solve_solid_cached`], the file's text read by `parse`, which also
+/// checks a cached file (one it rejects is solved again).
+fn solve_solid_cached_as<T>(
+    spec: &crate::modal_fe::SolidSpec,
+    base: &Path,
+    progress: &crate::modal_fe::SolveProgress,
+    parse: impl Fn(&str) -> Result<T, String>,
+) -> Result<(PathBuf, T), String> {
     use crate::modal_fe::{solve_watched, spec_hash};
     // The key: the spec, the solver's version (a fix re-solves) and, for a
     // spec with .obj files, their contents and the folder their relative
@@ -225,9 +238,9 @@ pub fn solve_solid_cached(
     let cache = keyed(if objs.is_empty() { None } else { Some(canonical.clone()) });
     // A cached file is already at unit modal mass; one that does not parse
     // is solved again.
-    let read = |path: &Path| std::fs::read_to_string(path).ok().filter(|text| modes_json_value(text).is_ok());
-    if let Some(text) = read(&cache) {
-        return Ok((cache, text));
+    let read = |path: &Path| std::fs::read_to_string(path).ok().and_then(|text| parse(&text).ok());
+    if let Some(parsed) = read(&cache) {
+        return Ok((cache, parsed));
     }
     // a solve cached under an earlier key (keyed by the folder as given, or
     // canonical) is moved to this one, rather than solved again
@@ -236,14 +249,28 @@ pub fn solve_solid_cached(
         legacy.push(keyed(Some(canonical)));
     }
     for old in legacy {
-        if let Some(text) = read(&old) {
+        if let Some(parsed) = read(&old) {
             if std::fs::rename(&old, &cache).is_ok() {
-                return Ok((cache, text));
+                return Ok((cache, parsed));
             }
-            return Ok((old, text));
+            return Ok((old, parsed));
         }
     }
-    let (mut solid, _) = solve_watched(spec, base, progress)?;
+    if let Some(error) = defer_solve(spec, base, &cache) {
+        return Err(error);
+    }
+    let solved = solve_watched(spec, base, progress);
+    let mut failures = SOLVE_FAILURES.lock().unwrap_or_else(|e| e.into_inner());
+    match &solved {
+        Err(error) if !progress.is_cancelled() => {
+            failures.insert(cache.clone(), error.clone());
+        }
+        _ => {
+            failures.remove(&cache);
+        }
+    }
+    drop(failures);
+    let (mut solid, _) = solved?;
     unit_modal_mass(&mut solid);
     let text = solid.to_json(spec);
     if let Some(dir) = cache.parent() {
@@ -255,7 +282,54 @@ pub fn solve_solid_cached(
             let _ = std::fs::rename(&staging, &cache);
         }
     }
-    Ok((cache, text))
+    Ok((cache, parse(&text)?))
+}
+
+thread_local! {
+    /// The solves an evaluation under [`deferring_solves`] found uncached.
+    static DEFERRED_SOLVES: RefCell<Option<Vec<DeferredSolve>>> = const { RefCell::new(None) };
+}
+
+/// Solves that failed (by cache file): a deferring evaluation answers with
+/// the failure, as a solve on the spot would have, rather than solving
+/// again.
+static SOLVE_FAILURES: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// A solid a script asked [`SOLVE_NATIVE`] for that was not cached yet.
+pub struct DeferredSolve {
+    pub spec: crate::modal_fe::SolidSpec,
+    pub base: PathBuf,
+    /// The cache file it solves into: the solid's identity.
+    pub cache: PathBuf,
+}
+
+/// Run `f` (a script's evaluation) with [`SOLVE_NATIVE`] refusing to solve:
+/// a solid it finds uncached is recorded and fails the call, so the app's
+/// event loop never runs a solve of minutes. The caller solves the recorded
+/// solids in the background and evaluates again, now from the cache.
+pub fn deferring_solves<T>(f: impl FnOnce() -> T) -> (T, Vec<DeferredSolve>) {
+    let outer = DEFERRED_SOLVES.with(|deferred| deferred.borrow_mut().replace(Vec::new()));
+    let value = f();
+    let deferred = DEFERRED_SOLVES.with(|deferred| std::mem::replace(&mut *deferred.borrow_mut(), outer));
+    (value, deferred.unwrap_or_default())
+}
+
+/// Under [`deferring_solves`], record an uncached solve and the error that
+/// fails the call (or the error it failed with before); otherwise None
+/// (solve now).
+fn defer_solve(spec: &crate::modal_fe::SolidSpec, base: &Path, cache: &Path) -> Option<String> {
+    DEFERRED_SOLVES.with(|deferred| {
+        let mut deferred = deferred.borrow_mut();
+        let deferred = deferred.as_mut()?;
+        if let Some(error) = SOLVE_FAILURES.lock().unwrap_or_else(|e| e.into_inner()).get(cache) {
+            return Some(error.clone());
+        }
+        if !deferred.iter().any(|other| other.cache == cache) {
+            deferred.push(DeferredSolve { spec: spec.clone(), base: base.to_path_buf(), cache: cache.to_path_buf() });
+        }
+        Some(format!("{SOLVE_NATIVE}: solving this solid in the background"))
+    })
 }
 
 /// A script folder as a solve's cache key names it: absolute and without
@@ -927,6 +1001,33 @@ mod tests {
         assert!(squashed.contains("(param hit_bar_pt @group hit"), "{dsp}");
     }
 
+    /// A bar no earlier run has cached (its length carries the clock), as a
+    /// `modal-solve` call.
+    fn uncached_solve_source() -> String {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
+        let length = 0.3 + f64::from(nanos % 1_000_000) * 1e-10;
+        format!(
+            "(import eseq.modal.materials :as mat)
+             (modal-solve (dict :solid (dict :box (dict :size (list {length} 0.03 0.01))) :modes 4
+                                :made-of mat/steel :resolution (dict :cells 8)))"
+        )
+    }
+
+    /// Under deferring_solves an uncached solid is recorded, not solved;
+    /// once solved, the same call reads it from the cache and defers nothing.
+    #[test]
+    fn a_deferring_evaluation_records_uncached_solids_instead_of_solving() {
+        let mut vm = modal_vm();
+        let source = uncached_solve_source();
+        let (_, deferred) = deferring_solves(|| vm.eval_str(&source));
+        assert_eq!(deferred.len(), 1);
+        let solve = &deferred[0];
+        solve_solid_cached(&solve.spec, &solve.base, &crate::modal_fe::SolveProgress::default()).unwrap();
+        let (value, deferred) = deferring_solves(|| vm.eval_str(&source));
+        assert!(deferred.is_empty());
+        assert!(matches!(value, Ok(Some(Value::Map(_)))), "{value:?}");
+    }
+
     /// The cache folder key is canonical: a relative and an absolute path
     /// to one folder are the same key.
     #[test]
@@ -967,6 +1068,10 @@ mod tests {
         let top = xyz(eval("(modal-mesh-pick (get bar :mesh-id) 0 1 2 -0.05 0.01)"));
         assert!((top[2] - 0.005).abs() < 1e-6, "{top:?}");
         assert!(matches!(eval("(modal-mesh-pick 999999 0 1 2 0 0)"), Value::Nil));
+        // a point that is not finite picks nothing (it once panicked)
+        let id = eval("(get bar :mesh-id)");
+        let at = |u: f64| [id.clone(), Value::Number(0.0), Value::Number(1.0), Value::Number(2.0), Value::Number(u), Value::Number(0.0)];
+        assert!(matches!(pick_native(&at(f64::NAN)), Ok(Value::Nil)));
     }
 
     /// modal-mesh previews a spec without solving it: a handle to its surface

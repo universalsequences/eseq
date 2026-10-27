@@ -314,11 +314,17 @@ pub struct MeshDrawJob {
 }
 
 impl MeshDrawJob {
+    /// The frame time in `uniforms.view[1]` is left out: it differs on every
+    /// rebuild, and an animating widget gets its frame's time at encode.
     fn same_inputs(&self, other: &Self) -> bool {
+        let timeless = |uniforms: &MeshUniforms| {
+            let [aspect, _, yaw, pitch] = uniforms.view;
+            MeshUniforms { view: [aspect, 0.0, yaw, pitch], ..*uniforms }
+        };
         self.widget_type == other.widget_type
             && self.geometry_id == other.geometry_id
             && (self.width_px, self.height_px) == (other.width_px, other.height_px)
-            && self.uniforms == other.uniforms
+            && timeless(&self.uniforms) == timeless(&other.uniforms)
             && self.arrays == other.arrays
             && self.clear_color == other.clear_color
             && self.animates == other.animates
@@ -342,6 +348,11 @@ static MESH_JOB_REVISION: AtomicU64 = AtomicU64::new(1);
 thread_local! {
     static MESH_WIDGETS: RefCell<HashMap<String, Rc<MeshWidgetDef>>> = RefCell::new(HashMap::new());
     static GEOMETRIES: RefCell<HashMap<u64, Rc<MeshGeometry>>> = RefCell::new(HashMap::new());
+    /// Geometry id -> how many holders (files, replace slots, handles) name
+    /// it: ids are content hashes, so one entry may have several.
+    static GEOMETRY_HOLDS: RefCell<HashMap<u64, usize>> = RefCell::new(HashMap::new());
+    /// Instance -> the geometry its inline `:geometry` dict registered.
+    static INLINE_GEOMETRY: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
     /// A file's path and modification time -> its geometry id.
     static GEOMETRY_FILES: RefCell<HashMap<PathBuf, (Option<std::time::SystemTime>, u64)>> =
         RefCell::new(HashMap::new());
@@ -376,22 +387,45 @@ pub fn mesh_widget_registry_generation() -> u64 {
     MESH_WIDGET_GENERATION.load(Ordering::Relaxed)
 }
 
-/// Keep `geometry` for the backend; the id is its content's, so the same
-/// mesh registered twice (a reload, a re-run view) uploads once.
+/// Keep `geometry` for the backend, held for good; the id is its content's,
+/// so the same mesh registered twice (a reload, a re-run view) uploads once.
 pub fn register_geometry(geometry: MeshGeometry) -> u64 {
     let id = geometry.content_id();
     GEOMETRIES.with(|geometries| {
         geometries.borrow_mut().entry(id).or_insert_with(|| Rc::new(geometry));
     });
+    GEOMETRY_HOLDS.with(|holds| {
+        let mut holds = holds.borrow_mut();
+        let count = holds.entry(id).or_default();
+        *count = count.saturating_add(1);
+    });
     id
 }
 
+/// One holder lets go of `id`; the mesh goes with its last holder.
+fn release_geometry(id: u64) {
+    let last = GEOMETRY_HOLDS.with(|holds| {
+        let mut holds = holds.borrow_mut();
+        match holds.get_mut(&id) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            _ => holds.remove(&id).is_some(),
+        }
+    });
+    if last {
+        GEOMETRIES.with(|geometries| geometries.borrow_mut().remove(&id));
+    }
+}
+
 /// Register `geometry` in place of `previous` (a live preview that changes
-/// on every edit): the previous mesh goes, as nothing else names its id.
+/// on every edit): the previous mesh goes unless another holder still
+/// names it (the same content loaded from a file, say).
 pub fn replace_geometry(previous: Option<u64>, geometry: MeshGeometry) -> u64 {
     let id = register_geometry(geometry);
-    if let Some(old) = previous.filter(|old| *old != id) {
-        GEOMETRIES.with(|geometries| geometries.borrow_mut().remove(&old));
+    if let Some(old) = previous {
+        release_geometry(old);
     }
     id
 }
@@ -413,12 +447,9 @@ pub fn load_geometry_file(path: &Path) -> Result<u64, String> {
     }
     let text = std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let geometry = MeshGeometry::from_modes_json(&text).map_err(|error| format!("{}: {error}", path.display()))?;
-    let id = register_geometry(geometry);
-    let replaced = GEOMETRY_FILES.with(|files| files.borrow_mut().insert(path.to_path_buf(), (modified, id)));
-    // An edited file's previous mesh goes: nothing else names its id.
-    if let Some((_, old)) = replaced.filter(|(_, old)| *old != id) {
-        GEOMETRIES.with(|geometries| geometries.borrow_mut().remove(&old));
-    }
+    let replaced = GEOMETRY_FILES.with(|files| files.borrow_mut().get(path).map(|(_, old)| *old));
+    let id = replace_geometry(replaced, geometry);
+    GEOMETRY_FILES.with(|files| files.borrow_mut().insert(path.to_path_buf(), (modified, id)));
     Ok(id)
 }
 
@@ -444,8 +475,9 @@ pub fn geometry_handle(id: u64) -> Value {
 }
 
 /// The geometry an instance draws: its `:geometry` (a handle or a geometry
-/// dict) or else its `:src` (an eseq-modes file).
-fn instance_geometry(props: &HashMap<String, Value>) -> Result<Option<u64>, String> {
+/// dict) or else its `:src` (an eseq-modes file). An inline dict's mesh is
+/// the instance's own, replaced when the dict changes.
+fn instance_geometry(widget_id: u64, props: &HashMap<String, Value>) -> Result<Option<u64>, String> {
     if let Some(value) = props.get("geometry").filter(|value| !matches!(value, Value::Nil)) {
         if let Value::Map(map) = value
             && let Some(id) = map.get("mesh-id")
@@ -455,7 +487,11 @@ fn instance_geometry(props: &HashMap<String, Value>) -> Result<Option<u64>, Stri
                 _ => Err(":geometry names a mesh that is not loaded".into()),
             };
         }
-        return MeshGeometry::from_value(value).map(|geometry| Some(register_geometry(geometry)));
+        let geometry = MeshGeometry::from_value(value)?;
+        let previous = INLINE_GEOMETRY.with(|inline| inline.borrow().get(&widget_id).copied());
+        let id = replace_geometry(previous, geometry);
+        INLINE_GEOMETRY.with(|inline| inline.borrow_mut().insert(widget_id, id));
+        return Ok(Some(id));
     }
     match props.get("src") {
         Some(Value::String(path)) if !path.is_empty() => load_geometry_file(Path::new(path)).map(Some),
@@ -487,6 +523,15 @@ pub fn mesh_draw_job(widget_id: u64) -> Option<Rc<MeshDrawJob>> {
 pub fn retain_mesh_draw_jobs(mut keep: impl FnMut(u64) -> bool) {
     MESH_JOBS.with(|jobs| jobs.borrow_mut().retain(|id, _| keep(*id)));
     ORBITS.with(|orbits| orbits.borrow_mut().retain(|id, _| keep(*id)));
+    let dropped: Vec<u64> = INLINE_GEOMETRY.with(|inline| {
+        let mut dropped = Vec::new();
+        inline.borrow_mut().retain(|id, geometry| keep(*id) || {
+            dropped.push(*geometry);
+            false
+        });
+        dropped
+    });
+    dropped.into_iter().for_each(release_geometry);
 }
 
 /// Built-in drag orbit: a drag across the widget's width turns the mesh
@@ -533,7 +578,7 @@ pub fn mesh_widget_primitives(
     if !(px_w >= 1.0 && px_h >= 1.0) {
         return Vec::new();
     }
-    let geometry_id = match instance_geometry(&node.props) {
+    let geometry_id = match instance_geometry(node.widget_id, &node.props) {
         Ok(Some(id)) => id,
         Ok(None) => return Vec::new(),
         Err(error) => {
@@ -743,6 +788,48 @@ mod tests {
         // Redefined without :vertex it is an ordinary widget again.
         runtime.eval_str("(defwidget test-mesh-face :shader (rgba 1 1 1 1))").expect("redefine");
         assert!(mesh_widget_def("test-mesh-face").is_none());
+    }
+
+    #[test]
+    fn replacing_shared_geometry_keeps_it_for_its_other_holders() {
+        let plate = |modes: &[(usize, usize)]| MeshGeometry::from_modes_json(&plate_modes_json(3, 3, modes)).unwrap();
+        let dir = std::env::temp_dir().join(format!("eseq-mesh-holds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shared.modes.json");
+        std::fs::write(&path, plate_modes_json(3, 3, &[(1, 2)])).unwrap();
+        // A preview slot and a file share one content id.
+        let preview = replace_geometry(None, plate(&[(1, 2)]));
+        let file = load_geometry_file(&path).unwrap();
+        assert_eq!(preview, file);
+        // The preview moves on: the file still names the mesh.
+        let next = replace_geometry(Some(preview), plate(&[(2, 2)]));
+        assert!(geometry(file).is_some(), "the file's mesh went with the preview");
+        // Re-registering the same content in the same slot keeps it.
+        assert_eq!(replace_geometry(Some(next), plate(&[(2, 2)])), next);
+        assert!(geometry(next).is_some());
+        // Its last holder gone, the mesh goes.
+        replace_geometry(Some(next), plate(&[(3, 2)]));
+        assert!(geometry(next).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_rebuild_at_a_later_time_keeps_a_static_jobs_revision() {
+        let job = |time: f32| MeshDrawJob {
+            widget_type: "w".into(),
+            geometry_id: 1,
+            width_px: 8,
+            height_px: 8,
+            uniforms: MeshUniforms { view: [1.0, time, 0.5, 0.25], ..MeshUniforms::default() },
+            arrays: Vec::new(),
+            clear_color: [0.0; 4],
+            revision: 0,
+            animates: false,
+        };
+        assert!(job(0.0).same_inputs(&job(3.5)));
+        let mut turned = job(0.0);
+        turned.uniforms.view[2] = 1.0;
+        assert!(!job(0.0).same_inputs(&turned));
     }
 
     #[test]

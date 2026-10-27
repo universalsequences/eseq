@@ -58,6 +58,7 @@ pub(crate) fn dispatch_custom_host_command(
         n if super::customize::COMMANDS.contains(&n) => super::customize::handle(name, payload, app, editor, ctx),
         n if super::drafts::COMMANDS.contains(&n) => super::drafts::handle(name, payload, app, editor, ctx),
         n if super::shape_lab::COMMANDS.contains(&n) => super::shape_lab::handle(name, payload, app, editor, ctx),
+        n if super::script_solves::COMMANDS.contains(&n) => super::script_solves::handle(name, payload, app, editor, ctx),
         n if super::agent::COMMANDS.contains(&n) => super::agent::handle(name, payload, app, editor, ctx),
         n if crate::agent_pane::COMMANDS.contains(&n) => {
             let host_views: Vec<_> = crate::edit_sessions::agent_pane_view(&ctx.sessions).into_iter().collect();

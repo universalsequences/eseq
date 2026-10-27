@@ -26,6 +26,7 @@ mod learn;
 mod misc;
 pub(crate) mod drafts;
 pub(crate) mod shape_lab;
+pub(crate) mod script_solves;
 pub(crate) mod notes;
 pub(crate) mod packages;
 mod panel;

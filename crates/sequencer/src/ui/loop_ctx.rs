@@ -59,6 +59,8 @@ pub(crate) struct EditSessionState {
     pub(crate) pending_draft_compiles: Vec<super::host_commands::drafts::PendingDraftCompile>,
     /// The shape lab's background solves (content/ui/modal/shape-lab.lisp).
     pub(crate) shape_solves: super::host_commands::shape_lab::ShapeSolves,
+    /// Script evaluations waiting on modal solids solving in the background.
+    pub(crate) script_solves: super::host_commands::script_solves::ScriptSolves,
     pub(crate) pending_agentic_bubbles: HashMap<String, PendingAgenticBubble>,
     /// In-flight Jev ghost-cable requests (eseq-c049), one worker thread each.
     pub(crate) pending_jev_suggestions: Vec<PendingJevSuggestion>,

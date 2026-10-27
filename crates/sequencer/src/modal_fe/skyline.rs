@@ -14,6 +14,11 @@ pub(crate) struct Envelope {
     data: Vec<f64>,
 }
 
+/// The entries an [`Envelope`] with rows starting at `first` stores.
+pub(crate) fn envelope_size(first: &[usize]) -> usize {
+    first.iter().enumerate().map(|(i, &f)| i - f + 1).sum()
+}
+
 impl Envelope {
     /// `first[i] <= i` is row i's first stored column.
     pub fn new(first: Vec<usize>) -> Self {

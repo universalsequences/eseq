@@ -92,7 +92,9 @@ fn carve(mesh: HexMesh, cuts: &[Solid]) -> Result<HexMesh, String> {
     for e in 0..kept.len() {
         *sizes.entry(root(&mut parent, e)).or_default() += 1;
     }
-    let largest = sizes.iter().max_by_key(|(_, &n)| n).map(|(&r, _)| r).unwrap_or(0);
+    // ties go to the lowest root, so equal halves pick the same one every run
+    let largest =
+        sizes.iter().max_by_key(|(&r, &n)| (n, std::cmp::Reverse(r))).map(|(&r, _)| r).unwrap_or(0);
     let mut renumber = vec![u32::MAX; mesh.nodes.len()];
     let mut nodes = Vec::new();
     let mut elements = Vec::new();
@@ -365,6 +367,9 @@ fn occupancy(solid: &Solid, grid: &Grid, objs: &Objs) -> Vec<bool> {
     }
 }
 
+/// Most elements (voxel cells, or along x through x around) one mesh may have.
+const MAX_ELEMENTS: usize = 8_000_000;
+
 fn voxel_mesh(spec: &SolidSpec, base_dir: &Path) -> Result<HexMesh, String> {
     let mut objs = Objs::new();
     load_objs(&spec.solid, base_dir, &mut objs)?;
@@ -377,10 +382,16 @@ fn voxel_mesh(spec: &SolidSpec, base_dir: &Path) -> Result<HexMesh, String> {
     let h = cell_sizes(spec.resolution, largest);
     // Cells per axis fit the bounding box exactly (cells are boxes of about
     // h on a side), so a box primitive keeps its exact dimensions.
-    let n = [0, 1, 2].map(|i| ((extent[i] / h[i]).round() as usize).max(1));
-    if n.iter().product::<usize>() > 8_000_000 {
-        return Err(format!("voxel grid {}x{}x{} is too large; coarsen the resolution", n[0], n[1], n[2]));
+    // Counted in f64 first: a tiny cell size would saturate the usize cast
+    // and wrap the product past the limit.
+    let counts = [0, 1, 2].map(|i| (extent[i] / h[i]).round().max(1.0));
+    if !(counts.iter().product::<f64>() <= MAX_ELEMENTS as f64) {
+        return Err(format!(
+            "voxel grid {}x{}x{} is too large; coarsen the resolution",
+            counts[0], counts[1], counts[2]
+        ));
     }
+    let n = counts.map(|c| c as usize);
     let grid = Grid { lo: b.lo, h: [0, 1, 2].map(|i| extent[i] / n[i] as f64), n };
     let mut cells = occupancy(&spec.solid, &grid, &objs);
     let total = cells.iter().filter(|&&c| c).count();
@@ -510,10 +521,15 @@ fn revolve_mesh(
     let through = segments.through.unwrap_or(((wall_max / h).round() as usize).max(1));
     let around = segments.around.unwrap_or_else(|| {
         let n = (std::f64::consts::TAU * extent[1] / h).ceil() as usize;
-        (n.div_ceil(4) * 4).max(8)
+        n.div_ceil(4).saturating_mul(4).max(8)
     });
     if along == 0 || through == 0 || around < 3 {
         return Err("revolve segments must be positive (around >= 3)".into());
+    }
+    if along.checked_mul(through).and_then(|n| n.checked_mul(around)).is_none_or(|n| n > MAX_ELEMENTS) {
+        return Err(format!(
+            "revolve mesh {along}x{through}x{around} is too large; coarsen the resolution or segments"
+        ));
     }
 
     // Resample the profile at uniform arc length (mid point and wall); the

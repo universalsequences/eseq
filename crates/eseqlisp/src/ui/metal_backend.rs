@@ -2721,6 +2721,14 @@ fragment float4 live_spectrogram_frag(
     }
 
     impl MetalBackend {
+        /// Drop every cached widget scene, so the next frame rebuilds them.
+        fn clear_widget_scene_caches(&mut self) {
+            self.cached_widget_scenes.clear();
+            self.cached_widget_run_scenes.clear();
+            self.widget_scene_last_keys.clear();
+            self.stats.note_widget_scene_cache_clear();
+        }
+
         pub fn new() -> Result<Self, BackendError> {
             Self::new_with_size(1350, 900)
         }
@@ -3322,10 +3330,7 @@ fragment float4 live_spectrogram_frag(
                 self.stats.note_widget_scene_cache_hit();
                 let mut primitives = widget_render::flatten_gpu_primitive_runs(&scene.runs);
                 if self.cached_widget_scenes.len() >= 128 {
-                    self.cached_widget_scenes.clear();
-                    self.cached_widget_run_scenes.clear();
-                    self.widget_scene_last_keys.clear();
-                    self.stats.note_widget_scene_cache_clear();
+                    self.clear_widget_scene_caches();
                 } else {
                     self.cached_widget_scenes.insert(
                         cache_key,
@@ -3356,10 +3361,7 @@ fragment float4 live_spectrogram_frag(
                 widget_render::collect_gpu_primitive_runs(layout, viewport, scroll_top, max_rows);
             let mut primitives = widget_render::flatten_gpu_primitive_runs(&runs);
             if self.cached_widget_scenes.len() >= 128 {
-                self.cached_widget_scenes.clear();
-                self.cached_widget_run_scenes.clear();
-                self.widget_scene_last_keys.clear();
-                self.stats.note_widget_scene_cache_clear();
+                self.clear_widget_scene_caches();
             }
             self.cached_widget_scenes.insert(
                 cache_key,
@@ -3401,10 +3403,7 @@ fragment float4 live_spectrogram_frag(
             self.widget_scene_last_keys
                 .insert(layout_identity, cache_parts);
             if self.cached_widget_scenes.len() >= 128 {
-                self.cached_widget_scenes.clear();
-                self.cached_widget_run_scenes.clear();
-                self.widget_scene_last_keys.clear();
-                self.stats.note_widget_scene_cache_clear();
+                self.clear_widget_scene_caches();
             }
             let primitives = widget_render::flatten_gpu_primitive_runs(runs);
             self.cached_widget_scenes
@@ -3479,10 +3478,7 @@ fragment float4 live_spectrogram_frag(
                 widget_render::collect_gpu_primitive_runs(layout, viewport, scroll_top, max_rows);
             let run_indices = widget_render::build_gpu_primitive_run_index(&runs);
             if self.cached_widget_run_scenes.len() >= 128 {
-                self.cached_widget_scenes.clear();
-                self.cached_widget_run_scenes.clear();
-                self.widget_scene_last_keys.clear();
-                self.stats.note_widget_scene_cache_clear();
+                self.clear_widget_scene_caches();
             }
             self.cached_widget_run_scenes
                 .insert(cache_key, CachedWidgetRunScene { runs, run_indices });

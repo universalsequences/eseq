@@ -373,6 +373,7 @@ pub(crate) fn run_event_loop(
         drafts: Vec::new(),
         pending_draft_compiles: Vec::new(),
         shape_solves: Default::default(),
+        script_solves: Default::default(),
         pending_agentic_bubbles: HashMap::new(),
         pending_jev_suggestions: Vec::new(),
         queued_jev_suggestions: Vec::new(),
@@ -2114,8 +2115,14 @@ pub(crate) fn run_event_loop(
             &mut sessions,
             &shared.ui_epoch,
         );
-        host_commands::shape_lab::poll_draft_outcomes(&mut editor, &mut sessions.shape_solves, drafts_finished);
+        host_commands::shape_lab::poll_draft_outcomes(
+            &mut editor,
+            &mut sessions.shape_solves,
+            drafts_finished,
+            &sessions.pending_draft_compiles,
+        );
         host_commands::shape_lab::poll_shape_solves(&mut editor, &mut sessions.shape_solves);
+        host_commands::script_solves::poll_script_solves(&mut editor, &mut sessions.script_solves);
         poll_learn_job(
             &mut app,
             &mut sessions,
@@ -2444,7 +2451,7 @@ pub(crate) fn run_event_loop(
             Instant::now(),
             editor.needs_redraw() || host_animation_active(&editor, backend, &gesture),
             shared.state.transport.playing.load(Ordering::Relaxed) || sessions.pending_learn_job.is_some() || !sessions.pending_jev_suggestions.is_empty() || !sessions.queued_jev_suggestions.is_empty()
-                || sessions.shape_solves.busy() || !sessions.pending_draft_compiles.is_empty(),
+                || sessions.shape_solves.busy() || sessions.script_solves.busy() || !sessions.pending_draft_compiles.is_empty(),
         )))
     })?;
 

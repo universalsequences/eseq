@@ -28,6 +28,9 @@ pub struct SolidSpec {
     pub mesh: MeshMode,
 }
 
+/// Most elastic modes one solve may ask for.
+pub const MAX_MODES: usize = 512;
+
 fn default_modes() -> usize {
     20
 }
@@ -269,6 +272,11 @@ impl SolidSpec {
         }
         if self.modes == 0 {
             return Err("modes must be positive".into());
+        }
+        // The Lanczos basis and its dense Rayleigh-Ritz grow with modes
+        // (memory quadratic, time cubic), so keep requests bounded.
+        if self.modes > MAX_MODES {
+            return Err(format!("modes must be at most {MAX_MODES}"));
         }
         self.solid.validate()
     }

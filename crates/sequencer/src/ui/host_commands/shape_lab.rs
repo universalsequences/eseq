@@ -65,6 +65,12 @@ impl ShapeSolves {
     pub(crate) fn tickets(&self) -> (Option<f64>, Option<f64>) {
         (self.running.as_ref().map(|r| r.ticket), self.waiting.as_ref().map(|w| w.ticket))
     }
+
+    /// As though an Update draft were waiting on draft `key`'s compile.
+    #[cfg(test)]
+    pub(crate) fn set_applying(&mut self, key: &str) {
+        self.applying = Some(key.to_string());
+    }
 }
 
 fn start_solve(request: ShapeSolveRequest) -> PendingShapeSolve {
@@ -131,7 +137,7 @@ pub(crate) fn cancel(solves: &mut ShapeSolves) {
 
 /// Tell the lab how its Update draft is going: `:compiling`, `:done`, or
 /// `:failed` with the error.
-fn draft_status(editor: &mut Editor, status: &str, error: Option<String>) {
+pub(super) fn draft_status(editor: &mut Editor, status: &str, error: Option<String>) {
     let args = vec![Value::Keyword(status.to_string()), error.map_or(Value::Nil, Value::String)];
     if let Err(error) = editor.runtime_mut().invoke_global(DRAFT_STATUS, args) {
         editor.show_transient_message(format!("{error:?}"));
@@ -139,10 +145,21 @@ fn draft_status(editor: &mut Editor, status: &str, error: Option<String>) {
 }
 
 /// Hand the lab the outcome of the draft compile its Update draft started
-/// (`finished`: what [`super::drafts::poll_draft_compiles`] returned).
-pub(crate) fn poll_draft_outcomes(editor: &mut Editor, solves: &mut ShapeSolves, finished: Vec<(String, Result<(), String>)>) {
+/// (`finished`: what [`super::drafts::poll_draft_compiles`] returned;
+/// `pending`: the compiles still running). A compile dropped without an
+/// outcome (the draft was saved, or its track deleted) fails the update.
+pub(crate) fn poll_draft_outcomes(
+    editor: &mut Editor,
+    solves: &mut ShapeSolves,
+    finished: Vec<(String, Result<(), String>)>,
+    pending: &[super::drafts::PendingDraftCompile],
+) {
     let Some(key) = solves.applying.clone() else { return };
-    let Some((_, outcome)) = finished.into_iter().find(|(done, _)| *done == key) else { return };
+    let outcome = match finished.into_iter().find(|(done, _)| *done == key) {
+        Some((_, outcome)) => outcome,
+        None if pending.iter().any(|compile| compile.key == key) => return,
+        None => Err("The draft is gone (saved or its track deleted)".to_string()),
+    };
     solves.applying = None;
     match outcome {
         Ok(()) => draft_status(editor, "done", None),
@@ -166,8 +183,8 @@ fn solve_summary(path: &Path, text: &str) -> Result<Value, String> {
 
 pub(super) fn handle(name: &str, payload: Value, app: &mut app::App, editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
     let result = match name {
-        "shape-lab-load" => load(editor, &payload),
-        "shape-lab-solve" => solve(&mut ctx.sessions.shape_solves, &payload),
+        "shape-lab-load" => load_or_solve(editor, &mut ctx.sessions.script_solves, &payload),
+        "shape-lab-solve" => solve(&mut ctx.sessions.shape_solves, &payload).or_else(|error| solve_refused(editor, &payload, error)),
         "shape-lab-cancel" => Ok(cancel(&mut ctx.sessions.shape_solves)),
         "shape-lab-apply" => apply(app, editor, ctx, &payload),
         _ => Ok(()),
@@ -199,12 +216,17 @@ fn script_buffer(editor: &Editor, payload: &Value) -> Result<(String, PathBuf, S
 /// `m/solid` (`:points` its named points, a dict, or nil; `:place` where it
 /// sits, or nil), `wiring` the patch's `(dict :strings :connections :listens)`,
 /// `:editable` when the script has a `(… solid 'id …)` call to write into.
-/// Then show the lab beside the script.
-pub(crate) fn load(editor: &mut Editor, payload: &Value) -> Result<(), String> {
+/// Then show the lab beside the script. A script whose solids are not all
+/// solved yet does neither: those solids are the answer.
+pub(crate) fn load(editor: &mut Editor, payload: &Value) -> Result<Vec<sequencer::lisp_host::DeferredSolve>, String> {
     let (name, path, script) = script_buffer(editor, payload)?;
-    let value = sequencer::lisp_host::eval_script(editor.runtime_mut(), path.clone(), &script)
-        .map_err(|errors| errors.join("; "))?
-        .unwrap_or(Value::Nil);
+    let (evaluated, deferred) = sequencer::lisp_host::deferring_solves(|| {
+        sequencer::lisp_host::eval_script(editor.runtime_mut(), path.clone(), &script)
+    });
+    if !deferred.is_empty() {
+        return Ok(deferred);
+    }
+    let value = evaluated.map_err(|errors| errors.join("; "))?.unwrap_or(Value::Nil);
     let calls = solid_calls(&script).unwrap_or_default();
     let objects = match field(&value, "objects") {
         Some(Value::List(objects)) => objects,
@@ -263,7 +285,17 @@ pub(crate) fn load(editor: &mut Editor, payload: &Value) -> Result<(), String> {
     if !editor.buffer_named_is_showing(LAB_BUFFER) && !editor.show_buffer_beside(&name, LAB_BUFFER) {
         editor.switch_active_tile_to_buffer_named(LAB_BUFFER);
     }
-    Ok(())
+    Ok(Vec::new())
+}
+
+/// [`load`], solving the solids it waits on in the background and then
+/// loading again.
+pub(super) fn load_or_solve(editor: &mut Editor, solves: &mut super::script_solves::ScriptSolves, payload: &Value) -> Result<(), String> {
+    let deferred = load(editor, payload)?;
+    if deferred.is_empty() {
+        return Ok(());
+    }
+    super::script_solves::start(editor, solves, super::script_solves::Resume::LabLoad(payload.clone()), deferred)
 }
 
 /// Queue `(dict :ticket n :spec spec :dir dir)` for a background solve.
@@ -285,13 +317,20 @@ pub(crate) fn solve(solves: &mut ShapeSolves, payload: &Value) -> Result<(), Str
     Ok(())
 }
 
+/// Answer a solve request the host refused (a spec it rejects, such as
+/// grain on a metal) as a failed solve, so the lab does not wait on it.
+pub(crate) fn solve_refused(editor: &mut Editor, payload: &Value, error: String) -> Result<(), String> {
+    let Some(Value::Number(ticket)) = field(payload, "ticket") else { return Err(error) };
+    let result = crate::values::map_value([("error", Value::String(error))]);
+    editor.runtime_mut().invoke_global(SOLVED, vec![Value::Number(ticket), result]).map(|_| ()).map_err(|error| format!("{error:?}"))
+}
+
 /// Write `(dict :buffer :id :shape :made-of :modes :resolution :block :points
 /// :place)` into the script's call for solid `id` (`:made-of` a material
 /// name; all but `:shape` optional; `:block :free` removes the call's block,
 /// and an empty `:points` or `:place` dict its points or place), then
 /// evaluate the script, updating its draft.
 fn apply(app: &mut app::App, editor: &mut Editor, ctx: &mut LoopCtx<'_>, payload: &Value) -> Result<(), String> {
-    use super::drafts::ScriptEvaluation;
     ctx.sessions.shape_solves.applying = None;
     let name = match write_back(editor, payload) {
         Ok(name) => name,
@@ -300,7 +339,19 @@ fn apply(app: &mut app::App, editor: &mut Editor, ctx: &mut LoopCtx<'_>, payload
             return Ok(());
         }
     };
-    match super::drafts::evaluate_script_buffer_named(app, editor, ctx, &name) {
+    evaluate_for_lab(app, editor, ctx, &name)
+}
+
+/// Evaluate the script `name` for the lab's Update draft and tell the lab how
+/// it went (solids the script waits on are solved first, and it runs again).
+pub(super) fn evaluate_for_lab(app: &mut app::App, editor: &mut Editor, ctx: &mut LoopCtx<'_>, name: &str) -> Result<(), String> {
+    use super::drafts::ScriptEvaluation;
+    match super::drafts::evaluate_script_buffer_named(app, editor, ctx, name) {
+        ScriptEvaluation::Solving(deferred) => {
+            let resume = super::script_solves::Resume::LabApply(name.to_string());
+            super::script_solves::start(editor, &mut ctx.sessions.script_solves, resume, deferred)?;
+            draft_status(editor, "compiling", None);
+        }
         ScriptEvaluation::Compiling(key) => {
             ctx.sessions.shape_solves.applying = Some(key);
             draft_status(editor, "compiling", None);

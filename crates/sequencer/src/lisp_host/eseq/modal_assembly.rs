@@ -54,7 +54,11 @@ pub(super) fn assembly_native(args: &[Value]) -> Result<Value, String> {
         let error = errors.into_iter().next().unwrap_or_else(|| "nothing to draw".to_string());
         return Ok(error_value(error));
     }
-    let geometry = MeshGeometry::new(mesh.positions, Some(mesh.normals), mesh.indices, mesh.tints, 1, Vec::new(), None)?;
+    // too many vertices, or a part placed at a non-finite :at or :turn
+    let geometry = match MeshGeometry::new(mesh.positions, Some(mesh.normals), mesh.indices, mesh.tints, 1, Vec::new(), None) {
+        Ok(geometry) => geometry,
+        Err(error) => return Ok(error_value(error)),
+    };
     let id = replace_geometry(ASSEMBLY_GEOMETRY.get(), geometry);
     ASSEMBLY_GEOMETRY.set(Some(id));
     Ok(geometry_handle(id))
@@ -254,5 +258,16 @@ mod tests {
         let geometry =
             MeshGeometry::new(mesh.positions, Some(mesh.normals), mesh.indices, mesh.tints, 1, Vec::new(), None);
         assert!(geometry.is_ok());
+    }
+
+    /// A mesh the geometry rejects (here a marker at a NaN) is an error
+    /// dict, as the doc says, not a raised error.
+    #[test]
+    fn a_rejected_mesh_is_an_error_dict() {
+        let at = Value::List([f64::NAN, 0.0, 0.0].map(|x| std::rc::Rc::new(std::cell::RefCell::new(Value::Number(x)))).into());
+        let mark = super::super::modal_patch::data_dict(vec![("at", at)]);
+        let marks = Value::List(vec![std::rc::Rc::new(std::cell::RefCell::new(mark))]);
+        let value = assembly_native(&[Value::List(Vec::new()), Value::List(Vec::new()), marks]).unwrap();
+        assert!(matches!(part_field(&value, "error"), Value::String(_)), "{value:?}");
     }
 }

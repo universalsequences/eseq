@@ -226,6 +226,50 @@ fn modes_json_round_trips_and_hash_is_stable() {
     assert_eq!(spec_hash(&reparsed), hash);
 }
 
+/// Oversized requests come back as errors before anything is allocated:
+/// segments or a cell size that would overflow the element count, and more
+/// modes than a solve takes.
+#[test]
+fn oversized_meshes_and_mode_counts_are_refused() {
+    let revolve = |segments: Segments, resolution: Resolution| SolidSpec {
+        name: None,
+        solid: Solid::Revolve {
+            profile: vec![vec![0.0475, -0.02], vec![0.0475, 0.02]],
+            thickness: Some(0.005),
+            center: [0.0; 3],
+            axis: Axis::Z,
+            segments,
+        },
+        resolution,
+        material: STEEL,
+        block: None,
+        modes: 4,
+        mesh: MeshMode::Auto,
+    };
+    let huge = Segments { along: Some(4), around: Some(usize::MAX / 2), through: Some(4) };
+    let error = mesh::build_mesh(&revolve(huge, Resolution::Cells(16)), Path::new(".")).err().unwrap();
+    assert!(error.contains("too large"), "{error}");
+    let fine = revolve(Segments::default(), Resolution::ElementSize(1e-300));
+    let error = mesh::build_mesh(&fine, Path::new(".")).err().unwrap();
+    assert!(error.contains("too large"), "{error}");
+
+    let mut voxels = bar_spec(1.0, 1.0, 0.1, None, 4);
+    voxels.resolution = Resolution::CellSize([1e-300, 1e-300, 1.0]);
+    let error = mesh::build_mesh(&voxels, Path::new(".")).err().unwrap();
+    assert!(error.contains("too large"), "{error}");
+
+    // a chunky cube meshes within the element cap, but its factor would
+    // not fit: refused before anything is assembled
+    let mut cube = bar_spec(0.1, 0.1, 0.01, None, 4);
+    cube.resolution = Resolution::Cells(32);
+    let error = solve_detailed(&cube, Path::new("."), &SolveProgress::default()).err().unwrap();
+    assert!(error.contains("too fine"), "{error}");
+
+    let many = bar_spec(0.1, 0.02, 0.01, None, spec::MAX_MODES + 1);
+    assert!(many.validate().is_err());
+    assert!(bar_spec(0.1, 0.02, 0.01, None, spec::MAX_MODES).validate().is_ok());
+}
+
 /// A tube with a hole through both walls keeps its mapped mesh, less the
 /// elements the hole covers (voxels could not follow a 2.5 mm wall), and
 /// still solves, its modes moved a little by the missing metal.
