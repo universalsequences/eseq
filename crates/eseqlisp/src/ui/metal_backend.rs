@@ -2675,6 +2675,8 @@ fragment float4 live_spectrogram_frag(
         cached_widget_run_scenes: HashMap<u64, CachedWidgetRunScene>,
         widget_scene_last_keys: HashMap<usize, WidgetSceneCacheKey>,
         image_rotation_states: HashMap<u64, ImageRotationState>,
+        /// Mesh widgets' pipelines, geometry and offscreen targets.
+        mesh: mesh_pass::MeshPassState,
         stats: RenderStats,
         backend_poll_profile: BackendPollProfile,
         // Winit
@@ -2719,6 +2721,14 @@ fragment float4 live_spectrogram_frag(
     }
 
     impl MetalBackend {
+        /// Drop every cached widget scene, so the next frame rebuilds them.
+        fn clear_widget_scene_caches(&mut self) {
+            self.cached_widget_scenes.clear();
+            self.cached_widget_run_scenes.clear();
+            self.widget_scene_last_keys.clear();
+            self.stats.note_widget_scene_cache_clear();
+        }
+
         pub fn new() -> Result<Self, BackendError> {
             Self::new_with_size(1350, 900)
         }
@@ -2846,6 +2856,7 @@ fragment float4 live_spectrogram_frag(
                 cached_widget_run_scenes: HashMap::new(),
                 widget_scene_last_keys: HashMap::new(),
                 image_rotation_states: HashMap::new(),
+                mesh: Default::default(),
                 stats: RenderStats::new(),
                 backend_poll_profile: BackendPollProfile::new(),
                 event_loop: None,
@@ -3319,10 +3330,7 @@ fragment float4 live_spectrogram_frag(
                 self.stats.note_widget_scene_cache_hit();
                 let mut primitives = widget_render::flatten_gpu_primitive_runs(&scene.runs);
                 if self.cached_widget_scenes.len() >= 128 {
-                    self.cached_widget_scenes.clear();
-                    self.cached_widget_run_scenes.clear();
-                    self.widget_scene_last_keys.clear();
-                    self.stats.note_widget_scene_cache_clear();
+                    self.clear_widget_scene_caches();
                 } else {
                     self.cached_widget_scenes.insert(
                         cache_key,
@@ -3353,10 +3361,7 @@ fragment float4 live_spectrogram_frag(
                 widget_render::collect_gpu_primitive_runs(layout, viewport, scroll_top, max_rows);
             let mut primitives = widget_render::flatten_gpu_primitive_runs(&runs);
             if self.cached_widget_scenes.len() >= 128 {
-                self.cached_widget_scenes.clear();
-                self.cached_widget_run_scenes.clear();
-                self.widget_scene_last_keys.clear();
-                self.stats.note_widget_scene_cache_clear();
+                self.clear_widget_scene_caches();
             }
             self.cached_widget_scenes.insert(
                 cache_key,
@@ -3398,10 +3403,7 @@ fragment float4 live_spectrogram_frag(
             self.widget_scene_last_keys
                 .insert(layout_identity, cache_parts);
             if self.cached_widget_scenes.len() >= 128 {
-                self.cached_widget_scenes.clear();
-                self.cached_widget_run_scenes.clear();
-                self.widget_scene_last_keys.clear();
-                self.stats.note_widget_scene_cache_clear();
+                self.clear_widget_scene_caches();
             }
             let primitives = widget_render::flatten_gpu_primitive_runs(runs);
             self.cached_widget_scenes
@@ -3476,10 +3478,7 @@ fragment float4 live_spectrogram_frag(
                 widget_render::collect_gpu_primitive_runs(layout, viewport, scroll_top, max_rows);
             let run_indices = widget_render::build_gpu_primitive_run_index(&runs);
             if self.cached_widget_run_scenes.len() >= 128 {
-                self.cached_widget_scenes.clear();
-                self.cached_widget_run_scenes.clear();
-                self.widget_scene_last_keys.clear();
-                self.stats.note_widget_scene_cache_clear();
+                self.clear_widget_scene_caches();
             }
             self.cached_widget_run_scenes
                 .insert(cache_key, CachedWidgetRunScene { runs, run_indices });
@@ -4502,6 +4501,7 @@ fragment float4 live_spectrogram_frag(
             crate::widget_render::sdf_widget::set_sdf_time_seconds(render_time_seconds);
             self.compile_pending_sdf_pipelines();
             self.compile_pending_button_surface_override();
+            self.begin_mesh_frame();
             self.drain_decoded_images(usize::MAX);
 
             let desc = MTLTextureDescriptor::new();
@@ -4607,7 +4607,9 @@ fragment float4 live_spectrogram_frag(
             // Offscreen rendering has no later frame in which an asynchronous
             // decoder can catch up. Decode the scene's images before drawing.
             for primitive in primitive_scene.iter().chain(overlay_scene.iter()) {
-                if let widget_render::GpuPrimitive::Image(image) = widget_render::innermost_primitive(primitive) {
+                if let widget_render::GpuPrimitive::Image(image) = widget_render::innermost_primitive(primitive)
+                    && widget_render::mesh_widget::mesh_target_widget_id(&image.src).is_none()
+                {
                     let (path, modified) = Self::image_path_and_modified(&image.src)
                         .ok_or(BackendError::MetalError)?;
                     if self.image_textures.get(&path).is_none_or(|cached| cached.modified != modified) {
@@ -5426,12 +5428,19 @@ fragment float4 live_spectrogram_frag(
                         continue;
                     }
                 }
-                let Some(resource) = self.ensure_image_texture(&image.src, load_budget) else {
-                    continue;
-                };
-                let texture = resource.texture.clone();
-                let image_w = resource.width;
-                let image_h = resource.height;
+                // A mesh widget's image is its offscreen render.
+                let (texture, image_w, image_h) =
+                    if let Some(widget_id) = widget_render::mesh_widget::mesh_target_widget_id(&image.src) {
+                        let Some(target) = self.mesh_target_texture(widget_id, time_seconds) else {
+                            continue;
+                        };
+                        target
+                    } else {
+                        let Some(resource) = self.ensure_image_texture(&image.src, load_budget) else {
+                            continue;
+                        };
+                        (resource.texture.clone(), resource.width, resource.height)
+                    };
                 let rotation = self.effective_image_rotation(image, time_seconds);
                 let verts = image_vertices(
                     image, image_w, image_h, cell_w, cell_h, vp_w, vp_h, rotation,
@@ -5520,6 +5529,7 @@ fragment float4 live_spectrogram_frag(
             crate::widget_render::sdf_widget::set_sdf_time_seconds(render_time_seconds);
             self.compile_pending_sdf_pipelines();
             self.compile_pending_button_surface_override();
+            self.begin_mesh_frame();
             self.sync_window_theme();
             let mut widget_scene_build_time = Duration::ZERO;
             let mut metal_prep_time = Duration::ZERO;
@@ -7524,6 +7534,7 @@ fragment float4 live_spectrogram_frag(
 
             self.compile_pending_sdf_pipelines();
             self.compile_pending_button_surface_override();
+            self.begin_mesh_frame();
 
             let Some(pipeline) = self.pipeline.clone() else {
                 return Ok(());
@@ -10853,6 +10864,8 @@ fragment float4 live_spectrogram_frag(
         }
         pending.push_back(release);
     }
+
+    mod mesh_pass;
 
     #[cfg(feature = "capture-harness")]
     mod native_host_probe;

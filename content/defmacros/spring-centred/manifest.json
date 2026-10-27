@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "spring-centred",
+  "params": [
+    "gap",
+    "gap-old",
+    "C",
+    "stiffness",
+    "keep"
+  ],
+  "outputs": [
+    "force"
+  ],
+  "summary": "Modalys spring connection, centred in time: conserves a mode's energy at any pitch.",
+  "tags": [
+    "modal",
+    "physical"
+  ]
+}

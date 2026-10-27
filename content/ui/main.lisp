@@ -39,6 +39,8 @@
 (import eseq.midi-midimix)
 (import eseq.agent)
 (import eseq.manual)
+;; *shape-lab*: design a modal script's solids live (M-x Shape Lab).
+(import eseq.modal.shape-lab)
 (import eseq.theme-editor)
 (import eseq.agent-pane)
 ;; The chrome around every kind instance's view: a project-owned

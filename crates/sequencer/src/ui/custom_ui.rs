@@ -7,6 +7,20 @@ const GENERATED_INSTRUMENT_UI_PATH: &str = ".metal-seq-generated/custom-instrume
 const GENERATED_MIDI_FX_UI_PATH: &str = ".metal-seq-generated/custom-midi-fx-ui.lisp";
 const GENERATED_AUDIO_FX_UI_PATH: &str = ".metal-seq-generated/custom-audio-fx-ui.lisp";
 
+/// The panels of draft instruments outside the instrument roots (modal
+/// script drafts): engine name -> (ui.lisp path, for messages; its source).
+/// Every instrument UI rebuild includes them, so a hot reload of another
+/// panel keeps the drafts'. A static because the rebuild also runs on a
+/// worker and from callers that only hold the editor.
+pub(crate) type DraftInstrumentUis = BTreeMap<String, (String, String)>;
+static DRAFT_INSTRUMENT_UIS: std::sync::Mutex<DraftInstrumentUis> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// Replace every draft panel; takes effect on the next instrument UI rebuild.
+pub(crate) fn set_draft_instrument_uis(uis: DraftInstrumentUis) {
+    *DRAFT_INSTRUMENT_UIS.lock().unwrap_or_else(|poison| poison.into_inner()) = uis;
+}
+
 pub(crate) fn lisp_string_literal(value: &str) -> String {
     format!(
         "\"{}\"",
@@ -527,7 +541,14 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
         *logical_path_counts.entry(instrument_logical_name(name).to_string()).or_insert(0) += 1;
     }
 
-    for (instrument_name, ui_path, src) in ui_sources {
+    // Drafts dispatch on their exact engine name only, and are added after
+    // the counts so they never make a saved instrument's short name ambiguous.
+    let first_draft = ui_sources.len();
+    let drafts = DRAFT_INSTRUMENT_UIS.lock().unwrap_or_else(|poison| poison.into_inner()).clone();
+    ui_sources.extend(drafts.into_iter().map(|(name, (path, src))| (name, path, src)));
+
+    for (index, (instrument_name, ui_path, src)) in ui_sources.into_iter().enumerate() {
+        let is_draft = index >= first_draft;
         warn_custom_ui_source(&ui_path, &src);
         let tokens = match Parser::new(src).parse() {
             Ok(tokens) => tokens,
@@ -577,17 +598,21 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
             lisp_string_literal(normalized_instrument_name)
         ));
         let release_alias_list = release_aliases.get(&instrument_name);
-        let aliases = match release_alias_list {
-            Some(release_aliases) => {
-                release_instrument_ui_dispatch_aliases(&instrument_name, release_aliases, &leaf_name_counts, &logical_path_counts)
+        let aliases = if is_draft {
+            vec![instrument_name.clone()]
+        } else {
+            match release_alias_list {
+                Some(release_aliases) => {
+                    release_instrument_ui_dispatch_aliases(&instrument_name, release_aliases, &leaf_name_counts, &logical_path_counts)
+                }
+                None => instrument_ui_dispatch_aliases(&instrument_name, &leaf_name_counts, &logical_path_counts),
             }
-            None => instrument_ui_dispatch_aliases(&instrument_name, &leaf_name_counts, &logical_path_counts),
         };
         let mut name_clauses = aliases
             .iter()
             .map(|alias| format!("(= (get inst :name) {})", lisp_string_literal(alias)))
             .collect::<Vec<_>>();
-        if let Some(leaf) = instrument_leaf_name(&instrument_name).filter(|_| release_alias_list.is_none()) {
+        if let Some(leaf) = instrument_leaf_name(&instrument_name).filter(|_| release_alias_list.is_none() && !is_draft) {
             if !instrument_name.contains(':') && leaf != normalized_instrument_name
                 && leaf_name_counts.get(&leaf).copied() == Some(1)
             {
@@ -895,6 +920,14 @@ pub(crate) fn reload_custom_instrument_ui(editor: &mut Editor) -> bool {
     CustomUiSources::build(CustomUiSources::overlays(editor)).load(editor)
 }
 
+/// Rebuild only the instrument panels (the MIDI FX and audio effect ones are
+/// untouched), for a change that can only affect an instrument's.
+pub(crate) fn reload_instrument_panels(editor: &mut Editor) -> bool {
+    let source = build_custom_instrument_ui_source_with_overlay(active_custom_ui_buffer_overlay(editor));
+    source.is_empty()
+        || reload_custom_ui_source(editor, GENERATED_INSTRUMENT_UI_PATH, &source, "custom instrument UI")
+}
+
 fn reload_custom_ui_source(editor: &mut Editor, path: &str, source: &str, label: &str) -> bool {
     let report = editor.runtime_mut().eval_source_transactional(
         Some(PathBuf::from(path)),
@@ -917,7 +950,7 @@ mod tests {
         build_custom_audio_fx_ui_source_with_overlay,
         build_custom_instrument_ui_source_with_overlay, build_custom_midi_fx_ui_source_with_overlay,
         instrument_ui_dispatch_aliases, release_instrument_ui_dispatch_aliases,
-        reload_custom_ui_source, GENERATED_INSTRUMENT_UI_PATH,
+        reload_custom_ui_source, set_draft_instrument_uis, GENERATED_INSTRUMENT_UI_PATH,
     };
     use eseqlisp::vm::Value;
     use std::collections::BTreeMap;
@@ -1034,6 +1067,22 @@ mod tests {
         runtime.run_reactive_cycle();
         assert_eq!(f64::from_bits(slot.load(std::sync::atomic::Ordering::Relaxed)), 0.8);
         assert_eq!(runtime.current_layout.as_ref().unwrap().widget_type, "test_heat_plot");
+    }
+
+    #[test]
+    fn draft_instrument_ui_dispatches_on_its_exact_engine_name() {
+        set_draft_instrument_uis(BTreeMap::from([(
+            "draft/probe-draft-ui".to_string(),
+            ("probe/ui.lisp".to_string(), "(defsynth-ui (label \"draft panel\"))".to_string()),
+        )]));
+        let source = build_custom_instrument_ui_source_with_overlay(None);
+        set_draft_instrument_uis(BTreeMap::new());
+        assert!(source.contains("draft panel"), "{source}");
+        assert!(source.contains(r#"(= (get inst :name) "draft/probe-draft-ui")"#), "{source}");
+        // No short-name match: a saved probe-draft-ui keeps its own panel.
+        assert!(!source.contains(r#"(= (get inst :name) "probe-draft-ui")"#), "{source}");
+        assert!(!source.contains(r#""/probe-draft-ui""#), "{source}");
+        assert!(!build_custom_instrument_ui_source_with_overlay(None).contains("draft panel"));
     }
 
     #[test]

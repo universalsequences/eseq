@@ -14,7 +14,7 @@
     "force",
     "x"
   ],
-  "summary": "Modalys bow connection: implicit stick-slip friction force (bracket scan + one regula falsi step).",
+  "summary": "Modalys bow connection: implicit stick-slip friction force (three bracketed Newton steps on its unique root).",
   "tags": [
     "modal",
     "physical"

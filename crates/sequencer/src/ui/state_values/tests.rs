@@ -28,6 +28,10 @@ mod retrospective_ui_tests;
 mod resample_ui_tests;
 #[path = "factory_promote_ui_tests.rs"]
 mod factory_promote_ui_tests;
+#[path = "draft_save_ui_tests.rs"]
+mod draft_save_ui_tests;
+#[path = "shape_lab_ui_tests.rs"]
+mod shape_lab_ui_tests;
 #[path = "midi_midimix_tests.rs"]
 mod midi_midimix_tests;
 #[path = "mixer_hit_tests.rs"]
@@ -27923,6 +27927,55 @@ use panel_kinds_seed::*;
         assert!(
             find_layout_node_by_debug_name(&layout, "process-chain-panel").is_none(),
             "tracks without attached processes must not show a process panel"
+        );
+    }
+
+    /// A program script's draft (`draft/<name>`) has no saved instrument to
+    /// hold presets: its header offers Save instrument in place of the
+    /// preset save icon, and the button asks the host to open the save modal.
+    #[test]
+    fn metal_seq_fx_draft_header_saves_the_instrument_not_a_preset() {
+        let header = |name: &str| {
+            let mut editor = full_grid_editor_for_scroll_tests();
+            let mut instrument = test_instrument_map();
+            instrument.insert("name".to_string(), Rc::new(RefCell::new(Value::String(name.to_string()))));
+            let mut panel_seed = PanelSeed::default();
+            panel_seed.instrument_panel = test_list(vec![Value::Map(instrument)]);
+            set_kind_instrument_types(&mut editor, &["custom"]);
+            seed_panel_kinds(&mut editor, &panel_seed);
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let fx_id = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
+            editor.set_active_buffer(fx_id);
+            editor.set_layout_viewport(180, 18);
+            let layout = editor.widget_layout().expect("instrument panel layout");
+            (editor, layout)
+        };
+
+        let (_, saved) = header("test-instrument");
+        assert!(find_layout_node_by_debug_name(&saved, "instrument-preset-button").is_some());
+        assert!(find_layout_node_by_debug_name(&saved, "draft-save-button").is_none());
+
+        let (mut editor, draft) = header("draft/modal-banjo");
+        assert!(find_layout_node_by_debug_name(&draft, "instrument-preset-button").is_none());
+        let button = find_layout_node_by_debug_name(&draft, "draft-save-button")
+            .expect("draft header shows Save instrument");
+        assert_finite_nonzero_rect(button, "Save instrument button");
+        let on_click = button.props.get("on-click").cloned().expect("button click");
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .invoke(on_click, vec![Value::Number(0.0), Value::Number(0.0), Value::Number(0.0)])
+            .expect("click Save instrument");
+        let commands = editor.drain_host_commands();
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [eseqlisp::host::HostCommand::Custom { name, payload }]
+                    if name == "draft-save-open"
+                        && extract_usize_from_payload(payload, "track") == Some(0)
+            ),
+            "unexpected commands: {commands:?}"
         );
     }
 

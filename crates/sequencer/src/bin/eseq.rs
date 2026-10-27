@@ -15,7 +15,8 @@ const USAGE: &str = "usage: eseq run
        eseq run -noui [FILE]
        eseq paths
        eseq lisp run FILE...
-       eseq modal emit PATCH.lisp [DIR]
+       eseq generate SCRIPT.lisp [DIR]
+       eseq modal solve SPEC.json OUT.modes.json
        eseq authoring seed [DIR]
        eseq authoring skill
        eseq instrument check DIR_OR_NAME [--no-render]
@@ -32,20 +33,22 @@ fn core_vm() -> eseqlisp::vm::VM {
     let mut vm = eseqlisp::vm::VM::new(Vec::new());
     eseqlisp::vm::register_core_natives(&mut vm);
     eseqlisp::vm::register_math_natives(&mut vm);
+    sequencer::lisp_host::register_modal_natives(&mut vm);
     let (roots, _) = sequencer::app_paths::app_paths().module_load_roots();
     vm.source_manager.set_scoped_module_load_roots(roots);
     vm
 }
 
-/// Generate an instrument from a modal patch script (its last form is an
-/// `eseq.modal` patch) into DIR, by default the user instrument folder under
-/// the patch's :name. Writes dsp.lisp, ui.lisp and instrument.json.
-fn emit_modal(script: &str, dir: Option<&String>) -> Result<(), String> {
+/// Generate an instrument from a script whose last value is a program (an
+/// `eseq.modal` patch, or any eseq.gen program) into DIR, by default the user
+/// instrument folder under the instrument's name. Writes dsp.lisp, ui.lisp
+/// and instrument.json.
+fn generate(script: &str, dir: Option<&String>) -> Result<(), String> {
     let path = PathBuf::from(script);
     let source =
         std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
     let mut vm = core_vm();
-    let instrument = sequencer::lisp_host::generate_modal_instrument(&mut vm, path.clone(), &source)
+    let instrument = sequencer::lisp_host::generate_instrument(&mut vm, path.clone(), &source)
         .map_err(|errors| format!("{}:\n  {}", path.display(), errors.join("\n  ")))?;
     let dir = match dir {
         Some(dir) => PathBuf::from(dir),
@@ -56,6 +59,54 @@ fn emit_modal(script: &str, dir: Option<&String>) -> Result<(), String> {
     Ok(())
 }
 
+/// Compute a finite-element solid's modes from a JSON spec and write the
+/// "eseq-modes" v1 document (see `sequencer::modal_fe`).
+fn solve_modal(spec_path: &str, out: &str) -> Result<(), String> {
+    let (spec, solid, stats) = sequencer::modal_fe::solve_file(Path::new(spec_path))?;
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    println!(
+        "mesh: {} nodes, {} elements, {} blocked, {} DOFs, envelope {} entries{}",
+        stats.nodes,
+        stats.elements,
+        stats.blocked_nodes,
+        stats.dofs,
+        stats.envelope,
+        if stats.dropped_cells > 0 {
+            format!(" ({} loose voxel cells dropped)", stats.dropped_cells)
+        } else {
+            String::new()
+        }
+    );
+    println!(
+        "time: mesh {:.0} ms, assemble {:.0} ms, factor {:.0} ms, eigen {:.0} ms ({} Lanczos steps), total {:.0} ms",
+        ms(stats.mesh_time),
+        ms(stats.assemble_time),
+        ms(stats.factor_time),
+        ms(stats.eigen_time),
+        stats.lanczos_steps,
+        ms(stats.total_time)
+    );
+    if stats.converged < spec.modes {
+        eprintln!("eseq: only {} of {} modes converged", stats.converged, spec.modes);
+    }
+    let shown: Vec<String> = solid.freqs.iter().take(12).map(|f| format!("{f:.2}")).collect();
+    println!(
+        "{} modes, mass {:.4} kg, Hz: {}{}",
+        solid.freqs.len(),
+        solid.mass,
+        shown.join(" "),
+        if solid.freqs.len() > 12 { " ..." } else { "" }
+    );
+    std::fs::write(out, solid.to_json(&spec)).map_err(|error| format!("{out}: {error}"))?;
+    println!(
+        "wrote {out} ({} surface points, {} triangles, spec {})",
+        solid.point_count(),
+        solid.triangle_count(),
+        &sequencer::modal_fe::spec_hash(&spec)[..12]
+    );
+    Ok(())
+}
+
 /// Evaluate eseqlisp files in order in one core VM (no app, no UI) and print
 /// the last file's value when it is a string. Generator scripts build source
 /// as data and write it with `(write-text-file path text)`; relative paths
@@ -63,7 +114,7 @@ fn emit_modal(script: &str, dir: Option<&String>) -> Result<(), String> {
 /// native, so app UI code cannot write files.
 fn run_lisp(files: &[String]) -> Result<(), String> {
     use eseqlisp::vm::Value;
-    use sequencer::lisp_host::ModalScriptHost;
+    use sequencer::lisp_host::ScriptHost;
     let mut vm = core_vm();
     vm.register_native("write-text-file", |args| match args.as_slice() {
         [Value::String(path), Value::String(text)] => {
@@ -122,9 +173,15 @@ fn run(args: Vec<String>) -> Result<(), String> {
         [lisp, run, files @ ..] if lisp == "lisp" && run == "run" && !files.is_empty() => {
             run_lisp(files)
         }
-        [modal, emit, script, dir @ ..] if modal == "modal" && emit == "emit" && dir.len() <= 1 => {
-            emit_modal(script, dir.first())
+        [generate_cmd, script, dir @ ..] if generate_cmd == "generate" && dir.len() <= 1 => {
+            generate(script, dir.first())
         }
+        // The spelling from before generators were generic.
+        [modal, emit, script, dir @ ..] if modal == "modal" && emit == "emit" && dir.len() <= 1 => {
+            eprintln!("eseq: `eseq modal emit` is now `eseq generate`");
+            generate(script, dir.first())
+        }
+        [modal, solve, spec, out] if modal == "modal" && solve == "solve" => solve_modal(spec, out),
         [authoring, seed, dir @ ..] if authoring == "authoring" && seed == "seed" && dir.len() <= 1 => {
             let paths = sequencer::app_paths::app_paths();
             paths

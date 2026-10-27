@@ -318,6 +318,72 @@ def attribution(data):
 INSTRUMENT_JSON = json.dumps({'version': 1, 'run_mode': 'instrument', 'voice_controls': {'mode': 'voice_mode'}}) + '\n'
 
 
+# ── the model as eseq.modal data ─────────────────────────────────────────────
+# PM Ride Kit's identified model as an eseq-modes v1 file, for an eseq.modal
+# patch (tools/modal/examples/ride-kit.lisp); see export_modes.py for the
+# fields.
+
+MODES_OUT = ROOT/'tools/modal/examples/data/ride.modes.json'
+
+
+def rounded(a):
+    return [float(f'{x:.7g}') for x in np.asarray(a, float).ravel()]
+
+
+def stroke_shapes(tables, sample_rate=48000):
+    """Each stroke's spot as a mode shape, from its residue.
+
+    Points sit at (0, 0, 0): address them by index (m/stroke-point).
+    A force impulse on a two-sample modal state starts mode m with residue
+    proportional to e^(i w)/sin w (w its frequency per sample), times its
+    shape at the struck point (the mic's shape is 1). The shape whose impulse
+    best reproduces the stroke's residue z is Re(z e^(-i w)) sin w, scaled to
+    mean square 1/2. A stick there adds its own contact filtering.
+    """
+    w = 2*np.pi*tables['frequency']/sample_rate
+    shapes = []
+    for re, im in zip(tables['sine'], tables['cosine']):
+        a = ((re + 1j*im)*np.exp(-1j*w)).real*np.sin(w)
+        shapes.append(a/max(np.sqrt(2*np.mean(a**2)), 1e-20))
+    return shapes
+
+
+def modes_file(data):
+    tables, _ = coefficients(data)
+    rows = strokes(data)
+    n = len(tables['frequency'])
+    spots = stroke_shapes(tables)
+    return {
+        'format': 'eseq-modes', 'version': 1,
+        'source': 'tools/pm-ride (PM Ride Kit); fitted coefficients only, see ATTRIBUTION.md',
+        'measured': True,
+        'freqs': rounded(tables['frequency']),
+        'losses': rounded(tables['rate']),
+        'points': [0.0]*3*(1 + len(rows)),
+        'shapes': [1.0]*n + [x for spot in spots for x in rounded(spot)],
+        'mass': 1.0,
+        'contact_s': CONTACT_SECONDS,
+        # the engine's sine table is the phasor's real part: what it injects
+        # into the mode's quarter-cycle state; its cosine table is heard at once
+        'strokes': [{'name': hit['name'], 'point': k + 1,
+                     're': rounded(tables['sine'][k]),
+                     'im': rounded(tables['cosine'][k]),
+                     'click': {'rms': float(tables['click'][k]), 'decay_s': float(tables['click_decay'][k]),
+                               'hz': float(tables['click_hz'][k])}}
+                    for k, hit in enumerate(rows)],
+        'wash': {'hz': rounded(tables['wash_hz']),
+                 'buildup': rounded(tables['wash_buildup']),
+                 'fast_rate': rounded(tables['wash_fast_rate']),
+                 'slow_rate': rounded(tables['wash_slow_rate']),
+                 'fast_power': [rounded(r) for r in tables['wash_fast_power']],
+                 'slow_power': [rounded(r) for r in tables['wash_slow_power']]},
+    }
+
+
+def modes_text(data):
+    return json.dumps(modes_file(data), separators=(',', ':')) + '\n'
+
+
 def outputs():
     analysis_bytes = (HERE/'analysis.json').read_bytes()
     data = json.loads(analysis_bytes)
@@ -331,7 +397,9 @@ def outputs():
             HERE/'build-report.json': json.dumps(report, indent=1) + '\n',
             # Copies beside the generator; the surface test reads these.
             HERE/'model.lisp': dsp, HERE/'ui.lisp': ui, HERE/'instrument.json': INSTRUMENT_JSON,
-            HERE/'model.presets': preset_text}
+            HERE/'model.presets': preset_text,
+            # the same model as eseq.modal data (tools/modal/examples/ride-kit.lisp)
+            MODES_OUT: modes_text(data)}
 
 
 def main():

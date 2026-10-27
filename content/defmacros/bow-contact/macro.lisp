@@ -14,36 +14,58 @@
 ; With F = (pressure v0 / C) mu(x) the point's velocity v = vfree + C F turns
 ; the implicit force into one scalar equation in the relative velocity x:
 ;   h(x) = x + pressure mu(x) - xfree = 0,  xfree = (vb - vfree) / v0
-; Every root lies in [xfree - pressure, xfree + pressure] (|mu| <= 1) and
-; there is always one. Above a small pressure there can be three (stick,
-; slip, and an unstable middle one): the root kept is the one whose bracket is nearest last
-; sample's x, which is the stick / slip hysteresis behind Helmholtz motion.
-; The range is scanned in 64 brackets (tensors), then the chosen bracket is
-; refined by one regula falsi step. Returns (F x): push the object by +F,
-; and store x for the next sample's x-prev. The macro keeps no state, so a
-; patch can solve it inside Gauss-Seidel sweeps with the connections that
-; share its object (solved once before them, a stiff bridge's push on the
-; bow point read as string velocity and pumped energy in after release).
+; mu falls no faster than 0.428 per unit x, so h rises everywhere and its root
+; is unique below pressure 2.33 (the knob's range ends at 2): the stick / slip
+; hysteresis of Helmholtz motion comes from the string, not from choosing
+; between roots. A bow with :hair scales the knob by its hair force ratio (up
+; to 2x), so its pressure can pass 2.33; there h has up to three roots and the
+; solve returns one of them, not the one nearest last sample's (x-prev is not
+; consulted). mu is odd, so the root has xfree's sign and the macro solves
+; for a = |xfree| on [0, a] (h(0) = -a, h(a) >= 0). It starts at the larger of
+; the stick line's root (tanh(20x) <= 20x, a lower bound) and the slip
+; curve's (tanh = 1, a quadratic; near the knob's top pressure it can land
+; just past the root), then takes three Newton steps, each kept inside the
+; shrinking bracket (a step leaving it bisects instead). That is more
+; accurate than a 64-bracket scan plus a regula falsi step (force error under
+; 0.1% of pressure up to pressure 1, about 1.4% near 2, against 13%) at a
+; twentieth of its cost, which matters: a
+; patch solves its bow inside every Gauss-Seidel sweep. x-prev is unused, kept
+; so patches written against the scanning version still compile.
+; Returns (F x): push the object by +F. The macro keeps no state, so a patch can solve it inside
+; Gauss-Seidel sweeps with the connections that share its object (solved once
+; before them, a stiff bridge's push on the bow point read as string velocity
+; and pumped energy in after release).
+; The friction curve mu at x >= 0.
+(defmacro bow-mu (x)
+  (* (tanh (* 20 x)) (+ 0.35 (/ 0.65 (+ 1 x)))))
+
+; One Newton step on h(x) = x + p mu(x) - a from x inside [lo, hi], h(lo) <= 0
+; <= h(hi): the step, or the midpoint of the narrowed bracket when the step
+; leaves it. Returns (x lo hi) after it.
+(defmacro bow-newton-step (x lo hi a p)
+  (def t (tanh (* 20 x)))
+  (def r (/ 1 (+ 1 x)))
+  (def g (+ 0.35 (* 0.65 r)))
+  (def h (- (+ x (* p t g)) a))
+  (def d (max (+ 1 (* p (- (* 20 (- 1 (* t t)) g) (* 0.65 t r r)))) 0.0001))
+  (def below (lt h 0))
+  (def lo-next (gswitch below x lo))
+  (def hi-next (gswitch below hi x))
+  (def n (- x (/ h d)))
+  (tuple (gswitch (* (gte n lo-next) (lte n hi-next)) n (* 0.5 (+ lo-next hi-next))) lo-next hi-next))
+
 (defmacro bow-contact (y y-prev x-prev C vb v0 pressure)
   (def vfree (- y y-prev))
   (def xfree (/ (- vb vfree) v0))
-  (def step (/ (* 2 pressure) 64))
-  (def x-lo (+ (- xfree pressure) (* (iota 64) step)))
-  (def x-hi (+ x-lo step))
-  (def h-lo (- (+ x-lo (* pressure (* (tanh (* 20 x-lo)) (+ 0.35 (/ 0.65 (+ 1 (abs x-lo))))))) xfree))
-  (def h-hi (- (+ x-hi (* pressure (* (tanh (* 20 x-hi)) (+ 0.35 (/ 0.65 (+ 1 (abs x-hi))))))) xfree))
-  (def crosses (lte (* h-lo h-hi) 0))
-  ;; nearest crossing bracket to last sample's x, as a soft-min: weights
-  ;; exp(-(dist - lb) / step) with lb a lower bound on the nearest distance,
-  ;; so the exponent stays in float range; brackets a few steps farther than
-  ;; the nearest get negligible weight
-  (def dist (abs (- (+ x-lo (* 0.5 step)) x-prev)))
-  (def lb (max 0 (- (abs (- xfree x-prev)) pressure step)))
-  (def pick (* crosses (exp (* -1 (min (/ (- dist lb) step) 80)))))
-  (def picks (max (sum pick) 1e-30))
-  (def lo (/ (sum (* pick x-lo)) picks))
-  (def hl (/ (sum (* pick h-lo)) picks))
-  (def hh (/ (sum (* pick h-hi)) picks))
-  (def x (- lo (/ (* hl step) (gswitch (gt (abs (- hh hl)) 1e-12) (- hh hl) 1e-12))))
-  (def F (/ (* pressure v0 (* (tanh (* 20 x)) (+ 0.35 (/ 0.65 (+ 1 (abs x)))))) (max C 1e-12)))
-  (tuple F x))
+  (def a (abs xfree))
+  (def p pressure)
+  (def slip-b (+ (- 1 a) (* 0.35 p)))
+  (def slip-disc (- (* slip-b slip-b) (* 4 (- p a))))
+  (def x-slip (gswitch (gte slip-disc 0) (* 0.5 (- (sqrt (max slip-disc 0)) slip-b)) 0))
+  (def x0 (max (max (/ a (+ 1 (* 20 p))) x-slip) 0))
+  (def (x1 lo1 hi1) (bow-newton-step x0 0 a a p))
+  (def (x2 lo2 hi2) (bow-newton-step x1 lo1 hi1 a p))
+  (def (x3 lo3 hi3) (bow-newton-step x2 lo2 hi2 a p))
+  (def s (gswitch (lt xfree 0) -1 1))
+  (def F (/ (* pressure v0 s (bow-mu x3)) (max C 1e-12)))
+  (tuple F (* s x3)))

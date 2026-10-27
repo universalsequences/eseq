@@ -13,6 +13,11 @@ pub(crate) struct RuntimeInit {
 }
 
 pub(super) fn register_factory_path_native(runtime: &mut Runtime) {
+    // eseq.modal's natives (modal-read-data, modal-circ-plate-modes); the
+    // CLI registers the same functions on its bare VM.
+    for (name, native) in sequencer::lisp_host::modal_natives() {
+        runtime.register_native(name, move |args, _ctx| native(&args));
+    }
     runtime.register_native_with_docs(
         "seq-manual-path",
         "(seq-manual-path [relative])",

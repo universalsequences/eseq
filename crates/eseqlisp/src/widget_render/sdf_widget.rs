@@ -563,6 +563,13 @@ pub fn sdf_handle_event(
 
     if let super::WidgetEvent::Custom(Value::List(values)) = event {
         let phase = values.first()?.borrow();
+        if super::mesh_widget::mesh_widget_def(&node.widget_type).is_some()
+            && let (Value::Keyword(phase), Some(sx), Some(sy)) = (&*phase, values.get(1), values.get(2))
+            && let (Value::Number(sx), Value::Number(sy)) = (&*sx.borrow(), &*sy.borrow())
+            && super::mesh_widget::mesh_orbit_pointer(node.widget_id, phase, *sx as f32, *sy as f32)
+        {
+            super::bump_widget_state_revision(node.widget_id);
+        }
         let names: &[&str] = match &*phase {
             Value::Keyword(s) if s == "down" => &["on-mouse-down", "on-click"],
             Value::Keyword(s) if s == "drag" => &["on-drag"],
@@ -1224,6 +1231,21 @@ pub fn estimate_shadow_paint_margin(expr: &Expression, width: f32, height: f32) 
     cells.max(1.0)
 }
 
+/// `def`'s state uniforms read from `props`, in slot order, four per register.
+fn state_uniform_values(def: &SdfWidgetDef, props: &HashMap<String, Value>) -> [[f32; 4]; 4] {
+    let mut uniforms = [[0.0; 4]; 4];
+    for (idx, (name, prop_name)) in def
+        .state_uniforms
+        .iter()
+        .zip(&def.state.prop_names)
+        .take(MAX_SDF_STATE_UNIFORMS)
+        .enumerate()
+    {
+        uniforms[idx / 4][idx % 4] = prop_uniform_value(props, name, prop_name);
+    }
+    uniforms
+}
+
 /// Build Metal primitives for an SDF widget.
 pub fn sdf_widget_primitives(
     widget_type: &str,
@@ -1236,6 +1258,12 @@ pub fn sdf_widget_primitives(
         Some(d) => d,
         None => return Vec::new(),
     };
+    // A mesh widget renders offscreen through its own vertex stage and
+    // paints the image of that render (widget_render/mesh_widget.rs).
+    if let Some(mesh) = super::mesh_widget::mesh_widget_def(widget_type) {
+        let state = state_uniform_values(&def, &node.props);
+        return super::mesh_widget::mesh_widget_primitives(&mesh, node, viewport, state);
+    }
 
     let paint_rect = sdf_widget_paint_rect(node.rect, def.paint_margin);
     let (ndc_min, ndc_max) = ndc_bounds(paint_rect, viewport);
@@ -1251,28 +1279,7 @@ pub fn sdf_widget_primitives(
     let visual_brightness = visual_style_target_brightness(&node.props, &hit);
     let (visual_scale, visual_ease) =
         visual_scale_anim_uniforms(node.widget_id, &node.props, &hit, viewport.time_seconds);
-    let mut uniform_a = [0.0; 4];
-    let mut uniform_b = [0.0; 4];
-    let mut uniform_c = [0.0; 4];
-    let mut uniform_d = [0.0; 4];
-    for (idx, (name, prop_name)) in def
-        .state_uniforms
-        .iter()
-        .zip(&def.state.prop_names)
-        .take(MAX_SDF_STATE_UNIFORMS)
-        .enumerate()
-    {
-        let value = prop_uniform_value(&node.props, name, prop_name);
-        if idx < 4 {
-            uniform_a[idx] = value;
-        } else if idx < 8 {
-            uniform_b[idx - 4] = value;
-        } else if idx < 12 {
-            uniform_c[idx - 8] = value;
-        } else {
-            uniform_d[idx - 12] = value;
-        }
-    }
+    let [uniform_a, uniform_b, uniform_c, uniform_d] = state_uniform_values(&def, &node.props);
 
     vec![GpuPrimitive::WidgetInstance {
         widget_type: widget_type.to_string(),
@@ -1330,28 +1337,7 @@ pub fn sdf_widget_background_primitives(
         visual_scale_anim_uniforms(widget_id, props, &hit, viewport.time_seconds);
 
     // Resolve state uniforms from the box's props
-    let mut uniform_a = [0.0; 4];
-    let mut uniform_b = [0.0; 4];
-    let mut uniform_c = [0.0; 4];
-    let mut uniform_d = [0.0; 4];
-    for (idx, (name, prop_name)) in def
-        .state_uniforms
-        .iter()
-        .zip(&def.state.prop_names)
-        .take(MAX_SDF_STATE_UNIFORMS)
-        .enumerate()
-    {
-        let value = prop_uniform_value(props, name, prop_name);
-        if idx < 4 {
-            uniform_a[idx] = value;
-        } else if idx < 8 {
-            uniform_b[idx - 4] = value;
-        } else if idx < 12 {
-            uniform_c[idx - 8] = value;
-        } else {
-            uniform_d[idx - 12] = value;
-        }
-    }
+    let [uniform_a, uniform_b, uniform_c, uniform_d] = state_uniform_values(&def, props);
 
     vec![GpuPrimitive::WidgetInstance {
         widget_type: widget_type.to_string(),

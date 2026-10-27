@@ -1,0 +1,759 @@
+//! The `*shape-lab*` buffer (content/ui/modal/shape-lab.lisp): a solid loaded
+//! from a script renders its profile canvas and 3-D preview, a canvas drag
+//! moves the picked point, a finished edit asks for a solve, and Update draft
+//! hands the host the shape to write back.
+
+use super::*;
+
+fn eval(editor: &mut Editor, source: &str) -> Value {
+    editor.runtime_mut().eval_str(source).unwrap_or_else(|error| panic!("{source}: {error:?}")).unwrap_or(Value::Nil)
+}
+
+fn find_by_key_suffix<'a>(
+    node: &'a eseqlisp::layout::LayoutNode,
+    key: &str,
+) -> Option<&'a eseqlisp::layout::LayoutNode> {
+    if node.stable_key.as_deref().is_some_and(|k| k.ends_with(key)) {
+        return Some(node);
+    }
+    node.children.iter().find_map(|child| find_by_key_suffix(child, key))
+}
+
+fn host_commands(editor: &mut Editor, name: &str) -> Vec<Value> {
+    editor
+        .drain_host_commands()
+        .into_iter()
+        .filter_map(|command| match command {
+            HostCommand::Custom { name: n, payload } if n == name => Some(payload),
+            _ => None,
+        })
+        .collect()
+}
+
+fn field(value: &Value, key: &str) -> Value {
+    match value {
+        Value::Map(map) => map.get(key).map(|item| item.borrow().clone()).unwrap_or(Value::Nil),
+        other => panic!("{key} of {other:?}"),
+    }
+}
+
+/// What shape_lab.rs `load` sends for a script with one bronze bell.
+const LOADED: &str = r#"(eseq.modal.shape-lab/loaded "bell.lisp" "/tmp"
+  (list (dict :id "bell" :editable true
+              :spec (dict :solid (dict :revolve (dict :profile (list (list 0 0.25 0.012) (list 0.1 0.2 0.01) (list 0.15 0 0.016))
+                                                      :segments (dict :along 12 :around 24 :through 1)))
+                          :modes 8 :made-of eseq.modal.materials/bronze))))"#;
+
+fn lab_layout(editor: &mut Editor) -> std::sync::Arc<eseqlisp::layout::LayoutNode> {
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    if let Some(status) = editor.runtime_mut().take_status_message() {
+        panic!("shape lab status after refresh: {status}");
+    }
+    let id = editor.buffers.iter().find(|b| b.name == "*shape-lab*").expect("shape lab buffer").id;
+    editor.set_active_buffer(id);
+    editor.set_layout_viewport(140, 40);
+    let layout = editor.widget_layout().expect("shape lab layout");
+    assert_finite_layout_tree(&layout);
+    layout
+}
+
+#[test]
+fn a_loaded_solid_shows_its_profile_and_preview_and_asks_for_a_solve() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    editor.drain_host_commands();
+    eval(&mut editor, LOADED);
+    // The script had no solve to show: the lab asks for one.
+    let solves = host_commands(&mut editor, "shape-lab-solve");
+    assert_eq!(solves.len(), 1, "{solves:?}");
+    assert_eq!(field(&solves[0], "dir"), Value::String("/tmp".into()));
+    let preview = eval(&mut editor, "eseq.modal.shape-lab/lab-preview");
+    assert!(matches!(field(&preview, "mesh-id"), Value::Number(_)), "{preview:?}");
+    let layout = lab_layout(&mut editor);
+    for key in ["lab-profile", "lab-preview", "lab-apply", "lab-material", "lab-modes", "lab-template", "lab-layers", "lab-detail"] {
+        let node = find_by_key_suffix(&layout, key).unwrap_or_else(|| panic!("{key}"));
+        assert_finite_nonzero_rect(node, key);
+    }
+}
+
+/// A press on a point picks it; the drag moves it (snapped to 0.1 mm)
+/// without solving; the release solves; Update draft sends the new shape.
+#[test]
+fn dragging_a_profile_point_moves_it_then_solves_and_applies() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    eval(&mut editor, LOADED);
+    editor.drain_host_commands();
+    // the pointer (-1..1, y down) over point 2, (0.1, 0.2)
+    let at = |editor: &mut Editor, r: f64, z: f64| -> (f64, f64) {
+        let view = eval(editor, "eseq.modal.shape-lab/lab-view");
+        let n = |key: &str| match field(&view, key) {
+            Value::Number(n) => n,
+            other => panic!("{key}: {other:?}"),
+        };
+        ((r - n("cr")) / n("hr"), (n("cz") - z) / n("hz"))
+    };
+    let (sx, sy) = at(&mut editor, 0.1, 0.2);
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/canvas-down {sx} {sy} 0)"));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-point"), Value::Number(1.0));
+    let (sx, sy) = at(&mut editor, 0.11237, 0.18);
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/canvas-drag {sx} {sy} 0)"));
+    assert!(host_commands(&mut editor, "shape-lab-solve").is_empty(), "a drag does not solve");
+    let point = eval(&mut editor, "(nth (eseq.modal.shape-lab/profile) 1)");
+    assert_eq!(format!("{point:?}"), format!("{:?}", eval(&mut editor, "(list 0.1124 0.18 0.01)")));
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/canvas-up {sx} {sy} 0)"));
+    assert_eq!(host_commands(&mut editor, "shape-lab-solve").len(), 1);
+
+    eval(&mut editor, "(eseq.modal.shape-lab/set-material! \"brass\")");
+    editor.drain_host_commands();
+    // Update draft waits for the solve, so the script reads it from the cache
+    eval(&mut editor, "(eseq.modal.shape-lab/update-draft)");
+    assert!(host_commands(&mut editor, "shape-lab-apply").is_empty());
+    eval(&mut editor, "(eseq.modal.shape-lab/solved eseq.modal.shape-lab/lab-ticket (dict :file \"/tmp/x.modes.json\" :freqs (list 440) :mass 2))");
+    eval(&mut editor, "(eseq.modal.shape-lab/update-draft)");
+    let applies = host_commands(&mut editor, "shape-lab-apply");
+    assert_eq!(applies.len(), 1);
+    assert_eq!(field(&applies[0], "buffer"), Value::String("bell.lisp".into()));
+    assert_eq!(field(&applies[0], "id"), Value::String("bell".into()));
+    assert_eq!(field(&applies[0], "made-of"), Value::String("brass".into()));
+    assert_eq!(field(&applies[0], "modes"), Value::Number(8.0));
+    let profile = field(&field(&field(&applies[0], "shape"), "revolve"), "profile");
+    let Value::List(points) = profile else { panic!("profile") };
+    assert_eq!(points.len(), 3);
+}
+
+/// Only the latest solve's answer is shown: the 3-D view plays its modes.
+#[test]
+fn a_solve_answer_plays_its_modes_and_a_stale_one_is_ignored() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    eval(&mut editor, LOADED);
+    let ticket = eval(&mut editor, "eseq.modal.shape-lab/lab-ticket");
+    let Value::Number(ticket) = ticket else { panic!("ticket") };
+    let answer = |t: f64| {
+        format!("(eseq.modal.shape-lab/solved {t} (dict :file \"/tmp/x.modes.json\" :freqs (list 440 880 1100) :mass 2))")
+    };
+    eval(&mut editor, &answer(ticket - 1.0));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-solved"), Value::Nil);
+    eval(&mut editor, &answer(ticket));
+    let layout = lab_layout(&mut editor);
+    assert_finite_nonzero_rect(find_by_key_suffix(&layout, "lab-cycle").expect("3-D view"), "lab-cycle");
+    assert!(find_by_key_suffix(&layout, "lab-mode-0").is_none(), "no modes list");
+}
+
+/// The lab's load as the app runs it: the solids the script waits on are
+/// solved (here, at once), then it loads again from the cache.
+fn load_solved(editor: &mut Editor, payload: &Value) {
+    loop {
+        let deferred = crate::host_commands::shape_lab::load(editor, payload).unwrap();
+        if deferred.is_empty() {
+            return;
+        }
+        for solve in deferred {
+            let progress = sequencer::modal_fe::SolveProgress::default();
+            // a failure is remembered: the next load answers with it
+            let _ = sequencer::lisp_host::solve_solid_cached(&solve.spec, &solve.base, &progress);
+        }
+    }
+}
+
+/// The host's load: a real modal script in a buffer is evaluated, its solid
+/// (a coarse bar, solved on evaluation) reaches the lab with the spec it was
+/// solved from and its solve, and the lab opens.
+#[test]
+fn loading_a_modal_script_hands_the_lab_its_solid() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    let script = "(import eseq.modal :as m)
+(import eseq.modal.materials :as mat)
+(m/patch :name \"probe-lab\"
+  :objects (list (m/mallet 'mal)
+                 (m/solid 'bar :made-of mat/steel :modes 4 :resolution (dict :cells 10)
+                          :shape (dict :box (dict :size (list 0.3 0.03 0.01)))))
+  :connections (list (m/felt 'hit 'mal 'bar (list 0.15 0 0.005)))
+  :listens (list (m/listen 'bar (list -0.14 0 0.005))))";
+    editor.open_scratch_buffer("probe-lab.lisp", script);
+    let payload = eval(&mut editor, "(dict :buffer \"probe-lab.lisp\")");
+    load_solved(&mut editor, &payload);
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-buffer"), Value::String("probe-lab.lisp".into()));
+    assert_eq!(eval(&mut editor, "(len eseq.modal.shape-lab/lab-solids)"), Value::Number(1.0));
+    assert_eq!(eval(&mut editor, "(get (first eseq.modal.shape-lab/lab-solids) :editable)"), Value::Bool(true));
+    assert_eq!(eval(&mut editor, "(get (eseq.modal.shape-lab/part) :size)"), eval(&mut editor, "(list 0.3 0.03 0.01)"));
+    assert_eq!(eval(&mut editor, "(get eseq.modal.shape-lab/lab-spec :modes)"), Value::Number(4.0));
+    // the script's own solve: no new one asked for
+    let solved = eval(&mut editor, "eseq.modal.shape-lab/lab-solved");
+    assert!(matches!(field(&solved, "file"), Value::String(_)), "{solved:?}");
+    assert!(editor.buffer_named_is_showing("*shape-lab*"));
+    let layout = lab_layout(&mut editor);
+    for key in ["lab-box-x", "lab-cycle"] {
+        let node = find_by_key_suffix(&layout, key).unwrap_or_else(|| panic!("{key}"));
+        assert_finite_nonzero_rect(node, key);
+    }
+}
+
+/// Solves run one at a time on a worker thread: a request made meanwhile
+/// waits, replacing an older waiting one, and the answer reaches the lab.
+#[test]
+fn background_solves_queue_the_latest_and_answer_the_lab() {
+    use crate::host_commands::shape_lab::{poll_shape_solves, solve, ShapeSolves};
+    let mut editor = full_grid_editor_for_scroll_tests();
+    let spec = "(dict :solid (dict :box (dict :size (list 0.2 0.02 0.01))) :modes 3 :resolution (dict :cells 8)
+                      :made-of eseq.modal.materials/aluminium)";
+    let mut solves = ShapeSolves::default();
+    for ticket in [1, 2, 3] {
+        let payload = eval(&mut editor, &format!("(dict :ticket {ticket} :dir \"/tmp\" :spec {spec})"));
+        solve(&mut solves, &payload).unwrap();
+    }
+    assert_eq!(solves.tickets(), (Some(1.0), Some(3.0)));
+    assert!(solves.busy());
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-ticket 3)");
+    let start = std::time::Instant::now();
+    while solves.tickets() != (None, None) {
+        assert!(start.elapsed() < std::time::Duration::from_secs(120), "solves did not finish");
+        poll_shape_solves(&mut editor, &mut solves);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let solved = eval(&mut editor, "eseq.modal.shape-lab/lab-solved");
+    assert!(matches!(field(&solved, "file"), Value::String(_)), "{solved:?}");
+    assert_eq!(eval(&mut editor, "(len (get eseq.modal.shape-lab/lab-solved :freqs))"), Value::Number(3.0));
+}
+
+/// A spec the host refuses (grain on a metal) answers the lab as a failed
+/// solve, so it does not sit on "Solving…".
+#[test]
+fn a_refused_solve_answers_the_lab() {
+    use crate::host_commands::shape_lab::{solve, solve_refused, ShapeSolves};
+    let mut editor = full_grid_editor_for_scroll_tests();
+    let payload = eval(
+        &mut editor,
+        "(dict :ticket 4 :dir \"/tmp\" :spec (dict :solid (dict :box (dict :size (list 0.2 0.02 0.01))) :modes 3
+                                                :grain (list :x :y) :made-of eseq.modal.materials/steel))",
+    );
+    let mut solves = ShapeSolves::default();
+    let error = solve(&mut solves, &payload).expect_err("grain on steel is refused");
+    assert!(!solves.busy());
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-ticket 4)");
+    solve_refused(&mut editor, &payload, error.clone()).unwrap();
+    assert_eq!(eval(&mut editor, "(get eseq.modal.shape-lab/lab-solved :error)"), Value::String(error));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-solve-progress"), Value::Nil);
+}
+
+/// An Update draft whose compile was dropped without an outcome (the draft
+/// saved or its track deleted) fails, so the lab and the loop stop waiting.
+#[test]
+fn a_dropped_draft_compile_fails_the_update() {
+    use crate::host_commands::shape_lab::{poll_draft_outcomes, ShapeSolves};
+    let mut editor = full_grid_editor_for_scroll_tests();
+    let mut solves = ShapeSolves::default();
+    solves.set_applying("/scripts/body.lisp");
+    eval(&mut editor, "(eseq.modal.shape-lab/draft-status :compiling nil)");
+    poll_draft_outcomes(&mut editor, &mut solves, Vec::new(), &[]);
+    assert!(!solves.busy());
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-draft"), Value::Keyword("failed".into()));
+}
+
+/// What shape_lab.rs `load` sends for a script with one steel bar.
+const LOADED_BAR: &str = r#"(eseq.modal.shape-lab/loaded "bar.lisp" "/tmp"
+  (list (dict :id "bar" :editable true
+              :spec (dict :solid (dict :box (dict :size (list 0.3 0.04 0.012)))
+                          :modes 8 :made-of eseq.modal.materials/steel))))"#;
+
+/// The pointer (-1..1, y down) over (u, v) in the parts canvas.
+fn pointer_at(editor: &mut Editor, u: f64, v: f64) -> (f64, f64) {
+    let view = eval(editor, "eseq.modal.shape-lab/lab-view");
+    let n = |key: &str| match field(&view, key) {
+        Value::Number(n) => n,
+        other => panic!("{key}: {other:?}"),
+    };
+    ((u - n("cr")) / n("hr"), (n("cz") - v) / n("hz"))
+}
+
+fn lisp_str(editor: &mut Editor, source: &str) -> String {
+    format!("{:?}", eval(editor, source))
+}
+
+/// The parts round trip: a lone part stays a primitive, cuts make a
+/// difference of the added parts' union, and a disc footprint is hit inside
+/// and missed outside.
+#[test]
+fn shape_parts_read_and_write_back_their_nesting() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    let box_ = "(dict :box (dict :size (list 0.3 0.04 0.012)))";
+    assert_eq!(lisp_str(&mut editor, &format!("(eseq.modal.shape-parts/shape-of (eseq.modal.shape-parts/parts-of {box_}))")), lisp_str(&mut editor, box_));
+    let drilled = "(dict :difference (list (dict :union (list (dict :box (dict :size (list 0.3 0.04 0.012)))
+                                                             (dict :sphere (dict :radius 0.02))))
+                                           (dict :cylinder (dict :radius 0.004 :height 0.02 :center (list 0.08 0 0)))))";
+    assert_eq!(eval(&mut editor, &format!("(len (eseq.modal.shape-parts/parts-of {drilled}))")), Value::Number(3.0));
+    assert_eq!(lisp_str(&mut editor, &format!("(eseq.modal.shape-parts/shape-of (eseq.modal.shape-parts/parts-of {drilled}))")), lisp_str(&mut editor, drilled));
+    // a cut listed before an added part: back in shape-of's order
+    let ps = "(list (dict :shape (dict :sphere (dict :radius 0.01)) :cut true) (dict :shape (dict :sphere (dict :radius 0.05)) :cut false))";
+    assert_eq!(eval(&mut editor, &format!("(eseq.modal.shape-parts/reorder {ps} 0)")), Value::Number(1.0));
+    let hole = "(dict :cylinder (dict :radius 0.004 :height 0.02 :center (list 0.08 0 0)))";
+    assert_eq!(eval(&mut editor, &format!("(eseq.modal.shape-parts/hit? (eseq.modal.shape-parts/footprint {hole} 0 1) 0.081 0.001)")), Value::Bool(true));
+    assert_eq!(eval(&mut editor, &format!("(eseq.modal.shape-parts/hit? (eseq.modal.shape-parts/footprint {hole} 0 1) 0.085 0.0)")), Value::Bool(false));
+    // seen from the front the hole is a rectangle through the bar's thickness
+    assert_eq!(eval(&mut editor, &format!("(eseq.modal.shape-parts/hit? (eseq.modal.shape-parts/footprint {hole} 0 2) 0.0835 0.009)")), Value::Bool(true));
+    assert_eq!(eval(&mut editor, &format!("(eseq.modal.shape-parts/hit? (eseq.modal.shape-parts/footprint {hole} 0 2) 0.0835 0.011)")), Value::Bool(false));
+}
+
+/// A box opens the parts editor. Drilling drops a hole where the pointer
+/// is and drags it (solving on release); a row, an arch, the detail and a
+/// delete all edit the parts; Update draft sends the shape and resolution.
+#[test]
+fn drilling_a_bar_cuts_holes_and_applies_them_with_their_detail() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    eval(&mut editor, LOADED_BAR);
+    let layout = lab_layout(&mut editor);
+    for key in ["lab-parts", "lab-tool-Hole", "lab-tool-Arch", "lab-box-x", "lab-detail", "lab-view-plane", "lab-layers", "lab-part-repeat"] {
+        let node = find_by_key_suffix(&layout, key).unwrap_or_else(|| panic!("{key}"));
+        assert_finite_nonzero_rect(node, key);
+    }
+    assert!(find_by_key_suffix(&layout, "lab-profile").is_none());
+    editor.drain_host_commands();
+
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-tool :hole)");
+    let (sx, sy) = pointer_at(&mut editor, 0.08, 0.0);
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-down {sx} {sy} 0)"));
+    assert_eq!(eval(&mut editor, "(eseq.modal.shape-parts/kind-of (eseq.modal.shape-lab/shape))"), Value::Keyword("difference".into()));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-part"), Value::Number(1.0));
+    assert!(host_commands(&mut editor, "shape-lab-solve").is_empty(), "drilling waits for the release");
+    let (sx, sy) = pointer_at(&mut editor, 0.1, 0.005);
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-drag {sx} {sy} 0)"));
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-up {sx} {sy} 0)"));
+    assert_eq!(host_commands(&mut editor, "shape-lab-solve").len(), 1);
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-tool"), Value::Keyword("select".into()), "one hole, then Move");
+    let center = lisp_str(&mut editor, "(eseq.modal.shape-parts/center-of (get (eseq.modal.shape-lab/selected-part) :shape))");
+    assert_eq!(center, lisp_str(&mut editor, "(list 0.1 0.005 0)"));
+    // the drilled bar meshes (its :axis keyword reads as the solver's axis)
+    let preview = eval(&mut editor, "eseq.modal.shape-lab/lab-preview");
+    assert!(matches!(field(&preview, "mesh-id"), Value::Number(_)), "{preview:?}");
+
+    // a click that moves nothing selects without solving
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-tool :select)");
+    let (sx, sy) = pointer_at(&mut editor, -0.1, 0.0);
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-down {sx} {sy} 0)"));
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-up {sx} {sy} 0)"));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-part"), Value::Number(0.0));
+    assert!(host_commands(&mut editor, "shape-lab-solve").is_empty());
+
+    // the hole as a row of three, then an arch under the bar
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-part 1)");
+    eval(&mut editor, "(eseq.modal.shape-lab/make-row 3)");
+    assert_eq!(eval(&mut editor, "(len (eseq.modal.shape-lab/layer-parts))"), Value::Number(4.0));
+    eval(&mut editor, "(eseq.modal.shape-lab/add-part! (eseq.modal.shape-lab/placed-part :arch 0.02 0) true)");
+    let arch = eval(&mut editor, "(get (eseq.modal.shape-lab/selected-part) :shape)");
+    assert_eq!(field(&field(&arch, "cylinder"), "axis"), Value::Keyword("y".into()));
+    eval(&mut editor, "(eseq.modal.shape-lab/delete-part)");
+    assert_eq!(eval(&mut editor, "(len (eseq.modal.shape-lab/layer-parts))"), Value::Number(4.0));
+    // the body's only added part cannot be cut or deleted
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-part 0)");
+    eval(&mut editor, "(eseq.modal.shape-lab/toggle-cut)");
+    eval(&mut editor, "(eseq.modal.shape-lab/delete-part)");
+    assert_eq!(eval(&mut editor, "(get (first (eseq.modal.shape-lab/layer-parts)) :cut)"), Value::Bool(false));
+
+    eval(&mut editor, "(eseq.modal.shape-lab/step-detail 1)");
+    assert_eq!(eval(&mut editor, "(eseq.modal.shape-lab/detail)"), Value::Number(48.0));
+    // every view draws
+    for plane in [":front", ":side", ":top"] {
+        eval(&mut editor, &format!("(eseq.modal.shape-lab/set-plane! {plane})"));
+        let layout = lab_layout(&mut editor);
+        assert_finite_nonzero_rect(find_by_key_suffix(&layout, "lab-parts").expect("parts canvas"), plane);
+    }
+    editor.drain_host_commands();
+    eval(&mut editor, "(eseq.modal.shape-lab/solved eseq.modal.shape-lab/lab-ticket (dict :file \"/tmp/x.modes.json\" :freqs (list 440) :mass 2))");
+    eval(&mut editor, "(eseq.modal.shape-lab/update-draft)");
+    let applies = host_commands(&mut editor, "shape-lab-apply");
+    assert_eq!(applies.len(), 1);
+    assert_eq!(field(&field(&applies[0], "resolution"), "cells"), Value::Number(48.0));
+    let Value::List(items) = field(&field(&applies[0], "shape"), "difference") else { panic!("difference") };
+    assert_eq!(items.len(), 4);
+    // the host's progress shows on the button; a failure shows its error
+    // and leaves the edit to try again
+    eval(&mut editor, "(eseq.modal.shape-lab/draft-status :compiling nil)");
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-edited"), Value::Bool(false));
+    eval(&mut editor, "(eseq.modal.shape-lab/draft-status :failed \"Draft did not compile: boom\")");
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-edited"), Value::Bool(true));
+    let layout = lab_layout(&mut editor);
+    assert_finite_nonzero_rect(find_by_key_suffix(&layout, "lab-draft-error").expect("error line"), "lab-draft-error");
+}
+
+/// A revolve's Holes & parts tab cuts into the revolve itself: the bell
+/// stays the body, the hole goes through it.
+#[test]
+fn a_bell_can_be_drilled_from_its_parts_tab() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    eval(&mut editor, LOADED);
+    eval(&mut editor, "(eseq.modal.shape-lab/set-editor! :parts)");
+    eval(&mut editor, "(eseq.modal.shape-lab/set-plane! :front)");
+    let layout = lab_layout(&mut editor);
+    for key in ["lab-parts", "lab-edit-profile", "lab-tool-Hole"] {
+        assert_finite_nonzero_rect(find_by_key_suffix(&layout, key).unwrap_or_else(|| panic!("{key}")), key);
+    }
+    // a hole through the bell's wall, where the front view was clicked
+    eval(&mut editor, "(eseq.modal.shape-lab/add-part! (eseq.modal.shape-lab/placed-part :hole 0.125 0.1) true)");
+    let shape = eval(&mut editor, "(eseq.modal.shape-lab/shape)");
+    let Value::List(items) = field(&shape, "difference") else { panic!("{shape:?}") };
+    assert!(matches!(field(&items[0].borrow(), "revolve"), Value::Map(_)));
+    // the preview meshes the drilled bell: its fitted mesh (12 along, 24
+    // around), carved; finer detail scales those counts until the hole
+    // takes elements out
+    let preview = eval(&mut editor, "eseq.modal.shape-lab/lab-preview");
+    assert!(matches!(field(&preview, "mesh-id"), Value::Number(_)), "{preview:?}");
+    assert!(matches!(field(&preview, "elements"), Value::Number(n) if n <= 288.0), "{preview:?}");
+    for _ in 0..4 {
+        eval(&mut editor, "(eseq.modal.shape-lab/step-detail 1)");
+    }
+    let segments = eval(&mut editor, "(get (eseq.modal.shape-parts/body (eseq.modal.shape-lab/segmented-revolve)) :segments)");
+    let count = |key: &str| match field(&segments, key) {
+        Value::Number(n) => n,
+        other => panic!("{key}: {other:?}"),
+    };
+    assert_eq!((count("along"), count("around")), (30.0, 60.0));
+    let preview = eval(&mut editor, "eseq.modal.shape-lab/lab-preview");
+    let Value::Number(elements) = field(&preview, "elements") else { panic!("{preview:?}") };
+    assert!(elements < 30.0 * 60.0 && elements > 0.9 * 30.0 * 60.0, "{elements}");
+    eval(&mut editor, "(eseq.modal.shape-lab/set-editor! :profile)");
+    let layout = lab_layout(&mut editor);
+    assert!(find_by_key_suffix(&layout, "lab-parts").is_some(), "a cut revolve stays in the parts editor");
+}
+
+/// A clamp the shape misses (a ride's stand point inside a bar's empty
+/// air) is caught by the preview: no doomed solve, a plain message and a
+/// fix. Clamped to the shape it solves; dragged, it moves; freed, the
+/// script's :block goes; a template starts free.
+#[test]
+fn a_clamp_that_misses_the_shape_is_explained_and_fixable() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    editor.drain_host_commands();
+    eval(
+        &mut editor,
+        r#"(eseq.modal.shape-lab/loaded "bar.lisp" "/tmp"
+  (list (dict :id "bar" :editable true
+              :spec (dict :solid (dict :box (dict :size (list 0.3 0.04 0.012)))
+                          :block (dict :sphere (dict :center (list 0 0 0.046) :radius 0.008))
+                          :modes 8 :made-of eseq.modal.materials/steel))))"#,
+    );
+    assert_eq!(eval(&mut editor, "(eseq.modal.shape-lab/clamp-misses?)"), Value::Bool(true));
+    assert!(host_commands(&mut editor, "shape-lab-solve").is_empty(), "a shape its clamp misses is not solved");
+    eval(&mut editor, "(eseq.modal.shape-lab/select-layer! eseq.modal.shape-lab/clamp-layer)");
+    let layout = lab_layout(&mut editor);
+    for key in ["lab-layers", "lab-clamp-snap", "lab-clamp-free", "lab-clamp-radius"] {
+        assert_finite_nonzero_rect(find_by_key_suffix(&layout, key).unwrap_or_else(|| panic!("{key}")), key);
+    }
+    eval(&mut editor, "(eseq.modal.shape-lab/update-draft)");
+    assert!(host_commands(&mut editor, "shape-lab-apply").is_empty(), "nothing solved, nothing applied");
+
+    eval(&mut editor, "(eseq.modal.shape-lab/clamp-to-shape)");
+    assert_eq!(eval(&mut editor, "(eseq.modal.shape-lab/clamp-misses?)"), Value::Bool(false));
+    assert_eq!(host_commands(&mut editor, "shape-lab-solve").len(), 1);
+    let center = eval(&mut editor, "(eseq.modal.shape-parts/region-center (eseq.modal.shape-lab/held-by))");
+    assert_eq!(format!("{center:?}"), lisp_str(&mut editor, "(list 0 0 0.006)"), "onto the bar's top face");
+
+    // drag it along the bar in the front view
+    eval(&mut editor, "(eseq.modal.shape-lab/set-plane! :front)");
+    let (sx, sy) = pointer_at(&mut editor, 0.0, 0.006);
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-down {sx} {sy} 0)"));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-drag-clamp"), Value::Bool(true));
+    let (sx, sy) = pointer_at(&mut editor, 0.05, 0.006);
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-drag {sx} {sy} 0)"));
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-up {sx} {sy} 0)"));
+    let center = eval(&mut editor, "(eseq.modal.shape-parts/region-center (eseq.modal.shape-lab/held-by))");
+    assert_eq!(format!("{center:?}"), lisp_str(&mut editor, "(list 0.05 0 0.006)"));
+    assert_eq!(host_commands(&mut editor, "shape-lab-solve").len(), 1);
+    assert_eq!(eval(&mut editor, "(len (eseq.modal.shape-lab/layer-parts))"), Value::Number(1.0), "the drag moved no part");
+
+    eval(&mut editor, "(eseq.modal.shape-lab/free-it)");
+    eval(&mut editor, "(eseq.modal.shape-lab/solved eseq.modal.shape-lab/lab-ticket (dict :file \"/tmp/x.modes.json\" :freqs (list 440) :mass 2))");
+    editor.drain_host_commands();
+    eval(&mut editor, "(eseq.modal.shape-lab/update-draft)");
+    let applies = host_commands(&mut editor, "shape-lab-apply");
+    assert_eq!(field(&applies[0], "block"), Value::Keyword("free".into()));
+
+    eval(&mut editor, "(eseq.modal.shape-lab/clamp-it)");
+    assert!(matches!(eval(&mut editor, "(eseq.modal.shape-lab/held-by)"), Value::Map(_)));
+    assert_eq!(eval(&mut editor, "(eseq.modal.shape-lab/clamp-misses?)"), Value::Bool(false));
+    eval(&mut editor, "(eseq.modal.shape-lab/use-template (nth eseq.modal.shape-lab/templates 1))");
+    assert_eq!(eval(&mut editor, "(eseq.modal.shape-lab/held-by)"), Value::Nil, "a template starts free");
+}
+
+/// The user's flow end to end, short of the dgen compile: a real script
+/// loaded, a hole drilled, Update draft's write-back, then the evaluation
+/// C-c C-c does: it must still be a program that generates an instrument.
+#[test]
+fn an_applied_shape_still_evaluates_to_an_instrument() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    let script = "(import eseq.modal :as m)
+(import eseq.modal.materials :as mat)
+(m/patch :name \"probe-lab-apply\"
+  :objects (list (m/mallet 'mal)
+                 (m/solid 'bar :made-of mat/steel :modes 4 :resolution (dict :cells 12)
+                          :block (dict :sphere (dict :center (list 0 0 0.046) :radius 0.008))
+                          :shape (dict :box (dict :size (list 0.3 0.03 0.012)))))
+  :connections (list (m/felt 'hit 'mal 'bar (list 0.15 0 0.006)))
+  :listens (list (m/listen 'bar (list -0.14 0 0.006))))";
+    editor.open_scratch_buffer("probe-lab-apply.lisp", script);
+    let payload = eval(&mut editor, "(dict :buffer \"probe-lab-apply.lisp\")");
+    load_solved(&mut editor, &payload);
+    eval(&mut editor, "(eseq.modal.shape-lab/free-it)");
+    eval(&mut editor, "(eseq.modal.shape-lab/set-plane! :top)");
+    eval(&mut editor, "(eseq.modal.shape-lab/add-part! (eseq.modal.shape-lab/placed-part :hole 0.06 0) true)");
+    eval(&mut editor, "(eseq.modal.shape-lab/solved eseq.modal.shape-lab/lab-ticket (dict :file \"/tmp/x.modes.json\" :freqs (list 440) :mass 2))");
+    editor.drain_host_commands();
+    eval(&mut editor, "(eseq.modal.shape-lab/update-draft)");
+    let applies = host_commands(&mut editor, "shape-lab-apply");
+    assert_eq!(applies.len(), 1);
+    let name = crate::host_commands::shape_lab::write_back(&mut editor, &applies[0]).unwrap();
+    let text = editor.buffers.iter().find(|b| b.name == name).unwrap().text();
+    assert!(text.contains(":difference") && !text.contains(":block"), "{text}");
+    let value = sequencer::lisp_host::eval_script(editor.runtime_mut(), std::path::PathBuf::from("/tmp/probe-lab-apply.lisp"), &text)
+        .unwrap_or_else(|errors| panic!("{errors:?}\n{text}"))
+        .unwrap_or(Value::Nil);
+    assert!(sequencer::lisp_host::is_program(&value), "{value:?}");
+    sequencer::lisp_host::generate_from_program(editor.runtime_mut(), std::path::PathBuf::from("/tmp/probe-lab-apply.lisp"), value)
+        .unwrap_or_else(|errors| panic!("{errors:?}\n{text}"));
+    // the script now builds exactly the spec the lab solved, so its
+    // evaluation reads that solve from the cache instead of solving again
+    let solved_spec = eval(&mut editor, "eseq.modal.shape-lab/lab-spec");
+    load_solved(&mut editor, &payload);
+    let script_spec = eval(&mut editor, "(get (first eseq.modal.shape-lab/lab-solids) :spec)");
+    let hash = |spec: &Value| {
+        let (spec, _) = sequencer::lisp_host::solid_spec(spec, std::path::Path::new("/tmp")).unwrap();
+        sequencer::modal_fe::spec_hash(&spec)
+    };
+    assert_eq!(hash(&solved_spec), hash(&script_spec), "{solved_spec:?}\n{script_spec:?}");
+}
+
+/// Turning a bell's hole into an added part makes the body a union, which
+/// is voxelized: the lab says the bell's wall is thinner than the cubes,
+/// and Mesh shows the cube size, not the bell's own element size.
+#[test]
+fn adding_a_part_to_a_thin_revolve_warns_that_its_wall_will_vanish() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    eval(&mut editor, LOADED);
+    eval(&mut editor, "(eseq.modal.shape-lab/set-editor! :parts)");
+    eval(&mut editor, "(eseq.modal.shape-lab/add-part! (eseq.modal.shape-lab/placed-part :hole 0.05 0.05) true)");
+    assert_eq!(eval(&mut editor, "(eseq.modal.shape-lab/voxel-body?)"), Value::Bool(false), "a cut keeps the fitted mesh");
+    eval(&mut editor, "(eseq.modal.shape-lab/toggle-cut)");
+    assert_eq!(eval(&mut editor, "(eseq.modal.shape-lab/voxel-body?)"), Value::Bool(true));
+    let warning = lisp_str(&mut editor, "(eseq.modal.shape-lab/detail-warning)");
+    assert!(warning.contains("wall is thinner"), "{warning}");
+    // 32 voxel cells across the body's longest side, not the bell's 24 around
+    let Value::Number(cell) = eval(&mut editor, "(eseq.modal.shape-lab/cell-size)") else { panic!() };
+    let Value::Number(longest) = eval(&mut editor, "(eseq.modal.shape-lab/body-extent)") else { panic!() };
+    assert!((cell - longest / 32.0).abs() < 1e-9, "{cell} vs {longest}");
+}
+
+/// An added cylinder's Radius and Depth fields edit it through their real
+/// callbacks (the value they show is millimetres).
+#[test]
+fn an_added_cylinders_size_fields_edit_it() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    eval(&mut editor, LOADED_BAR);
+    eval(&mut editor, "(eseq.modal.shape-lab/add-part! (eseq.modal.shape-lab/placed-part :hole 0.05 0) true)");
+    eval(&mut editor, "(eseq.modal.shape-lab/toggle-cut)");
+    let index = eval(&mut editor, "eseq.modal.shape-lab/lab-part");
+    assert_eq!(eval(&mut editor, "(get (eseq.modal.shape-lab/selected-part) :cut)"), Value::Bool(false));
+    for (key, field_name, mm) in [("lab-field-Radius", "radius", 7.5), ("lab-field-Depth", "height", 30.0)] {
+        let layout = lab_layout(&mut editor);
+        let picker = find_by_key_suffix(&layout, key).unwrap_or_else(|| panic!("{key}"));
+        assert_finite_nonzero_rect(picker, key);
+        let on_change = picker.props.get("on-change").expect("callback").clone();
+        editor.runtime_mut().invoke(on_change, vec![Value::Number(mm)]).unwrap();
+        assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-part"), index, "still selected");
+        let shape = eval(&mut editor, "(get (eseq.modal.shape-lab/selected-part) :shape)");
+        assert_eq!(field(&field(&shape, "cylinder"), field_name), Value::Number(mm / 1000.0), "{key}");
+    }
+    let layout = lab_layout(&mut editor);
+    let on_change = find_by_key_suffix(&layout, "lab-center-1").expect("Y field").props.get("on-change").unwrap().clone();
+    editor.runtime_mut().invoke(on_change, vec![Value::Number(12.0)]).unwrap();
+    let center = eval(&mut editor, "(eseq.modal.shape-parts/center-of (get (eseq.modal.shape-lab/selected-part) :shape))");
+    assert_eq!(format!("{center:?}"), lisp_str(&mut editor, "(list 0.05 0.012 0)"));
+}
+
+/// A solve shows a progress bar with Cancel; cancelling leaves the shape
+/// unsolved with a Solve button, ignores the cancelled solve's progress,
+/// and Solve asks again.
+#[test]
+fn a_running_solve_shows_progress_and_can_be_cancelled() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    eval(&mut editor, LOADED_BAR);
+    let ticket = eval(&mut editor, "eseq.modal.shape-lab/lab-ticket");
+    let Value::Number(ticket) = ticket else { panic!("ticket") };
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/solve-progress {ticket} \"factoring\" 0.4)"));
+    let layout = lab_layout(&mut editor);
+    for key in ["lab-solve-bar", "lab-solve-phase", "lab-solve-cancel"] {
+        assert_finite_nonzero_rect(find_by_key_suffix(&layout, key).unwrap_or_else(|| panic!("{key}")), key);
+    }
+    editor.drain_host_commands();
+    eval(&mut editor, "(eseq.modal.shape-lab/cancel-solve)");
+    assert_eq!(host_commands(&mut editor, "shape-lab-cancel").len(), 1);
+    // the cancelled solve's late progress is ignored
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/solve-progress {ticket} \"finding modes\" 0.7)"));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-solve-progress"), Value::Nil);
+    let layout = lab_layout(&mut editor);
+    assert_finite_nonzero_rect(find_by_key_suffix(&layout, "lab-solve-again").expect("Solve"), "lab-solve-again");
+    assert!(find_by_key_suffix(&layout, "lab-solve-bar").is_none());
+    eval(&mut editor, "(eseq.modal.shape-lab/request-solve)");
+    assert_eq!(host_commands(&mut editor, "shape-lab-solve").len(), 1);
+}
+
+/// Named points: loaded with the solid and listed as layers; the Point tool
+/// drops one on the surface the view looks at; it renames, drags back onto
+/// the surface without a solve, deletes, and Update draft sends them all.
+#[test]
+fn named_points_are_placed_renamed_dragged_and_applied() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    eval(
+        &mut editor,
+        r#"(eseq.modal.shape-lab/loaded "bar.lisp" "/tmp"
+  (list (dict :id "bar" :editable true :points (dict :tip (list 0.1 0 0.006))
+              :spec (dict :solid (dict :box (dict :size (list 0.3 0.04 0.012)))
+                          :modes 8 :made-of eseq.modal.materials/steel))))"#,
+    );
+    eval(&mut editor, "(eseq.modal.shape-lab/set-plane! :front)");
+    let layout = lab_layout(&mut editor);
+    assert_finite_nonzero_rect(find_by_key_suffix(&layout, "lab-tool-Point").expect("Point tool"), "lab-tool-Point");
+    editor.drain_host_commands();
+
+    // the front view looks along y: a point lands on the +y face
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-tool :point)");
+    let (sx, sy) = pointer_at(&mut editor, -0.1, 0.0);
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-down {sx} {sy} 0)"));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-named"), Value::Keyword("p1".into()));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-tool"), Value::Keyword("select".into()));
+    assert_eq!(eval(&mut editor, "(nth (get eseq.modal.shape-lab/lab-points :p1) 1)"), Value::Number(0.02));
+    let layout = lab_layout(&mut editor);
+    assert_finite_nonzero_rect(find_by_key_suffix(&layout, "lab-point-name").expect("name field"), "lab-point-name");
+
+    // renamed; a taken or invalid name is refused
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-point-draft \"tip\")");
+    eval(&mut editor, "(eseq.modal.shape-lab/rename-point)");
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-named"), Value::Keyword("p1".into()));
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-point-draft \"neck mic\")");
+    eval(&mut editor, "(eseq.modal.shape-lab/rename-point)");
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-named"), Value::Keyword("p1".into()));
+    eval(&mut editor, "(set! eseq.modal.shape-lab/lab-point-draft \"neck-mic\")");
+    eval(&mut editor, "(eseq.modal.shape-lab/rename-point)");
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-named"), Value::Keyword("neck-mic".into()));
+
+    // Move drags the tip across the view, then drops it onto the surface,
+    // without solving (a point is not part of the shape)
+    let (sx, sy) = pointer_at(&mut editor, 0.1, 0.006);
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-down {sx} {sy} 0)"));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-named"), Value::Keyword("tip".into()));
+    let (sx, sy) = pointer_at(&mut editor, 0.05, 0.003);
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-drag {sx} {sy} 0)"));
+    eval(&mut editor, &format!("(eseq.modal.shape-lab/parts-up {sx} {sy} 0)"));
+    assert!(host_commands(&mut editor, "shape-lab-solve").is_empty());
+    assert_eq!(eval(&mut editor, "(nth (get eseq.modal.shape-lab/lab-points :tip) 1)"), Value::Number(0.02), "on the +y face");
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-edited"), Value::Bool(true));
+
+    eval(&mut editor, "(eseq.modal.shape-lab/solved eseq.modal.shape-lab/lab-ticket (dict :file \"/tmp/x.modes.json\" :freqs (list 440) :mass 2))");
+    eval(&mut editor, "(eseq.modal.shape-lab/update-draft)");
+    let applies = host_commands(&mut editor, "shape-lab-apply");
+    let points = field(&applies[0], "points");
+    assert!(matches!(field(&points, "tip"), Value::List(_)) && matches!(field(&points, "neck-mic"), Value::List(_)), "{points:?}");
+
+    eval(&mut editor, "(eseq.modal.shape-lab/delete-point)");
+    assert_eq!(eval(&mut editor, "(len (keys eseq.modal.shape-lab/lab-points))"), Value::Number(1.0));
+    lab_layout(&mut editor);
+}
+
+/// A body, a neck glued to it at named points, and a string between them.
+const LOADED_GUITAR: &str = r#"(eseq.modal.shape-lab/loaded "guitar.lisp" "/tmp"
+  (list (dict :id "body" :editable true :points (dict :joint (list 0.2 0 0) :bridge (list -0.1 0 0.02))
+              :spec (dict :solid (dict :box (dict :size (list 0.4 0.3 0.04)))
+                          :resolution (dict :cell-size (list 0.02 0.02 0.01)) :grain (list :x :y)
+                          :modes 8 :made-of eseq.modal.materials/maple))
+        (dict :id "neck" :editable true :points (dict :heel (list 0 0 -0.01) :nut (list 0.28 0 0.01))
+              :spec (dict :solid (dict :box (dict :center (list 0.15 0 0) :size (list 0.3 0.05 0.02)))
+                          :modes 8 :made-of eseq.modal.materials/mahogany)))
+  (dict :strings (list 'str)
+        :connections (list (dict :law :spring :a 'neck :a-at :heel :b 'body :b-at :joint)
+                           (dict :law :spring :a 'str :a-at 0.98 :b 'body :b-at :bridge)
+                           (dict :law :spring :a 'str :a-at 0.02 :b 'neck :b-at :nut)
+                           (dict :law :pluck :a 'pick :b 'str :b-at 0.8))
+        :listens (list (dict :obj 'str :at 0.9 :hear :pickup) (dict :obj 'body :at :bridge :hear :speed))))"#;
+
+#[test]
+fn the_instrument_view_seats_glued_parts_and_writes_a_moved_place() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    eval(&mut editor, LOADED_GUITAR);
+    eval(&mut editor, "(eseq.modal.shape-lab/set-look! :instrument)");
+    let assembly = eval(&mut editor, "eseq.modal.shape-lab/lab-assembly");
+    assert!(matches!(field(&assembly, "mesh-id"), Value::Number(_)), "{assembly:?}");
+
+    // the body is at the origin; the neck is seated by its glue, its heel
+    // on the body's joint
+    let place = |editor: &mut Editor, id: &str, key: &str| {
+        eval(editor, &format!("(get (eseq.modal.shape-lab/placed-in (eseq.modal.shape-lab/resolve-places) \"{id}\") {key})"))
+    };
+    assert_eq!(place(&mut editor, "neck", ":how"), Value::Keyword("seated".into()));
+    assert_eq!(eval(&mut editor, "(nth (get (eseq.modal.shape-lab/placed-in (eseq.modal.shape-lab/resolve-places) \"neck\") :at) 2)"), Value::Number(0.01));
+    // the string runs from the neck's nut to the body's bridge, lifted
+    let line = eval(&mut editor, "(eseq.modal.shape-lab/string-line \"str\" (eseq.modal.shape-lab/resolve-places))");
+    let Value::List(line) = line else { panic!("no string line: {line:?}") };
+    assert_eq!(line[0].borrow().clone(), Value::Number(0.02));
+    let layout = lab_layout(&mut editor);
+    assert_finite_nonzero_rect(find_by_key_suffix(&layout, "lab-assembly").expect("instrument view"), "lab-assembly");
+    assert_finite_nonzero_rect(find_by_key_suffix(&layout, "lab-place-at-0").expect("place fields"), "lab-place-at-0");
+    // flat cells: the mesh size shown is the thinnest
+    assert_eq!(eval(&mut editor, "(eseq.modal.shape-lab/cell-size)"), Value::Number(0.01));
+
+    // tilting the neck places it where it was seated, with the turn
+    eval(&mut editor, "(eseq.modal.shape-lab/select-solid 1)");
+    eval(&mut editor, "(eseq.modal.shape-lab/nudge-place! :turn 1 -3)");
+    assert_eq!(place(&mut editor, "neck", ":how"), Value::Keyword("placed".into()));
+    assert_eq!(eval(&mut editor, "eseq.modal.shape-lab/lab-edited"), Value::Bool(true));
+    eval(&mut editor, "(eseq.modal.shape-lab/solved eseq.modal.shape-lab/lab-ticket (dict :file \"/tmp/no.modes.json\" :freqs (list 200) :mass 1))");
+    eval(&mut editor, "(eseq.modal.shape-lab/update-draft)");
+    let applies = host_commands(&mut editor, "shape-lab-apply");
+    let written = field(&applies[0], "place");
+    assert_eq!(field(&written, "turn"), eval(&mut editor, "(list 0 -3 0)"));
+    assert_eq!(field(&written, "at"), eval(&mut editor, "(list 0.2 0 0.01)"));
+
+    // seated again, it keeps the turn and puts the turned heel on the joint
+    eval(&mut editor, "(eseq.modal.shape-lab/reseat)");
+    assert_eq!(place(&mut editor, "neck", ":how"), Value::Keyword("seated".into()));
+    assert_eq!(eval(&mut editor, "(get (eseq.modal.shape-lab/place-of \"neck\") :at)"), Value::Nil);
+    lab_layout(&mut editor);
+}
+
+
+
+/// An evaluation that stopped on an uncached solid: the solid solves on a
+/// worker thread while the loop polls, and then the evaluation is queued to
+/// run again, now reading it from the cache.
+#[test]
+fn deferred_solids_solve_in_the_background_then_resume() {
+    use crate::host_commands::script_solves::{poll_script_solves, start, Resume, ScriptSolves};
+    let mut editor = full_grid_editor_for_scroll_tests();
+    // two new solids: one evaluation finds both
+    let source = format!("(import eseq.modal.materials :as mat) (list {} {})", uncached_solve_source(), uncached_solve_source());
+    let path = std::path::PathBuf::from("/tmp/probe-deferred.lisp");
+    let evaluate = |editor: &mut Editor| {
+        sequencer::lisp_host::deferring_solves(|| sequencer::lisp_host::eval_script(editor.runtime_mut(), path.clone(), &source)).1
+    };
+    let deferred = evaluate(&mut editor);
+    assert_eq!(deferred.len(), 2);
+    let mut solves = ScriptSolves::default();
+    start(&mut editor, &mut solves, Resume::Evaluate("probe-deferred.lisp".into()), deferred).unwrap();
+    let started = std::time::Instant::now();
+    while host_commands(&mut editor, "script-solves-resume").is_empty() {
+        assert!(started.elapsed() < std::time::Duration::from_secs(60), "never solved");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        poll_script_solves(&mut editor, &mut solves);
+    }
+    assert!(solves.busy(), "the evaluation waits to run again");
+    assert!(evaluate(&mut editor).is_empty(), "solved into the cache");
+}
+
+/// A `modal-solve` call (materials imported as `mat`) for a bar no earlier
+/// run has cached (its length carries the clock and a call count).
+fn uncached_solve_source() -> String {
+    static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
+    let unique = nanos % 1_000_000 + 1_000_000 * CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let length = 0.3 + f64::from(unique) * 1e-10;
+    format!(
+        "(modal-solve (dict :solid (dict :box (dict :size (list {length} 0.03 0.01))) :modes 4
+                            :made-of mat/steel :resolution (dict :cells 8)))"
+    )
+}

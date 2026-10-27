@@ -620,6 +620,150 @@ fn compile_defwidget_shader(
     ))
 }
 
+/// One `(name :floats n)` entry of a `defwidget` `:state`: an array state.
+fn array_state_entry(entry: &Value) -> Result<crate::lang::sdf_codegen::MeshArrayState, String> {
+    let Value::List(items) = entry else {
+        return Err("a state entry is a symbol or (name :floats n)".into());
+    };
+    let items: Vec<Value> = items.iter().map(|item| item.borrow().clone()).collect();
+    match items.as_slice() {
+        [Value::Symbol(name), Value::Keyword(kind), Value::Number(len)]
+            if kind == "floats" && *len >= 1.0 && len.fract() == 0.0 =>
+        {
+            Ok(crate::lang::sdf_codegen::MeshArrayState { name: name.clone(), len: *len as usize })
+        }
+        _ => Err(format!(
+            "state entry {entry:?}: an array state is (name :floats n), n a positive integer"
+        )),
+    }
+}
+
+/// Compile a mesh widget's stages for the platform's render backend, as
+/// [`compile_sdf_for_platform_backend`] does a 2-D shader.
+fn compile_mesh_for_platform_backend(
+    vertex: &crate::parser::Expression,
+    fragment: &crate::parser::Expression,
+    state_symbols: &[String],
+    arrays: &[crate::lang::sdf_codegen::MeshArrayState],
+) -> Result<crate::lang::sdf_codegen::MeshShaderOutput, crate::lang::sdf_codegen::CodegenError> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::lang::sdf_codegen::compile_mesh_to_metal(vertex, fragment, state_symbols, arrays)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        crate::lang::sdf_codegen::compile_mesh_to_wgsl(vertex, fragment, state_symbols, arrays)
+    }
+}
+
+/// Compile a mesh `defwidget` (one with `:vertex`; docs/defwidget-vertex-
+/// stage.md): both bodies macro-expanded, their state planned together (the
+/// scalars and instance fields either stage reads are its uniforms), then
+/// lowered. Also the widget's stub 2-D shader, which paints nothing.
+fn compile_defwidget_mesh(
+    widget: &str,
+    vertex: &Value,
+    fragment: &Value,
+    vm: &mut VM,
+    state_names: &[String],
+    arrays: Vec<crate::lang::sdf_codegen::MeshArrayState>,
+    animates: bool,
+) -> Result<(crate::widget_render::mesh_widget::MeshWidgetDef, crate::vm::SdfStatePlan, SdfCompileResult), String> {
+    use crate::parser::Expression;
+    let shader_error = |e: String| format!("{widget}: shader error: {e}");
+    let mut expand = |value: &Value| -> Result<Expression, String> {
+        let expr = crate::lang::sdf_codegen::value_to_expression(value)
+            .map_err(|e| shader_error(e.to_string()))?;
+        expand_sdf_expression(&expr, vm).map_err(shader_error)
+    };
+    let vertex_expr = expand(vertex)?;
+    let fragment_expr = expand(fragment)?;
+    let both = Expression::List(vec![
+        Expression::Symbol("do".into()),
+        vertex_expr.clone(),
+        fragment_expr.clone(),
+    ]);
+    let plan = plan_sdf_state(widget, vm, state_names, &both)?;
+    let state_uniforms = plan.uniforms();
+    let output = compile_mesh_for_platform_backend(&vertex_expr, &fragment_expr, &state_uniforms, &arrays)
+        .map_err(|e| shader_error(e.to_string()))?;
+    let stub = Expression::List(
+        std::iter::once(Expression::Symbol("rgba".into()))
+            .chain([0.0; 4].map(Expression::Number))
+            .collect(),
+    );
+    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env().map_err(shader_error)?;
+    let stub_output = compile_expanded_sdf(&stub, &[], options).map_err(shader_error)?;
+    Ok((
+        crate::widget_render::mesh_widget::MeshWidgetDef {
+            name: widget.to_string(),
+            shader_source: output.shader_source,
+            vertex_expr,
+            fragment_expr,
+            state_uniforms: state_uniforms.clone(),
+            arrays,
+            animates,
+        },
+        plan,
+        SdfCompileResult { output: stub_output, expanded_expr: stub, state_symbols: state_uniforms },
+    ))
+}
+
+/// `path` as given when absolute, else the first that exists of: beside the
+/// executing chunk's source file, beside the file being loaded, the working
+/// directory, a content root (`instruments/…`); else as given. A view's call through a wrapper function
+/// runs in the wrapper's file, so a top-level `mesh-load` (resolved while its
+/// file loads) is the reliable way to name a file beside a ui.lisp.
+fn source_relative_path(vm: &VM, path: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(path);
+    if path.is_absolute() {
+        return path;
+    }
+    [vm.current_source_file(), vm.source_manager.current_source_file()]
+        .into_iter()
+        .flatten()
+        .filter_map(|file| file.parent().map(|dir| dir.join(&path)))
+        .find(|candidate| candidate.exists())
+        .unwrap_or_else(|| crate::hot_reload::resolve_content_relative_asset(&path.to_string_lossy()))
+}
+
+/// The constructor native of `defwidget` `name`: builds the widget map and
+/// fills its state props. A mesh widget's relative `:src` is resolved here,
+/// against the file whose view is constructing it.
+fn register_defwidget_constructor(vm: &mut VM, name: &str) {
+    let widget_type = name.to_string();
+    vm.register_ref_aware_native_with_vm(name, move |args, vm| {
+        if let Some(message) = crate::widgets::undeclared_sdf_binding_error(&widget_type, &args) {
+            // Logged too: a view re-run's error is otherwise
+            // only traced (ESEQLISP_TRACE_UI).
+            crate::vm::log_native_misuse(&widget_type, &message);
+            vm.fail_native_call(crate::vm::VMError::Instance(message));
+            return Value::Nil;
+        }
+        let mut widget = crate::widgets::build_widget(&widget_type, args);
+        vm.qualify_widget_stable_key(&mut widget);
+        let mut widget = vm.restyle_part(widget);
+        if let Value::Map(map) = &mut widget {
+            if let Err(error) = fill_sdf_state_props(vm, &widget_type, map) {
+                vm.fail_native_call(error);
+                return Value::Nil;
+            }
+            if crate::widget_render::mesh_widget::mesh_widget_def(&widget_type).is_some()
+                && let Some(src) = map.get("src")
+            {
+                let resolved = match &*src.borrow() {
+                    Value::String(path) => Some(source_relative_path(vm, path)),
+                    _ => None,
+                };
+                if let Some(resolved) = resolved {
+                    *src.borrow_mut() = Value::String(resolved.display().to_string());
+                }
+            }
+        }
+        widget
+    });
+}
+
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -688,6 +832,21 @@ pub fn recompile_theme_dependent_sdf_shaders() -> bool {
             Err(e) => {
                 eprintln!("theme recompile of SDF widget '{}' failed: {}", def.name, e);
             }
+        }
+    }
+    for def in crate::widget_render::mesh_widget::mesh_widget_defs() {
+        if !expression_contains_keyword(&def.fragment_expr) && !expression_contains_keyword(&def.vertex_expr) {
+            continue;
+        }
+        match compile_mesh_for_platform_backend(&def.vertex_expr, &def.fragment_expr, &def.state_uniforms, &def.arrays) {
+            Ok(output) if output.shader_source != def.shader_source => {
+                let mut new_def = (*def).clone();
+                new_def.shader_source = output.shader_source;
+                crate::widget_render::mesh_widget::register_mesh_widget(new_def);
+                changed = true;
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("theme recompile of mesh widget '{}' failed: {}", def.name, e),
         }
     }
     changed
@@ -1891,7 +2050,9 @@ impl Runtime {
                 let mut height: f32 = 5.0;
                 let mut paint_margin: f32 = 0.0;
                 let mut shader_val = None;
+                let mut vertex_val = None;
                 let mut widget_state_names: Vec<String> = Vec::new();
+                let mut array_states: Vec<crate::lang::sdf_codegen::MeshArrayState> = Vec::new();
                 let mut animates = false;
 
                 let mut i = 1;
@@ -1916,15 +2077,29 @@ impl Runtime {
                             "shader" => {
                                 shader_val = Some(args[i + 1].clone());
                             }
+                            "vertex" => {
+                                vertex_val = Some(args[i + 1].clone());
+                            }
                             "animates" => {
                                 animates = matches!(args[i + 1], Value::Bool(true));
                             }
                             "state" => {
-                                // Extract state symbol names from quoted list
+                                // Extract state symbol names from quoted list;
+                                // `(name :floats n)` is an array state.
                                 if let Value::List(items) = &args[i + 1] {
                                     for item in items {
-                                        if let Value::Symbol(s) = &*item.borrow() {
-                                            widget_state_names.push(s.clone());
+                                        match &*item.borrow() {
+                                            Value::Symbol(s) => widget_state_names.push(s.clone()),
+                                            entry @ Value::List(_) => match array_state_entry(entry) {
+                                                Ok(array) => array_states.push(array),
+                                                Err(error) => {
+                                                    vm.fail_native_call(crate::vm::VMError::Instance(
+                                                        format!("{name}: {error}"),
+                                                    ));
+                                                    return Value::Nil;
+                                                }
+                                            },
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -1947,19 +2122,40 @@ impl Runtime {
                     return Value::String("defwidget: :shader is required".into());
                 };
 
-                let (compiled, plan) =
-                    match compile_defwidget_shader(&name, &shader_val, vm, &widget_state_names) {
-                        Ok(compiled) => compiled,
-                        Err(error) => {
-                            vm.fail_native_call(crate::vm::VMError::Instance(error));
-                            return Value::Nil;
-                        }
-                    };
-                let paint_margin = paint_margin.max(estimate_shadow_paint_margin(
-                    &compiled.expanded_expr,
-                    width,
-                    height,
-                ));
+                if let Some(array) = array_states.iter().find(|array| widget_state_names.contains(&array.name)) {
+                    vm.fail_native_call(crate::vm::VMError::Instance(format!(
+                        "{name}: state {} declared twice", array.name
+                    )));
+                    return Value::Nil;
+                }
+                if vertex_val.is_none() && !array_states.is_empty() {
+                    vm.fail_native_call(crate::vm::VMError::Instance(format!(
+                        "{name}: array states (name :floats n) need a :vertex body for now"
+                    )));
+                    return Value::Nil;
+                }
+                // A mesh widget is registered as an SDF widget too, for
+                // layout, events and state props, with a 2-D shader that
+                // paints nothing (its stages are the mesh def's).
+                let compiled = match &vertex_val {
+                    Some(vertex_val) => compile_defwidget_mesh(
+                        &name, vertex_val, &shader_val, vm, &widget_state_names, array_states, animates,
+                    )
+                    .map(|(mesh, plan, stub)| (stub, plan, Some(mesh))),
+                    None => compile_defwidget_shader(&name, &shader_val, vm, &widget_state_names)
+                        .map(|(compiled, plan)| (compiled, plan, None)),
+                };
+                let (compiled, plan, mesh) = match compiled {
+                    Ok(compiled) => compiled,
+                    Err(error) => {
+                        vm.fail_native_call(crate::vm::VMError::Instance(error));
+                        return Value::Nil;
+                    }
+                };
+                let paint_margin = match mesh {
+                    Some(_) => 0.0,
+                    None => paint_margin.max(estimate_shadow_paint_margin(&compiled.expanded_expr, width, height)),
+                };
                 register_sdf_widget(SdfWidgetDef {
                     name: name.clone(),
                     shader_source: compiled.output.shader_source,
@@ -1977,32 +2173,59 @@ impl Runtime {
                     paint_margin,
                     animates,
                 });
+                match mesh {
+                    Some(mesh) => crate::widget_render::mesh_widget::register_mesh_widget(mesh),
+                    None => crate::widget_render::mesh_widget::unregister_mesh_widget(&name),
+                }
                 crate::theme::note_widget_redefined(&name);
-
-                let widget_type = name.clone();
-                vm.register_ref_aware_native_with_vm(&name, move |args, vm| {
-                    if let Some(message) =
-                        crate::widgets::undeclared_sdf_binding_error(&widget_type, &args)
-                    {
-                        // Logged too: a view re-run's error is otherwise
-                        // only traced (ESEQLISP_TRACE_UI).
-                        crate::vm::log_native_misuse(&widget_type, &message);
-                        vm.fail_native_call(crate::vm::VMError::Instance(message));
-                        return Value::Nil;
-                    }
-                    let mut widget = crate::widgets::build_widget(&widget_type, args);
-                    vm.qualify_widget_stable_key(&mut widget);
-                    let mut widget = vm.restyle_part(widget);
-                    if let Value::Map(map) = &mut widget
-                        && let Err(error) = fill_sdf_state_props(vm, &widget_type, map)
-                    {
-                        vm.fail_native_call(error);
-                        return Value::Nil;
-                    }
-                    widget
-                });
+                register_defwidget_constructor(vm, &name);
                 Value::Keyword(name.clone())
             });
+        // (mesh-load path): an eseq-modes file as geometry for a mesh
+        // widget's :geometry, a handle (dict :mesh-id id :points P :modes N
+        // :freqs (...) :mass kg :radius r). A relative path is resolved
+        // against the file being run, so an instrument's ui.lisp names a
+        // file in its own folder.
+        runtime.vm.register_native_with_vm("mesh-load", |args, vm| {
+            let Some(Value::String(path)) = args.first() else {
+                vm.fail_native_call(crate::vm::VMError::Instance("mesh-load: expects a path".into()));
+                return Value::Nil;
+            };
+            let path = source_relative_path(vm, path);
+            match crate::widget_render::mesh_widget::load_geometry_file(&path) {
+                Ok(id) => crate::widget_render::mesh_widget::geometry_handle(id),
+                Err(error) => {
+                    vm.fail_native_call(crate::vm::VMError::Instance(format!("mesh-load: {error}")));
+                    Value::Nil
+                }
+            }
+        });
+        // (mesh-geometry dict [previous]): geometry built in Lisp (:points
+        // :triangles and optionally :normals :shapes :freqs :modes :mass)
+        // checked and registered once, as a handle like mesh-load's. Given
+        // the handle it replaces (a view rebuilt on every edit), that one's
+        // geometry is dropped.
+        runtime.vm.register_native_with_vm("mesh-geometry", |args, vm| {
+            use crate::widget_render::mesh_widget::{MeshGeometry, geometry_handle, replace_geometry};
+            let previous = match args.get(1) {
+                Some(Value::Map(handle)) => match handle.get("mesh-id").map(|id| id.borrow().clone()) {
+                    Some(Value::Number(id)) => Some(id as u64),
+                    _ => None,
+                },
+                _ => None,
+            };
+            match args.first().map(MeshGeometry::from_value) {
+                Some(Ok(geometry)) => geometry_handle(replace_geometry(previous, geometry)),
+                Some(Err(error)) => {
+                    vm.fail_native_call(crate::vm::VMError::Instance(format!("mesh-geometry: {error}")));
+                    Value::Nil
+                }
+                None => {
+                    vm.fail_native_call(crate::vm::VMError::Instance("mesh-geometry: expects a dict".into()));
+                    Value::Nil
+                }
+            }
+        });
 
         // Override slider natives with material-aware versions.
         // These intercept :material, compile it into an SDF shader, and set
@@ -2368,6 +2591,8 @@ impl Runtime {
             ),
             ("number?", "(number? x)", "Whether x is a number."),
             ("string?", "(string? x)", "Whether x is a string."),
+            ("map?", "(map? x)", "Whether x is a map (a dict)."),
+            ("list?", "(list? x)", "Whether x is a list."),
             (
                 "current-source-path",
                 "(current-source-path)",
@@ -2463,6 +2688,8 @@ impl Runtime {
             ("fract", "(fract x)", "Return the fractional part."),
             ("pow", "(pow base exponent)", "Return base raised to exponent."),
             ("atan2", "(atan2 y x)", "Return the angle of vector x/y in radians."),
+            ("bessel-j", "(bessel-j m x)", "Bessel function of the first kind J_m(x), integer order m."),
+            ("bessel-i", "(bessel-i m x)", "Modified Bessel function of the first kind I_m(x), integer order m."),
             ("mod", "(mod a b)", "Return the floating-point remainder of a divided by b."),
             ("clamp", "(clamp value low high)", "Clamp value to the inclusive numeric range."),
             ("mix", "(mix a b t)", "Linearly interpolate between a and b by t."),

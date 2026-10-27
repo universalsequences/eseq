@@ -41,7 +41,7 @@ pub(super) fn start(editor: &mut Editor, request: LiveRequest, buffer: &str, for
             if !compiles {
                 return request.reply(Ok(format!("{done} Not compiled: {buffer} is not the code the editor is showing.")));
             }
-            if let Err(error) = editor.runtime_mut().eval_str("(host-command \"evaluate-editor-source\" (dict))") {
+            if let Err(error) = editor.runtime_mut().eval_str("(host-command \"evaluate-editor-source\" (dict :session true))") {
                 return request.reply(Ok(format!("{done} The compile did not start: {error:?}")));
             }
             editor.refresh_runtime_side_effects();

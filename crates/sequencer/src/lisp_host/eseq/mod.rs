@@ -7,13 +7,16 @@ runtime, and MIDI-FX event scripting. Everything is surfaced through the
 
 pub mod expr_process;
 pub mod expr_promote;
+pub mod generator;
 pub mod graph_authoring;
 pub mod graph_dsl;
 pub mod graph_manifest;
 pub mod graph_update;
 pub mod kinds;
 pub mod midi_fx;
+pub mod modal_assembly;
 pub mod modal_patch;
+pub mod modal_plates;
 pub mod neural_natives;
 pub mod process_dsl_parse;
 pub mod process_library;
