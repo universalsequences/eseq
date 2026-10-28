@@ -26,6 +26,16 @@
 //! Clicking a dot dispatches `(on-pick index slot)`: `slot` is the `armed`
 //! prop (0 = A, 1 = B), flipped by Shift. Drawing is plain primitives plus one
 //! anti-aliased mesh, so there is no WGSL/MSL pair to keep in sync.
+//!
+//! Latent mode (for a decoder whose latent dims ARE the axes): an `:on-move`
+//! callback turns the plot into a continuous 2D control. A press on empty
+//! space, and any drag, dispatches `(on-move x y phase)` in score units
+//! (clamped to -3..3), `phase` 0 on press (or on first leaving a pressed dot),
+//! 1 while dragging, 2 on release; a
+//! press and release on a dot that moves less than `CLICK_SLOP_PX` still picks
+//! it. `:x` / `:y` / `:size` place the ring directly at that point (with a
+//! dashed lead from member A) instead of deriving it from the morph. Without
+//! `:on-move` the widget behaves exactly as before.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -65,6 +75,11 @@ const PREVIEW_FMAX: f32 = 1800.0;
 /// `STRIP_MIN_PX` design pixels.
 const STRIP_SHARE: f32 = 0.24;
 const STRIP_MIN_PX: f32 = 40.0;
+/// Latent mode: a press on a dot that travels less than this many design
+/// pixels before release is a pick, not a drag.
+const CLICK_SLOP_PX: f32 = 3.0;
+/// Latent mode: the score range `on-move` reports, the DSP's z clip.
+const SCORE_LIMIT: f32 = 3.0;
 
 /// One per-member column, in the domain the DSP blends it in.
 #[derive(Clone, Debug)]
@@ -630,6 +645,15 @@ impl Plot {
                 .clamp(self.rect.row + margin_y, self.rect.row + self.rect.height - margin_y),
         ]
     }
+
+    /// The inverse of `point` (before its edge clamp): the score under a
+    /// pointer, clamped to `-SCORE_LIMIT..SCORE_LIMIT` on each axis.
+    fn score(&self, col: f32, row: f32) -> [f32; 2] {
+        [
+            ((col - self.center[0]) / self.sd[0].max(1e-6)).clamp(-SCORE_LIMIT, SCORE_LIMIT),
+            ((self.center[1] - row) / self.sd[1].max(1e-6)).clamp(-SCORE_LIMIT, SCORE_LIMIT),
+        ]
+    }
 }
 
 /// Split the widget into the plot (top) and the preview strip (bottom).
@@ -680,11 +704,139 @@ fn nearest_member(
         .map(|(i, _)| i)
 }
 
+/// A custom payload tagged with its kind: `(:pick index slot)` or
+/// `(:move x y phase)`.
+fn tagged_event(kind: &str, numbers: &[f64]) -> WidgetEvent {
+    let mut items = vec![Rc::new(RefCell::new(Value::Keyword(kind.to_string())))];
+    items.extend(numbers.iter().map(|n| Rc::new(RefCell::new(Value::Number(*n)))));
+    WidgetEvent::Custom(Value::List(items))
+}
+
 fn pick_event(index: usize, slot: usize) -> WidgetEvent {
-    WidgetEvent::Custom(Value::List(vec![
-        Rc::new(RefCell::new(Value::Number(index as f64))),
-        Rc::new(RefCell::new(Value::Number(slot as f64))),
-    ]))
+    tagged_event("pick", &[index as f64, slot as f64])
+}
+
+fn move_event(score: [f32; 2], phase: u8) -> WidgetEvent {
+    tagged_event("move", &[score[0] as f64, score[1] as f64, phase as f64])
+}
+
+/// A prop that is present and not nil / false.
+fn prop_set(props: &HashMap<String, Value>, key: &str) -> bool {
+    props.get(key).is_some_and(|value| !matches!(value, Value::Nil | Value::Bool(false)))
+}
+
+/// Latent mode is on when the host wants continuous moves.
+fn latent_mode(props: &HashMap<String, Value>) -> bool {
+    prop_set(props, "on-move")
+}
+
+/// The point `:x` / `:y` / `:size` place directly, when `:x` is given.
+fn direct_point(props: &HashMap<String, Value>) -> Option<[f32; 3]> {
+    prop_set(props, "x").then(|| {
+        [
+            get_f32_prop(props, "x", 0.0).clamp(-SCORE_LIMIT, SCORE_LIMIT),
+            get_f32_prop(props, "y", 0.0).clamp(-SCORE_LIMIT, SCORE_LIMIT),
+            get_f32_prop(props, "size", 0.0).clamp(-SCORE_LIMIT, SCORE_LIMIT),
+        ]
+    })
+}
+
+/// The latent-mode press in flight (one pointer, so one slot): which widget,
+/// where it landed, the dot it landed on with the slot a pick would load
+/// (Shift read at press time), and whether it has since travelled past
+/// `CLICK_SLOP_PX` (after which release is a move, never a pick).
+#[derive(Clone, Copy, Debug)]
+struct LatentPress {
+    widget_id: u64,
+    at: (f32, f32),
+    dot: Option<(usize, usize)>,
+    travelled: bool,
+}
+
+thread_local! {
+    static LATENT_PRESS: RefCell<Option<LatentPress>> = const { RefCell::new(None) };
+}
+
+fn travel_px(from: (f32, f32), col: f32, row: f32, cell_w: f32, cell_h: f32) -> f32 {
+    ((col - from.0) * cell_w).hypot((row - from.1) * cell_h)
+}
+
+fn armed_slot(props: &HashMap<String, Value>, modifiers: KeyModifiers) -> usize {
+    let armed = usize::from(get_f32_prop(props, "armed", 0.0) > 0.5);
+    if modifiers.contains(KeyModifiers::SHIFT) { 1 - armed } else { armed }
+}
+
+/// Latent-mode pointer handling; see the module doc.
+#[allow(clippy::too_many_arguments)]
+fn latent_mouse_event(
+    node: &LayoutNode,
+    family: &Family,
+    mouse_kind: MouseEventKind,
+    col: f32,
+    row: f32,
+    modifiers: KeyModifiers,
+    cell_w: f32,
+    cell_h: f32,
+) -> MouseEventOutcome {
+    let plot = Plot::new(split_rect(node.rect, cell_h).0, family);
+    let slop = super::ui_design_px(CLICK_SLOP_PX);
+    match mouse_kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let r = plot.rect;
+            if !(col >= r.col && col < r.col + r.width && row >= r.row && row < r.row + r.height) {
+                // The preview strip: the whole gesture is ignored.
+                LATENT_PRESS.with(|press| *press.borrow_mut() = None);
+                return MouseEventOutcome::Consume;
+            }
+            let dot = nearest_member(family, &plot, col, row, cell_w, cell_h)
+                .map(|index| (index, armed_slot(&node.props, modifiers)));
+            LATENT_PRESS.with(|press| {
+                *press.borrow_mut() =
+                    Some(LatentPress { widget_id: node.widget_id, at: (col, row), dot, travelled: false });
+            });
+            match dot {
+                Some(_) => MouseEventOutcome::Consume,
+                None => MouseEventOutcome::Dispatch(move_event(plot.score(col, row), 0)),
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            // A drag that leaves a dot opens the gesture there (phase 0).
+            let phase = LATENT_PRESS.with(|press| {
+                let mut press = press.borrow_mut();
+                let state = press.as_mut().filter(|state| state.widget_id == node.widget_id)?;
+                if state.dot.is_some()
+                    && !state.travelled
+                    && travel_px(state.at, col, row, cell_w, cell_h) < slop
+                {
+                    return None;
+                }
+                let phase = if state.dot.is_some() && !state.travelled { 0 } else { 1 };
+                state.travelled = true;
+                Some(phase)
+            });
+            match phase {
+                Some(phase) => MouseEventOutcome::Dispatch(move_event(plot.score(col, row), phase)),
+                None => MouseEventOutcome::Consume,
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            let Some(state) = LATENT_PRESS
+                .with(|press| press.borrow_mut().take())
+                .filter(|state| state.widget_id == node.widget_id)
+            else {
+                return MouseEventOutcome::Consume;
+            };
+            match state.dot {
+                Some((index, slot))
+                    if !state.travelled && travel_px(state.at, col, row, cell_w, cell_h) < slop =>
+                {
+                    MouseEventOutcome::Dispatch(pick_event(index, slot))
+                }
+                _ => MouseEventOutcome::Dispatch(move_event(plot.score(col, row), 2)),
+            }
+        }
+        _ => MouseEventOutcome::Ignore,
+    }
 }
 
 /// `color` mixed over `under` at `amount`, opaque. Text is drawn without
@@ -780,6 +932,9 @@ impl WidgetDefinition for FamilyMapWidget {
             "ring",
             "tune",
             "armed",
+            "x",
+            "y",
+            "size",
         ]
     }
 
@@ -794,6 +949,10 @@ instrument's params: :a and :b (member indices), :blend 0..1, :exaggerate, :pc1 
 :bend, :body, :ring, :tune) for the preview. Clicking a dot calls :on-pick with \
 (index slot): slot is :armed (0 = A, 1 = B), flipped when Shift is held. :x-label and \
 :y-label name the axes; :accent colours A and the morph marker. \
+Latent mode: an :on-move callback (lambda (x y phase)) makes the plot a continuous 2D \
+control in score units (-3..3); phase is 0 on press, 1 while dragging, 2 on release, so \
+the host can group one undo per drag. A short press and release on a dot still picks it. \
+:x :y :size then place the ring directly (lead from member A). \
 Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-label \"deep\" \
 :y-label \"swell\" :on-pick (lambda (index slot) (set-member! slot index)))"
     }
@@ -831,6 +990,10 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
             "width",
             "height",
             "on-pick",
+            "on-move",
+            "x",
+            "y",
+            "size",
         ]
     }
 
@@ -894,6 +1057,29 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
         cell_h: f32,
     ) -> MouseEventOutcome {
         let local_row = super::scroll::event_content_row(local_row);
+        if latent_mode(&node.props) {
+            if !matches!(
+                mouse_kind,
+                MouseEventKind::Down(MouseButton::Left)
+                    | MouseEventKind::Drag(MouseButton::Left)
+                    | MouseEventKind::Up(MouseButton::Left)
+            ) {
+                return MouseEventOutcome::Ignore;
+            }
+            let Some(family) = family_from_props(&node.props) else {
+                return MouseEventOutcome::Ignore;
+            };
+            return latent_mouse_event(
+                node,
+                &family,
+                mouse_kind,
+                local_col,
+                local_row,
+                modifiers,
+                cell_w.max(1.0),
+                cell_h.max(1.0),
+            );
+        }
         let MouseEventKind::Down(MouseButton::Left) = mouse_kind else {
             return match mouse_kind {
                 MouseEventKind::Up(MouseButton::Left) => MouseEventOutcome::Consume,
@@ -905,21 +1091,36 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
         };
         let plot = Plot::new(split_rect(node.rect, cell_h).0, &family);
         match nearest_member(&family, &plot, local_col, local_row, cell_w.max(1.0), cell_h.max(1.0)) {
-            Some(index) => {
-                let armed = usize::from(get_f32_prop(&node.props, "armed", 0.0) > 0.5);
-                let slot = if modifiers.contains(KeyModifiers::SHIFT) { 1 - armed } else { armed };
-                MouseEventOutcome::Dispatch(pick_event(index, slot))
-            }
+            Some(index) => MouseEventOutcome::Dispatch(pick_event(index, armed_slot(&node.props, modifiers))),
             None => MouseEventOutcome::Consume,
         }
+    }
+
+    /// Drags follow the pointer outside the rect (latent mode). The trait
+    /// cannot see the node, so a family-map without `:on-move` captures its
+    /// drags too; `mouse_event` then ignores them and consumes the release,
+    /// so nothing is dispatched that was not before.
+    fn captures_drag(&self) -> bool {
+        true
+    }
+
+    /// The raw pointer arrives during a drag; `Plot::score` clamps it.
+    fn unclamped_drag(&self) -> bool {
+        true
     }
 
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
         let WidgetEvent::Custom(Value::List(items)) = event else {
             return None;
         };
-        let callback = node.props.get("on-pick")?.clone();
-        let args = items
+        let (kind, rest) = items.split_first()?;
+        let key = match &*kind.borrow() {
+            Value::Keyword(kind) if kind == "move" => "on-move",
+            Value::Keyword(kind) if kind == "pick" => "on-pick",
+            _ => return None,
+        };
+        let callback = node.props.get(key)?.clone();
+        let args = rest
             .iter()
             .map(|item| match &*item.borrow() {
                 Value::Number(number) => Value::Number(*number),
@@ -960,7 +1161,13 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
         let grid_color = resolve_named_color(props, "grid-color", with_alpha(theme::FG(), 0.06));
         let label_color = resolve_named_color(props, "label-color", mixed(background, theme::FG(), 0.42));
         let inset_color = resolve_named_color(props, "inset-color", with_alpha(theme::FG(), 0.05));
-        let morph = morph_from_props(props, family.members.len());
+        let point = direct_point(props);
+        let mut morph = morph_from_props(props, family.members.len());
+        if point.is_some() {
+            // A point, not a morph: A alone, as fitted, is the reference.
+            morph.b = morph.a;
+            morph.blend = 0.0;
+        }
         let (plot_rect, strip) = split_rect(rect, cell_h);
         let plot = Plot::new(plot_rect, &family);
         let hair_w = super::ui_design_px(1.0) / cell_w;
@@ -1024,13 +1231,23 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
             };
             mesh.push_disc(plot.point(score[0], score[1]), dot_radius_px(score[2]), color, viewport);
         }
-        let (blend, moved) = morph_points(&family, &morph);
-        let p_blend = plot.point(blend[0], blend[1]);
-        let p_moved = plot.point(moved[0], moved[1]);
-        dashed(&mut mesh, p_blend, p_moved, accent, viewport);
-        mesh.push_disc(p_blend, 3.0, b_color, viewport);
-        let ring = 5.0 + (moved[2].clamp(-3.0, 3.0) + 3.0) * 1.2;
-        mesh.push_polyline(&ring_points(p_moved, ring, viewport), accent, viewport, 0.75);
+        let (ring_center, ring_axis3) = match point {
+            Some(point) => {
+                let p_point = plot.point(point[0], point[1]);
+                dashed(&mut mesh, pa, p_point, accent, viewport);
+                (p_point, point[2])
+            }
+            None => {
+                let (blend, moved) = morph_points(&family, &morph);
+                let p_blend = plot.point(blend[0], blend[1]);
+                let p_moved = plot.point(moved[0], moved[1]);
+                dashed(&mut mesh, p_blend, p_moved, accent, viewport);
+                mesh.push_disc(p_blend, 3.0, b_color, viewport);
+                (p_moved, moved[2])
+            }
+        };
+        let ring = 5.0 + (ring_axis3.clamp(-3.0, 3.0) + 3.0) * 1.2;
+        mesh.push_polyline(&ring_points(ring_center, ring, viewport), accent, viewport, 0.75);
 
         // Morph preview strip under the plot, set off by a hairline.
         let inset = strip;
@@ -1114,7 +1331,10 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
                 text(p[1] - 0.5, p[0] + gap, label, 9.5, color)
             }
         };
-        if morph.a == morph.b {
+        // A point forces a == b; in latent mode the tag is the name alone.
+        if point.is_some() || (morph.a == morph.b && latent_mode(props)) {
+            prims.push(tag(pa, family.members[morph.a].clone(), accent));
+        } else if morph.a == morph.b {
             prims.push(tag(pa, format!("ab {}", family.members[morph.a]), accent));
         } else {
             prims.push(tag(pb, format!("b {}", family.members[morph.b]), b_color));
@@ -1272,14 +1492,16 @@ mod tests {
         assert_eq!(member_index(&props, "a", 33), 32);
     }
 
-    #[test]
-    fn clicking_a_dot_picks_it_into_the_armed_slot() {
-        let path = std::env::temp_dir().join(format!("family-map-test-{}.json", std::process::id()));
+    /// A 40x20 family-map node over `DOC`, written to a per-test sidecar.
+    fn test_node(name: &str, extra: &[(&str, Value)]) -> (LayoutNode, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("family-map-{name}-{}.json", std::process::id()));
         std::fs::write(&path, DOC).unwrap();
         let mut props = HashMap::new();
         props.insert("file".to_string(), Value::String(path.to_string_lossy().into_owned()));
         props.insert("on-pick".to_string(), Value::Keyword("cb".to_string()));
-        props.insert("armed".to_string(), Value::Number(1.0));
+        for (key, value) in extra {
+            props.insert(key.to_string(), value.clone());
+        }
         let node = LayoutNode {
             widget_id: 1,
             stable_widget_id: None,
@@ -1293,6 +1515,118 @@ mod tests {
             focusable: false,
             animation: crate::layout::LayoutAnimationHints::default(),
         };
+        (node, path)
+    }
+
+    /// Mouse event at (col, row), then `handle_event`: the callback and its
+    /// numeric args, or None when nothing was dispatched.
+    fn send(node: &LayoutNode, kind: MouseEventKind, col: f32, row: f32) -> Option<(Value, Vec<f64>)> {
+        match FAMILY_MAP_WIDGET.mouse_event(node, kind, col, row, None, None, KeyModifiers::NONE, 8.0, 16.0) {
+            MouseEventOutcome::Dispatch(event) => {
+                let output = FAMILY_MAP_WIDGET.handle_event(node, event).expect("routed to a callback");
+                let args = output.args.iter().map(|v| match v { Value::Number(n) => *n, _ => f64::NAN }).collect();
+                Some((output.callback, args))
+            }
+            _ => None,
+        }
+    }
+
+    fn assert_close(actual: &[f64], expected: &[f64]) {
+        assert_eq!(actual.len(), expected.len(), "{actual:?} vs {expected:?}");
+        for (a, e) in actual.iter().zip(expected) {
+            assert!((a - e).abs() < 1e-4, "{actual:?} vs {expected:?}");
+        }
+    }
+
+    #[test]
+    fn family_map_score_inverts_point_inside_the_clamp_margin() {
+        let family = parse_family(DOC).unwrap();
+        let plot = Plot::new(Rect { col: 2.0, row: 1.0, width: 40.0, height: 15.0 }, &family);
+        for (x, y) in [(0.0, 0.0), (1.5, -0.7), (-2.0, 1.8), (0.3, -1.8)] {
+            let p = plot.point(x, y);
+            let s = plot.score(p[0], p[1]);
+            assert!((s[0] - x).abs() < 1e-4 && (s[1] - y).abs() < 1e-4, "({x}, {y}) -> {s:?}");
+        }
+        let far = plot.score(1e6, -1e6);
+        assert_eq!(far, [SCORE_LIMIT, SCORE_LIMIT], "right and above: clamped to the z range");
+    }
+
+    #[test]
+    fn family_map_latent_drag_moves_with_begin_update_end_phases() {
+        let (node, path) = test_node("latent-drag", &[("on-move", Value::Keyword("mv".to_string()))]);
+        let family = family_from_props(&node.props).unwrap();
+        let plot = Plot::new(split_rect(node.rect, 16.0).0, &family);
+        let start = plot.point(0.5, 0.5);
+        let mid = plot.point(-1.0, 1.25);
+        let left = MouseButton::Left;
+        let (callback, args) = send(&node, MouseEventKind::Down(left), start[0], start[1]).expect("press moves");
+        assert_eq!(callback, Value::Keyword("mv".to_string()), "routed to on-move");
+        assert_close(&args, &[0.5, 0.5, 0.0]);
+        let (_, args) = send(&node, MouseEventKind::Drag(left), mid[0], mid[1]).expect("drag moves");
+        assert_close(&args, &[-1.0, 1.25, 1.0]);
+        // Far outside the rect: still tracked, clamped to the z range.
+        let (_, args) = send(&node, MouseEventKind::Drag(left), 1e4, -1e4).expect("captured drag");
+        assert_close(&args, &[3.0, 3.0, 1.0]);
+        let (_, args) = send(&node, MouseEventKind::Up(left), mid[0], mid[1]).expect("release ends");
+        assert_close(&args, &[-1.0, 1.25, 2.0]);
+        assert!(send(&node, MouseEventKind::Drag(left), mid[0], mid[1]).is_none(), "no gesture after release");
+        // A press on the preview strip is ignored, drag and release included.
+        let strip = split_rect(node.rect, 16.0).1;
+        let (col, row) = (strip.col + 5.0, strip.row + strip.height * 0.5);
+        assert!(send(&node, MouseEventKind::Down(left), col, row).is_none());
+        assert!(send(&node, MouseEventKind::Drag(left), start[0], start[1]).is_none());
+        assert!(send(&node, MouseEventKind::Up(left), start[0], start[1]).is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn family_map_latent_press_release_on_a_dot_picks_but_a_drag_off_it_moves() {
+        let (node, path) = test_node("latent-pick", &[
+            ("on-move", Value::Keyword("mv".to_string())),
+            ("armed", Value::Number(0.0)),
+        ]);
+        let family = family_from_props(&node.props).unwrap();
+        let plot = Plot::new(split_rect(node.rect, 16.0).0, &family);
+        let dot = plot.point(family.scores[1][0], family.scores[1][1]);
+        let left = MouseButton::Left;
+        assert!(send(&node, MouseEventKind::Down(left), dot[0], dot[1]).is_none(), "a dot press waits");
+        // Jitter inside the click slop (1 px) neither moves nor cancels the pick.
+        assert!(send(&node, MouseEventKind::Drag(left), dot[0] + 0.125, dot[1]).is_none());
+        let (callback, args) = send(&node, MouseEventKind::Up(left), dot[0] + 0.125, dot[1]).expect("picks");
+        assert_eq!(callback, Value::Keyword("cb".to_string()), "routed to on-pick");
+        assert_close(&args, &[1.0, 0.0]);
+
+        // Dragging off the dot drags the point; coming back and releasing on
+        // the dot does not turn the drag into a pick.
+        assert!(send(&node, MouseEventKind::Down(left), dot[0], dot[1]).is_none());
+        let away = plot.point(0.0, 0.0);
+        let (_, args) = send(&node, MouseEventKind::Drag(left), away[0], away[1]).expect("drag off the dot moves");
+        assert_close(&args, &[0.0, 0.0, 0.0]);
+        let (_, args) = send(&node, MouseEventKind::Drag(left), away[0] + 1.0, away[1]).expect("and keeps moving");
+        assert_eq!(args[2], 1.0, "the gesture opened on leaving the dot");
+        let (callback, args) = send(&node, MouseEventKind::Up(left), dot[0], dot[1]).expect("release ends the drag");
+        assert_eq!(callback, Value::Keyword("mv".to_string()));
+        assert_eq!(args[2], 2.0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn family_map_without_on_move_ignores_drags() {
+        let (node, path) = test_node("no-latent", &[]);
+        let family = family_from_props(&node.props).unwrap();
+        let plot = Plot::new(split_rect(node.rect, 16.0).0, &family);
+        let empty = plot.point(0.0, 0.0);
+        let left = MouseButton::Left;
+        let outcome = |kind| FAMILY_MAP_WIDGET.mouse_event(&node, kind, empty[0], empty[1], Some((0.0, 0.0)), None, KeyModifiers::NONE, 8.0, 16.0);
+        assert!(matches!(outcome(MouseEventKind::Down(left)), MouseEventOutcome::Consume));
+        assert!(matches!(outcome(MouseEventKind::Drag(left)), MouseEventOutcome::Ignore));
+        assert!(matches!(outcome(MouseEventKind::Up(left)), MouseEventOutcome::Consume));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn clicking_a_dot_picks_it_into_the_armed_slot() {
+        let (node, path) = test_node("pick", &[("armed", Value::Number(1.0))]);
         let family = family_from_props(&node.props).unwrap();
         let plot = Plot::new(split_rect(node.rect, 16.0).0, &family);
         let p = plot.point(family.scores[1][0], family.scores[1][1]);
