@@ -36,6 +36,20 @@
 //! it. `:x` / `:y` / `:size` place the ring directly at that point (with a
 //! dashed lead from member A) instead of deriving it from the morph. Without
 //! `:on-move` the widget behaves exactly as before.
+//!
+//! Markers (latent mode with several points, e.g. a morph's START and END):
+//! `:markers` is a list of `(dict :id n :x .. :y .. :size .. :label "START"
+//! :near i :color c)`. Each draws as its own labelled ring (the first in
+//! `:accent`, the rest in `:b-color`, unless `:color` is given), a faint line
+//! joins them in list order (the morph path), and `:selected` (an id; default
+//! the first marker) is drawn heavier. A press on a ring grabs that marker
+//! (no jump: the grab offset is kept); a press anywhere else moves the
+//! selected one there. `on-move` then gets `(x y phase id)`. A short click on
+//! a dot dispatches `(on-pick index id)` with the selected marker's id (Shift:
+//! the next marker's), so a host that selects the marker on its phase-0 move
+//! gets "click a ring to select it, click a snare to load it there". Markers
+//! with `:near` (a member index) split the preview strip into side-by-side
+//! strips, one per marker, labelled and drawn in the marker's colour.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -521,11 +535,14 @@ enum PreviewTrace {
     Envelope(Vec<f32>),
 }
 
+/// The last few modal previews (markers mode draws one per marker each frame,
+/// so a single entry would recompute every strip on every frame).
 #[derive(Default)]
 struct PreviewCache {
-    key: Option<(usize, [u32; 16])>,
-    samples: Rc<Vec<f32>>,
+    entries: Vec<((usize, [u32; 16]), Rc<Vec<f32>>)>,
 }
+
+const PREVIEW_CACHE_ENTRIES: usize = 4;
 
 thread_local! {
     static PREVIEW: RefCell<PreviewCache> = RefCell::new(PreviewCache::default());
@@ -558,11 +575,15 @@ fn preview_trace(family: &Arc<Family>, morph: &Morph, voice: &Voice) -> PreviewT
     let key = (Arc::as_ptr(family) as usize, bits);
     PreviewTrace::Wave(PREVIEW.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if cache.key != Some(key) {
-            cache.samples = Rc::new(preview_samples(kind, slots, morph, voice));
-            cache.key = Some(key);
+        if let Some((_, samples)) = cache.entries.iter().find(|(k, _)| *k == key) {
+            return samples.clone();
         }
-        cache.samples.clone()
+        let samples = Rc::new(preview_samples(kind, slots, morph, voice));
+        if cache.entries.len() >= PREVIEW_CACHE_ENTRIES {
+            cache.entries.remove(0);
+        }
+        cache.entries.push((key, samples.clone()));
+        samples
     }))
 }
 
@@ -720,6 +741,18 @@ fn move_event(score: [f32; 2], phase: u8) -> WidgetEvent {
     tagged_event("move", &[score[0] as f64, score[1] as f64, phase as f64])
 }
 
+/// A move: `(x y phase)`, or `(x y phase id)` when it moves a marker, at the
+/// pointer plus the grab offset, clamped to the z range.
+fn gesture_move(score: [f32; 2], phase: u8, marker: Option<(i64, [f32; 2])>) -> WidgetEvent {
+    match marker {
+        None => move_event(score, phase),
+        Some((id, offset)) => {
+            let at = |k: usize| (score[k] + offset[k]).clamp(-SCORE_LIMIT, SCORE_LIMIT) as f64;
+            tagged_event("move", &[at(0), at(1), phase as f64, id as f64])
+        }
+    }
+}
+
 /// A prop that is present and not nil / false.
 fn prop_set(props: &HashMap<String, Value>, key: &str) -> bool {
     props.get(key).is_some_and(|value| !matches!(value, Value::Nil | Value::Bool(false)))
@@ -741,6 +774,99 @@ fn direct_point(props: &HashMap<String, Value>) -> Option<[f32; 3]> {
     })
 }
 
+/// One `:markers` entry: a point in score units with its own label, colour
+/// and (optionally) the member the preview strip shows for it.
+#[derive(Clone, Debug)]
+struct Marker {
+    id: i64,
+    x: f32,
+    y: f32,
+    size: f32,
+    label: String,
+    near: Option<usize>,
+    color: Option<Color>,
+}
+
+fn map_number(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<f32> {
+    match &*map.get(key)?.borrow() {
+        Value::Number(n) if n.is_finite() => Some(*n as f32),
+        _ => None,
+    }
+}
+
+/// The `:markers` list; empty when unset (single-point / VILLAIN modes).
+/// A marker without `:id` takes its list position.
+fn markers_from_props(props: &HashMap<String, Value>, count: usize) -> Vec<Marker> {
+    let Some(Value::List(items)) = props.get("markers") else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(position, item)| {
+            let Value::Map(map) = &*item.borrow() else {
+                return None;
+            };
+            let coord = |key| map_number(map, key).unwrap_or(0.0).clamp(-SCORE_LIMIT, SCORE_LIMIT);
+            let label = match map.get("label").map(|cell| cell.borrow().clone()) {
+                Some(Value::String(label)) => label,
+                _ => String::new(),
+            };
+            let near = map_number(map, "near")
+                .filter(|_| count > 0)
+                .map(|n| ((n.max(0.0) + 0.5).floor() as usize).min(count - 1));
+            let color = map.get("color").and_then(|cell| theme::parse_color_value(&cell.borrow()));
+            Some(Marker {
+                id: map_number(map, "id").map_or(position as i64, |id| id.round() as i64),
+                x: coord("x"),
+                y: coord("y"),
+                size: coord("size"),
+                label,
+                near,
+                color,
+            })
+        })
+        .collect()
+}
+
+/// Position in `markers` of the `:selected` id (the first marker by default).
+fn selected_marker(props: &HashMap<String, Value>, markers: &[Marker]) -> usize {
+    if !prop_set(props, "selected") {
+        return 0;
+    }
+    let id = get_f32_prop(props, "selected", 0.0).round() as i64;
+    markers.iter().position(|marker| marker.id == id).unwrap_or(0)
+}
+
+fn marker_ring_px(size: f32) -> f32 {
+    5.0 + (size.clamp(-3.0, 3.0) + 3.0) * 1.2
+}
+
+/// The marker whose ring is under the pointer, the selected one first (it is
+/// drawn on top).
+fn marker_at(
+    markers: &[Marker],
+    selected: usize,
+    plot: &Plot,
+    col: f32,
+    row: f32,
+    cell_w: f32,
+    cell_h: f32,
+) -> Option<usize> {
+    let order = std::iter::once(selected).chain((0..markers.len()).filter(|&i| i != selected));
+    let mut best: Option<(usize, f32)> = None;
+    for i in order {
+        let marker = &markers[i];
+        let p = plot.point(marker.x, marker.y);
+        let distance = ((p[0] - col) * cell_w).hypot((p[1] - row) * cell_h);
+        let limit = super::ui_design_px(marker_ring_px(marker.size) + 4.0).max(super::ui_design_px(PICK_RADIUS_PX));
+        if distance <= limit && best.is_none_or(|(_, d)| distance < d - 1e-3) {
+            best = Some((i, distance));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 /// The latent-mode press in flight (one pointer, so one slot): which widget,
 /// where it landed, the dot it landed on with the slot a pick would load
 /// (Shift read at press time), and whether it has since travelled past
@@ -751,6 +877,9 @@ struct LatentPress {
     at: (f32, f32),
     dot: Option<(usize, usize)>,
     travelled: bool,
+    /// Markers mode: the marker this gesture moves and the grab offset
+    /// (marker minus pointer, in score units) that keeps it from jumping.
+    marker: Option<(i64, [f32; 2])>,
 }
 
 thread_local! {
@@ -780,6 +909,7 @@ fn latent_mouse_event(
 ) -> MouseEventOutcome {
     let plot = Plot::new(split_rect(node.rect, cell_h).0, family);
     let slop = super::ui_design_px(CLICK_SLOP_PX);
+    let pointer = plot.score(col, row);
     match mouse_kind {
         MouseEventKind::Down(MouseButton::Left) => {
             let r = plot.rect;
@@ -788,20 +918,43 @@ fn latent_mouse_event(
                 LATENT_PRESS.with(|press| *press.borrow_mut() = None);
                 return MouseEventOutcome::Consume;
             }
-            let dot = nearest_member(family, &plot, col, row, cell_w, cell_h)
-                .map(|index| (index, armed_slot(&node.props, modifiers)));
+            let markers = markers_from_props(&node.props, family.members.len());
+            let (dot, marker) = if markers.is_empty() {
+                let dot = nearest_member(family, &plot, col, row, cell_w, cell_h)
+                    .map(|index| (index, armed_slot(&node.props, modifiers)));
+                (dot, None)
+            } else {
+                let selected = selected_marker(&node.props, &markers);
+                match marker_at(&markers, selected, &plot, col, row, cell_w, cell_h) {
+                    // Grab the ring where it is: phase 0 at its own position.
+                    Some(i) => {
+                        let m = &markers[i];
+                        (None, Some((m.id, [m.x - pointer[0], m.y - pointer[1]])))
+                    }
+                    None => {
+                        let target = if modifiers.contains(KeyModifiers::SHIFT) {
+                            (selected + 1) % markers.len()
+                        } else {
+                            selected
+                        };
+                        let dot = nearest_member(family, &plot, col, row, cell_w, cell_h)
+                            .map(|index| (index, markers[target].id.max(0) as usize));
+                        (dot, Some((markers[selected].id, [0.0, 0.0])))
+                    }
+                }
+            };
             LATENT_PRESS.with(|press| {
                 *press.borrow_mut() =
-                    Some(LatentPress { widget_id: node.widget_id, at: (col, row), dot, travelled: false });
+                    Some(LatentPress { widget_id: node.widget_id, at: (col, row), dot, travelled: false, marker });
             });
             match dot {
                 Some(_) => MouseEventOutcome::Consume,
-                None => MouseEventOutcome::Dispatch(move_event(plot.score(col, row), 0)),
+                None => MouseEventOutcome::Dispatch(gesture_move(pointer, 0, marker)),
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
             // A drag that leaves a dot opens the gesture there (phase 0).
-            let phase = LATENT_PRESS.with(|press| {
+            let gesture = LATENT_PRESS.with(|press| {
                 let mut press = press.borrow_mut();
                 let state = press.as_mut().filter(|state| state.widget_id == node.widget_id)?;
                 if state.dot.is_some()
@@ -812,10 +965,10 @@ fn latent_mouse_event(
                 }
                 let phase = if state.dot.is_some() && !state.travelled { 0 } else { 1 };
                 state.travelled = true;
-                Some(phase)
+                Some((phase, state.marker))
             });
-            match phase {
-                Some(phase) => MouseEventOutcome::Dispatch(move_event(plot.score(col, row), phase)),
+            match gesture {
+                Some((phase, marker)) => MouseEventOutcome::Dispatch(gesture_move(pointer, phase, marker)),
                 None => MouseEventOutcome::Consume,
             }
         }
@@ -832,7 +985,7 @@ fn latent_mouse_event(
                 {
                     MouseEventOutcome::Dispatch(pick_event(index, slot))
                 }
-                _ => MouseEventOutcome::Dispatch(move_event(plot.score(col, row), 2)),
+                _ => MouseEventOutcome::Dispatch(gesture_move(pointer, 2, state.marker)),
             }
         }
         _ => MouseEventOutcome::Ignore,
@@ -904,6 +1057,118 @@ fn dashed(mesh: &mut ShadedMesh, a: [f32; 2], b: [f32; 2], color: Color, viewpor
     }
 }
 
+/// Where each marker's ring label goes, `(marker, (row, col, width))`, in
+/// marker order: right of the ring, or left of it near the plot's right
+/// edge; a label overlapping one already placed tries the other side, then
+/// the line below.
+fn label_slots(
+    markers: &[Marker],
+    centers: &[[f32; 2]],
+    plot_rect: Rect,
+    pad_w: f32,
+    cell_w: f32,
+    placed: &mut Vec<(f32, f32, f32)>,
+) -> Vec<(usize, (f32, f32, f32))> {
+    let overlaps = |placed: &[(f32, f32, f32)], row: f32, col: f32, width: f32| {
+        placed.iter().any(|&(r, c, w)| (r - row).abs() < 0.9 && col < c + w && c < col + width)
+    };
+    let mut out = Vec::new();
+    for (i, marker) in markers.iter().enumerate() {
+        if marker.label.is_empty() {
+            continue;
+        }
+        let gap = super::ui_design_px(marker_ring_px(marker.size) + 4.0) / cell_w;
+        let width = marker.label.chars().count() as f32 * 0.6;
+        let p = centers[i];
+        let right = p[0] + gap;
+        let left = p[0] - gap - width;
+        let fits_right = right + width <= plot_rect.col + plot_rect.width - pad_w * 0.5;
+        let sides = if fits_right { [right, left] } else { [left, right] };
+        let row = p[1] - 0.5;
+        let slot = sides
+            .iter()
+            .map(|&col| (row, col))
+            .chain(std::iter::once((row + 1.0, sides[0])))
+            .find(|&(row, col)| !overlaps(placed, row, col, width))
+            .unwrap_or((row + 1.0, sides[0]));
+        placed.push((slot.0, slot.1, width));
+        out.push((i, (slot.0, slot.1, width)));
+    }
+    out
+}
+
+/// One preview trace drawn into `inset` (a strip, or one side of a split
+/// strip), in `color`.
+#[allow(clippy::too_many_arguments)]
+fn push_trace(
+    prims: &mut Vec<GpuPrimitive>,
+    mesh: &mut ShadedMesh,
+    trace: PreviewTrace,
+    inset: Rect,
+    color: Color,
+    pad_w: f32,
+    hair_h: f32,
+    viewport: WidgetViewport,
+) {
+    let cell_w = viewport.cell_w.max(1.0);
+    let x0 = inset.col + pad_w;
+    let span = inset.width - pad_w * 2.0;
+    if span <= 0.0 {
+        return;
+    }
+    let columns = ((span * cell_w / super::ui_design_px(1.0)) as usize).clamp(16, 600);
+    let mid = inset.row + inset.height * 0.5;
+    let half = inset.height * 0.40;
+    let column_x = |c: usize| x0 + span * c as f32 / (columns - 1).max(1) as f32;
+    match trace {
+        PreviewTrace::Wave(samples) if !samples.is_empty() => {
+            // Min/max per pixel column, in time order, so dense cycles fill
+            // in rather than aliasing into a moire.
+            let mut points = Vec::with_capacity(columns * 2);
+            let per = samples.len() as f32 / columns as f32;
+            for c in 0..columns {
+                let start = ((c as f32 * per) as usize).min(samples.len() - 1);
+                let end = (((c + 1) as f32 * per) as usize).min(samples.len()).max(start + 1);
+                let chunk = &samples[start..end];
+                let (lo_i, lo) = chunk.iter().enumerate().fold((0, f32::MAX), |acc, (i, v)| if *v < acc.1 { (i, *v) } else { acc });
+                let (hi_i, hi) = chunk.iter().enumerate().fold((0, f32::MIN), |acc, (i, v)| if *v > acc.1 { (i, *v) } else { acc });
+                let (first, second) = if lo_i <= hi_i { (lo, hi) } else { (hi, lo) };
+                points.push([column_x(c), mid - first * half]);
+                points.push([column_x(c), mid - second * half]);
+            }
+            mesh.push_polyline(&points, with_alpha(color, 0.85), viewport, 0.45);
+        }
+        PreviewTrace::Envelope(envelope) if !envelope.is_empty() => {
+            // A rendered hit's peak envelope, mirrored: filled columns plus
+            // an outline top and bottom.
+            let at = |c: usize| {
+                let position = c as f32 / (columns - 1).max(1) as f32 * (envelope.len() - 1) as f32;
+                let i = (position.floor() as usize).min(envelope.len() - 1);
+                let j = (i + 1).min(envelope.len() - 1);
+                let frac = position - i as f32;
+                (envelope[i] + (envelope[j] - envelope[i]) * frac).clamp(0.0, 1.0)
+            };
+            let fill = with_alpha(color, 0.22);
+            let column_w = span / columns as f32;
+            let mut top = Vec::with_capacity(columns);
+            let mut bottom = Vec::with_capacity(columns);
+            for c in 0..columns {
+                let e = at(c) * half;
+                let x = column_x(c);
+                prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
+                    rect: Rect { col: x - column_w * 0.5, row: mid - e, width: column_w, height: (e * 2.0).max(hair_h) },
+                    color: fill,
+                }));
+                top.push([x, mid - e]);
+                bottom.push([x, mid + e]);
+            }
+            mesh.push_polyline(&top, with_alpha(color, 0.85), viewport, 0.45);
+            mesh.push_polyline(&bottom, with_alpha(color, 0.85), viewport, 0.45);
+        }
+        _ => {}
+    }
+}
+
 impl WidgetDefinition for FamilyMapWidget {
     fn names(&self) -> &'static [&'static str] {
         &["family-map"]
@@ -935,6 +1200,8 @@ impl WidgetDefinition for FamilyMapWidget {
             "x",
             "y",
             "size",
+            "markers",
+            "selected",
         ]
     }
 
@@ -953,6 +1220,10 @@ Latent mode: an :on-move callback (lambda (x y phase)) makes the plot a continuo
 control in score units (-3..3); phase is 0 on press, 1 while dragging, 2 on release, so \
 the host can group one undo per drag. A short press and release on a dot still picks it. \
 :x :y :size then place the ring directly (lead from member A). \
+Several points: :markers (list (dict :id 0 :x .. :y .. :size .. :label \"START\" :near i)), \
+:selected id; a press on a ring grabs that marker, elsewhere moves the selected one, \
+on-move gets (x y phase id), a dot click calls (on-pick index id) for the selected marker \
+(Shift: the next), and markers with :near get side-by-side preview strips. \
 Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-label \"deep\" \
 :y-label \"swell\" :on-pick (lambda (index slot) (set-member! slot index)))"
     }
@@ -994,6 +1265,8 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
             "x",
             "y",
             "size",
+            "markers",
+            "selected",
         ]
     }
 
@@ -1209,6 +1482,101 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
         }
 
         let mut mesh = ShadedMesh::new();
+        let markers = markers_from_props(props, family.members.len());
+        if !markers.is_empty() {
+            let selected = selected_marker(props, &markers);
+            let colors: Vec<Color> = markers
+                .iter()
+                .enumerate()
+                .map(|(i, marker)| marker.color.unwrap_or(if i == 0 { accent } else { b_color }))
+                .collect();
+            let centers: Vec<[f32; 2]> = markers.iter().map(|m| plot.point(m.x, m.y)).collect();
+            // The morph path, START -> END, faint.
+            if centers.len() > 1 {
+                mesh.push_polyline(&centers, with_alpha(line_color, 0.45), viewport, 0.6);
+            }
+            // Members, the markers' nearest ones on top in their colours.
+            let near_color = |i: usize| {
+                markers.iter().zip(&colors).rev().find(|(m, _)| m.near == Some(i)).map(|(_, c)| *c)
+            };
+            for (_, score) in family.scores.iter().enumerate().filter(|(i, _)| near_color(*i).is_none()) {
+                mesh.push_disc(plot.point(score[0], score[1]), dot_radius_px(score[2]), dot_color, viewport);
+            }
+            for (i, score) in family.scores.iter().enumerate() {
+                if let Some(color) = near_color(i) {
+                    mesh.push_disc(plot.point(score[0], score[1]), dot_radius_px(score[2]), color, viewport);
+                }
+            }
+            // Leads from each marker's nearest member, then the rings, the
+            // selected one last (on top), heavier, with a soft halo.
+            let order: Vec<usize> = (0..markers.len()).filter(|&i| i != selected).chain([selected]).collect();
+            for &i in &order {
+                if let Some(near) = markers[i].near {
+                    let score = family.scores[near];
+                    dashed(&mut mesh, plot.point(score[0], score[1]), centers[i], with_alpha(colors[i], 0.7), viewport);
+                }
+            }
+            for &i in &order {
+                let radius = marker_ring_px(markers[i].size);
+                if i == selected {
+                    mesh.push_disc(centers[i], radius, with_alpha(colors[i], 0.16), viewport);
+                    mesh.push_polyline(&ring_points(centers[i], radius, viewport), colors[i], viewport, 1.15);
+                    mesh.push_disc(centers[i], 1.8, colors[i], viewport);
+                } else {
+                    mesh.push_polyline(&ring_points(centers[i], radius, viewport), colors[i], viewport, 0.7);
+                }
+            }
+
+            // Strip: one side-by-side preview per marker that names a member.
+            let previewed: Vec<usize> = (0..markers.len()).filter(|&i| markers[i].near.is_some()).collect();
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive { rect: strip, color: inset_color }));
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
+                rect: Rect { height: hair_h, ..strip },
+                color: with_alpha(grid_color, 2.2),
+            }));
+            let mut labels = Vec::new();
+            let voice = voice_from_props(props);
+            let share = strip.width / previewed.len().max(1) as f32;
+            for (k, &i) in previewed.iter().enumerate() {
+                let near = markers[i].near.unwrap_or(0);
+                let side = Rect { col: strip.col + share * k as f32, width: share, ..strip };
+                if k > 0 {
+                    prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
+                        rect: Rect { col: side.col - hair_w * 0.5, width: hair_w, ..side },
+                        color: with_alpha(grid_color, 2.2),
+                    }));
+                }
+                let morph = Morph { a: near, b: near, blend: 0.0, exaggerate: 0.0, axes: [0.0; 3] };
+                let label_h = super::ui_design_px(11.0) / cell_h;
+                let trace_rect = Rect { row: side.row + label_h, height: (side.height - label_h).max(hair_h), ..side };
+                push_trace(&mut prims, &mut mesh, preview_trace(&family, &morph, &voice), trace_rect, colors[i], pad_w, hair_h, viewport);
+                let name = family.members.get(near).cloned().unwrap_or_default();
+                let caption = if markers[i].label.is_empty() { name } else { format!("{}  {}", markers[i].label, name) };
+                // Top right: the hit's tail is quiet there, its attack is not.
+                let width = caption.chars().count() as f32 * 0.6;
+                let mut primitive = text(side.row + pad_h * 0.25, side.col + side.width - pad_w - width, caption, 8.5, mixed(inset_color, colors[i], 1.0));
+                if let GpuPrimitive::ProportionalText(t) = &mut primitive {
+                    t.align_width = width;
+                    t.h_align = 1.0;
+                }
+                labels.push(primitive);
+            }
+            mesh.push_into(&mut prims);
+
+            // Ring labels, right of the ring (left of it near the edge). A
+            // label that would cover one already placed (two rings close
+            // together) takes the other side, else moves down a line.
+            let mut placed: Vec<(f32, f32, f32)> = Vec::new();
+            for (i, (row, col, width)) in label_slots(&markers, &centers, plot_rect, pad_w, cell_w, &mut placed) {
+                let mut primitive = text(row, col, markers[i].label.clone(), 9.0, colors[i]);
+                if let GpuPrimitive::ProportionalText(t) = &mut primitive {
+                    t.align_width = width;
+                }
+                prims.push(primitive);
+            }
+            prims.extend(labels);
+            return prims;
+        }
         let pa = plot.point(family.scores[morph.a][0], family.scores[morph.a][1]);
         let pb = plot.point(family.scores[morph.b][0], family.scores[morph.b][1]);
         if morph.a != morph.b {
@@ -1251,7 +1619,6 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
 
         // Morph preview strip under the plot, set off by a hairline.
         let inset = strip;
-        let inset_w = inset.width;
         prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
             rect: inset,
             color: inset_color,
@@ -1260,59 +1627,16 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
             rect: Rect { height: hair_h, ..inset },
             color: with_alpha(grid_color, 2.2),
         }));
-        let x0 = inset.col + pad_w;
-        let span = inset_w - pad_w * 2.0;
-        let columns = ((span * cell_w / super::ui_design_px(1.0)) as usize).clamp(16, 600);
-        let mid = inset.row + inset.height * 0.5;
-        let half = inset.height * 0.40;
-        let column_x = |c: usize| x0 + span * c as f32 / (columns - 1).max(1) as f32;
-        match preview_trace(&family, &morph, &voice_from_props(props)) {
-            PreviewTrace::Wave(samples) if !samples.is_empty() => {
-                // Min/max per pixel column, in time order, so dense cycles fill
-                // in rather than aliasing into a moire.
-                let mut points = Vec::with_capacity(columns * 2);
-                let per = samples.len() as f32 / columns as f32;
-                for c in 0..columns {
-                    let start = ((c as f32 * per) as usize).min(samples.len() - 1);
-                    let end = (((c + 1) as f32 * per) as usize).min(samples.len()).max(start + 1);
-                    let chunk = &samples[start..end];
-                    let (lo_i, lo) = chunk.iter().enumerate().fold((0, f32::MAX), |acc, (i, v)| if *v < acc.1 { (i, *v) } else { acc });
-                    let (hi_i, hi) = chunk.iter().enumerate().fold((0, f32::MIN), |acc, (i, v)| if *v > acc.1 { (i, *v) } else { acc });
-                    let (first, second) = if lo_i <= hi_i { (lo, hi) } else { (hi, lo) };
-                    points.push([column_x(c), mid - first * half]);
-                    points.push([column_x(c), mid - second * half]);
-                }
-                mesh.push_polyline(&points, with_alpha(b_color, 0.85), viewport, 0.45);
-            }
-            PreviewTrace::Envelope(envelope) if !envelope.is_empty() => {
-                // A rendered hit's peak envelope, mirrored: filled columns plus
-                // an outline top and bottom.
-                let at = |c: usize| {
-                    let position = c as f32 / (columns - 1).max(1) as f32 * (envelope.len() - 1) as f32;
-                    let i = (position.floor() as usize).min(envelope.len() - 1);
-                    let j = (i + 1).min(envelope.len() - 1);
-                    let frac = position - i as f32;
-                    (envelope[i] + (envelope[j] - envelope[i]) * frac).clamp(0.0, 1.0)
-                };
-                let fill = with_alpha(b_color, 0.22);
-                let column_w = span / columns as f32;
-                let mut top = Vec::with_capacity(columns);
-                let mut bottom = Vec::with_capacity(columns);
-                for c in 0..columns {
-                    let e = at(c) * half;
-                    let x = column_x(c);
-                    prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
-                        rect: Rect { col: x - column_w * 0.5, row: mid - e, width: column_w, height: (e * 2.0).max(hair_h) },
-                        color: fill,
-                    }));
-                    top.push([x, mid - e]);
-                    bottom.push([x, mid + e]);
-                }
-                mesh.push_polyline(&top, with_alpha(b_color, 0.85), viewport, 0.45);
-                mesh.push_polyline(&bottom, with_alpha(b_color, 0.85), viewport, 0.45);
-            }
-            _ => {}
-        }
+        push_trace(
+            &mut prims,
+            &mut mesh,
+            preview_trace(&family, &morph, &voice_from_props(props)),
+            inset,
+            b_color,
+            pad_w,
+            hair_h,
+            viewport,
+        );
         mesh.push_into(&mut prims);
 
         // Tags for A and B, right of their dots, or left of them when the
@@ -1641,6 +1965,144 @@ mod tests {
         assert_eq!(numbers(pick(KeyModifiers::SHIFT)), vec![1.0, 0.0], "shift flips to A");
         let miss = FAMILY_MAP_WIDGET.mouse_event(&node, MouseEventKind::Down(MouseButton::Left), 0.2, 0.2, None, None, KeyModifiers::NONE, 8.0, 16.0);
         assert!(matches!(miss, MouseEventOutcome::Consume), "empty space picks nothing");
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn cell(value: Value) -> Rc<RefCell<Value>> {
+        Rc::new(RefCell::new(value))
+    }
+
+    /// `(list (dict :id 0 :x .. :y .. :label "START" :near 0) (dict :id 1 ... "END" :near 1))`.
+    fn two_markers(start: [f32; 2], end: [f32; 2]) -> Value {
+        let marker = |id: f64, at: [f32; 2], label: &str, near: f64| {
+            cell(Value::Map(HashMap::from([
+                ("id".to_string(), cell(Value::Number(id))),
+                ("x".to_string(), cell(Value::Number(at[0] as f64))),
+                ("y".to_string(), cell(Value::Number(at[1] as f64))),
+                ("size".to_string(), cell(Value::Number(0.0))),
+                ("label".to_string(), cell(Value::String(label.to_string()))),
+                ("near".to_string(), cell(Value::Number(near))),
+            ])))
+        };
+        Value::List(vec![marker(0.0, start, "START", 0.0), marker(1.0, end, "END", 1.0)])
+    }
+
+    fn marker_node(name: &str, selected: Option<f64>) -> (LayoutNode, std::path::PathBuf) {
+        let mut extra = vec![
+            ("on-move", Value::Keyword("mv".to_string())),
+            ("markers", two_markers([0.0, 1.5], [-1.5, -1.5])),
+        ];
+        if let Some(selected) = selected {
+            extra.push(("selected", Value::Number(selected)));
+        }
+        test_node(name, &extra)
+    }
+
+    #[test]
+    fn family_map_markers_parse_with_ids_labels_and_nearest() {
+        let (node, path) = marker_node("markers-parse", Some(1.0));
+        let markers = markers_from_props(&node.props, 2);
+        assert_eq!(markers.len(), 2);
+        assert_eq!((markers[0].id, markers[0].label.as_str(), markers[0].near), (0, "START", Some(0)));
+        assert_eq!((markers[1].id, markers[1].x, markers[1].y), (1, -1.5, -1.5));
+        assert_eq!(selected_marker(&node.props, &markers), 1);
+        assert_eq!(selected_marker(&HashMap::new(), &markers), 0, "the first marker by default");
+        assert!(markers_from_props(&HashMap::new(), 2).is_empty(), "no :markers, single-point mode");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn family_map_markers_press_on_a_ring_grabs_it_without_jumping() {
+        let (node, path) = marker_node("markers-grab", Some(0.0));
+        let family = family_from_props(&node.props).unwrap();
+        let plot = Plot::new(split_rect(node.rect, 16.0).0, &family);
+        let end = plot.point(-1.5, -1.5);
+        let left = MouseButton::Left;
+        // Press a little off END's centre (inside its ring): END is grabbed
+        // where it is, although START is the selected marker.
+        let press = [end[0] + 0.5, end[1] + 0.25];
+        let (callback, args) = send(&node, MouseEventKind::Down(left), press[0], press[1]).expect("grabs");
+        assert_eq!(callback, Value::Keyword("mv".to_string()));
+        assert_close(&args, &[-1.5, -1.5, 0.0, 1.0]);
+        // Dragging carries the grab offset: the marker moves by the pointer's delta.
+        let target = plot.point(0.5, 0.25);
+        let (_, args) = send(&node, MouseEventKind::Drag(left), target[0] + 0.5, target[1] + 0.25).expect("drags");
+        assert_close(&args, &[0.5, 0.25, 1.0, 1.0]);
+        let (_, args) = send(&node, MouseEventKind::Up(left), target[0] + 0.5, target[1] + 0.25).expect("ends");
+        assert_close(&args, &[0.5, 0.25, 2.0, 1.0]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn family_map_markers_press_elsewhere_moves_the_selected_marker() {
+        let (node, path) = marker_node("markers-empty", Some(1.0));
+        let family = family_from_props(&node.props).unwrap();
+        let plot = Plot::new(split_rect(node.rect, 16.0).0, &family);
+        let empty = plot.point(1.0, 1.0);
+        let left = MouseButton::Left;
+        let (_, args) = send(&node, MouseEventKind::Down(left), empty[0], empty[1]).expect("moves");
+        assert_close(&args, &[1.0, 1.0, 0.0, 1.0]);
+        let (_, args) = send(&node, MouseEventKind::Up(left), empty[0], empty[1]).expect("ends");
+        assert_close(&args, &[1.0, 1.0, 2.0, 1.0]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn family_map_markers_dot_click_loads_into_the_selected_marker() {
+        let (node, path) = marker_node("markers-pick", Some(1.0));
+        let family = family_from_props(&node.props).unwrap();
+        let plot = Plot::new(split_rect(node.rect, 16.0).0, &family);
+        let dot = plot.point(family.scores[0][0], family.scores[0][1]);
+        let left = MouseButton::Left;
+        assert!(send(&node, MouseEventKind::Down(left), dot[0], dot[1]).is_none(), "a dot press waits");
+        let (callback, args) = send(&node, MouseEventKind::Up(left), dot[0], dot[1]).expect("picks");
+        assert_eq!(callback, Value::Keyword("cb".to_string()));
+        assert_close(&args, &[0.0, 1.0]);
+        // Shift loads into the next marker instead.
+        let shifted = FAMILY_MAP_WIDGET.mouse_event(&node, MouseEventKind::Down(left), dot[0], dot[1], None, None, KeyModifiers::SHIFT, 8.0, 16.0);
+        assert!(matches!(shifted, MouseEventOutcome::Consume));
+        let (_, args) = send(&node, MouseEventKind::Up(left), dot[0], dot[1]).expect("picks");
+        assert_close(&args, &[0.0, 0.0]);
+        // A drag that starts on a dot moves the selected marker off it.
+        assert!(send(&node, MouseEventKind::Down(left), dot[0], dot[1]).is_none());
+        let away = plot.point(0.5, -0.5);
+        let (_, args) = send(&node, MouseEventKind::Drag(left), away[0], away[1]).expect("moves");
+        assert_close(&args, &[0.5, -0.5, 0.0, 1.0]);
+        let _ = send(&node, MouseEventKind::Up(left), away[0], away[1]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn family_map_markers_draw_side_by_side_strips() {
+        let (node, path) = marker_node("markers-draw", None);
+        let viewport = WidgetViewport::window(8.0, 16.0, 800.0, 600.0, 0.0);
+        let prims = FAMILY_MAP_WIDGET.build_primitives("family-map", &node, viewport);
+        let captions: Vec<String> = prims
+            .iter()
+            .filter_map(|p| match p {
+                GpuPrimitive::ProportionalText(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(captions.contains(&"START".to_string()) && captions.contains(&"END".to_string()), "{captions:?}");
+        assert!(captions.contains(&"START  51".to_string()) && captions.contains(&"END  52".to_string()), "{captions:?}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn family_map_marker_labels_do_not_overlap_when_rings_coincide() {
+        let (node, path) = marker_node("markers-labels", None);
+        let markers = {
+            let mut m = markers_from_props(&node.props, 2);
+            m[1].x = m[0].x;
+            m[1].y = m[0].y;
+            m
+        };
+        let centers = vec![[20.0, 5.0], [20.0, 5.0]];
+        let rect = Rect { col: 0.0, row: 0.0, width: 40.0, height: 15.0 };
+        let slots = label_slots(&markers, &centers, rect, 1.0, 8.0, &mut Vec::new());
+        let (a, b) = (slots[0].1, slots[1].1);
+        assert!(a.1 > 20.0 && b.1 + b.2 < 20.0, "START right of the ring, END left of it: {slots:?}");
         let _ = std::fs::remove_file(path);
     }
 }
