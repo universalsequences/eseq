@@ -2,6 +2,7 @@
 members = [
     "crates/eseq-plugin",
     "crates/eseq-plugin-format",
+    "crates/eseq-voice-mod",
     "crates/eseqlisp",
     "crates/musicplayer",
     "crates/sequencer",
