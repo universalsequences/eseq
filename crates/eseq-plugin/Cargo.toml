@@ -21,6 +21,7 @@ serde_json = "1"
 [target.'cfg(target_os = "macos")'.dependencies]
 eseqlisp = { path = "../eseqlisp" }
 crossterm = "0.28"
+image = { version = "0.25", default-features = false, features = ["png"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString"] }
 objc2-app-kit = { version = "0.3", features = ["NSView", "NSResponder"] }

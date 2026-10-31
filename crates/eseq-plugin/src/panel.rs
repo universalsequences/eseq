@@ -12,9 +12,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use eseqlisp::backend::Backend;
 use eseqlisp::editor::ViewMode;
-use eseqlisp::frame::build_render_frame;
 use eseqlisp::metal_backend::MetalBackend;
 use eseqlisp::vm::{InstanceId, Value};
 use eseqlisp::{Editor, EditorConfig, HostCommand, Runtime};
@@ -155,6 +153,8 @@ impl PanelHost {
             .ok_or("the plugin root buffer was not created")?;
         editor.set_active_buffer(buffer);
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        // A plugin window is the panel alone: no `*plugin*` mode line.
+        editor.active_leaf_mut().show_status = false;
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             crate::shell::log(&format!("panel status: {status}"));
@@ -364,11 +364,14 @@ impl PanelHost {
         let animating = self.editor.visible_widgets_animating()
             || eseqlisp::widget_render::sdf_widget::sdf_visual_animations_active(self.backend.time_seconds());
         if self.editor.needs_redraw() || animating {
+            // The tiled path (the app's) honours the tile's hidden status
+            // line, and is what the pointer handlers hit-test against.
             let (cols, rows) = self.grid();
-            self.editor.set_layout_viewport(cols as u16, rows as u16);
-            let frame = build_render_frame(&mut self.editor, cols, rows);
-            let _ = self.backend.render(&frame);
-            self.editor.clear_needs_redraw();
+            let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(&mut self.editor, cols, rows);
+            match self.backend.render_tiled(&tiled) {
+                Ok(eseqlisp::metal_backend::TiledRenderStatus::Presented) => self.editor.clear_needs_redraw(),
+                _ => eseqlisp::frame::requeue_unpresented_tiled_frame(&mut self.editor, &tiled),
+            }
         }
     }
 
@@ -415,17 +418,17 @@ impl PanelHost {
         self.pump();
     }
 
-    /// Render the panel to a PNG (headless verification).
+    /// Render the panel to a PNG through the live (tiled) renderer, into an
+    /// offscreen target: exactly what the plugin window shows.
     pub fn render_png(&mut self, path: &Path) -> Result<(), String> {
         self.pump();
         let (cols, rows) = self.grid();
-        self.editor.set_layout_viewport(cols as u16, rows as u16);
-        let frame = build_render_frame(&mut self.editor, cols, rows);
+        let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(&mut self.editor, cols, rows);
         let w = (self.size.0 * self.scale).round() as u32;
         let h = (self.size.1 * self.scale).round() as u32;
-        self.backend
-            .render_frame_region_to_png(&frame, w, h, None, false, path)
-            .map_err(|_| "render failed".to_string())
+        let target = self.backend.create_tiled_capture_target(w, h).map_err(|_| "capture target")?;
+        self.backend.render_tiled_capture(&tiled, &target).map_err(|_| "render failed")?;
+        image::save_buffer(path, &target.rgba(), w, h, image::ExtendedColorType::Rgba8).map_err(|e| e.to_string())
     }
 
     pub fn editor_mut(&mut self) -> &mut Editor {
