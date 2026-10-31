@@ -14,6 +14,12 @@ pub const PAYLOAD_DIR: &str = "eseq-payload";
 /// The payload's identity, params and DSP layout.
 pub const SPEC_FILE: &str = "plugin.json";
 pub const SPEC_FORMAT: u32 = 1;
+/// The plugin's own voice-count param (the voice-stealing pool size),
+/// appended after the instrument descriptor's params.
+pub const VOICES_PARAM: &str = "eseq:voices";
+/// The voice count a fresh instance plays with (eseq's default pool).
+pub const DEFAULT_VOICES: usize = 6;
+
 /// Slots after a voice's state span the host keeps zeroed.
 pub const STATE_REDZONE_SLOTS: usize = 256;
 
@@ -33,7 +39,7 @@ pub struct PluginSpec {
     /// CLAP feature strings, e.g. `["instrument", "drum", "stereo"]`.
     pub features: Vec<String>,
     pub dsp: DspSpec,
-    /// Voices one plugin instance plays.
+    /// Voices one plugin instance allocates: the most its voices param allows.
     pub polyphony: usize,
     /// Host-visible params, in display order.
     pub params: Vec<ParamSpec>,

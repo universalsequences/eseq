@@ -195,6 +195,9 @@ fn main() {
     let mut silence_param: Option<String> = None;
     // name=value params applied (through state) before the first render.
     let mut presets: Vec<(String, f64)> = Vec::new();
+    // --bench SECONDS: a note every 250 ms (each held 200 ms) at 128-frame
+    // blocks; prints the render's share of real time, per second of audio.
+    let mut bench: Option<f64> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--wav" => wav = args.next().map(PathBuf::from),
@@ -202,6 +205,7 @@ fn main() {
             // that a store-only write (state load, the editor) reaches the DSP
             // of an already active instance.
             "--silence-param" => silence_param = args.next(),
+            "--bench" => bench = args.next().and_then(|v| v.parse().ok()),
             "--param" => {
                 let raw = args.next().expect("--param name=value");
                 let (name, value) = raw.split_once('=').expect("name=value");
@@ -261,6 +265,57 @@ fn main() {
         );
     }
 
+    if let Some(seconds) = bench {
+        let total = (SR * seconds) as usize;
+        let mut done = 0usize;
+        let mut second_started = std::time::Instant::now();
+        let mut second_frames = 0usize;
+        let block: usize = std::env::var("BENCH_BLOCK").ok().and_then(|v| v.parse().ok()).unwrap_or(128);
+        let mut left = vec![0.0f32; block];
+        let mut right = vec![0.0f32; block];
+        while done < total {
+            let mut events = Events { list: Vec::new() };
+            // BENCH_HELD=N: N notes struck at the start and held throughout.
+            let held: usize = std::env::var("BENCH_HELD").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+            if held > 0 {
+                if done == 0 {
+                    for k in 0..held {
+                        events.list.push(note(CLAP_EVENT_NOTE_ON, 0, 48 + 3 * k as i16, 0.8));
+                    }
+                }
+            } else {
+                let period = (SR * 0.25) as usize;
+                let hold = (SR * 0.2) as usize;
+                for f in done..done + block {
+                    let key = 48 + ((f / period) % 12) as i16;
+                    if f % period == 0 {
+                        events.list.push(note(CLAP_EVENT_NOTE_ON, (f - done) as u32, key, 0.8));
+                    }
+                    if f % period == hold {
+                        events.list.push(note(CLAP_EVENT_NOTE_OFF, (f - done) as u32, key, 0.0));
+                    }
+                }
+            }
+            let in_events = clap_input_events { ctx: &events as *const Events as *mut c_void, size: Some(events_size), get: Some(events_get) };
+            let out_events = clap_output_events { ctx: std::ptr::null_mut(), try_push: Some(out_try_push) };
+            let mut chans = [left.as_mut_ptr(), right.as_mut_ptr()];
+            let mut out = clap_audio_buffer { data32: chans.as_mut_ptr(), data64: std::ptr::null_mut(), channel_count: 2, latency: 0, constant_mask: 0 };
+            let process = clap_process {
+                steady_time: done as i64, frames_count: block as u32, transport: std::ptr::null(),
+                audio_inputs: std::ptr::null(), audio_outputs: &mut out, audio_inputs_count: 0, audio_outputs_count: 1,
+                in_events: &in_events, out_events: &out_events,
+            };
+            unsafe { ((*plugin.raw).process.unwrap())(plugin.raw, &process) };
+            done += block;
+            second_frames += block;
+            if second_frames as f64 >= SR {
+                println!("second {:>2}: {:.1}% of real time", done as f64 / SR, second_started.elapsed().as_secs_f64() * 100.0);
+                second_started = std::time::Instant::now();
+                second_frames = 0;
+            }
+        }
+        return;
+    }
     if !presets.is_empty() {
         let params: serde_json::Map<String, serde_json::Value> =
             presets.iter().map(|(n, v)| (n.clone(), serde_json::json!(v))).collect();

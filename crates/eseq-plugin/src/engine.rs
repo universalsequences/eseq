@@ -247,6 +247,9 @@ pub struct Engine {
     /// an unleased slot is off unless it is an envelope.
     leased: u8,
     mod_display: Arc<ModDisplay>,
+    /// The voices param (the stealing pool size) and its current value.
+    voices_param: Option<usize>,
+    voice_limit: usize,
 }
 
 // The raw pointers are the static host-services table and pointers into this
@@ -363,6 +366,8 @@ impl Engine {
             ext_claims,
             leased: 0,
             mod_display,
+            voices_param: payload.spec.params.iter().position(|p| p.name == crate::payload::VOICES_PARAM),
+            voice_limit: usize::MAX,
         };
         engine.sync_params();
         Ok(engine)
@@ -426,11 +431,27 @@ impl Engine {
         if depth_moved || first {
             self.sync_active_flags();
         }
+        self.sync_voice_limit();
         if resync {
             for voice in &mut self.voices {
                 unsafe { vm::reset_slot_cycles(voice.modulation.as_mut_ptr()) };
             }
         }
+    }
+
+    /// The voice-stealing pool: notes go to the first `voices` voices only.
+    /// Lowering it releases the voices above it (they ring out and retire).
+    fn sync_voice_limit(&mut self) {
+        let limit = match self.voices_param {
+            Some(index) => (self.params.get(index).round().max(1.0) as usize).min(self.voices.len()),
+            None => self.voices.len(),
+        };
+        if limit < self.voice_limit {
+            for voice in self.voices.iter_mut().skip(limit) {
+                voice.gate = false;
+            }
+        }
+        self.voice_limit = limit;
     }
 
     /// A destination's `__dgen_mod_active__` flag is on while any of its
@@ -509,14 +530,15 @@ impl Engine {
     /// A free voice, else the same key's voice (retrigger in place), else the
     /// oldest released voice, else the oldest voice.
     fn pick_voice(&self, key: i16, channel: i16) -> usize {
-        if let Some(i) = self.voices.iter().position(|v| v.active && v.key == key && v.channel == channel) {
+        let pool = &self.voices[..self.voice_limit.clamp(1, self.voices.len())];
+        if let Some(i) = pool.iter().position(|v| v.active && v.key == key && v.channel == channel) {
             return i;
         }
-        if let Some(i) = self.voices.iter().position(|v| !v.active) {
+        if let Some(i) = pool.iter().position(|v| !v.active) {
             return i;
         }
         let oldest = |gated: bool| {
-            self.voices
+            pool
                 .iter()
                 .enumerate()
                 .filter(|(_, v)| v.gate == gated)

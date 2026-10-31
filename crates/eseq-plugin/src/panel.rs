@@ -153,6 +153,13 @@ impl PanelHost {
         eval(rt, &panel_source, "panel source")?;
         eval(rt, r#"(load "@/ui/effects.lisp")"#, "effects.lisp")?;
         let kinds = publish_kinds(rt, &spec, &params)?;
+        // The header's voices picker binds the voices param instance.
+        let voices = spec
+            .params
+            .iter()
+            .position(|p| p.name == crate::payload::VOICES_PARAM)
+            .map_or(Value::Nil, |index| Value::Instance(kinds.params[index]));
+        rt.register_native("plugin-voices-param", move |_args, _ctx| Ok(voices.clone()));
         eval(rt, PLUGIN_ROOT, "plugin root")?;
         eseqlisp::runtime::recompile_theme_dependent_sdf_shaders();
         editor.refresh_runtime_side_effects();
@@ -706,7 +713,17 @@ const PLUGIN_ROOT: &str = r#"
         (v-stack :gap 0.3 :align :start
           (h-stack :debug-name "plugin-header" :gap 1 :height 1.0 :align :center
             (eseq.effects.effect-panels/instrument-synth-button)
-            (eseq.effects.effect-panels/instrument-mods-toggle-button))
+            (eseq.effects.effect-panels/instrument-mods-toggle-button)
+            (let ((v (plugin-voices-param)))
+              (if v
+                (h-stack :gap 0.3 :height 0.8 :align :center
+                  (label "voices" :font-size 9 :color :dim :bg :transparent)
+                  (number-picker :key "plugin-voices" :width 2.5 :height 0.8
+                    :font-size 10 :decimals 0 :step 1 :min v.min :max v.max
+                    :value #'v.value
+                    :on-change (lambda (x) (host-command "set-instrument-param"
+                                             (dict :param-idx v.index :value x)))))
+                (box :width 0 :height 0))))
           (eseq.effects.panel-bodies/instrument-synth-panel-body inst)))
       (label "this instrument has no panel"))))
 "#;

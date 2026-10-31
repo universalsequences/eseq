@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use eseq_plugin_format::{
     CellDefault, DspLayout, DspSpec, HostSignal, ModTargetSpec, ModulatorSpec, PAYLOAD_DIR,
     ParamKind as PluginParamKind, ParamSpec, ParamTarget, PluginSpec, Route, SPEC_FILE, SPEC_FORMAT,
-    UiSpec,
+    UiSpec, DEFAULT_VOICES, VOICES_PARAM,
 };
 
 use crate::effects::panel_section::PanelSection;
@@ -27,6 +27,8 @@ const _: () = assert!(crate::lisp_host::DGEN_STATE_REDZONE_SLOTS == eseq_plugin_
 /// so this bounds `instances × polyphony` per DAW process (spec §6). Untouched
 /// slices cost only virtual address space.
 pub const VOICE_SLOTS: usize = 64;
+/// Voices one instance allocates (the voices param's ceiling).
+const MAX_VOICES: usize = 16;
 /// The compile-time sample rate is only a cache-key input; the shell passes
 /// the host's rate at runtime.
 const COMPILE_SAMPLE_RATE: u32 = 48_000;
@@ -75,7 +77,8 @@ pub struct ExportOptions {
     pub formats: Vec<PluginFormat>,
     /// Where bundles go; `None` installs into the per-user plug-in folders.
     pub out_dir: Option<PathBuf>,
-    /// Voices per plugin instance; `None` = 8 for drums, 16 otherwise.
+    /// The most voices an instance may play (its voices param's ceiling);
+    /// `None` = 16. Instances start at eseq's default of 6.
     pub polyphony: Option<usize>,
     /// Start from this preset's values (name or id).
     pub preset: Option<String>,
@@ -440,6 +443,22 @@ fn build_payload(
     }
 
     let mut params = param_specs(&desc);
+    let max_voices = options.polyphony.unwrap_or(MAX_VOICES).clamp(1, VOICE_SLOTS);
+    params.push(ParamSpec {
+        name: VOICES_PARAM.into(),
+        label: "voices".into(),
+        min: 1.0,
+        max: max_voices as f32,
+        default: DEFAULT_VOICES.min(max_voices) as f32,
+        unit: String::new(),
+        options: Vec::new(),
+        percent: false,
+        kind: PluginParamKind::Continuous,
+        target: ParamTarget::Host,
+        section: "hidden".into(),
+        mod_slot: 0,
+        resync: false,
+    });
     if params.is_empty() {
         return Err("the instrument has no visible params".into());
     }
@@ -496,7 +515,7 @@ fn build_payload(
             voice_slots: VOICE_SLOTS,
             layout,
         },
-        polyphony: options.polyphony.unwrap_or(if drum { 8 } else { 16 }).clamp(1, VOICE_SLOTS),
+        polyphony: max_voices,
         params,
         ui: build_ui_payload(source, payload)?,
         source_instrument: source.logical_name.clone(),

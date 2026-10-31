@@ -45,6 +45,15 @@ fn main() {
             drag = Some((x + w / 2.0, y + h / 2.0, 40.0));
         }
     }
+    if std::env::var_os("SET_VOICES").is_some() {
+        let r = panel.invoke_keyed("number-picker", "plugin-voices", "on-change", vec![eseqlisp::vm::Value::Number(3.0)]);
+        panel.frame_headless();
+        for edit in panel.take_edits() {
+            if let eseq_plugin::panel::PanelEdit::Value(index, value) = edit {
+                println!("voices picker ({r:?}): {} = {value}", payload.spec.params[index].name);
+            }
+        }
+    }
     if std::env::var_os("INVOKE_FIRST_KNOB").is_some() {
         let r = panel.invoke_first("knob-number", "on-change", vec![eseqlisp::vm::Value::Number(1.5)]);
         panel.frame_headless();
