@@ -774,6 +774,9 @@ pub struct SequencerState {
     pub(super) active_note_trigger_ids: Vec<[AtomicU64; 128]>,
     pub(super) active_note_trigger_sequence: AtomicU64,
     pub(super) audio_rendered_sample: AtomicU64,
+    /// When the block ending at `audio_rendered_sample` started, so the
+    /// playhead can move between blocks (audio_clock.rs).
+    pub(super) audio_clock: AudioClockStamp,
     /// The scheduler's rendered-beat clock (`rendered_total_beats` in
     /// scheduler/worker.rs), published every scheduler loop. This is the same
     /// clock quantized-launch deadlines are computed against

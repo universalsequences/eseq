@@ -1028,6 +1028,21 @@ pub fn debug_grid(node: &LayoutNode) -> (f64, Vec<f32>, Vec<(f32, String)>) {
     )
 }
 
+/// `view.view_start` moved to the nearest whole device pixel of scroll.
+/// Solid quads rasterize hard-edged, so a thin grid line or clip gap at a
+/// fractional x covers 2 pixels on one frame and 3 on the next: while the
+/// view scrolls, every thin vertical shimmers. Scrolling by whole pixels
+/// keeps each edge's sub-pixel phase fixed, so shapes translate unchanged.
+/// Only the drawing snaps: hit-testing still reads the exact `view-start`.
+fn pixel_snapped_view_start(view: &TimelineView, cell_w: f32) -> f64 {
+    let pixels = view.content_rect().width as f64 * cell_w as f64;
+    let pixels_per_time = pixels / view.view_duration;
+    if !(pixels_per_time.is_finite() && pixels_per_time > 0.0) {
+        return view.view_start;
+    }
+    (view.view_start * pixels_per_time).round() / pixels_per_time
+}
+
 fn build_primitives(
     node: &LayoutNode,
     viewport: super::WidgetViewport,
@@ -1060,6 +1075,7 @@ fn build_primitives(
             }
         }
     }
+    view.view_start = pixel_snapped_view_start(&view, viewport.cell_w);
     let content = view.content_rect();
     let mut primitives = Vec::new();
 
@@ -1909,7 +1925,12 @@ fn build_primitives(
         }
     }
 
-    if let Some(playhead_x) = view.metal_playhead_x() {
+    // Whole device pixels, like the scroll: a followed playhead sits still
+    // while the snapped content moves under it.
+    if let Some(playhead_x) = view
+        .metal_playhead_x()
+        .map(|x| (x * viewport.cell_w).round() / viewport.cell_w)
+    {
         if view.header_height > 0.0 {
             primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x: playhead_x - 0.0625,
@@ -5107,6 +5128,24 @@ mod tests {
     /// start, so the host never moves it with the record head): its
     /// `:cycle-beats` content still lands on the beat grid once the playhead
     /// stretches it, and it draws nothing until the playhead reaches it.
+    #[test]
+    fn scrolling_snaps_the_drawn_view_to_whole_device_pixels() {
+        let props = HashMap::from([
+            ("view-start".to_string(), Value::Number(1.3)),
+            ("view-duration".to_string(), Value::Number(10.0)),
+            ("sidebar-width".to_string(), Value::Number(0.0)),
+        ]);
+        let view = TimelineView::from_props(&props, Rect { row: 0.0, col: 0.0, width: 100.0, height: 4.0 });
+        // 100 cells * 8 px over 10 beats: 80 px per beat, so 1.3 beats
+        // (104 px) is already whole and 1.3001 (104.008 px) rounds back.
+        assert!((pixel_snapped_view_start(&view, 8.0) - 1.3).abs() < 1e-9);
+        let mut nudged = view;
+        nudged.view_start = 1.3001;
+        assert!((pixel_snapped_view_start(&nudged, 8.0) - 1.3).abs() < 1e-9);
+        nudged.view_start = 1.307; // 104.56 px
+        assert!((pixel_snapped_view_start(&nudged, 8.0) - 105.0 / 80.0).abs() < 1e-9);
+    }
+
     #[test]
     fn a_spanless_grow_item_draws_its_cycle_in_beats_from_the_playhead() {
         let item = |start: f64, end: f64, grow: bool| {

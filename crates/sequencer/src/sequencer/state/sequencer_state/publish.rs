@@ -281,6 +281,12 @@ impl SequencerState {
         self.audio_rendered_sample.store(sample, Ordering::Release);
     }
 
+    /// Stamp the block the audio callback that started at `started` just
+    /// rendered, for [`Self::song_position_beats_at`].
+    pub fn stamp_audio_clock(&self, block_start_sample: u64, frames: u64, sample_rate: f64, started: std::time::Instant) {
+        self.audio_clock.stamp(block_start_sample, frames, sample_rate, started);
+    }
+
     /// The audio clock published above — the "now" that due-ness of sequenced
     /// mixer controls is measured against on the app thread.
     pub fn audio_rendered_sample(&self) -> u64 {
