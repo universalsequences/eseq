@@ -732,6 +732,29 @@ fn project_name_and_agent_generation() {
 }
 
 #[test]
+fn a_song_row_sidebar_sync_never_leaves_another_tracks_sidebar_shown() {
+    let mut h = Harness::new();
+    h.app
+        .graph_controller()
+        .add_blank_sampler_track()
+        .expect("track");
+    h.track_names = h.app.tracks.clone();
+    h.sync();
+    let shown = || presented(|p| p.sidebar.get().track);
+    sync_sidebar_browser(&h.app, 0);
+    assert_eq!(shown(), 0);
+    // Unchanged inputs: the row sync keeps what is shown.
+    sync_sidebar_browser_if_inputs_changed(&h.app, 0);
+    assert_eq!(shown(), 0);
+    // Another caller showed track 2 in between: the row sync for track 0
+    // compares against THAT, so it rebuilds instead of skipping.
+    sync_sidebar_browser(&h.app, 2);
+    assert_eq!(shown(), 2);
+    sync_sidebar_browser_if_inputs_changed(&h.app, 0);
+    assert_eq!(shown(), 0);
+}
+
+#[test]
 fn a_drum_racks_slots_carry_their_presets_and_their_slot_device() {
     let mut h = Harness::new();
     h.rack_track();

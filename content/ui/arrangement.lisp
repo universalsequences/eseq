@@ -780,22 +780,25 @@
 ;; Provisional lanes carry raw events in clip.events' shape, so they go
 ;; through the windowed-dots pipeline.
 ;;
-;; The window is the item's OWN span, not the recorded content's length: the
-;; item grows to the record head while the notes stay put, so normalizing over
-;; the content would stretch the same dots across an ever-wider rect (they
-;; would snap back on every new note and creep apart again in between). A take
-;; never loops, so this is one cycle at phase 0 and the span past the last
-;; note is honestly empty.
-(def pending-span-steps (lane)
-  (let ((num-steps (max 1 lane.num-steps)))
-    (if (<= lane.length 0)
-      num-steps
-      (max 1 (/ (- lane.end lane.start) (/ lane.length num-steps))))))
+;; The window is the recorded content (`num-steps` steps of `length` beats,
+;; stretched to cover a note that starts at its very end), and `:cycle-beats`
+;; pins it to beats: the timeline sizes the cycle against the item's span as
+;; it grows to the playhead, so the dots keep their beat positions instead of
+;; stretching across an ever-wider rect. A take never loops (`:wrap false`),
+;; so the span past the last note is honestly empty.
+(def pending-window-steps (lane)
+  (max 1 lane.num-steps
+    (if (empty? lane.events)
+      0
+      (+ 1 (nth (nth lane.events (- (len lane.events) 1)) 0)))))
 
 (def pending-content (lane)
-  (let ((dots (windowed-dots lane.events 0 (pending-span-steps lane))))
-    (unless (empty? dots)
-      (dict :dots dots :cycle 1 :phase 0))))
+  (let ((window (pending-window-steps lane))
+        (dots (windowed-dots lane.events 0 window)))
+    (unless (or (empty? dots) (<= lane.num-steps 0))
+      (dict :dots dots
+        :cycle-beats (* window (/ lane.length lane.num-steps))
+        :phase 0 :wrap false))))
 
 ;; Whether pending row p (a lane or a launch) is on track lane i.
 (def on-lane? (p i)
@@ -810,11 +813,12 @@
       (dict
         :lane 0
         :start lane.start
-        :end lane.end
+        ;; The music it holds so far, never the record head: the timeline
+        ;; grows it to the playhead (see pending-span-items).
+        :end (+ lane.start (max 0 lane.length))
         :kind :midi
         :label "Take"
         :content (pending-content lane)
-        ;; A take runs to the record head until stop (see pending-span-items).
         :grow true
         :color color)
       (filter |lane| (on-lane? lane i) song.pending-lanes))))
@@ -835,27 +839,26 @@
     (unless (empty? dots)
       (dict :dots dots
         :cycle (span-cycle launch.length span)
+        ;; The growing last launch has no span: the timeline sizes its cycle
+        ;; from beats against the playhead.
+        :cycle-beats launch.length
         :phase 0))))
 
-;; A captured launch's provisional span runs to the next one in `rows`, or to
-;; the record head while it is the last.
-(def pending-end (rows index)
-  (if (< (+ index 1) (len rows))
-    (let ((next (nth rows (+ index 1)))) next.start)
-    song.pending-head))
-
-;; The captured launches `rows` as items, `(item row end)` each; a launch
-;; the record head has not passed yet has nothing to draw. The last one ends
-;; at the record head, so it is marked `:grow`: the head is floored to a
-;; 16th, and the timeline stretches a growing item to the playhead at paint
-;; time so its edge travels smoothly with the playhead instead of in steps.
+;; The captured launches `rows` as items, `(item row end)` each. A launch's
+;; span runs to the next one's start; the last one is still being recorded,
+;; so it is pushed with no span and marked `:grow`, and the timeline stretches
+;; it to the playhead at paint time (hiding it until the playhead reaches it).
+;; Nothing here reads the record head: it moves every 16th, and reading it
+;; would rerun every lane holding a capture, rebuilding all its items, at
+;; that rate for as long as the capture runs.
 (def pending-span-items (rows item)
   (filter |x| (not (= x nil))
     (map |index|
       (let ((row (nth rows index))
-            (end (pending-end rows index)))
-        (when (> end row.start)
-          (merge (item row end) :grow (= (+ index 1) (len rows)))))
+            (last? (= (+ index 1) (len rows)))
+            (end (if last? row.start (let ((next (nth rows (+ index 1)))) next.start))))
+        (when (or last? (> end row.start))
+          (merge (item row end) :grow last?)))
       (range 0 (len rows)))))
 
 (def pending-launch-items (i)
@@ -2069,12 +2072,12 @@
   (map |c| (dict :clip c :start (get c :start) :end (get c :end)) g.arr-clips))
 
 ;; A rack-lane span's ring glyph. A committed clip carries its :cycle; a
-;; provisional one's span is still growing, so it derives it from :length.
+;; provisional one's span is still growing, so it gives its :length in beats.
 (def rack-span-content (span)
   (let ((c (get span :clip)))
     (dict :rings (get c :rings)
-      :cycle (or (get c :cycle)
-               (span-cycle (get c :length) (- (get span :end) (get span :start))))
+      :cycle (get c :cycle)
+      :cycle-beats (when (= (get c :cycle) nil) (get c :length))
       :phase (get c :phase))))
 
 ;; A rack row's items: one per rack-lane clip, labelled with its rack clip
@@ -2128,6 +2131,9 @@
       :content (unless (empty? dots)
                  (dict :dots dots
                    :cycle (span-cycle (get member :length) (- (get span :end) start))
+                   ;; A growing span has no span yet: the timeline sizes
+                   ;; the cycle from beats against the playhead.
+                   :cycle-beats (when (get span :grow) (get member :length))
                    :phase (get member :phase))))))
 
 ;; Lane i's rack member items for `spans`.

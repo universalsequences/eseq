@@ -24036,10 +24036,25 @@ use panel_kinds_seed::*;
             Value::Number(1.0 / 8.0),
             "a 1-beat pattern repeats 8 times across an 8-beat launch span"
         );
+        // The last launch is still recording: pushed with no span and
+        // `:grow`, the timeline stretches it to the playhead, so nothing in
+        // the lane reads the record head (it moves every 16th).
         assert_eq!(
             read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 2) :end)"),
-            Value::Number(10.0),
-            "the last launch on the lane runs to the record head"
+            Value::Number(8.0),
+            "the last launch on the lane is pushed with no span"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 2) :grow)"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (get (nth (eseq.arrangement/track-items 0) 2) :content) :cycle-beats)"
+            ),
+            Value::Number(1.0),
+            "its pattern still draws, its cycle given in beats"
         );
         assert_eq!(
             read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 2) :id)"),
@@ -24052,8 +24067,8 @@ use panel_kinds_seed::*;
         );
         assert_eq!(
             read(&mut editor, &format!("(get {provisional} :end)")),
-            Value::Number(10.0),
-            "the span grows to the record head"
+            Value::Number(7.0),
+            "the take holds its recorded content; the timeline grows it to the playhead"
         );
         assert_eq!(
             read(&mut editor, &format!("(get {provisional} :id)")),
@@ -24088,15 +24103,22 @@ use panel_kinds_seed::*;
             Value::Number(2.0),
             "recorded notes draw through the committed dot pipeline"
         );
-        assert_eq!(
-            read(
-                &mut editor,
-                &format!("(get (nth (get (get {provisional} :content) :dots) 1) :offset)")
-            ),
-            Value::Number(0.5),
-            "dots normalize over the DRAWN span (24 steps), so a note at step \
-             12 stays at its real position as the item grows to the head — \
-             normalizing over the recorded length would stretch it to the end"
+        let Value::Number(offset) = read(
+            &mut editor,
+            &format!("(get (nth (get (get {provisional} :content) :dots) 1) :offset)"),
+        ) else {
+            panic!("dot offset")
+        };
+        let Value::Number(cycle_beats) =
+            read(&mut editor, &format!("(get (get {provisional} :content) :cycle-beats)"))
+        else {
+            panic!("cycle-beats")
+        };
+        assert!(
+            (offset * cycle_beats - 3.0).abs() < 1e-9,
+            "the note at step 12 sits 3 beats into the take whatever the drawn \
+             span: dots are pinned to beats, not stretched across the growing \
+             rect ({offset} of {cycle_beats})"
         );
 
         // Scene lane: one committed span plus the two captured launches, the
@@ -24112,8 +24134,8 @@ use panel_kinds_seed::*;
         );
         assert_eq!(
             read(&mut editor, "(get (nth (eseq.arrangement/scene-items) 2) :end)"),
-            Value::Number(10.0),
-            "the last captured launch runs to the record head"
+            Value::Number(8.0),
+            "the last captured launch is pushed with no span (it grows at paint)"
         );
         assert_eq!(
             read(&mut editor, "(get (nth (eseq.arrangement/scene-items) 2) :id)"),
