@@ -18,8 +18,11 @@ macOS arm64, with the instrument's own panel). Epic: see §13.
 Departures from the plan below, all deliberate for v1:
 
 - **No `dgen-host` extraction (§4).** The plugin owns a small engine; what it
-  shares with the app is the resolved layout, computed by the app's parser.
-  Voice modulator slots are not run (mod inputs read 0).
+  shares with the app is the resolved layout, computed by the app's parser,
+  and the voice-modulation kernel (`crates/eseq-voice-mod`, extracted from
+  `voice_modulator.rs`, which now calls it). Plugin params are the app's
+  instrument descriptor in order, so the panel's mods tab (sources, depth
+  lanes, live mod values and LFO phases) works as in eseq.
 - **Scratch statics (§6) are handled without a DGen change:** the library is
   compiled with 64 scratch slices and every voice of every instance of one
   plugin claims a distinct slice from a process-wide pool. Two instances on
@@ -27,7 +30,10 @@ Departures from the plan below, all deliberate for v1:
   real fix (bead .3).
 - **UI runtime is the whole `content/ui` + `content/core`** (~3 MB), not a
   curated subset (§7.3); unknown app natives are stubs, not missing symbols.
-- **No modal yet (§9):** the menu entry exports immediately with defaults.
+- **No modal yet (§9):** the menu entry exports immediately, with the
+  track's current values (mod settings and depths included) as defaults.
+- **Fixed-size window per tab:** the editor resizes between the synth and
+  mods tabs (CLAP `request_resize`); free resizing is not offered.
 - **Not verified here:** a real DAW session (Bitwig/Ableton/Logic) end to
   end, clap-validator and pluginval (not installed on the build machine),
   AU. Panel boot is ~0.35 s warm, ~1-1.7 s cold.
