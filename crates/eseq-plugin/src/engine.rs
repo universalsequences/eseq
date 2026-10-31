@@ -324,6 +324,7 @@ impl Engine {
 
     /// Write every param whose store value moved since the last write into
     /// all voices (idle ones too, so a new note starts from current values).
+    /// Runs at block start and after a param event within the block.
     fn sync_params(&mut self) {
         if !std::mem::take(&mut self.params_dirty) {
             return;
@@ -423,6 +424,9 @@ impl Engine {
         let frames = out_l.len().min(out_r.len());
         out_l[..frames].fill(0.0);
         out_r[..frames].fill(0.0);
+        // The editor and the host's main thread write the store directly
+        // (no event reaches the engine for those): look once per block.
+        self.params_dirty = true;
         let max_frames = self.clock.len();
         let mut next_event = 0;
         let mut done = 0;

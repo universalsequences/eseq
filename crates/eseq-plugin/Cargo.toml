@@ -26,6 +26,7 @@ objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString"] }
 objc2-app-kit = { version = "0.3", features = ["NSView", "NSResponder"] }
 
 [dev-dependencies]
+serde_json = "1"
 libc = "0.2"
 eseqlisp = { path = "../eseqlisp" }
 crossterm = "0.28"

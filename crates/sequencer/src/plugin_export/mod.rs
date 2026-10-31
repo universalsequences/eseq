@@ -112,6 +112,9 @@ struct InstrumentSource {
     dsp: String,
     logical_name: String,
     leaf_name: String,
+    /// The folder's path under its content root (differs from
+    /// `logical_name` for a versioned release).
+    content_rel: String,
 }
 
 fn resolve_instrument(target: &str) -> Result<InstrumentSource, String> {
@@ -128,16 +131,20 @@ fn resolve_instrument(target: &str) -> Result<InstrumentSource, String> {
         .parent()
         .ok_or_else(|| format!("{} has no parent folder", dsp_path.display()))?
         .to_path_buf();
-    let leaf_name = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| target.to_string());
+    // Where the folder sits under its content root: a versioned release's
+    // `Drums/808 Kick/versions/1`. Panels read data files by this path.
+    let content_rel = logical_name_for_dir(&dir);
     let logical_name = if as_path.exists() {
-        logical_name_for_dir(&dir).unwrap_or_else(|| leaf_name.clone())
+        content_rel
+            .as_deref()
+            .map(|rel| rel.split("/versions/").next().unwrap_or(rel).to_string())
+            .unwrap_or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
     } else {
         logical_instrument_name(target)
     };
-    Ok(InstrumentSource { dir, dsp, logical_name, leaf_name })
+    let leaf_name = logical_name.rsplit('/').next().unwrap_or(&logical_name).to_string();
+    let content_rel = content_rel.unwrap_or_else(|| logical_name.clone());
+    Ok(InstrumentSource { dir, dsp, logical_name, leaf_name, content_rel })
 }
 
 /// A track's instrument id without its tier or release pin
@@ -457,14 +464,25 @@ fn build_payload(
     Ok(spec)
 }
 
-/// The panel half of the payload, when the instrument has a `ui.lisp`:
-/// the eseqlisp UI runtime it renders through (`content/ui` + `content/core`),
-/// the instrument folder at its content-relative path (panels read data
-/// files such as `data/family.json` by that path), the monospace font, and
-/// the instrument's panel source generated for one instrument.
+/// The panel half of the payload: the eseqlisp UI runtime the panel renders
+/// through (`content/ui` + `content/core`), the instrument folder at its
+/// content-relative path (panels read data files such as `data/family.json`
+/// by that path), the monospace font, and the panel source generated for this
+/// one instrument. An instrument with no `ui.lisp` gets eseq's own fallback,
+/// the generic param grid, exactly as the app shows it.
 fn build_ui_payload(source: &InstrumentSource, payload: &Path) -> Result<Option<UiSpec>, String> {
+    // Every instrument gets a panel; `Option` keeps the format open to
+    // headless exports.
     let ui_path = source.dir.join("ui.lisp");
-    let Ok(ui_src) = std::fs::read_to_string(&ui_path) else { return Ok(None) };
+    let panel = match std::fs::read_to_string(&ui_path) {
+        Ok(ui_src) => crate::custom_ui_codegen::single_instrument_ui_source(
+            &source.logical_name,
+            &ui_path.display().to_string(),
+            &ui_src,
+        )?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => NO_CUSTOM_UI.to_string(),
+        Err(e) => return Err(format!("{}: {e}", ui_path.display())),
+    };
     let paths = crate::app_paths::app_paths();
     let factory = paths.factory_root();
     let ui_dir = payload.join("ui");
@@ -472,18 +490,13 @@ fn build_ui_payload(source: &InstrumentSource, payload: &Path) -> Result<Option<
     for dir in UI_RUNTIME_DIRS {
         copy_dir(&factory.join(dir), &content.join(dir))?;
     }
-    let instrument_rel = Path::new("instruments").join(&source.logical_name);
+    let instrument_rel = Path::new("instruments").join(&source.content_rel);
     crate::package_export::copy_dir_filtered(&source.dir, &content.join(&instrument_rel))?;
     let font = paths.ui_monospace_font();
     let fonts = ui_dir.join("fonts");
     std::fs::create_dir_all(&fonts).map_err(|e| e.to_string())?;
     let font_name = font.file_name().ok_or("monospace font has no file name")?;
     std::fs::copy(&font, fonts.join(font_name)).map_err(|e| format!("{}: {e}", font.display()))?;
-    let panel = crate::custom_ui_codegen::single_instrument_ui_source(
-        &source.logical_name,
-        &ui_path.display().to_string(),
-        &ui_src,
-    )?;
     std::fs::write(ui_dir.join("panel.lisp"), panel).map_err(|e| e.to_string())?;
     Ok(Some(UiSpec {
         root: "ui/content".into(),
@@ -500,6 +513,9 @@ fn build_ui_payload(source: &InstrumentSource, payload: &Path) -> Result<Option<
 /// `eseq.kinds` and the other core modules).
 const UI_RUNTIME_DIRS: [&str; 2] = ["ui", "core"];
 const DEFAULT_THEME: &str = "seq-theme-mac-osx-dark";
+/// Panel source for an instrument without `ui.lisp`: declining the custom UI
+/// makes `instrument-synth-panel-body` draw the param grid.
+const NO_CUSTOM_UI: &str = "(def custom-instrument-synth-ui (inst) false)\n";
 
 pub fn export_instrument_plugin(options: &ExportOptions) -> Result<ExportReport, String> {
     if options.formats.is_empty() {

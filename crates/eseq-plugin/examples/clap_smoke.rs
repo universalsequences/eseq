@@ -192,9 +192,15 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let bundle = PathBuf::from(args.next().expect("bundle path"));
     let mut wav: Option<PathBuf> = None;
+    let mut silence_param: Option<String> = None;
     while let Some(a) = args.next() {
-        if a == "--wav" {
-            wav = args.next().map(PathBuf::from);
+        match a.as_str() {
+            "--wav" => wav = args.next().map(PathBuf::from),
+            // A param that silences the instrument at 0 (e.g. `level`): checks
+            // that a store-only write (state load, the editor) reaches the DSP
+            // of an already active instance.
+            "--silence-param" => silence_param = args.next(),
+            _ => {}
         }
     }
     let binary_dir = bundle.join("Contents/MacOS");
@@ -275,6 +281,17 @@ fn main() {
     let input = clap_istream { ctx: &mut saved as *mut Bytes as *mut c_void, read: Some(istream_read) };
     assert!(unsafe { (other_state.load.unwrap())(other.raw, &input) });
 
+    if let Some(param) = &silence_param {
+        let mut silent = Bytes {
+            data: serde_json::to_vec(&serde_json::json!({ "format": 1, "params": { param: 0.0 } })).unwrap(),
+            pos: 0,
+        };
+        let input = clap_istream { ctx: &mut silent as *mut Bytes as *mut c_void, read: Some(istream_read) };
+        assert!(unsafe { (other_state.load.unwrap())(other.raw, &input) });
+        let (l, _) = other.render(&[36], frames, frames / 4);
+        println!("after {param}=0 via state: peak {:.6}", stats(&l).0);
+        assert!(stats(&l).0 < 1e-4, "a store-only param write did not reach the DSP");
+    }
     drop((plugin, other));
     // Two fresh instances, two threads, same notes: identical output means
     // their voices never shared a scratch slice.
