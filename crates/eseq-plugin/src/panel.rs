@@ -232,8 +232,15 @@ impl PanelHost {
 
     /// The size the window should have now: the mods tab's when it is open.
     pub fn wanted_size(&mut self) -> (f64, f64) {
-        let open = matches!(self.editor.runtime_mut().eval_str(MODS_OPEN), Ok(Some(Value::Bool(true))));
-        self.sizes[open as usize]
+        self.sizes[self.mods_open() as usize]
+    }
+
+    /// Whether the mods tab is showing (`eseq.effects.state` instrument-view).
+    fn mods_open(&self) -> bool {
+        let rt = self.editor.runtime();
+        rt.singleton_instance(INSTRUMENT_VIEW_KIND)
+            .and_then(|view| rt.instance_field(view, "mods-open").ok())
+            .is_some_and(|open| matches!(open, Value::Bool(true)))
     }
 
     pub fn size(&self) -> (f64, f64) {
@@ -611,6 +618,43 @@ impl PanelHost {
         }
     }
 
+    /// Whether the panel takes `key` rather than the host: only while a
+    /// focused widget handles it — typing into a focused knob or number
+    /// (digits, sign, point, Enter, Backspace, Escape), or a key the focused
+    /// widget's own handler consumes. Everything else (space to play, the
+    /// host's shortcuts) goes back to the host.
+    pub fn wants_key(&self, key: &crossterm::event::KeyEvent) -> bool {
+        use crossterm::event::KeyCode;
+        if self.editor.focused_widget_captures_numeric_input()
+            && matches!(
+                key.code,
+                KeyCode::Char('0'..='9' | '.' | '-' | '+' | ',')
+                    | KeyCode::Enter
+                    | KeyCode::Backspace
+                    | KeyCode::Delete
+                    | KeyCode::Esc
+                    | KeyCode::Left
+                    | KeyCode::Right
+            )
+        {
+            return true;
+        }
+        !matches!(key.code, KeyCode::Char(_) | KeyCode::Enter) && self.editor.focused_widget_consumes_key(key.code, key.modifiers)
+    }
+
+    pub fn key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        self.editor.handle_key(key);
+        self.dirty = true;
+        // Enter commits a typed value, Escape abandons it: either closes the
+        // host gesture the edit opened.
+        if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+            self.pump();
+            self.edits.push(PanelEdit::Commit);
+        }
+        self.editor.mark_needs_redraw();
+    }
+
     pub fn scroll(&mut self, x: f64, y: f64, dx: f32, dy: f32) {
         let (col, row) = self.cell_at(x, y);
         self.editor.handle_tiled_touchpad_scroll(col, row, 0, dx, dy);
@@ -651,7 +695,8 @@ const PLUGIN_STUBS: &str = r#"
 /// The plugin's one buffer: the current track's instrument panel, as the
 /// *fx* buffer shows it, without the device chain around it.
 const TOGGLE_MODS: &str = "(eseq.effects.effect-panels/instrument-toggle-mods-view)";
-const MODS_OPEN: &str = "eseq.effects.state/instrument-view.mods-open";
+/// The kind holding the instrument panel's tab state (`mods-open`).
+const INSTRUMENT_VIEW_KIND: &str = "eseq.effects.state:instrument-view";
 
 const PLUGIN_ROOT: &str = r#"
 (effect-buffer "*plugin*"

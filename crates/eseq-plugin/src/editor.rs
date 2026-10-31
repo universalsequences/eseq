@@ -111,6 +111,7 @@ fn view_class() -> &'static AnyClass {
         builder.add_ivar::<*mut c_void>(STATE_IVAR);
         unsafe {
             builder.add_method(sel!(isFlipped), yes as extern "C-unwind" fn(*mut AnyObject, Sel) -> Bool);
+            builder.add_method(sel!(acceptsFirstResponder), yes as extern "C-unwind" fn(*mut AnyObject, Sel) -> Bool);
             builder.add_method(
                 sel!(acceptsFirstMouse:),
                 yes_with as extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject) -> Bool,
@@ -124,6 +125,7 @@ fn view_class() -> &'static AnyClass {
             builder.add_method(sel!(mouseMoved:), mouse_moved as Handler);
             builder.add_method(sel!(scrollWheel:), scroll_wheel as Handler);
             builder.add_method(sel!(eseqTick:), tick as Handler);
+            builder.add_method(sel!(keyDown:), key_down as Handler);
             builder.add_method(
                 sel!(updateTrackingAreas),
                 update_tracking_areas as extern "C-unwind" fn(*mut AnyObject, Sel),
@@ -189,7 +191,15 @@ fn mouse(view: &AnyObject, event: *mut AnyObject, kind: MouseEventKind) {
 }
 
 extern "C-unwind" fn mouse_down(view: *mut AnyObject, _: Sel, event: *mut AnyObject) {
-    mouse(unsafe { &*view }, event, MouseEventKind::Down(MouseButton::Left));
+    let view = unsafe { &*view };
+    // Take key focus, so a clicked knob can be typed into.
+    unsafe {
+        let window: *mut AnyObject = msg_send![view, window];
+        if !window.is_null() {
+            let _: Bool = msg_send![window, makeFirstResponder: view];
+        }
+    }
+    mouse(view, event, MouseEventKind::Down(MouseButton::Left));
 }
 
 extern "C-unwind" fn mouse_dragged(view: *mut AnyObject, _: Sel, event: *mut AnyObject) {
@@ -226,6 +236,59 @@ extern "C-unwind" fn scroll_wheel(view: *mut AnyObject, _: Sel, event: *mut AnyO
         state.panel.scroll(x, y, (dx * scale) as f32, (dy * scale) as f32);
         state.forward_edits();
     }
+}
+
+/// A key the panel takes (typing into a focused knob, …) goes to the editor;
+/// any other continues up the responder chain to the host.
+extern "C-unwind" fn key_down(view: *mut AnyObject, _: Sel, event: *mut AnyObject) {
+    unsafe {
+        let view = &*view;
+        if let (Some(state), Some(key)) = (state_of(view), key_event(event)) {
+            if state.panel.wants_key(&key) {
+                state.panel.key(key);
+                state.panel.frame();
+                state.forward_edits();
+                return;
+            }
+        }
+        let _: () = msg_send![super(view, NSView::class()), keyDown: event];
+    }
+}
+
+/// An NSEvent key press as the crossterm event eseq's own window produces.
+unsafe fn key_event(event: *mut AnyObject) -> Option<crossterm::event::KeyEvent> {
+    use crossterm::event::{KeyCode, KeyEvent};
+    let code: u16 = unsafe { msg_send![event, keyCode] };
+    let modifiers = unsafe { modifiers(event) };
+    let named = match code {
+        36 | 76 => Some(KeyCode::Enter),
+        48 => Some(KeyCode::Tab),
+        51 => Some(KeyCode::Backspace),
+        117 => Some(KeyCode::Delete),
+        53 => Some(KeyCode::Esc),
+        123 => Some(KeyCode::Left),
+        124 => Some(KeyCode::Right),
+        125 => Some(KeyCode::Down),
+        126 => Some(KeyCode::Up),
+        115 => Some(KeyCode::Home),
+        119 => Some(KeyCode::End),
+        _ => None,
+    };
+    let code = match named {
+        Some(code) => code,
+        None => {
+            let chars: Option<Retained<objc2_foundation::NSString>> =
+                unsafe { msg_send![event, charactersIgnoringModifiers] };
+            let ch = chars?.to_string().chars().next()?;
+            if ch.is_control() {
+                return None;
+            }
+            KeyCode::Char(ch)
+        }
+    };
+    // Shift is already in the character (`+`, capitals).
+    let modifiers = if matches!(code, KeyCode::Char(_)) { modifiers - KeyModifiers::SHIFT } else { modifiers };
+    Some(KeyEvent::new(code, modifiers))
 }
 
 /// Hover (mouseMoved:) needs a tracking area covering the view.
@@ -382,16 +445,41 @@ unsafe extern "C" fn gui_get_size(plugin: *const clap_plugin, width: *mut u32, h
     true
 }
 
+// The window has one size per panel tab (synth, mods). Saying it can
+// resize is what lets a host (and clap-wrapper's VST3 view, whose onSize only
+// forwards to resizable plugins) apply the size the panel asks for; the
+// hints forbid free dragging and `adjust_size` snaps to the tab's size.
 unsafe extern "C" fn gui_can_resize(_: *const clap_plugin) -> bool {
-    false
+    true
 }
 
-unsafe extern "C" fn gui_get_resize_hints(_: *const clap_plugin, _: *mut clap_gui_resize_hints) -> bool {
-    false
+unsafe extern "C" fn gui_get_resize_hints(_: *const clap_plugin, hints: *mut clap_gui_resize_hints) -> bool {
+    let Some(hints) = (unsafe { hints.as_mut() }) else { return false };
+    hints.can_resize_horizontally = false;
+    hints.can_resize_vertically = false;
+    hints.preserve_aspect_ratio = false;
+    hints.aspect_ratio_width = 1;
+    hints.aspect_ratio_height = 1;
+    true
 }
 
-unsafe extern "C" fn gui_adjust_size(_: *const clap_plugin, _: *mut u32, _: *mut u32) -> bool {
-    false
+unsafe extern "C" fn gui_adjust_size(plugin: *const clap_plugin, width: *mut u32, height: *mut u32) -> bool {
+    let Ok(mut slot) = unsafe { crate::shell::editor_slot(plugin) }.try_borrow_mut() else { return false };
+    let Some(editor) = slot.as_mut() else { return false };
+    let wanted = if let Some(panel) = editor.pending.as_mut() {
+        panel.wanted_size()
+    } else if let Some(state) = editor.state() {
+        state.panel.wanted_size()
+    } else {
+        editor.size
+    };
+    unsafe {
+        if let (Some(w), Some(h)) = (width.as_mut(), height.as_mut()) {
+            *w = wanted.0.ceil() as u32;
+            *h = wanted.1.ceil() as u32;
+        }
+    }
+    true
 }
 
 /// The host's answer to `request_resize` (or its own resize): the view, its

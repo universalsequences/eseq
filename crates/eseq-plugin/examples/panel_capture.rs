@@ -50,6 +50,26 @@ fn main() {
         panel.frame_headless();
         println!("invoke: {r:?} edits {:?}", panel.take_edits());
     }
+    if let Ok(text) = std::env::var("TYPE_INTO_FIRST_KNOB") {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+        let (_, (x, y, w, h)) = knobs.first().cloned().expect("a knob");
+        let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+        panel.mouse(MouseEventKind::Down(MouseButton::Left), cx, cy, KeyModifiers::NONE);
+        panel.mouse(MouseEventKind::Up(MouseButton::Left), cx, cy, KeyModifiers::NONE);
+        panel.frame_headless();
+        let _ = panel.take_edits();
+        let keys = text.chars().map(KeyCode::Char).chain([KeyCode::Enter]);
+        for code in keys {
+            let key = KeyEvent::new(code, KeyModifiers::NONE);
+            let wanted = panel.wants_key(&key);
+            if wanted {
+                panel.key(key);
+                panel.frame_headless();
+            }
+            println!("key {code:?}: panel takes it: {wanted}");
+        }
+        println!("typed edits: {:?}", panel.take_edits());
+    }
     if let Some((x, y, dy)) = drag {
         println!("dragging at ({x:.1}, {y:.1})");
         use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
@@ -76,6 +96,7 @@ fn main() {
     if std::env::var_os("MODS_OPEN").is_some() {
         let r = panel.editor_mut().runtime_mut().eval_str("(eseq.effects.effect-panels/instrument-toggle-mods-view)");
         println!("toggle: {r:?}");
+        println!("wanted size after toggle: {:?} (current {:?})", panel.wanted_size(), panel.size());
         panel.editor_mut().refresh_runtime_side_effects();
         let mods = out.with_file_name(format!("{}-mods.png", out.file_stem().unwrap().to_string_lossy()));
         panel.render_png(&mods).expect("render mods");
