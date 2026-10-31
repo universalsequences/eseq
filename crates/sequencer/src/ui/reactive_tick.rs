@@ -25,6 +25,7 @@ pub(crate) fn sync_reactive_tick(
     ui_loop_stats: &mut UiLoopStats,
 ) {
     host_commands::export::poll(editor);
+    host_commands::plugin_export::poll(editor);
     // Rack-slot instrument params resolve by name in the scheduler
     // (`seq-emit :params`), which needs the registry's descriptors.
     let registry = &app.editor.engine_registry;

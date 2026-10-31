@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "crates/eseq-plugin",
+    "crates/eseq-plugin-format",
     "crates/eseqlisp",
     "crates/musicplayer",
     "crates/sequencer",

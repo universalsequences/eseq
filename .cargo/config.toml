@@ -5,3 +5,7 @@
 # and bead eseq-4tl.1 (iterative compiler traversal).
 [env]
 RUST_MIN_STACK = { value = "16777216", force = false }
+# clap-wrapper (the plugin shell's VST3 layer, crates/eseq-plugin) logs every
+# factory/instance call to stderr unless NDEBUG, which the `cc` crate never
+# defines. No other C++ in the workspace reads this macro.
+CXXFLAGS = { value = "-DCLAP_WRAPPER_LOGLEVEL=0", force = false }

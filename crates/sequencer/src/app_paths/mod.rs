@@ -322,6 +322,20 @@ impl AppPaths {
         }
     }
 
+    /// The prebuilt plugin shell (`eseq-plugin` cdylib) the plugin exporter
+    /// copies into every bundle. Dev: `ESEQ_PLUGIN_SHELL`, else the workspace's
+    /// release build (`cargo build -p eseq-plugin --release`).
+    pub fn plugin_shell(&self) -> PathBuf {
+        match self {
+            AppPaths::Dev { workspace_root, .. } => std::env::var_os("ESEQ_PLUGIN_SHELL")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| workspace_root.join("target/release/libeseq_plugin.dylib")),
+            AppPaths::Release {
+                contents_resources, ..
+            } => contents_resources.join("plugin-shell/libeseq_plugin.dylib"),
+        }
+    }
+
     /// Read-only factory content root.
     pub fn factory_root(&self) -> PathBuf {
         match self {

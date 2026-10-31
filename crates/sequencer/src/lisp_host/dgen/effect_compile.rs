@@ -713,6 +713,30 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     dir: &Path,
     dylib_name: &str,
 ) -> Result<String, String> {
+    compile_effective_dgen_source_to_dir_with_voices(
+        kind,
+        effective_source,
+        sample_rate,
+        asset_base,
+        dir,
+        dylib_name,
+        super::dylib_cache::DGEN_INSTRUMENT_VOICES,
+    )
+}
+
+/// As [`compile_effective_dgen_source_to_dir`], with an explicit instrument
+/// `--voices`: the number of scratch slices in the image's file-scope statics.
+/// Plugin export compiles with more slices than the app's 16 because every
+/// instance of one exported plugin shares the image (docs/plugin-export-spec.md §6).
+pub(crate) fn compile_effective_dgen_source_to_dir_with_voices(
+    kind: DGenCompileKind,
+    effective_source: &str,
+    sample_rate: u32,
+    asset_base: Option<&Path>,
+    dir: &Path,
+    dylib_name: &str,
+    instrument_voices: usize,
+) -> Result<String, String> {
     let source_for_report = effective_source;
     let (compiler_source, latency_samples) = super::effect_latency::prepare(
         effective_source, sample_rate, kind == DGenCompileKind::Effect,
@@ -759,7 +783,7 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
         // Tools) dependency this path must not have.
         .arg("--skip-inline-audit");
     if kind == DGenCompileKind::Instrument {
-        command.args(["--voices", &super::dylib_cache::DGEN_INSTRUMENT_VOICES.to_string()]);
+        command.args(["--voices", &instrument_voices.to_string()]);
     }
     let effective_asset_base = super::dylib_cache::effective_asset_base(asset_base);
     command.arg("--asset-base").arg(&effective_asset_base);

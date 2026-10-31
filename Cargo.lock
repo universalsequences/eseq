@@ -667,6 +667,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a76abbdb2907f6fd97fb6bc0b7be96b77d328f2dd9669d1075cc03369ed22154"
+
+[[package]]
+name = "clap-wrapper"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd1028157e0bb8ddb7b0f95269da629bb1b717e904752316ef7752b85c4bde82"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "claxon"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1101,6 +1116,32 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "eseq-plugin"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "clap-sys",
+ "clap-wrapper",
+ "crossterm",
+ "eseq-plugin-format",
+ "eseqlisp",
+ "libc",
+ "objc2 0.6.4",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "eseq-plugin-format"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3488,6 +3529,7 @@ dependencies = [
  "cpal",
  "crossbeam-queue",
  "crossterm",
+ "eseq-plugin-format",
  "eseqlisp",
  "fs2",
  "hound",

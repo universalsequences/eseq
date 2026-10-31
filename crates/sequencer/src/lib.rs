@@ -65,6 +65,7 @@ pub mod audio;
 pub use audio::{audiograph, engine};
 pub mod audio_tap;
 pub mod crash;
+pub mod custom_ui_codegen;
 pub mod groove;
 #[allow(dead_code)]
 pub mod effects;
@@ -83,6 +84,7 @@ pub mod pad_role;
 pub mod patch_fork;
 pub mod paths;
 pub mod plock_variants;
+pub mod plugin_export;
 pub mod project;
 pub mod quantized_launch;
 pub mod record_quantize;
