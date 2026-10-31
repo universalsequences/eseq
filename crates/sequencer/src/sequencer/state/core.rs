@@ -133,6 +133,11 @@ pub struct PatternState {
     pub project_process_lane_overrides: Mutex<Vec<crate::process::ProjectLaneOverrides>>,
     pub plock_variant_registries: Mutex<Vec<PlockVariantRegistry>>,
     pub key_lock_variant_registries: Mutex<Vec<PlockVariantRegistry>>,
+    /// Rack layers' key-lock variant registries, by (track position, slot
+    /// id). Not saved: with no variant names to keep, a reload only
+    /// re-derives the labels from the layers' key locks.
+    pub rack_key_lock_variant_registries:
+        Mutex<std::collections::HashMap<(usize, u64), PlockVariantRegistry>>,
 }
 
 pub struct TransportState {

@@ -1146,6 +1146,36 @@ mod tests {
             .release_device_param_gesture(&state);
         assert!(!shared.step_print.lock().unwrap().armed());
 
+        // A batch drag (a family-map ring writes two params per move) prints
+        // like a knob: both params latch, the bases stay, the tick prints both.
+        let batch_defaults_before = (
+            state.pattern.instrument_slots[TRACK].defaults.get(2),
+            state.pattern.instrument_slots[TRACK].defaults.get(3),
+        );
+        dispatch_custom_host_command(
+            "set-instrument-param-batch",
+            effect_batch_payload(0, 0, &[(2, 1_500.0), (3, 0.6)]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert_eq!(
+            (
+                state.pattern.instrument_slots[TRACK].defaults.get(2),
+                state.pattern.instrument_slots[TRACK].defaults.get(3),
+            ),
+            batch_defaults_before,
+            "a printed batch must never write the instrument base values"
+        );
+        assert!(tick_step_print(&mut app, &shared).printed);
+        assert_eq!(state.pattern.instrument_slots[TRACK].plocks.get(PRINT_STEP, 2), Some(1_500.0));
+        assert_eq!(state.pattern.instrument_slots[TRACK].plocks.get(PRINT_STEP, 3), Some(0.6));
+        shared
+            .step_print
+            .lock()
+            .unwrap()
+            .release_device_param_gesture(&state);
+
         // Track-effect scalar, batch, and enum-option commands all use the
         // same print gate. The stale reported index proves each latch keys on
         // the slot resolved from the stable node id, not the payload index.

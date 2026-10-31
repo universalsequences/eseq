@@ -1454,9 +1454,8 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                 return true;
             }
             _ if is_duplicate_shortcut(key) && editor.active_buffer().name == "*mixer*" => {
-                let _ = editor
-                    .runtime_mut()
-                    .eval_str("(seq-clone-active-track-pattern)");
+                // An armed track duplicates, an armed track pattern clones.
+                let _ = editor.runtime_mut().eval_str("(eseq.mixer/seq-duplicate)");
                 editor.refresh_runtime_side_effects();
                 return true;
             }
@@ -4938,6 +4937,10 @@ mod live_keyboard_tests {
                 },
             );
         }
+        editor
+            .runtime_mut()
+            .eval_str("(def eseq.mixer/seq-duplicate () (seq-clone-active-track-pattern))")
+            .expect("install mixer duplicate dispatcher");
         let state = Arc::new(SequencerState::new(1, vec![]));
         let current_track = Arc::new(AtomicUsize::new(0));
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));

@@ -484,6 +484,31 @@ pub fn live_track_key_lock_variant_key(
     PlockVariantKey::new(entries)
 }
 
+/// The key-lock variant key of `note` on a rack layer's instrument
+/// (`live_track_key_lock_variant_key` over its snapshot), or `None`.
+pub fn rack_slot_key_lock_variant_key(
+    slot: &crate::effects::EffectSlotSnapshot,
+    note: u8,
+) -> Option<PlockVariantKey> {
+    let row = slot.key_locks.get(&note)?;
+    let ids = slot.key_lock_param_ids.get(&note);
+    let num_params = (slot.num_params as usize).min(MAX_SLOT_PARAMS);
+    let entries = (0..num_params)
+        .filter_map(|param_idx| {
+            let value = row.get(param_idx).copied().flatten()?;
+            let id = ids.and_then(|ids| ids.get(param_idx).copied().flatten());
+            (id == slot.param_node_id(param_idx)).then(|| PlockVariantEntry {
+                domain: PlockVariantDomain::InstrumentKeyLock,
+                slot: 0,
+                param: param_idx,
+                cell: None,
+                value_bits: value.to_bits(),
+            })
+        })
+        .collect();
+    PlockVariantKey::new(entries)
+}
+
 fn collect_live_slot_entries(
     out: &mut Vec<PlockVariantEntry>,
     slot: &EffectSlotState,

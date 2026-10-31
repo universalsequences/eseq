@@ -47,8 +47,8 @@ pub fn cable_curve(start: (f32, f32), end: (f32, f32), zoom: f32) -> CableCurve 
     }
 }
 
-/// Handle length in unzoomed cells.
-fn cable_y_handle(diff_y: f32) -> f32 {
+/// Handle length in unzoomed cells for a port end dropping `diff_y` rows.
+pub fn cable_y_handle(diff_y: f32) -> f32 {
     PORT_HANDLE
         .min(diff_y * Y_HANDLE_VERTICAL_LIMIT)
         .max(MIN_Y_HANDLE)

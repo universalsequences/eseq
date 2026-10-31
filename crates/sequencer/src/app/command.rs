@@ -943,6 +943,24 @@ pub enum AppCommand {
         value: f32,
     },
 
+    /// Key-lock a rack layer's underlying instrument param on several notes.
+    SetRackSlotInstrumentKeyLockMulti {
+        track: usize,
+        slot_idx: usize,
+        notes: Vec<u8>,
+        param_idx: usize,
+        value: f32,
+    },
+
+    /// Stamp key-lock variant `key` onto `notes` of a rack layer's
+    /// instrument, or clear those notes' key locks (`None`).
+    StampRackSlotKeyLockVariant {
+        track: usize,
+        slot_idx: usize,
+        notes: Vec<u8>,
+        key: Option<PlockVariantKey>,
+    },
+
     SetRackSlotEffectParam {
         track: usize,
         rack_slot_idx: usize,
@@ -1158,6 +1176,7 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::ClearInstrumentKeyLocksForNote { .. }
         | AppCommand::StampInstrumentKeyLockVariant { .. }
         | AppCommand::ClearInstrumentKeyLockVariantsForNotes { .. }
+        | AppCommand::StampRackSlotKeyLockVariant { .. }
         | AppCommand::SetRackSlotMute { .. }
         | AppCommand::SetRackSlotSolo { .. }
         | AppCommand::SetRackSlotChokeGroup { .. } => HistoryPolicy::Record,
@@ -1312,6 +1331,11 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
             track, slot_idx, param_idx, ..
         } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
             "track:{track}:rack-slot:{slot_idx}:instrument:param:{param_idx}"
+        ))),
+        AppCommand::SetRackSlotInstrumentKeyLockMulti {
+            track, slot_idx, notes, param_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:rack-slot:{slot_idx}:instrument:key-lock:{notes:?}:param:{param_idx}"
         ))),
         AppCommand::SetRackSlotEffectParam {
             track,
@@ -2182,6 +2206,103 @@ mod tests {
             "rack sampler p-locks need node identity for scheduler/audio resolution"
         );
         assert!(rack.slots[0].track_sound_state.dirty);
+    }
+
+    #[test]
+    fn rack_slot_instrument_key_lock_command_writes_slot_key_locks_without_changing_default() {
+        let mut app = test_app_with_rack_sampler_slot();
+
+        crate::app::try_apply_command(
+            &mut app,
+            AppCommand::SetRackSlotInstrumentKeyLockMulti {
+                track: 0,
+                slot_idx: 0,
+                notes: vec![60, 64],
+                param_idx: 8,
+                value: 22_050.0,
+            },
+        )
+        .expect("rack key lock applies through the edit path");
+
+        let rack_tracks = app.state.pattern.rack_tracks.lock().unwrap();
+        let rack = rack_tracks[0].as_ref().unwrap();
+        let slot = &rack.slots[0].instrument_slot;
+        assert_eq!(
+            slot.defaults[8], 44_100.0,
+            "key-locking a rack layer must not overwrite its default"
+        );
+        assert_eq!(slot.key_locks[&60][8], Some(22_050.0));
+        assert_eq!(slot.key_locks[&64][8], Some(22_050.0));
+        assert!(!slot.key_locks.contains_key(&62));
+        assert_eq!(
+            slot.key_lock_param_ids[&60][8],
+            slot.param_node_id(8),
+            "audio resolves rack key locks only when their node id matches"
+        );
+        assert!(rack.slots[0].track_sound_state.dirty);
+    }
+
+    #[test]
+    fn rack_slot_key_lock_variant_stamps_clears_and_undoes() {
+        let mut app = test_app_with_rack_sampler_slot();
+        let rack_key_locks = |app: &App, note: u8| {
+            let racks = app.state.pattern.rack_tracks.lock().unwrap();
+            let slot = &racks[0].as_ref().unwrap().slots[0].instrument_slot;
+            crate::plock_variants::rack_slot_key_lock_variant_key(slot, note)
+        };
+        crate::app::try_apply_command(
+            &mut app,
+            AppCommand::SetRackSlotInstrumentKeyLockMulti {
+                track: 0,
+                slot_idx: 0,
+                notes: vec![60],
+                param_idx: 8,
+                value: 22_050.0,
+            },
+        )
+        .unwrap();
+        crate::app::edit::finish_active_gesture(&mut app);
+
+        let (registry, assignments) =
+            app.state.rack_key_lock_variant_registry_with_assignments(0, 0);
+        assert_eq!(registry.entries.len(), 1, "the locked key forms one variant");
+        assert!(assignments[60].is_some());
+        assert!(
+            app.state.key_lock_variant_registry_snapshot(0).entries.is_empty(),
+            "a rack layer's variants stay off the track instrument's registry"
+        );
+
+        let key = registry.entries[0].key.clone();
+        crate::app::try_apply_command(
+            &mut app,
+            AppCommand::StampRackSlotKeyLockVariant {
+                track: 0,
+                slot_idx: 0,
+                notes: vec![62, 64],
+                key: Some(key.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(rack_key_locks(&app, 62), Some(key.clone()));
+        assert_eq!(rack_key_locks(&app, 64), Some(key.clone()));
+
+        crate::app::try_apply_command(
+            &mut app,
+            AppCommand::StampRackSlotKeyLockVariant {
+                track: 0,
+                slot_idx: 0,
+                notes: vec![60, 62],
+                key: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(rack_key_locks(&app, 60), None);
+        assert_eq!(rack_key_locks(&app, 62), None);
+        assert_eq!(rack_key_locks(&app, 64), Some(key.clone()));
+
+        crate::app::edit::undo(&mut app);
+        assert_eq!(rack_key_locks(&app, 60), Some(key.clone()), "undo restores the cleared keys");
+        assert_eq!(rack_key_locks(&app, 62), Some(key));
     }
 
     #[test]
@@ -4216,6 +4337,25 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
             value,
         } => {
             app.set_rack_slot_instrument_param(track, slot_idx, param_idx, value);
+        }
+
+        AppCommand::SetRackSlotInstrumentKeyLockMulti {
+            track,
+            slot_idx,
+            notes,
+            param_idx,
+            value,
+        } => {
+            app.set_rack_slot_instrument_key_locks(track, slot_idx, &notes, param_idx, value);
+        }
+
+        AppCommand::StampRackSlotKeyLockVariant {
+            track,
+            slot_idx,
+            notes,
+            key,
+        } => {
+            app.stamp_rack_slot_key_lock_variant(track, slot_idx, &notes, key.as_ref());
         }
 
         AppCommand::SetRackSlotEffectParam {

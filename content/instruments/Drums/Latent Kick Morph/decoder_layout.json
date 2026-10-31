@@ -1,0 +1,1444 @@
+{
+ "doc": "Latent Kick decoder contract (kick/scripts/kick_layout.py; voice = kick/scripts/kick_np.py)",
+ "version": "k1",
+ "inputs": [
+  "z1",
+  "z2",
+  "z3",
+  "z4"
+ ],
+ "input_ranges": {
+  "z": [
+   -3,
+   3
+  ]
+ },
+ "hidden": [
+  128,
+  128
+ ],
+ "activation": "tanh",
+ "P": 534,
+ "K": 24,
+ "K2": 4,
+ "J": 5,
+ "B": 18,
+ "matmul": "y[1,out] = x[1,in] @ W[in,out] + b[1,out]; W stored row-major (C order)",
+ "weights": {
+  "l1.W": {
+   "file": "w1.json",
+   "shape": [
+    4,
+    128
+   ]
+  },
+  "l1.b": {
+   "file": "b1.json",
+   "shape": [
+    1,
+    128
+   ]
+  },
+  "l2.W": {
+   "file": "w2.json",
+   "shape": [
+    128,
+    128
+   ]
+  },
+  "l2.b": {
+   "file": "b2.json",
+   "shape": [
+    1,
+    128
+   ]
+  },
+  "l3.W": {
+   "file": "w3.json",
+   "shape": [
+    128,
+    534
+   ]
+  },
+  "l3.b": {
+   "file": "b3.json",
+   "shape": [
+    1,
+    534
+   ]
+  }
+ },
+ "segments": [
+  {
+   "name": "mode_f",
+   "offset": 0,
+   "width": 24,
+   "squash": "log",
+   "lo": 4.0,
+   "hi": 12000.0
+  },
+  {
+   "name": "mode_dec",
+   "offset": 24,
+   "width": 24,
+   "squash": "log",
+   "lo": 0.001,
+   "hi": 12.0
+  },
+  {
+   "name": "mode_amp",
+   "offset": 48,
+   "width": 24,
+   "squash": "log",
+   "lo": 1e-07,
+   "hi": 14.0
+  },
+  {
+   "name": "mode_glide",
+   "offset": 72,
+   "width": 24,
+   "squash": "lin",
+   "lo": -0.95,
+   "hi": 14.0
+  },
+  {
+   "name": "mode_tau",
+   "offset": 96,
+   "width": 24,
+   "squash": "log",
+   "lo": 0.0002,
+   "hi": 0.8
+  },
+  {
+   "name": "mode_rise",
+   "offset": 120,
+   "width": 24,
+   "squash": "log",
+   "lo": 5e-07,
+   "hi": 0.3
+  },
+  {
+   "name": "mode_t0",
+   "offset": 144,
+   "width": 24,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.006
+  },
+  {
+   "name": "mode_phase",
+   "offset": 168,
+   "width": 24,
+   "squash": "pi",
+   "lo": 0.0,
+   "hi": 0.0
+  },
+  {
+   "name": "mode_mga",
+   "offset": 192,
+   "width": 24,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "mode_mgb",
+   "offset": 216,
+   "width": 24,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "mode_msm",
+   "offset": 240,
+   "width": 24,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "mode_glide2",
+   "offset": 264,
+   "width": 4,
+   "squash": "lin",
+   "lo": -0.5,
+   "hi": 2.0
+  },
+  {
+   "name": "mode_tau2",
+   "offset": 268,
+   "width": 4,
+   "squash": "log",
+   "lo": 0.03,
+   "hi": 2.0
+  },
+  {
+   "name": "tr_f",
+   "offset": 272,
+   "width": 5,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 6000.0
+  },
+  {
+   "name": "tr_dec",
+   "offset": 277,
+   "width": 5,
+   "squash": "log",
+   "lo": 5e-05,
+   "hi": 1.5
+  },
+  {
+   "name": "tr_dl",
+   "offset": 282,
+   "width": 5,
+   "squash": "lin",
+   "lo": -50.0,
+   "hi": 1200.0
+  },
+  {
+   "name": "tr_tau",
+   "offset": 287,
+   "width": 5,
+   "squash": "log",
+   "lo": 0.001,
+   "hi": 1.0
+  },
+  {
+   "name": "tr_rise",
+   "offset": 292,
+   "width": 5,
+   "squash": "log",
+   "lo": 1e-09,
+   "hi": 1.5
+  },
+  {
+   "name": "tr_amp",
+   "offset": 297,
+   "width": 5,
+   "squash": "lin",
+   "lo": -2.5,
+   "hi": 4.0
+  },
+  {
+   "name": "tr_phase",
+   "offset": 302,
+   "width": 5,
+   "squash": "pi",
+   "lo": 0.0,
+   "hi": 0.0
+  },
+  {
+   "name": "tr_t0",
+   "offset": 307,
+   "width": 5,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.012
+  },
+  {
+   "name": "tr_wb",
+   "offset": 312,
+   "width": 5,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "tr_wt",
+   "offset": 317,
+   "width": 5,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "tr_mgb",
+   "offset": 322,
+   "width": 5,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "tr_msm",
+   "offset": 327,
+   "width": 5,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "gr_amp",
+   "offset": 332,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 12.0
+  },
+  {
+   "name": "gr_dl",
+   "offset": 333,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 200.0
+  },
+  {
+   "name": "gr_tau",
+   "offset": 334,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.01,
+   "hi": 1.5
+  },
+  {
+   "name": "gr_off",
+   "offset": 335,
+   "width": 1,
+   "squash": "pi",
+   "lo": 0.0,
+   "hi": 0.0
+  },
+  {
+   "name": "gr_clip",
+   "offset": 336,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.9,
+   "hi": 1.0
+  },
+  {
+   "name": "gr_a",
+   "offset": 337,
+   "width": 1,
+   "squash": "lin",
+   "lo": -0.01,
+   "hi": 0.01
+  },
+  {
+   "name": "gr_b",
+   "offset": 338,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "gr_d1",
+   "offset": 339,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.02,
+   "hi": 0.3
+  },
+  {
+   "name": "gr_d2",
+   "offset": 340,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.02,
+   "hi": 0.3
+  },
+  {
+   "name": "bu_amp",
+   "offset": 341,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.2
+  },
+  {
+   "name": "bu_samp",
+   "offset": 342,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "bu_tc",
+   "offset": 343,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.01
+  },
+  {
+   "name": "bu_w",
+   "offset": 344,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.0001,
+   "hi": 0.003
+  },
+  {
+   "name": "bu_hann",
+   "offset": 345,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "bu_f",
+   "offset": 346,
+   "width": 1,
+   "squash": "log",
+   "lo": 300.0,
+   "hi": 3000.0
+  },
+  {
+   "name": "bu_off",
+   "offset": 347,
+   "width": 1,
+   "squash": "lin",
+   "lo": -1.0,
+   "hi": 25.0
+  },
+  {
+   "name": "bu_sm",
+   "offset": 348,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "samp",
+   "offset": 349,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "wk",
+   "offset": 350,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.4
+  },
+  {
+   "name": "wtau",
+   "offset": 351,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.001,
+   "hi": 1.5
+  },
+  {
+   "name": "nsamp",
+   "offset": 352,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "fd_samp",
+   "offset": 353,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "vb_k",
+   "offset": 354,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "vb_e",
+   "offset": 355,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 2.0
+  },
+  {
+   "name": "vd_k",
+   "offset": 356,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.5
+  },
+  {
+   "name": "vk_k",
+   "offset": 357,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "vk_e",
+   "offset": 358,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 2.0
+  },
+  {
+   "name": "vt_k",
+   "offset": 359,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "vt_e",
+   "offset": 360,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 2.0
+  },
+  {
+   "name": "va_k",
+   "offset": 361,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.6
+  },
+  {
+   "name": "vpre_e",
+   "offset": 362,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 2.0
+  },
+  {
+   "name": "vtex_e",
+   "offset": 363,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 2.0
+  },
+  {
+   "name": "vpost_e",
+   "offset": 364,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 2.0
+  },
+  {
+   "name": "len",
+   "offset": 365,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.05,
+   "hi": 1.2
+  },
+  {
+   "name": "len_dsc",
+   "offset": 366,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "hold",
+   "offset": 367,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.05,
+   "hi": 0.5
+  },
+  {
+   "name": "rel",
+   "offset": 368,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.005,
+   "hi": 0.3
+  },
+  {
+   "name": "fd_s",
+   "offset": 369,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.1
+  },
+  {
+   "name": "fd_frac",
+   "offset": 370,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.4
+  },
+  {
+   "name": "gA_dsc",
+   "offset": 371,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "gA_hvk",
+   "offset": 372,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.4
+  },
+  {
+   "name": "gA_hL",
+   "offset": 373,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.2
+  },
+  {
+   "name": "gA_hH",
+   "offset": 374,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.2
+  },
+  {
+   "name": "gA_hR",
+   "offset": 375,
+   "width": 1,
+   "squash": "lin",
+   "lo": -8.0,
+   "hi": 1.0
+  },
+  {
+   "name": "gA_hC",
+   "offset": 376,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.0001,
+   "hi": 100.0
+  },
+  {
+   "name": "gA_rR",
+   "offset": 377,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.2
+  },
+  {
+   "name": "gA_rC",
+   "offset": 378,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.0001,
+   "hi": 1.2
+  },
+  {
+   "name": "gA_wexp",
+   "offset": 379,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "gA_wrat",
+   "offset": 380,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "gA_wss",
+   "offset": 381,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "gA_pe",
+   "offset": 382,
+   "width": 1,
+   "squash": "log",
+   "lo": 1.0,
+   "hi": 8.0
+  },
+  {
+   "name": "gA_tmix",
+   "offset": 383,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.6
+  },
+  {
+   "name": "gA_tail",
+   "offset": 384,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.05,
+   "hi": 1.5
+  },
+  {
+   "name": "gA_floor",
+   "offset": 385,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.01
+  },
+  {
+   "name": "gB_dsc",
+   "offset": 386,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "gB_hL",
+   "offset": 387,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "gB_hH",
+   "offset": 388,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.2
+  },
+  {
+   "name": "gB_hC",
+   "offset": 389,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.0001,
+   "hi": 100.0
+  },
+  {
+   "name": "gB_rL",
+   "offset": 390,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.5
+  },
+  {
+   "name": "gB_rR",
+   "offset": 391,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.2
+  },
+  {
+   "name": "gB_rC",
+   "offset": 392,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.0001,
+   "hi": 1.2
+  },
+  {
+   "name": "gB_wexp",
+   "offset": 393,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "gB_wss",
+   "offset": 394,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "gB_pe",
+   "offset": 395,
+   "width": 1,
+   "squash": "log",
+   "lo": 1.0,
+   "hi": 8.0
+  },
+  {
+   "name": "oA_e",
+   "offset": 396,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "sh_ec",
+   "offset": 397,
+   "width": 1,
+   "squash": "lin",
+   "lo": -0.05,
+   "hi": 0.8
+  },
+  {
+   "name": "sh_p3",
+   "offset": 398,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 2.0
+  },
+  {
+   "name": "sh_p4",
+   "offset": 399,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 2.0
+  },
+  {
+   "name": "sh_p5",
+   "offset": 400,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 2.0
+  },
+  {
+   "name": "sh_ed",
+   "offset": 401,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "sh_ecl",
+   "offset": 402,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.5,
+   "hi": 100.0
+  },
+  {
+   "name": "sh_oc",
+   "offset": 403,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.8
+  },
+  {
+   "name": "sh_ow",
+   "offset": 404,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.1,
+   "hi": 1.5
+  },
+  {
+   "name": "sh_rk",
+   "offset": 405,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "sh_rg",
+   "offset": 406,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.5,
+   "hi": 1.2
+  },
+  {
+   "name": "sat_on",
+   "offset": 407,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "sat_g",
+   "offset": 408,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.05,
+   "hi": 1.5
+  },
+  {
+   "name": "sat_b",
+   "offset": 409,
+   "width": 1,
+   "squash": "lin",
+   "lo": -0.1,
+   "hi": 0.1
+  },
+  {
+   "name": "bk_amt",
+   "offset": 410,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.2
+  },
+  {
+   "name": "bk_del",
+   "offset": 411,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.02
+  },
+  {
+   "name": "bhp_on",
+   "offset": 412,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "ceil",
+   "offset": 413,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.4,
+   "hi": 1.1
+  },
+  {
+   "name": "cneg",
+   "offset": 414,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.9,
+   "hi": 1.2
+  },
+  {
+   "name": "coff",
+   "offset": 415,
+   "width": 1,
+   "squash": "lin",
+   "lo": -0.02,
+   "hi": 0.0
+  },
+  {
+   "name": "kap",
+   "offset": 416,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "kbp",
+   "offset": 417,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "kan",
+   "offset": 418,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "kbn",
+   "offset": 419,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "kr",
+   "offset": 420,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "kn",
+   "offset": 421,
+   "width": 1,
+   "squash": "log",
+   "lo": 2.0,
+   "hi": 16.0
+  },
+  {
+   "name": "dry",
+   "offset": 422,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.3,
+   "hi": 1.0
+  },
+  {
+   "name": "cmix",
+   "offset": 423,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.2,
+   "hi": 1.0
+  },
+  {
+   "name": "dc_hz",
+   "offset": 424,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 5.0
+  },
+  {
+   "name": "rl_hz",
+   "offset": 425,
+   "width": 1,
+   "squash": "log",
+   "lo": 2000.0,
+   "hi": 21000.0
+  },
+  {
+   "name": "rl_q1",
+   "offset": 426,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.4,
+   "hi": 0.8
+  },
+  {
+   "name": "rl_q2",
+   "offset": 427,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.5,
+   "hi": 1.4
+  },
+  {
+   "name": "rl_two",
+   "offset": 428,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "rl_mix",
+   "offset": 429,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "dr_track",
+   "offset": 430,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "lvl",
+   "offset": 431,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.9,
+   "hi": 1.1
+  },
+  {
+   "name": "out_clip",
+   "offset": 432,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.8,
+   "hi": 100.0
+  },
+  {
+   "name": "np",
+   "offset": 433,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "band_amp",
+   "offset": 434,
+   "width": 18,
+   "squash": "log",
+   "lo": 1e-06,
+   "hi": 2.0
+  },
+  {
+   "name": "band_d1",
+   "offset": 452,
+   "width": 18,
+   "squash": "log",
+   "lo": 0.0002,
+   "hi": 0.5
+  },
+  {
+   "name": "band_tail",
+   "offset": 470,
+   "width": 18,
+   "squash": "log",
+   "lo": 1e-05,
+   "hi": 1.0
+  },
+  {
+   "name": "band_d2",
+   "offset": 488,
+   "width": 18,
+   "squash": "log",
+   "lo": 0.01,
+   "hi": 2.0
+  },
+  {
+   "name": "band_couple",
+   "offset": 506,
+   "width": 18,
+   "squash": "log",
+   "lo": 1e-06,
+   "hi": 2.0
+  },
+  {
+   "name": "noise_rise",
+   "offset": 524,
+   "width": 1,
+   "squash": "log",
+   "lo": 1e-06,
+   "hi": 0.06
+  },
+  {
+   "name": "noise_onset",
+   "offset": 525,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.03
+  },
+  {
+   "name": "noise_q",
+   "offset": 526,
+   "width": 1,
+   "squash": "log",
+   "lo": 1.0,
+   "hi": 8.0
+  },
+  {
+   "name": "noise_ve",
+   "offset": 527,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 2.0
+  },
+  {
+   "name": "noise_ga",
+   "offset": 528,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "noise_gb",
+   "offset": 529,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "couple_ga",
+   "offset": 530,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "hum_amt",
+   "offset": 531,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 60.0
+  },
+  {
+   "name": "hum_h2",
+   "offset": 532,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "hum_ve",
+   "offset": 533,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 2.0
+  }
+ ],
+ "knobs": [
+  {
+   "name": "tune",
+   "default": 1,
+   "min": 0.5,
+   "max": 2
+  },
+  {
+   "name": "drop_time",
+   "default": 1,
+   "min": 0.25,
+   "max": 4
+  },
+  {
+   "name": "tilt",
+   "default": 0,
+   "min": -2,
+   "max": 2
+  },
+  {
+   "name": "spread",
+   "default": 1,
+   "min": 0.5,
+   "max": 1.6
+  },
+  {
+   "name": "beat",
+   "default": 1,
+   "min": 0,
+   "max": 4
+  },
+  {
+   "name": "decay",
+   "default": 1,
+   "min": 0.25,
+   "max": 2.5
+  },
+  {
+   "name": "bend",
+   "default": 1,
+   "min": 0,
+   "max": 2.5
+  },
+  {
+   "name": "attack",
+   "default": 1,
+   "min": 0.25,
+   "max": 3
+  },
+  {
+   "name": "body",
+   "default": 1,
+   "min": 0,
+   "max": 2
+  },
+  {
+   "name": "knock",
+   "default": 1,
+   "min": 0,
+   "max": 3
+  },
+  {
+   "name": "tick",
+   "default": 1,
+   "min": 0,
+   "max": 3
+  },
+  {
+   "name": "shape",
+   "default": 1,
+   "min": 0,
+   "max": 3
+  },
+  {
+   "name": "growl",
+   "default": 1,
+   "min": 0,
+   "max": 3
+  },
+  {
+   "name": "noise",
+   "default": 1,
+   "min": 0,
+   "max": 4
+  },
+  {
+   "name": "hold",
+   "default": 1,
+   "min": 0.25,
+   "max": 4
+  },
+  {
+   "name": "release",
+   "default": 1,
+   "min": 0.25,
+   "max": 4
+  },
+  {
+   "name": "length",
+   "default": 1,
+   "min": 0.5,
+   "max": 4
+  },
+  {
+   "name": "drive",
+   "default": 1,
+   "min": 1,
+   "max": 5
+  },
+  {
+   "name": "clip_amt",
+   "default": 1,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "name": "ceiling",
+   "default": 1,
+   "min": 0.25,
+   "max": 2
+  },
+  {
+   "name": "level",
+   "default": 1,
+   "min": 0,
+   "max": 2
+  }
+ ],
+ "noise_bands": {
+  "fc": [
+   50.0,
+   70.68719358212266,
+   99.93358673032964,
+   141.2804958112531,
+   199.7344351357663,
+   282.37333362915666,
+   399.2035699334701,
+   564.3716005312326,
+   797.8768915800728,
+   1127.993565796458,
+   1594.6939908968604,
+   2254.4888567754824,
+   3187.269804952539,
+   4505.983154022685,
+   6370.306069723703,
+   9005.981166558608,
+   12732.150682349582,
+   18000.0
+  ],
+  "Q": 1.8,
+  "stages": 2,
+  "form": "RBJ BPF constant 0 dB peak, DF1, a0-normalised, w0 = 2 pi fc / sr; N_b = norm_b * cascade(white), white = sqrt(12) (u - 0.5), u = dgen xorshift32 seed 1, zero initial filter state at voice start (no pre-roll)",
+  "norm": {
+   "44100": [
+    31.791666223103014,
+    26.738103481000824,
+    22.487986812370078,
+    18.91367318570012,
+    15.907861404778153,
+    13.380392706317268,
+    11.255582389393751,
+    9.470012255907909,
+    7.97073319763896,
+    6.713848246843101,
+    5.663471494980016,
+    4.791095180247538,
+    4.075476003949418,
+    3.5033986001254864,
+    3.0726392895250734,
+    2.802872445615056,
+    2.787232941167287,
+    3.6647837737703655
+   ],
+   "48000": [
+    33.167611363724355,
+    27.89530335420233,
+    23.461200691381862,
+    19.73212586427917,
+    16.59611693583107,
+    13.959085253591239,
+    11.742024343898063,
+    9.878695013661277,
+    8.313731145471664,
+    7.001131126643746,
+    5.90312354224423,
+    4.989428396076849,
+    4.236997981131125,
+    3.6305032570075215,
+    3.1645134160055393,
+    2.8513067408078405,
+    2.7548648757476673,
+    3.2348691782251
+   ],
+   "88200": [
+    44.9599972244564,
+    37.8130386111816,
+    31.802228166157064,
+    26.746986292369733,
+    22.495457302190378,
+    18.919955675797613,
+    15.913144432401126,
+    13.384834628971559,
+    11.25931604419003,
+    9.473148789600463,
+    7.973365145241801,
+    6.71605189373701,
+    5.6653085020945495,
+    4.792613357882303,
+    4.0767088790387875,
+    3.504362576168213,
+    3.073323694866768,
+    2.803200495059221
+   ],
+   "96000": [
+    46.90590234763737,
+    39.44960808815707,
+    33.17863047066896,
+    27.90457067641407,
+    23.468994601434865,
+    19.738680417297594,
+    16.60162886990931,
+    13.963719847957341,
+    11.745920297503739,
+    9.881968469478306,
+    8.31647894801729,
+    7.0034333588808915,
+    5.905045336952464,
+    4.991020937103949,
+    4.238298425527877,
+    3.6315326989571535,
+    3.1652695704799467,
+    2.851736605306495
+   ]
+  }
+ }
+}

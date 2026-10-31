@@ -21,7 +21,8 @@
 (import eseq.materials)
 
 ;; Names other code calls by spelling: `seq-ctrl-g` is the global Ctrl+G /
-;; Cmd+G dispatcher src/ui/input.rs evals by name.
+;; Cmd+G dispatcher and `seq-duplicate` the mixer's Cmd+D one
+;; src/ui/input.rs evals by name.
 
 (import eseq.track-collapse)
 (import eseq.drum-rack-v2)
@@ -58,6 +59,7 @@
         drop-on-group-header
         patch-mixer-strip
         seq-ctrl-g
+        seq-duplicate
         clip-area-height
         strip-height
         grouped-strip-height
@@ -182,7 +184,8 @@
 ;; Data, rather than menu-specific control flow, is the extension seam for
 ;; Duplicate/Delete/Group/color actions added later.
 (def track-menu-actions
-  (list (dict :id :rename :label "Rename" :icon :pencil)))
+  (list (dict :id :rename :label "Rename" :icon :pencil)
+        (dict :id :duplicate :label "Duplicate" :icon :clips)))
 
 ;; The names of the track palette's colors, in `seq-track-palette` order.
 (def palette-color-names
@@ -1405,6 +1408,7 @@
     (set! strip-menu.open false)
     (match (get action :id)
       :rename (begin-rename t g)
+      :duplicate (duplicate-track t)
       :set-color
       (if g
         (host-command "set-group-color" (dict :group-id g.gid :color (get action :color)))
@@ -2079,6 +2083,20 @@
 
 (effect-buffer "*mixer*"
   (mixer-body))
+
+;; Append a copy of track t (its Sound, every scene's lane, mixer and
+;; links), in its group, as one undo step.
+(def duplicate-track (t)
+  (host-command "duplicate-track" (dict :track t.index)))
+
+;; Cmd+D / Ctrl+D in the mixer: a track armed by its label duplicates;
+;; otherwise the armed track pattern clones.
+(def seq-duplicate ()
+  (let ((armed (find (lambda (t) (seq-delete-target? :mixer-track (dict :track t.index)))
+                     (tracks))))
+    (if armed
+      (duplicate-track armed)
+      (seq-clone-active-track-pattern))))
 
 ;; Ctrl+G / Cmd+G — fold the multi-selected tracks into a new group.
 (def group-selected ()

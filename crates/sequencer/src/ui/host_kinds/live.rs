@@ -90,7 +90,7 @@ pub(crate) struct KindsShared {
     /// instrument's key locks, the instrument params and the sends (by bus
     /// id) a process writes, the step and key-lock variant registries
     /// (`panel`, `variants`), the buses some step locks a send to.
-    pub(super) key_locks: PlockCache<usize, InstrumentKeyLocks>,
+    pub(super) key_locks: PlockCache<(usize, Option<usize>), InstrumentKeyLocks>,
     pub(super) process_bound: PlockCache<usize, HashSet<usize>>,
     pub(super) process_bound_sends: PlockCache<usize, HashSet<u64>>,
     pub(super) variants: PlockCache<(usize, VariantScope), VariantSnapshot>,

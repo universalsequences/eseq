@@ -26,6 +26,7 @@ mod state;
 mod tests;
 mod text;
 mod text_metrics;
+mod ties;
 mod writeback;
 
 pub use inspector::{
@@ -67,6 +68,7 @@ use preview::patcher_preview_payload;
 pub use lisp::{parse_patch_source, parse_patch_source_with_library};
 pub use model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CableSegmentInfo,
+    CableTie,
     CallSourceShape, ConnectionKind, ConnectionSource, ConnectionSourceTarget, ExprPath,
     ExprPathSegment, MacroOrigin,
     MacroPatch, NodeKind, NodeSource, Patch, PatchConnection, PatchNode, PatcherIntent,
@@ -2955,6 +2957,13 @@ pub fn run_patcher_command(node: &LayoutNode, name: &str) -> Option<WidgetEvent>
             set_patcher_interaction_state(key, state);
             Some(WidgetEvent::Custom(Value::Nil))
         }
+        "delete-selection" if state.selected_tie.is_some() => {
+            let tie_id = state.selected_tie.take()?;
+            let patch = debug_patch_for_state(node, &state, &view_key)?;
+            let changed = ties::remove_tie(&mut state, &view_key, &patch, tie_id);
+            set_patcher_interaction_state(key, state);
+            changed.then(|| patcher_widget_event(PatcherChangeKind::Layout))
+        }
         "delete-selection" if state.selected_cable.is_some() => {
             let cable_id = state.selected_cable.clone()?;
             let changed = delete_connection_edit_or_mark_deleted(&mut state, &view_key, &cable_id);
@@ -4582,35 +4591,108 @@ fn toggle_selected_cable_segmented(
         .connections
         .iter()
         .find(|connection| state::source_connection_id(connection) == selected_cable)
-        .cloned()
     else {
         return false;
     };
-    let mut segment = connection.segment.unwrap_or(CableSegmentInfo {
-        is_segmented: false,
-        segment_row: 0.0,
-    });
-    segment.is_segmented = !segment.is_segmented;
-    if segment.is_segmented && segment.segment_row == 0.0 {
-        let pan_state = state::get_patcher_pan_state(patcher_state_key(node));
-        let node_rects = geometry::patch_node_rects(&patch, node.rect, &pan_state);
-        let input_indices = geometry::patch_input_indices(&patch);
-        let input_slot_counts = geometry::patch_input_slot_counts(&patch, &input_indices);
-        let output_counts = geometry::patch_output_counts(&patch);
-        if let Some((start, end)) = geometry::connection_endpoints_at(
-            &connection,
-            &node_rects,
-            &input_indices,
-            &input_slot_counts,
-            &output_counts,
-            geometry::patcher_zoom(&pan_state),
-        ) {
-            let midpoint = ((start.0 + end.0) * 0.5, (start.1 + end.1) * 0.5);
-            segment.segment_row = geometry::screen_to_model(node.rect, &pan_state, midpoint).1;
-        }
-    }
-    set_connection_segment_edit(state, view_key, &connection, Some(segment));
+    let segmented = connection.segment.is_some_and(|segment| segment.is_segmented);
+    let pan_state = state::get_patcher_pan_state(patcher_state_key(node));
+    set_cables_segmented(
+        node.rect,
+        &pan_state,
+        state,
+        view_key,
+        &patch,
+        std::slice::from_ref(&selected_cable),
+        !segmented,
+    );
     state.drag = None;
+    true
+}
+
+/// Segment (`on`) or unsegment `cables`. A newly segmented cable runs
+/// halfway between its ports, keeping a row it had before; a tied one gets a
+/// run before its ties and one after, where the bundle puts them. Returns
+/// whether any cable changed.
+fn set_cables_segmented(
+    rect: crate::layout::Rect,
+    pan_state: &state::PatcherPanState,
+    state: &mut state::PatcherInteractionState,
+    view_key: &str,
+    patch: &Patch,
+    cables: &[String],
+    on: bool,
+) -> bool {
+    // Lay the ties out with every cable switched, for the runs they would get.
+    let mut toggled = patch.clone();
+    let mut changed = Vec::new();
+    for connection in &mut toggled.connections {
+        let id = state::source_connection_id(connection);
+        if !cables.contains(&id) {
+            continue;
+        }
+        let current = connection.segment.unwrap_or(CableSegmentInfo {
+            is_segmented: false,
+            segment_row: 0.0,
+            after_row: None,
+        });
+        if current.is_segmented == on {
+            continue;
+        }
+        connection.segment = Some(CableSegmentInfo {
+            is_segmented: on,
+            ..current
+        });
+        changed.push(id);
+    }
+    if changed.is_empty() {
+        return false;
+    }
+    let node_rects = geometry::patch_node_rects(patch, rect, pan_state);
+    let zoom = geometry::patcher_zoom(pan_state);
+    let (_, tie_layout) = ties::patch_tie_layout(
+        &toggled,
+        &node_rects,
+        geometry::patcher_origin(rect, pan_state),
+        zoom,
+    );
+    let input_indices = geometry::patch_input_indices(patch);
+    let input_slot_counts = geometry::patch_input_slot_counts(patch, &input_indices);
+    let output_counts = geometry::patch_output_counts(patch);
+    for connection in &patch.connections {
+        let id = state::source_connection_id(connection);
+        if !changed.contains(&id) {
+            continue;
+        }
+        let mut segment = toggled
+            .connections
+            .iter()
+            .find(|toggled| state::source_connection_id(toggled) == id)
+            .and_then(|toggled| toggled.segment)
+            .expect("switched above");
+        if segment.is_segmented
+            && let Some(&first) = tie_layout
+                .auto_segment_rows
+                .get(&id)
+                .and_then(|rows| rows.first())
+        {
+            segment.segment_row = first;
+            segment.after_row = None;
+        } else if segment.is_segmented
+            && segment.segment_row == 0.0
+            && let Some((start, end)) = geometry::connection_endpoints_at(
+                connection,
+                &node_rects,
+                &input_indices,
+                &input_slot_counts,
+                &output_counts,
+                zoom,
+            )
+        {
+            let midpoint = ((start.0 + end.0) * 0.5, (start.1 + end.1) * 0.5);
+            segment.segment_row = geometry::screen_to_model(rect, pan_state, midpoint).1;
+        }
+        set_connection_segment_edit(state, view_key, connection, Some(segment));
+    }
     true
 }
 

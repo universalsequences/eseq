@@ -1184,3 +1184,62 @@ fn an_imported_kits_lanes_output_to_its_own_bus_not_one_with_the_source_id() {
     }
 }
 
+
+/// eseq-7pjq: a duplicate is a mirror import of one track from this very
+/// project: every scene's lane, its send to a bus that stays behind, its
+/// group, a `<name> copy` name, one undo step.
+#[test]
+fn a_duplicated_track_keeps_every_scenes_lane_its_links_and_its_group() {
+    let mut rig = Rig::new();
+    let app = rig.app();
+    let bank = app.state.scene_banks()[0].id;
+    new_scene_in(app, bank);
+    launch(app, 0);
+    let track = app.graph_controller().add_track(Path::new(PLATE)).expect("track");
+    let other = app.graph_controller().add_track(Path::new(PIANO)).expect("other");
+    app.group_tracks_recorded(vec![track, other]).expect("group");
+    launch(app, 1);
+    set_steps(app, track, &[4]);
+    launch(app, 0);
+    set_steps(app, track, &[0, 8]);
+    // On the live grid: the capture's save-back writes it into scene 0.
+    app.state.pattern.track_params[track].set_sends(vec![TrackSendSnapshot {
+        destination: BusId(crate::sequencer::DEFAULT_BUS_A_ID),
+        amount: 0.5,
+    }]);
+    let tracks_before = app.tracks.len();
+    let undo_before = app.history.undo_len();
+    let name = app.tracks[track].clone();
+
+    let copy = app.duplicate_track_then(track, |_, _| Vec::new()).expect("duplicate");
+
+    assert_eq!(copy, tracks_before, "the copy is appended");
+    assert_eq!(app.tracks[copy], format!("{name} copy"));
+    assert_eq!(app.history.undo_len(), undo_before + 1, "one undo step");
+    assert_eq!(
+        cell_bits(app, copy, 0..2),
+        vec![Some((1 << 0) | (1 << 8)), Some(1 << 4)],
+        "each scene keeps its own lane"
+    );
+    let sends = app.state.with_project_scenes(|s| {
+        let id = s.composed_scene_cell(0, copy).unwrap();
+        s.track_pools[copy].get(id).unwrap().track_params.sends.clone()
+    });
+    assert!(
+        sends.iter().any(|send| send.destination.0 == crate::sequencer::DEFAULT_BUS_A_ID),
+        "the send to Bus A stays: {sends:?}"
+    );
+    assert!(
+        app.groups.iter().any(|group| group.members.contains(&track) && group.members.contains(&copy)),
+        "the copy joins the source's group"
+    );
+    let again = app.duplicate_track_then(track, |_, _| Vec::new()).expect("again");
+    assert_eq!(app.tracks[again], format!("{name} copy 2"), "names never collide");
+
+    crate::app::edit::undo(app);
+    let crate::app::history::HistoryReplay::Applied(step) = crate::app::edit::undo(app) else {
+        panic!("undo");
+    };
+    assert_eq!(step.label, "Duplicate track");
+    assert_eq!(app.tracks.len(), tracks_before);
+}

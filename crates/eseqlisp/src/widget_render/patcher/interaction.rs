@@ -35,9 +35,10 @@ use super::model::{
     Patch, is_tensor_options_source,
 };
 use super::state::{
+    SegmentPart,
     AlignmentAxis, AlignmentSnapState, PatcherClipboard, PatcherClipboardConnection,
     PatcherClipboardNode, PatcherDragState, PatcherInteractionState, PatcherMacroEdit,
-    PatcherPanState, active_patcher_patch, active_patcher_view_key, allocate_created_connection,
+    PatcherPanState, WireSelection, active_patcher_patch, active_patcher_view_key, allocate_created_connection,
     breadcrumb_overlay_enabled,
     allocate_created_node_avoiding, bring_nodes_to_front, connection_id_from_ports,
     debug_log_edit_event, delete_connection_edit_or_mark_deleted, ensure_source_node_edit,
@@ -52,6 +53,7 @@ use super::text::{
     begin_patcher_text_edit, patcher_text_cursor_at_col_with_zoom,
     update_patcher_text_edit_pointer,
 };
+use super::render::WireOverlayItem;
 use super::{debug_patch_for_state, load_patch_from_props};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -165,6 +167,7 @@ pub(super) fn handle_patcher_pointer_down(
     cell_w: f32,
     cell_h: f32,
 ) {
+    super::ties::note_cell_size(cell_w, cell_h);
     let key = patcher_state_key(node);
     let mut state = get_patcher_interaction_state(key);
     if state.active_macro.is_some()
@@ -223,6 +226,134 @@ pub(super) fn handle_patcher_pointer_down(
         }
     }
     state.hovered_node = hit.clone();
+    // The overlay floats over everything; any click elsewhere drops the wire
+    // selection or tie it belongs to.
+    let origin = patcher_origin(node.rect, &pan_state);
+    let zoom = patcher_zoom(&pan_state);
+    let (_, tie_layout) = super::ties::patch_tie_layout(
+        &patch,
+        &patch_node_rects(&patch, node.rect, &pan_state),
+        origin,
+        zoom,
+    );
+    if let Some((anchor, items)) =
+        super::render::wire_overlay_content(&patch, &state, &tie_layout, origin, zoom)
+    {
+        let selection = state.wire_selection.take();
+        let selected_tie = state.selected_tie.take();
+        let (_, items) = super::render::wire_overlay_layout(anchor, items, zoom);
+        let clicked = items
+            .iter()
+            .find(|(_, rect, _)| rect_contains(*rect, local_col, local_row))
+            .map(|(item, _, _)| *item);
+        match (clicked, selection, selected_tie) {
+            (Some(WireOverlayItem::TieUp), Some(selection), _) => {
+                let count = selection.points.len().max(1) as f32;
+                let position = selection.points.iter().fold((0.0, 0.0), |sum, point| {
+                    (sum.0 + point.0 / count, sum.1 + point.1 / count)
+                });
+                let cables = selection.cables;
+                let tied = super::ties::add_tie(
+                    &mut state,
+                    &view_key,
+                    &patch,
+                    position,
+                    cables.clone(),
+                );
+                // A segmented cable tied for the first time splits into two
+                // runs; the one before the tie starts where the bundle would
+                // put it, and the one after follows the bundle until dragged.
+                let mut tied_patch = patch.clone();
+                if let Some(ties) = state.edit_state.cable_ties.get(&view_key) {
+                    tied_patch.cable_ties = ties.clone();
+                }
+                let (_, tied_layout) = super::ties::patch_tie_layout(
+                    &tied_patch,
+                    &patch_node_rects(&tied_patch, node.rect, &pan_state),
+                    origin,
+                    zoom,
+                );
+                for cable_id in &cables {
+                    let Some(connection) = patch
+                        .connections
+                        .iter()
+                        .find(|connection| source_connection_id(connection) == *cable_id)
+                    else {
+                        continue;
+                    };
+                    if let Some(segment) = connection.segment.filter(|segment| segment.is_segmented)
+                        && !tie_layout.routes.contains_key(cable_id)
+                        && let Some(&first) = tied_layout
+                            .auto_segment_rows
+                            .get(cable_id)
+                            .and_then(|rows| rows.first())
+                    {
+                        set_connection_segment_edit(
+                            &mut state,
+                            &view_key,
+                            connection,
+                            Some(CableSegmentInfo {
+                                segment_row: first,
+                                after_row: None,
+                                ..segment
+                            }),
+                        );
+                    }
+                }
+                state.drag = tied.then_some(PatcherDragState::TieEdited);
+            }
+            (Some(WireOverlayItem::Remove), Some(selection), _) => {
+                let mut changed = false;
+                for cable_id in &selection.cables {
+                    changed |=
+                        delete_connection_edit_or_mark_deleted(&mut state, &view_key, cable_id);
+                }
+                state.drag = changed.then_some(PatcherDragState::WiresRemoved);
+            }
+            (Some(WireOverlayItem::Untie), _, Some(tie_id)) => {
+                state.drag = super::ties::remove_tie(&mut state, &view_key, &patch, tie_id)
+                    .then_some(PatcherDragState::TieEdited);
+            }
+            (
+                Some(item @ (WireOverlayItem::Segment | WireOverlayItem::Unsegment)),
+                selection,
+                selected_tie,
+            ) => {
+                let cables = match (&selection, selected_tie) {
+                    (Some(selection), _) => selection.cables.clone(),
+                    (None, Some(tie_id)) => patch
+                        .cable_ties
+                        .iter()
+                        .find(|tie| tie.id == tie_id)
+                        .map(|tie| tie.cables.clone())
+                        .unwrap_or_default(),
+                    (None, None) => Vec::new(),
+                };
+                let changed = super::set_cables_segmented(
+                    node.rect,
+                    &pan_state,
+                    &mut state,
+                    &view_key,
+                    &patch,
+                    &cables,
+                    item == WireOverlayItem::Segment,
+                );
+                // The overlay stays up, now offering the inverse.
+                state.wire_selection = selection;
+                state.selected_tie = selected_tie;
+                state.drag = changed.then_some(PatcherDragState::TieEdited);
+            }
+            (Some(WireOverlayItem::Count), selection, selected_tie) => {
+                state.wire_selection = selection;
+                state.selected_tie = selected_tie;
+            }
+            _ => {}
+        }
+        if clicked.is_some() {
+            set_patcher_interaction_state(key, state);
+            return;
+        }
+    }
     let input_indices = patch_input_indices(&patch);
     let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
     let output_counts = patch_output_counts(&patch);
@@ -350,8 +481,41 @@ pub(super) fn handle_patcher_pointer_down(
         set_patcher_interaction_state(key, state);
         return;
     }
+    if hit.is_none() {
+        // Ties sit over the cables, so they claim the click ahead of cable
+        // selection: drag one to move it, Option-click it to cut it.
+        let zoom = patcher_zoom(&pan_state);
+        let (_, tie_layout) = super::ties::patch_tie_layout(
+            &patch,
+            &patch_node_rects(&patch, node.rect, &pan_state),
+            patcher_origin(node.rect, &pan_state),
+            zoom,
+        );
+        if let Some(tie_id) = tie_layout.hit_bar((local_col, local_row), zoom) {
+            state.selected_nodes.clear();
+            state.selected_ties.clear();
+            state.selected_cable = None;
+            state.drag = if modifiers.contains(KeyModifiers::ALT) {
+                super::ties::remove_tie(&mut state, &view_key, &patch, tie_id)
+                    .then_some(PatcherDragState::TieEdited)
+            } else {
+                patch
+                    .cable_ties
+                    .iter()
+                    .find(|tie| tie.id == tie_id)
+                    .map(|tie| PatcherDragState::Tie {
+                        tie_id,
+                        start_col: local_col,
+                        start_row: local_row,
+                        start_position: tie.position,
+                    })
+            };
+            set_patcher_interaction_state(key, state);
+            return;
+        }
+    }
     if hit.is_none()
-        && let Some(cable_id) = hit_patcher_segmented_cable_horizontal_segment(
+        && let Some(run) = hit_patcher_segmented_cable_horizontal_segment(
             &patch,
             node.rect,
             &pan_state,
@@ -361,29 +525,18 @@ pub(super) fn handle_patcher_pointer_down(
             local_col,
             local_row,
         )
-        && let Some(connection) = patch
-            .connections
-            .iter()
-            .find(|connection| source_connection_id(connection) == cable_id)
-        && let Some((start, end)) = connection_endpoints_at(
-            connection,
-            &patch_node_rects(&patch, node.rect, &pan_state),
-            &input_indices,
-            &input_slot_counts,
-            &output_counts,
-            patcher_zoom(&pan_state),
-        )
     {
         let origin = patcher_origin(node.rect, &pan_state);
         let zoom = patcher_zoom(&pan_state);
         state.selected_nodes.clear();
-        state.selected_cable = Some(cable_id.clone());
+        state.selected_cable = Some(run.cable_id.clone());
         state.drag = Some(PatcherDragState::CableSegment {
-            cable_id,
-            start_col: start.0,
-            start_row: (start.1 - origin.1) / zoom,
-            end_col: end.0,
-            end_row: (end.1 - origin.1) / zoom,
+            cable_id: run.cable_id,
+            part: run.part,
+            start_col: run.start.0,
+            start_row: (run.start.1 - origin.1) / zoom,
+            end_col: run.end.0,
+            end_row: (run.end.1 - origin.1) / zoom,
         });
         set_patcher_interaction_state(key, state);
         return;
@@ -400,6 +553,7 @@ pub(super) fn handle_patcher_pointer_down(
                 bring_nodes_to_front(&mut state, &view_key, std::slice::from_ref(&node_id));
             } else if !state.selected_nodes.contains(&node_id) {
                 state.selected_nodes.clear();
+                state.selected_ties.clear();
                 state.selected_nodes.insert(node_id.clone());
                 bring_nodes_to_front(&mut state, &view_key, std::slice::from_ref(&node_id));
             } else {
@@ -412,11 +566,18 @@ pub(super) fn handle_patcher_pointer_down(
                 .filter(|node| state.selected_nodes.contains(&node.id))
                 .map(|node| (node.id.clone(), node.position))
                 .collect();
+            let tie_start_positions = patch
+                .cable_ties
+                .iter()
+                .filter(|tie| state.selected_ties.contains(&tie.id))
+                .map(|tie| (tie.id, tie.position))
+                .collect();
             state.drag = Some(PatcherDragState::Nodes {
                 primary_node_id: node_id,
                 start_col: local_col,
                 start_row: local_row,
                 start_positions,
+                tie_start_positions,
                 alignment: AlignmentSnapState::default(),
             });
         }
@@ -432,17 +593,19 @@ pub(super) fn handle_patcher_pointer_down(
                 local_row,
             ) {
                 state.selected_nodes.clear();
+                state.selected_ties.clear();
                 state.selected_cable = Some(cable_id);
                 state.drag = None;
                 set_patcher_interaction_state(key, state);
                 return;
             }
-            let base_selection = if shift {
-                state.selected_nodes.clone()
+            let (base_selection, base_ties) = if shift {
+                (state.selected_nodes.clone(), state.selected_ties.clone())
             } else {
                 state.selected_nodes.clear();
+                state.selected_ties.clear();
                 state.selected_cable = None;
-                HashSet::new()
+                (HashSet::new(), HashSet::new())
             };
             state.drag = Some(PatcherDragState::Marquee {
                 start_col: local_col,
@@ -450,6 +613,7 @@ pub(super) fn handle_patcher_pointer_down(
                 current_col: local_col,
                 current_row: local_row,
                 base_selection,
+                base_ties,
             });
         }
     }
@@ -464,6 +628,7 @@ pub(super) fn handle_patcher_pointer_drag(
     cell_w: f32,
     cell_h: f32,
 ) {
+    super::ties::note_cell_size(cell_w, cell_h);
     let key = patcher_state_key(node);
     let Some((patch, pan_state, view_key)) = load_interactive_patch_for_node(node) else {
         return;
@@ -493,6 +658,19 @@ pub(super) fn handle_patcher_pointer_drag(
         return;
     }
     match state.drag.clone() {
+        Some(PatcherDragState::Tie {
+            tie_id,
+            start_col,
+            start_row,
+            start_position,
+        }) => {
+            let zoom = patcher_zoom(&pan_state);
+            let position = (
+                start_position.0 + (local_col - start_col) / zoom,
+                start_position.1 + (local_row - start_row) / zoom,
+            );
+            super::ties::move_tie(&mut state, &view_key, &patch, tie_id, position);
+        }
         Some(PatcherDragState::Cable {
             from,
             start_col,
@@ -580,6 +758,7 @@ pub(super) fn handle_patcher_pointer_drag(
             start_col,
             start_row,
             start_positions,
+            tie_start_positions,
             mut alignment,
         }) => {
             let zoom = patcher_zoom(&pan_state);
@@ -630,11 +809,26 @@ pub(super) fn handle_patcher_pointer_drag(
                     );
                 }
             }
+            // Ties taken in by the marquee move with the nodes, snap included.
+            let tie_positions = tie_start_positions
+                .iter()
+                .map(|(tie_id, start_position)| {
+                    (
+                        *tie_id,
+                        (
+                            start_position.0 + delta.0 + position_adjustment.0,
+                            start_position.1 + delta.1 + position_adjustment.1,
+                        ),
+                    )
+                })
+                .collect();
+            super::ties::move_ties(&mut state, &view_key, &patch, &tie_positions);
             state.drag = Some(PatcherDragState::Nodes {
                 primary_node_id,
                 start_col,
                 start_row,
                 start_positions,
+                tie_start_positions,
                 alignment,
             });
         }
@@ -707,6 +901,7 @@ pub(super) fn handle_patcher_pointer_drag(
         }
         Some(PatcherDragState::CableSegment {
             cable_id,
+            part,
             start_col,
             start_row,
             end_col,
@@ -727,18 +922,42 @@ pub(super) fn handle_patcher_pointer_drag(
                     SEGMENTED_CABLE_DRAG_PADDING_CELLS,
                     SEGMENTED_CABLE_DRAG_EXTRA_RANGE_CELLS,
                 );
-                set_connection_segment_edit(
-                    &mut state,
-                    &view_key,
-                    &connection,
-                    Some(CableSegmentInfo {
+                // Each run of a tied cable moves on its own.
+                let current = connection.segment.unwrap_or(CableSegmentInfo {
+                    is_segmented: true,
+                    segment_row,
+                    after_row: None,
+                });
+                let segment = match part {
+                    SegmentPart::Before => Some(CableSegmentInfo {
                         is_segmented: true,
                         segment_row,
+                        ..current
                     }),
-                );
+                    SegmentPart::After => Some(CableSegmentInfo {
+                        is_segmented: true,
+                        after_row: Some(segment_row),
+                        ..current
+                    }),
+                    SegmentPart::Between(tie_id) => {
+                        super::ties::set_tie_leg_row(
+                            &mut state,
+                            &view_key,
+                            &patch,
+                            tie_id,
+                            &cable_id,
+                            segment_row,
+                        );
+                        None
+                    }
+                };
+                if let Some(segment) = segment {
+                    set_connection_segment_edit(&mut state, &view_key, &connection, Some(segment));
+                }
             }
             state.drag = Some(PatcherDragState::CableSegment {
                 cable_id,
+                part,
                 start_col,
                 start_row,
                 end_col,
@@ -749,10 +968,21 @@ pub(super) fn handle_patcher_pointer_drag(
             start_col,
             start_row,
             base_selection,
+            base_ties,
             ..
         }) => {
             let marquee = rect_from_points(start_col, start_row, local_col, local_row);
             let node_rects = patch_node_rects(&patch, node.rect, &pan_state);
+            let (_, tie_layout) = super::ties::patch_tie_layout(
+                &patch,
+                &node_rects,
+                patcher_origin(node.rect, &pan_state),
+                patcher_zoom(&pan_state),
+            );
+            state.selected_ties = base_ties.clone();
+            state
+                .selected_ties
+                .extend(super::ties::ties_in_rect(&tie_layout, marquee));
             state.selected_nodes = base_selection.clone();
             for patch_node in &patch.nodes {
                 if let Some(node_rect) = node_rects.get(&patch_node.id)
@@ -767,9 +997,10 @@ pub(super) fn handle_patcher_pointer_drag(
                 current_col: local_col,
                 current_row: local_row,
                 base_selection,
+                base_ties,
             });
         }
-        None => {}
+        Some(PatcherDragState::TieEdited | PatcherDragState::WiresRemoved) | None => {}
     }
     let ordered_nodes = ordered_patch_nodes(&patch, &state, &view_key);
     state.hovered_node = hit_patcher_node(
@@ -873,6 +1104,40 @@ fn retarget_cable(
     true
 }
 
+/// Release of a marquee that picked up no nodes: the tieable cables running
+/// through it become the wire selection the tie-up overlay acts on.
+fn select_wires_in_marquee(
+    node: &LayoutNode,
+    patch: &Patch,
+    pan_state: &PatcherPanState,
+    marquee: Rect,
+) -> Option<WireSelection> {
+    let zoom = patcher_zoom(pan_state);
+    let (ends, tie_layout) = super::ties::patch_tie_layout(
+        patch,
+        &patch_node_rects(patch, node.rect, pan_state),
+        patcher_origin(node.rect, pan_state),
+        zoom,
+    );
+    let wires = super::ties::wires_in_rect(&ends, &tie_layout, marquee, zoom);
+    if wires.is_empty() {
+        return None;
+    }
+    let (cables, points) = wires
+        .into_iter()
+        .map(|(id, point)| (id, screen_to_model(node.rect, pan_state, point)))
+        .unzip();
+    Some(WireSelection {
+        cables,
+        points,
+        anchor: screen_to_model(
+            node.rect,
+            pan_state,
+            (marquee.col + marquee.width * 0.5, marquee.row),
+        ),
+    })
+}
+
 pub(super) fn handle_patcher_pointer_up(
     node: &LayoutNode,
     local_col: f32,
@@ -886,9 +1151,11 @@ pub(super) fn handle_patcher_pointer_up(
             PatcherDragState::Nodes { .. }
                 | PatcherDragState::NodeResize { .. }
                 | PatcherDragState::CableSegment { .. }
+                | PatcherDragState::TieEdited
         )
     );
-    let mut semantic_changed = false;
+    let mut layout_changed = layout_changed;
+    let mut semantic_changed = matches!(state.drag, Some(PatcherDragState::WiresRemoved));
     if let Some((patch, pan_state, view_key)) = load_interactive_patch_for_node(node) {
         state.last_pointer_model_position = Some(screen_to_model(
             node.rect,
@@ -933,6 +1200,33 @@ pub(super) fn handle_patcher_pointer_up(
                 allocate_created_connection(&mut state, &view_key, from, target);
                 semantic_changed = true;
             }
+        }
+        // A tie released where it was grabbed was clicked, not dragged: select
+        // it so the overlay offers to untie it.
+        if let Some(PatcherDragState::Tie {
+            tie_id,
+            start_position,
+            ..
+        }) = &state.drag
+        {
+            let moved = patch
+                .cable_ties
+                .iter()
+                .find(|tie| tie.id == *tie_id)
+                .is_some_and(|tie| tie.position != *start_position);
+            layout_changed |= moved;
+            state.selected_tie = (!moved).then_some(*tie_id);
+        }
+        if let Some(PatcherDragState::Marquee {
+            start_col,
+            start_row,
+            base_selection,
+            ..
+        }) = &state.drag
+            && state.selected_nodes == *base_selection
+        {
+            let marquee = rect_from_points(*start_col, *start_row, local_col, local_row);
+            state.wire_selection = select_wires_in_marquee(node, &patch, &pan_state, marquee);
         }
         if let Some(PatcherDragState::CableEndpoint {
             cable_id,
@@ -1002,6 +1296,7 @@ pub(super) fn handle_patcher_pointer_moved(
     cell_w: f32,
     cell_h: f32,
 ) {
+    super::ties::note_cell_size(cell_w, cell_h);
     let key = patcher_state_key(node);
     let Some((patch, pan_state, _view_key)) = load_interactive_patch_for_node(node) else {
         return;

@@ -1131,6 +1131,7 @@ impl LayoutGraph {
             patch.connections[connection_idx].segment = Some(CableSegmentInfo {
                 is_segmented: true,
                 segment_row,
+                after_row: None,
             });
         }
     }

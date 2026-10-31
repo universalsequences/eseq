@@ -474,8 +474,11 @@
           (host-command (if (seq-has-selection?) "set-rack-slot-param-plock" "set-rack-slot-base-note")
             (dict :track rack-track :slot rack-slot :param "base-note" :value v))
           (host-command
-            (if (seq-has-selection?) "set-rack-slot-instrument-plock" "set-rack-slot-instrument-param")
-            (dict :track rack-track :slot rack-slot :param-idx (get p :idx) :value v)))
+            (if (instrument-key-lock-authoring-active?)
+              "set-rack-slot-instrument-key-lock"
+              (if (seq-has-selection?) "set-rack-slot-instrument-plock" "set-rack-slot-instrument-param"))
+            (dict :track rack-track :slot rack-slot :param-idx (get p :idx) :value v
+                  :notes key-lock-view.notes)))
         (if (dv/base-note-param? p)
           (host-command "set-instrument-base-note" (dict :value v))
           (host-command
@@ -491,8 +494,11 @@
           (rack-slot (get p :rack-slot)))
       (if (instrument-rack-target? p)
         (host-command
-          (if (seq-has-selection?) "set-rack-slot-instrument-plock-option" "set-rack-slot-instrument-param-option")
-          (dict :track rack-track :slot rack-slot :param-idx (get p :idx) :label label))
+          (if (instrument-key-lock-authoring-active?)
+            "set-rack-slot-instrument-key-lock-option"
+            (if (seq-has-selection?) "set-rack-slot-instrument-plock-option" "set-rack-slot-instrument-param-option"))
+          (dict :track rack-track :slot rack-slot :param-idx (get p :idx) :label label
+                :notes key-lock-view.notes))
         (host-command
           (if (instrument-key-lock-authoring-active?)
             "set-instrument-key-lock-option-multi"
@@ -552,9 +558,14 @@
     (let ((rack-track (get p :rack-track))
           (rack-slot (get p :rack-slot)))
       (if (instrument-rack-target? p)
-        (host-command
-          (if (seq-has-selection?) "toggle-rack-slot-instrument-plock" "toggle-rack-slot-instrument-param")
-          (dict :track rack-track :slot rack-slot :param-idx (get p :idx)))
+        (if (instrument-key-lock-authoring-active?)
+          (host-command "set-rack-slot-instrument-key-lock"
+            (dict :track rack-track :slot rack-slot :param-idx (get p :idx)
+                  :notes key-lock-view.notes
+                  :value (if (fx-param-on? p) 0 1)))
+          (host-command
+            (if (seq-has-selection?) "toggle-rack-slot-instrument-plock" "toggle-rack-slot-instrument-param")
+            (dict :track rack-track :slot rack-slot :param-idx (get p :idx))))
         (if (instrument-key-lock-authoring-active?)
           (host-command "set-instrument-key-lock-multi"
             (dict :param-idx (get p :idx)

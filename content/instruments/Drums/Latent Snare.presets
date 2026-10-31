@@ -1,0 +1,763 @@
+{
+  "version": 1,
+  "engine_name": "Drums/Latent Snare",
+  "source_file": "instruments/Drums/Latent Snare/dsp.lisp",
+  "presets": [
+    {
+      "id": "latent-snare-sp01",
+      "name": "Latent SP01",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 0,
+        "snare_b": 0,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp02",
+      "name": "Latent SP02",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 1,
+        "snare_b": 1,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp03",
+      "name": "Latent SP03",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 2,
+        "snare_b": 2,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp04",
+      "name": "Latent SP04",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 3,
+        "snare_b": 3,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp05",
+      "name": "Latent SP05",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 4,
+        "snare_b": 4,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp06",
+      "name": "Latent SP06",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 5,
+        "snare_b": 5,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp07",
+      "name": "Latent SP07",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 6,
+        "snare_b": 6,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp08",
+      "name": "Latent SP08",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 7,
+        "snare_b": 7,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp09",
+      "name": "Latent SP09",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 8,
+        "snare_b": 8,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp10",
+      "name": "Latent SP10",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 9,
+        "snare_b": 9,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp11",
+      "name": "Latent SP11",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 10,
+        "snare_b": 10,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp12",
+      "name": "Latent SP12",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 11,
+        "snare_b": 11,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp13",
+      "name": "Latent SP13",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 12,
+        "snare_b": 12,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp14",
+      "name": "Latent SP14",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 13,
+        "snare_b": 13,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp15",
+      "name": "Latent SP15",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 14,
+        "snare_b": 14,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp16",
+      "name": "Latent SP16",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 15,
+        "snare_b": 15,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp17",
+      "name": "Latent SP17",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 16,
+        "snare_b": 16,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp18",
+      "name": "Latent SP18",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 17,
+        "snare_b": 17,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp19",
+      "name": "Latent SP19",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 18,
+        "snare_b": 18,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp20",
+      "name": "Latent SP20",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 19,
+        "snare_b": 19,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-xcf",
+      "name": "Latent XCF",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 20,
+        "snare_b": 20,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-xdxdfghs",
+      "name": "Latent XDXDFGHS",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 21,
+        "snare_b": 21,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-yetpre",
+      "name": "Latent YETPRE",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 22,
+        "snare_b": 22,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-yng",
+      "name": "Latent YNG",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 23,
+        "snare_b": 23,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-yute",
+      "name": "Latent YUTE",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 24,
+        "snare_b": 24,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-yyuuu",
+      "name": "Latent YYUUU",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 25,
+        "snare_b": 25,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-zdszs",
+      "name": "Latent ZDSZS",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 26,
+        "snare_b": 26,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-zetwy",
+      "name": "Latent ZETWY",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 27,
+        "snare_b": 27,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-zfg",
+      "name": "Latent ZFG",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 28,
+        "snare_b": 28,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-zsfg",
+      "name": "Latent ZSFG",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 29,
+        "snare_b": 29,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-zv",
+      "name": "Latent ZV",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 30,
+        "snare_b": 30,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-zxdvfb",
+      "name": "Latent ZXDVFB",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 31,
+        "snare_b": 31,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp10-x-sp13",
+      "name": "Latent SP10 x SP13",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 9,
+        "snare_b": 12,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp03-x-xcf",
+      "name": "Latent SP03 x XCF",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 2,
+        "snare_b": 20,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp20-x-yyuuu",
+      "name": "Latent SP20 x YYUUU",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 19,
+        "snare_b": 25,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp19-x-xdxdfghs",
+      "name": "Latent SP19 x XDXDFGHS",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 18,
+        "snare_b": 21,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp02-x-zxdvfb",
+      "name": "Latent SP02 x ZXDVFB",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 1,
+        "snare_b": 31,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp04-x-sp18",
+      "name": "Latent SP04 x SP18",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 3,
+        "snare_b": 17,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp14-x-zdszs",
+      "name": "Latent SP14 x ZDSZS",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 13,
+        "snare_b": 26,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-yng-x-zv",
+      "name": "Latent YNG x ZV",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 23,
+        "snare_b": 30,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp13-x-xdxdfghs",
+      "name": "Latent SP13 x XDXDFGHS",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 12,
+        "snare_b": 21,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    },
+    {
+      "id": "latent-snare-sp03-x-zxdvfb",
+      "name": "Latent SP03 x ZXDVFB",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 2,
+        "snare_b": 31,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0,
+        "tune": 0,
+        "decay": 1,
+        "level": 0.8
+      }
+    }
+  ]
+}

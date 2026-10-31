@@ -621,6 +621,7 @@ pub(super) fn hit_patcher_cable(
     let origin = patcher_origin(rect, pan_state);
     let zoom = patcher_zoom(pan_state);
     let hidden_node_ids = hidden_inline_node_ids(patch);
+    let (_, tie_layout) = super::ties::patch_tie_layout(patch, &node_rects, origin, zoom);
     patch
         .connections
         .iter()
@@ -635,6 +636,10 @@ pub(super) fn hit_patcher_cable(
                 output_counts,
                 zoom,
             )?;
+            let cable_id = source_connection_id(connection);
+            if let Some(distance) = tie_layout.distance_to(&cable_id, (local_col, local_row), zoom) {
+                return (distance <= CABLE_HIT_RADIUS_CELLS * zoom).then_some((distance, cable_id));
+            }
             let distance = match connection.segment {
                 Some(segment)
                     if segment.is_segmented
@@ -656,8 +661,7 @@ pub(super) fn hit_patcher_cable(
                     zoom,
                 ),
             };
-            (distance <= CABLE_HIT_RADIUS_CELLS * zoom)
-                .then(|| (distance, source_connection_id(connection)))
+            (distance <= CABLE_HIT_RADIUS_CELLS * zoom).then_some((distance, cable_id))
         })
         .min_by(|(a, _), (b, _)| a.total_cmp(b))
         .map(|(_, id)| id)
@@ -728,6 +732,10 @@ pub(super) fn segmented_cable_row_px(
     )
 }
 
+/// The segmented cable whose horizontal run is under the pointer. A tied
+/// cable has a run before its ties and one after (`ties::SegmentRun`);
+/// an untied one has one run, reported with `after` false and the cable's
+/// own ends.
 pub(super) fn hit_patcher_segmented_cable_horizontal_segment(
     patch: &Patch,
     rect: Rect,
@@ -737,11 +745,15 @@ pub(super) fn hit_patcher_segmented_cable_horizontal_segment(
     output_counts: &HashMap<String, usize>,
     local_col: f32,
     local_row: f32,
-) -> Option<String> {
+) -> Option<super::ties::SegmentRun> {
     let node_rects = patch_node_rects(patch, rect, pan_state);
     let origin = patcher_origin(rect, pan_state);
     let zoom = patcher_zoom(pan_state);
     let hidden_node_ids = hidden_inline_node_ids(patch);
+    let (_, tie_layout) = super::ties::patch_tie_layout(patch, &node_rects, origin, zoom);
+    if let Some(run) = tie_layout.hit_segment_run((local_col, local_row), zoom) {
+        return Some(run);
+    }
     patch
         .connections
         .iter()
@@ -749,7 +761,9 @@ pub(super) fn hit_patcher_segmented_cable_horizontal_segment(
         .filter(|connection| !connection_touches_hidden_inline_node(connection, &hidden_node_ids))
         .find_map(|connection| {
             let segment = connection.segment?;
-            if !segment.is_segmented {
+            if !segment.is_segmented
+                || tie_layout.routes.contains_key(&source_connection_id(connection))
+            {
                 return None;
             }
             let (start, end) = connection_endpoints_at(
@@ -771,7 +785,12 @@ pub(super) fn hit_patcher_segmented_cable_horizontal_segment(
                 CABLE_HIT_RADIUS_CELLS * zoom,
                 (local_col, local_row),
             )
-            .then(|| source_connection_id(connection))
+            .then(|| super::ties::SegmentRun {
+                cable_id: source_connection_id(connection),
+                part: super::state::SegmentPart::Before,
+                start,
+                end,
+            })
         })
 }
 
@@ -792,6 +811,12 @@ pub(super) fn hit_patcher_cable_handle(
     let threshold_radius = CABLE_HANDLE_HIT_RADIUS_CELLS * zoom;
     let threshold = threshold_radius * threshold_radius;
     let hidden_node_ids = hidden_inline_node_ids(patch);
+    let (_, tie_layout) = super::ties::patch_tie_layout(
+        patch,
+        &node_rects,
+        patcher_origin(rect, pan_state),
+        zoom,
+    );
     patch
         .connections
         .iter()
@@ -810,8 +835,9 @@ pub(super) fn hit_patcher_cable_handle(
                 output_counts,
                 zoom,
             )?;
-            let (from_handle, to_handle) =
-                connection_cable_edit_points(connection, start, end, zoom);
+            let (from_handle, to_handle) = tie_layout
+                .edit_points(&cable_id, zoom)
+                .unwrap_or_else(|| connection_cable_edit_points(connection, start, end, zoom));
             // Nearest handle wins: on a short cable both handles can sit inside
             // one hit radius, and first-match would make the `To` end
             // unreachable.

@@ -151,6 +151,7 @@ impl SequencerState {
                         .map(|_| PlockVariantRegistry::default())
                         .collect(),
                 ),
+                rack_key_lock_variant_registries: Mutex::new(Default::default()),
             },
             transport: TransportState {
                 playhead: AtomicU32::new(0),

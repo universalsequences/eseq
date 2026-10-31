@@ -1093,8 +1093,8 @@ impl DeviceBits {
     }
 }
 
-/// `device.variants`: a track instrument's key-lock variants (registering
-/// their instances); empty for any other device.
+/// `device.variants`: a track instrument's or rack layer's key-lock
+/// variants (registering their instances); empty for any other device.
 pub(super) fn device_variants<S: KindStore>(
     store: &mut S,
     sources: &KindsHandles,
@@ -1103,18 +1103,13 @@ pub(super) fn device_variants<S: KindStore>(
     source: &DeviceSource,
 ) -> Value {
     let track = source.owner;
-    let owner = (source.device == DeviceSlot::Instrument)
-        .then(|| store.keyed(TRACK, &[track as u64]))
-        .flatten();
-    match owner {
-        Some(track_id) => owner_variants(
-            store,
-            sources,
-            shared,
-            (id, track_id),
-            track,
-            VariantScope::Keys,
-        ),
+    let scope = match source.device {
+        DeviceSlot::Instrument => VariantScope::Keys,
+        DeviceSlot::RackSlot(slot_idx) => VariantScope::RackKeys(slot_idx),
+        _ => return instance_list([]),
+    };
+    match store.keyed(TRACK, &[track as u64]) {
+        Some(track_id) => owner_variants(store, sources, shared, (id, track_id), track, scope),
         None => instance_list([]),
     }
 }

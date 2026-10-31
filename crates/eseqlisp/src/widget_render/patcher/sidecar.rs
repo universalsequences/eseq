@@ -9,7 +9,7 @@ use super::graph_payload::{GraphPayload, patch_from_payload, payload_from_patch}
 use super::geometry::{patch_input_indices, patch_input_slot_counts, patch_output_counts};
 use super::lisp::parse_editor_node_text;
 use super::model::{
-    CableSegmentInfo, InputPresentation, MacroOrigin, Patch, PatchNode,
+    CableSegmentInfo, CableTie, InputPresentation, MacroOrigin, Patch, PatchNode,
     connection_touches_hidden_inline_node, hidden_inline_node_ids, refresh_patch_inline_inputs,
 };
 use super::state::{
@@ -77,6 +77,19 @@ struct ScopeLayout {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     input_presentation: BTreeMap<String, InputPresentation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ties: Vec<TieEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct TieEntry {
+    id: u64,
+    x: f32,
+    y: f32,
+    cables: Vec<String>,
+    /// `CableTie::leg_rows`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    rows: BTreeMap<String, f32>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -95,6 +108,9 @@ struct NodePosition {
 struct CableLayout {
     segmented: bool,
     y: f32,
+    /// A tied cable's run after its last tie (`CableSegmentInfo::after_row`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    after_y: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -414,6 +430,22 @@ fn apply_sidecar(patch: &mut Patch, sidecar: &LayoutSidecar, place_unmatched: bo
 }
 
 fn apply_scope_layout(patch: &mut Patch, scope: &ScopeLayout, place_unmatched: bool) {
+    patch.cable_ties = scope
+        .ties
+        .iter()
+        .filter(|tie| tie.x.is_finite() && tie.y.is_finite())
+        .map(|tie| CableTie {
+            id: tie.id,
+            position: (tie.x, tie.y),
+            cables: tie.cables.clone(),
+            leg_rows: tie
+                .rows
+                .iter()
+                .filter(|(_, row)| row.is_finite())
+                .map(|(id, row)| (id.clone(), *row))
+                .collect(),
+        })
+        .collect();
     for connection in &mut patch.connections {
         let key = destination_input_key(&connection.to_node, connection.to_input);
         if let Some(presentation) = scope.input_presentation.get(&key).copied() {
@@ -456,6 +488,7 @@ fn apply_scope_layout(patch: &mut Patch, scope: &ScopeLayout, place_unmatched: b
             connection.segment = cable.segmented.then_some(CableSegmentInfo {
                 is_segmented: true,
                 segment_row: cable.y,
+                after_row: cable.after_y.filter(|row| row.is_finite()),
             });
         } else if !connection_endpoint_new.get(&id).copied().unwrap_or(false) {
             connection.segment = None;
@@ -543,9 +576,14 @@ fn sidecar_from_patch_with_graph(layout_patch: &Patch, graph_patch: &Patch) -> L
         if matches!(macro_patch.origin, MacroOrigin::Library { .. }) {
             continue;
         }
+        let graph_scope = graph_patch
+            .macros
+            .iter()
+            .find(|graph_macro| graph_macro.name == macro_patch.name)
+            .map(|graph_macro| &graph_macro.patch);
         macros.insert(
             macro_patch.name.clone(),
-            scope_layout_from_patch(&macro_patch.patch),
+            scope_layout_with_graph(&macro_patch.patch, graph_scope),
         );
     }
     LayoutSidecar {
@@ -553,7 +591,7 @@ fn sidecar_from_patch_with_graph(layout_patch: &Patch, graph_patch: &Patch) -> L
         // Sidecars are only serialized from live patch-editor state, so any
         // written layout marks the item as patch-authored.
         authored: true,
-        root: scope_layout_from_patch(patch),
+        root: scope_layout_with_graph(patch, Some(graph_patch)),
         macros,
         // Every sidecar write is a patch-editor write, which is exactly the set
         // of moments the model is authoritative — so the payload is refreshed
@@ -562,6 +600,43 @@ fn sidecar_from_patch_with_graph(layout_patch: &Patch, graph_patch: &Patch) -> L
         // agentic macro rematerialize both end in a sidecar write.
         graph: Some(payload_from_patch(graph_patch)),
     }
+}
+
+/// A scope's layout keyed off `layout_patch`, plus the cables only
+/// `graph_patch` has. After a save the two disagree on summing inlets: the
+/// regenerated source spells several cables into one inlet as `(+ a b)`,
+/// which reparses into a `+` node with cables `a -> +` and `b -> +`, while the
+/// graph payload a reload is built from keeps the editor's cables `a -> c`
+/// and `b -> c`. Their segments and ties are stored under the graph's ids, or
+/// the reload would find nothing for them.
+fn scope_layout_with_graph(layout_patch: &Patch, graph_patch: Option<&Patch>) -> ScopeLayout {
+    let mut layout = scope_layout_from_patch(layout_patch);
+    let Some(graph_patch) = graph_patch.filter(|graph| !std::ptr::eq(*graph, layout_patch)) else {
+        return layout;
+    };
+    for (id, cable) in scope_layout_from_patch(graph_patch).cables {
+        layout.cables.entry(id).or_insert(cable);
+    }
+    let live = layout_patch
+        .connections
+        .iter()
+        .chain(&graph_patch.connections)
+        .map(source_connection_id)
+        .collect::<HashSet<_>>();
+    layout.ties = tie_entries(super::ties::live_ties_among(&layout_patch.cable_ties, &live));
+    layout
+}
+
+fn tie_entries(ties: Vec<CableTie>) -> Vec<TieEntry> {
+    ties.into_iter()
+        .map(|tie| TieEntry {
+            id: tie.id,
+            x: tie.position.0,
+            y: tie.position.1,
+            cables: tie.cables,
+            rows: tie.leg_rows,
+        })
+        .collect()
 }
 
 fn scope_layout_from_patch(patch: &Patch) -> ScopeLayout {
@@ -608,6 +683,7 @@ fn scope_layout_from_patch(patch: &Patch) -> ScopeLayout {
                     CableLayout {
                         segmented: true,
                         y: segment.segment_row,
+                        after_y: segment.after_row.filter(|row| row.is_finite()),
                     },
                 )
             })
@@ -625,10 +701,12 @@ fn scope_layout_from_patch(patch: &Patch) -> ScopeLayout {
             })
         })
         .collect();
+    let ties = tie_entries(super::ties::live_ties(patch));
     ScopeLayout {
         nodes,
         cables,
         input_presentation,
+        ties,
     }
 }
 
@@ -736,7 +814,9 @@ fn overlay_scope_visible_layout(
         }
     }
 
-    let visible_segments = visible
+    // Visible cable id -> (emitted cable id, segment): the save may rename
+    // nodes, and every cable id is spelled with its endpoint node ids.
+    let mapped_cables = visible
         .connections
         .iter()
         .filter_map(|connection| {
@@ -748,9 +828,33 @@ fn overlay_scope_visible_layout(
             let mut mapped = connection.clone();
             mapped.from_node = from_node;
             mapped.to_node = to_node;
-            Some((source_connection_id(&mapped), connection.segment))
+            Some((
+                source_connection_id(connection),
+                (source_connection_id(&mapped), connection.segment),
+            ))
         })
         .collect::<HashMap<_, _>>();
+    let visible_segments = mapped_cables
+        .values()
+        .cloned()
+        .collect::<HashMap<_, _>>();
+    emitted.cable_ties = visible
+        .cable_ties
+        .iter()
+        .map(|tie| CableTie {
+            cables: tie
+                .cables
+                .iter()
+                .filter_map(|id| mapped_cables.get(id).map(|(mapped, _)| mapped.clone()))
+                .collect(),
+            leg_rows: tie
+                .leg_rows
+                .iter()
+                .filter_map(|(id, row)| mapped_cables.get(id).map(|(mapped, _)| (mapped.clone(), *row)))
+                .collect(),
+            ..tie.clone()
+        })
+        .collect();
     for connection in &mut emitted.connections {
         let id = source_connection_id(connection);
         if let Some(segment) = visible_segments.get(&id) {

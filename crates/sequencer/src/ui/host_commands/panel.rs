@@ -187,16 +187,18 @@ fn stamp_variant(map: &Payload, app: &mut app::App, ctx: &mut LoopCtx<'_>) -> Re
 }
 
 /// `stamp-key-variant` (`device-target`, `:label`, `:notes`): a track
-/// instrument's keys.
+/// instrument's or a rack layer's keys.
 fn stamp_key_variant(
     map: &Payload,
     app: &mut app::App,
     ctx: &mut LoopCtx<'_>,
 ) -> Result<(), String> {
     let (track, device) = track_device(app, map)?;
-    if device != DeviceSlot::Instrument {
-        return Err(format!("a {} has no key-lock variants", device.role()));
-    }
+    let rack_slot = match device {
+        DeviceSlot::Instrument => None,
+        DeviceSlot::RackSlot(slot_idx) => Some(slot_idx),
+        _ => return Err(format!("a {} has no key-lock variants", device.role())),
+    };
     let notes = map_usize_list(map, "notes").unwrap_or_default();
     if let Some(note) = notes
         .iter()
@@ -205,7 +207,12 @@ fn stamp_key_variant(
         return Err(format!("{note} is no MIDI note"));
     }
     let label = variant_label(map)?;
-    let (registry, assignments) = app.state.key_lock_variant_registry_with_assignments(track);
+    let (registry, assignments) = match rack_slot {
+        None => app.state.key_lock_variant_registry_with_assignments(track),
+        Some(slot_idx) => app
+            .state
+            .rack_key_lock_variant_registry_with_assignments(track, slot_idx),
+    };
     let key = variant_key(
         &registry,
         label.as_deref(),
@@ -228,7 +235,16 @@ fn stamp_key_variant(
         return Ok(());
     }
     let script = ScriptEdit::begin(app, ctx, false);
-    let changed = script.apply(app, key_variant_command(track, notes, key));
+    let command = match rack_slot {
+        None => key_variant_command(track, notes, key),
+        Some(slot_idx) => app::AppCommand::StampRackSlotKeyLockVariant {
+            track,
+            slot_idx,
+            notes,
+            key,
+        },
+    };
+    let changed = script.apply(app, command);
     if changed {
         variant_edit_applied(ctx.shared);
     }

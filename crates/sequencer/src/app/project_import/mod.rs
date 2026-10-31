@@ -33,6 +33,7 @@
 //! **Assets** are shared by file through `assets::ImportSampleCache`.
 
 mod assets;
+mod duplicate;
 mod extract;
 mod links;
 mod place;
@@ -65,6 +66,11 @@ pub enum ImportTarget {
     /// A new bank the import appends, with one bare scene.
     #[default]
     NewBank,
+    /// Every scene here, each standing for the source scene at its index:
+    /// the source is a capture of this very project (`App::duplicate_track`).
+    /// Links to what did not come along stay on the same thing here instead
+    /// of being cut, and no group is rebuilt around the imported tracks.
+    Mirror,
 }
 
 /// What a pick names in the source.
@@ -289,9 +295,11 @@ fn plan(source: &ImportSource, request: &ImportRequest) -> Result<Plan, String> 
             }
         }
     }
-    // A plain group comes along with the tracks it groups.
+    // A plain group comes along with the tracks it groups (a mirror keeps
+    // the group it already has: the duplicate joins it afterwards).
     for group in &source.file.groups {
-        if !group.is_rack()
+        if request.target != ImportTarget::Mirror
+            && !group.is_rack()
             && (group.members.iter().any(|track| tracks.contains(track))
                 || group.rack_members.iter().any(|kit| kits.contains(kit)))
         {
@@ -472,7 +480,11 @@ impl App {
             ));
         }
 
-        let mut ids = IdMap { source_tracks: source.file.tracks.len(), ..Default::default() };
+        let mut ids = IdMap {
+            source_tracks: source.file.tracks.len(),
+            same_project: request.target == ImportTarget::Mirror,
+            ..Default::default()
+        };
         let mut kits = Vec::new();
         for gid in &plan.kits {
             kits.push(self.import_kit(source, *gid, &mut ids, &mut summary)?);

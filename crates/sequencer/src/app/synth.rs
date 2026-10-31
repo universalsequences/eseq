@@ -1147,6 +1147,70 @@ impl App {
         updated
     }
 
+    /// Key-locks a rack layer's instrument param on `notes`; `true` when the
+    /// slot and param exist.
+    pub fn set_rack_slot_instrument_key_locks(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        notes: &[u8],
+        param_idx: usize,
+        value: f32,
+    ) -> bool {
+        let mut wrote = false;
+        let slot_exists = self.state.update_live_rack_slot(track, slot_idx, |slot| {
+            for &note in notes {
+                wrote |= slot.instrument_slot.set_key_lock(note, param_idx, value);
+            }
+            if wrote {
+                slot.track_sound_state.dirty = true;
+            }
+        });
+        if slot_exists && wrote {
+            for &note in notes {
+                self.sync_rack_slot_mod_active_key_lock(track, slot_idx, note, param_idx);
+            }
+        }
+        slot_exists && wrote
+    }
+
+    /// Stamps key-lock variant `key` onto `notes` of a rack layer's
+    /// instrument (each note's locks replaced by the variant's), or clears
+    /// those notes' locks (`None`); `true` when any note changed.
+    pub fn stamp_rack_slot_key_lock_variant(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        notes: &[u8],
+        key: Option<&crate::plock_variants::PlockVariantKey>,
+    ) -> bool {
+        use crate::plock_variants::{rack_slot_key_lock_variant_key, PlockVariantDomain};
+        let mut changed = false;
+        self.state.update_live_rack_slot(track, slot_idx, |slot| {
+            let instrument = &mut slot.instrument_slot;
+            for &note in notes {
+                let now = rack_slot_key_lock_variant_key(instrument, note);
+                if now.as_ref() == key {
+                    continue;
+                }
+                instrument.clear_note_key_locks(note);
+                for entry in key.iter().flat_map(|key| &key.entries) {
+                    if entry.domain == PlockVariantDomain::InstrumentKeyLock
+                        && entry.slot == 0
+                        && entry.cell.is_none()
+                    {
+                        instrument.set_key_lock(note, entry.param, f32::from_bits(entry.value_bits));
+                    }
+                }
+                changed = true;
+            }
+            if changed {
+                slot.track_sound_state.dirty = true;
+            }
+        });
+        changed
+    }
+
     pub fn set_rack_slot_instrument_plock(
         &mut self,
         track: usize,
@@ -1473,13 +1537,41 @@ impl App {
         changed_param_idx: usize,
     ) {
         let Some((active_param_idx, value, _)) =
-            self.rack_slot_mod_active_value(track, slot_idx, None, changed_param_idx)
+            self.rack_slot_mod_active_value(track, slot_idx, ModActiveLock::Default, changed_param_idx)
         else {
             return;
         };
         if self.set_rack_slot_instrument_default_only(track, slot_idx, active_param_idx, value) {
             self.send_rack_slot_instrument_param(track, slot_idx, active_param_idx, value);
         }
+    }
+
+    /// The rack-layer counterpart of `sync_instrument_mod_active_key_lock`:
+    /// re-derives the modulation-active key lock of `note` after
+    /// `changed_param_idx` (a depth) was key-locked or cleared there.
+    fn sync_rack_slot_mod_active_key_lock(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        note: u8,
+        changed_param_idx: usize,
+    ) {
+        let Some((active_param_idx, value, note_locked)) = self.rack_slot_mod_active_value(
+            track,
+            slot_idx,
+            ModActiveLock::Note(note),
+            changed_param_idx,
+        ) else {
+            return;
+        };
+        self.state.update_live_rack_slot(track, slot_idx, |slot| {
+            if note_locked {
+                slot.instrument_slot.set_key_lock(note, active_param_idx, value);
+            } else {
+                slot.instrument_slot.clear_key_lock(note, active_param_idx);
+            }
+            slot.track_sound_state.dirty = true;
+        });
     }
 
     fn sync_rack_slot_mod_active_plock(
@@ -1490,7 +1582,7 @@ impl App {
         changed_param_idx: usize,
     ) {
         let Some((active_param_idx, value, step_locked)) =
-            self.rack_slot_mod_active_value(track, slot_idx, Some(step), changed_param_idx)
+            self.rack_slot_mod_active_value(track, slot_idx, ModActiveLock::Step(step), changed_param_idx)
         else {
             return;
         };
@@ -1517,7 +1609,7 @@ impl App {
         &self,
         track: usize,
         slot_idx: usize,
-        step: Option<usize>,
+        lock: ModActiveLock,
         changed_param_idx: usize,
     ) -> Option<(usize, f32, bool)> {
         let racks = self.state.pattern.rack_tracks.lock().unwrap();
@@ -1542,15 +1634,22 @@ impl App {
             .iter()
             .find(|target| target.depth_param_idx == changed_param_idx)
             .and_then(|target| target.active_param_idx)?;
-        let step_lock = |target: &crate::effects::InstrumentModulationTarget| {
-            step.and_then(|step| {
-                slot.instrument_slot
-                    .plocks
-                    .get(step)
-                    .and_then(|step_plocks| step_plocks.get(target.depth_param_idx))
-                    .copied()
-                    .flatten()
-            })
+        let step_lock = |target: &crate::effects::InstrumentModulationTarget| match lock {
+            ModActiveLock::Default => None,
+            ModActiveLock::Step(step) => slot
+                .instrument_slot
+                .plocks
+                .get(step)
+                .and_then(|step_plocks| step_plocks.get(target.depth_param_idx))
+                .copied()
+                .flatten(),
+            ModActiveLock::Note(note) => slot
+                .instrument_slot
+                .key_locks
+                .get(&note)
+                .and_then(|row| row.get(target.depth_param_idx))
+                .copied()
+                .flatten(),
         };
         let step_locked = descriptor
             .instrument_modulation_targets
@@ -1836,4 +1935,12 @@ pub fn instrument_param_macro_key(
     Some(crate::macro_engine::MacroParamKey::for_instrument(
         track, param_idx, param_id,
     ))
+}
+
+/// Which lock a rack layer's derived modulation-active value follows.
+#[derive(Clone, Copy)]
+enum ModActiveLock {
+    Default,
+    Step(usize),
+    Note(u8),
 }

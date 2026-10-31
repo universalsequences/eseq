@@ -49,7 +49,10 @@
 //! the next marker's), so a host that selects the marker on its phase-0 move
 //! gets "click a ring to select it, click a snare to load it there". Markers
 //! with `:near` (a member index) split the preview strip into side-by-side
-//! strips, one per marker, labelled and drawn in the marker's colour.
+//! strips, one per marker, labelled and drawn in the marker's colour. Each
+//! strip is a number picker over the members: a vertical drag (up = next,
+//! one member per `STRIP_STEP_PX`) or the scroll wheel dispatches
+//! `(on-pick index id)` for that strip's marker at every step.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -94,6 +97,8 @@ const STRIP_MIN_PX: f32 = 40.0;
 const CLICK_SLOP_PX: f32 = 3.0;
 /// Latent mode: the score range `on-move` reports, the DSP's z clip.
 const SCORE_LIMIT: f32 = 3.0;
+/// Markers mode: design pixels of vertical drag per member step on a strip.
+const STRIP_STEP_PX: f32 = 12.0;
 
 /// One per-member column, in the domain the DSP blends it in.
 #[derive(Clone, Debug)]
@@ -758,6 +763,56 @@ fn prop_set(props: &HashMap<String, Value>, key: &str) -> bool {
     props.get(key).is_some_and(|value| !matches!(value, Value::Nil | Value::Bool(false)))
 }
 
+/// A boolean prop as a host binding delivers it (bool or 0/1).
+fn prop_on(props: &HashMap<String, Value>, key: &str) -> bool {
+    match props.get(key) {
+        Some(Value::Bool(on)) => *on,
+        Some(Value::Number(n)) => *n != 0.0,
+        _ => false,
+    }
+}
+
+/// Bottom right of the plot while `:recording` and `:playing` are both on:
+/// a drag then prints p-locks instead of moving the base values.
+fn recording_badge(
+    props: &HashMap<String, Value>,
+    plot_rect: Rect,
+    background: Color,
+    cell_w: f32,
+    cell_h: f32,
+    viewport: WidgetViewport,
+) -> Vec<GpuPrimitive> {
+    if !(prop_on(props, "recording") && prop_on(props, "playing")) {
+        return Vec::new();
+    }
+    let red = resolve_named_color(props, "recording-color", Color::rgba(0.93, 0.27, 0.24, 1.0));
+    let label = "recording";
+    let (pad_w, pad_h) = (super::ui_design_px(6.0) / cell_w, super::ui_design_px(4.0) / cell_h);
+    let dot_w = super::ui_design_px(10.0) / cell_w;
+    let text_w = label.chars().count() as f32 * 0.55;
+    let width = pad_w * 2.0 + dot_w + text_w;
+    let height = 1.0 + pad_h;
+    let badge = Rect {
+        col: plot_rect.col + plot_rect.width - width - pad_w,
+        row: plot_rect.row + plot_rect.height - height - pad_h,
+        width,
+        height,
+    };
+    let fill = mixed(background, red, 0.2);
+    let mut prims = vec![
+        GpuPrimitive::Rect(GpuRectPrimitive { rect: badge, color: fill }),
+    ];
+    let mut mesh = ShadedMesh::new();
+    mesh.push_disc([badge.col + pad_w + dot_w * 0.4, badge.row + badge.height * 0.5], 2.6, red, viewport);
+    mesh.push_into(&mut prims);
+    let mut primitive = text(badge.row + pad_h * 0.5, badge.col + pad_w + dot_w, label.to_string(), 8.5, mixed(fill, red, 1.0));
+    if let GpuPrimitive::ProportionalText(t) = &mut primitive {
+        t.align_width = text_w;
+    }
+    prims.push(primitive);
+    prims
+}
+
 /// Latent mode is on when the host wants continuous moves.
 fn latent_mode(props: &HashMap<String, Value>) -> bool {
     prop_set(props, "on-move")
@@ -867,6 +922,32 @@ fn marker_at(
     best.map(|(i, _)| i)
 }
 
+/// The marker whose preview strip is under `col`: strips sit side by side in
+/// `strip`, one per marker with `:near`.
+fn strip_marker_at(markers: &[Marker], strip: Rect, col: f32) -> Option<usize> {
+    let previewed: Vec<usize> = (0..markers.len()).filter(|&i| markers[i].near.is_some()).collect();
+    if previewed.is_empty() || strip.width <= 0.0 {
+        return None;
+    }
+    let k = ((col - strip.col) / (strip.width / previewed.len() as f32)).floor();
+    previewed.get(k.clamp(0.0, (previewed.len() - 1) as f32) as usize).copied()
+}
+
+/// A number-picker drag on a marker's preview strip: the marker id, the row
+/// the drag began on, the member it began at and the last one dispatched.
+#[derive(Clone, Copy, Debug)]
+struct StripPress {
+    widget_id: u64,
+    id: i64,
+    row: f32,
+    start: usize,
+    last: usize,
+}
+
+thread_local! {
+    static STRIP_PRESS: RefCell<Option<StripPress>> = const { RefCell::new(None) };
+}
+
 /// The latent-mode press in flight (one pointer, so one slot): which widget,
 /// where it landed, the dot it landed on with the slot a pick would load
 /// (Shift read at press time), and whether it has since travelled past
@@ -912,10 +993,16 @@ fn latent_mouse_event(
     let pointer = plot.score(col, row);
     match mouse_kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            let r = plot.rect;
-            if !(col >= r.col && col < r.col + r.width && row >= r.row && row < r.row + r.height) {
-                // The preview strip: the whole gesture is ignored.
+            if !plot.rect.contains(col, row) {
+                // The preview strip: a marker's strip starts a picker drag,
+                // anything else ignores the whole gesture.
                 LATENT_PRESS.with(|press| *press.borrow_mut() = None);
+                let markers = markers_from_props(&node.props, family.members.len());
+                let press = strip_marker_at(&markers, split_rect(node.rect, cell_h).1, col).map(|i| {
+                    let near = markers[i].near.unwrap_or(0);
+                    StripPress { widget_id: node.widget_id, id: markers[i].id, row, start: near, last: near }
+                });
+                STRIP_PRESS.with(|slot| *slot.borrow_mut() = press);
                 return MouseEventOutcome::Consume;
             }
             let markers = markers_from_props(&node.props, family.members.len());
@@ -953,6 +1040,22 @@ fn latent_mouse_event(
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
+            let strip_step = STRIP_PRESS.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                let state = slot.as_mut().filter(|state| state.widget_id == node.widget_id)?;
+                let steps = ((state.row - row) * cell_h / super::ui_design_px(STRIP_STEP_PX)).round() as i64;
+                let last = family.members.len().saturating_sub(1) as i64;
+                let index = (state.start as i64 + steps).clamp(0, last) as usize;
+                let changed = index != state.last;
+                state.last = index;
+                Some(changed.then_some((index, state.id)))
+            });
+            if let Some(step) = strip_step {
+                return match step {
+                    Some((index, id)) => MouseEventOutcome::Dispatch(pick_event(index, id.max(0) as usize)),
+                    None => MouseEventOutcome::Consume,
+                };
+            }
             // A drag that leaves a dot opens the gesture there (phase 0).
             let gesture = LATENT_PRESS.with(|press| {
                 let mut press = press.borrow_mut();
@@ -973,6 +1076,9 @@ fn latent_mouse_event(
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            if STRIP_PRESS.with(|slot| slot.borrow_mut().take()).is_some_and(|s| s.widget_id == node.widget_id) {
+                return MouseEventOutcome::Consume;
+            }
             let Some(state) = LATENT_PRESS
                 .with(|press| press.borrow_mut().take())
                 .filter(|state| state.widget_id == node.widget_id)
@@ -987,6 +1093,21 @@ fn latent_mouse_event(
                 }
                 _ => MouseEventOutcome::Dispatch(gesture_move(pointer, 2, state.marker)),
             }
+        }
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if !plot.rect.contains(col, row) => {
+            let markers = markers_from_props(&node.props, family.members.len());
+            let Some(i) = strip_marker_at(&markers, split_rect(node.rect, cell_h).1, col) else {
+                return MouseEventOutcome::Ignore;
+            };
+            let near = markers[i].near.unwrap_or(0);
+            let index = match mouse_kind {
+                MouseEventKind::ScrollUp => (near + 1).min(family.members.len().saturating_sub(1)),
+                _ => near.saturating_sub(1),
+            };
+            if index == near {
+                return MouseEventOutcome::Consume;
+            }
+            MouseEventOutcome::Dispatch(pick_event(index, markers[i].id.max(0) as usize))
         }
         _ => MouseEventOutcome::Ignore,
     }
@@ -1202,6 +1323,8 @@ impl WidgetDefinition for FamilyMapWidget {
             "size",
             "markers",
             "selected",
+            "recording",
+            "playing",
         ]
     }
 
@@ -1223,7 +1346,10 @@ the host can group one undo per drag. A short press and release on a dot still p
 Several points: :markers (list (dict :id 0 :x .. :y .. :size .. :label \"START\" :near i)), \
 :selected id; a press on a ring grabs that marker, elsewhere moves the selected one, \
 on-move gets (x y phase id), a dot click calls (on-pick index id) for the selected marker \
-(Shift: the next), and markers with :near get side-by-side preview strips. \
+(Shift: the next), and markers with :near get side-by-side preview strips; dragging a strip \
+vertically or scrolling it steps (on-pick index id) through the members. \
+:recording and :playing (bind #'transport.recording and #'transport.playing) show a \
+\"recording\" badge in the plot's bottom right while both are on: drags then print p-locks. \
 Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-label \"deep\" \
 :y-label \"swell\" :on-pick (lambda (index slot) (set-member! slot index)))"
     }
@@ -1267,6 +1393,9 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
             "size",
             "markers",
             "selected",
+            "recording",
+            "playing",
+            "recording-color",
         ]
     }
 
@@ -1336,6 +1465,8 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
                 MouseEventKind::Down(MouseButton::Left)
                     | MouseEventKind::Drag(MouseButton::Left)
                     | MouseEventKind::Up(MouseButton::Left)
+                    | MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
             ) {
                 return MouseEventOutcome::Ignore;
             }
@@ -1575,6 +1706,7 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
                 prims.push(primitive);
             }
             prims.extend(labels);
+            prims.extend(recording_badge(props, plot_rect, background, cell_w, cell_h, viewport));
             return prims;
         }
         let pa = plot.point(family.scores[morph.a][0], family.scores[morph.a][1]);
@@ -1664,6 +1796,7 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
             prims.push(tag(pb, format!("b {}", family.members[morph.b]), b_color));
             prims.push(tag(pa, format!("a {}", family.members[morph.a]), accent));
         }
+        prims.extend(recording_badge(props, plot_rect, background, cell_w, cell_h, viewport));
         prims
     }
 }
@@ -2073,6 +2206,31 @@ mod tests {
     }
 
     #[test]
+    fn family_map_marker_strips_pick_members_like_a_number_picker() {
+        let (node, path) = marker_node("markers-strip-picker", Some(0.0));
+        let strip = split_rect(node.rect, 16.0).1;
+        let (start_col, end_col) = (strip.col + strip.width * 0.25, strip.col + strip.width * 0.75);
+        let row = strip.row + strip.height * 0.5;
+        let step = super::super::ui_design_px(STRIP_STEP_PX) / 16.0;
+        let left = MouseButton::Left;
+        // START strip (near 0): a press alone dispatches nothing.
+        assert!(send(&node, MouseEventKind::Down(left), start_col, row).is_none());
+        assert!(send(&node, MouseEventKind::Drag(left), start_col, row - step * 0.3).is_none(), "under one step");
+        let (callback, args) = send(&node, MouseEventKind::Drag(left), start_col, row - step).expect("steps up");
+        assert_eq!(callback, Value::Keyword("cb".to_string()));
+        assert_close(&args, &[1.0, 0.0]);
+        assert!(send(&node, MouseEventKind::Drag(left), start_col, row - step * 5.0).is_none(), "clamped at the last member");
+        let (_, args) = send(&node, MouseEventKind::Drag(left), start_col, row + step).expect("steps back down");
+        assert_close(&args, &[0.0, 0.0]);
+        assert!(send(&node, MouseEventKind::Up(left), start_col, row + step).is_none(), "release dispatches nothing");
+        // END strip (near 1): the wheel steps by one, clamped at the ends.
+        let (_, args) = send(&node, MouseEventKind::ScrollDown, end_col, row).expect("scrolls down");
+        assert_close(&args, &[0.0, 1.0]);
+        assert!(send(&node, MouseEventKind::ScrollUp, end_col, row).is_none(), "already the last member");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn family_map_markers_draw_side_by_side_strips() {
         let (node, path) = marker_node("markers-draw", None);
         let viewport = WidgetViewport::window(8.0, 16.0, 800.0, 600.0, 0.0);
@@ -2087,6 +2245,33 @@ mod tests {
         assert!(captions.contains(&"START".to_string()) && captions.contains(&"END".to_string()), "{captions:?}");
         assert!(captions.contains(&"START  51".to_string()) && captions.contains(&"END  52".to_string()), "{captions:?}");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn family_map_shows_the_recording_badge_only_while_recording_and_playing() {
+        let viewport = WidgetViewport::window(8.0, 16.0, 800.0, 600.0, 0.0);
+        let badge = |name: &str, recording: bool, playing: bool, markers: bool| {
+            let (mut node, path) = if markers {
+                marker_node(name, None)
+            } else {
+                test_node(name, &[])
+            };
+            node.props.insert("recording".to_string(), Value::Bool(recording));
+            node.props.insert("playing".to_string(), Value::Bool(playing));
+            let prims = FAMILY_MAP_WIDGET.build_primitives("family-map", &node, viewport);
+            let _ = std::fs::remove_file(path);
+            prims.iter().find_map(|p| match p {
+                GpuPrimitive::ProportionalText(t) if t.text == "recording" => Some((t.row, t.col)),
+                _ => None,
+            })
+        };
+        assert!(badge("rec-off", false, true, false).is_none(), "playing alone");
+        assert!(badge("rec-stopped", true, false, true).is_none(), "recording alone");
+        let (plot, _) = split_rect(Rect { col: 0.0, row: 0.0, width: 40.0, height: 20.0 }, 16.0);
+        for (name, markers) in [("rec-point", false), ("rec-markers", true)] {
+            let (row, col) = badge(name, true, true, markers).expect("badge while recording and playing");
+            assert!(col > plot.col + plot.width * 0.5 && row > plot.row + plot.height * 0.5, "bottom right: {row} {col}");
+        }
     }
 
     #[test]

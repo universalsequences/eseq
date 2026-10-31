@@ -74,6 +74,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "scroll",
     "tree",
     "xy-pad",
+    "drum-pad",
     "automation-lane",
     "color-picker",
 ];

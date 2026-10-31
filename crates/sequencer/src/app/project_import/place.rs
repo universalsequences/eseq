@@ -91,6 +91,15 @@ impl App {
                 targets.extend(range.map(|scene| Target { scene, source_scene: None }));
                 Ok((bank, false, targets))
             }
+            ImportTarget::Mirror => {
+                let (bank, _) = self.bank_scene_range(None)?;
+                let count = self.state.with_project_scenes(|scenes| scenes.scenes.len());
+                if count != cx.source.scene_count() {
+                    return Err("The project's scenes changed while it was copied".to_string());
+                }
+                targets.extend((0..count).map(|scene| Target { scene, source_scene: Some(scene) }));
+                Ok((bank, false, targets))
+            }
         }
     }
 
@@ -291,13 +300,18 @@ impl App {
             for target in &targets {
                 let from = target.source_scene.unwrap_or_else(|| source.current_scene());
                 for (connection, destination) in source.scene_mod_connections(from) {
-                    let Some(source_track) = cx.ids.tracks.get(&connection.source_track).copied() else {
+                    // A mirror also copies the cables INTO an imported track.
+                    let into_imported = cx.ids.same_project
+                        && matches!(destination, Some(ProjectModDestination::Track(track))
+                            if cx.ids.tracks.contains_key(&track));
+                    if !cx.ids.tracks.contains_key(&connection.source_track) && !into_imported {
+                        continue;
+                    }
+                    let Some(source_track) = cx.ids.track(connection.source_track) else {
                         continue;
                     };
                     let mapped = match destination {
-                        Some(ProjectModDestination::Track(track)) => {
-                            cx.ids.tracks.get(&track).copied().map(ModDestination::Track)
-                        }
+                        Some(ProjectModDestination::Track(track)) => cx.ids.track(track).map(ModDestination::Track),
                         Some(ProjectModDestination::Bus(bus)) => {
                             cx.ids.bus(bus).map(|bus| ModDestination::Bus(BusId(bus)))
                         }

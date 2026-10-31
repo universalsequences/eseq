@@ -28,6 +28,14 @@ use sequencer::plock_variants::{label_sort_index, PlockVariantKey};
 pub(crate) enum VariantScope {
     Steps,
     Keys,
+    /// A rack layer's (its slot position) key-lock variants.
+    RackKeys(usize),
+}
+
+impl VariantScope {
+    fn keys(self) -> bool {
+        matches!(self, Self::Keys | Self::RackKeys(_))
+    }
 }
 
 /// One variant as of its registry's last read.
@@ -59,6 +67,9 @@ fn read_variants(state: &SequencerState, track: usize, scope: VariantScope) -> V
     let (registry, assignments) = match scope {
         VariantScope::Steps => (state.plock_variant_registry_snapshot(track), Vec::new()),
         VariantScope::Keys => state.key_lock_variant_registry_with_assignments(track),
+        VariantScope::RackKeys(slot_idx) => {
+            state.rack_key_lock_variant_registry_with_assignments(track, slot_idx)
+        }
     };
     let entries = registry
         .entries
@@ -120,7 +131,7 @@ pub(super) fn owner_variants<S: KindStore>(
 ) -> Value {
     let snapshot = variant_snapshot(sources, shared, track, scope);
     let wanted: Vec<u64> = snapshot.entries.iter().map(|entry| entry.vid).collect();
-    let device = (scope == VariantScope::Keys).then_some(owner);
+    let device = scope.keys().then_some(owner);
     let (ids, _) = reconcile_children(store, owner, VARIANT, &wanted, |store, id, _| {
         store.push(id, f::VARIANT_TRACK, Value::Instance(track_id));
         store.push(id, f::VARIANT_DEVICE, instance_or_nil(device));
@@ -161,8 +172,13 @@ fn owner_registry<S: KindStore>(
     match store.kind_of(owner)? {
         TRACK => Some((*store.key_of(owner)?.first()? as usize, VariantScope::Steps)),
         _ => {
-            let track = shared.borrow().devices.get(&owner)?.owner;
-            Some((track, VariantScope::Keys))
+            let shared = shared.borrow();
+            let device = shared.devices.get(&owner)?;
+            let scope = match device.device {
+                DeviceSlot::RackSlot(slot_idx) => VariantScope::RackKeys(slot_idx),
+                _ => VariantScope::Keys,
+            };
+            Some((device.owner, scope))
         }
     }
 }

@@ -1,0 +1,652 @@
+{
+  "version": 1,
+  "engine_name": "Drums/Latent Kick",
+  "source_file": "instruments/Drums/Latent Kick/dsp.lisp",
+  "presets": [
+    {
+      "id": "latent-kick-51",
+      "name": "Latent Kick 51",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 0,
+        "kick_b": 0,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-52",
+      "name": "Latent Kick 52",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 1,
+        "kick_b": 1,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-54",
+      "name": "Latent Kick 54",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 2,
+        "kick_b": 2,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-55",
+      "name": "Latent Kick 55",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 3,
+        "kick_b": 3,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-56",
+      "name": "Latent Kick 56",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 4,
+        "kick_b": 4,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-57",
+      "name": "Latent Kick 57",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 5,
+        "kick_b": 5,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-58",
+      "name": "Latent Kick 58",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 6,
+        "kick_b": 6,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-59",
+      "name": "Latent Kick 59",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 7,
+        "kick_b": 7,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-60",
+      "name": "Latent Kick 60",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 8,
+        "kick_b": 8,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-61",
+      "name": "Latent Kick 61",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 9,
+        "kick_b": 9,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-62",
+      "name": "Latent Kick 62",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 10,
+        "kick_b": 10,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-63",
+      "name": "Latent Kick 63",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 11,
+        "kick_b": 11,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-64",
+      "name": "Latent Kick 64",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 12,
+        "kick_b": 12,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-65",
+      "name": "Latent Kick 65",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 13,
+        "kick_b": 13,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-66",
+      "name": "Latent Kick 66",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 14,
+        "kick_b": 14,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-67",
+      "name": "Latent Kick 67",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 15,
+        "kick_b": 15,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-68",
+      "name": "Latent Kick 68",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 16,
+        "kick_b": 16,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-69",
+      "name": "Latent Kick 69",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 17,
+        "kick_b": 17,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-70",
+      "name": "Latent Kick 70",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 18,
+        "kick_b": 18,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-71",
+      "name": "Latent Kick 71",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 19,
+        "kick_b": 19,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-72",
+      "name": "Latent Kick 72",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 20,
+        "kick_b": 20,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-73",
+      "name": "Latent Kick 73",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 21,
+        "kick_b": 21,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-74",
+      "name": "Latent Kick 74",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 22,
+        "kick_b": 22,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-75",
+      "name": "Latent Kick 75",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 23,
+        "kick_b": 23,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-76",
+      "name": "Latent Kick 76",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 24,
+        "kick_b": 24,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-77",
+      "name": "Latent Kick 77",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 25,
+        "kick_b": 25,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-78",
+      "name": "Latent Kick 78",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 26,
+        "kick_b": 26,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-79",
+      "name": "Latent Kick 79",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 27,
+        "kick_b": 27,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-81",
+      "name": "Latent Kick 81",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 28,
+        "kick_b": 28,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-85",
+      "name": "Latent Kick 85",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 29,
+        "kick_b": 29,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-86",
+      "name": "Latent Kick 86",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 30,
+        "kick_b": 30,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-98",
+      "name": "Latent Kick 98",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 31,
+        "kick_b": 31,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-99",
+      "name": "Latent Kick 99",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 32,
+        "kick_b": 32,
+        "blend": 0,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-58-x-77",
+      "name": "Latent Kick 58 x 77",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 6,
+        "kick_b": 25,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-69-x-99",
+      "name": "Latent Kick 69 x 99",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 17,
+        "kick_b": 32,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-63-x-66",
+      "name": "Latent Kick 63 x 66",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 11,
+        "kick_b": 14,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-55-x-76",
+      "name": "Latent Kick 55 x 76",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 3,
+        "kick_b": 24,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-51-x-81",
+      "name": "Latent Kick 51 x 81",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 0,
+        "kick_b": 28,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-62-x-98",
+      "name": "Latent Kick 62 x 98",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 10,
+        "kick_b": 31,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-70-x-74",
+      "name": "Latent Kick 70 x 74",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 18,
+        "kick_b": 22,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-61-x-68",
+      "name": "Latent Kick 61 x 68",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 9,
+        "kick_b": 16,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-56-x-59",
+      "name": "Latent Kick 56 x 59",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 4,
+        "kick_b": 7,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    },
+    {
+      "id": "latent-kick-54-x-72",
+      "name": "Latent Kick 54 x 72",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 2,
+        "kick_b": 20,
+        "blend": 0.5,
+        "even": 1,
+        "z1": 0,
+        "z2": 0,
+        "z3": 0,
+        "z4": 0
+      }
+    }
+  ]
+}

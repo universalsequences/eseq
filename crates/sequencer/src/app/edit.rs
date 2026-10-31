@@ -5927,6 +5927,12 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
             slot_idx,
             param_idx,
             ..
+        }
+        | AppCommand::SetRackSlotInstrumentKeyLockMulti {
+            track,
+            slot_idx,
+            param_idx,
+            ..
         } => {
             let rack = app
                 .state
@@ -5949,7 +5955,8 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
         | AppCommand::SetRackSlotBaseNoteOffset { track, slot_idx, .. }
         | AppCommand::SetRackSlotParamPlock { track, slot_idx, .. }
         | AppCommand::SetRackSlotParamPlockMulti { track, slot_idx, .. }
-        | AppCommand::ClearRackSlotParamPlockMulti { track, slot_idx, .. } => {
+        | AppCommand::ClearRackSlotParamPlockMulti { track, slot_idx, .. }
+        | AppCommand::StampRackSlotKeyLockVariant { track, slot_idx, .. } => {
             let rack = app
                 .state
                 .live_rack_track_snapshot(*track)
@@ -6188,7 +6195,9 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         | AppCommand::SetRackSlotMaxPolyphony { track, slot_idx, .. }
         | AppCommand::SetRackSlotChokeGroup { track, slot_idx, .. }
         | AppCommand::SetRackSlotBaseNoteOffset { track, slot_idx, .. }
-        | AppCommand::SetRackSlotInstrumentParam { track, slot_idx, .. } => {
+        | AppCommand::SetRackSlotInstrumentParam { track, slot_idx, .. }
+        | AppCommand::SetRackSlotInstrumentKeyLockMulti { track, slot_idx, .. }
+        | AppCommand::StampRackSlotKeyLockVariant { track, slot_idx, .. } => {
             capture_rack_slot_witness(app, *track, *slot_idx)
         }
 
@@ -7125,6 +7134,8 @@ fn device_value_command_track(cmd: &AppCommand) -> Option<usize> {
         | AppCommand::SetRackSlotChokeGroup { track, .. }
         | AppCommand::SetRackSlotBaseNoteOffset { track, .. }
         | AppCommand::SetRackSlotInstrumentParam { track, .. }
+        | AppCommand::SetRackSlotInstrumentKeyLockMulti { track, .. }
+        | AppCommand::StampRackSlotKeyLockVariant { track, .. }
         | AppCommand::SetRackSlotEffectParam { track, .. } => Some(*track),
         _ => None,
     }
@@ -7181,7 +7192,9 @@ impl DeviceScope {
             | AppCommand::SetRackSlotMaxPolyphony { slot_idx, .. }
             | AppCommand::SetRackSlotChokeGroup { slot_idx, .. }
             | AppCommand::SetRackSlotBaseNoteOffset { slot_idx, .. }
-            | AppCommand::SetRackSlotInstrumentParam { slot_idx, .. } => {
+            | AppCommand::SetRackSlotInstrumentParam { slot_idx, .. }
+            | AppCommand::SetRackSlotInstrumentKeyLockMulti { slot_idx, .. }
+            | AppCommand::StampRackSlotKeyLockVariant { slot_idx, .. } => {
                 Self::RackSlot(track, *slot_idx)
             }
             AppCommand::SetRackSlotEffectParam { rack_slot_idx, .. } => {
@@ -7660,7 +7673,9 @@ fn resolve_device_value_target(
             DeviceId::RackSlot(app.device_registry.rack_slot(track_id, *slot_idx)),
             Some(*slot_idx),
         ),
-        AppCommand::SetRackSlotInstrumentParam { slot_idx, .. } => (
+        AppCommand::SetRackSlotInstrumentParam { slot_idx, .. }
+        | AppCommand::SetRackSlotInstrumentKeyLockMulti { slot_idx, .. }
+        | AppCommand::StampRackSlotKeyLockVariant { slot_idx, .. } => (
             DeviceId::RackInstrument(app.device_registry.rack_slot(track_id, *slot_idx)),
             Some(*slot_idx),
         ),
@@ -7702,6 +7717,9 @@ fn device_value_label(cmd: &AppCommand) -> &'static str {
         AppCommand::SetRackSlotChokeGroup { .. } => "Set rack slot choke group",
         AppCommand::SetRackSlotBaseNoteOffset { .. } => "Set rack slot base note",
         AppCommand::SetRackSlotInstrumentParam { .. } => "Set rack instrument parameter",
+        AppCommand::SetRackSlotInstrumentKeyLockMulti { .. } => "Set rack instrument key lock",
+        AppCommand::StampRackSlotKeyLockVariant { key: Some(_), .. } => "Stamp key-lock variant",
+        AppCommand::StampRackSlotKeyLockVariant { key: None, .. } => "Clear key-lock variant",
         AppCommand::SetRackSlotEffectParam { .. } => "Set rack effect parameter",
         _ => "Edit device values",
     }
@@ -7739,7 +7757,8 @@ fn device_value_merge_suffix(cmd: &AppCommand) -> String {
         | AppCommand::ClearInstrumentKeyLock { note, param_idx, .. } => {
             format!("key-lock:note:{note}:param:{param_idx}")
         }
-        AppCommand::SetInstrumentKeyLockMulti { notes, param_idx, .. } => {
+        AppCommand::SetInstrumentKeyLockMulti { notes, param_idx, .. }
+        | AppCommand::SetRackSlotInstrumentKeyLockMulti { notes, param_idx, .. } => {
             format!("key-lock:notes:{}:param:{param_idx}", note_list(notes))
         }
         AppCommand::ClearInstrumentKeyLocksForNote { note, .. } => {

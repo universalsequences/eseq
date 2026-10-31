@@ -47,6 +47,9 @@ pub(super) const COMMANDS: &[&str] = &[
     "toggle-rack-slot-instrument-plock",
     "set-rack-slot-instrument-param-option",
     "set-rack-slot-instrument-plock-option",
+    "set-rack-slot-instrument-key-lock",
+    "set-rack-slot-instrument-key-lock-option",
+    "set-rack-slot-instrument-key-lock-batch",
     "set-instrument-param-batch",
     "set-instrument-plock-batch",
     "set-instrument-key-lock-batch",
@@ -1733,7 +1736,8 @@ pub(super) fn handle(
             }
         }
         "set-rack-slot-instrument-param-batch"
-        | "set-rack-slot-instrument-plock-batch" => {
+        | "set-rack-slot-instrument-plock-batch"
+        | "set-rack-slot-instrument-key-lock-batch" => {
             if let Value::Map(ref map) = payload {
                 let track = map_usize(map, "track");
                 let slot_idx = map_usize(map, "slot");
@@ -1749,6 +1753,7 @@ pub(super) fn handle(
                             .copied()
                             .collect::<Vec<_>>()
                     });
+                    let notes = map_u8_list(map, "notes").unwrap_or_default();
                     let commands = rack_slot_snapshot_for_host(&state, track, slot_idx)
                         .and_then(|slot| app.rack_slot_instrument_descriptor(&slot))
                         .map(|descriptor| {
@@ -1760,6 +1765,14 @@ pub(super) fn handle(
                                         track,
                                         slot_idx,
                                         steps: steps.clone(),
+                                        param_idx,
+                                        value,
+                                    }
+                                } else if name == "set-rack-slot-instrument-key-lock-batch" {
+                                    app::AppCommand::SetRackSlotInstrumentKeyLockMulti {
+                                        track,
+                                        slot_idx,
+                                        notes: notes.clone(),
                                         param_idx,
                                         value,
                                     }
@@ -1821,6 +1834,52 @@ pub(super) fn handle(
                         Err(error) => editor.handle_host_event(HostEvent::Error(
                             format!("rack instrument parameter batch failed: {error:?}"),
                         )),
+                    }
+                }
+            }
+        }
+        "set-rack-slot-instrument-key-lock" | "set-rack-slot-instrument-key-lock-option" => {
+            if let Value::Map(ref map) = payload {
+                let track = map_usize(map, "track");
+                let slot_idx = map_usize(map, "slot");
+                let param_idx = map_usize(map, "param-idx");
+                let notes = map_u8_list(map, "notes").filter(|notes| !notes.is_empty());
+                if let (Some(track), Some(slot_idx), Some(param_idx), Some(notes)) =
+                    (track, slot_idx, param_idx, notes)
+                {
+                    let desc = rack_slot_snapshot_for_host(&state, track, slot_idx)
+                        .and_then(|slot| app.rack_slot_instrument_descriptor(&slot))
+                        .and_then(|desc| desc.params.get(param_idx).cloned());
+                    // A knob sends display units; an option sends its label.
+                    let stored = desc.as_ref().and_then(|desc| {
+                        if name == "set-rack-slot-instrument-key-lock-option" {
+                            let label = map_string(map, "label")?;
+                            match &desc.kind {
+                                sequencer::effects::ParamKind::Enum { labels } => labels
+                                    .iter()
+                                    .position(|item| item == &label)
+                                    .map(|idx| idx as f32),
+                                _ => None,
+                            }
+                        } else {
+                            let user_val = map_number(map, "value")? as f32;
+                            Some(desc.clamp(desc.user_input_to_stored(user_val)))
+                        }
+                    });
+                    if let (Some(desc), Some(stored)) = (desc, stored) {
+                        app::apply_command(
+                            &mut app,
+                            app::AppCommand::SetRackSlotInstrumentKeyLockMulti {
+                                track,
+                                slot_idx,
+                                notes,
+                                param_idx,
+                                value: stored,
+                            },
+                        );
+                        let rebuild = param_change_needs_fx_rebuild(&desc);
+                        rack_param_applied(ctx, rebuild, None);
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -2176,6 +2235,25 @@ pub(super) fn handle(
                                     value,
                                 }
                             });
+                        }
+                    }
+                    // While record+play is active a batch drag (a family-map
+                    // ring, an envelope) prints like a single knob: latch every
+                    // param and leave the base values untouched.
+                    if name == "set-instrument-param-batch"
+                        && ctx.shared.selected_neural_neurons.lock().unwrap().is_empty()
+                    {
+                        let targets = commands
+                            .iter()
+                            .filter_map(|command| match command {
+                                app::AppCommand::SetInstrumentParam {
+                                    param_idx, value, ..
+                                } => Some((PrintTarget::Instrument { param_idx: *param_idx }, *value)),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        if try_latch_param_print(ctx.shared, track, &targets) {
+                            return;
                         }
                     }
                     let result = if name == "set-instrument-plock-batch" {

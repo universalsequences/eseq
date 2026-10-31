@@ -47,8 +47,9 @@ pub const CIRC_PLATE_NATIVE: &str = "modal-circ-plate-modes";
 /// The natives eseq.modal calls, by name, as (args) -> value or a
 /// user-facing error. The CLI and tests register them on a bare VM
 /// ([`register_modal_natives`]); the app on its runtime.
-pub fn modal_natives() -> [(&'static str, fn(&[Value]) -> Result<Value, String>); 7] {
+pub fn modal_natives() -> [(&'static str, fn(&[Value]) -> Result<Value, String>); 8] {
     [
+        (NET_NATIVE, net_native),
         (READ_DATA_NATIVE, read_data_native),
         (CIRC_PLATE_NATIVE, circ_plate_native),
         (SOLVE_NATIVE, solve_native),
@@ -95,6 +96,66 @@ fn pick_native(args: &[Value]) -> Result<Value, String> {
         return Ok(Value::Nil);
     };
     Ok(Value::List(front.iter().map(|&x| cell(Value::Number(x))).collect()))
+}
+
+/// The native a tensioned network (eseq.modal's net and web) is solved
+/// with: `(modal-net-solve (dict :points ((x y z) ...) :masses (kg ...)
+/// :edges ((i j stiffness) ...) :fixed (i ...) :modes n))`, into the dict
+/// `modal-read-data` returns (freqs, shapes as a row per node, points, mass
+/// 1), each shape at eseq.modal's unit modal mass. See
+/// [`crate::modal_fe::net`].
+pub const NET_NATIVE: &str = "modal-net-solve";
+
+fn net_native(args: &[Value]) -> Result<Value, String> {
+    let usage = || format!("{NET_NATIVE} takes (dict :points :masses :edges :fixed :modes)");
+    let Some(Value::Map(spec)) = args.first() else { return Err(usage()) };
+    let field = |key: &str| spec.get(key).map(|v| v.borrow().clone());
+    let list = |value: Option<Value>| -> Vec<Value> {
+        match value {
+            Some(Value::List(items)) => items.iter().map(|item| item.borrow().clone()).collect(),
+            _ => Vec::new(),
+        }
+    };
+    let number = |value: &Value| match value {
+        Value::Number(x) => Some(*x),
+        _ => None,
+    };
+    let numbers_of = |value: &Value| -> Option<Vec<f64>> {
+        match value {
+            Value::List(items) => items.iter().map(|item| number(&item.borrow())).collect(),
+            _ => None,
+        }
+    };
+    let points: Vec<Vec<f64>> = list(field("points"))
+        .iter()
+        .map(|p| numbers_of(p).filter(|xyz| xyz.len() == 3).ok_or_else(|| "a net's points are (x y z) lists".to_string()))
+        .collect::<Result<_, _>>()?;
+    let n = points.len();
+    let masses: Vec<f64> = list(field("masses")).iter().map(|m| number(m).ok_or_else(usage)).collect::<Result<_, _>>()?;
+    if masses.len() != n {
+        return Err(format!("a net needs one mass per point ({n} points, {} masses)", masses.len()));
+    }
+    let edges = list(field("edges"))
+        .iter()
+        .map(|e| match numbers_of(e).as_deref() {
+            Some([i, j, s]) if *i >= 0.0 && *j >= 0.0 => Ok((*i as usize, *j as usize, *s)),
+            _ => Err("a net's edges are (i j stiffness) lists".to_string()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut fixed = vec![false; n];
+    for anchor in list(field("fixed")) {
+        let i = number(&anchor).ok_or_else(usage)? as usize;
+        *fixed.get_mut(i).ok_or_else(|| format!("a net's anchor {i} names a node it does not have ({n} nodes)"))? = true;
+    }
+    let count = field("modes").as_ref().and_then(number).unwrap_or(40.0).max(1.0) as usize;
+    let net = crate::modal_fe::net::Net { masses, edges, fixed };
+    let modes = crate::modal_fe::net::net_modes(&net, count)?;
+    Ok(data_dict(vec![
+        ("freqs", numbers(modes.freqs.iter().copied())),
+        ("shapes", rows(&modes.shapes, modes.freqs.len())),
+        ("points", Value::List(points.into_iter().map(|p| cell(numbers(p))).collect())),
+        ("mass", Value::Number(1.0)),
+    ]))
 }
 
 /// `(modal-nearest-point points (x y z))`: the index of the nearest of a
@@ -1340,7 +1401,7 @@ mod tests {
         assert!(squashed.contains("mic1_near mic1_near mic1_near) (min (mod mic1_coil_hz) (* 0.45 samplerate)) (mod mic1_coil_q) 0)"), "{squashed}");
         // The amp plays the mix and is what the output hears.
         assert!(squashed.contains("(def amp_x (* (svf heard 80 0.5 2) (mod amp_drive)))"), "{squashed}");
-        assert!(squashed.contains("(def raw (* amp_speaker (mod out_gain)))"), "{squashed}");
+        assert!(squashed.contains("(def toned_out (* amp_speaker (mod out_gain)))"), "{squashed}");
         assert!(squashed.contains("(param amp_drive @group amp @default 30 @min 1 @max 500 @mod true @mod-mode additive)"), "{squashed}");
         // The speaker's sound reaches the body a sample (at least) later, off axis.
         assert!(squashed.contains("(make-history amp_speaker_h)"), "{squashed}");
@@ -1503,6 +1564,101 @@ mod tests {
         let bad_at = script.replace("(m/by-note 27.5 0.12 4186 0.06)", "(m/by-note 27.5 0.12)");
         let errors = generate_instrument(&mut modal_vm(), PathBuf::from("scale.lisp"), &bad_at).unwrap_err();
         assert!(errors.contains(&"felt hit b: by-note takes pitch value pairs, at least two, got (27.5 0.12)".to_string()), "{errors:?}");
+    }
+
+    /// A drum: two membranes coupled by m/cavity's air, snare wires laid
+    /// under the bottom one by m/snare-bed. Both are solved as exciters in
+    /// their own small spaces (air modes, touches) and push the objects
+    /// through ordinary force terms.
+    #[test]
+    fn a_cavity_couples_two_heads_and_a_snare_bed_rattles_one() {
+        use crate::agent::verify::{verify_sources, ArtifactKind, VerifyMode};
+        let script = "(import eseq.modal :as m)
+(m/patch :name \"probe-drum\"
+  :objects (list (m/mallet 'stick) (m/membrane 'top :modes 12 :bend 1) (m/membrane 'bot :tune 1.2 :modes 10)
+                 (m/cavity 'air 'top 'bot :modes 3) (m/snare-wires 'wires :count 2 :modes 2))
+  :connections (list (m/felt 'hit 'stick 'top (list 0.3 0)) (m/snare-bed 'snares 'bot 'wires :points 2 :iterations 2))
+  :listens (list (m/listen 'top (list 0.5 0.5))))";
+        let instrument = generate_instrument(&mut modal_vm(), PathBuf::from("drum.lisp"), script).unwrap();
+        let squashed = squash(&instrument.dsp);
+        // The lowest air modes of the shell: the uniform air spring, then the
+        // (1,0) and (2,0) radial families (zeros of J_m').
+        assert!(squashed.contains("(tensor @shape [3] @data [0 1.841184 3.054237])"), "{squashed}");
+        // A head has the modes it asks for, its coefficients held (worked out
+        // when an input changes), only Bend's stretch moving them per sample;
+        // its points are x/y across its face, from the (r theta) written.
+        assert!(squashed.contains("(make-history top_s1 @shape [12])"), "{squashed}");
+        assert!(squashed.contains("(make-history bot_s1 @shape [10])"), "{squashed}");
+        assert!(squashed.contains("(def top_a_c (latch top_a_c_e coef_tick))"), "{squashed}");
+        assert!(squashed.contains("(def top_a (max (min (- top_a_c (* (read-history top_tens) top_a1)) top_amax) (* -1 top_amax)))"), "{squashed}");
+        assert!(squashed.contains("(param hit_top_x @group hit @default 0.3"), "{squashed}");
+        assert!(squashed.contains("(param hit_top_y @group hit @default 0"), "{squashed}");
+        // The air pushes both heads and its own masses as force terms.
+        assert!(squashed.contains("(def top_next (modal-advance top_free (* top_G (+ (* hit_F hit_phi_b) air_solve_push_t))))"), "{squashed}");
+        assert!(squashed.contains("(def air_next (modal-advance air_free (* air_G air_solve_push_air)))"), "{squashed}");
+        // The wires push the bottom head up and themselves down, after the
+        // projected Jacobi passes over the touches (forces never negative).
+        assert!(squashed.contains("(def bot_next (modal-advance bot_free (* bot_G (+ snares_push_h air_solve_push_b))))"), "{squashed}");
+        assert!(squashed.contains("(def wires_next (modal-advance wires_free (* wires_G (* -1 snares_push_w))))"), "{squashed}");
+        assert!(squashed.contains("(def snares_P0 (max 0 (* -1 snares_kD snares_d0)))"), "{squashed}");
+        assert!(squashed.contains("(def snares_P1 (max 0 (- snares_P0 (* snares_kD snares_d1))))"), "{squashed}");
+        assert!(squashed.contains("(param snares_drag @group snares"), "{squashed}");
+        // The gap knob reads in the mics' units.
+        assert!(squashed.contains("(def snares_gapd (/ snares_gap (* (/ samplerate (* stick_speed 10))"), "{squashed}");
+        assert!(squashed.contains("(param snares_snap @group snares"), "{squashed}");
+        let report = verify_sources(ArtifactKind::Instrument, VerifyMode::Library, &instrument.dsp, Some(ui(&instrument)), 44_100, None)
+            .unwrap_or_else(|failure| panic!("{failure}\n{}", instrument.dsp));
+        assert!(!report.audition.silent);
+        // A cavity needs two membranes; a bed a membrane and snare wires.
+        let bad = script.replace("(m/cavity 'air 'top 'bot", "(m/cavity 'air 'top 'stick").replace("(m/snare-bed 'snares 'bot 'wires", "(m/snare-bed 'snares 'wires 'bot");
+        let errors = generate_instrument(&mut modal_vm(), PathBuf::from("drum.lisp"), &bad).unwrap_err();
+        assert!(errors.contains(&"cavity air: stick is not a membrane (m/membrane)".to_string()), "{errors:?}");
+        assert!(errors.contains(&"bed snares: wires is not a membrane (m/membrane)".to_string()), "{errors:?}");
+        assert!(errors.contains(&"bed snares: bot is not snare wires (m/snare-wires)".to_string()), "{errors:?}");
+    }
+
+    /// The Autechre-style pieces: Modalys pitch controls (Note in / Shift /
+    /// Note) and a material skin on a head, a heavy snare string in contact
+    /// at a gap read in the mics' units, a spider web solved offline into
+    /// modes, per-listen left/right levels making the output stereo, the
+    /// output filter, and the drum pad placing every point on the head.
+    #[test]
+    fn a_stereo_snare_with_string_snares_a_web_and_a_drum_pad() {
+        use crate::agent::verify::{verify_sources, ArtifactKind, VerifyMode};
+        let script = "(import eseq.modal :as m)
+(import eseq.modal.materials :as mat)
+(m/patch :name \"probe-ae\"
+  :objects (list (m/mallet 'stick) (m/membrane 'head :modes 12 :note 44 :shift 12 :made-of (list mat/water mat/steel) :thick-mm 3)
+                 (m/string 'sn :note 25 :modes 8 :mass 100 :made-of mat/spider-silk)
+                 (m/web 'web :spokes 5 :rings 3 :hub 0.05 :modes 6))
+  :connections (list (m/felt 'hit 'stick 'head (list 0.3 0)) (m/strike 'touch 'head (list 0.4 2) 'sn 0.4 :mic-gap true)
+                     (m/spring 'tie 'web (list 0 0 0) 'head (list 0.9 1)))
+  :listens (list (m/listen 'head (list 0.5 1) :left 1 :right 0) (m/listen 'sn 0.2 :left 0 :right 1))
+  :out-filter (dict :type :highpass :cutoff 110)
+  :pad 'head)";
+        let instrument = generate_instrument(&mut modal_vm(), PathBuf::from("ae.lisp"), script).unwrap();
+        let squashed = squash(&instrument.dsp);
+        // Note in blends following the note (shifted) with a fixed Note.
+        assert!(squashed.contains("(param head_note_in @group head"), "{squashed}");
+        assert!(squashed.contains("(def head_f0 (* (+ (* (event-hold (mod head_note_in) coef_tick) (event-hold f0 coef_tick) (pow 2 (/ (event-hold (mod head_shift) coef_tick) 12)))"), "{squashed}");
+        assert!(squashed.contains("(def sn_mass sn_mass_k)"), "{squashed}");
+        assert!(squashed.contains("(def touch_offd (/ touch_offset (* (/ samplerate (* stick_speed 10))"), "{squashed}");
+        // The web's modes are numbers by now, played as a data object.
+        assert!(squashed.contains("(def web_freqs (* web_hz web_ratio))"), "{squashed}");
+        // Stereo: each listen at its own left and right level.
+        assert!(squashed.contains("(def mix_l (+ (* mic1_v (mod mic1_gain) (mod mic1_left))"), "{squashed}");
+        assert!(squashed.contains("(out voice_l 1 @name left)"), "{squashed}");
+        assert!(squashed.contains("(out voice_r 2 @name right)"), "{squashed}");
+        assert!(squashed.contains("(param out_filter @group out @options [\"lowpass\" \"bandpass\" \"highpass\"] @default 2)"), "{squashed}");
+        // The pad: the stick (blue), the snare's and the web's contacts
+        // (grey), the mic (green), each dragging its point's x and y.
+        let ui_text = squash(&ui(&instrument));
+        assert!(ui_text.contains("(drum-pad :debug-name \"modal-drum-pad\" :count 4"), "{ui_text}");
+        assert!(ui_text.contains("'(\"#2f7fe0\" \"#8a8a8a\" \"#8a8a8a\" \"#36b04f\")"), "{ui_text}");
+        assert!(ui_text.contains(":x1 (mx-bind \"hit.hit_head_x\") :y1 (mx-bind \"hit.hit_head_y\")"), "{ui_text}");
+        let report = verify_sources(ArtifactKind::Instrument, VerifyMode::Library, &instrument.dsp, Some(ui(&instrument)), 44_100, None)
+            .unwrap_or_else(|failure| panic!("{failure}\n{}", instrument.dsp));
+        assert!(!report.audition.silent);
     }
 
     #[test]

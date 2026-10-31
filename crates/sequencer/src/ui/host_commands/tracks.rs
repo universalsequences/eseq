@@ -3,6 +3,7 @@ use crate::*;
 pub(super) const COMMANDS: &[&str] = &[
     "reveal-sequencer-track",
     "rename-track",
+    "duplicate-track",
     "rename-group",
     "set-track-color",
     "set-group-color",
@@ -189,6 +190,33 @@ pub(super) fn handle(
                 _ => editor.handle_host_event(HostEvent::Error(
                     "Track rename requires a track and name".to_string(),
                 )),
+            }
+        }
+        "duplicate-track" => {
+            let Some(track) = extract_usize_from_payload(&payload, "track") else {
+                editor.handle_host_event(HostEvent::Error(
+                    "Duplicate track requires a track".to_string(),
+                ));
+                return;
+            };
+            let result = app.duplicate_track_then(track, |app, summary| {
+                let copy = summary.tracks.first().map(|(_, new)| *new);
+                super::finish_imported_racks(app, editor, ctx, &[], &[], copy)
+            });
+            match result {
+                Ok(copy) => {
+                    *ctx.track_names = app.tracks.clone();
+                    crate::param_words::set_track_word_names(ctx.track_names);
+                    *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                    editor.runtime_mut().run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    editor.show_transient_message(format!("Duplicated as {}", app.tracks[copy]));
+                }
+                Err(error) => {
+                    editor.handle_host_event(HostEvent::Status(format!("Duplicate failed: {error}")));
+                    editor.show_toast(format!("Duplicate failed: {error}"), eseqlisp::ToastKind::Error);
+                }
             }
         }
         "rename-group" => {

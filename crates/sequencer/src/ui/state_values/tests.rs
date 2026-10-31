@@ -27041,6 +27041,40 @@ use panel_kinds_seed::*;
     }
 
     #[test]
+    fn metal_seq_mixer_track_duplicate_menu_row_and_cmd_d_send_duplicate_track() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        fn duplicated_tracks(editor: &mut Editor) -> Vec<Option<Value>> {
+            editor.drain_host_commands().into_iter().filter_map(|command| match command {
+                eseqlisp::host::HostCommand::Custom { name, payload } if name == "duplicate-track" => {
+                    let Value::Map(payload) = payload else { panic!("{payload:?}") };
+                    Some(payload.get("track").map(|value| value.borrow().clone()))
+                }
+                _ => None,
+            }).collect()
+        }
+        editor.drain_host_commands();
+        editor.runtime_mut().eval_str(
+            "(let ((m eseq.mixer/strip-menu))
+               (set! m.group nil)
+               (set! m.track (eseq.kinds/track 1))
+               (set! m.open true)
+               (eseq.mixer/select-track-menu-action (dict :id :duplicate)))",
+        ).expect("pick Duplicate");
+        assert_eq!(duplicated_tracks(&mut editor), vec![Some(Value::Number(1.0))]);
+
+        // Cmd+D duplicates the track its label armed...
+        editor.runtime_mut().eval_str("(eseq.mixer/select-track-delete-target (eseq.kinds/track 1))")
+            .expect("arm track 1");
+        editor.runtime_mut().eval_str("(eseq.mixer/seq-duplicate)").expect("Cmd+D");
+        assert_eq!(duplicated_tracks(&mut editor), vec![Some(Value::Number(1.0))]);
+        // ...and with no track armed it is the pattern clone again.
+        editor.runtime_mut().eval_str("(seq-clear-delete-target)").expect("disarm");
+        editor.runtime_mut().eval_str("(eseq.mixer/seq-duplicate)").expect("Cmd+D");
+        assert!(duplicated_tracks(&mut editor).is_empty());
+    }
+
+    #[test]
     fn metal_seq_mixer_track_context_menu_only_groups_the_clicked_multi_selection() {
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 3, 16);
@@ -27073,16 +27107,16 @@ use panel_kinds_seed::*;
 
         assert_eq!(
             track_menu_action_ids(&mut editor, 0, &[0, 1]),
-            vec!["rename", "color-menu", "group"],
+            vec!["rename", "duplicate", "color-menu", "group"],
         );
         assert_eq!(
             track_menu_action_ids(&mut editor, 2, &[0, 1]),
-            vec!["rename", "color-menu"],
+            vec!["rename", "duplicate", "color-menu"],
             "right-clicking outside the multi-selection keeps the single-track menu",
         );
         assert_eq!(
             track_menu_action_ids(&mut editor, 0, &[0]),
-            vec!["rename", "color-menu"],
+            vec!["rename", "duplicate", "color-menu"],
         );
 
         track_menu_action_ids(&mut editor, 0, &[0, 1]);

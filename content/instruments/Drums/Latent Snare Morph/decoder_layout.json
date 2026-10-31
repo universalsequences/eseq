@@ -1,0 +1,470 @@
+{
+ "doc": "Latent Snare decoder contract; see e3proto/REPORT.md and reference_render.py",
+ "inputs": [
+  "z1",
+  "z2",
+  "z3",
+  "z4",
+  "velocity"
+ ],
+ "version": "e2",
+ "gates": "G = 1 - depth smooth01((T - time)/fall), T = max(0, age - pre); modes *= GH GD (E from gated env); noise *= 1 - gate_noise (1 - GD)",
+ "input_ranges": {
+  "z": [
+   -3,
+   3
+  ],
+  "velocity": [
+   0,
+   1
+  ]
+ },
+ "hidden": [
+  128,
+  128
+ ],
+ "activation": "tanh",
+ "P": 360,
+ "K": 32,
+ "B": 16,
+ "weights": {
+  "l1.W": {
+   "file": "w1.json",
+   "shape": [
+    5,
+    128
+   ]
+  },
+  "l1.b": {
+   "file": "b1.json",
+   "shape": [
+    1,
+    128
+   ]
+  },
+  "l2.W": {
+   "file": "w2.json",
+   "shape": [
+    128,
+    128
+   ]
+  },
+  "l2.b": {
+   "file": "b2.json",
+   "shape": [
+    1,
+    128
+   ]
+  },
+  "l3.W": {
+   "file": "w3.json",
+   "shape": [
+    128,
+    360
+   ]
+  },
+  "l3.b": {
+   "file": "b3.json",
+   "shape": [
+    1,
+    360
+   ]
+  }
+ },
+ "matmul": "y[1,out] = x[1,in] @ W[in,out] + b[1,out]; W stored row-major (C order)",
+ "segments": [
+  {
+   "name": "mode_freq",
+   "offset": 0,
+   "width": 32,
+   "squash": "log",
+   "lo": 4.0,
+   "hi": 24000.0
+  },
+  {
+   "name": "mode_amp",
+   "offset": 32,
+   "width": 32,
+   "squash": "log",
+   "lo": 1e-06,
+   "hi": 10.0
+  },
+  {
+   "name": "mode_decay",
+   "offset": 64,
+   "width": 32,
+   "squash": "log",
+   "lo": 0.002,
+   "hi": 12.0
+  },
+  {
+   "name": "mode_rise",
+   "offset": 96,
+   "width": 32,
+   "squash": "log",
+   "lo": 1e-05,
+   "hi": 0.3
+  },
+  {
+   "name": "mode_t0",
+   "offset": 128,
+   "width": 32,
+   "squash": "log",
+   "lo": 1e-06,
+   "hi": 0.6
+  },
+  {
+   "name": "mode_phase",
+   "offset": 160,
+   "width": 32,
+   "squash": "pi",
+   "lo": 0.0,
+   "hi": 0.0
+  },
+  {
+   "name": "mode_glide",
+   "offset": 192,
+   "width": 32,
+   "squash": "lin",
+   "lo": -0.9,
+   "hi": 2.8
+  },
+  {
+   "name": "mode_gtau",
+   "offset": 224,
+   "width": 32,
+   "squash": "log",
+   "lo": 0.0003,
+   "hi": 0.3
+  },
+  {
+   "name": "band_amp",
+   "offset": 256,
+   "width": 16,
+   "squash": "log",
+   "lo": 1e-05,
+   "hi": 4.0
+  },
+  {
+   "name": "band_d1",
+   "offset": 272,
+   "width": 16,
+   "squash": "log",
+   "lo": 0.002,
+   "hi": 0.4
+  },
+  {
+   "name": "band_tail",
+   "offset": 288,
+   "width": 16,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "band_d2",
+   "offset": 304,
+   "width": 16,
+   "squash": "log",
+   "lo": 0.02,
+   "hi": 2.0
+  },
+  {
+   "name": "band_couple",
+   "offset": 320,
+   "width": 16,
+   "squash": "log",
+   "lo": 1e-05,
+   "hi": 20.0
+  },
+  {
+   "name": "noise_rise",
+   "offset": 336,
+   "width": 1,
+   "squash": "log",
+   "lo": 5e-05,
+   "hi": 0.05
+  },
+  {
+   "name": "noise_onset",
+   "offset": 337,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.05
+  },
+  {
+   "name": "pre",
+   "offset": 338,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 0.035
+  },
+  {
+   "name": "drive",
+   "offset": 339,
+   "width": 1,
+   "squash": "log",
+   "lo": 1.0,
+   "hi": 6.0
+  },
+  {
+   "name": "drive_amt",
+   "offset": 340,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "drive_norm",
+   "offset": 341,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.1,
+   "hi": 2.0
+  },
+  {
+   "name": "gain",
+   "offset": 342,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.05,
+   "hi": 8.0
+  },
+  {
+   "name": "len",
+   "offset": 343,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.08,
+   "hi": 2.0
+  },
+  {
+   "name": "fade",
+   "offset": 344,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.005,
+   "hi": 0.08
+  },
+  {
+   "name": "fade_curve",
+   "offset": 345,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "gh_depth",
+   "offset": 346,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "gh_time",
+   "offset": 347,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.03,
+   "hi": 2.0
+  },
+  {
+   "name": "gh_fall",
+   "offset": 348,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.001,
+   "hi": 0.2
+  },
+  {
+   "name": "gd_depth",
+   "offset": 349,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "gd_time",
+   "offset": 350,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.03,
+   "hi": 2.0
+  },
+  {
+   "name": "gd_fall",
+   "offset": 351,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.001,
+   "hi": 0.2
+  },
+  {
+   "name": "gate_noise",
+   "offset": 352,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "clip_ceil",
+   "offset": 353,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.05,
+   "hi": 4.0
+  },
+  {
+   "name": "clip_mix",
+   "offset": 354,
+   "width": 1,
+   "squash": "lin",
+   "lo": 0.0,
+   "hi": 1.0
+  },
+  {
+   "name": "wire_thr",
+   "offset": 355,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.004,
+   "hi": 0.3
+  },
+  {
+   "name": "wire_level",
+   "offset": 356,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.001,
+   "hi": 40.0
+  },
+  {
+   "name": "wire_lo",
+   "offset": 357,
+   "width": 1,
+   "squash": "log",
+   "lo": 150.0,
+   "hi": 5000.0
+  },
+  {
+   "name": "wire_hi",
+   "offset": 358,
+   "width": 1,
+   "squash": "log",
+   "lo": 1200.0,
+   "hi": 16000.0
+  },
+  {
+   "name": "wire_k",
+   "offset": 359,
+   "width": 1,
+   "squash": "log",
+   "lo": 0.12,
+   "hi": 2.0
+  }
+ ],
+ "noise_bands": {
+  "fc": [
+   100.0,
+   141.36812579990746,
+   199.84946992178462,
+   282.5234500494767,
+   399.3981062801829,
+   564.621617328617,
+   798.1949982785916,
+   1128.3933092950483,
+   1595.1884730019628,
+   2255.0880472590375,
+   3187.975707547833,
+   4506.78150871671,
+   6371.1525527696085,
+   9006.778955703356,
+   12732.714604618308,
+   18000.0
+  ],
+  "Q": 1.8,
+  "stages": 2,
+  "form": "RBJ BPF constant 0 dB peak, DF1, a0-normalised; N_b = norm_b * cascade(white)",
+  "norm": {
+   "44100": [
+    22.480518804391085,
+    18.907811411927774,
+    15.90328420180276,
+    13.376840232875933,
+    11.252845167649513,
+    9.467921817498393,
+    7.969154456277921,
+    6.712673278469588,
+    5.662614448521112,
+    4.7904880701250425,
+    4.075065162328791,
+    3.503141626749971,
+    3.0725024776133285,
+    2.8028287703885435,
+    2.787258663291314,
+    3.6647837737703686
+   ],
+   "48000": [
+    23.453409370498434,
+    19.726010246504774,
+    16.591341408560975,
+    13.955378688562865,
+    11.739168136857494,
+    9.876513318479127,
+    8.312082908731824,
+    6.9999035915764365,
+    5.902226936197025,
+    4.988791545267191,
+    4.236564618427996,
+    3.630228825715592,
+    3.1643622511539515,
+    2.851249481991609,
+    2.754873899943542,
+    3.2348691782250993
+   ],
+   "88200": [
+    31.79166622310253,
+    26.738695576617125,
+    22.488982734265516,
+    18.914929516674626,
+    15.90927004035786,
+    13.381873182878541,
+    11.257075701798103,
+    9.471475840787464,
+    7.972136792258209,
+    6.715170343999737,
+    5.664696093808335,
+    4.792208454310177,
+    4.076462261991714,
+    3.5042340163000274,
+    3.0732780499173447,
+    2.8032004950592206
+   ],
+   "96000": [
+    33.167611363735396,
+    27.895921079903736,
+    23.462239729775,
+    19.733436600620387,
+    16.597586605721613,
+    13.960629946990467,
+    11.743582569437896,
+    9.880222490011132,
+    8.315196524833592,
+    7.002512371438265,
+    5.904404663551562,
+    4.990596201662664,
+    4.238038293891642,
+    3.631395410417501,
+    3.1652191430612917,
+    2.851736605306495
+   ]
+  }
+ }
+}

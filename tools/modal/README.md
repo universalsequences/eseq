@@ -44,7 +44,7 @@ bridges any number of tuned strings onto one body.
 |---|---|
 | `m/string` (stiff string, follows the note, `:tune` ratio) | `x` in 0..1 |
 | `m/plate` (simply supported, `:grid` x `:grid` modes, default 8) | `(x y)` |
-| `m/membrane` (circular, 120 Bessel modes, `:tune`) | `(r theta)` |
+| `m/membrane` (circular, up to 120 Bessel modes, `:modes` how many, `:tune`, `:bend`) | `(r theta)`, knobs `x`/`y` across the face |
 | `m/rect-membrane` (fixed edges, `:aspect`, follows the note) | `(x y)` |
 | `m/circ-plate` (`:edge :free` or `:clamped`; cymbals, gongs; modes solved from the Bessel equations, pitch from material and size) | `(r theta)` |
 | `m/bar` (free bar, follows the note; `:undercut` 1 tunes modes 2 and 3 to 4x and 10x, marimba-style) | `x` in 0..1 |
@@ -52,6 +52,8 @@ bridges any number of tuned strings onto one body.
 | `m/finger` (Modalys' two-mass: hand on a stroke + soft tip) | lumped |
 | `m/mallet` (thrown mass) | lumped |
 | `m/modal-data` (modes from data: frequencies, losses or bandwidths, shapes over points; `:root` makes it follow the note) | point index, or `(x y z)` for the nearest point |
+| `m/net` (a tensioned network: nodes, masses, strands as `(i j tension/length)`, anchors; modes solved when generated) | `(x y z)`, the nearest node |
+| `m/web` (a spider web built as a net: spokes, rings, an anchored frame, irregular, optionally a drum skin in its hub) | `(x y 0)`, the nearest node |
 
 `(m/solid 'bell :shape (dict :revolve ...) :made-of mat/bronze)` is a
 finite-element solid: any 3-D shape (the spec's "solid", below), solved for
@@ -71,7 +73,14 @@ name is reported by check with the names the solid has. Solids are composed
 like any other objects: `examples/fe-bottle-guitar.lisp` glues a string to
 fe-bottle's drilled bottle, and `examples/fe-hollow-body.lisp` builds a
 semi-hollow electric guitar from a body and a neck solid joined at named
-points, with pickups and a clean amp.
+points, with pickups and a clean amp. `examples/fe-p-bass.lisp` is a
+Fender Precision Bass the same way (an alder solid body with its routes, a
+bolted one-piece maple neck), its four strings chosen by note, with the
+fretted length, the core's stiffness and the split coil's position each a
+`m/by-note` curve computed by the script. `examples/fe-tissue-box-guitar.lisp`
+is the small version of that build (a cardboard box, a paper-roll neck and a
+rubber band), coarse enough to solve in seconds: the one to learn the Shape
+Lab on.
 
 **Wood.** A solid made of a wood (`mat/maple`, `mat/mahogany`, `mat/spruce`,
 `mat/rosewood`: materials with `:wood` constants) and given `:grain` is
@@ -240,9 +249,121 @@ per-sample code.
 | `(m/fingerboard id string at :press s)` | clamps the string while pressed, plus a board to buzz on |
 | `(m/strokes id obj)` | plays a data object's measured strokes (see Identified models) |
 | `(m/mount id a a-at string end)` | a string's end carried by another object, one way (see Electric) |
+| `(m/snare-bed id head wires)` | snare wires (`m/snare-wires`) lying under a membrane, rattling against it (see Drums) |
 
 `m/felt` takes `:exponent :hysteresis :tau-ms` for Stulov's hysteretic
 felt (`examples/piano-hammer.lisp`).
+
+**Drums.** `examples/snare.lisp` is a snare built from parts: a stick on
+the batter head, the air inside the shell coupling it to the snare-side
+head, and snare wires under that head. `tools/modal/bench/snare_bench.py`
+scores it against the factory Membrane Snare, and `snare_fit.py` fits its
+knobs to that.
+
+- `(m/membrane 'batter :modes 32 :bend 1)` is a head. `:modes` is how many
+  of its lowest modes it has (the cost is in proportion; 120 is the
+  default, 24-32 is plenty for a drum, whose upper modes are too dense to
+  hear one by one). Its coefficients are worked out when the note or a
+  knob changes, not every sample. `Bend` is tension modulation: the head's
+  own swing tightens it, so a hard hit starts sharp and glides down as it
+  rings out (at Bend 1 a full-velocity hit starts about 12% sharp and
+  settles in about 0.1 s; a soft hit hardly bends). Points on a head are
+  written `(r theta)`; their knobs are `x`/`y` across its face, -1..1 from
+  the centre.
+- `(m/cavity 'air 'top 'bottom :radius :depth :modes)` is the shell's air
+  between two `m/membrane`s, as the cylinder's acoustic modes (rigid walls;
+  the overlaps of each with the head's modes are tabulated by
+  `tools/modal/cavity_table.py` into `content/ui/modal/drum-tables.lisp`).
+  The uniform mode is the air spring: pressing one head in pushes the other
+  out, so the heads' (0,1) modes split into a pair, the heads moving
+  together and, much higher, against each other. The others are masses of
+  air on springs coupling the heads' (m,n) modes with the same m. Each is a
+  spring between the volume the heads push into its shape and its air mass,
+  solved centred in time, so the air conserves energy; `:top-density` and
+  `:bottom-density` (kg/m^2: a 10 mil batter is 0.35, a 3 mil snare side
+  0.1) set how hard it pushes each head, `:loss` its own damping, `Air` 0..2
+  scales it. Both heads read positive upward. Verified: with every loss at
+  0 a hit never gains energy, and the coupled peaks match an independent
+  eigen-solve of the same heads and air.
+- `(m/snare-wires 'wires :count :modes :pitch :spread)` is a bank of wires,
+  each a string with its own few modes at a pitch of its own, spread a
+  little so they do not lock.
+- `(m/snare-bed 'snares 'head 'wires :points :span :width :gap :iterations)`
+  lays them across the head's middle, each touching it at `:points` places:
+  one-sided contacts solved each sample by `:iterations` passes of
+  projected Jacobi over all the touches at once (a touch only ever pushes
+  the head up and its wire down, each pass bounded so it never overshoots
+  the force that closes the gaps, so a bed cannot add energy; fewer passes
+  are a softer bed). `Gap` is the strainer, in the mics' units (a head
+  mic's level for that swing: 0 lays the wires on the head); `Hard` softens
+  the bed; `Drag` damps the head and wire against each other while they
+  touch (the buzz's own loss, which ends it); `Snap` mixes in
+  the contact force, high-passed (a mic beside the snares hears the slaps,
+  not the wires' steady push), the buzz.
+
+Both are solved in their own small spaces (air modes, touches) with the
+coupling between them fixed when generating; the heads' shapes there leave
+out the modes knob's mask. Cost goes with the touches times the head's
+modes: `examples/snare.lisp` (8 wires x 2 touches, 32 + 24 head modes, 8
+air modes) runs about 18x faster than real time per voice on an M-series
+Mac, against 45x for the factory Membrane Snare and 1.4x for the same
+drum with 120-mode heads, 32 touches and per-sample coefficients. DGen's
+matrix-vector products cost about 0.3 us per thousand multiplies whatever
+the formulation, so sparse couplings are gathered (`matvec-form`) and
+nothing touch x touch is formed per sample.
+
+**Autechre-style: string snares, webs, the drum pad.**
+`examples/ae-snare.lisp` is built the way Autechre's Modalys snare patch
+appears in a screen recording of it: a head, a stick, two mics, and two
+"snares" that are heavy strings each touching the head at one point (a
+`m/strike` contact), plus a bed of wires on the head for the buzz.
+`examples/ae-snare-air.lisp` puts the same top on a real two-headed snare:
+the shell's air (`m/cavity`) carries the hit to a snare-side head with the
+wires under it (with Air at 0 the wires never rattle). `examples/web-drum.lisp`
+hangs a drum skin in the hub of a spider web. The pieces:
+
+- Modalys' pitch controls on `m/membrane` and `m/string`: given `:note`
+  (a MIDI note), Note in (1 follows the played note, shifted by Shift
+  semitones; 0 sits at Note), Shift and Note knobs. `:shift 12` puts a head
+  an octave over the note.
+- `m/membrane :made-of mat/water :thick-mm 3`: a skin with thickness has
+  bending stiffness on top of its tension, stretching its upper modes
+  sharp in proportion to E h^2 / rho (with the tension set so the
+  fundamental stays on its pitch); a stiff or thick head clanks. `:radius`
+  sets the head's size. New materials: `mat/mylar`, `mat/water` (its bulk
+  modulus as Young's: a what-if, as Modalys allows), `mat/spider-silk`.
+- `m/string ... :mass 100`: a heavy string, which a head slaps but hardly
+  moves, so the head buzzes against it. A string given `:note` has its
+  coefficients worked out when the note or a knob changes.
+- `m/strike ... :mic-gap true`: the contact's Gap in the mics' units (as a
+  snare bed's), so it reads against what is heard.
+- `(m/listen obj at :left 1 :right 0)`: any listen with a left or right
+  level makes the instrument stereo (Modalys' L/R matrix: listen to the
+  snares themselves as well as the head).
+- `(m/patch ... :out-filter (dict :type :highpass :cutoff 110 :q 0
+  :steep false))`: an output filter, low-, band- or high-pass, Q, and a
+  24 dB/oct switch.
+- `(m/patch ... :pad 'head)`: the panel gets a drum pad, the head as a disc
+  with a numbered dot for every point on it: the stick (blue), contacts
+  with other objects (grey), mics (green). Drag a dot to move that point
+  (its x/y knobs). It is the `drum-pad` widget (`:count`, `:x1 :y1` ..
+  `:x8 :y8` in -1..1 with y up, `:labels`, `:colors`, `:on-change (k x y)`).
+- `m/net` and `m/web`: a tensioned network (point masses joined by strands
+  under tension, moving across its plane) is solved once when the
+  instrument is generated: K is the strands' graph Laplacian (tension over
+  length per strand), M the node masses, and `modal-net-solve` (Rust,
+  `crate::modal_fe::net`) eigen-solves it dense, so a few hundred nodes
+  take milliseconds. Then it is a data object: it costs its mode count, not
+  its node count (the web drum's 64 modes run about 22x faster than real
+  time). `m/web` lays out a hub, `:spokes` out to an anchored frame and
+  `:rings` of capture thread, of `:made-of` silk `:thread-um` thick under
+  `:spoke-tension` and `:ring-tension` (N), `:irregular` (seeded jitter,
+  as real webs are) and `:bead` mass per node; `:hub` (m) stretches a skin
+  of `:hub-tension` (N/m) and `:hub-density` (kg/m^2) over the middle, so a
+  drum skin hangs on the threads as springs. Its pitch follows the note by
+  its lowest audible mode (a heavy hub also bounces whole on the threads,
+  far lower). Reshaping a web means generating again; the drum pad does not
+  place points on a net yet.
 
 **Following the note.** Any knob argument can be a curve over the played
 pitch instead of one number: `(m/by-note 27.5 2.0 262 0.66 4186 0.05)`
@@ -326,7 +447,10 @@ the guitar, so the amp's sound can drive the strings (feedback):
   of the swing, so the clipping stays lopsided however hard it is driven:
   Bloom; antiderivative-antialiased), a bass / mid / treble stack, a power
   stage whose drive sags with its load, then the speaker cone with its
-  presence peak and the cabinet.
+  presence peak and the cabinet. `:low-cut`, `:cone-hz` and `:bass-hz` (fixed
+  when generating; 80, 100 and 120 Hz) are where its input coupling, speaker
+  cone and Bass band sit: a bass amp's are an octave lower
+  (`examples/fe-p-bass.lisp`), or it cuts away a bass's 41 Hz low E.
 - `(m/speaker :distance m :angle deg :room r)`: a signal for any driver. It
   is the speaker's sound at that distance (delayed by the air, falling as
   1 / distance), off-axis angle (a 12-inch cone beams, so off axis it loses

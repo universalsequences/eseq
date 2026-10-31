@@ -15,7 +15,7 @@ use super::skyline::dot;
 
 /// Eigenvalues ascending and eigenvectors (column k of the row-major
 /// `vectors` belongs to `values[k]`) of the symmetric n×n row-major `a`.
-fn symmetric_eigen(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+pub(crate) fn symmetric_eigen(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     let mut v = a.to_vec();
     let mut d = vec![0.0; n];
     let mut e = vec![0.0; n];

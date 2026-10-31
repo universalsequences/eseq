@@ -35,6 +35,7 @@
 (module eseq.modal)
 
 (import eseq.modal.materials :as mat)
+(import eseq.modal.drum-tables :as drum)
 (import eseq.gen.modulate :refer (mod-pass))
 (import eseq.gen.panel :refer (ui-helpers panel-form screen-form))
 (import eseq.gen :as gen :refer (concat-all index-of member? any? all? first-occurrence?
@@ -45,10 +46,10 @@
   host-name modulatable? mod-sources preamble mod-hold change-tick-forms voice-mode-sym
   voice-mode-params voice-mode))
 
-(export string plate membrane finger mallet modal-data bar rect-membrane oscillator circ-plate solid
-        melt mix-hybrid tube
+(export string plate membrane finger mallet modal-data bar rect-membrane oscillator circ-plate solid net web
+        melt mix-hybrid tube cavity snare-wires
         pluck spring mount felt bow strike stop fingerboard force position speed listen patch plane
-        tone-hole reed lips jet strokes stroke-point
+        tone-hole reed lips jet strokes stroke-point snare-bed
         envelope noise sine constant signal tap-position tap-speed tap-force tap-contact speaker spectral
         pickup amp by-note
         check dsp ui generate)
@@ -91,6 +92,29 @@
         (pspec id "tune" tune 0.25 4 :title "Tune" :dec 3)
         (pspec id "mass" mass 0.01 1000 :title "Mass" :taper :log)))
 
+;; Modalys' pitch controls, for an object given :note: Note in (1 follows
+;; the played note, shifted by Shift semitones; 0 holds it at Note, a MIDI
+;; note number). None without :note (the object follows the note).
+;;   id      the object's id
+;;   note    the MIDI note it sits at with Note in off, or nil
+;;   shift   semitones it sits from the played note with Note in on
+;;   follow  true to start with Note in on
+(def pitch-params (id note shift follow)
+  (if (= note nil) (list)
+    (list (pspec id "note_in" (if follow 1 0) 0 1 :title "Note in" :dec 0)
+          (pspec id "shift" shift -48 48 :unit 'st :title "Shift" :dec 0)
+          (pspec id "note" note 0 127 :title "Note" :dec 1))))
+
+;; A form for the pitch obj sounds at, Hz: base (a form for the played
+;; note's, f0) unless obj has pitch-params, then base shifted by Shift
+;; semitones with Note in on, or Note's pitch with it off.
+;;   obj   an object
+;;   base  a form for the played note's pitch
+(def pitch-form (obj base)
+  (if (= (get obj :note) nil) base
+    `(+ (* ,(pp obj "note_in") ,base (pow 2 (/ ,(pp obj "shift") 12)))
+        (* (- 1 ,(pp obj "note_in")) 440 (pow 2 (/ (- ,(pp obj "note") 69) 12))))))
+
 ;; ── objects ─────────────────────────────────────────────────────────────────
 ;; Each constructor returns an object dict:
 ;;   :id      the name everything the object introduces is prefixed with
@@ -129,14 +153,27 @@
 ;;               connection to the string made to each copy (a hammer
 ;;               strikes them all, a bridge carries them all); a listen
 ;;               hears the first
+;;   note, shift, follow  Modalys' pitch controls (pitch-params): with
+;;               :note, Note in / Shift / Note knobs set its pitch
+;;   mass        relative to one modal mass (a Mass knob); nil keeps 1. A
+;;               heavier string moves less when something pushes it (a
+;;               snare string that a head slaps but hardly moves)
 ;;   detune      with unison: the copies' detuning, cents: +detune, -detune,
 ;;               +2 detune ... (they beat, and through a shared bridge they
 ;;               exchange energy, a piano's two-stage decay)
 (def string (id &key (made-of mat/steel) (length 0.65) (radius-mm 0.5) (modes 60)
                  (freq-loss 0.4) (const-loss 0.3) (mute 6) (tune 1) (planes 1) (split 1.0007)
-                 (unison 1) (detune 1))
+                 (unison 1) (detune 1) (note nil) (shift 0) (follow true) (mass nil))
   (dict :id id :title "STRING" :kind :string :lumped false :modes modes :stuff made-of :planes planes :unison unison
-        :params (append (material-params id made-of)
+        :note note :heavy (not (= mass nil))
+        ;; a lone string given Modalys' pitch controls has its coefficients
+        ;; computed when the note or a param changes, not every sample
+        ;; (held-pass); other strings keep theirs per sample, as patches
+        ;; made before were tuned (and modulated) with
+        :held (and (not (= note nil)) (= planes 1) (= unison 1)) :follows-note true
+        :params (append (pitch-params id note shift follow)
+                (if mass (list (pspec id "mass_k" mass 0.01 1000 :title "Mass" :taper :log)) (list))
+                (material-params id made-of)
                 (if (= planes 2) (list (pspec id "split" split 0.99 1.01 :title "Split" :dec 4)) (list))
                 (if (> unison 1) (list (pspec id "detune" detune 0 30 :unit 'cents :title "Detune" :dec 2)) (list))
                 (list (pspec id "length" length 0.2 20 :unit 'm :title "Length" :taper :log)
@@ -171,21 +208,46 @@
                       (pspec id "loss" loss 0 40 :title "Loss")
                       (pspec id "damp" damp 0 5 :title "HF damp")))))
 
-;; A circular drum head with 120 Bessel modes. Its fundamental follows the
-;; played note.
+;; A circular drum head with up to 120 Bessel modes, the lowest first. Its
+;; fundamental follows the played note.
 ;;   id      the object's id ('head)
 ;;   loss    damping at every frequency (panel "Decay")
 ;;   bright  damping that rises with frequency (panel "Dark")
 ;;   choke   extra damping at every frequency, for a hand on the head
-;;   modes   how many of the 120 modes sound (a param; the rest are masked)
+;;   modes   how many modes it has (fixed when generating: the cost is in
+;;           proportion), and the Modes knob's top (fewer sound below it)
 ;;   tune    frequency ratio to the played note
-(def membrane (id &key (loss 6) (bright 1) (choke 0) (modes 120) (tune 1))
-  (dict :id id :title "HEAD" :kind :membrane :lumped false :modes 120
-        :params (list (pspec id "loss" loss 0 60 :title "Decay")
-                      (pspec id "bright" bright 0 10 :title "Dark")
-                      (pspec id "choke" choke 0 60 :title "Choke")
-                      (pspec id "tune" tune 0.25 4 :title "Tune" :dec 3)
-                      (pspec id "modes" modes 1 120 :title "Modes" :dec 0))))
+;;   bend    how far a hard hit stretches the head sharp (tension
+;;           modulation: the head's own swing tightens it, so the pitch
+;;           glides down as it rings out); 0 keeps it linear
+;;   note, shift, follow  Modalys' pitch controls (pitch-params): with
+;;           :note, Note in / Shift / Note knobs set the pitch instead of
+;;           following the note alone
+;;   made-of  a material (or a menu of them): with it the skin has a
+;;           thickness, and so bending stiffness on top of its tension,
+;;           which pushes its upper modes sharp (a thick or stiff head
+;;           clanks); nil is an ideal membrane
+;;   thick-mm  the skin's thickness, mm (a batter head is about 0.25)
+;;   radius    the head's radius, m (bending matters more on a small head)
+(def membrane (id &key (loss 6) (bright 1) (choke 0) (modes 120) (tune 1) (bend 0)
+                       (note nil) (shift 0) (follow true) (made-of nil) (thick-mm 0.25) (radius 0.178))
+  ;; its coefficients are computed when the note or a param changes, not
+  ;; every sample (held-pass); only Bend's stretch moves them per sample
+  (dict :id id :title "HEAD" :kind :membrane :lumped false :modes (max 2 (min modes 120))
+        :held true :follows-note true :held-names (list "a_c" "b" "mask" "wref" "a1" "amax")
+        :note note :stuff made-of
+        :params (append (pitch-params id note shift follow)
+                        (list (pspec id "loss" loss 0 60 :title "Decay")
+                              (pspec id "bright" bright 0 10 :title "Dark")
+                              (pspec id "choke" choke 0 60 :title "Choke")
+                              (pspec id "tune" tune 0.25 4 :title "Tune" :dec 3)
+                              (pspec id "modes" modes 1 (max 2 (min modes 120)) :title "Modes" :dec 0)
+                              (pspec id "bend" bend 0 4 :title "Bend"))
+                        (if made-of
+                          (append (material-params id made-of)
+                                  (list (pspec id "thick" thick-mm 0.01 10 :unit 'mm :title "Thickness" :taper :log :dec 3)
+                                        (pspec id "radius" radius 0.03 0.5 :unit 'm :title "Radius" :dec 3)))
+                          (list)))))
 
 ;; A free bar (Euler-Bernoulli beam, free at both ends): marimba, xylophone,
 ;; glockenspiel, vibraphone bars. Its fundamental follows the played note;
@@ -447,6 +509,147 @@
     (merge (modal-data id :data data :losses losses :root root :tune tune :decay decay :mute mute :mass mass)
            :title "SOLID" :label "solid" :fe-spec fe-spec :data data :named-points points :place place)))
 
+;; A tensioned network (a web, a net, a trampoline, a skin): point masses
+;; joined by strands under tension, moving across its plane, its modes
+;; solved once when the instrument is generated (modal-net-solve: a dense
+;; eigen-solve of the strands' graph Laplacian against the node masses) and
+;; played as a data object, so a connection or listen reaches it at the
+;; node nearest an (x y z), and its cost is its mode count whatever its
+;; node count. Its pitch follows the note: its lowest audible mode (20 Hz
+;; up: a heavy skin hung on threads also bounces as a whole, far lower) on
+;; it, times Tune, unless follow is false (its own pitch, from its tensions
+;; and masses).
+;;   id      the object's id ('net)
+;;   points  the nodes, (list (list x y z) ...), metres
+;;   masses  each node's mass, kg (a list), or one number for all
+;;   edges   the strands, (list (list i j stiffness) ...): stiffness is the
+;;           strand's tension over its length, N/m
+;;   fixed   the anchored nodes' indices
+;;   modes   how many modes to keep
+;;   follow  true to put its lowest audible mode on the note
+;;   loss, hf-loss  damping at every frequency, and rising with it (1/s,
+;;           and per 100 Hz)
+;;   tune, decay, mute, mass  as for modal-data
+(def net (id &key (points nil) (masses 0.001) (edges nil) (fixed nil) (modes 40) (follow true)
+             (loss 3) (hf-loss 0.3) (tune 1) (decay 1) (mute 0) (mass nil))
+  (let ((data (modal-net-solve (dict :points points
+                                     :masses (if (list? masses) masses (map (lambda (q) masses) points))
+                                     :edges edges :fixed (or fixed (list)) :modes modes))))
+    (if (string? data)
+      (merge (modal-data id :data data) :title "NET" :label "net")
+      (let ((losses (map (lambda (f) (+ loss (* hf-loss f 0.01))) (get data :freqs))))
+        (merge (modal-data id :data data :losses losses
+                           :root (if follow (or (first (filter (lambda (f) (>= f 20)) (get data :freqs))) (first (get data :freqs))) nil)
+                           :tune tune :decay decay :mute mute :mass mass)
+               :title "NET" :label "net" :net-points points :net-edges edges)))))
+
+;; A spider web, as a net (solved once when generated): a hub, spokes
+;; running out to an anchored frame, and rings of capture thread from spoke
+;; to spoke, of silk (or any material) of a given thickness under tension.
+;; Real webs are irregular, and so is this one: irregular jitters every
+;; node a little (the same web each time for a seed). With a hub skin, a
+;; membrane is stretched over the middle: the nodes within hub of the
+;; centre carry its mass, and its tension joins them, so a drum skin hangs
+;; in the web, on the threads as springs.
+;;   id            the object's id ('web)
+;;   spokes        radial threads
+;;   rings         rings of capture thread (the outermost is the frame)
+;;   radius        the frame's radius, m
+;;   made-of       the threads' material (its density)
+;;   thread-um     a thread's diameter, micrometres
+;;   spoke-tension a spoke's tension, N
+;;   ring-tension  a ring thread's tension, N
+;;   bead          extra mass at every node, kg (glue droplets, water)
+;;   irregular     0..1, how far nodes wander from the even pattern
+;;   seed          which irregular web
+;;   hub           the hub skin's radius, m (0: none)
+;;   hub-tension   the skin's tension, N/m
+;;   hub-density   the skin's surface density, kg/m^2 (a 10 mil Mylar
+;;                 batter is 0.35)
+;;   modes, follow, loss, hf-loss, tune, decay, mute, mass  as for net
+;; Points on it are reached by (list x y 0): the node nearest.
+(def web (id &key (spokes 8) (rings 8) (radius 0.15) (made-of mat/spider-silk) (thread-um 4)
+             (spoke-tension 0.02) (ring-tension 0.005) (bead 0) (irregular 0.15) (seed 1)
+             (hub 0) (hub-tension 300) (hub-density 0.35)
+             (modes 40) (follow true) (loss 3) (hf-loss 0.3) (tune 1) (decay 1) (mute 0) (mass nil))
+  (let ((g (web-geometry spokes rings radius irregular seed))
+        (mu (* (get made-of :density) 3.14159265 (pow (* thread-um 0.5e-6) 2))))
+    (let ((pts (get g :points)) (spoke-edges (get g :spokes)) (ring-edges (get g :rings)))
+      (let ((len-of (lambda (e) (web-distance (nth pts (first e)) (nth pts (nth e 1)))))
+            (dr (/ radius rings))
+            (dtheta (/ 6.28318531 spokes))
+            (in-hub (lambda (i) (< (web-distance (nth pts i) (list 0 0 0)) (+ hub 1e-9)))))
+        (let ((thread (lambda (e tension) (list (first e) (nth e 1) (/ tension (max (len-of e) 1e-6)))))
+              ;; the skin's share of a strand inside the hub: its tension times
+              ;; the width of the patch of skin it stands for, over its length
+              (skin (lambda (e radial)
+                      (if (and (> hub 0) (in-hub (first e)) (in-hub (nth e 1)))
+                        (list (list (first e) (nth e 1)
+                                    (/ (* hub-tension (if radial
+                                                        (* dtheta 0.5 (+ (web-distance (nth pts (first e)) (list 0 0 0))
+                                                                         (web-distance (nth pts (nth e 1)) (list 0 0 0))))
+                                                        dr))
+                                       (max (len-of e) 1e-6))))
+                        (list)))))
+          (let ((edges (append (map (lambda (e) (thread e spoke-tension)) spoke-edges)
+                               (map (lambda (e) (thread e ring-tension)) ring-edges)
+                               (concat-all (map (lambda (e) (skin e true)) spoke-edges))
+                               (concat-all (map (lambda (e) (skin e false)) ring-edges))))
+                (masses (map (lambda (i)
+                               (+ bead 1e-9
+                                  ;; half of every thread it holds
+                                  (* mu 0.5 (reduce (lambda (acc e) (if (or (= (first e) i) (= (nth e 1) i)) (+ acc (len-of e)) acc))
+                                                    0 (append spoke-edges ring-edges)))
+                                  ;; its patch of skin
+                                  (if (and (> hub 0) (in-hub i))
+                                    (let ((r (web-distance (nth pts i) (list 0 0 0))))
+                                      (* hub-density (if (< r (* 0.5 dr)) (* 3.14159265 0.25 dr dr) (* r dtheta dr))))
+                                    0)))
+                             (range (len pts)))))
+            (merge (net id :points pts :masses masses :edges edges :fixed (get g :frame) :modes modes :follow follow
+                        :loss loss :hf-loss hf-loss :tune tune :decay decay :mute mute :mass mass)
+                   :title "WEB" :label "web")))))))
+
+;; The distance between two points.
+;;   a, b  (x y z) lists
+(def web-distance (a b)
+  (sqrt (+ (pow (- (first a) (first b)) 2) (pow (- (nth a 1) (nth b 1)) 2) (pow (- (nth a 2) (nth b 2)) 2))))
+
+;; A repeatable pseudo-random number in -1..1 for an integer and a seed.
+;;   k     an integer
+;;   seed  a seed
+(def web-noise (k seed)
+  (let ((x (* (sin (+ (* k 12.9898) (* seed 78.233))) 43758.5453)))
+    (- (* 2 (- x (floor x))) 1)))
+
+;; A web's layout: :points (the hub, node 0, then ring r's spokes, r = 1 ..
+;; rings, each at radius r / rings of the frame's, jittered by irregular
+;; within its cell), :spokes and :rings (the threads, as (i j) pairs) and
+;; :frame (the outermost ring's nodes, anchored).
+;;   spokes, rings, radius, irregular, seed  as for web
+(def web-geometry (spokes rings radius irregular seed)
+  (let ((node (lambda (r s) (+ 1 (* (- r 1) spokes) s)))
+        (dtheta (/ 6.28318531 spokes)))
+    (let ((pts (cons (list 0 0 0)
+                     (concat-all
+                       (map (lambda (r)
+                              (map (lambda (s)
+                                     (let ((k (+ (* r 101) s))
+                                           ;; the frame stays round; inner rings wander
+                                           (j (if (= r rings) 0 irregular)))
+                                       (let ((rr (* radius (/ (+ r (* j 0.35 (web-noise k seed))) rings)))
+                                             (th (+ (* s dtheta) (* j 0.35 dtheta (web-noise (+ k 7919) seed)))))
+                                         (list (* rr (cos th)) (* rr (sin th)) 0))))
+                                   (range spokes)))
+                            (range 1 (+ rings 1)))))))
+      (dict :points pts
+            :spokes (append (map (lambda (s) (list 0 (node 1 s))) (range spokes))
+                            (concat-all (map (lambda (r) (map (lambda (s) (list (node r s) (node (+ r 1) s))) (range spokes)))
+                                             (range 1 rings))))
+            :rings (concat-all (map (lambda (r) (map (lambda (s) (list (node r s) (node r (mod (+ s 1) spokes)))) (range spokes)))
+                                    (range 1 rings)))
+            :frame (map (lambda (s) (node rings s)) (range spokes))))))
+
 ;; The positions of xs's numbers in increasing order (insertion sort; a few
 ;; hundred modes at most).
 ;;   xs  a list of numbers
@@ -645,11 +848,25 @@
 ;;   b, b-at    the lower object and its point
 ;;   stiffness  relative to the points' give (large is nearly rigid)
 ;;   offset     the gap at rest
+;;   mic-gap    true to read offset in the mics' units (a mic's level for
+;;              that swing, as a snare bed's gap), so the knob reads
+;;              against what is heard whatever the objects' sizes: a snare
+;;              string under a head
 ;;   weight     0..1
-(def strike (id a a-at b b-at &key (stiffness 200) (offset 0) (weight 1))
-  (dict :id id :title "STRIKE" :law :strike :a a :b b :a-at a-at :b-at b-at :weight weight
+(def strike (id a a-at b b-at &key (stiffness 200) (offset 0) (mic-gap false) (weight 1))
+  (dict :id id :title "STRIKE" :law :strike :a a :b b :a-at a-at :b-at b-at :weight weight :mic-gap mic-gap
         :params (list (pspec id "stiff" stiffness 1 5000 :title "Hard" :taper :log :dec 0)
-                      (pspec id "offset" offset -0.02 0.02 :title "Gap" :dec 4))))
+                      (if mic-gap
+                        (pspec id "offset" offset -0.2 0.2 :title "Gap" :dec 4)
+                        (pspec id "offset" offset -0.02 0.02 :title "Gap" :dec 4)))))
+
+;; Forms defining each mic-gap strike's gap in the objects' own units,
+;; cid_offd: its Gap over the output normalisation.
+;;   patch  the patch
+;;   conns  its connections, resolved
+(def strike-gap-forms (patch conns)
+  (map (lambda (c) `(def ,(nm (get c :id) "offd") (/ ,(nm (get c :id) "offset") ,(excite-norm patch conns))))
+       (filter (lambda (c) (and (= (get c :law) :strike) (get c :mic-gap))) conns)))
 
 ;; A rigid stop under b's point (Modalys' unilateral strike): the point cannot
 ;; go below height. A sitar's jawari or a buzzing fret: a string that rings
@@ -1191,8 +1408,11 @@
 ;;            poor loudspeaker for wavelengths longer than itself, so a
 ;;            piano's lowest fundamentals are heard far weaker than its
 ;;            board moves at them
-(def listen (obj at &key (gain 1) (modes nil) (hear :speed) (radiate nil))
-  (dict :obj obj :at at :gain gain :modes modes :hear hear :radiate radiate))
+;;   left, right  its levels in the left and right outputs, 0..1 (knobs):
+;;            any listen with one makes the instrument stereo (the others
+;;            sit in the middle)
+(def listen (obj at &key (gain 1) (modes nil) (hear :speed) (radiate nil) (left nil) (right nil))
+  (dict :obj obj :at at :gain gain :modes modes :hear hear :radiate radiate :left left :right right))
 
 ;; A magnetic pickup: a listen that hears obj the way a guitar's coil does.
 ;; The coil's voltage is the string's speed times how fast the magnet's flux
@@ -1343,6 +1563,13 @@
 ;;                adds the host's Voicing param (0 poly, 1 one voice, ...)
 ;;   tone         nil, or a starting cutoff (Hz) for an output Tone param: a
 ;;                gentle low-pass, 1 kHz .. 20 kHz
+;;   out-filter   nil, or an output filter: (dict :type :highpass :cutoff 110
+;;                :q 0 :steep false), a state-variable low-, band- or
+;;                high-pass (a Filter menu, Cutoff, Q 0..1, and a 24 dB/oct
+;;                switch)
+;;   pad          nil, or the id of a membrane whose points (the strikes,
+;;                contacts and mics on it) the panel shows as dots on a
+;;                drum-pad, to drag around
 ;;   amp          nil, or an amplifier (m/amp) the mix plays through before
 ;;                the output: inside the instrument, so m/speaker can feed
 ;;                its sound back into the objects
@@ -1351,7 +1578,7 @@
 ;;                knob-only setup, such as a plate's size or a point on it,
 ;;                for a fixed cost; see eseq.gen.modulate)
 (def patch (&key (name "modal") (objects nil) (connections nil) (listens nil) (level 1) (voicing nil) (tone nil)
-                (amp nil) (modulate :cheap))
+                (amp nil) (modulate :cheap) (out-filter nil) (pad nil))
   (let ((conns (expand-unison-connections (expand-connections connections) objects)))
     (let ((planed (concat-all (map expand-unison (concat-all (map expand-planes objects)))))
           (compiled (map (lambda (o) (compile-points o conns listens planed)) planed)))
@@ -1364,6 +1591,7 @@
                                         o))
                           compiled)
             :connections conns :listens listens :level level :voicing voicing :tone tone :amp amp
+            :out-filter out-filter :pad pad
             :modulate modulate
             ;; a patch is an eseq.gen program
             :generator generate))))
@@ -1645,6 +1873,7 @@
   (append
   (if (and (get c :a) (= (get c :a) (get c :b))) (list (str (what c) ": both ends on " (source (get c :b)))) nil)
   (if (strokes? c) (strokes-errors patch c)
+  (if (bed? c) (bed-errors patch c)
   (if (mount? c) (mount-errors patch c)
   (append
           ;; these read their struck object's own wref / state, which a mix has none of
@@ -1654,7 +1883,7 @@
             nil)
           (air-errors patch c)
           (if (get c :a) (end-errors patch c "a" (get c :a) (get c :a-at)) nil)
-          (end-errors patch c "b" (get c :b) (get c :b-at)))))))
+          (end-errors patch c "b" (get c :b) (get c :b-at))))))))
 
 ;; What is wrong with a mount: its string must be a string and its end 0 or
 ;; 1; the mount's object one whose state is a displacement to read (not
@@ -1789,6 +2018,7 @@
           (concat-all (map (lambda (o) (if (= (get o :kind) :data) (data-errors o) nil)) (all-objects patch)))
           (concat-all (map spectral-errors (all-objects patch)))
           (concat-all (map (lambda (o) (hybrid-errors patch o)) (filter hybrid? (get patch :objects))))
+          (concat-all (map (lambda (o) (cavity-errors patch o)) (filter cavity? (get patch :objects))))
           (concat-all (map (lambda (c) (if (and (bow? c) (get c :hair) (= (find-object patch (plane (get c :b) 1)) nil))
                                          (list (str (what c) ": :hair needs a string with :planes 2"))
                                          nil))
@@ -1857,8 +2087,10 @@
 
 ;; The param specs for where a connection or mic touches an object, one per
 ;; coordinate: none for a lumped object, <obj>_at for a string, <obj>_x and
-;; <obj>_y for a plate, <obj>_r and <obj>_angle for a membrane. They belong
-;; to the connection (cid_str_at), so they sit in its panel section.
+;; <obj>_y for a plate or a membrane (a membrane's across its face, -1..1
+;; from the centre, from the (r theta) its position is written as),
+;; <obj>_r and <obj>_angle for a circular plate. They belong to the
+;; connection (cid_str_at), so they sit in its panel section.
 ;;   cid    the connection's (or mic's) id, which owns the params
 ;;   side   "a", "b" or "mic"; not part of the names, since the object id
 ;;          already tells a connection's two ends apart
@@ -1885,8 +2117,11 @@
         (if (rect? obj)
           (list (pspec cid (str on "_x") (nth at 0) 0.01 0.99 :title (str lb " x"))
                 (pspec cid (str on "_y") (nth at 1) 0.01 0.99 :title (str lb " y")))
+        (if (= (get obj :kind) :membrane)
+          (list (pspec cid (str on "_x") (sig-figs (* (nth at 0) (cos (nth at 1))) 3) -0.95 0.95 :title (str lb " x"))
+                (pspec cid (str on "_y") (sig-figs (* (nth at 0) (sin (nth at 1))) 3) -0.95 0.95 :title (str lb " y")))
           (list (pspec cid (str on "_r") (nth at 0) 0 (if (= (get obj :kind) :circ-plate) 1 0.95) :title (str lb " r"))
-                (pspec cid (str on "_angle") (nth at 1) 0 3.14159 :title (str lb " angle"))))))))))
+                (pspec cid (str on "_angle") (nth at 1) 0 3.14159 :title (str lb " angle")))))))))))
 
 ;; A hybrid's two part objects: a melt's own, a mix's from the patch.
 ;;   obj  a hybrid (a mix after the patch gave it :part-objs)
@@ -1916,8 +2151,20 @@
       (if (rect? obj)
         (list `(def ,phi-sym (* (rect-plate-shape ,(nm id "pm") ,(nm id "pn") ,(nth coords 0) ,(nth coords 1))
                                 ,(nm id "mask"))))
-        (list `(def (,(nm phi-sym "ratios") ,(nm phi-sym "raw")) (circ-membrane ,(nth coords 0) ,(nth coords 1)))
-              `(def ,phi-sym (* ,(nm phi-sym "raw") ,(nm id "mask")))))))))))))
+        (membrane-shape-defs obj coords phi-sym))))))))))
+
+;; shape-defs for a membrane: at the point (x y) across its face, r and
+;; theta; its radial table's row at r (linear between the samples at r = 0,
+;; 0.1 .. 1) times cos(m theta).
+;;   obj      a membrane
+;;   coords   (x y)
+;;   phi-sym  the symbol to define
+(def membrane-shape-defs (obj coords phi-sym)
+  (let ((x (first coords)) (y (nth coords 1)))
+    (append (list `(def ,(nm phi-sym "r") (sqrt (+ (* ,x ,x) (* ,y ,y))))
+                  `(def ,(nm phi-sym "theta") (atan2 ,y ,x)))
+            (table-row-defs (p obj "radial") (get obj :modes) `(* (clip ,(nm phi-sym "r") 0 1) 10) 10 (nm phi-sym "row") true)
+            (list `(def ,phi-sym (* ,(nm phi-sym "row") (cos (* ,(p obj "order") ,(nm phi-sym "theta"))) ,(p obj "mask")))))))
 
 ;; shape-defs for a melt: each part's shape at its own point, blended.
 ;;   obj      a melt
@@ -2054,6 +2301,8 @@
 ;;   obj  the object
 (def object-setup (obj)
   (let ((kind (get obj :kind)))
+    (if (= kind :cavity) (cavity-setup obj)
+    (if (= kind :wires) (wires-setup obj)
     (if (= kind :melt) (melt-setup obj)
     (if (= kind :mix) (list)
     (if (= kind :data) (data-setup obj)
@@ -2065,7 +2314,7 @@
     (if (= kind :plate) (plate-setup obj)
     (if (= kind :membrane) (membrane-setup obj)
     (if (= kind :two-mass) (finger-setup obj)
-      (mallet-setup obj))))))))))))))
+      (mallet-setup obj))))))))))))))))
 
 ;; object-setup for a tube: its ratio and wavenumber tables, frequencies on
 ;; the note, and losses with the wall's sqrt(f) term.
@@ -2146,13 +2395,13 @@
 (def string-setup (obj)
   (if (get obj :unison-k) (unison-setup obj)
   (append (material-defs obj)
-          (list `(def ,(p obj "f0") (* f0 ,(pp obj "tune") ,@(if (get obj :plane-of) (list (pp obj "split")) (list))))
+          (list `(def ,(p obj "f0") (* ,(pitch-form obj 'f0) ,(pp obj "tune") ,@(if (get obj :plane-of) (list (pp obj "split")) (list))))
                 `(def ,(p obj "n") (+ (iota ,(get obj :modes)) 1))
                 `(def ,(p obj "freqs") (stiff-string-freqs ,(p obj "n") ,(p obj "f0") ,(p obj "young") ,(p obj "density")
                                          (* ,(pp obj "radius") 0.001) ,(pp obj "length")))
                 (mask-def obj (get obj :modes))
                 `(def ,(p obj "sigma") (modal-loss ,(p obj "freqs") ,(pp obj "loss") ,(pp obj "hf_loss")))
-                `(def ,(p obj "mass") 1))
+                `(def ,(p obj "mass") ,(if (get obj :heavy) (pp obj "mass_k") 1)))
           (setup-tail obj (p obj "f0")))))
 
 ;; object-setup for a unison copy: the first string's modes moved by its
@@ -2185,17 +2434,82 @@
                                        ,(p obj "thick_m") ,(p obj "width") ,(p obj "height"))))
           (setup-tail obj (p obj "f11"))))
 
-;; object-setup for a circular membrane: circ-membrane's Bessel ratios at the
-;; note; its modes param masks the rest.
+;; object-setup for a circular membrane: its lowest modes' Bessel ratios
+;; (circ-membrane's, from eseq.modal.drum-tables) at the note, their orders
+;; and radial table for points; its modes param masks the rest.
 ;;   obj  a membrane
 (def membrane-setup (obj)
-  (append (list `(def (,(p obj "ratios") ,(p obj "phi0")) (circ-membrane 0 0))
-                `(def ,(p obj "f0") (* f0 ,(p obj "tune")))
-                `(def ,(p obj "freqs") (* ,(p obj "ratios") ,(p obj "f0")))
-                (mask-def obj (p obj "modes"))
-                `(def ,(p obj "sigma") (+ (modal-loss ,(p obj "freqs") ,(p obj "loss") ,(p obj "bright")) ,(p obj "choke")))
-                `(def ,(p obj "mass") 1))
-          (setup-tail obj (p obj "f0"))))
+  (let ((n (get obj :modes)))
+    (append (list `(def ,(p obj "ratios") ,(tensor-form (take drum/membrane-ratios n)))
+                  `(def ,(p obj "order") ,(tensor-form (take drum/membrane-m n)))
+                  `(def ,(p obj "radial") ,(table-form (map (lambda (r) (map (lambda (k) (nth (nth drum/membrane-radial k) r)) (range n)))
+                                                           (range 11))))
+                  `(def ,(p obj "f0") (* ,(pitch-form obj '(event-hold f0 coef_tick)) ,(p obj "tune")))
+                  `(def ,(p obj "freqs") (* ,(p obj "ratios") ,(p obj "f0") ,@(stiffness-terms obj)))
+                  (mask-def obj (p obj "modes"))
+                  `(def ,(p obj "sigma") (+ (modal-loss ,(p obj "freqs") ,(p obj "loss") ,(p obj "bright")) ,(p obj "choke")))
+                  `(def ,(p obj "mass") 1))
+            (bend-pass obj (setup-tail obj (p obj "f0"))))))
+
+;; For a membrane made of something: its material's numbers, and the factor
+;; its bending stiffness stretches its modes by, sqrt(1 - beta + beta r^2)
+;; for a mode r times the fundamental (w^2 = (T / sigma) k^2 + (D / sigma)
+;; k^4 with the tension set so the fundamental stays on its pitch), beta
+;; the bending's share of the fundamental's stiffness, D k0^4 / (sigma w0^2)
+;; = E h^2 k0^4 / (12 rho (1 - nu^2) w0^2), k0 = 2.405 / radius, at most
+;; 0.95. As terms to multiply the frequencies by: none for an ideal head.
+;;   obj  a membrane
+(def stiffness-terms (obj)
+  (if (= (get obj :stuff) nil) (list)
+    (let ((choices (material-choices (get obj :stuff))) (idx (p obj "material")))
+      (let ((pick (lambda (key) (pick-form idx (map (lambda (m) (get m key)) choices))))
+            (h `(* ,(p obj "thick") 0.001))
+            (k0 `(/ 2.404826 ,(p obj "radius")))
+            (w0 `(* twopi ,(p obj "f0"))))
+        (let ((beta `(min 0.95 (/ (* ,(pick :young) ,h ,h (pow ,k0 4))
+                                  (* 12 ,(pick :density) (- 1 (* ,(pick :poisson) ,(pick :poisson))) ,w0 ,w0)))))
+          (list `(sqrt (+ (- 1 ,beta) (* ,beta ,(p obj "ratios") ,(p obj "ratios"))))))))))
+
+;; A membrane's setup-tail with its pitch bent by its tension, obj_tens (a
+;; fraction, kept from the last sample by glide-forms): each mode's a
+;; coefficient moved by its derivative, a = a_c - tens 2 r w sin w (first
+;; order in the stretch, so no transcendental per sample), held within
+;; |a| <= 2r (the band's top), where the pair of poles stays stable. r is
+;; worked out from sigma rather than read from b, so all but that sum is
+;; held (see held-pass).
+;;   obj    a membrane
+;;   forms  its setup-tail forms
+(def bend-pass (obj forms)
+  (let ((a (p obj "a")) (b (p obj "b")))
+    (concat-all
+      (map (lambda (f)
+             (if (and (list? f) (= (first f) 'def) (list? (nth f 1)) (= (first (nth f 1)) a))
+               (list `(def (,(p obj "a_c") ,b) ,(nth f 2))
+                     `(def ,(p obj "w") (min (* twopi (/ ,(p obj "freqs") samplerate)) 2.8))
+                     `(def ,(p obj "amax") (* 2 (exp (/ (* -1 ,(p obj "sigma")) samplerate))))
+                     ;; from sigma again, not amax: a held value read
+                     ;; inside another's held work is last tick's
+                     `(def ,(p obj "a1") (* 2 (exp (/ (* -1 ,(p obj "sigma")) samplerate)) ,(p obj "w") (sin ,(p obj "w"))))
+                     `(make-history ,(p obj "tens"))
+                     `(def ,a (max (min (- ,(p obj "a_c") (* (read-history ,(p obj "tens")) ,(p obj "a1"))) ,(p obj "amax"))
+                                   (* -1 ,(p obj "amax")))))
+               (list f)))
+           forms))))
+
+;; How much a hit stretches a membrane at Bend 1: its tension over its
+;; swing squared, in the mics' units.
+(def bend-scale 40)
+
+;; Forms keeping each membrane's tension for the next sample: Bend times its
+;; modes' swing (in the mics' units, so a hit's loudness sets it) weighted
+;; by their wavenumbers squared, the stretch of its surface, at most 0.5.
+;;   patch  the patch
+;;   norm   a form for the output normalisation
+(def glide-forms (patch norm)
+  (map (lambda (o) `(write-history ,(p o "tens")
+                      (min 0.5 (* ,(p o "bend") ,bend-scale ,norm ,norm
+                                  (sum (* ,(p o "ratios") ,(p o "ratios") ,(p o "next") ,(p o "next")))))))
+       (filter (lambda (o) (= (get o :kind) :membrane)) (get patch :objects))))
 
 ;; object-setup for a finger: the hand on its stroke and two-mass-coefs.
 ;;   obj  a finger
@@ -2320,7 +2634,7 @@
 ;;   forms  its setup forms, after spectral-pass
 (def held-pass (obj forms)
   (if (not (get obj :held)) forms
-    (let ((names (map (lambda (n) (p obj n)) (list "a" "b" "mask" "wref")))
+    (let ((names (map (lambda (n) (p obj n)) (if (get obj :held-names) (get obj :held-names) (list "a" "b" "mask" "wref"))))
           (held (lambda (sym) (member? names sym)))
           (event (lambda (sym) (if (held sym) (symbol sym "_e") sym)))
           (g (p obj "g"))
@@ -2368,14 +2682,15 @@
 ;; What coef_tick's coefficients are computed from, besides the key: the
 ;; params of each held object and of each object strokes play (whose wash
 ;; bank is latched on it), the gate (for a release mute), and the note's
-;; pitch for an object following it continuously (:root, or spectral
-;; :follow-note).
+;; pitch for an object following it continuously (:root, :follows-note, or
+;; spectral :follow-note).
 ;;   patch  the patch
 (def coef-inputs (patch)
   (let ((struck (map (lambda (c) (get c :b)) (filter strokes? (get patch :connections)))))
     (let ((objs (filter (lambda (o) (or (get o :held) (member? struck (get o :id)))) (all-objects patch))))
       (append (list 'gate)
-              (if (any? (lambda (o) (and (get o :held) (or (get o :root) (and (get o :spectral) (get (get o :spectral) :follow)))))
+              (if (any? (lambda (o) (and (get o :held) (or (get o :root) (get o :follows-note)
+                                                         (and (get o :spectral) (get (get o :spectral) :follow)))))
                         objs)
                 (list 'f0) (list))
               (concat-all (map (lambda (o) (map spec-ref (get o :params))) objs))))))
@@ -2466,10 +2781,17 @@
 ;;   c   a resolved connection
 ;;   id  an object id
 (def terms-on (c id)
+  (if (air? c)
+    (if (= (get c :a) id) (list (nm (get c :id) "push_t"))
+      (if (= (get c :a2) id) (list (nm (get c :id) "push_b"))
+        (if (= (get c :b) id) (list (nm (get c :id) "push_air")) nil)))
+  (if (bed? c)
+    (if (= (get c :a) id) (list (nm (get c :id) "push_h"))
+      (if (= (get c :b) id) (list `(* -1 ,(nm (get c :id) "push_w"))) nil))
   (if (pusher? c)
     ;; a mount with :back pushes its body by the string's reaction
     (if (and (mount? c) (get c :back) (= (get c :a) id)) (list `(* ,(nm (get c :id) "R") ,(nm (get c :id) "phi_a"))) nil)
-    (terms-with c id (nm (get c :id) "F"))))
+    (terms-with c id (nm (get c :id) "F"))))))
 
 ;; Every final force term on object id from the connections at indices.
 ;;   conns    the resolved connections
@@ -2767,7 +3089,7 @@
     (if (driver? c)
       (list `(def ,F (* ,w (spring-connection (- ,(n "anchor") ,yb) ,cb ,(n "stiff")))))
     (if (= law :strike)
-      (list `(def ,F (* ,w (felt-contact (+ (- ,ya ,yb) ,(n "offset")) (+ ,ca ,cb) ,(n "stiff")))))
+      (list `(def ,F (* ,w (felt-contact (+ (- ,ya ,yb) ,(n (if (get c :mic-gap) "offd" "offset"))) (+ ,ca ,cb) ,(n "stiff")))))
     (if (= law :stop)
       (if (get c :above)
         ;; a stop above b: b is pushed down while above height
@@ -2904,10 +3226,12 @@
         (map (lambda (k)
                (let ((c (nth conns k)) (before (filter (lambda (j) (< j k)) exciters)))
                  (if (strokes? c) (strokes-forms c patch)
+                 (if (bed? c) (bed-forms c patch (lambda (id) (terms-of conns before id)))
+                 (if (air? c) (cavity-solve-forms c patch (lambda (id) (terms-of conns before id)))
                  (if (mount? c) (mount-forms c patch)
                    (append (if (get c :a) (end-forms c "a" (find-object patch (get c :a)) (lambda (id) (terms-of conns before id)) "" true) nil)
                            (end-forms c "b" (find-object patch (get c :b)) (lambda (id) (terms-of conns before id)) "" true)
-                           (exciter-forms c patch))))))
+                           (exciter-forms c patch))))))))
              exciters))
       (concat-all (map (lambda (k) (bow-pre-forms (nth conns k))) (indices-where conns bow?)))
       (concat-all (map (lambda (k) (driver-pre-forms (nth conns k) patch)) (indices-where conns driver?)))
@@ -2955,7 +3279,7 @@
             ;; a connection placed at another's point has no point params,
             ;; nor do strokes (they play every mode); a mount's string end
             ;; is fixed
-            (if (or (get c :coords-of) (strokes? c)) (list)
+            (if (or (get c :coords-of) (strokes? c) (bed? c)) (list)
               (append (if (get c :a) (access-params (get c :id) "a" (find-object patch (get c :a)) (get c :a-at)) nil)
                       (if (mount? c) nil (access-params (get c :id) "b" (find-object patch (get c :b)) (get c :b-at)))))
             (if (get c :signal) (tap-params patch c) (list)))))
@@ -3431,7 +3755,7 @@
 ;;   patch  the patch
 ;;   k      the listen's position, from 0
 (def listen-params (patch k)
-  (append (mic-at-params patch k) (list (mic-gain-param patch k)) (pickup-params patch k) (radiate-params patch k)))
+  (append (mic-at-params patch k) (list (mic-gain-param patch k)) (pan-params patch k) (pickup-params patch k) (radiate-params patch k)))
 
 ;; A form for the output's level normalisation by what drives the patch (its
 ;; first pluck, felt or bow), so the output sits near the same level whatever
@@ -3467,7 +3791,7 @@
 ;; ── the amp ─────────────────────────────────────────────────────────────────
 ;; A guitar amplifier inside the instrument (a patch's :amp), so its sound
 ;; can reach back into the objects (m/speaker). Its stages, in order:
-;;   input     a coupling capacitor's high-pass (80 Hz)
+;;   input     a coupling capacitor's high-pass (low-cut, 80 Hz)
 ;;   fuzz      drive into tanh about a bias point, which makes it asymmetric
 ;;             (even harmonics); the input's peaks charge the stage's
 ;;             coupling capacitor, drifting the bias by a share of the
@@ -3480,7 +3804,7 @@
 ;;   tone      bass, mid and treble bands added to or taken from the signal
 ;;   power     a second, softer tanh whose drive sags as the supply is
 ;;             loaded (the power-amp compression of a cranked amp)
-;;   speaker   the cone's resonance (a high-pass peaking at 100 Hz), its
+;;   speaker   the cone's resonance (a high-pass peaking at cone-hz), its
 ;;             presence peak (around 2.8 kHz, where a guitar cone's
 ;;             break-up rings) and the cabinet's falling top: two low-passes
 ;;             from cab Hz
@@ -3496,9 +3820,15 @@
 ;;   presence  the cone's presence peak, 0 none
 ;;   cab     where the cabinet's top falls away, Hz
 ;;   level   the speaker's level
+;; and, fixed when generated (a guitar amp's by default; a bass amp's are
+;; about an octave lower, or it cuts a bass's 41 Hz low E):
+;;   low-cut   the input coupling capacitor's high-pass, Hz
+;;   cone-hz   the speaker cone's resonance, Hz (a 12-inch guitar cone's 100,
+;;             a 15-inch bass cone in its cabinet's ~50)
+;;   bass-hz   where the Bass knob's low-pass band sits, Hz
 (def amp (&key (drive 20) (bias 0.2) (bloom 0.5) (bass 1) (mid 1) (treble 1) (power 2) (sag 0.3) (presence 0.5)
-               (cab 5000) (level 0.5))
-  (dict :kind :amp
+               (cab 5000) (level 0.5) (low-cut 80) (cone-hz 100) (bass-hz 120))
+  (dict :kind :amp :low-cut low-cut :cone-hz cone-hz :bass-hz bass-hz
         :params (list (pspec 'amp "drive" drive 1 500 :title "Drive" :taper :log :dec 1)
                       (pspec 'amp "bias" bias 0 0.8 :title "Bias")
                       (pspec 'amp "bloom" bloom 0 1 :title "Bloom")
@@ -3526,9 +3856,10 @@
 
 ;; The amp's forms on the signal named in, ending in amp_speaker (and its
 ;; history, which m/speaker reads next sample).
-;;   in  the input signal's symbol
-(def amp-forms (in)
-  (list `(def amp_x (* (svf ,in 80 0.5 2) amp_drive))
+;;   amp  the patch's m/amp
+;;   in   the input signal's symbol
+(def amp-forms (amp in)
+  (list `(def amp_x (* (svf ,in ,(get amp :low-cut) 0.5 2) amp_drive))
         ;; the bias, less what loud peaks charged the coupling cap with
         '(make-history amp_charge)
         '(def amp_b (- amp_bias (* amp_bloom (read-history amp_charge))))
@@ -3552,18 +3883,500 @@
                                          (- amp_peak (read-history amp_charge)))))
         ;; the next stage's coupling capacitor blocks the bias's DC
         '(def amp_t (svf amp_fuzz 30 0.5 2))
-        '(def amp_tone (+ amp_t (* (- amp_bass 1) (svf amp_t 120 0.6 0))
+        `(def amp_tone (+ amp_t (* (- amp_bass 1) (svf amp_t ,(get amp :bass-hz) 0.6 0))
                           (* (- amp_mid 1) (/ (svf amp_t 700 0.8 1) 0.8))
                           (* (- amp_treble 1) (svf amp_t 2200 0.6 2))))
         ;; the supply sags with the power drawn (~60 ms)
         '(make-history amp_load)
         '(def amp_pw (tanh (/ (* amp_tone amp_power) (+ 1 (* 4 amp_sag (read-history amp_load))))))
         `(write-history amp_load (+ (read-history amp_load) (* ,(follow-coef 0.06) (- (* amp_pw amp_pw) (read-history amp_load)))))
-        '(def amp_cone (+ (svf amp_pw 100 1.4 2) (* amp_presence (/ (svf amp_pw 2800 1.2 1) 1.2))))
+        `(def amp_cone (+ (svf amp_pw ,(get amp :cone-hz) 1.4 2) (* amp_presence (/ (svf amp_pw 2800 1.2 1) 1.2))))
         `(def amp_speaker (* (svf (svf amp_cone (min amp_cab (* 0.4 samplerate)) 0.9 0)
                                   ,(below-nyquist '(* 1.25 amp_cab)) 0.6 0)
                              amp_level))
         `(write-history ,(speaker-history) amp_speaker)))
+
+;; ── drums: the air between two heads, and snare wires ──────────────────────
+
+;; The air inside a drum's shell between two heads (membranes), as the
+;; cylinder's acoustic modes: pressure J_m(alpha r / a) cos(m theta)
+;; cos(l pi z / L) in a shell of radius a and depth L (rigid walls, alpha a
+;; zero of J_m', eseq.modal.drum-tables). A head drives a mode by how its
+;; motion changes the air's volume under that mode's shape (the overlap of
+;; the two shapes), and the mode pushes back on every head mode it overlaps.
+;; The uniform mode (alpha 0, l 0) is the air spring: pressing one head in
+;; pushes the other out, so the heads' (0,1) modes split into a pair, one
+;; with the heads moving together and one, much higher, against each other.
+;; The others are masses of air on springs: m = 1 modes couple the heads'
+;; (1,1) modes, and so on.
+;;
+;; Energy-conserving by construction: air mode j is a spring
+;;   U = c_j (s_j - y_j)^2 / 2,   c_j = rho c^2 / (V lam_j)
+;; between s_j, the volume the heads push into its shape, and y_j, a mass of
+;; air c_j / w_j^2 (none for the uniform mode, whose y stays 0). Each spring
+;; is solved centred in time with the generator's other springs.
+;;
+;; The heads are the membranes named top and bottom; both read positive
+;; upward (a mallet above the top pushes it down, into the air; wires below
+;; the bottom push it up, into the air). Their surface densities set how
+;; hard the air pushes: Mylar 10 mil (a coated batter) is about 0.35 kg/m^2,
+;; a 3 mil snare-side head 0.1.
+;;   id              the object's id ('air)
+;;   top, bottom     the membranes' ids
+;;   radius, depth   the shell, m (a 14 x 5.5 inch snare is 0.178 x 0.14)
+;;   modes           how many air modes (the lowest for this size)
+;;   top-density     kg/m^2
+;;   bottom-density  kg/m^2
+;;   loss            each air mode's decay rate, 1/s (the shell's vent and
+;;                   walls; the heads radiate on their own)
+;;   air             multiplies the coupling: 0 is no air, 1 is physical
+(def cavity (id top bottom &key (radius 0.178) (depth 0.14) (modes 8) (top-density 0.35)
+                (bottom-density 0.1) (loss 60) (air 1))
+  (let ((picks (cavity-picks radius depth modes)))
+    (dict :id id :title "AIR" :kind :cavity :lumped false :heads (list top bottom)
+          :modes (len picks) :picks picks
+          :params (list (pspec id "radius" radius 0.05 0.5 :unit 'm :title "Radius" :dec 3)
+                        (pspec id "depth" depth 0.02 0.6 :unit 'm :title "Depth" :dec 3)
+                        (pspec id "top" top-density 0.02 2 :title "Top kg/m2" :taper :log)
+                        (pspec id "bottom" bottom-density 0.02 2 :title "Btm kg/m2" :taper :log)
+                        (pspec id "loss" loss 0 400 :title "Air loss")
+                        (pspec id "air" air 0 2 :title "Air")))))
+
+;; True when obj is a cavity.
+;;   obj  an object
+(def cavity? (obj) (= (get obj :kind) :cavity))
+
+;; The air modes a cavity of this size simulates, lowest first: one dict per
+;; mode (:alpha :l :lam, its mean square over the volume, and :g, its
+;; overlap with each of the membrane's 120 modes), from every radial family
+;; that touches the heads with axial orders 0..4.
+;;   radius, depth  m
+;;   count          how many
+(def cavity-picks (radius depth count)
+  (let ((all (concat-all
+               (map (lambda (fam)
+                      (if (empty? (nth fam 3)) (list)
+                        (map (lambda (l) (dict :m (nth fam 0) :alpha (nth fam 1) :l l
+                                               :lam (* (nth fam 2) (if (= l 0) 1 0.5)) :pairs (nth fam 3)))
+                             (range 5))))
+                    drum/families)))
+        (hz (lambda (q) (+ (pow (/ (get q :alpha) radius) 2) (pow (/ (* (get q :l) 3.14159265) depth) 2)))))
+    (let ((order (sort-by-value (map hz all))))
+      (map (lambda (k) (let ((q (nth all k)))
+                         (merge q :g (map (lambda (mode) (pair-value (get q :pairs) mode)) (range 120)))))
+           (take order count)))))
+
+;; The value paired with k in a list of (k value) pairs, 0 when none is.
+;;   pairs  a list of (k value)
+;;   k      the key
+(def pair-value (pairs k)
+  (reduce (lambda (found pr) (if (= (first pr) k) (nth pr 1) found)) 0 pairs))
+
+;; object-setup for a cavity: each air mode's frequency from the shell's
+;; size, its air mass's give per sample (K = 1, so C = (w dt)^2), and how
+;; hard the air pushes on each head relative to that head's own stiffness at
+;; its reference pitch, beta = 2 rho c^2 / (L sigma w^2) (rho c^2 = 1.2 *
+;; 343^2), as s = sqrt(mass beta): air mode j reads a head through s times
+;; its overlap over sqrt(lam_j) (cavity-solve-forms).
+;;   obj  a cavity
+(def cavity-setup (obj)
+  (let ((top (first (get obj :heads))) (bot (nth (get obj :heads) 1)) (picks (get obj :picks)) (n (get obj :modes)))
+    (append
+      (list `(def ,(p obj "freqs")
+               (* ,(/ 343 6.28318531)
+                  (sqrt (+ (pow (/ ,(tensor-form (map (lambda (q) (get q :alpha)) picks)) ,(pp obj "radius")) 2)
+                           (pow (/ ,(tensor-form (map (lambda (q) (* (get q :l) 3.14159265)) picks)) ,(pp obj "depth")) 2)))))
+            `(def ,(p obj "Cair") (pow (min (* twopi (/ ,(p obj "freqs") samplerate)) 2.8) 2))
+            `(def ,(p obj "st") (sqrt (/ (* 282352 ,(pp obj "air") ,(nm top "mass"))
+                                         (* ,(pp obj "depth") ,(pp obj "top") (pow (* ,(nm top "wref") samplerate) 2)))))
+            `(def ,(p obj "sb") (sqrt (/ (* 282352 ,(pp obj "air") ,(nm bot "mass"))
+                                         (* ,(pp obj "depth") ,(pp obj "bottom") (pow (* ,(nm bot "wref") samplerate) 2)))))
+            `(def (,(p obj "a") ,(p obj "b")) (modal-coefs (* 0 ,(p obj "freqs")) ,(pp obj "loss")))
+            `(def ,(p obj "G") 1)
+            `(make-history ,(p obj "s1") @shape [ ,n ])
+            `(make-history ,(p obj "s2") @shape [ ,n ]))
+      ;; each mode's final gap the last two samples, for the centred springs
+      (concat-all (map (lambda (j) (list `(make-history ,(p obj (str "g1_" j))) `(make-history ,(p obj (str "g2_" j)))))
+                       (range n))))))
+
+;; A cavity's air modes' overlaps with a head, one row per mode over the
+;; head's modes, over sqrt(lam): the top's signed (-1)^(l+1) so both heads
+;; read the volume they push in (both heads read positive upward, and mode
+;; l's shape at the top face is (-1)^l times the bottom's).
+;;   obj   a cavity
+;;   head  the head (a membrane)
+;;   top   true for the top head
+(def cavity-rows (obj head top)
+  (map (lambda (q) (map (lambda (g) (/ (* g (if top (if (= (mod (get q :l) 2) 0) -1 1) 1)) (sqrt (get q :lam))))
+                        (take (get q :g) (get head :modes))))
+       (get obj :picks)))
+
+;; The dot products of every pair of rows: a Gram matrix, as rows.
+;;   rows  a list of equal-length lists
+(def gram (rows)
+  (map (lambda (a) (map (lambda (b) (reduce (lambda (acc k) (+ acc (* (nth a k) (nth b k)))) 0 (range (len a)))) rows)) rows))
+
+;; A form for the matrix rows times the vector form v. Dense rows multiply
+;; through (sum-axis); mostly-zero rows gather each row's nonzero entries
+;; (padded with zero weights to the longest row's count), which DGen does in
+;; proportion to the entries rather than the whole row.
+;;   rows  the matrix, as rows (numbers)
+;;   v     a form for a vector as long as a row
+(def matvec-form (rows v)
+  (let ((nz (map (lambda (row) (filter (lambda (k) (coupled? (nth row k))) (range (len row)))) rows)))
+    (let ((width (max 1 (reduce (lambda (acc ks) (max acc (len ks))) 0 nz))))
+      (if (> (* 2 width) (len (first rows)))
+        `(sum-axis (* ,(table-form rows) ,v) @axis 1)
+        (let ((padded (lambda (j f) (map (lambda (l) (if (< l (len (nth nz j))) (f (nth (nth nz j) l)) 0)) (range width)))))
+          `(sum-axis (* (gather ,v ,(table-form (map (lambda (j) (padded j (lambda (k) k))) (range (len rows)))))
+                        ,(table-form (map (lambda (j) (padded j (lambda (k) (nth (nth rows j) k)))) (range (len rows))))) @axis 1))))))
+
+;; The columns of a matrix given as rows.
+;;   rows  a list of equal-length lists
+(def columns (rows) (map (lambda (k) (map (lambda (r) (nth r k)) rows)) (range (len (first rows)))))
+
+;; A one-hot list: 1 at k, 0 elsewhere.
+;;   n  its length
+;;   k  where the 1 is
+(def one-hot (n k) (map (lambda (i) (if (= i k) 1 0)) (range n)))
+
+;; A cavity's internal connection: its air pushing both heads and its own
+;; air masses, solved as an exciter after those before it.
+;;   patch  the patch
+(def cavity-connections (patch)
+  (map (lambda (o) (dict :id (nm (get o :id) "solve") :title "AIR" :law :air :internal true
+                         :a (first (get o :heads)) :a2 (nth (get o :heads) 1) :b (get o :id) :cavity o))
+       (filter cavity? (get patch :objects))))
+
+;; True when c is a cavity's internal connection.
+;;   c  a connection
+(def air? (c) (= (get c :law) :air))
+
+;; How much of the backward step's damping an air spring keeps (see
+;; spring-keep): nearly none, the air is a physical spring, not glue.
+(def cavity-keep 0.999)
+
+;; How many Gauss-Seidel sweeps solve a cavity's air springs together.
+(def cavity-sweeps 3)
+
+;; True when a Gram entry couples two modes or touches (some do not at all:
+;; air modes of different m share no head mode).
+;;   x  the entry
+(def coupled? (x) (> (abs x) 1e-9))
+
+;; A cavity's forms. Air mode j is a spring (K = 1) between the volume the
+;; heads push into its shape, s_j = st T_j . top + sb B_j . bottom (T_j and
+;; B_j cavity-rows), and its air mass y_j = sqrt(C_j) z_j. They share the
+;; heads, so they are solved together in the modes' own space: W, how far
+;; each spring's gap moves per unit of every spring's force (st^2 G_top T
+;; T^T + sb^2 G_bot B B^T + diag(C)), its Gram parts fixed when generating;
+;; then sweeps of Gauss-Seidel on the centred spring law (spring-centred,
+;; the gap the sample before last kept per mode), each mode's force F_j
+;; moving every gap it is coupled to by F_j W_ij. The sweeps are scalar
+;; arithmetic (a mode's gap is read once, its gaps since kept in scalar
+;; histories): a tensor op per step costs far more than the few multiplies
+;; it saves. The forces push the top by -st T^T F, the bottom by -sb B^T F,
+;; and the air by sqrt(C) F.
+;;   c      the cavity's internal connection
+;;   patch  the patch
+;;   terms  a function from an object id to the forces already on it
+(def cavity-solve-forms (c patch terms)
+  (let ((o (get c :cavity)) (top (find-object patch (get c :a))) (bot (find-object patch (get c :a2)))
+        (n (lambda (s) (nm (get c :id) s))) (q (lambda (s) (p (get c :cavity) s))))
+    (let ((rows-t (cavity-rows o top true)) (rows-b (cavity-rows o bot false)) (count (get o :modes))
+          (picks (get o :picks)))
+      (let ((gram-t (gram rows-t)) (gram-b (gram rows-b))
+            (e (lambda (j) (tensor-form (one-hot count j))))
+            (g (lambda (j i) (n (str "g" j "_" i))))
+            (W (lambda (i j) (n (str "W" (min i j) "_" (max i j)))))
+            (last (* cavity-sweeps count)))
+        (let ((links (lambda (j) (filter (lambda (i) (or (= i j) (coupled? (nth (nth gram-t j) i)) (coupled? (nth (nth gram-b j) i))))
+                                         (range count)))))
+          (append
+            (list `(def ,(n "ht") ,(displaced top (terms (get top :id))))
+                  `(def ,(n "hb") ,(displaced bot (terms (get bot :id))))
+                  `(def ,(n "at") (* ,(p top "G") ,(q "st") ,(q "st")))
+                  `(def ,(n "ab") (* ,(p bot "G") ,(q "sb") ,(q "sb")))
+                  `(def ,(n "rc") (sqrt ,(q "Cair")))
+                  `(def ,(n "g_0") (- (+ (* ,(q "st") ,(matvec-form rows-t (n "ht")))
+                                         (* ,(q "sb") ,(matvec-form rows-b (n "hb"))))
+                                      (* ,(n "rc") ,(q "free")))))
+            ;; per mode: its gap, its air's give C_j (scalar, from the
+            ;; params), and its row of W where it is coupled
+            (concat-all
+              (map (lambda (j)
+                     (let ((pk (nth picks j)))
+                       (append
+                         (list `(def ,(g j 0) (sum (* ,(n "g_0") ,(e j))))
+                               `(def ,(n (str "go" j)) (read-history ,(q (str "g2_" j))))
+                               `(def ,(n (str "C" j))
+                                  (pow (min (* twopi (/ (* ,(/ 343 6.28318531)
+                                                           (sqrt (+ (pow (/ ,(get pk :alpha) ,(pp o "radius")) 2)
+                                                                    (pow (/ ,(* (get pk :l) 3.14159265) ,(pp o "depth")) 2))))
+                                                        samplerate))
+                                            2.8)
+                                       2)))
+                         (map (lambda (i) `(def ,(W j i) (+ (* ,(n "at") ,(nth (nth gram-t j) i)) (* ,(n "ab") ,(nth (nth gram-b j) i))
+                                                            ,@(if (= i j) (list (n (str "C" j))) (list)))))
+                              (filter (lambda (i) (>= i j)) (links j))))))
+                   (range count)))
+            ;; step k solves mode j = k mod count; every gap it is coupled
+            ;; to moves, the rest keep their names
+            (concat-all
+              (map (lambda (k)
+                     (let ((s (floor (/ k count))) (j (mod k count)))
+                       (let ((F (n (str "F" s "_" j))) (old (if (= s 0) 0 (n (str "F" (- s 1) "_" j)))))
+                         (cons `(def ,F (/ (+ ,(g j k) (* ,(W j j) ,old) (* ,cavity-keep ,(n (str "go" j))))
+                                           (+ 1 ,cavity-keep ,(W j j))))
+                               (map (lambda (i) (if (member? (links j) i)
+                                                  `(def ,(g i (+ k 1)) (- ,(g i k) (* (- ,F ,old) ,(W j i))))
+                                                  `(def ,(g i (+ k 1)) ,(g i k))))
+                                    (range count))))))
+                   (range last)))
+            (list `(def ,(n "F") ,(sum-form (map (lambda (j) `(* ,(n (str "F" (- cavity-sweeps 1) "_" j)) ,(e j))) (range count))))
+                  `(def ,(n "push_t") (* -1 ,(q "st") ,(matvec-form (columns rows-t) (n "F"))))
+                  `(def ,(n "push_b") (* -1 ,(q "sb") ,(matvec-form (columns rows-b) (n "F"))))
+                  `(def ,(n "push_air") (* ,(n "rc") ,(n "F"))))
+            (concat-all
+              (map (lambda (j) (list `(write-history ,(q (str "g2_" j)) (read-history ,(q (str "g1_" j))))
+                                     `(write-history ,(q (str "g1_" j)) ,(g j last))))
+                   (range count)))))))))
+
+;; A bank of snare wires: count steel coils stretched under a head, each a
+;; string with its own few modes (harmonic, the coils' pitch spread a little
+;; so they do not lock), at a pitch of their own. Pair it with snare-bed,
+;; which lays them against a head.
+;;   id       the object's id ('wires)
+;;   count    how many wires (each stands for a few of a real set's strands)
+;;   modes    modes per wire
+;;   pitch    the wires' fundamental, Hz
+;;   spread   +-fraction their pitches spread over
+;;   loss     damping at every frequency (panel "Decay")
+;;   hf-loss  damping that rises with frequency
+;;   mass     relative to one modal mass, as for any object
+(def snare-wires (id &key (count 8) (modes 8) (pitch 1600) (spread 0.05) (loss 8) (hf-loss 2) (mass 0.05))
+  (dict :id id :title "WIRES" :kind :wires :lumped false :modes (* count modes) :count count :wire-modes modes
+        :fixed-pitch true :held true
+        :params (list (pspec id "pitch" pitch 100 4000 :unit 'Hz :title "Pitch" :taper :log)
+                      (pspec id "spread" spread 0 0.3 :title "Spread")
+                      (pspec id "loss" loss 0 60 :title "Decay")
+                      (pspec id "hf_loss" hf-loss 0 10 :title "HF loss")
+                      (pspec id "mass" mass 0.0001 10 :title "Mass" :taper :log :dec 4))))
+
+;; Wire i's pitch offset in -1..1, interleaved so neighbours differ most.
+;;   i  the wire
+;;   w  how many
+(def wire-offset (i w) (if (= w 1) 0 (- (* 2 (/ (mod (* i 5) w) (- w 1))) 1)))
+
+;; object-setup for snare wires: wire i's modes k at k pitch (1 + spread
+;; offset_i), modal-loss damping.
+;;   obj  snare wires
+(def wires-setup (obj)
+  (let ((w (get obj :count)) (m (get obj :wire-modes)))
+    (append
+      (list `(def ,(p obj "freqs")
+               (* ,(tensor-form (concat-all (map (lambda (i) (map (lambda (k) (+ k 1)) (range m))) (range w))))
+                  ,(pp obj "pitch")
+                  (+ 1 (* ,(pp obj "spread") ,(tensor-form (concat-all (map (lambda (i) (map (lambda (k) (wire-offset i w)) (range m))) (range w))))))))
+            (mask-def obj (get obj :modes))
+            `(def ,(p obj "sigma") (modal-loss ,(p obj "freqs") ,(pp obj "loss") ,(pp obj "hf_loss"))))
+      (setup-tail obj (pp obj "pitch")))))
+
+;; Snare wires laid against a head (the snare side's), which they rattle
+;; against: each wire touches the head at points along its length, running
+;; across the head's middle, and every touch is a one-sided contact (the
+;; head can lift off the wires, never pull them). Solved each sample by
+;; projected iterations over all the touches at once, so a hit that throws
+;; the head into the bed is resolved without energy appearing: a touch
+;; pushes at most what closes its own gap (Hard 1 closes it; lower is a
+;; softer bed), and the force is never sticky. The wires rest gap below the
+;; head, untouching: a still drum is silent. While a wire touches, Drag
+;; damps how fast it and the head move apart or together there (the energy
+;; a buzz sheds into the wires' rubbing: without it the head rings on under
+;; the rattle). Its contact force is also a sound (Snap), the buzz a mic beside
+;; the snares hears.
+;;   id          the connection's id ('snares)
+;;   head        the head the wires lie under (a membrane)
+;;   wires       the snare-wires object
+;;   points      touches per wire
+;;   span        how much of the head's diameter the touches cover, 0..1
+;;   width       how far either side of the centre line the wires spread,
+;;               as a fraction of the radius
+;;   gap         the wires' rest gap under the head, in the mics' units (a
+;;               head mic's level for that displacement): 0 lays them on it
+;;   stiffness   relative to the touch's give (large closes it at once)
+;;   drag        0..1, the share of a touching point's relative speed lost
+;;               each sample
+;;   iterations  passes of the contact solve per sample
+;;   snap        the contact force's level in the mix
+(def snare-bed (id head wires &key (points 4) (span 0.7) (width 0.3) (gap 0.002) (stiffness 20) (drag 0.1)
+                              (iterations 4) (snap 20) (weight 1))
+  (dict :id id :title "SNARES" :law :bed :a head :b wires :a-at nil :b-at nil :weight weight
+        :points points :span span :width width :iterations (max 1 iterations)
+        :params (list (pspec id "gap" gap 0 0.2 :title "Gap" :dec 4)
+                      (pspec id "stiff" stiffness 0.01 1000 :title "Hard" :taper :log)
+                      (pspec id "drag" drag 0 1 :title "Drag" :dec 3)
+                      (pspec id "snap" snap 0 200 :title "Snap" :dec 1))))
+
+;; True when c is a snare bed.
+;;   c  a connection
+(def bed? (c) (= (get c :law) :bed))
+
+;; Where a bed's heard contact force is high-passed, Hz.
+(def snap-cut 250)
+
+;; A membrane's shape at (r theta), its n lowest modes, read from its own
+;; tables (as membrane-shape-defs does) when generating.
+;;   n      how many modes
+;;   r      0 at the centre, 1 at the rim
+;;   theta  radians
+(def membrane-shape-at (n r theta)
+  (let ((pos (* (max (min r 1) 0) 10)) (k0 (min (floor (* (max (min r 1) 0) 10)) 9)))
+    (map (lambda (k)
+           (let ((row (nth drum/membrane-radial k)) (frac (- pos k0)))
+             (* (+ (nth row k0) (* (- (nth row (+ k0 1)) (nth row k0)) frac))
+                (cos (* (nth drum/membrane-m k) theta)))))
+         (range n))))
+
+;; A bed's touches: one dict per wire and point, :wire, its :r and :theta on
+;; the head, and :u, where along the wire it is.
+;;   c      a snare bed
+;;   count  how many wires
+(def bed-touches (c count)
+  (let ((pts (get c :points)) (span (get c :span)) (width (get c :width)))
+    (concat-all
+      (map (lambda (i)
+             (let ((yy (if (= count 1) 0 (* width (- (* 2 (/ i (- count 1))) 1)))))
+               (map (lambda (q)
+                      (let ((xx (* span (- (* 2 (/ (+ q 0.5) pts)) 1))))
+                        (dict :wire i :r (sqrt (+ (* xx xx) (* yy yy))) :theta (atan2 yy xx) :u (* 0.5 (+ xx 1)))))
+                    (range pts))))
+           (range count)))))
+
+;; The largest eigenvalue of a Gram matrix scaled to a unit diagonal,
+;; D^-1/2 A D^-1/2 (power iteration, with a margin): how much more than its
+;; own give a touch's gap can move when every touch pushes at once.
+;;   rows  the Gram matrix, as rows
+(def scaled-top-eigen (rows)
+  (let ((d (map (lambda (k) (sqrt (max (nth (nth rows k) k) 1e-12))) (range (len rows)))))
+    (let ((m (map (lambda (i) (map (lambda (j) (/ (nth (nth rows i) j) (* (nth d i) (nth d j)))) (range (len rows))))
+                  (range (len rows))))
+          (norm (lambda (v) (sqrt (reduce (lambda (acc x) (+ acc (* x x))) 0 v))))
+          (times (lambda (mat v) (map (lambda (row) (reduce (lambda (acc k) (+ acc (* (nth row k) (nth v k)))) 0 (range (len v))))
+                                      mat))))
+      (let ((v (reduce (lambda (v step) (let ((w (times m v))) (map (lambda (x) (/ x (max (norm w) 1e-12))) w)))
+                       (map (lambda (k) (+ 1 (* 0.01 k))) (range (len rows)))
+                       (range 60))))
+        (* 1.05 (norm (times m v)))))))
+
+;; A bed's forms, solved as an exciter (after those before it, reading both
+;; objects with their forces). Its Q touches each have a head shape (a row
+;; of PH) and a wire shape; their gaps d = gap + PH head - PW wires, and W =
+;; G_head PH PH^T + G_wires PW PW^T, how far every gap opens per unit of
+;; each touch's force (its two Gram parts fixed when generating). Then
+;; projected Jacobi on all the touches' forces P >= 0 together (head pushed
+;; up, wire down): P <- max(0, P - k d / D), d = gap + W P, a few tensor ops
+;; a pass whatever the touch count. D, each touch's give scaled by the most
+;; the others can add to it (scaled-top-eigen, the heads' and the wires'
+;; parts each), bounds W, so every pass moves the forces toward the solve's
+;; without overshooting it; fewer passes leave the bed a little softer.
+;; Drag adds -drag v / D at each touching point, v its gap's change since
+;; the last sample. (A restitution, the force scaled past what closes a
+;; touch, was tried and pumps energy while the wires rest on the head.) The
+;; forces push the head by PH^T P and the wires by -PW^T P; the contact heard is P times each touch's own give, the
+;; displacement it corrects this sample, high-passed (snap-cut).
+;;
+;; A touch reads only its own wire's modes, so the wires' side is gathered
+;; (touch q of wire i reads modes i m .. i m + m - 1, and wire i's mode k
+;; the touches i pts .. i pts + pts - 1) rather than multiplied through
+;; zeros; nothing Q x Q is formed per sample (W P is G_head (PH PH^T) P +
+;; G_wires times the wires' blocks of P). The shapes leave out the objects'
+;; mode masks (the heads keep every mode in their own band).
+;;   c      a resolved snare bed
+;;   patch  the patch
+;;   terms  a function from an object id to the forces already on it
+(def bed-forms (c patch terms)
+  (let ((head (find-object patch (get c :a))) (wires (find-object patch (get c :b)))
+        (n (lambda (s) (nm (get c :id) s))))
+    (let ((touches (bed-touches c (get wires :count))) (m (get wires :wire-modes)) (total (get wires :modes))
+          (pts (get c :points)) (passes (get c :iterations)))
+      (let ((rows-h (map (lambda (tq) (membrane-shape-at (get head :modes) (get tq :r) (get tq :theta))) touches))
+            ;; touch q's shape over its own wire's m modes
+            (rows-w (map (lambda (tq) (map (lambda (k) (sin (* (+ k 1) 3.14159265 (get tq :u)))) (range m))) touches))
+            (count (len touches)))
+        (let ((gram-h (gram rows-h))
+              ;; the wires' Gram, one pts x pts block per wire: touch q's
+              ;; row against the touches of its own wire
+              (block-w (map (lambda (q) (map (lambda (j) (reduce (lambda (acc k) (+ acc (* (nth (nth rows-w q) k)
+                                                                                             (nth (nth rows-w (+ (* (floor (/ q pts)) pts) j)) k))))
+                                                                 0 (range m)))
+                                             (range pts)))
+                            (range count)))
+              (wire-of (lambda (q) (floor (/ q pts)))))
+          (let ((diag-h (map (lambda (j) (nth (nth gram-h j) j)) (range count)))
+                (diag-w (map (lambda (q) (nth (nth block-w q) (mod q pts))) (range count)))
+                (rho-h (scaled-top-eigen gram-h))
+                ;; every wire's block is the same (same points along each)
+                (rho-w (scaled-top-eigen (map (lambda (q) (nth block-w q)) (range pts))))
+                (wire-index (table-form (map (lambda (q) (map (lambda (k) (+ (* (wire-of q) m) k)) (range m))) (range count))))
+                (block-index (table-form (map (lambda (q) (map (lambda (j) (+ (* (wire-of q) pts) j)) (range pts))) (range count))))
+                (mode-index (table-form (map (lambda (k) (map (lambda (j) (+ (* (floor (/ k m)) pts) j)) (range pts))) (range total))))
+                (mode-shapes (table-form (map (lambda (k) (map (lambda (j) (nth (nth rows-w j) (mod k m))) (range pts))) (range total)))))
+            (let ((wp (lambda (P) `(+ (* ,(p head "G") (sum-axis (* ,(table-form gram-h) ,P) @axis 1))
+                                      (* ,(p wires "G") (sum-axis (* (gather ,P ,block-index) ,(table-form block-w)) @axis 1))))))
+              (append
+                (list `(def ,(n "h0") ,(displaced head (terms (get head :id))))
+                      `(def ,(n "w0") ,(displaced wires (terms (get wires :id))))
+                      `(def ,(n "k") (* ,(weight-of c) (/ ,(n "stiff") (+ 1 ,(n "stiff")))))
+                      ;; the gap knob is in the mics' units (what the mix scales
+                      ;; displacement by), so it reads against what is heard
+                      `(def ,(n "gapd") (/ ,(n "gap") ,(excite-norm patch (map (lambda (x) (resolve-connection patch x))
+                                                                               (get patch :connections)))))
+                      `(def ,(n "d0") (+ ,(n "gapd") (- (sum-axis (* ,(table-form rows-h) ,(n "h0")) @axis 1)
+                                                        (sum-axis (* (gather ,(n "w0") ,wire-index) ,(table-form rows-w)) @axis 1))))
+                      `(def ,(n "Wdiag") (+ (* ,(p head "G") ,(tensor-form diag-h)) (* ,(p wires "G") ,(tensor-form diag-w))))
+                      `(def ,(n "D") (max 1e-12 (+ (* ,(p head "G") ,(tensor-form (map (lambda (x) (* x rho-h)) diag-h)))
+                                                   (* ,(p wires "G") ,(tensor-form (map (lambda (x) (* x rho-w)) diag-w))))))
+                      `(def ,(n "kD") (/ ,(n "k") ,(n "D")))
+                      `(def ,(n "P0") (max 0 (* -1 ,(n "kD") ,(n "d0")))))
+                (concat-all
+                  (map (lambda (i)
+                         (list `(def ,(n (str "d" i)) (+ ,(n "d0") ,(wp (n (str "P" (- i 1))))))
+                               `(def ,(n (str "P" i)) (max 0 (- ,(n (str "P" (- i 1))) (* ,(n "kD") ,(n (str "d" i))))))))
+                       (range 1 passes)))
+                (let ((P (n (str "P" (- passes 1)))))
+                  (list `(make-history ,(n "dprev") @shape [ ,count ])
+                        `(def ,(n "touching") (gt ,P 0))
+                        `(def ,(n "Pd") (- ,P (* ,(n "drag") ,(n "touching") (/ (- ,(n "d0") (read-history ,(n "dprev"))) ,(n "D")))))
+                        `(write-history ,(n "dprev") ,(n "d0"))
+                        `(def ,(n "push_h") (sum-axis (* ,(table-form (columns rows-h)) ,(n "Pd")) @axis 1))
+                        `(def ,(n "push_w") (sum-axis (* (gather ,(n "Pd") ,mode-index) ,mode-shapes) @axis 1))
+                        ;; a mic hears the slaps, not the wires' steady
+                        ;; push (always one way: left in, the output's DC
+                        ;; blocker would answer a hit with a slow tail)
+                        `(def ,(n "out") (svf (* ,(n "snap") (sum (* ,P ,(n "Wdiag")))) ,snap-cut 0.707 2))))))))))))
+
+;; What is wrong with a snare bed: its head must be a membrane and its wires
+;; snare wires.
+;;   patch  the patch
+;;   c      a snare bed
+(def bed-errors (patch c)
+  (let ((head (find-object patch (get c :a))) (wires (find-object patch (get c :b))))
+    (append (if (and head (= (get head :kind) :membrane)) nil
+              (list (str (what c) ": " (source (get c :a)) " is not a membrane (m/membrane)")))
+            (if (and wires (= (get wires :kind) :wires)) nil
+              (list (str (what c) ": " (source (get c :b)) " is not snare wires (m/snare-wires)"))))))
+
+;; What is wrong with a cavity: its heads must be two different membranes.
+;;   patch  the patch
+;;   o      a cavity
+(def cavity-errors (patch o)
+  (let ((name (str "cavity " (source (get o :id)))))
+    (append (concat-all (map (lambda (id) (let ((h (find-object patch id)))
+                                            (if (and h (= (get h :kind) :membrane)) nil
+                                              (list (str name ": " (source id) " is not a membrane (m/membrane)")))))
+                             (get o :heads)))
+            (if (= (first (get o :heads)) (nth (get o :heads) 1)) (list (str name ": top and bottom are the same head")) nil))))
 
 ;; ── the whole program ───────────────────────────────────────────────────────
 
@@ -3591,7 +4404,93 @@
                     (amp-params patch)
                     (list (out-gain-param))
                     (tone-params patch)
+                    (filter-params patch)
                     (voicing-params patch))))
+
+;; True when a patch's output is stereo: a listen has a left or right
+;; level (an amp keeps it mono).
+;;   patch  the patch
+(def stereo? (patch)
+  (and (not (get patch :amp))
+       (any? (lambda (l) (or (get l :left) (get l :right))) (get patch :listens))))
+
+;; Forms defining the mix: mix (mono), or mix_l and mix_r, each listen at
+;; its gain (and in stereo its left and right levels), with the strokes'
+;; click and wash and the snare beds' contact in the middle.
+;;   patch  the patch
+;;   conns  its connections, resolved
+(def mix-forms (patch conns)
+  (let ((ks (range (len (get patch :listens))))
+        (centred (append (map (lambda (c) (nm (get c :id) "out")) (filter strokes? conns))
+                         (map (lambda (c) (nm (get c :id) "out")) (filter bed? conns)))))
+    (if (stereo? patch)
+      (map (lambda (ch) `(def ,(symbol "mix_" ch)
+                           ,(sum-form (append (map (lambda (k) `(* ,(mic-out patch k) ,(nm (mic k) "gain") ,(nm (mic k) (if (= ch "l") "left" "right"))))
+                                                   ks)
+                                              centred))))
+           (list "l" "r"))
+      (list `(def mix ,(sum-form (append (map (lambda (k) `(* ,(mic-out patch k) ,(nm (mic k) "gain"))) ks) centred)))))))
+
+;; One output channel's forms, from its sound to voice_<ch>: the Tone
+;; low-pass (:tone), the output filter (:out-filter), a DC blocker, tanh.
+;;   patch  the patch
+;;   ch     the channel's name ("l", "r", or "out" for mono)
+;;   sound  a form for its sound
+(def channel-forms (patch ch sound)
+  (let ((n (lambda (s) (symbol s "_" ch))))
+    (append (list `(def ,(n "toned") ,(if (get patch :tone) `(svf ,sound (min out_tone (* samplerate 0.43)) 0.707 0) sound)))
+            (output-filter-forms patch (n "toned") (n "raw"))
+            (list `(make-history ,(n "dcx"))
+                  `(make-history ,(n "dcy"))
+                  `(def ,(n "dc") (+ (- ,(n "raw") (read-history ,(n "dcx"))) (* 0.9995 (read-history ,(n "dcy")))))
+                  `(write-history ,(n "dcx") ,(n "raw"))
+                  `(write-history ,(n "dcy") ,(n "dc"))
+                  `(def ,(n "voice") (tanh ,(n "dc")))))))
+
+;; The output filter's forms (a patch's :out-filter, Modalys-patch style): a
+;; state-variable filter at out_cutoff, its type picked by out_filter
+;; (low-pass, band-pass, high-pass), Q from out_q (0 none), run twice for
+;; 24 dB/oct when out_steep is on. Without :out-filter, out is just in.
+;;   patch  the patch
+;;   in     the symbol filtered
+;;   out    the symbol to define
+(def output-filter-forms (patch in out)
+  (if (not (get patch :out-filter)) (list `(def ,out ,in))
+    (let ((stage (lambda (x) `(selector (+ 1 (clip (round out_filter) 0 2))
+                                        ,@(map (lambda (mode) `(svf ,x out_fc out_qq ,mode)) (list 0 1 2)))))
+          (one (symbol out "_1")))
+      (list `(def ,one ,(stage in))
+            `(def ,out (+ ,one (* (clip (round out_steep) 0 1) (- ,(stage one) ,one))))))))
+
+;; The output filter's params (a patch's :out-filter: (dict :type :highpass
+;; :cutoff 110 :q 0 :steep false)), and its cutoff and Q as the svf takes
+;; them; none without :out-filter.
+;;   patch  the patch
+(def filter-params (patch)
+  (let ((f (get patch :out-filter)))
+    (if (not f) (list)
+      (list (pspec 'out "filter" (index-of (list :lowpass :bandpass :highpass) (or (get f :type) :highpass)) 0 2
+                   :options (list "lowpass" "bandpass" "highpass") :title "Filter")
+            (pspec 'out "cutoff" (or (get f :cutoff) 110) 20 20000 :unit 'Hz :title "Cutoff" :taper :log)
+            (pspec 'out "q" (or (get f :q) 0) 0 1 :title "Q" :dec 2)
+            (pspec 'out "steep" (if (get f :steep) 1 0) 0 1 :title "24dB/oct" :dec 0)))))
+
+;; Forms for the filter's svf inputs: cutoff kept below Nyquist, and Q from
+;; 0..1 (0.5, none, to 12).
+;;   patch  the patch
+(def filter-defs (patch)
+  (if (not (get patch :out-filter)) (list)
+    (list `(def out_fc ,(below-nyquist 'out_cutoff))
+          '(def out_qq (+ 0.5 (* 11.5 out_q out_q))))))
+
+;; A stereo patch's left and right levels for listen k; none in mono.
+;;   patch  the patch
+;;   k      the listen's position, from 0
+(def pan-params (patch k)
+  (if (not (stereo? patch)) (list)
+    (let ((l (nth (get patch :listens) k)))
+      (list (pspec (mic k) "left" (if (= (get l :left) nil) 1 (get l :left)) 0 1 :title (str (source (mic k)) " L"))
+            (pspec (mic k) "right" (if (= (get l :right) nil) 1 (get l :right)) 0 1 :title (str (source (mic k)) " R"))))))
 
 ;; Every form of the instrument's dsp.lisp, in the order one sample runs:
 ;; preamble, params, macro imports, each object's setup and prediction, the
@@ -3600,7 +4499,7 @@
 ;; outputs.
 ;;   patch  a patch that checks clean
 (def patch-forms (patch)
-  (let ((conns (map (lambda (c) (resolve-connection patch c)) (get patch :connections)))
+  (let ((conns (map (lambda (c) (resolve-connection patch c)) (append (get patch :connections) (cavity-connections patch))))
         (tapped (tapped-connections patch))
         (objects (get patch :objects))
         (listens (get patch :listens)))
@@ -3613,16 +4512,20 @@
             (unison-alias-forms patch conns)
             (if (keyed? patch) (key-forms) (list))
             (if (or (any-held? patch) (any? strokes? conns)) (coef-tick-forms patch) (list))
-            (concat-all (map (lambda (o) (held-pass o (spectral-pass o (object-setup o)))) objects))
+            ;; a cavity reads its heads' setup, so it comes after them
+            (concat-all (map (lambda (o) (held-pass o (spectral-pass o (object-setup o))))
+                             (append (filter (lambda (o) (not (cavity? o))) objects) (filter cavity? objects))))
             (concat-all (map object-predict (filter physical? objects)))
             ;; the force histories feedback taps read, and the speaker's
             (map (lambda (id) `(make-history ,(nm id "F_h"))) tapped)
             (if (get patch :amp) (list `(make-history ,(speaker-history))) (list))
+            (strike-gap-forms patch conns)
             (connection-forms patch conns)
             (map (lambda (id) `(write-history ,(nm id "F_h") ,(nm id "F"))) tapped)
             (concat-all (map (lambda (o) (object-commit o (terms-of conns (range (len conns)) (get o :id))
                                                         (pushes-on conns (get o :id))))
                              (filter physical? objects)))
+            (glide-forms patch (excite-norm patch conns))
             ;; a bow needs its point's true position after every force
             (concat-all (map (lambda (c) (if (bow? c)
                                            (list `(write-history ,(nm (get c :id) "y_prev")
@@ -3630,24 +4533,22 @@
                                            nil))
                              conns))
             (concat-all (map (lambda (k) (listen-forms patch (nth listens k) k)) (range (len listens))))
-            (list `(def mix ,(sum-form (append (map (lambda (k) `(* ,(mic-out patch k) ,(nm (mic k) "gain")))
-                                                    (range (len listens)))
-                                               ;; strokes' click and wash
-                                               (map (lambda (c) (nm (get c :id) "out")) (filter strokes? conns))))))
+            (mix-forms patch conns)
+            (filter-defs patch)
             ;; the mix at its level, through the amp when there is one; then
-            ;; the output gain and the tone filter
+            ;; the output gain, the tone and output filters, a DC blocker and
+            ;; tanh, per channel
             (let ((norm (excite-norm patch conns)))
-              (let ((sound (if (get patch :amp) '(* amp_speaker out_gain) `(* mix ,norm ,(get patch :level) out_gain))))
-                (append (if (get patch :amp) (cons `(def heard (* mix ,norm ,(get patch :level))) (amp-forms 'heard)) (list))
-                        (list `(def raw ,(if (get patch :tone) `(svf ,sound (min out_tone (* samplerate 0.43)) 0.707 0) sound))))))
-            (list '(make-history dcx)
-                  '(make-history dcy)
-                  '(def dc-out (+ (- raw (read-history dcx)) (* 0.9995 (read-history dcy))))
-                  '(write-history dcx raw)
-                  '(write-history dcy dc-out)
-                  '(def voice_out (tanh dc-out))
-                  '(out voice_out 1 @name audio)
-                  '(out (voice-amp (max (gt gate 0.5) (lt age 0.25)) voice_out voice_out) 2 @name amp @amp true)))) :stateful stateful-macros))))
+              (if (stereo? patch)
+                (append (concat-all (map (lambda (ch) (channel-forms patch ch `(* ,(symbol "mix_" ch) ,norm ,(get patch :level) out_gain)))
+                                         (list "l" "r")))
+                        (list '(out voice_l 1 @name left)
+                              '(out voice_r 2 @name right)
+                              '(out (voice-amp (max (gt gate 0.5) (lt age 0.25)) voice_l voice_r) 3 @name amp @amp true)))
+                (append (if (get patch :amp) (cons `(def heard (* mix ,norm ,(get patch :level))) (amp-forms (get patch :amp) 'heard)) (list))
+                        (channel-forms patch "out" (if (get patch :amp) '(* amp_speaker out_gain) `(* mix ,norm ,(get patch :level) out_gain)))
+                        (list '(out voice_out 1 @name audio)
+                              '(out (voice-amp (max (gt gate 0.5) (lt age 0.25)) voice_out voice_out) 2 @name amp @amp true))))))) :stateful stateful-macros))))
 
 ;; The instrument's dsp.lisp source, pretty-printed.
 ;;   patch  a patch that checks clean
@@ -3670,7 +4571,9 @@
     (append (map (lambda (k) (mic-gain-param patch k)) ks)
             (list (out-gain-param))
             (tone-params patch)
+            (filter-params patch)
             (voicing-params patch)
+            (concat-all (map (lambda (k) (pan-params patch k)) ks))
             (concat-all (map (lambda (k) (mic-at-params patch k :label (source (mic k)))) ks))
             (concat-all (map (lambda (k) (pickup-params patch k)) ks))
             (concat-all (map (lambda (k) (radiate-params patch k)) ks)))))
@@ -3771,12 +4674,81 @@
                        (chunks (map (lambda (k) (panel-form k (nth secs k) knobs width)) (range from to)) 2)))))
     (append (if (empty? meshes) (list) (list '(import eseq.modal.mesh-view)))
             (ui-helpers)
+            (if (get patch :pad) (pad-helpers) (list))
             (list `(defsynth-ui
                      (h-stack :height 9.8 :gap 0.3 :align :start
                        ,@(panels 0 n-obj)
                        ,(display-form patch secs)
+                       ,@(pad-views patch)
                        ,@(panels n-obj (len secs))
                        ,@meshes))))))
+
+;; The dots a patch's :pad shows on its drum-pad: every point placed on the
+;; pad's membrane, in order, the connections' first (a stick blue, a contact
+;; with another object grey), then the mics (green). Each is (dict :label
+;; :name :x :y :color): its legend, the panel section owning it, and its x
+;; and y params' host names. At most 8.
+;;   patch  the patch
+(def pad-dots (patch)
+  (let ((pad (get patch :pad)) (obj (find-object patch (get patch :pad))))
+    (let ((conn-dots
+            (concat-all
+              (map (lambda (c)
+                     (let ((side (if (= (get c :b) pad) "b" (if (= (get c :a) pad) "a" nil))))
+                       (if (or (not side) (get c :coords-of) (strokes? c) (bed? c) (get c :internal)) (list)
+                         (let ((ps (access-params (get c :id) side obj (get c (if (= side "a") :a-at :b-at))))
+                               (other (find-object patch (get c (if (= side "a") :b :a)))))
+                           (if (< (len ps) 2) (list)
+                             ;; named for what touches the head there
+                             (list (dict :name (source (if other (get other :id) (get c :id))) :x (host-name (first ps)) :y (host-name (nth ps 1))
+                                         :color (if (and other (member? (list :mallet :two-mass) (get other :kind))) "#2f7fe0" "#8a8a8a"))))))))
+                   (get patch :connections))))
+          (mic-dots
+            (concat-all
+              (map (lambda (k)
+                     (if (= (get (nth (get patch :listens) k) :obj) pad)
+                       (let ((ps (mic-at-params patch k)))
+                         (list (dict :name (source (mic k)) :x (host-name (first ps)) :y (host-name (nth ps 1)) :color "#36b04f")))
+                       (list)))
+                   (range (len (get patch :listens)))))))
+      (take (append conn-dots mic-dots) 8))))
+
+;; The drum-pad panel for a patch's :pad (none without one): the head as a
+;; disc with a dot per point on it (pad-dots), dragged to move that point's
+;; x and y knobs, and a legend in the dots' colours.
+;;   patch  the patch
+(def pad-views (patch)
+  (if (not (get patch :pad)) (list)
+    (let ((dots (pad-dots patch)))
+      (if (empty? dots) (list)
+        (let ((n (len dots)))
+          (list
+            `(box :width 18.7 :height 9.8 :padding 0.2 :background-color "#141414"
+                  (v-stack :gap 0.14
+                    (mx-label ,(str "HEAD " (source (get patch :pad))) 9)
+                    (h-stack :gap 0.4 :align :center
+                      (drum-pad :debug-name "modal-drum-pad" :count ,n :width 10.5 :height 8.3
+                                :background "#262626" :rim-color "#4a4a4a" :dot-size 10
+                                :labels (quote ,(map (lambda (k) (str (+ k 1))) (range n)))
+                                :colors (quote ,(map (lambda (d) (get d :color)) dots))
+                                ,@(concat-all (map (lambda (k) (list (symbol ":x" (+ k 1)) `(mx-bind ,(get (nth dots k) :x))
+                                                                     (symbol ":y" (+ k 1)) `(mx-bind ,(get (nth dots k) :y))))
+                                                   (range n)))
+                                :on-change (mx-pad-move (quote ,(map (lambda (d) (list (get d :x) (get d :y))) dots))))
+                      (v-stack :gap 0.2
+                        ,@(map (lambda (k) `(label ,(str (+ k 1) " : " (get (nth dots k) :name)) :width 6.5 :height 0.7
+                                                    :font-size 9 :color ,(get (nth dots k) :color) :bg :transparent))
+                               (range n))))))))))))
+
+;; The drum-pad's helpers (with a :pad): a param's binding by host name, and
+;; the callback moving dot k's two params.
+(def pad-helpers ()
+  '((def mx-bind (name) (eseq.effects.custom-ui-runtime/custom-ui-param-binding (mx-p name)))
+    (def mx-pad-move (pairs)
+      (lambda (k x y)
+        (let ((pair (nth pairs k)))
+          (do (eseq.effects.custom-ui-runtime/custom-ui-set-param (mx-p (first pair)) x)
+              (eseq.effects.custom-ui-runtime/custom-ui-set-param (mx-p (nth pair 1)) y)))))))
 
 ;; A 3-D view per object that has a mesh (a solid, or data from an
 ;; eseq-modes file), moving through its lowest modes (mode-mesh-cycle);

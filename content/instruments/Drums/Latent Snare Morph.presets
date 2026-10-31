@@ -1,0 +1,271 @@
+{
+  "version": 1,
+  "engine_name": "Drums/Latent Snare Morph",
+  "source_file": "instruments/Drums/Latent Snare Morph/dsp.lisp",
+  "presets": [
+    {
+      "id": "latent-morph-drop-ring",
+      "name": "Drop Ring",
+      "base_note_offset": 0,
+      "params": {
+        "z1": 1.4039,
+        "z2": 0.4485,
+        "z3": 0.2406,
+        "z4": 0.6034,
+        "b1": -0.8368,
+        "b2": -0.6095,
+        "b3": -0.1963,
+        "b4": -0.3416,
+        "curve": 0.0,
+        "amount": 1.0,
+        "follow": 1.0,
+        "tune": 0.0,
+        "decay": 1.0,
+        "level": 0.8,
+        "morph": 600.0
+      }
+    },
+    {
+      "id": "latent-morph-ring-bend-up",
+      "name": "Ring Bend Up",
+      "base_note_offset": 0,
+      "params": {
+        "z1": -1.2318,
+        "z2": 0.0367,
+        "z3": 0.2823,
+        "z4": 0.3001,
+        "b1": 0.5894,
+        "b2": 0.4428,
+        "b3": 1.3299,
+        "b4": -0.5953,
+        "curve": 0.0,
+        "amount": 1.0,
+        "follow": 1.0,
+        "tune": 0.0,
+        "decay": 1.0,
+        "level": 0.8,
+        "morph": 500.0
+      }
+    },
+    {
+      "id": "latent-morph-buzz-out",
+      "name": "Buzz Out",
+      "base_note_offset": 0,
+      "params": {
+        "z1": -0.4886,
+        "z2": 0.218,
+        "z3": 0.6361,
+        "z4": 0.1975,
+        "b1": 0.2334,
+        "b2": 1.0198,
+        "b3": -0.4189,
+        "b4": 0.3183,
+        "curve": 0.0,
+        "amount": 1.0,
+        "follow": 1.0,
+        "tune": 0.0,
+        "decay": 1.0,
+        "level": 0.8,
+        "morph": 250.0
+      }
+    },
+    {
+      "id": "latent-morph-buzz-in",
+      "name": "Buzz In",
+      "base_note_offset": 0,
+      "params": {
+        "z1": 0.5852,
+        "z2": 0.8902,
+        "z3": 0.2846,
+        "z4": 1.0699,
+        "b1": 0.6112,
+        "b2": 0.5755,
+        "b3": 0.3171,
+        "b4": -0.4448,
+        "curve": -0.3,
+        "amount": 1.0,
+        "follow": 1.0,
+        "tune": 0.0,
+        "decay": 1.0,
+        "level": 0.8,
+        "morph": 300.0
+      }
+    },
+    {
+      "id": "latent-morph-bright-to-dark",
+      "name": "Bright To Dark",
+      "base_note_offset": 0,
+      "params": {
+        "z1": 0.9926,
+        "z2": -2.5,
+        "z3": 0.5043,
+        "z4": 1.1782,
+        "b1": -1.2318,
+        "b2": 0.0367,
+        "b3": 0.2823,
+        "b4": 0.3001,
+        "curve": 0.0,
+        "amount": 1.0,
+        "follow": 1.0,
+        "tune": 0.0,
+        "decay": 1.0,
+        "level": 0.8,
+        "morph": 150.0
+      }
+    },
+    {
+      "id": "latent-morph-long-to-short",
+      "name": "Long To Short",
+      "base_note_offset": 0,
+      "params": {
+        "z1": -0.7477,
+        "z2": 0.298,
+        "z3": -0.0435,
+        "z4": -0.1536,
+        "b1": -0.5025,
+        "b2": -0.6129,
+        "b3": -0.5752,
+        "b4": 0.1188,
+        "curve": 0.0,
+        "amount": 1.0,
+        "follow": 1.0,
+        "tune": 0.0,
+        "decay": 1.0,
+        "level": 0.8,
+        "morph": 1200.0
+      }
+    },
+    {
+      "id": "latent-morph-pitch-dive",
+      "name": "Pitch Dive",
+      "base_note_offset": 0,
+      "params": {
+        "z1": 0.5894,
+        "z2": 0.4428,
+        "z3": 1.3299,
+        "z4": -0.5953,
+        "b1": -0.8368,
+        "b2": -0.6095,
+        "b3": -0.1963,
+        "b4": -0.3416,
+        "curve": -0.4,
+        "amount": 1.0,
+        "follow": 1.0,
+        "tune": 0.0,
+        "decay": 1.0,
+        "level": 0.8,
+        "morph": 80.0
+      }
+    },
+    {
+      "id": "latent-morph-tom-slide",
+      "name": "Tom Slide",
+      "base_note_offset": 0,
+      "params": {
+        "z1": -0.7477,
+        "z2": 0.298,
+        "z3": -0.0435,
+        "z4": -0.1536,
+        "b1": 0.0282,
+        "b2": -0.5083,
+        "b3": -0.174,
+        "b4": 0.4751,
+        "curve": -0.5,
+        "amount": 1.0,
+        "follow": 1.0,
+        "tune": 0.0,
+        "decay": 1.0,
+        "level": 0.8,
+        "morph": 900.0
+      }
+    },
+    {
+      "id": "latent-morph-ring-to-wires",
+      "name": "Ring To Wires",
+      "base_note_offset": 0,
+      "params": {
+        "z1": 1.4039,
+        "z2": 0.4485,
+        "z3": 0.2406,
+        "z4": 0.6034,
+        "b1": 0.0034,
+        "b2": 0.5504,
+        "b3": 0.294,
+        "b4": -0.1117,
+        "curve": 0.0,
+        "amount": 1.0,
+        "follow": 1.0,
+        "tune": 0.0,
+        "decay": 1.0,
+        "level": 0.8,
+        "morph": 400.0
+      }
+    },
+    {
+      "id": "latent-morph-wire-swell",
+      "name": "Wire Swell",
+      "base_note_offset": 0,
+      "params": {
+        "z1": 0.5276,
+        "z2": 0.3351,
+        "z3": -0.6048,
+        "z4": -0.1147,
+        "b1": -0.4886,
+        "b2": 0.218,
+        "b3": 0.6361,
+        "b4": 0.1975,
+        "curve": 0.0,
+        "amount": 1.0,
+        "follow": 1.0,
+        "tune": 0.0,
+        "decay": 1.0,
+        "level": 0.8,
+        "morph": 150.0
+      }
+    },
+    {
+      "id": "latent-morph-half-way",
+      "name": "Half Way",
+      "base_note_offset": 0,
+      "params": {
+        "z1": 0.2151,
+        "z2": -0.5967,
+        "z3": 1.0656,
+        "z4": -1.2394,
+        "b1": -0.9026,
+        "b2": -0.5634,
+        "b3": 0.7369,
+        "b4": 0.0733,
+        "curve": 0.0,
+        "amount": 0.5,
+        "follow": 1.0,
+        "tune": 0.0,
+        "decay": 1.0,
+        "level": 0.8,
+        "morph": 300.0
+      }
+    },
+    {
+      "id": "latent-morph-ring-only",
+      "name": "Ring Only",
+      "base_note_offset": 0,
+      "params": {
+        "z1": -0.4886,
+        "z2": 0.218,
+        "z3": 0.6361,
+        "z4": 0.1975,
+        "b1": -0.0014,
+        "b2": 0.4132,
+        "b3": -0.3103,
+        "b4": 1.274,
+        "curve": 0.0,
+        "amount": 1.0,
+        "follow": 0.3,
+        "tune": 0.0,
+        "decay": 1.0,
+        "level": 0.8,
+        "morph": 400.0
+      }
+    }
+  ]
+}

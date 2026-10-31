@@ -1316,6 +1316,7 @@ fn draw_patch_with_view_key(
     probe_path: Option<&str>,
     library_macros: &HashSet<String>,
 ) {
+    super::ties::note_cell_size(viewport.cell_w, viewport.cell_h);
     // Each probe node's `@id`/`@view`, parsed once for this paint.
     let probe_attrs = probe_attrs_by_node(patch);
     let autocomplete_symbols = interaction_state
@@ -1340,6 +1341,38 @@ fn draw_patch_with_view_key(
     // Compile shapes are reported for the root view only (spec §7); inside a
     // macro view every cable's shape is unknown and draws plain.
     let shapes_path = probe_path.filter(|_| view_key == "root");
+    let (tie_ends, tie_layout) =
+        super::ties::patch_tie_layout(patch, &node_rects, origin, zoom);
+    // Wires a marquee over cables alone is picking up (or has picked up),
+    // marked by their control points, in screen cells. The cables keep their
+    // colours; only a single selected cable turns red.
+    let wire_points = match (&interaction_state.drag, &interaction_state.wire_selection) {
+        (
+            Some(PatcherDragState::Marquee {
+                start_col,
+                start_row,
+                current_col,
+                current_row,
+                base_selection,
+                ..
+            }),
+            _,
+        ) if interaction_state.selected_nodes == *base_selection => super::ties::wires_in_rect(
+            &tie_ends,
+            &tie_layout,
+            rect_from_points(*start_col, *start_row, *current_col, *current_row),
+            zoom,
+        ),
+        (_, Some(selection)) => selection
+            .cables
+            .iter()
+            .cloned()
+            .zip(selection.points.iter().map(|point| {
+                (origin.0 + point.0 * zoom, origin.1 + point.1 * zoom)
+            }))
+            .collect(),
+        _ => Vec::new(),
+    };
 
     for connection in &patch.connections {
         if connection.presentation != InputPresentation::Cable {
@@ -1365,24 +1398,57 @@ fn draw_patch_with_view_key(
         let selected = interaction_state.selected_cable.as_deref() == Some(connection_id.as_str());
         let shape = shapes_path.and_then(|path| super::shapes::connection_shape(path, connection));
         let tensor = shape.as_ref().is_some_and(super::shapes::BindingShape::is_multichannel);
+        let route = tie_layout.routes.get(&connection_id);
         let mut cable_prims = Vec::new();
-        push_cable(
-            &mut cable_prims,
-            start,
-            end,
-            connection,
-            origin.1,
-            zoom,
-            selected,
-            tensor,
-        );
+        match route {
+            Some(legs) => push_tied_cable(
+                &mut cable_prims,
+                legs,
+                |index| tie_layout.leg_row(&connection_id, index),
+                connection,
+                zoom,
+                selected,
+                tensor,
+            ),
+            None => push_cable(
+                &mut cable_prims,
+                start,
+                end,
+                connection,
+                origin.1,
+                zoom,
+                selected,
+                tensor,
+            ),
+        }
         push_z_layered(prims, cable_z, cable_prims);
         if selected {
+            let handles = tie_layout
+                .edit_points(&connection_id, zoom)
+                .unwrap_or_else(|| connection_cable_edit_points(connection, start, end, zoom));
             let mut handle_prims = Vec::new();
-            push_cable_handles(&mut handle_prims, connection, start, end, zoom);
+            push_cable_handles(&mut handle_prims, handles, zoom);
             push_z_layered(prims, cable_handle_z, handle_prims);
         }
     }
+    let mut tie_prims = Vec::new();
+    for bar in &tie_layout.bars {
+        let dragged = matches!(
+            &interaction_state.drag,
+            Some(PatcherDragState::Tie { tie_id, .. }) if *tie_id == bar.id
+        ) || interaction_state.selected_tie == Some(bar.id)
+            || interaction_state.selected_ties.contains(&bar.id);
+        push_tie_bar(&mut tie_prims, bar, zoom, dragged);
+    }
+    for (_, point) in &wire_points {
+        push_wire_control_point(&mut tie_prims, *point, zoom);
+    }
+    if let Some((anchor, items)) =
+        wire_overlay_content(patch, interaction_state, &tie_layout, origin, zoom)
+    {
+        push_wire_overlay(&mut tie_prims, anchor, items, viewport, zoom);
+    }
+    push_z_layered(prims, cable_handle_z, tie_prims);
     if let Some(PatcherDragState::Cable {
         start_col,
         start_row,
@@ -1442,7 +1508,11 @@ fn draw_patch_with_view_key(
             source: None,
             authored_reference: None,
         };
-        push_cable_handles(&mut cable_prims, &preview_connection, start, end, zoom);
+        push_cable_handles(
+            &mut cable_prims,
+            connection_cable_edit_points(&preview_connection, start, end, zoom),
+            zoom,
+        );
         push_z_layered(prims, cable_handle_z, cable_prims);
     }
     let mut alignment_prims = Vec::new();
@@ -2248,7 +2318,16 @@ fn push_cable(
     selected: bool,
     tensor: bool,
 ) {
-    let color = if selected {
+    let color = cable_color(connection, selected, tensor);
+    push_cable_colored(prims, start, end, connection, origin_row, zoom, color, tensor);
+}
+
+fn cable_color(
+    connection: &PatchConnection,
+    selected: bool,
+    tensor: bool,
+) -> crate::backend::Color {
+    if selected {
         theme::PATCHER_ERROR()
     } else {
         match connection.kind {
@@ -2256,8 +2335,63 @@ fn push_cable(
             ConnectionKind::Forward => theme::PATCHER_CABLE(),
             ConnectionKind::Feedback => theme::PATCHER_FEEDBACK_CABLE(),
         }
-    };
-    push_cable_colored(prims, start, end, connection, origin_row, zoom, color, tensor);
+    }
+}
+
+/// A cable's stroke: radius, `[primary, alternate]` dash lengths and the
+/// alternate colour (see [`push_cable`]).
+fn cable_stroke(
+    connection: &PatchConnection,
+    zoom: f32,
+    color: crate::backend::Color,
+    tensor: bool,
+) -> (f32, [f32; 2], crate::backend::Color) {
+    let base_radius_px = ui_design_px(if connection.kind == ConnectionKind::Feedback {
+        CABLE_FEEDBACK_RADIUS_PX
+    } else {
+        CABLE_FORWARD_RADIUS_PX
+    }) * zoom;
+    if tensor {
+        let (radius, dash) = tensor_cable_radius_and_dash(base_radius_px);
+        (radius, dash, theme::PATCHER_TENSOR_CABLE_ALT())
+    } else {
+        (base_radius_px, [0.0, 0.0], color)
+    }
+}
+
+/// Draw a tied cable leg by leg (`ties.rs`); the tie bars cover the joins.
+/// `leg_row` gives the screen row a segmented leg runs at.
+fn push_tied_cable(
+    prims: &mut Vec<GpuPrimitive>,
+    legs: &[super::super::cable::CableCurve],
+    leg_row: impl Fn(usize) -> Option<f32>,
+    connection: &PatchConnection,
+    zoom: f32,
+    selected: bool,
+    tensor: bool,
+) {
+    let color = cable_color(connection, selected, tensor);
+    let (radius_px, dash_px, alt_color) = cable_stroke(connection, zoom, color, tensor);
+    for (index, leg) in legs.iter().enumerate() {
+        let row = leg_row(index);
+        prims.push(GpuPrimitive::PatchCable(GpuPatchCablePrimitive {
+            start: [leg.p0.0, leg.p0.1],
+            control1: [leg.p1.0, leg.p1.1],
+            control2: [leg.p2.0, leg.p2.1],
+            end: [leg.p3.0, leg.p3.1],
+            radius_px,
+            color,
+            is_segmented: row.is_some(),
+            segment_row: row.unwrap_or(0.0),
+            corner_radius_cells: if row.is_some() {
+                SEGMENTED_CABLE_CORNER_RADIUS_CELLS * zoom
+            } else {
+                0.0
+            },
+            dash_px,
+            alt_color,
+        }));
+    }
 }
 
 fn push_cable_colored(
@@ -2275,17 +2409,7 @@ fn push_cable_colored(
         .segment
         .is_some_and(|segment| segment.is_segmented)
         && super::super::cable::should_render_segmented_cable(start, end);
-    let base_radius_px = ui_design_px(if connection.kind == ConnectionKind::Feedback {
-        CABLE_FEEDBACK_RADIUS_PX
-    } else {
-        CABLE_FORWARD_RADIUS_PX
-    }) * zoom;
-    let (radius_px, dash_px, alt_color) = if tensor {
-        let (radius, dash) = tensor_cable_radius_and_dash(base_radius_px);
-        (radius, dash, theme::PATCHER_TENSOR_CABLE_ALT())
-    } else {
-        (base_radius_px, [0.0, 0.0], color)
-    };
+    let (radius_px, dash_px, alt_color) = cable_stroke(connection, zoom, color, tensor);
     prims.push(GpuPrimitive::PatchCable(GpuPatchCablePrimitive {
         start: [curve.p0.0, curve.p0.1],
         control1: [curve.p1.0, curve.p1.1],
@@ -2575,14 +2699,279 @@ fn push_preview_cable(
     push_cable(prims, start, end, &connection, 0.0, zoom, selected, false);
 }
 
-fn push_cable_handles(
+/// Bar half-thickness and outline, in design pixels at zoom 1.
+const TIE_BAR_RADIUS_PX: f32 = 7.0;
+const TIE_BAR_OUTLINE_PX: f32 = 2.0;
+/// The knob at the bar's end, in design pixels at zoom 1.
+const TIE_KNOB_RADIUS_PX: f32 = 8.5;
+const TIE_KNOB_STEM_RADIUS_PX: f32 = 2.5;
+
+/// A straight stroke from `start` to `end`, drawn as a cable whose control
+/// points sit on the line.
+fn push_straight_stroke(
     prims: &mut Vec<GpuPrimitive>,
-    connection: &PatchConnection,
     start: (f32, f32),
     end: (f32, f32),
+    radius_px: f32,
+    color: crate::backend::Color,
+) {
+    let third = ((end.0 - start.0) / 3.0, (end.1 - start.1) / 3.0);
+    prims.push(GpuPrimitive::PatchCable(GpuPatchCablePrimitive {
+        start: [start.0, start.1],
+        control1: [start.0 + third.0, start.1 + third.1],
+        control2: [end.0 - third.0, end.1 - third.1],
+        end: [end.0, end.1],
+        radius_px,
+        color,
+        is_segmented: false,
+        segment_row: 0.0,
+        corner_radius_cells: 0.0,
+        dash_px: [0.0, 0.0],
+        alt_color: color,
+    }));
+}
+
+/// A tie: an outlined bar across its cables, angled with them, and a grab
+/// knob on a short stem past one end.
+fn push_tie_bar(
+    prims: &mut Vec<GpuPrimitive>,
+    bar: &super::ties::TieBar,
+    zoom: f32,
+    dragged: bool,
+) {
+    let fill = if dragged {
+        theme::PATCHER_NODE_SELECTED_BORDER()
+    } else {
+        theme::PATCHER_TEXT_MUTED()
+    };
+    let outline = theme::PATCHER_BG();
+    let px = |design: f32| ui_design_px(design) * zoom;
+    push_straight_stroke(prims, bar.end, bar.knob, px(TIE_KNOB_STEM_RADIUS_PX), fill);
+    push_straight_stroke(
+        prims,
+        bar.start,
+        bar.end,
+        px(TIE_BAR_RADIUS_PX + TIE_BAR_OUTLINE_PX),
+        outline,
+    );
+    push_straight_stroke(prims, bar.start, bar.end, px(TIE_BAR_RADIUS_PX), fill);
+    for (radius, color) in [
+        (TIE_KNOB_RADIUS_PX + TIE_BAR_OUTLINE_PX, outline),
+        (TIE_KNOB_RADIUS_PX, fill),
+    ] {
+        prims.push(GpuPrimitive::Circle(GpuCirclePrimitive {
+            center: [bar.knob.0, bar.knob.1],
+            radius_px: px(radius),
+            color,
+            visible_half: GpuCircleVisibleHalf::Full,
+        }));
+    }
+}
+
+/// A selected wire's control point: a ring where it runs through the box.
+fn push_wire_control_point(prims: &mut Vec<GpuPrimitive>, center: (f32, f32), zoom: f32) {
+    for (radius, color) in [
+        (CABLE_HANDLE_RADIUS_PX, theme::PATCHER_NODE_SELECTED_BORDER()),
+        (CABLE_HANDLE_RADIUS_PX * 0.62, theme::PATCHER_BG()),
+    ] {
+        prims.push(GpuPrimitive::Circle(GpuCirclePrimitive {
+            center: [center.0, center.1],
+            radius_px: ui_design_px(radius) * zoom,
+            color,
+            visible_half: GpuCircleVisibleHalf::Full,
+        }));
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WireOverlayItem {
+    Count,
+    TieUp,
+    Remove,
+    Untie,
+    Segment,
+    Unsegment,
+}
+
+/// Font size of the tie-up overlay's text, and the rows its line box takes
+/// (what centres it in an item).
+const WIRE_OVERLAY_FONT_SIZE: f32 = 12.0;
+const WIRE_OVERLAY_TEXT_ROWS: f32 = 1.05;
+/// Overlay geometry, in unzoomed cells.
+const WIRE_OVERLAY_PAD_CELLS: f32 = 0.35;
+const WIRE_OVERLAY_ITEM_PAD_X_CELLS: f32 = 0.7;
+const WIRE_OVERLAY_ITEM_HEIGHT_CELLS: f32 = 1.2;
+const WIRE_OVERLAY_GAP_ROWS: f32 = 0.6;
+/// Space between neighbouring items, so the chips never touch.
+const WIRE_OVERLAY_ITEM_GAP_CELLS: f32 = 0.45;
+/// The overlay keeps a readable size when the canvas is zoomed out.
+const WIRE_OVERLAY_MIN_SCALE: f32 = 0.8;
+
+/// What the overlay over the canvas offers, if anything: the screen point it
+/// hangs above and its items. A wire selection offers to tie its cables up
+/// or remove them; a clicked tie offers to untie.
+pub(super) fn wire_overlay_content(
+    patch: &Patch,
+    state: &super::state::PatcherInteractionState,
+    tie_layout: &super::ties::TieLayout,
+    origin: (f32, f32),
+    zoom: f32,
+) -> Option<((f32, f32), Vec<(WireOverlayItem, String)>)> {
+    let count_label = |count: usize| format!("{count} wire{}", if count == 1 { "" } else { "s" });
+    // "segment" while any of the cables is plain, else "unsegment".
+    let segment_item = |cables: &[String]| {
+        let all_segmented = cables.iter().all(|id| {
+            patch.connections.iter().any(|connection| {
+                source_connection_id(connection) == *id
+                    && connection.segment.is_some_and(|segment| segment.is_segmented)
+            })
+        });
+        if all_segmented {
+            (WireOverlayItem::Unsegment, "unsegment".to_string())
+        } else {
+            (WireOverlayItem::Segment, "segment".to_string())
+        }
+    };
+    if let Some(selection) = &state.wire_selection {
+        let anchor = (
+            origin.0 + selection.anchor.0 * zoom,
+            origin.1 + selection.anchor.1 * zoom,
+        );
+        return Some((
+            anchor,
+            vec![
+                (WireOverlayItem::Count, count_label(selection.cables.len())),
+                (WireOverlayItem::TieUp, "tie up".to_string()),
+                segment_item(&selection.cables),
+                (WireOverlayItem::Remove, "remove".to_string()),
+            ],
+        ));
+    }
+    let bar = tie_layout
+        .bars
+        .iter()
+        .find(|bar| Some(bar.id) == state.selected_tie)?;
+    let top = bar.start.1.min(bar.end.1).min(bar.knob.1);
+    let anchor = ((bar.start.0 + bar.end.0) * 0.5, top);
+    let tie_cables = patch
+        .cable_ties
+        .iter()
+        .find(|tie| tie.id == bar.id)
+        .map_or(&[][..], |tie| tie.cables.as_slice());
+    Some((
+        anchor,
+        vec![
+            (WireOverlayItem::Count, count_label(bar.cables)),
+            (WireOverlayItem::Untie, "untie".to_string()),
+            segment_item(tie_cables),
+        ],
+    ))
+}
+
+/// The overlay's card hanging above `anchor`, then each item's rect and
+/// label, in screen cells. The pointer handler hit-tests the same rects.
+pub(super) fn wire_overlay_layout(
+    anchor: (f32, f32),
+    items: Vec<(WireOverlayItem, String)>,
+    zoom: f32,
+) -> (Rect, Vec<(WireOverlayItem, Rect, String)>) {
+    let scale = zoom.max(WIRE_OVERLAY_MIN_SCALE);
+    let widths = items
+        .iter()
+        .map(|(_, label)| {
+            (approx_text_width_cells(label, WIRE_OVERLAY_FONT_SIZE) * AGENTIC_HEADER_WIDTH_SAFETY
+                + WIRE_OVERLAY_ITEM_PAD_X_CELLS * 2.0)
+                * scale
+        })
+        .collect::<Vec<_>>();
+    let pad = WIRE_OVERLAY_PAD_CELLS * scale;
+    let item_height = WIRE_OVERLAY_ITEM_HEIGHT_CELLS * scale;
+    let gap = WIRE_OVERLAY_ITEM_GAP_CELLS * scale;
+    let card_width = widths.iter().sum::<f32>()
+        + gap * widths.len().saturating_sub(1) as f32
+        + pad * 2.0;
+    let card_height = item_height + pad * 2.0;
+    let card = Rect {
+        col: anchor.0 - card_width * 0.5,
+        row: anchor.1 - WIRE_OVERLAY_GAP_ROWS * scale - card_height,
+        width: card_width,
+        height: card_height,
+    };
+    let mut left = card.col + pad;
+    let rects = items
+        .into_iter()
+        .zip(widths)
+        .map(|((item, label), width)| {
+            let rect = Rect {
+                col: left,
+                row: card.row + pad,
+                width,
+                height: item_height,
+            };
+            left += width + gap;
+            (item, rect, label)
+        })
+        .collect();
+    (card, rects)
+}
+
+fn push_wire_overlay(
+    prims: &mut Vec<GpuPrimitive>,
+    anchor: (f32, f32),
+    items: Vec<(WireOverlayItem, String)>,
+    viewport: WidgetViewport,
     zoom: f32,
 ) {
-    let (from_handle, to_handle) = connection_cable_edit_points(connection, start, end, zoom);
+    let scale = zoom.max(WIRE_OVERLAY_MIN_SCALE);
+    let (card, items) = wire_overlay_layout(anchor, items, zoom);
+    push_flat_panel_chrome(
+        prims,
+        card,
+        theme::PATCHER_AGENTIC_CARD_BG(),
+        theme::PATCHER_AGENTIC_CARD_BORDER(),
+        viewport,
+        scale,
+        ui_design_px(AGENTIC_MODEL_CHIP_RADIUS_PX + 3.0),
+        AGENTIC_CARD_BORDER_WIDTH_PX * scale,
+    );
+    for (item, rect, label) in items {
+        // Every action is a chip with full-strength text; only the count is
+        // a muted label.
+        let fg = if item == WireOverlayItem::Count {
+            theme::PATCHER_TEXT_MUTED()
+        } else {
+            push_flat_panel_chrome(
+                prims,
+                rect,
+                theme::PATCHER_AGENTIC_CHIP_BG(),
+                theme::PATCHER_AGENTIC_CHIP_BORDER(),
+                viewport,
+                scale,
+                ui_design_px(AGENTIC_MODEL_CHIP_RADIUS_PX),
+                AGENTIC_INNER_BORDER_WIDTH_PX * scale,
+            );
+            theme::PATCHER_TEXT()
+        };
+        prims.push(GpuPrimitive::ProportionalText(GpuProportionalTextPrimitive {
+            row: rect.row + (rect.height - WIRE_OVERLAY_TEXT_ROWS * scale) * 0.5,
+            col: rect.col,
+            align_width: rect.width,
+            h_align: 0.5,
+            text: label,
+            font_size: WIRE_OVERLAY_FONT_SIZE,
+            scale,
+            fg,
+            bg: theme::PATCHER_AGENTIC_CARD_BG(),
+            face: crate::ui::glyph_atlas::TextFace::Regular,
+        }));
+    }
+}
+
+fn push_cable_handles(
+    prims: &mut Vec<GpuPrimitive>,
+    (from_handle, to_handle): ((f32, f32), (f32, f32)),
+    zoom: f32,
+) {
     for center in [from_handle, to_handle] {
         prims.push(GpuPrimitive::Circle(GpuCirclePrimitive {
             center: [center.0, center.1],

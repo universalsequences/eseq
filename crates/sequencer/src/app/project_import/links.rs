@@ -54,6 +54,9 @@ pub(super) struct IdMap {
     /// selections are positional over them).
     pub source_tracks: usize,
     pub target_tracks: usize,
+    /// The source is this project (a mirror import): what did not come
+    /// along is still here under the same id, so links to it stay.
+    pub same_project: bool,
 }
 
 impl IdMap {
@@ -62,7 +65,12 @@ impl IdMap {
         if bus == BusId::MIX.0 {
             return Some(bus);
         }
-        self.buses.get(&bus).copied()
+        self.buses.get(&bus).copied().or(self.same_project.then_some(bus))
+    }
+
+    /// The new track for a source track.
+    pub fn track(&self, track: usize) -> Option<usize> {
+        self.tracks.get(&track).copied().or(self.same_project.then_some(track))
     }
 
     /// Source track -> new track, as the positional map
@@ -206,8 +214,8 @@ pub(super) fn remap_slot_sidechains(
         let Some(old) = sidechain_source(old_owner, selection, ids.source_tracks) else {
             return 0.0;
         };
-        match ids.tracks.get(&old) {
-            Some(new) => sidechain_selection(new_owner, *new, ids.target_tracks) as f32,
+        match ids.track(old) {
+            Some(new) => sidechain_selection(new_owner, new, ids.target_tracks) as f32,
             None => {
                 cut.push(format!("{who}: sidechain from '{}'", source.track_name(old)));
                 0.0
@@ -265,7 +273,7 @@ pub(super) fn remap_bus_sidechain(
     let Some(old) = selection.checked_sub(1) else {
         return 0;
     };
-    match ids.tracks.get(&old) {
+    match ids.track(old) {
         Some(new) => new + 1,
         None => {
             cut.push(format!("{who}: sidechain from '{}'", source.track_name(old)));

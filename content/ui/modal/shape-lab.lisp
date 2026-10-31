@@ -102,7 +102,7 @@
 (def materials
   (list mat/steel mat/brass mat/bronze mat/copper mat/aluminium mat/titanium mat/silver mat/gold
         mat/lead mat/uranium mat/glass mat/granite mat/ice mat/carbon mat/diamond mat/nylon
-        mat/spruce mat/maple mat/rosewood mat/mahogany))
+        mat/spruce mat/maple mat/rosewood mat/mahogany mat/cardboard))
 
 (def material-named (name) (or (find-by-key materials :name name) mat/steel))
 

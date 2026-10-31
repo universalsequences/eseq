@@ -155,6 +155,32 @@ pub(crate) fn instrument_key_locks(
     InstrumentKeyLocks { by_param, notes }
 }
 
+/// [`instrument_key_locks`] of a rack layer's instrument (its snapshot).
+pub(crate) fn rack_instrument_key_locks(
+    slot: &sequencer::effects::EffectSlotSnapshot,
+    params: &[sequencer::effects::ParamDescriptor],
+) -> InstrumentKeyLocks {
+    let mut by_param = vec![Vec::<(u8, f32)>::new(); params.len()];
+    let mut notes = Vec::<u8>::new();
+    for (&note, row) in &slot.key_locks {
+        let ids = slot.key_lock_param_ids.get(&note);
+        for (param_idx, pdesc) in params.iter().enumerate().take(slot.num_params as usize) {
+            let Some(value) = row.get(param_idx).copied().flatten() else {
+                continue;
+            };
+            let id = ids.and_then(|ids| ids.get(param_idx).copied().flatten());
+            if id != slot.param_node_id(param_idx) {
+                continue;
+            }
+            by_param[param_idx].push((note, pdesc.stored_to_user(value)));
+            if notes.last() != Some(&note) {
+                notes.push(note);
+            }
+        }
+    }
+    InstrumentKeyLocks { by_param, notes }
+}
+
 /// Slice sensitivity as the sampler panel resolves it. Marker indices in
 /// `edit-sampler-slice` payloads address the list this panel rendered, so the
 /// host command has to reach the same value — p-lock and descriptor-tail

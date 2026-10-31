@@ -247,7 +247,12 @@ pub enum ConnectionKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CableSegmentInfo {
     pub is_segmented: bool,
+    /// Model row of the horizontal run. On a tied cable this is the run of its
+    /// first part, from the outlet to the first tie.
     pub segment_row: f32,
+    /// On a tied cable, the model row of the run of its last part, from the
+    /// last tie to the inlet; `None` sits it halfway. Unused while untied.
+    pub after_row: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -369,10 +374,27 @@ pub struct HostModulatorInput {
     pub slot: usize,
 }
 
+/// A zip tie gathering cables (see `ties.rs`). Layout only, like a node
+/// position: `position` is the tie's centre in model cells and `cables` the
+/// source connection ids it holds, in no particular order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CableTie {
+    pub id: u64,
+    pub position: (f32, f32),
+    pub cables: Vec<String>,
+    /// For a segmented cable tied again further on, the model row of its run
+    /// from this tie to the next one, by cable id; absent sits it where the
+    /// bundle puts it. The runs before the first tie and after the last are
+    /// the cable's own (`CableSegmentInfo`).
+    pub leg_rows: std::collections::BTreeMap<String, f32>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Patch {
     pub nodes: Vec<PatchNode>,
     pub connections: Vec<PatchConnection>,
+    /// This scope's cable ties. Layout only: never emitted into source.
+    pub cable_ties: Vec<CableTie>,
     pub macros: Vec<MacroPatch>,
     pub diagnostics: Vec<String>,
     pub host_modulators: Vec<HostModulatorInput>,

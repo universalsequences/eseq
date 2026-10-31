@@ -53,11 +53,14 @@
           (dict :param-idx 3 :value (* 100 (/ end-seconds duration))))))
       (if (pc/instrument-rack-target? inst)
         (host-command
-          (if (seq-has-selection?)
-            "set-rack-slot-instrument-plock-batch"
-            "set-rack-slot-instrument-param-batch")
+          (if (pc/instrument-key-lock-authoring-active?)
+            "set-rack-slot-instrument-key-lock-batch"
+            (if (seq-has-selection?)
+              "set-rack-slot-instrument-plock-batch"
+              "set-rack-slot-instrument-param-batch"))
           (dict :track (get inst :rack-track)
                 :slot (get inst :rack-slot)
+                :notes key-lock-view.notes
                 :updates updates
                 :gesture "sampler-range"
                 :label "Set sampler range"))

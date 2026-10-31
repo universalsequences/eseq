@@ -23,7 +23,7 @@ use super::metrics::{
     PAN_OVERSCROLL_VIEWPORT_FACTOR,
 };
 use super::model::{
-    ArgValue, BindingTarget, CableEndpoint, CableSegmentInfo, ConnectionKind, ExprPath,
+    ArgValue, BindingTarget, CableEndpoint, CableSegmentInfo, CableTie, ConnectionKind, ExprPath,
     InputPortRef, InputPresentation, MacroOrigin, MacroPatch, MacroSignature, NodeKind, NodeSource,
     OutputPortRef, ParamNodeInfo, Patch, PatchConnection, PatchNode, PatcherIntent, SourceExprId,
     SourceFormId, SourceOwner, SourceScopeId, hidden_inline_node_ids, orphaned_inline_mod_node_ids,
@@ -134,6 +134,13 @@ pub(super) struct PatcherInteractionState {
     pub(super) hovered_label_arg: Option<InputPortRef>,
     pub(super) hover_back_button: bool,
     pub(super) selected_cable: Option<String>,
+    /// Cables a marquee over cables alone picked up, offered for tying.
+    pub(super) wire_selection: Option<WireSelection>,
+    /// A tie clicked without dragging it; the overlay offers to untie it.
+    pub(super) selected_tie: Option<u64>,
+    /// Ties a marquee took in alongside nodes; they ride along when the
+    /// selected nodes are dragged.
+    pub(super) selected_ties: HashSet<u64>,
     pub(super) edit_state: PatchEditState,
     pub(super) text_edit: Option<PatcherTextEdit>,
     /// File spellings captured when the active node edit begins. Keeping the
@@ -153,6 +160,17 @@ pub(super) struct PatcherInteractionState {
     /// Jev ghost-cable suggestions for the single selected node, if any
     /// (`jev.rs`). Never part of an undo gesture: written without history.
     pub(super) jev: Option<super::jev::JevSuggestionState>,
+}
+
+/// Cables picked up by a marquee drawn over cables alone (`ties.rs`). Model
+/// positions, so the selection rides along with pan and zoom.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct WireSelection {
+    pub(super) cables: Vec<String>,
+    /// Each cable's control point: where it ran through the box.
+    pub(super) points: Vec<(f32, f32)>,
+    /// Top centre of the box; the tie-up overlay hangs above it.
+    pub(super) anchor: (f32, f32),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -516,6 +534,13 @@ pub(super) struct PatchEditState {
     /// generator emits its body (with its view's edits) as a defmacro in the
     /// patch instead of importing the package.
     pub(super) forked_macros: HashSet<String>,
+    /// Cable ties per view key, replacing the scope's loaded ties wholesale
+    /// once any tie in that view is edited.
+    pub(super) cable_ties: HashMap<String, Vec<CableTie>>,
+    /// Cables deleted this session (connection edit keys), cut out of every
+    /// tie. A cable's id is spelled from its ports, so without this a cable
+    /// re-drawn between the same ports would rejoin the tie it was cut from.
+    pub(super) cut_tie_cables: HashSet<String>,
     pub(super) next_created_node: u64,
     pub(super) next_created_connection: u64,
 }
@@ -611,6 +636,17 @@ impl PatcherTextEdit {
     }
 }
 
+/// Which horizontal run of a segmented cable: the only one, or on a tied
+/// cable the one before its first tie; the one leaving tie `id` for the next
+/// tie (`CableTie::leg_rows`); or the one after its last tie
+/// (`CableSegmentInfo::after_row`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SegmentPart {
+    Before,
+    Between(u64),
+    After,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum PatcherDragState {
     Nodes {
@@ -618,6 +654,8 @@ pub(super) enum PatcherDragState {
         start_col: f32,
         start_row: f32,
         start_positions: HashMap<String, (f32, f32)>,
+        /// Model positions of the selected ties at grab time.
+        tie_start_positions: HashMap<u64, (f32, f32)>,
         alignment: AlignmentSnapState,
     },
     NodeResize {
@@ -637,6 +675,7 @@ pub(super) enum PatcherDragState {
         current_col: f32,
         current_row: f32,
         base_selection: HashSet<String>,
+        base_ties: HashSet<u64>,
     },
     Cable {
         from: OutputPortRef,
@@ -660,13 +699,29 @@ pub(super) enum PatcherDragState {
         target_from: Option<OutputPortRef>,
         target_to: Option<InputPortRef>,
     },
+    /// Dragging a segmented cable's horizontal run; `part` says which one on
+    /// a tied cable. The ends are those of the leg the run belongs to.
     CableSegment {
         cable_id: String,
+        part: SegmentPart,
         start_col: f32,
         start_row: f32,
         end_col: f32,
         end_row: f32,
     },
+    /// Dragging a tie; `start_position` is its model position at grab time.
+    Tie {
+        tie_id: u64,
+        start_col: f32,
+        start_row: f32,
+        start_position: (f32, f32),
+    },
+    /// A tie was made or removed on pointer down; the release reports the
+    /// layout change.
+    TieEdited,
+    /// The tie-up overlay's remove deleted cables on pointer down; the
+    /// release reports the semantic change.
+    WiresRemoved,
 }
 
 pub(super) fn get_patcher_interaction_state(key: u64) -> PatcherInteractionState {
@@ -1494,6 +1549,10 @@ pub(super) fn delete_connection_edit_or_mark_deleted(
             .insert(connection_edit_key(view_key, cable_id))
     };
 
+    state
+        .edit_state
+        .cut_tie_cables
+        .insert(connection_edit_key(view_key, cable_id));
     if state.selected_cable.as_deref() == Some(cable_id) {
         state.selected_cable = None;
     }
@@ -1846,6 +1905,17 @@ pub(super) fn patch_scope_with_interaction_state(
         {
             apply_node_text_override(node, &edit.node_text(), macro_signatures);
         }
+    }
+    if let Some(ties) = interaction_state.edit_state.cable_ties.get(view_key) {
+        patch.cable_ties = ties.clone();
+    }
+    let cut = &interaction_state.edit_state.cut_tie_cables;
+    if !cut.is_empty() {
+        for tie in &mut patch.cable_ties {
+            tie.cables
+                .retain(|id| !cut.contains(&connection_edit_key(view_key, id)));
+        }
+        patch.cable_ties.retain(|tie| !tie.cables.is_empty());
     }
     for connection in &mut patch.connections {
         let edit_key = connection_edit_key(view_key, &source_connection_id(connection));

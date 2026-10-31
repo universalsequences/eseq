@@ -394,26 +394,43 @@ pub(super) fn process_bound_sends(
     )
 }
 
-/// A track instrument's key locks, cached per track under its [`PlockKey`]
-/// (and its descriptor); `None` for any other device.
+/// A track instrument's or rack layer's key locks, cached per track (and
+/// layer) under its [`PlockKey`] (and its descriptor); `None` for any other
+/// device.
 pub(super) fn device_key_locks(
     sources: &KindsHandles,
     shared: &RefCell<KindsShared>,
     device: &DeviceSource,
 ) -> Option<Rc<InstrumentKeyLocks>> {
-    if device.device != DeviceSlot::Instrument || !sources.track_exists(device.owner) {
+    if !sources.track_exists(device.owner) {
         return None;
     }
     let track = device.owner;
-    let slot = sources.state.pattern.instrument_slots.get(track)?;
     let key = (sources.plock_key(track), Rc::as_ptr(&device.desc) as usize);
-    Some(plock_cached(
-        shared,
-        |shared| &mut shared.key_locks,
-        track,
-        key,
-        || instrument_key_locks(slot, device.params()),
-    ))
+    match device.device {
+        DeviceSlot::Instrument => {
+            let slot = sources.state.pattern.instrument_slots.get(track)?;
+            Some(plock_cached(
+                shared,
+                |shared| &mut shared.key_locks,
+                (track, None),
+                key,
+                || instrument_key_locks(slot, device.params()),
+            ))
+        }
+        DeviceSlot::RackSlot(slot_idx) => {
+            let racks = sources.state.pattern.rack_tracks.lock().unwrap();
+            let slot = racks.get(track)?.as_ref()?.slots.get(slot_idx)?;
+            Some(plock_cached(
+                shared,
+                |shared| &mut shared.key_locks,
+                (track, Some(slot_idx)),
+                key,
+                || rack_instrument_key_locks(&slot.instrument_slot, device.params()),
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// `device.key-locked-notes`, through `read` (no copy).

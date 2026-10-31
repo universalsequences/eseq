@@ -290,8 +290,8 @@
       :patcher-error        '(1.00 0.35 0.39)
       :patcher-cable        '(0.74 0.76 0.84 0.92)
       :patcher-feedback-cable '(1.00 0.62 0.12 0.88)
-      :patcher-tensor-cable '(0.47 0.80 0.96 1.00)      ; Max mc cyan
-      :patcher-tensor-cable-alt '(0.13 0.19 0.22 1.00)  ; Max mc slate
+      :patcher-tensor-cable '(0.017 0.723 0.957 1.0)      ; Max mc cyan
+      :patcher-tensor-cable-alt '(0.295 0.307 0.391 1.0)  ; Max mc slate
       :patcher-marquee-fill '(0.00 0.48 0.95 0.12)
       :patcher-marquee-border '(0.00 0.48 0.95 0.72)
       :patcher-node-bg      '(0.17 0.17 0.18)

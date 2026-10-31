@@ -25,6 +25,7 @@
 mod eigen;
 mod element;
 pub(crate) mod mesh;
+pub mod net;
 mod obj;
 mod skyline;
 mod spec;

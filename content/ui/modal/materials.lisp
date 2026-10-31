@@ -19,7 +19,8 @@
 
 (export material material?
         uranium steel brass aluminium granite nylon carbon diamond spruce
-        copper bronze titanium silver gold lead glass ice maple rosewood mahogany)
+        copper bronze titanium silver gold lead glass ice maple rosewood mahogany
+        cardboard rubber alder mylar water spider-silk)
 
 ;; A material.
 ;;   name     what the panel's material menu shows
@@ -73,6 +74,22 @@
 ;; soda-lime glass
 (def glass     (material :name "glass"     :density 2500  :young 7.0e10  :poisson 0.22))
 (def ice       (material :name "ice"       :density 917   :young 9.0e9   :poisson 0.33))
+;; paperboard (a tissue box, a toilet-paper roll): light, soft and lossy, so a
+;; cardboard solid thuds rather than rings
+;; polyester film, a drum head's skin
+(def mylar     (material :name "mylar"     :density 1390  :young 4.0e9   :poisson 0.38))
+;; not a solid at all: its bulk modulus stands in for Young's, so a "water"
+;; head or string is about as stiff for its weight as nylon (Poisson's ratio
+;; near the incompressible 0.5); a what-if material, as Modalys allows
+(def water     (material :name "water"     :density 1000  :young 2.2e9   :poisson 0.49))
+;; spider dragline silk: light, and for its weight about a third as stiff as
+;; steel, three times nylon
+(def spider-silk (material :name "spider_silk" :density 1300 :young 1.0e10 :poisson 0.3))
+(def cardboard (material :name "cardboard" :density 700   :young 3.0e9   :poisson 0.3
+                         :damping 0.04))
+;; a rubber band: so soft for its weight that a string of it barely stretches
+;; its partials
+(def rubber    (material :name "rubber"    :density 1100  :young 5.0e6   :poisson 0.49))
 ;; Woods are along the grain; their :damping is the loss factor along it
 ;; (spruce, prized for soundboards, rings longest); their :wood constants (Wood Handbook ratios:
 ;; sugar maple, Honduras mahogany; rosewood, which the handbook lacks, as a
@@ -82,6 +99,12 @@
                          :damping 0.012))
 (def rosewood  (material :name "rosewood"  :density 850   :young 1.6e10  :poisson 0.35
                          :wood (wood-ratios 1.6e10 0.12 0.07 0.08 0.06 0.02 0.40 0.50 0.65)
+                         :damping 0.01))
+;; red alder: Fender solid bodies (a Precision Bass, a Stratocaster). The
+;; handbook gives its density and modulus but no elastic ratios; these are
+;; yellow-poplar's, the closest listed diffuse-porous hardwood of its weight
+(def alder     (material :name "alder"     :density 450   :young 9.5e9   :poisson 0.35
+                         :wood (wood-ratios 9.5e9 0.092 0.043 0.075 0.069 0.011 0.318 0.392 0.703)
                          :damping 0.01))
 ;; Honduras mahogany: guitar necks and bodies
 (def mahogany  (material :name "mahogany"  :density 560   :young 1.05e10 :poisson 0.3

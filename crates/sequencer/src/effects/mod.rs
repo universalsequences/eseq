@@ -11752,7 +11752,7 @@ impl EffectSlotSnapshot {
             .filter(|&idx| idx != u32::MAX)
     }
 
-    fn param_node_id(&self, param_idx: usize) -> Option<ParamNodeId> {
+    pub fn param_node_id(&self, param_idx: usize) -> Option<ParamNodeId> {
         let raw_idx = self.param_node_indices.get(param_idx).copied()?;
         ParamNodeId::from_slot_param(self.node_id, self.modulator_node_id, raw_idx)
     }

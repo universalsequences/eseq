@@ -568,6 +568,7 @@ fn is_widget_name(name: &str) -> bool {
             | "scroll"
             | "tree"
             | "xy-pad"
+            | "drum-pad"
             | "automation-lane"
             | "color-picker"
     )

@@ -795,6 +795,8 @@
         :options (append (scene-bank-labels) (list "New bank"))
         :on-change   select-scene-bank
         :bg-color :transport-led-bg
+        :badge-color :transport-led-bg
+        :chevron-color :clock-fg
         :text-color :clock-fg
         :width 5.0 :height 0.5 :font-size 10))))
 
@@ -1009,11 +1011,12 @@
 
 ;; A label on a pill: white while on (a value or a #' binding), else gray.
 (def pill-label (text on &key (font 9))
-  (label text :font-size font :color :transport-led-dim :active on :active-color :arrangement-return-fg
+  (label text :font-size font :color :transport-led-dim :active on 
+    :active-color :clock-fg
     :height :fill
     :h-align :center
     :v-align :center
-    :hover-color :white :bg :transparent))
+    :bg :transparent))
 
 ;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
 (set-buffer-mode-for "*transport*" "eseq.sequencer-keys/sequencer-keys")
@@ -1123,6 +1126,8 @@
         (dropdown
           :bg-color :transport-led-bg
           :text-color :clock-fg
+          :badge-color :transport-led-bg
+          :chevron-color :clock-fg
           :key "transport-scene-launch-quantize-dropdown"
           :debug-name "transport-scene-launch-quantize"
           :value (launch-quantize)
@@ -1135,6 +1140,8 @@
           :text-color :clock-fg
           :key "transport-record-quantize-dropdown"
           :debug-name "transport-record-quantize"
+          :badge-color :transport-led-bg
+          :chevron-color :clock-fg
           :value (label-or transport.record-quantize "1/16")
           :options record-quantize-options
           :on-change seq-set-record-quantize

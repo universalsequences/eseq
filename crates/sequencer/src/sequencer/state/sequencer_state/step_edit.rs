@@ -1694,6 +1694,41 @@ impl SequencerState {
         (registry, assignments)
     }
 
+    /// [`Self::key_lock_variant_registry_with_assignments`] of rack layer
+    /// `slot_idx` of `track`; empty for a slot that does not exist.
+    pub fn rack_key_lock_variant_registry_with_assignments(
+        &self,
+        track: usize,
+        slot_idx: usize,
+    ) -> (PlockVariantRegistry, Vec<Option<PlockVariantAssignment>>) {
+        let (slot_id, keys) = {
+            let racks = self.pattern.rack_tracks.lock().unwrap();
+            let Some(slot) = racks
+                .get(track)
+                .and_then(Option::as_ref)
+                .and_then(|rack| rack.slots.get(slot_idx))
+            else {
+                return (
+                    PlockVariantRegistry::default(),
+                    vec![None; crate::effects::MAX_MIDI_NOTES],
+                );
+            };
+            let keys = (0..crate::effects::MAX_MIDI_NOTES)
+                .map(|note| {
+                    crate::plock_variants::rack_slot_key_lock_variant_key(
+                        &slot.instrument_slot,
+                        note as u8,
+                    )
+                })
+                .collect();
+            (slot.id, keys)
+        };
+        let mut registries = self.pattern.rack_key_lock_variant_registries.lock().unwrap();
+        let registry = registries.entry((track, slot_id)).or_default();
+        let assignments = registry.reconcile(keys);
+        (registry.clone(), assignments)
+    }
+
     pub fn clear_key_lock_variant_locks_for_notes(&self, track: usize, notes: &[u8]) -> bool {
         if track >= self.pattern.instrument_slots.len() {
             return false;

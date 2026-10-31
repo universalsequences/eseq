@@ -270,6 +270,7 @@ pub(super) fn patch_from_payload(payload: &GraphPayload) -> Patch {
     let mut patch = Patch {
         nodes: payload.nodes.iter().map(patch_node).collect(),
         connections: payload.connections.iter().map(patch_connection).collect(),
+        cable_ties: Vec::new(),
         macros: payload.macros.iter().map(macro_patch).collect(),
         diagnostics: Vec::new(),
         host_modulators: payload

@@ -1830,3 +1830,64 @@ fn the_tick_samples_modulation_only_while_a_kind_field_observes_it() {
     h.tick();
     assert_eq!(h.meters.cached_mod_display_values, unpolled, "released, nothing sampled");
 }
+
+#[test]
+fn rack_layer_key_locks_and_variants_read_and_stamp_through_history() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.eval_all(
+        r#"(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))
+           (def start (device-param rs "start"))"#,
+    );
+    h.sync();
+    let command = app::AppCommand::SetRackSlotInstrumentKeyLockMulti {
+        track: 2,
+        slot_idx: 0,
+        notes: vec![60, 62],
+        param_idx: START,
+        value: 0.5,
+    };
+    app::apply_command(&mut h.app, command);
+    h.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+    h.sync();
+    assert_eq!(
+        h.eval_all("rs.key-locked-notes"),
+        h.eval_all("(list 60 62)"),
+        "the layer's locked keys mark the keyboard"
+    );
+    assert_eq!(
+        h.eval_all("(len start.key-locks)"),
+        Value::Number(2.0),
+        "the knob reads the layer's lock per key"
+    );
+    h.eval_all("(def kv (first rs.variants))");
+    assert_eq!(
+        h.eval_all("(list (len rs.variants) kv.label kv.notes)"),
+        h.eval_all(r#"(list 1 "A" (list 60 62))"#)
+    );
+    let key_lock = |h: &Harness, note: u8| {
+        let slot = h.rack_slot();
+        slot.instrument_slot
+            .key_locks
+            .get(&note)
+            .and_then(|row| row.get(START).copied().flatten())
+    };
+    let before = h.app.history.undo_len();
+    h.eval_panel("(stamp-key-variant! rs (list 64) kv)");
+    h.drain_and_sync();
+    assert_eq!(h.app.history.undo_len(), before + 1);
+    assert_eq!(key_lock(&h, 64), Some(0.5));
+    assert_eq!(h.eval_all("kv.notes"), h.eval_all("(list 60 62 64)"));
+    h.eval_panel("(stamp-key-variant! rs (list 60) nil)");
+    h.drain_and_sync();
+    assert_eq!(key_lock(&h, 60), None, "the def chip clears the layer's key");
+    h.undo();
+    h.sync();
+    assert_eq!(key_lock(&h, 60), Some(0.5));
+    assert_eq!(
+        h.shared.state.pattern.instrument_slots[2].key_locks.get(64, START),
+        None,
+        "the track instrument is untouched"
+    );
+}

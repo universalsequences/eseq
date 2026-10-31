@@ -2775,6 +2775,7 @@ fn build_persistence_case(
                     Some(CableSegmentInfo {
                         is_segmented: true,
                         segment_row: row,
+                        after_row: None,
                     }),
                 );
                 expectations.segments.push(expected_segment(
@@ -2948,6 +2949,7 @@ fn build_persistence_case(
                 Some(CableSegmentInfo {
                     is_segmented: true,
                     segment_row: row,
+                    after_row: None,
                 }),
             );
             expectations.segments.push(expected_segment(
@@ -7300,6 +7302,7 @@ fn writeback_allows_source_connection_segment_layout_edit() {
         Some(CableSegmentInfo {
             is_segmented: true,
             segment_row: 12.5,
+            after_row: None,
         }),
     );
 
@@ -8494,6 +8497,7 @@ fn writeback_macro_history_source_cable_layout_edit_is_not_counted_as_second_wri
         Some(CableSegmentInfo {
             is_segmented: true,
             segment_row: 12.0,
+            after_row: None,
         }),
     );
 
@@ -13790,6 +13794,7 @@ fn segmented_cable_hit_testing_uses_orthogonal_path() {
     patch.connections[0].segment = Some(CableSegmentInfo {
         is_segmented: true,
         segment_row,
+        after_row: None,
     });
     let horizontal_midpoint = ((start.0 + end.0) * 0.5, rendered_segment_row);
 
@@ -13851,6 +13856,7 @@ fn segmented_horizontal_segment_hit_is_used_for_dragging() {
     patch.connections[0].segment = Some(CableSegmentInfo {
         is_segmented: true,
         segment_row,
+        after_row: None,
     });
 
     assert_eq!(
@@ -13864,6 +13870,7 @@ fn segmented_horizontal_segment_hit_is_used_for_dragging() {
             (start.0 + end.0) * 0.5,
             rendered_segment_row,
         )
+        .map(|run| run.cable_id)
         .as_deref(),
         Some(source_connection_id(patch.connections.first().unwrap()).as_str())
     );
@@ -13911,6 +13918,7 @@ fn segmented_cable_row_left_outside_port_span_by_node_move_is_rerouted() {
     patch.connections[0].segment = Some(CableSegmentInfo {
         is_segmented: true,
         segment_row: stale_row,
+        after_row: None,
     });
 
     let effective = segmented_cable_row_px(start, end, origin.1, stale_row, zoom);
@@ -13932,6 +13940,7 @@ fn segmented_cable_row_left_outside_port_span_by_node_move_is_rerouted() {
             mid_col,
             row,
         )
+        .map(|run| run.cable_id)
     };
     assert!(hit(origin.1 + stale_row * zoom).is_none());
     assert_eq!(
@@ -13982,6 +13991,7 @@ fn segmented_horizontal_segment_hit_uses_tight_cable_radius() {
     patch.connections[0].segment = Some(CableSegmentInfo {
         is_segmented: true,
         segment_row,
+        after_row: None,
     });
     let midpoint_col = (start.0 + end.0) * 0.5;
 
@@ -13995,7 +14005,8 @@ fn segmented_horizontal_segment_hit_uses_tight_cable_radius() {
             &output_counts,
             midpoint_col,
             rendered_segment_row + CABLE_HIT_RADIUS_CELLS * zoom + 0.01,
-        ),
+        )
+        .map(|run| run.cable_id),
         None
     );
 }
@@ -14058,6 +14069,7 @@ fn node_drag_wins_over_segmented_cable_hit_inside_node_body() {
         Some(CableSegmentInfo {
             is_segmented: true,
             segment_row,
+            after_row: None,
         }),
     );
     set_patcher_interaction_state(key, state);
@@ -14090,6 +14102,7 @@ fn node_drag_wins_over_segmented_cable_hit_inside_node_body() {
             hit_col,
             segment_screen_row,
         )
+        .map(|run| run.cable_id)
         .as_deref(),
         None,
         "a stored row below the inlet reroutes above it, out of the node body"
@@ -14194,6 +14207,7 @@ fn platform_primary_y_initializes_selected_cable_segment_at_rendered_midpoint_af
         Some(CableSegmentInfo {
             is_segmented: false,
             segment_row: 0.0,
+            after_row: None,
         }),
     );
     set_patcher_interaction_state(key, interaction);
@@ -14311,6 +14325,7 @@ fn segmented_cable_render_row_tracks_pan_origin_once() {
     patch.connections[0].segment = Some(CableSegmentInfo {
         is_segmented: true,
         segment_row: stored_segment_row,
+        after_row: None,
     });
     let state = PatcherInteractionState::default();
 
@@ -14442,6 +14457,7 @@ fn segmented_cable_rendering_collapses_aligned_ports_to_vertical_curve() {
     patch.connections[0].segment = Some(CableSegmentInfo {
         is_segmented: true,
         segment_row: ((start.1 + end.1) * 0.5) - origin.1,
+        after_row: None,
     });
 
     let mut prims = Vec::new();
@@ -15923,6 +15939,7 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
     let patch = Patch {
         nodes: vec![phasor],
         host_declarations: Vec::new(),
+        cable_ties: Vec::new(),
         connections: Vec::new(),
         macros: Vec::new(),
         diagnostics: Vec::new(),
@@ -15940,6 +15957,7 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
     let patch = Patch {
         nodes: vec![multiply],
         host_declarations: Vec::new(),
+        cable_ties: Vec::new(),
         connections: Vec::new(),
         macros: Vec::new(),
         diagnostics: Vec::new(),
@@ -15981,6 +15999,7 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
     let patch = Patch {
         nodes: vec![history],
         host_declarations: Vec::new(),
+        cable_ties: Vec::new(),
         connections: Vec::new(),
         macros: Vec::new(),
         diagnostics: Vec::new(),
@@ -19038,6 +19057,7 @@ fn metal_render_emits_alignment_guide_rects_for_node_drag() {
             start_col: 0.0,
             start_row: 0.0,
             start_positions: HashMap::new(),
+            tie_start_positions: HashMap::new(),
             alignment: AlignmentSnapState {
                 snapped_x: true,
                 guides: vec![AlignmentGuide {
@@ -20245,6 +20265,7 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
 
     let patch = Patch {
         host_declarations: Vec::new(),
+        cable_ties: Vec::new(),
         nodes: vec![PatchNode {
             id: "committed-space-node".to_string(),
             op: "in".to_string(),
@@ -28693,4 +28714,869 @@ fn spectrogram_probe_paints_its_waterfall_in_the_plot() {
     eseqlisp_live_audio::publish_patch_probe_instance(&path, None);
     eseqlisp_live_audio::retain_spectrogram_frames(&HashSet::new());
     set_patcher_interaction_state(key, PatcherInteractionState::default());
+}
+
+/// Two inlets fed from two outlets: `a -> c` and `b -> c`.
+const TIE_TEST_SOURCE: &str =
+    "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def c (+ a b))\n(out c 1)\n";
+
+/// Auto-layout segments the projected cables; ties only take plain ones.
+fn unsegment_cables_into_c(root_patch: &Patch, key: u64) {
+    let mut state = get_patcher_interaction_state(key);
+    for connection in root_patch
+        .connections
+        .iter()
+        .filter(|connection| connection.to_node == "c")
+    {
+        set_connection_segment_edit(&mut state, "root", connection, None);
+    }
+    set_patcher_interaction_state(key, state);
+}
+
+/// Open a patcher on `TIE_TEST_SOURCE` with its two cables into `c` plain.
+fn tie_test_patcher(name: &str) -> (std::path::PathBuf, LayoutNode, u64, Patch) {
+    let path = temp_patcher_source_path(name);
+    fs::write(&path, TIE_TEST_SOURCE).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    unsegment_cables_into_c(&root_patch, key);
+    (path, node, key, root_patch)
+}
+
+fn cables_into_c(patch: &Patch) -> Vec<String> {
+    let mut ids = patch
+        .connections
+        .iter()
+        .filter(|connection| connection.to_node == "c")
+        .map(source_connection_id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
+}
+
+/// Drag a marquee across the whole canvas over the gap between the outlets
+/// of `a`/`b` and the inlet row of `c`: it holds cables and no nodes.
+fn marquee_over_cables_into_c(node: &LayoutNode, root_patch: &Patch, key: u64) {
+    let pan = get_patcher_pan_state(key);
+    let rects = patch_node_rects(root_patch, node.rect, &pan);
+    let top = rects["a"].row + rects["a"].height + 0.2;
+    let bottom = rects["c"].row - 0.2;
+    let none = KeyModifiers::empty();
+    let right = node.rect.col + node.rect.width - 0.5;
+    handle_patcher_pointer_down(node, node.rect.col + 0.5, top, none, 10.0, 20.0);
+    handle_patcher_pointer_drag(node, right, bottom, none, 10.0, 20.0);
+    handle_patcher_pointer_up(node, right, bottom);
+}
+
+/// Click one of the tie-up overlay's items.
+fn click_wire_overlay(node: &LayoutNode, key: u64, item: WireOverlayItem) -> PatcherChangeKind {
+    let state = get_patcher_interaction_state(key);
+    let pan = get_patcher_pan_state(key);
+    let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    let patch = patch_with_interaction_state(root_patch, &state, "root");
+    let origin = patcher_origin(node.rect, &pan);
+    let zoom = patcher_zoom(&pan);
+    let (_, tie_layout) = super::ties::patch_tie_layout(
+        &patch,
+        &patch_node_rects(&patch, node.rect, &pan),
+        origin,
+        zoom,
+    );
+    let (anchor, content) =
+        wire_overlay_content(&patch, &state, &tie_layout, origin, zoom).expect("an overlay");
+    let (_, items) = wire_overlay_layout(anchor, content, zoom);
+    let rect = items
+        .iter()
+        .find(|(kind, _, _)| *kind == item)
+        .map(|(_, rect, _)| *rect)
+        .unwrap();
+    let center = (rect.col + rect.width * 0.5, rect.row + rect.height * 0.5);
+    handle_patcher_pointer_down(node, center.0, center.1, KeyModifiers::empty(), 10.0, 20.0);
+    handle_patcher_pointer_up(node, center.0, center.1)
+}
+
+#[test]
+fn patcher_marquee_over_cables_selects_them_and_ties_them_up() {
+    let (path, node, key, root_patch) = tie_test_patcher("patcher-tie-marquee");
+
+    marquee_over_cables_into_c(&node, &root_patch, key);
+
+    let state = get_patcher_interaction_state(key);
+    assert!(state.selected_nodes.is_empty());
+    let selection = state.wire_selection.clone().expect("wires selected");
+    let mut selected = selection.cables.clone();
+    selected.sort();
+    assert_eq!(selected, cables_into_c(&root_patch));
+
+    assert_eq!(
+        click_wire_overlay(&node, key, WireOverlayItem::TieUp),
+        PatcherChangeKind::Layout
+    );
+    let state = get_patcher_interaction_state(key);
+    assert!(state.wire_selection.is_none());
+    let patch = patch_with_interaction_state(root_patch, &state, "root");
+    assert_eq!(patch.cable_ties.len(), 1);
+    let mut tied = patch.cable_ties[0].cables.clone();
+    tied.sort();
+    assert_eq!(tied, cables_into_c(&patch));
+
+    let pan = get_patcher_pan_state(key);
+    let zoom = patcher_zoom(&pan);
+    let (_, layout) = super::ties::patch_tie_layout(
+        &patch,
+        &patch_node_rects(&patch, node.rect, &pan),
+        patcher_origin(node.rect, &pan),
+        zoom,
+    );
+    assert_eq!(layout.bars.len(), 1);
+    // Each cable is drawn in two legs that meet at its lane through the tie,
+    // and the lanes sit one lane spacing apart (in the isotropic space: rows
+    // scale by the 20/10 cell aspect the pointer handlers reported).
+    let joints = tied
+        .iter()
+        .map(|id| {
+            let legs = &layout.routes[id];
+            assert_eq!(legs.len(), 2);
+            assert_eq!(legs[0].p3, legs[1].p0);
+            legs[0].p3
+        })
+        .collect::<Vec<_>>();
+    let gap = ((joints[0].0 - joints[1].0).powi(2)
+        + ((joints[0].1 - joints[1].1) * 2.0).powi(2))
+    .sqrt();
+    assert!((gap - super::ties::TIE_LANE_SPACING_CELLS * zoom).abs() < 0.001);
+
+    // A tied cable is still selectable along its routed path.
+    let probe = crate::widget_render::cable::cubic_bezier_point(layout.routes[&tied[0]][0], 0.25);
+    let hit = hit_patcher_cable(
+        &patch,
+        node.rect,
+        &pan,
+        &patch_input_indices(&patch),
+        &patch_input_slot_counts(&patch, &patch_input_indices(&patch)),
+        &patch_output_counts(&patch),
+        probe.0,
+        probe.1,
+    );
+    assert_eq!(hit.as_deref(), Some(tied[0].as_str()));
+
+    let _ = fs::remove_file(path);
+}
+
+/// Segment every cable into `c`, running halfway between `a` and `c`.
+fn segment_cables_into_c(root_patch: &Patch, key: u64) {
+    let mut state = get_patcher_interaction_state(key);
+    for connection in root_patch
+        .connections
+        .iter()
+        .filter(|connection| connection.to_node == "c")
+    {
+        set_connection_segment_edit(
+            &mut state,
+            "root",
+            connection,
+            Some(CableSegmentInfo {
+                is_segmented: true,
+                segment_row: segmented_row_between(root_patch),
+                after_row: None,
+            }),
+        );
+    }
+    set_patcher_interaction_state(key, state);
+}
+
+#[test]
+fn patcher_tied_segmented_cables_run_in_two_parts_dragged_apart() {
+    let (path, node, key, root_patch) = tie_test_patcher("patcher-tie-segmented");
+    segment_cables_into_c(&root_patch, key);
+
+    // Segmented cables are picked up and tied like plain ones.
+    marquee_over_cables_into_c(&node, &root_patch, key);
+    let mut selected = get_patcher_interaction_state(key)
+        .wire_selection
+        .expect("wires selected")
+        .cables;
+    selected.sort();
+    assert_eq!(selected, cables_into_c(&root_patch));
+    click_wire_overlay(&node, key, WireOverlayItem::TieUp);
+
+    // Park the tie well left of every port, so each part of each cable
+    // turns a corner.
+    let mut state = get_patcher_interaction_state(key);
+    let patch = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    let tie = patch.cable_ties[0].clone();
+    let left = patch.nodes.iter().map(|node| node.position.0).fold(f32::MAX, f32::min);
+    super::ties::move_tie(&mut state, "root", &patch, tie.id, (left - 12.0, tie.position.1));
+    set_patcher_interaction_state(key, state);
+
+    let pan = get_patcher_pan_state(key);
+    let zoom = patcher_zoom(&pan);
+    let origin = patcher_origin(node.rect, &pan);
+    let layout_of = |state: &PatcherInteractionState| {
+        let patch = patch_with_interaction_state(root_patch.clone(), state, "root");
+        let (_, layout) = super::ties::patch_tie_layout(
+            &patch,
+            &patch_node_rects(&patch, node.rect, &pan),
+            origin,
+            zoom,
+        );
+        (patch, layout)
+    };
+    let (patch, layout) = layout_of(&get_patcher_interaction_state(key));
+    let tied = cables_into_c(&patch);
+    for id in &tied {
+        let connection = patch
+            .connections
+            .iter()
+            .find(|connection| source_connection_id(connection) == *id)
+            .unwrap();
+        let segment = connection.segment.expect("still segmented");
+        assert!(segment.is_segmented);
+        assert_eq!(segment.after_row, None, "the run after the tie follows the bundle");
+        let legs = &layout.routes[id];
+        assert_eq!(legs.len(), 2);
+        for (index, leg) in legs.iter().enumerate() {
+            let row = layout.leg_row(id, index).expect("each part runs segmented");
+            assert!(
+                row > leg.p0.1.min(leg.p3.1) && row < leg.p0.1.max(leg.p3.1),
+                "leg {index} of {id} runs at {row}, outside {:?}..{:?}",
+                leg.p0,
+                leg.p3
+            );
+        }
+    }
+    // Both runs after the tie head right from the parked tie; staggered, they
+    // nest instead of sitting on one row.
+    let after_rows = tied
+        .iter()
+        .map(|id| layout.leg_row(id, 1).unwrap())
+        .collect::<Vec<_>>();
+    assert!((after_rows[0] - after_rows[1]).abs() > 0.05, "{after_rows:?}");
+
+    // Drag one cable's run after the tie: only that run moves.
+    let id = &tied[0];
+    let leg = layout.routes[id][1];
+    let row = layout.leg_row(id, 1).unwrap();
+    let before_row = patch
+        .connections
+        .iter()
+        .find(|connection| source_connection_id(connection) == *id)
+        .unwrap()
+        .segment
+        .unwrap()
+        .segment_row;
+    // Grab where no other cable's run crosses: just inside this run's corner
+    // at the inlet end, past where the other run (to the other inlet) ends.
+    let grab_col = leg.p3.0 - SEGMENTED_CABLE_CORNER_RADIUS_CELLS * zoom - 0.3;
+    let hit = hit_patcher_segmented_cable_horizontal_segment(
+        &patch,
+        node.rect,
+        &pan,
+        &patch_input_indices(&patch),
+        &patch_input_slot_counts(&patch, &patch_input_indices(&patch)),
+        &patch_output_counts(&patch),
+        grab_col,
+        row,
+    )
+    .expect("the run after the tie");
+    assert_eq!(hit.part, super::state::SegmentPart::After);
+    let id = &hit.cable_id;
+    // Down towards the inlet, staying inside the span a drag allows.
+    let target = row + (leg.p3.1 - row) * 0.3;
+    let none = KeyModifiers::empty();
+    handle_patcher_pointer_down(&node, grab_col, row, none, 10.0, 20.0);
+    handle_patcher_pointer_drag(&node, grab_col, target, none, 10.0, 20.0);
+    assert_eq!(handle_patcher_pointer_up(&node, grab_col, target), PatcherChangeKind::Layout);
+    let state = get_patcher_interaction_state(key);
+    let (patch, layout) = layout_of(&state);
+    let segment = patch
+        .connections
+        .iter()
+        .find(|connection| source_connection_id(connection) == *id)
+        .unwrap()
+        .segment
+        .unwrap();
+    let after_row = segment.after_row.expect("the dragged run is authored");
+    assert!((origin.1 + after_row * zoom - target).abs() < 0.01);
+    if *id == tied[0] {
+        assert_eq!(segment.segment_row, before_row, "the run before the tie stays put");
+    }
+    assert!((layout.leg_row(id, 1).unwrap() - target).abs() < 0.01);
+
+    // Both runs persist through the layout sidecar.
+    let json = super::sidecar::current_layout_json(&root_patch, &state).unwrap();
+    let mut reloaded = root_patch.clone();
+    super::sidecar::apply_layout_json(&json, "test", &mut reloaded).unwrap();
+    let reloaded_segment = reloaded
+        .connections
+        .iter()
+        .find(|connection| source_connection_id(connection) == *id)
+        .unwrap()
+        .segment
+        .unwrap();
+    assert_eq!(reloaded_segment, segment);
+
+    let _ = fs::remove_file(path);
+}
+
+fn segmented_row_between(patch: &Patch) -> f32 {
+    let a = patch.nodes.iter().find(|node| node.id == "a").unwrap();
+    let c = patch.nodes.iter().find(|node| node.id == "c").unwrap();
+    (a.position.1 + c.position.1) * 0.5
+}
+
+#[test]
+fn patcher_wire_overlay_remove_deletes_the_selected_cables() {
+    let (path, node, key, root_patch) = tie_test_patcher("patcher-tie-remove-wires");
+
+    marquee_over_cables_into_c(&node, &root_patch, key);
+    assert_eq!(
+        click_wire_overlay(&node, key, WireOverlayItem::Remove),
+        PatcherChangeKind::Semantic
+    );
+
+    let state = get_patcher_interaction_state(key);
+    let patch = patch_with_interaction_state(root_patch, &state, "root");
+    assert!(cables_into_c(&patch).is_empty());
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn patcher_ties_move_remove_and_survive_a_layout_round_trip() {
+    let (path, node, key, root_patch) = tie_test_patcher("patcher-tie-round-trip");
+    marquee_over_cables_into_c(&node, &root_patch, key);
+    click_wire_overlay(&node, key, WireOverlayItem::TieUp);
+
+    // Drag the tie by its knob.
+    let pan = get_patcher_pan_state(key);
+    let zoom = patcher_zoom(&pan);
+    let state = get_patcher_interaction_state(key);
+    let patch = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    let (_, layout) = super::ties::patch_tie_layout(
+        &patch,
+        &patch_node_rects(&patch, node.rect, &pan),
+        patcher_origin(node.rect, &pan),
+        zoom,
+    );
+    let grab = layout.bars[0].knob;
+    let before = patch.cable_ties[0].position;
+    handle_patcher_pointer_down(&node, grab.0, grab.1, KeyModifiers::empty(), 10.0, 20.0);
+    handle_patcher_pointer_drag(&node, grab.0 + 2.0, grab.1, KeyModifiers::empty(), 10.0, 20.0);
+    assert_eq!(
+        handle_patcher_pointer_up(&node, grab.0 + 2.0, grab.1),
+        PatcherChangeKind::Layout
+    );
+    let state = get_patcher_interaction_state(key);
+    let patch = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    let after = patch.cable_ties[0].position;
+    assert!((after.0 - (before.0 + 2.0 / zoom)).abs() < 0.001);
+    assert!((after.1 - before.1).abs() < 0.001);
+
+    // The tie persists through the layout sidecar.
+    let json = super::sidecar::current_layout_json(&root_patch, &state).unwrap();
+    let mut reloaded = root_patch.clone();
+    super::sidecar::apply_layout_json(&json, "test", &mut reloaded).unwrap();
+    assert_eq!(reloaded.cable_ties, patch.cable_ties);
+
+    // Option-click on the moved knob cuts the tie.
+    let moved = (grab.0 + 2.0, grab.1);
+    handle_patcher_pointer_down(&node, moved.0, moved.1, KeyModifiers::ALT, 10.0, 20.0);
+    assert_eq!(
+        handle_patcher_pointer_up(&node, moved.0, moved.1),
+        PatcherChangeKind::Layout
+    );
+    let state = get_patcher_interaction_state(key);
+    let patch = patch_with_interaction_state(root_patch, &state, "root");
+    assert!(patch.cable_ties.is_empty());
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn patcher_clicking_a_tie_selects_it_and_the_overlay_unties_it() {
+    let (path, node, key, root_patch) = tie_test_patcher("patcher-tie-untie");
+    marquee_over_cables_into_c(&node, &root_patch, key);
+    click_wire_overlay(&node, key, WireOverlayItem::TieUp);
+
+    let pan = get_patcher_pan_state(key);
+    let zoom = patcher_zoom(&pan);
+    let state = get_patcher_interaction_state(key);
+    let patch = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    let (_, layout) = super::ties::patch_tie_layout(
+        &patch,
+        &patch_node_rects(&patch, node.rect, &pan),
+        patcher_origin(node.rect, &pan),
+        zoom,
+    );
+    let knob = layout.bars[0].knob;
+    handle_patcher_pointer_down(&node, knob.0, knob.1, KeyModifiers::empty(), 10.0, 20.0);
+    // A click, not a drag: nothing moved, so no layout change.
+    assert_eq!(
+        handle_patcher_pointer_up(&node, knob.0, knob.1),
+        PatcherChangeKind::None
+    );
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(state.selected_tie, Some(patch.cable_ties[0].id));
+
+    assert_eq!(
+        click_wire_overlay(&node, key, WireOverlayItem::Untie),
+        PatcherChangeKind::Layout
+    );
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(state.selected_tie, None);
+    let patch = patch_with_interaction_state(root_patch, &state, "root");
+    assert!(patch.cable_ties.is_empty());
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn patcher_cables_deleted_and_redrawn_between_the_same_ports_come_back_untied() {
+    let (path, node, key, root_patch) = tie_test_patcher("patcher-tie-redraw");
+    marquee_over_cables_into_c(&node, &root_patch, key);
+    click_wire_overlay(&node, key, WireOverlayItem::TieUp);
+    let tied = cables_into_c(&root_patch);
+
+    // Delete both tied cables, then draw `a -> c` again: same ports, same id.
+    let mut state = get_patcher_interaction_state(key);
+    for cable_id in &tied {
+        delete_connection_edit_or_mark_deleted(&mut state, "root", cable_id);
+    }
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: "a".to_string(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: "c".to_string(),
+            input_index: 0,
+        },
+    );
+    set_patcher_interaction_state(key, state);
+
+    let state = get_patcher_interaction_state(key);
+    let patch = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    assert_eq!(cables_into_c(&patch).len(), 1);
+    assert!(patch.cable_ties.is_empty());
+
+    // Tying the redrawn cable up again works.
+    marquee_over_cables_into_c(&node, &root_patch, key);
+    click_wire_overlay(&node, key, WireOverlayItem::TieUp);
+    let state = get_patcher_interaction_state(key);
+    let patch = patch_with_interaction_state(root_patch, &state, "root");
+    assert_eq!(patch.cable_ties.len(), 1);
+    assert_eq!(patch.cable_ties[0].cables, cables_into_c(&patch));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn patcher_marquee_takes_in_ties_and_a_bulk_node_drag_moves_them_along() {
+    let (path, node, key, root_patch) = tie_test_patcher("patcher-tie-bulk-move");
+    marquee_over_cables_into_c(&node, &root_patch, key);
+    click_wire_overlay(&node, key, WireOverlayItem::TieUp);
+
+    // Marquee the whole canvas: every node and the tie.
+    let none = KeyModifiers::empty();
+    let (far_col, far_row) = (
+        node.rect.col + node.rect.width - 0.5,
+        node.rect.row + node.rect.height - 0.5,
+    );
+    handle_patcher_pointer_down(&node, node.rect.col + 0.5, node.rect.row + 0.5, none, 10.0, 20.0);
+    handle_patcher_pointer_drag(&node, far_col, far_row, none, 10.0, 20.0);
+    handle_patcher_pointer_up(&node, far_col, far_row);
+    let state = get_patcher_interaction_state(key);
+    let before = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    let tie = before.cable_ties[0].clone();
+    assert!(state.selected_ties.contains(&tie.id));
+    assert!(state.selected_nodes.contains("a"));
+
+    // Drag node `a` (no snapping) and everything selected follows it.
+    let pan = get_patcher_pan_state(key);
+    let zoom = patcher_zoom(&pan);
+    let a = patch_node_rects(&before, node.rect, &pan)["a"];
+    let grab = (a.col + a.width * 0.5, a.row + a.height * 0.5);
+    let no_snap = primary_shortcut_modifier();
+    handle_patcher_pointer_down(&node, grab.0, grab.1, none, 10.0, 20.0);
+    handle_patcher_pointer_drag(&node, grab.0 + 3.0, grab.1 + 1.0, no_snap, 10.0, 20.0);
+    handle_patcher_pointer_up(&node, grab.0 + 3.0, grab.1 + 1.0);
+
+    let state = get_patcher_interaction_state(key);
+    let after = patch_with_interaction_state(root_patch, &state, "root");
+    let moved = after.cable_ties[0].position;
+    assert!((moved.0 - (tie.position.0 + 3.0 / zoom)).abs() < 0.001);
+    assert!((moved.1 - (tie.position.1 + 1.0 / zoom)).abs() < 0.001);
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn patcher_ties_and_segments_on_a_summed_inlet_survive_a_save() {
+    let path = temp_patcher_source_path("patcher-tie-summed-save");
+    fs::write(
+        &path,
+        "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def x (in 3 @name x))\n\
+         (def c (* a x))\n(out c 1)\n",
+    )
+    .unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    reset_patcher_widget_state(key);
+    // A second cable onto `c`'s first inlet: the inlet now sums.
+    let mut state = get_patcher_interaction_state(key);
+    connect_output_to_input(&mut state, "root", "b", "c", 0);
+    set_patcher_interaction_state(key, state);
+    let root_patch = patch_with_interaction_state(
+        load_patch_from_props(&node.props).unwrap().1,
+        &get_patcher_interaction_state(key),
+        "root",
+    );
+    let summed = root_patch
+        .connections
+        .iter()
+        .filter(|connection| connection.to_node == "c" && connection.to_input == 0)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(summed.len(), 2, "{:?}", root_patch.connections);
+    let ids = summed.iter().map(source_connection_id).collect::<Vec<_>>();
+    let mut state = get_patcher_interaction_state(key);
+    for (index, connection) in summed.iter().enumerate() {
+        set_connection_segment_edit(
+            &mut state,
+            "root",
+            connection,
+            Some(CableSegmentInfo {
+                is_segmented: true,
+                segment_row: 3.0 + index as f32,
+                after_row: Some(8.0),
+            }),
+        );
+    }
+    super::ties::add_tie(&mut state, "root", &root_patch, (10.0, 6.0), ids.clone());
+    set_patcher_interaction_state(key, state);
+
+    // Save twice: the second save starts from the reloaded first one.
+    let save = || {
+        let Value::Map(writeback) = patcher_writeback_payload(&node) else {
+            panic!("expected writeback payload map");
+        };
+        let field = |name: &str| match writeback.get(name).map(|value| value.borrow().clone()) {
+            Some(Value::String(text)) => text,
+            other => panic!("payload `{name}` missing: {other:?}"),
+        };
+        let (source, layout) = (field("source"), field("layout"));
+        fs::write(&path, &source).unwrap();
+        fs::write(sidecar::sidecar_path_for_source(&path), &layout).unwrap();
+        reset_patcher_widget_state(key);
+        (source, layout)
+    };
+    save();
+    let (source, layout) = save();
+    let saved = load_patch_from_props(&node.props).unwrap().1;
+    let saved_ids = saved
+        .connections
+        .iter()
+        .filter(|connection| connection.to_node == "c" && connection.to_input == 0)
+        .map(|connection| (source_connection_id(connection), connection.segment))
+        .collect::<Vec<_>>();
+    assert_eq!(saved_ids.len(), 2, "source:\n{source}\nlayout:\n{layout}");
+    for (id, segment) in &saved_ids {
+        let segment = segment.unwrap_or_else(|| panic!("{id} lost its segment\n{layout}"));
+        assert!(segment.is_segmented);
+        assert_eq!(segment.after_row, Some(8.0));
+    }
+    assert_eq!(saved.cable_ties.len(), 1, "layout:\n{layout}");
+    let mut tied = saved.cable_ties[0].cables.clone();
+    tied.sort();
+    let mut expected = saved_ids.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(tied, expected);
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(sidecar::sidecar_path_for_source(&path));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn patcher_segmented_run_between_two_ties_drags_on_its_own() {
+    let (path, node, key, root_patch) = tie_test_patcher("patcher-tie-segmented-twice");
+    segment_cables_into_c(&root_patch, key);
+    let cables = cables_into_c(&root_patch);
+    // Two ties, far apart sideways, so the run between them turns corners:
+    // the upper one right, the lower one left, the way the cables flow.
+    let node_y = |id: &str| root_patch.nodes.iter().find(|node| node.id == id).unwrap().position.1;
+    let (top, bottom) = (node_y("a"), node_y("c"));
+    let xs = root_patch.nodes.iter().map(|node| node.position.0);
+    let (left, right) = (xs.clone().fold(f32::MAX, f32::min), xs.fold(f32::MIN, f32::max));
+    let mut state = get_patcher_interaction_state(key);
+    let patch = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    super::ties::add_tie(
+        &mut state,
+        "root",
+        &patch,
+        (right + 12.0, top + (bottom - top) * 0.35),
+        cables.clone(),
+    );
+    let patch = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    super::ties::add_tie(
+        &mut state,
+        "root",
+        &patch,
+        (left - 12.0, top + (bottom - top) * 0.7),
+        cables.clone(),
+    );
+    set_patcher_interaction_state(key, state);
+
+    let pan = get_patcher_pan_state(key);
+    let zoom = patcher_zoom(&pan);
+    let origin = patcher_origin(node.rect, &pan);
+    let layout_of = |state: &PatcherInteractionState| {
+        let patch = patch_with_interaction_state(root_patch.clone(), state, "root");
+        let (_, layout) = super::ties::patch_tie_layout(
+            &patch,
+            &patch_node_rects(&patch, node.rect, &pan),
+            origin,
+            zoom,
+        );
+        (patch, layout)
+    };
+    let (patch, layout) = layout_of(&get_patcher_interaction_state(key));
+    let id = &cables[0];
+    // The tie the bundle passes first, which the middle run leaves.
+    let first_tie = layout.cable_ties[id][0];
+    let legs = &layout.routes[id];
+    assert_eq!(legs.len(), 3);
+    let middle = legs[1];
+    let row = layout.leg_row(id, 1).expect("the middle part runs segmented");
+
+    // Grab the middle run halfway along and drag it towards the second tie.
+    let grab_col = (middle.p0.0 + middle.p3.0) * 0.5;
+    let hit = hit_patcher_segmented_cable_horizontal_segment(
+        &patch,
+        node.rect,
+        &pan,
+        &patch_input_indices(&patch),
+        &patch_input_slot_counts(&patch, &patch_input_indices(&patch)),
+        &patch_output_counts(&patch),
+        grab_col,
+        row,
+    )
+    .expect("the middle run");
+    assert_eq!(hit.part, super::state::SegmentPart::Between(first_tie));
+    let id = hit.cable_id.clone();
+    let middle = layout.routes[&id][1];
+    let row = layout.leg_row(&id, 1).unwrap();
+    let target = row + (middle.p3.1 - row) * 0.3;
+    let segment_before = patch
+        .connections
+        .iter()
+        .find(|connection| source_connection_id(connection) == id)
+        .unwrap()
+        .segment;
+    let none = KeyModifiers::empty();
+    handle_patcher_pointer_down(&node, grab_col, row, none, 10.0, 20.0);
+    handle_patcher_pointer_drag(&node, grab_col, target, none, 10.0, 20.0);
+    assert_eq!(handle_patcher_pointer_up(&node, grab_col, target), PatcherChangeKind::Layout);
+
+    let state = get_patcher_interaction_state(key);
+    let (patch, layout) = layout_of(&state);
+    assert!((layout.leg_row(&id, 1).unwrap() - target).abs() < 0.01);
+    let stored = patch
+        .cable_ties
+        .iter()
+        .find(|tie| tie.id == first_tie)
+        .unwrap()
+        .leg_rows[&id];
+    assert!((origin.1 + stored * zoom - target).abs() < 0.01);
+    let segment_after = patch
+        .connections
+        .iter()
+        .find(|connection| source_connection_id(connection) == id)
+        .unwrap()
+        .segment;
+    assert_eq!(segment_after, segment_before, "the runs before and after the ties stay put");
+
+    // The middle run persists through the layout sidecar.
+    let json = super::sidecar::current_layout_json(&root_patch, &state).unwrap();
+    let mut reloaded = root_patch.clone();
+    super::sidecar::apply_layout_json(&json, "test", &mut reloaded).unwrap();
+    assert_eq!(reloaded.cable_ties, patch.cable_ties);
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn patcher_wire_overlay_segments_and_unsegments_the_selected_cables() {
+    let (path, node, key, root_patch) = tie_test_patcher("patcher-tie-overlay-segment");
+    let segmented = |key: u64| {
+        let state = get_patcher_interaction_state(key);
+        let patch = patch_with_interaction_state(root_patch.clone(), &state, "root");
+        patch
+            .connections
+            .iter()
+            .filter(|connection| connection.to_node == "c")
+            .map(|connection| connection.segment.is_some_and(|segment| segment.is_segmented))
+            .collect::<Vec<_>>()
+    };
+    let labels = |key: u64| {
+        let state = get_patcher_interaction_state(key);
+        let patch = patch_with_interaction_state(root_patch.clone(), &state, "root");
+        let pan = get_patcher_pan_state(key);
+        let (_, tie_layout) = super::ties::patch_tie_layout(
+            &patch,
+            &patch_node_rects(&patch, node.rect, &pan),
+            patcher_origin(node.rect, &pan),
+            patcher_zoom(&pan),
+        );
+        wire_overlay_content(&patch, &state, &tie_layout, patcher_origin(node.rect, &pan), patcher_zoom(&pan))
+            .map(|(_, items)| items.into_iter().map(|(_, label)| label).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+
+    // A box selection over plain cables offers to segment them.
+    marquee_over_cables_into_c(&node, &root_patch, key);
+    assert!(labels(key).contains(&"segment".to_string()));
+    assert_eq!(
+        click_wire_overlay(&node, key, WireOverlayItem::Segment),
+        PatcherChangeKind::Layout
+    );
+    assert_eq!(segmented(key), vec![true, true]);
+    // The selection stays, now offering the inverse.
+    assert!(labels(key).contains(&"unsegment".to_string()));
+
+    // Tied up, the tie's overlay unsegments its cables.
+    click_wire_overlay(&node, key, WireOverlayItem::TieUp);
+    let mut state = get_patcher_interaction_state(key);
+    let patch = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    state.selected_tie = Some(patch.cable_ties[0].id);
+    set_patcher_interaction_state(key, state);
+    assert!(labels(key).contains(&"unsegment".to_string()));
+    assert_eq!(
+        click_wire_overlay(&node, key, WireOverlayItem::Unsegment),
+        PatcherChangeKind::Layout
+    );
+    assert_eq!(segmented(key), vec![false, false]);
+    assert!(labels(key).contains(&"segment".to_string()));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn tied_legs_bend_at_ports_like_untied_cables_and_drape_over_their_tie() {
+    super::ties::note_cell_size(10.0, 20.0);
+    let zoom = 1.0;
+    // Two cables from outlets on the right, low, to inlets on the left; a tie
+    // pulled up above both ends.
+    let ends = HashMap::from([
+        ("a:0->c:0".to_string(), ((40.0, 10.0), (2.0, 12.0))),
+        ("a:0->d:0".to_string(), ((41.0, 10.0), (8.0, 12.0))),
+    ]);
+    let tie = CableTie {
+        id: 1,
+        position: (20.0, 2.0),
+        cables: ends.keys().cloned().collect(),
+        leg_rows: Default::default(),
+    };
+    let layout = super::ties::tie_layout(&[tie], &ends, &HashMap::new(), (0.0, 0.0), zoom);
+    for (id, (start, end)) in &ends {
+        let legs = &layout.routes[id];
+        let plain = |from: (f32, f32), to: (f32, f32)| {
+            crate::widget_render::cable::cable_y_handle((to.1 - from.1).abs() / zoom) * zoom
+        };
+        // Leaving the outlet and entering the inlet: straight down, with the
+        // handle an untied cable between the same rows would get.
+        let first = legs[0];
+        assert_eq!(first.p1.0, start.0);
+        assert!((first.p1.1 - first.p0.1 - plain(first.p0, first.p3)).abs() < 0.001);
+        let last = legs[1];
+        assert_eq!(last.p2.0, end.0);
+        assert!((last.p3.1 - last.p2.1 - plain(last.p0, last.p3)).abs() < 0.001);
+    }
+    // Pulled above both of its cords' ends, the tie lies across them: the
+    // bundle crosses it heading sideways, draped over it.
+    let bar = &layout.bars[0];
+    // (Rows are twice as tall as columns are wide at this cell aspect.)
+    let across = ((bar.end.0 - bar.start.0).abs(), (bar.end.1 - bar.start.1).abs() * 2.0);
+    assert!(
+        across.0 < across.1 * 0.3,
+        "the bar stands upright across a level bundle: {:?} -> {:?}",
+        bar.start,
+        bar.end
+    );
+}
+
+#[test]
+fn cables_sharing_two_ties_visit_them_in_order_and_never_swap_lanes() {
+    super::ties::note_cell_size(10.0, 20.0);
+    // Three cables fanning in from spread-out outlets, tied twice, then
+    // fanning out again (the shape of a velocity/gate/… bundle into an adsr).
+    let ends = HashMap::from([
+        ("v:0->e:0".to_string(), ((2.0, 0.0), (10.0, 30.0))),
+        ("g:0->e:1".to_string(), ((30.0, 0.0), (17.0, 30.0))),
+        ("k:0->o:0".to_string(), ((55.0, 0.0), (-1.0, 45.0))),
+    ]);
+    let cables = {
+        let mut ids = ends.keys().cloned().collect::<Vec<_>>();
+        ids.sort();
+        ids
+    };
+    // Lane order across a bar, from its start end to its knob end.
+    let order_at = |layout: &super::ties::TieLayout, index: usize| {
+        let bar = &layout.bars[index];
+        let axis = (bar.end.0 - bar.start.0, (bar.end.1 - bar.start.1) * 2.0);
+        let mut lanes = cables
+            .iter()
+            .map(|id| {
+                let leg = layout.cable_ties[id].iter().position(|tie| *tie == bar.id).unwrap();
+                let lane = layout.routes[id][leg].p3;
+                let offset = (lane.0 - bar.start.0) * axis.0 + (lane.1 - bar.start.1) * 2.0 * axis.1;
+                (offset, id.clone())
+            })
+            .collect::<Vec<_>>();
+        lanes.sort_by(|a, b| a.0.total_cmp(&b.0));
+        lanes.into_iter().map(|(_, id)| id).collect::<Vec<_>>()
+    };
+    // Both ties anywhere over a grid around the bundle, as a pointer dragging
+    // them would place them.
+    let mut failures = Vec::new();
+    for (upper, lower) in (0..36)
+        .flat_map(|x| (0..5).map(move |y| (-10.0 + x as f32 * 2.0, 3.0 + y as f32 * 2.0)))
+        .flat_map(|upper| {
+            (0..36).flat_map(move |x| {
+                (0..5).map(move |y| (upper, (-10.0 + x as f32 * 2.0, 14.0 + y as f32 * 3.0)))
+            })
+        })
+    {
+        let ties = [
+            CableTie {
+                id: 1,
+                position: upper,
+                cables: cables.clone(),
+                leg_rows: Default::default(),
+            },
+            CableTie {
+                id: 2,
+                position: lower,
+                cables: cables.clone(),
+                leg_rows: Default::default(),
+            },
+        ];
+        let layout = super::ties::tie_layout(&ties, &ends, &HashMap::new(), (0.0, 0.0), 1.0);
+        // Every cable visits the two ties in the same order…
+        let visits = cables.iter().map(|id| layout.cable_ties[id].clone()).collect::<Vec<_>>();
+        assert!(visits.windows(2).all(|pair| pair[0] == pair[1]), "{visits:?}");
+        // …and keeps its lane from one to the other.
+        if order_at(&layout, 0) != order_at(&layout, 1) {
+            failures.push((upper, lower));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "lanes swap between the ties at {} placements, e.g. {:?}",
+        failures.len(),
+        &failures[..failures.len().min(3)]
+    );
 }
