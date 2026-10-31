@@ -14590,6 +14590,31 @@ use panel_kinds_seed::*;
         assert_eq!(format!("{empty:?}"), "(nil false)");
     }
 
+    /// Cmd+A spans the scene events as well as the clips: a scene event
+    /// past the last clip widens the span, and with no clips at all the
+    /// scene events alone still give Cmd+A something to select.
+    #[test]
+    fn metal_seq_arrangement_select_all_spans_the_scene_events_too() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        seed_kind_test_tracks(&mut editor, 1, |track| format!("track-{track}"));
+        seed_kind_clips(&mut editor, 0, &[KindClip::pattern(1, 2.0, 8.0, 1)]);
+        seed_kind_spans(&mut editor, &[(0.0, 4.0, 0), (4.0, 16.0, 1)]);
+        let span = eval_arrangement(
+            &mut editor,
+            "(let ((span (eseq.arrangement/everything-span)))
+               (list (get span :start) (get span :end)))",
+        );
+        assert_eq!(format!("{span:?}"), "(0 16)");
+
+        seed_kind_clips(&mut editor, 0, &[]);
+        let scenes_only = eval_arrangement(
+            &mut editor,
+            "(let ((span (eseq.arrangement/everything-span)))
+               (list (get span :start) (get span :end) (eseq.arrangement/select-all-clips)))",
+        );
+        assert_eq!(format!("{scenes_only:?}"), "(0 16 true)");
+    }
+
     #[test]
     fn metal_seq_arrangement_cmd_d_reaches_region_duplicate() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

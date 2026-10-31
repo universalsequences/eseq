@@ -72,6 +72,7 @@
         drop-scene
         select-all-clips
         clip-span-all-tracks
+        everything-span
         begin-placement
         cancel-placement)
 
@@ -1013,10 +1014,11 @@
   (set! song.bound-clip c)
   (when (= c nil) (clear-region!)))
 
-;; Cmd+A (Ableton): select EVERY clip on EVERY track as one region — the
-;; visible-track span over [first clip start, last clip end). A region is the
-;; thing copy/duplicate/delete already act on, so this needs no new verb. It
-;; is a track-lane sweep, not a scene-lane one: scene events are not clips.
+;; Cmd+A (Ableton): select EVERYTHING as one region — every visible track
+;; over [first clip or scene event start, last clip or scene event end). A
+;; region is the thing copy/duplicate/delete already act on, so this needs no
+;; new verb. It carries the scene-lane bit (lane spec 8), so the scene events
+;; inside go with the clips: Cmd+A + Backspace empties the song.
 ;; Returns nil when the song holds no clips so the caller can say so.
 (def clip-span-all-tracks ()
   (let ((hi (fold-rack-spans |acc start end| (max acc end)
@@ -1027,9 +1029,25 @@
                             (fold-clips |acc c| (min acc c.start) hi)))
         :end hi))))
 
+;; The clip span widened to every scene event; nil when the song holds
+;; neither clips nor scene events.
+(def everything-span ()
+  (let ((clips (clip-span-all-tracks))
+        (spans song.spans))
+    (if (empty? spans)
+      clips
+      ;; Spans are ordered and contiguous (as content-length-min reads them).
+      (let ((first-span (first spans))
+            (last-span (nth spans (- (len spans) 1)))
+            (lo first-span.start)
+            (hi last-span.end))
+        (if (= clips nil)
+          (dict :start lo :end hi)
+          (dict :start (min lo (get clips :start)) :end (max hi (get clips :end))))))))
+
 (def select-all-clips ()
-  (let ((span (clip-span-all-tracks))
-        (region (when span (visible-region (get span :start) (get span :end) false))))
+  (let ((span (everything-span))
+        (region (when span (visible-region (get span :start) (get span :end) true))))
     (if (= region nil)
       false
       (do
