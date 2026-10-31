@@ -2794,6 +2794,10 @@ fragment float4 live_spectrogram_frag(
             };
             view.setWantsLayer(true);
             view.setLayer(Some(&self.layer));
+            // While the host resizes the view, show the last frame pinned to
+            // its corner instead of stretched to the new bounds.
+            let gravity = NSString::from_str("topLeft");
+            let _: () = unsafe { objc2::msg_send![&*self.layer, setContentsGravity: &*gravity] };
         }
 
         /// The drawable size in pixels of an embedded backend.

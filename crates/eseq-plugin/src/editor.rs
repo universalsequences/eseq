@@ -500,6 +500,8 @@ unsafe extern "C" fn gui_set_size(plugin: *const clap_plugin, width: u32, height
     }
     if let Some(state) = editor.state() {
         state.panel.resize(size.0, size.1);
+        // Draw at the new size now, not on the next timer tick.
+        state.panel.frame();
     }
     true
 }

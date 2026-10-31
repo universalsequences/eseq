@@ -25,6 +25,8 @@ use crate::payload::{ParamKind, Payload, PluginSpec};
 /// The grid font size eseq's own panels are laid out in.
 const FONT_SIZE_PT: f64 = 13.0;
 const BUFFER: &str = "*plugin*";
+/// How long the panel holds its last frame waiting for a requested resize.
+const RESIZE_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 /// Breathing room around the panel, in cells.
 const MARGIN_CELLS: f32 = 0.5;
 
@@ -57,6 +59,8 @@ pub struct PanelHost {
     size: (f64, f64),
     /// The panel's size with the mods tab closed, open.
     sizes: [(f64, f64); 2],
+    /// When the panel started waiting for the host to apply its new size.
+    resize_wait: Option<std::time::Instant>,
     edits: Vec<PanelEdit>,
     /// Input arrived since the last pump: the runtime has side effects and
     /// host commands to settle.
@@ -198,6 +202,7 @@ impl PanelHost {
             scale,
             size: (0.0, 0.0),
             sizes: [(0.0, 0.0); 2],
+            resize_wait: None,
             edits: Vec::new(),
             dirty: false,
             pending_drag: None,
@@ -512,6 +517,18 @@ impl PanelHost {
 
     pub fn frame(&mut self) {
         self.pump();
+        // The tab changed the panel's size: hold the last frame until the
+        // host applies the new window size (or ignores the request), so the
+        // new layout never shows squeezed into the old window.
+        let wanted = self.wanted_size();
+        if wanted != self.size {
+            let since = *self.resize_wait.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() < RESIZE_WAIT {
+                return;
+            }
+        } else {
+            self.resize_wait = None;
+        }
         let animating = self.editor.visible_widgets_animating()
             || eseqlisp::widget_render::sdf_widget::sdf_visual_animations_active(self.backend.time_seconds());
         if self.editor.needs_redraw() || animating {
@@ -718,7 +735,7 @@ const PLUGIN_ROOT: &str = r#"
               (if v
                 (h-stack :gap 0.3 :height 0.8 :align :center
                   (label "voices" :font-size 9 :color :dim :bg :transparent)
-                  (number-picker :key "plugin-voices" :width 2.5 :height 0.8
+                  (number-picker :key "plugin-voices" :noui true :width 2.5 :height 0.8
                     :font-size 10 :decimals 0 :step 1 :min v.min :max v.max
                     :value #'v.value
                     :on-change (lambda (x) (host-command "set-instrument-param"
