@@ -93,6 +93,11 @@ struct TimelineItem {
     /// the record head (floored to a step), so the widget stretches it to the
     /// playhead at paint time ([`TimelineView::grow_items_to_playhead`]).
     grow: bool,
+    /// Content `:cycle-beats`: the source cycle in beats rather than as a
+    /// fraction of the item (`:cycle`), so the item's end can stay put while
+    /// it grows. A recording's host-side end then never has to follow the
+    /// record head, and the lane holding it never reruns on a head tick.
+    cycle_beats: Option<f64>,
 }
 
 /// What kind of clip an item represents (docs/arrangement-timeline-ui-spec.md
@@ -1023,6 +1028,21 @@ pub fn debug_grid(node: &LayoutNode) -> (f64, Vec<f32>, Vec<(f32, String)>) {
     )
 }
 
+/// `view.view_start` moved to the nearest whole device pixel of scroll.
+/// Solid quads rasterize hard-edged, so a thin grid line or clip gap at a
+/// fractional x covers 2 pixels on one frame and 3 on the next: while the
+/// view scrolls, every thin vertical shimmers. Scrolling by whole pixels
+/// keeps each edge's sub-pixel phase fixed, so shapes translate unchanged.
+/// Only the drawing snaps: hit-testing still reads the exact `view-start`.
+fn pixel_snapped_view_start(view: &TimelineView, cell_w: f32) -> f64 {
+    let pixels = view.content_rect().width as f64 * cell_w as f64;
+    let pixels_per_time = pixels / view.view_duration;
+    if !(pixels_per_time.is_finite() && pixels_per_time > 0.0) {
+        return view.view_start;
+    }
+    (view.view_start * pixels_per_time).round() / pixels_per_time
+}
+
 fn build_primitives(
     node: &LayoutNode,
     viewport: super::WidgetViewport,
@@ -1055,6 +1075,7 @@ fn build_primitives(
             }
         }
     }
+    view.view_start = pixel_snapped_view_start(&view, viewport.cell_w);
     let content = view.content_rect();
     let mut primitives = Vec::new();
 
@@ -1904,7 +1925,12 @@ fn build_primitives(
         }
     }
 
-    if let Some(playhead_x) = view.metal_playhead_x() {
+    // Whole device pixels, like the scroll: a followed playhead sits still
+    // while the snapped content moves under it.
+    if let Some(playhead_x) = view
+        .metal_playhead_x()
+        .map(|x| (x * viewport.cell_w).round() / viewport.cell_w)
+    {
         if view.header_height > 0.0 {
             primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x: playhead_x - 0.0625,
@@ -2647,12 +2673,19 @@ impl TimelineView {
         let Some(playhead) = self.playhead_time else {
             return;
         };
+        // A recording the playhead has not reached yet (a launch quantized
+        // ahead of it) holds nothing to draw.
+        self.items.retain(|item| !item.grow || playhead >= item.start);
         for item in self.items.iter_mut().filter(|item| item.grow) {
             if playhead <= item.end {
                 continue;
             }
             let old_span = (item.end - item.start).max(1e-9);
             item.end = playhead;
+            if item.cycle_beats.is_some() {
+                item.resolve_cycle_beats();
+                continue;
+            }
             let new_span = (item.end - item.start).max(1e-9);
             match item.content.as_mut() {
                 Some(TimelineItemContent::Dots { cycle, .. })
@@ -4584,9 +4617,41 @@ fn get_items(props: &HashMap<String, Value>) -> Vec<TimelineItem> {
                 content: map.get("content").and_then(parse_item_content),
                 sound_dot: map.get("sound-dot").and_then(parse_sound_dot),
                 grow: map.get("grow").and_then(as_bool).unwrap_or(false),
+                cycle_beats: map.get("content").and_then(parse_cycle_beats),
             })
         })
+        .map(|mut item| {
+            item.resolve_cycle_beats();
+            item
+        })
         .collect()
+}
+
+/// A content map's `:cycle-beats` (finite and positive), if it has one.
+fn parse_cycle_beats(content: &Value) -> Option<f64> {
+    get_map(content)?
+        .get("cycle-beats")
+        .and_then(as_number)
+        .filter(|beats| beats.is_finite() && *beats > 0.0)
+}
+
+impl TimelineItem {
+    /// Turn `:cycle-beats` into the content's span-relative cycle for the
+    /// item's current span (a zero span keeps the parsed cycle: nothing of
+    /// it is drawn).
+    fn resolve_cycle_beats(&mut self) {
+        let (Some(beats), span) = (self.cycle_beats, self.end - self.start) else {
+            return;
+        };
+        if span <= 0.0 {
+            return;
+        }
+        match self.content.as_mut() {
+            Some(TimelineItemContent::Dots { cycle, .. })
+            | Some(TimelineItemContent::Rings { cycle, .. }) => *cycle = beats / span,
+            _ => {}
+        }
+    }
 }
 
 /// The sound-identity dot of a patch without a palette color (takes spec
@@ -5057,6 +5122,92 @@ mod tests {
         let view = view_at(12.0);
         assert_eq!(view.items[0].end, 16.0, "never shrinks below its end");
         assert_eq!(cycle(&view.items[0]), 0.5);
+    }
+
+    /// A growing item can be pushed with no span at all (its end at its
+    /// start, so the host never moves it with the record head): its
+    /// `:cycle-beats` content still lands on the beat grid once the playhead
+    /// stretches it, and it draws nothing until the playhead reaches it.
+    #[test]
+    fn scrolling_snaps_the_drawn_view_to_whole_device_pixels() {
+        let props = HashMap::from([
+            ("view-start".to_string(), Value::Number(1.3)),
+            ("view-duration".to_string(), Value::Number(10.0)),
+            ("sidebar-width".to_string(), Value::Number(0.0)),
+        ]);
+        let view = TimelineView::from_props(&props, Rect { row: 0.0, col: 0.0, width: 100.0, height: 4.0 });
+        // 100 cells * 8 px over 10 beats: 80 px per beat, so 1.3 beats
+        // (104 px) is already whole and 1.3001 (104.008 px) rounds back.
+        assert!((pixel_snapped_view_start(&view, 8.0) - 1.3).abs() < 1e-9);
+        let mut nudged = view;
+        nudged.view_start = 1.3001;
+        assert!((pixel_snapped_view_start(&nudged, 8.0) - 1.3).abs() < 1e-9);
+        nudged.view_start = 1.307; // 104.56 px
+        assert!((pixel_snapped_view_start(&nudged, 8.0) - 105.0 / 80.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_spanless_grow_item_draws_its_cycle_in_beats_from_the_playhead() {
+        let item = |start: f64, end: f64, grow: bool| {
+            map_value_raw(vec![
+                ("lane", number_value(0.0)),
+                ("start", number_value(start)),
+                ("end", number_value(end)),
+                ("grow", Value::Bool(grow)),
+                (
+                    "content",
+                    map_value_raw(vec![
+                        (
+                            "dots",
+                            list_value_raw(vec![map_value_raw(vec![
+                                ("offset", number_value(0.0)),
+                                ("value", number_value(0.5)),
+                            ])]),
+                        ),
+                        ("cycle-beats", number_value(4.0)),
+                    ]),
+                ),
+            ])
+        };
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 32.0,
+            height: 8.0,
+        };
+        let view_at = |playhead: f64| {
+            let props = HashMap::from([
+                (
+                    "items".to_string(),
+                    list_value_raw(vec![item(8.0, 8.0, true), item(0.0, 8.0, false)]),
+                ),
+                ("view-start".to_string(), number_value(0.0)),
+                ("view-duration".to_string(), number_value(64.0)),
+                ("playhead-time".to_string(), number_value(playhead)),
+            ]);
+            TimelineView::from_props(&props, rect)
+        };
+        let cycle = |item: &TimelineItem| match &item.content {
+            Some(TimelineItemContent::Dots { cycle, .. }) => *cycle,
+            _ => panic!("dots content"),
+        };
+
+        let view = view_at(6.0);
+        assert_eq!(view.items.len(), 1, "unreached: the growing item is hidden");
+        // A committed item resolves its beats against its own span.
+        assert!((cycle(&view.items[0]) - 0.5).abs() < 1e-9);
+
+        for playhead in [8.0, 13.0, 21.5] {
+            let view = view_at(playhead);
+            let growing = &view.items[0];
+            assert_eq!(growing.end, playhead);
+            if playhead > 8.0 {
+                assert!(
+                    (cycle(growing) * (playhead - 8.0) - 4.0).abs() < 1e-9,
+                    "4 beats per cycle at playhead {playhead}"
+                );
+            }
+        }
     }
 
     /// The bound ghost channels must reproduce the arrangement's Lisp ghost

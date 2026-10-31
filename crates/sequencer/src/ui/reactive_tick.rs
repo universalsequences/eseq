@@ -25,6 +25,7 @@ pub(crate) fn sync_reactive_tick(
     ui_loop_stats: &mut UiLoopStats,
 ) {
     host_commands::export::poll(editor);
+    host_commands::plugin_export::poll(editor);
     // Rack-slot instrument params resolve by name in the scheduler
     // (`seq-emit :params`), which needs the registry's descriptors.
     let registry = &app.editor.engine_registry;
@@ -379,15 +380,36 @@ pub(crate) fn sync_reactive_tick(
             let profile_switch = pattern_switch_profile_enabled();
             let profile_total_started = Instant::now();
             let old_pattern_epoch = ctx.frame.prev_pattern_epoch;
+            let mut step_started = Instant::now();
+            let step_ms = |step_started: &mut Instant| {
+                let ms = duration_ms(step_started.elapsed());
+                *step_started = Instant::now();
+                ms
+            };
             sync_shared_track_collapsed(&ctx.shared.track_collapsed, &app);
+            let collapsed_ms = step_ms(&mut step_started);
             refresh_track_names_cache(&mut *ctx.track_names, &app);
+            let names_ms = step_ms(&mut step_started);
             sync_scene_slot_state(editor.runtime_mut(), &ctx.shared.state);
+            let scene_slots_ms = step_ms(&mut step_started);
             *ctx.shared.accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+            let accumulators_ms = step_ms(&mut step_started);
             drop_stale_plock_preview(ctx, ct);
-            sync_sidebar_browser(&app, ct);
+            let plock_ms = step_ms(&mut step_started);
+            if epoch == ctx.frame.prev_pattern_epoch {
+                // A mirrored song row alone: the sidebar's inputs move only
+                // when the row swaps the track's sound.
+                sync_sidebar_browser_if_inputs_changed(&app, ct);
+            } else {
+                sync_sidebar_browser(&app, ct);
+            }
+            let sidebar_ms = step_ms(&mut step_started);
             if profile_switch {
                 eprintln!(
-                    "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{}",
+                    "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{} \
+                     collapsed={collapsed_ms:.2}ms names={names_ms:.2}ms \
+                     scene_slots={scene_slots_ms:.2}ms accumulators={accumulators_ms:.2}ms \
+                     plock={plock_ms:.2}ms sidebar={sidebar_ms:.2}ms",
                     duration_ms(profile_total_started.elapsed()),
                     old_pattern_epoch,
                     epoch,

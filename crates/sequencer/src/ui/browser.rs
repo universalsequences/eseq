@@ -1694,6 +1694,9 @@ pub(crate) fn visible_preset_items_for_track(app: &app::App, track: usize) -> Ve
     {
         return sequencer::project::list_rack_presets().unwrap_or_default();
     }
+    if !has_instrument_presets(app, track) {
+        return Vec::new();
+    }
     let Some(name) = current_custom_instrument_name(app, track) else {
         return Vec::new();
     };
@@ -1713,10 +1716,24 @@ pub(crate) fn visible_user_preset_items_for_track(app: &app::App, track: usize) 
             .map(|(_, user)| user)
             .unwrap_or_default();
     }
+    if !has_instrument_presets(app, track) {
+        return Vec::new();
+    }
     let Some(name) = current_custom_instrument_name(app, track) else {
         return Vec::new();
     };
     sequencer::lisp_host::load_user_instrument_preset_names(&name).unwrap_or_default()
+}
+
+/// Whether `track` plays an instrument that can have a preset bank: a custom
+/// instrument, or any track with an engine. Without this an empty or
+/// modulator track's NAME is looked up as an instrument, and a name with no
+/// bank costs a recursive walk of every instrument directory (~30ms) on each
+/// sidebar sync.
+fn has_instrument_presets(app: &app::App, track: usize) -> bool {
+    app.graph.track_instrument_types.get(track)
+        == Some(&sequencer::sequencer::InstrumentType::Custom)
+        || matches!(app.graph.track_engine_ids.get(track), Some(Some(_)))
 }
 
 #[cfg(test)]

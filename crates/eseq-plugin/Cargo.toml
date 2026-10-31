@@ -1,0 +1,37 @@
+[package]
+name = "eseq-plugin"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "The prebuilt plugin shell eseq copies into every exported instrument bundle (CLAP + VST3)."
+
+[lib]
+# cdylib: the shell copied into .clap/.vst3 bundles; rlib: the payload model,
+# shared with the exporter in `sequencer`, and the engine tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+clap-sys = "0.5"
+eseq-plugin-format = { path = "../eseq-plugin-format" }
+eseq-voice-mod = { path = "../eseq-voice-mod" }
+clap-wrapper = { version = "0.3.1", default-features = false, features = ["vst3", "parallel"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+eseqlisp = { path = "../eseqlisp" }
+crossterm = "0.28"
+image = { version = "0.25", default-features = false, features = ["png"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString"] }
+objc2-app-kit = { version = "0.3", features = ["NSView", "NSResponder"] }
+
+[dev-dependencies]
+serde_json = "1"
+libc = "0.2"
+eseqlisp = { path = "../eseqlisp" }
+crossterm = "0.28"
+
+[build-dependencies]
+cc = "1"

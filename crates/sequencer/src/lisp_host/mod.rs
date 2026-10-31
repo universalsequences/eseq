@@ -58,6 +58,7 @@ mod value_helpers;
 pub use dgen::dylib_cache; // module path compat: `lisp_host::dylib_cache::`
 pub use dgen::dylib_cache::{DGenCompileKind, DGenSourceOrigin, DylibLease, DGEN_INSTRUMENT_VOICES};
 pub use dgen::compile_report::dgen_compile_failure_report;
+pub use dgen::dgen_audit::audit_dylib;
 pub use dgen::dgen_ffi::*;
 #[cfg(test)]
 use dgen::dgen_ffi::dgenlisp_wrapper_process;

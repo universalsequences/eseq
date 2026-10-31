@@ -848,6 +848,17 @@ impl SequencerState {
         let rendered = self.audio_rendered_sample.load(Ordering::Acquire);
         self.song_playback.shared().position_beats(rendered)
     }
+
+    /// [`Self::song_position_beats`] at wall time `now`, moving smoothly
+    /// between audio blocks (audio_clock.rs): what a scrolling playhead
+    /// draws.
+    pub fn song_position_beats_at(&self, now: std::time::Instant) -> Option<f64> {
+        let sample = self
+            .audio_clock
+            .sample_at(now)
+            .unwrap_or_else(|| self.audio_rendered_sample.load(Ordering::Acquire));
+        self.song_playback.shared().position_beats(sample)
+    }
 }
 
 #[cfg(test)]

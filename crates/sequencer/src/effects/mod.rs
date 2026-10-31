@@ -27,6 +27,7 @@ pub mod filter_table_editor;
 pub mod filter_table_presets;
 #[allow(dead_code)]
 pub(crate) mod gatepitch;
+pub mod panel_section;
 #[allow(dead_code)]
 pub(crate) mod limiter;
 pub mod multiverb;
