@@ -76,6 +76,44 @@ pub struct DspLayout {
     pub routes: Vec<Route>,
     /// Every manifest param's default (hidden ones included), by cell.
     pub cell_defaults: Vec<CellDefault>,
+    /// The voice modulator's slots the DSP reads, with the input each feeds.
+    #[serde(default)]
+    pub modulators: Vec<ModulatorSpec>,
+    /// Every modulation depth lane: which param it moves, from which slot.
+    #[serde(default)]
+    pub mod_targets: Vec<ModTargetSpec>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModulatorSpec {
+    /// 1-based slot.
+    pub slot: usize,
+    /// DSP input channel the slot's 0..1 output feeds.
+    pub channel: usize,
+    /// The ext input (1-4) the patch pinned the slot to with `(ext N)`.
+    #[serde(default)]
+    pub ext: Option<usize>,
+}
+
+/// One depth lane; indices are into [`PluginSpec::params`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModTargetSpec {
+    pub base: usize,
+    /// 1-based modulator slot.
+    pub slot: usize,
+    pub depth: usize,
+    /// The destination's `__dgen_mod_active__` flag (set while any of its
+    /// lanes has depth).
+    #[serde(default)]
+    pub active: Option<usize>,
+    /// Depth range and unit in display units.
+    pub depth_min: f32,
+    pub depth_max: f32,
+    #[serde(default)]
+    pub unit: String,
+    /// `base * 2^amount` instead of `base + amount`.
+    #[serde(default)]
+    pub octaves: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -126,11 +164,48 @@ pub struct ParamSpec {
     /// A `%` param stored as a 0-1 ratio: shown and entered ×100.
     #[serde(default)]
     pub percent: bool,
-    pub cell: usize,
-    pub span: usize,
+    pub kind: ParamKind,
+    pub target: ParamTarget,
+    /// Panel placement: `main`, `mod` (a depth lane), `source` (a modulation
+    /// source setting of slot `mod_slot`) or `hidden` (host plumbing).
+    pub section: String,
+    #[serde(default)]
+    pub mod_slot: usize,
+    /// Changing it restarts the slot's cycle on the bar (sync, division,
+    /// retrigger settings).
+    #[serde(default)]
+    pub resync: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ParamKind {
+    Continuous,
+    Enum,
+    Boolean,
+}
+
+/// Where a param's value lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ParamTarget {
+    /// DGen state cells (the voice's DSP memory).
+    Cell { cell: usize, span: usize },
+    /// The voice modulator's state (`eseq-voice-mod` layout).
+    Modulator { index: usize },
+    /// A host control outside the DSP's state (the app's node header, e.g.
+    /// `enabled`); the plugin keeps the value and writes it nowhere.
+    Host,
 }
 
 impl ParamSpec {
+    /// Shown to the host as an automatable param: the instrument's own and
+    /// its depth lanes; modulation-source settings and plumbing are state
+    /// only.
+    pub fn host_visible(&self) -> bool {
+        matches!(self.section.as_str(), "main" | "mod")
+    }
+
     pub fn clamp(&self, value: f32) -> f32 {
         value.clamp(self.min.min(self.max), self.max.max(self.min))
     }

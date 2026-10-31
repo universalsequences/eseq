@@ -299,59 +299,13 @@ fn shape_labels() -> Vec<String> {
         .collect()
 }
 
-pub fn source_type_label(source: usize) -> &'static str {
-    match source {
-        SOURCE_LFO => "lfo",
-        SOURCE_ENV => "env",
-        SOURCE_RAND => "rand",
-        SOURCE_DRIFT => "drift",
-        SOURCE_EXT1 => "ext1",
-        SOURCE_EXT2 => "ext2",
-        SOURCE_EXT3 => "ext3",
-        SOURCE_EXT4 => "ext4",
-        _ => "off",
-    }
-}
 
-pub fn source_type_name_from_param_name(name: &str) -> Option<&'static str> {
-    let parts = parse_slot_param_name(name)?;
-    match parts.1 {
-        "source" => Some("source"),
-        "lfo_rate" | "lfo_sync" | "lfo_div" | "lfo_shape" | "lfo_pw" | "lfo_retrigger"
-        | "lfo_phase" => Some("lfo"),
-        "env_attack" | "env_decay" | "env_sustain" | "env_release" => Some("env"),
-        "rand_rate" | "rand_sync" | "rand_div" | "rand_slew" => Some("rand"),
-        "drift_rate" | "drift_sync" | "drift_div" => Some("drift"),
-        _ => None,
-    }
-}
 
-pub fn source_param_display_name(name: &str) -> String {
-    let Some((_, suffix)) = parse_slot_param_name(name) else {
-        return name.to_string();
-    };
-    match suffix {
-        "source" => "type",
-        "lfo_rate" | "rand_rate" | "drift_rate" => "rate",
-        "lfo_div" | "rand_div" | "drift_div" => "division",
-        "lfo_sync" | "rand_sync" | "drift_sync" => "sync",
-        "lfo_shape" => "shape",
-        "lfo_pw" => "pulse width",
-        "lfo_retrigger" => "retrigger",
-        "lfo_phase" => "phase",
-        "env_attack" => "attack",
-        "env_decay" => "decay",
-        "env_sustain" => "sustain",
-        "env_release" => "release",
-        "rand_slew" => "slew",
-        other => other,
-    }
-    .to_string()
-}
 
-pub fn slot_from_param_name(name: &str) -> Option<usize> {
-    parse_slot_param_name(name).map(|(slot, _)| slot)
-}
+
+
+
+
 
 pub fn selected_source_param_indices<F>(
     params: &[ParamDescriptor],
@@ -360,92 +314,16 @@ pub fn selected_source_param_indices<F>(
 where
     F: FnMut(usize, &ParamDescriptor) -> f32,
 {
-    let source_indices = params
+    let sources: Vec<(usize, &str)> = params
         .iter()
         .enumerate()
-        .filter_map(|(idx, param)| is_source_param(param.node_param_idx).then_some(idx))
-        .collect::<Vec<_>>();
-
-    let find_idx_by_node = |node_param_idx: u32| {
-        source_indices
-            .iter()
-            .copied()
-            .find(|&idx| params[idx].node_param_idx == node_param_idx)
-    };
-
-    let mut out = Vec::new();
-    for slot in 0..SLOT_COUNT {
-        let Some(source_idx) = find_idx_by_node(slot_source_node_param_idx(slot)) else {
-            continue;
-        };
-        out.push(source_idx);
-
-        let source_value = value_for_param(source_idx, &params[source_idx]).round() as usize;
-        let source_name = source_type_label(source_value);
-        if source_name == "off" || source_name.starts_with("ext") {
-            continue;
-        }
-
-        let sync = source_indices
-            .iter()
-            .copied()
-            .find(|&idx| {
-                slot_from_param_name(&params[idx].name) == Some(slot + 1)
-                    && params[idx].name.ends_with("_sync")
-                    && source_type_name_from_param_name(&params[idx].name) == Some(source_name)
-            })
-            .map(|idx| value_for_param(idx, &params[idx]) > 0.5)
-            .unwrap_or(false);
-
-        // Pulse width doubles as the triangle's peak position, so the control
-        // is shown for both shapes.
-        let pulse = source_indices
-            .iter()
-            .copied()
-            .find(|&idx| {
-                slot_from_param_name(&params[idx].name) == Some(slot + 1)
-                    && params[idx].name.ends_with("_shape")
-            })
-            .map(|idx| {
-                let shape = value_for_param(idx, &params[idx]).round() as i32;
-                shape == SHAPE_PULSE as i32 || shape == SHAPE_TRIANGLE as i32
-            })
-            .unwrap_or(false);
-
-        for &idx in &source_indices {
-            let param = &params[idx];
-            if slot_from_param_name(&param.name) != Some(slot + 1)
-                || source_type_name_from_param_name(&param.name) != Some(source_name)
-            {
-                continue;
-            }
-            if (param.name.ends_with("_rate") && sync)
-                || (param.name.ends_with("_div") && !sync)
-                || (param.name.ends_with("_pw") && !pulse)
-            {
-                continue;
-            }
-            out.push(idx);
-        }
-    }
-
-    out
+        .filter(|(_, param)| is_source_param(param.node_param_idx))
+        .map(|(idx, param)| (idx, param.name.as_str()))
+        .collect();
+    selected_source_settings(&sources, |idx| value_for_param(idx, &params[idx]))
 }
 
-fn parse_slot_param_name(name: &str) -> Option<(usize, &str)> {
-    let rest = name.strip_prefix("mod")?;
-    let digit_end = rest
-        .char_indices()
-        .take_while(|(_, ch)| ch.is_ascii_digit())
-        .map(|(idx, ch)| idx + ch.len_utf8())
-        .last()?;
-    let slot = rest[..digit_end].parse::<usize>().ok()?;
-    if !(1..=SLOT_COUNT).contains(&slot) {
-        return None;
-    }
-    let suffix = rest[digit_end..].strip_prefix('_')?;
-    Some((slot, suffix))
-}
+
 
 
 
@@ -1487,18 +1365,7 @@ unsafe extern "C" fn voice_modulator_process(
     // The reset and the bar counter run before every early return so idle
     // blocks still count the bar wraps that pass through them.
     if reset_counter != last_reset_counter {
-        for slot in 0..SLOT_COUNT {
-            *s.add(slot_state_idx(slot, IDX_LFO_PHASE)) = 0.0;
-            *s.add(slot_state_idx(slot, IDX_ENV)) = 0.0;
-            *s.add(slot_state_idx(slot, IDX_RAND_PHASE)) = 0.0;
-            *s.add(slot_state_idx(slot, IDX_DRIFT)) = 0.0;
-            *s.add(slot_state_idx(slot, IDX_DRIFT_TARGET)) = 0.0;
-            *s.add(slot_state_idx(slot, IDX_DRIFT_PHASE)) = 0.0;
-            *s.add(slot_state_idx(slot, IDX_LFO_SYNC_ANCHOR)) = 0.0;
-            *s.add(slot_state_idx(slot, IDX_RAND_HOLD)) = 0.0;
-            *s.add(slot_state_idx(slot, IDX_RAND_SMOOTH)) = 0.0;
-            *s.add(slot_state_idx(slot, IDX_ENV_STAGE)) = ENV_STAGE_IDLE;
-        }
+        reset_slot_cycles(s);
         if nf > 0 {
             bars.reset(clock.frame(0).0);
         } else {

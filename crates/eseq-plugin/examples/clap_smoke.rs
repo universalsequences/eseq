@@ -193,6 +193,8 @@ fn main() {
     let bundle = PathBuf::from(args.next().expect("bundle path"));
     let mut wav: Option<PathBuf> = None;
     let mut silence_param: Option<String> = None;
+    // name=value params applied (through state) before the first render.
+    let mut presets: Vec<(String, f64)> = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--wav" => wav = args.next().map(PathBuf::from),
@@ -200,6 +202,11 @@ fn main() {
             // that a store-only write (state load, the editor) reaches the DSP
             // of an already active instance.
             "--silence-param" => silence_param = args.next(),
+            "--param" => {
+                let raw = args.next().expect("--param name=value");
+                let (name, value) = raw.split_once('=').expect("name=value");
+                presets.push((name.to_string(), value.parse().expect("number")));
+            }
             _ => {}
         }
     }
@@ -254,6 +261,16 @@ fn main() {
         );
     }
 
+    if !presets.is_empty() {
+        let params: serde_json::Map<String, serde_json::Value> =
+            presets.iter().map(|(n, v)| (n.clone(), serde_json::json!(v))).collect();
+        // A partial state resets the rest to defaults, as a plugin load does.
+        let mut bytes = Bytes { data: serde_json::to_vec(&serde_json::json!({ "format": 1, "params": params })).unwrap(), pos: 0 };
+        let input = clap_istream { ctx: &mut bytes as *mut Bytes as *mut c_void, read: Some(istream_read) };
+        let state: &clap_plugin_state = plugin.ext(CLAP_EXT_STATE);
+        assert!(unsafe { (state.load.unwrap())(plugin.raw, &input) });
+        println!("applied {} params", presets.len());
+    }
     let frames = (SR * 1.5) as usize;
     let (l, r) = plugin.render(&[36], frames, (SR * 0.25) as usize);
     let (peak, rms, bad) = stats(&l);

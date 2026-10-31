@@ -17,7 +17,8 @@ fn main() {
     let payload = Payload::load(&Payload::dir_for_bundle(&bundle)).expect("payload");
     let params = Arc::new(ParamStore::new(payload.spec.params.iter().map(|p| p.default)));
     let started = Instant::now();
-    let mut panel = PanelHost::boot(&payload, params.clone(), 2.0).unwrap_or_else(|e| {
+    let mod_display = Arc::new(eseq_plugin::engine::ModDisplay::default());
+    let mut panel = PanelHost::boot(&payload, params.clone(), mod_display, 2.0).unwrap_or_else(|e| {
         eprintln!("boot failed: {e}");
         std::process::exit(1);
     });
@@ -72,5 +73,22 @@ fn main() {
         println!("hidden drag active after up: {}", panel.editor_mut().hidden_drag_gesture_active());
     }
     panel.render_png(&out).expect("render");
+    if std::env::var_os("MODS_OPEN").is_some() {
+        let r = panel.editor_mut().runtime_mut().eval_str("(eseq.effects.effect-panels/instrument-toggle-mods-view)");
+        println!("toggle: {r:?}");
+        panel.editor_mut().refresh_runtime_side_effects();
+        let mods = out.with_file_name(format!("{}-mods.png", out.file_stem().unwrap().to_string_lossy()));
+        panel.render_png(&mods).expect("render mods");
+        let r = panel.invoke_keyed("knob-number", "-z3", "on-change", vec![eseqlisp::vm::Value::Number(2.5)]);
+        println!("mods knob invoke: {r:?}");
+        panel.editor_mut().refresh_runtime_side_effects();
+        panel.frame_headless();
+        for edit in panel.take_edits() {
+            if let eseq_plugin::panel::PanelEdit::Value(index, value) = edit {
+                println!("mods knob edit ({r:?}): {} = {value}", payload.spec.params[index].name);
+            }
+        }
+        println!("{}", mods.display());
+    }
     println!("{}", out.display());
 }

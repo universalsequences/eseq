@@ -10,11 +10,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use eseq_plugin_format::{
-    CellDefault, DspLayout, DspSpec, HostSignal, PAYLOAD_DIR, ParamSpec, PluginSpec, Route, SPEC_FILE,
-    SPEC_FORMAT, UiSpec,
+    CellDefault, DspLayout, DspSpec, HostSignal, ModTargetSpec, ModulatorSpec, PAYLOAD_DIR,
+    ParamKind as PluginParamKind, ParamSpec, ParamTarget, PluginSpec, Route, SPEC_FILE, SPEC_FORMAT,
+    UiSpec,
 };
 
-use crate::lisp_host::{DGenCompileKind, DGenManifest, DGenParamOptions};
+use crate::effects::panel_section::PanelSection;
+use crate::effects::{EffectDescriptor, ModulationMode, ParamKind};
+use crate::lisp_host::{DGenCompileKind, DGenManifest};
 
 // The shell zeroes the same redzone after each voice's state as the app.
 const _: () = assert!(crate::lisp_host::DGEN_STATE_REDZONE_SLOTS == eseq_plugin_format::STATE_REDZONE_SLOTS);
@@ -190,30 +193,49 @@ fn is_drum(logical_name: &str) -> bool {
     logical_name.split('/').next().is_some_and(|c| c.eq_ignore_ascii_case("drums"))
 }
 
-/// Host-visible params: every manifest param that is not hidden (the `@mod`
-/// active/depth cells are), in manifest order, in stored units.
-fn param_specs(manifest: &DGenManifest) -> Vec<ParamSpec> {
-    manifest
-        .params
+/// The plugin's params: exactly the app's instrument descriptor, in its
+/// order, so a `param-idx` the panel sends means what it means in eseq — the
+/// instrument's own params, the voice modulator's source settings, then each
+/// destination's active flag and depth lanes. Stored units.
+fn param_specs(desc: &EffectDescriptor) -> Vec<ParamSpec> {
+    use crate::instruments::voice_modulator::{MOD_PARAM_BASE, is_bar_resync_param};
+    desc.params
         .iter()
-        .filter(|p| !p.hidden && !p.name.starts_with("__"))
         .map(|p| {
-            let options = match &p.options {
-                Some(DGenParamOptions::Labels(labels)) => labels.clone(),
-                _ => Vec::new(),
+            let mut section = PanelSection::of(p);
+            let header = crate::lisp_host::HEADER_SLOTS as u32;
+            let target = if section == PanelSection::Source {
+                ParamTarget::Modulator { index: (p.node_param_idx - MOD_PARAM_BASE) as usize }
+            } else if p.node_param_idx < header || p.node_param_idx == u32::MAX {
+                // The node header (enabled, …) or a host-only control: no DSP
+                // cell. The plugin has no use for it; keep it out of sight.
+                section = PanelSection::Hidden;
+                ParamTarget::Host
+            } else {
+                ParamTarget::Cell {
+                    cell: (p.node_param_idx - header) as usize,
+                    span: p.node_param_span.max(1) as usize,
+                }
             };
-            let unit = p.unit.clone().unwrap_or_default();
+            let (kind, options) = match &p.kind {
+                ParamKind::Continuous { .. } => (PluginParamKind::Continuous, Vec::new()),
+                ParamKind::Boolean => (PluginParamKind::Boolean, Vec::new()),
+                ParamKind::Enum { labels } => (PluginParamKind::Enum, labels.clone()),
+            };
             let spec = ParamSpec {
                 name: p.name.clone(),
-                label: p.display_name.clone(),
+                label: section.label(p),
                 min: p.min,
                 max: p.max,
                 default: p.default,
-                percent: crate::effects::ParamDescriptor::percent_ratio_by_range(p.unit.as_deref(), p.min, p.max),
-                unit,
+                unit: p.kind.unit().unwrap_or_default().to_string(),
                 options,
-                cell: p.cell_id,
-                span: p.cell_span,
+                percent: p.is_percent(),
+                kind,
+                target,
+                section: section.name().to_string(),
+                mod_slot: section.mod_slot(p),
+                resync: is_bar_resync_param(p.node_param_idx),
             };
             ParamSpec { default: spec.clamp(spec.default), ..spec }
         })
@@ -222,7 +244,7 @@ fn param_specs(manifest: &DGenManifest) -> Vec<ParamSpec> {
 
 /// The voice layout the shell runs, resolved by eseq's own manifest rules
 /// (input routing, audio vs `@amp`/mod/probe outputs).
-fn dsp_layout(manifest: &DGenManifest, raw: &serde_json::Value) -> Result<DspLayout, String> {
+fn dsp_layout(manifest: &DGenManifest, desc: &EffectDescriptor, raw: &serde_json::Value) -> Result<DspLayout, String> {
     use crate::effects::gatepitch as gp;
     let signal = |output: usize| -> Option<HostSignal> {
         Some(match output {
@@ -267,12 +289,31 @@ fn dsp_layout(manifest: &DGenManifest, raw: &serde_json::Value) -> Result<DspLay
             .filter(|p| p.default != 0.0)
             .map(|p| CellDefault { cell: p.cell_id, span: p.cell_span, value: p.default })
             .collect(),
+        modulators: manifest
+            .modulators
+            .iter()
+            .map(|m| ModulatorSpec { slot: m.slot, channel: m.input_channel, ext: m.ext })
+            .collect(),
+        mod_targets: desc
+            .instrument_modulation_targets
+            .iter()
+            .map(|t| ModTargetSpec {
+                base: t.base_param_idx,
+                slot: t.modulator_slot,
+                depth: t.depth_param_idx,
+                active: t.active_param_idx,
+                depth_min: t.depth_min,
+                depth_max: t.depth_max,
+                unit: t.depth_unit.clone().unwrap_or_default(),
+                octaves: t.mod_mode == ModulationMode::Octaves,
+            })
+            .collect(),
     })
 }
 
 /// Compile the instrument for plugin use into `dir` (`instrument.<ext>` +
 /// `instrument.json`, the host manifest with `tensorInitData`) and parse it.
-fn compile_for_plugin(source: &InstrumentSource, dir: &Path) -> Result<(DGenManifest, DspLayout), String> {
+fn compile_for_plugin(source: &InstrumentSource, dir: &Path) -> Result<(EffectDescriptor, DspLayout), String> {
     let effective = crate::lisp_host::effective_dgen_source(DGenCompileKind::Instrument, &source.dsp, COMPILE_SAMPLE_RATE)?;
     let json = crate::lisp_host::compile_effective_dgen_source_to_dir_with_voices(
         DGenCompileKind::Instrument,
@@ -286,8 +327,9 @@ fn compile_for_plugin(source: &InstrumentSource, dir: &Path) -> Result<(DGenMani
     crate::lisp_host::audit_dylib(&dir.join(library_file()))?;
     let manifest = crate::lisp_host::parse_manifest(&json)?;
     let raw: serde_json::Value = serde_json::from_str(&json).map_err(|e| format!("compiled manifest: {e}"))?;
-    let layout = dsp_layout(&manifest, &raw)?;
-    Ok((manifest, layout))
+    let desc = crate::lisp_host::instrument_descriptor_from_manifest(&source.logical_name, &manifest);
+    let layout = dsp_layout(&manifest, &desc, &raw)?;
+    Ok((desc, layout))
 }
 
 fn library_file() -> String {
@@ -386,7 +428,7 @@ fn build_payload(
     payload: &Path,
 ) -> Result<PluginSpec, String> {
     let dsp_dir = payload.join("dsp");
-    let (manifest, layout) = compile_for_plugin(source, &dsp_dir)?;
+    let (desc, layout) = compile_for_plugin(source, &dsp_dir)?;
     // Only the library and the host manifest ship; drop compile by-products.
     let library = library_file();
     for entry in std::fs::read_dir(&dsp_dir).map_err(|e| e.to_string())? {
@@ -397,7 +439,7 @@ fn build_payload(
         }
     }
 
-    let mut params = param_specs(&manifest);
+    let mut params = param_specs(&desc);
     if params.is_empty() {
         return Err("the instrument has no visible params".into());
     }
@@ -614,21 +656,36 @@ mod tests {
     }
 
     #[test]
-    fn visible_params_skip_hidden_and_mod_cells() {
+    fn plugin_params_are_the_app_descriptor_in_order() {
         let manifest = crate::lisp_host::parse_manifest(
-            r#"{ "processAbi": "dgen-host-abi-v1", "totalMemorySlots": 10, "params": [
-                { "name": "z1", "displayName": "Z1", "cellId": 0, "min": -3, "max": 3, "default": 0.5 },
+            r#"{ "processAbi": "dgen-host-abi-v1", "totalMemorySlots": 20, "params": [
+                { "name": "z1", "cellId": 0, "min": -3, "max": 3, "default": 0.5 },
                 { "name": "__mod__z1__active", "hidden": true, "cellId": 1, "min": 0, "max": 1, "default": 0 },
-                { "name": "mix", "unit": "%", "cellId": 2, "min": 0, "max": 1, "default": 0.25 },
-                { "name": "mode", "options": { "labels": ["a", "b", "c"] }, "cellId": 3, "min": 0, "max": 2, "default": 1 }
-            ], "inputs": [], "outputs": [{ "channel": 0, "name": "out" }] }"#,
+                { "name": "__mod__z1__depth__slot1", "hidden": true, "cellId": 2, "min": -6, "max": 6, "default": 0 },
+                { "name": "mix", "unit": "%", "cellId": 3, "min": 0, "max": 1, "default": 0.25 }
+            ], "modDestinations": [{ "name": "z1", "paramCellId": 0, "activeCellId": 1, "mode": "additive",
+                "min": -3, "max": 3, "depthMin": -6, "depthMax": 6,
+                "depthLanes": [{ "slot": 1, "depthCellId": 2 }] }],
+              "modulators": [{ "inputChannel": 0, "name": "mod1", "slot": 1 }],
+              "inputs": [{ "channel": 0, "name": "mod1" }], "outputs": [{ "channel": 0, "name": "out" }] }"#,
         )
         .expect("manifest");
-        let specs = param_specs(&manifest);
-        assert_eq!(specs.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["z1", "mix", "mode"]);
-        assert_eq!(specs[0].label, "Z1");
+        let desc = crate::lisp_host::instrument_descriptor_from_manifest("Test", &manifest);
+        let specs = param_specs(&desc);
+        assert_eq!(specs.len(), desc.params.len());
+        assert_eq!((specs[0].name.as_str(), specs[0].section.as_str()), ("z1", "main"));
         assert!(specs[1].percent);
-        assert_eq!(specs[2].options, ["a", "b", "c"]);
-        assert_eq!(specs[2].cell, 3);
+        let source = specs.iter().find(|p| p.name == "mod1_source").expect("slot 1 type");
+        assert_eq!((source.section.as_str(), source.label.as_str(), source.mod_slot), ("source", "type", 1));
+        assert!(matches!(source.target, ParamTarget::Modulator { .. }));
+        let depth = specs.iter().find(|p| p.section == "mod").expect("a depth lane");
+        assert_eq!(depth.target, ParamTarget::Cell { cell: 2, span: 1 });
+        assert!(specs.iter().any(|p| p.section == "hidden" && p.target == ParamTarget::Cell { cell: 1, span: 1 }));
+        // The node header's controls (enabled) never land in DSP memory.
+        for (spec, param) in specs.iter().zip(&desc.params) {
+            if param.node_param_idx < crate::lisp_host::HEADER_SLOTS as u32 {
+                assert_eq!(spec.target, ParamTarget::Host, "{}", spec.name);
+            }
+        }
     }
 }

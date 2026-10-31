@@ -17,8 +17,10 @@ use eseqlisp::metal_backend::MetalBackend;
 use eseqlisp::vm::{InstanceId, Value};
 use eseqlisp::{Editor, EditorConfig, HostCommand, Runtime};
 
-use crate::engine::ParamStore;
-use crate::payload::{Payload, PluginSpec};
+use eseq_voice_mod as vm;
+
+use crate::engine::{ModDisplay, ParamStore};
+use crate::payload::{ParamKind, Payload, PluginSpec};
 
 /// The grid font size eseq's own panels are laid out in.
 const FONT_SIZE_PT: f64 = 13.0;
@@ -39,12 +41,22 @@ pub struct PanelHost {
     backend: MetalBackend,
     params: Arc<ParamStore>,
     spec: PluginSpec,
+    device: InstanceId,
     param_instances: Vec<InstanceId>,
     shown: Vec<f32>,
+    /// The engine's newest-voice modulation (slot values and phases).
+    mod_display: Arc<ModDisplay>,
+    /// Last published (mod-value, mod-offset, mod-scale) per param.
+    mod_shown: Vec<(f32, f32, f32)>,
+    phases_shown: [f32; vm::SLOT_COUNT],
+    /// A modulation source setting moved: re-decide which settings show.
+    sources_dirty: bool,
     cell: (f32, f32),
     scale: f64,
     /// Panel size in points.
     size: (f64, f64),
+    /// The panel's size with the mods tab closed, open.
+    sizes: [(f64, f64); 2],
     edits: Vec<PanelEdit>,
     /// Input arrived since the last pump: the runtime has side effects and
     /// host commands to settle.
@@ -81,7 +93,7 @@ fn number(value: Option<Value>) -> Option<f64> {
 impl PanelHost {
     /// Boot the panel of `payload` at `scale` pixels per point. Expensive
     /// (it evaluates the UI runtime): call when the host opens the editor.
-    pub fn boot(payload: &Payload, params: Arc<ParamStore>, scale: f64) -> Result<Self, String> {
+    pub fn boot(payload: &Payload, params: Arc<ParamStore>, mod_display: Arc<ModDisplay>, scale: f64) -> Result<Self, String> {
         let spec = payload.spec.clone();
         let ui = spec.ui.clone().ok_or("this plugin has no panel")?;
         let content = payload.dir.join(&ui.root);
@@ -140,7 +152,7 @@ impl PanelHost {
         eval(rt, PLUGIN_STUBS, "stubs")?;
         eval(rt, &panel_source, "panel source")?;
         eval(rt, r#"(load "@/ui/effects.lisp")"#, "effects.lisp")?;
-        let param_instances = publish_kinds(rt, &spec, &params)?;
+        let kinds = publish_kinds(rt, &spec, &params)?;
         eval(rt, PLUGIN_ROOT, "plugin root")?;
         eseqlisp::runtime::recompile_theme_dependent_sdf_shaders();
         editor.refresh_runtime_side_effects();
@@ -162,42 +174,66 @@ impl PanelHost {
 
         let cell = backend.cell_dimensions();
         let shown = (0..params.len()).map(|i| params.get(i)).collect();
+        let n_params = spec.params.len();
         let mut host = Self {
             editor,
             backend,
             params,
             spec,
-            param_instances,
+            device: kinds.device,
+            param_instances: kinds.params,
             shown,
+            mod_display,
+            mod_shown: vec![(f32::NAN, f32::NAN, f32::NAN); n_params],
+            phases_shown: [f32::NAN; vm::SLOT_COUNT],
+            sources_dirty: true,
             cell,
             scale,
             size: (0.0, 0.0),
+            sizes: [(0.0, 0.0); 2],
             edits: Vec::new(),
             dirty: false,
             pending_drag: None,
             trace: std::env::var_os("ESEQ_PLUGIN_TRACE").is_some(),
             unsupported_logged: Default::default(),
         };
-        let (width, height) = host.measure(ui.width, ui.height);
+        host.sizes = host.measure(ui.width, ui.height);
+        let (width, height) = host.sizes[0];
         host.resize(width, height);
         Ok(host)
     }
 
     /// The panel's extent in points: the laid-out panel plus a margin.
-    fn measure(&mut self, width: f64, height: f64) -> (f64, f64) {
+    /// The panel's extent in points with the mods tab closed and open
+    /// (the window follows the tab), unless the payload fixes a size.
+    fn measure(&mut self, width: f64, height: f64) -> [(f64, f64); 2] {
         if width > 0.0 && height > 0.0 {
-            return (width, height);
+            return [(width, height); 2];
         }
         // Lay out generously, then shrink to what the panel occupies.
         self.editor.set_layout_viewport(400, 120);
-        let (cols, rows) = self
-            .editor
-            .widget_layout()
-            .map(|layout| content_extent(&layout))
-            .unwrap_or((60.0, 12.0));
-        let (cell_w, cell_h) = self.cell;
-        let px = |cells: f32, cell: f32| ((cells + 2.0 * MARGIN_CELLS) * cell) as f64;
-        (px(cols, cell_w) / self.scale, px(rows, cell_h) / self.scale)
+        let mut sizes = [(0.0, 0.0); 2];
+        // The mods tab button's own toggle, twice: open, then back closed.
+        for open in [true, false] {
+            if let Err(e) = self.editor.runtime_mut().eval_str(TOGGLE_MODS) {
+                crate::shell::log(&format!("mods toggle: {e:?}"));
+            }
+            self.editor.refresh_runtime_side_effects();
+            let (cols, rows) =
+                self.editor.widget_layout().map(|layout| content_extent(&layout)).unwrap_or((60.0, 12.0));
+            let (cell_w, cell_h) = self.cell;
+            // Whole cells: the renderer lays out on a whole-cell grid, and a
+            // fractional row lost to its floor would clip the panel's bottom.
+            let pt = |cells: f32, cell: f32| ((cells + 2.0 * MARGIN_CELLS).ceil() * cell) as f64 / self.scale;
+            sizes[open as usize] = (pt(cols, cell_w), pt(rows, cell_h));
+        }
+        sizes
+    }
+
+    /// The size the window should have now: the mods tab's when it is open.
+    pub fn wanted_size(&mut self) -> (f64, f64) {
+        let open = matches!(self.editor.runtime_mut().eval_str(MODS_OPEN), Ok(Some(Value::Bool(true))));
+        self.sizes[open as usize]
     }
 
     pub fn size(&self) -> (f64, f64) {
@@ -247,18 +283,114 @@ impl PanelHost {
             let text = spec.option_label(value).unwrap_or_default().to_string();
             let display = spec.to_display(value) as f64;
             let rt = self.editor.runtime_mut();
-            for field in ["value", "base", "process-value", "mod-value"] {
+            for field in ["value", "base", "process-value"] {
                 let _ = rt.set_instance_field(id, field, Value::Number(display));
             }
-            let _ = rt.set_instance_field(id, "mod-ratio", Value::Number(value as f64));
             let _ = rt.set_instance_field(id, "text", Value::String(text));
+            // The modulated value follows in `sync_modulation`.
+            self.mod_shown[index] = (f32::NAN, f32::NAN, f32::NAN);
+            self.sources_dirty |= self.spec.params[index].section == "source";
             changed = true;
         }
+        changed |= self.sync_source_visibility();
+        changed |= self.sync_modulation();
         if changed {
             self.editor.runtime_mut().run_reactive_cycle();
             self.editor.mark_needs_redraw();
             self.dirty = true;
         }
+    }
+
+    /// Show each slot's type and the settings its selected type uses (the
+    /// app's rule, shared through `eseq-voice-mod`).
+    fn sync_source_visibility(&mut self) -> bool {
+        if !std::mem::take(&mut self.sources_dirty) {
+            return false;
+        }
+        let sources: Vec<(usize, &str)> = self
+            .spec
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.section == "source")
+            .map(|(i, p)| (i, p.name.as_str()))
+            .collect();
+        let visible = vm::selected_source_settings(&sources, |i| self.params.get(i));
+        let rt = self.editor.runtime_mut();
+        for &(index, _) in &sources {
+            let _ = rt.set_instance_field(self.param_instances[index], "visible", Value::Bool(visible.contains(&index)));
+        }
+        true
+    }
+
+    /// The live modulation: each slot's cycle phase (the LFO editor's
+    /// playhead) and each modulated param's effective value — base plus
+    /// every active lane's depth × slot output (×2^ for octave lanes), in
+    /// display units, as the app's `mod-value`/`mod-offset`/`mod-scale`.
+    fn sync_modulation(&mut self) -> bool {
+        let mut changed = false;
+        let phases: [f32; vm::SLOT_COUNT] = std::array::from_fn(|slot| {
+            let phase = self.mod_display.phase(slot);
+            if phase < 0.0 { -1.0 } else { (phase * 128.0).round() / 128.0 }
+        });
+        if phases != self.phases_shown {
+            self.phases_shown = phases;
+            let rt = self.editor.runtime_mut();
+            let list_value = list(phases.iter().map(|&p| Value::Number(p as f64)).collect());
+            let _ = rt.set_instance_field(self.device, "mod-phases", list_value);
+            for (index, p) in self.spec.params.iter().enumerate() {
+                if p.section == "source" && p.mod_slot >= 1 {
+                    let _ = rt.set_instance_field(
+                        self.param_instances[index],
+                        "mod-phase",
+                        Value::Number(phases[p.mod_slot - 1] as f64),
+                    );
+                }
+            }
+            changed = true;
+        }
+        let slot_values: [f32; vm::SLOT_COUNT] = std::array::from_fn(|slot| self.mod_display.value(slot).clamp(0.0, 1.0));
+        let n = self.spec.params.len();
+        for base in 0..n {
+            let lanes = self.spec.dsp.layout.mod_targets.iter().filter(|t| t.base == base);
+            let mut amount = 0.0f32;
+            let mut octaves = false;
+            let mut any = false;
+            for lane in lanes {
+                any = true;
+                let active = lane.active.is_none_or(|a| self.params.get(a) > 0.5);
+                let depth = self.spec.params[lane.depth].to_display(self.params.get(lane.depth));
+                if active && depth != 0.0 && (1..=vm::SLOT_COUNT).contains(&lane.slot) {
+                    amount += depth * slot_values[lane.slot - 1];
+                    octaves |= lane.octaves;
+                }
+            }
+            if !any {
+                continue;
+            }
+            let spec = &self.spec.params[base];
+            let display_base = spec.to_display(self.params.get(base));
+            let (lo, hi) = (spec.to_display(spec.min), spec.to_display(spec.max));
+            let value = if octaves { display_base * amount.exp2() } else { display_base + amount };
+            let value = value.clamp(lo.min(hi), hi.max(lo));
+            // Two decimals of display precision: no repaint for sub-visible motion.
+            let value = (value * 100.0).round() / 100.0;
+            let scale = if octaves && display_base != 0.0 { value / display_base } else { 1.0 };
+            let shown = (value, value - display_base, scale);
+            if shown == self.mod_shown[base] {
+                continue;
+            }
+            self.mod_shown[base] = shown;
+            let id = self.param_instances[base];
+            let rt = self.editor.runtime_mut();
+            let _ = rt.set_instance_field(id, "mod-value", Value::Number(shown.0 as f64));
+            let _ = rt.set_instance_field(id, "mod-offset", Value::Number(shown.1 as f64));
+            let _ = rt.set_instance_field(id, "mod-scale", Value::Number(shown.2 as f64));
+            let ratio = if spec.percent { shown.0 / 100.0 } else { shown.0 };
+            let _ = rt.set_instance_field(id, "mod-ratio", Value::Number(ratio as f64));
+            changed = true;
+        }
+        changed
     }
 
     /// Turn the panel's host commands into edits.
@@ -287,8 +419,13 @@ impl PanelHost {
                 "toggle-instrument-param" => {
                     if let Some(index) = number(dict_get(&payload, "param-idx")).map(|i| i as usize) {
                         if let Some(spec) = self.spec.params.get(index) {
-                            let on = self.params.get(index) > spec.min;
-                            let next = if on { spec.min } else { spec.max };
+                            let next = if spec.kind == ParamKind::Boolean {
+                                if self.params.get(index) > 0.5 { 0.0 } else { 1.0 }
+                            } else if self.params.get(index) > spec.min {
+                                spec.min
+                            } else {
+                                spec.max
+                            };
                             self.push_stored(index, next);
                             self.edits.push(PanelEdit::Commit);
                         }
@@ -400,16 +537,23 @@ impl PanelHost {
     /// Invoke the first `widget_type` widget's `prop` callback with `args`
     /// (headless tests).
     pub fn invoke_first(&mut self, widget_type: &str, prop: &str, args: Vec<Value>) -> Result<(), String> {
-        fn find(node: &eseqlisp::layout::LayoutNode, ty: &str) -> Option<eseqlisp::layout::LayoutNode> {
-            if node.widget_type == ty {
+        self.invoke_keyed(widget_type, "", prop, args)
+    }
+
+    /// As [`Self::invoke_first`], for the first whose stable key ends with
+    /// `key_suffix`.
+    pub fn invoke_keyed(&mut self, widget_type: &str, key_suffix: &str, prop: &str, args: Vec<Value>) -> Result<(), String> {
+        fn find(node: &eseqlisp::layout::LayoutNode, ty: &str, suffix: &str) -> Option<eseqlisp::layout::LayoutNode> {
+            if node.widget_type == ty && node.stable_key.as_deref().unwrap_or("").ends_with(suffix) {
                 return Some(node.clone());
             }
-            node.children.iter().find_map(|c| find(c, ty))
+            node.children.iter().find_map(|c| find(c, ty, suffix))
         }
         let layout = self.editor.widget_layout().ok_or("no layout")?;
-        let node = find(&layout, widget_type).ok_or("no such widget")?;
+        let node = find(&layout, widget_type, key_suffix).ok_or("no such widget")?;
         let callback = node.props.get(prop).cloned().ok_or("no such prop")?;
         self.editor.runtime_mut().invoke(callback, args).map_err(|e| format!("{e:?}"))?;
+        self.dirty = true;
         Ok(())
     }
 
@@ -506,18 +650,32 @@ const PLUGIN_STUBS: &str = r#"
 
 /// The plugin's one buffer: the current track's instrument panel, as the
 /// *fx* buffer shows it, without the device chain around it.
+const TOGGLE_MODS: &str = "(eseq.effects.effect-panels/instrument-toggle-mods-view)";
+const MODS_OPEN: &str = "eseq.effects.state/instrument-view.mods-open";
+
 const PLUGIN_ROOT: &str = r#"
 (effect-buffer "*plugin*"
   (let ((inst (eseq.effects.panel-data/current-instrument-panel)))
     (if inst
       (box :debug-name "plugin-root" :padding 0.5 :h-align :start :v-align :start
-        (eseq.effects.panel-bodies/instrument-synth-panel-body inst))
+        (v-stack :gap 0.3 :align :start
+          (h-stack :debug-name "plugin-header" :gap 1 :height 1.0 :align :center
+            (eseq.effects.effect-panels/instrument-synth-button)
+            (eseq.effects.effect-panels/instrument-mods-toggle-button))
+          (eseq.effects.panel-bodies/instrument-synth-panel-body inst)))
       (label "this instrument has no panel"))))
 "#;
 
-/// Publish the kinds the instrument panel lays out from: track 0 (selected),
-/// its instrument device, and one param per host param, in spec order.
-fn publish_kinds(rt: &mut Runtime, spec: &PluginSpec, params: &ParamStore) -> Result<Vec<InstanceId>, String> {
+/// The kinds the instrument panel lays out from: track 0 (selected), its
+/// instrument device, one param per descriptor param (in the app's order, so
+/// a `param-idx` means the same thing), the modulation lanes and the
+/// modulators.
+struct PublishedKinds {
+    device: InstanceId,
+    params: Vec<InstanceId>,
+}
+
+fn publish_kinds(rt: &mut Runtime, spec: &PluginSpec, params: &ParamStore) -> Result<PublishedKinds, String> {
     let kind = |k: &str| format!("eseq.kinds:{k}");
     let track = rt.register_keyed_instance(&kind("track"), &[0]).map_err(|e| format!("track: {e:?}"))?;
     set(rt, track, "index", Value::Number(0.0))?;
@@ -547,11 +705,31 @@ fn publish_kinds(rt: &mut Runtime, spec: &PluginSpec, params: &ParamStore) -> Re
         ("builtin", Value::Bool(false)),
         ("enabled", Value::Bool(true)),
         ("node-id", Value::Number(1.0)),
-        ("modulators", list(Vec::new())),
         ("tensors", list(Vec::new())),
+        ("mod-phases", list(vec![Value::Number(-1.0); vm::SLOT_COUNT])),
     ] {
         set(rt, device, field, value)?;
     }
+    let modulators = spec
+        .dsp
+        .layout
+        .modulators
+        .iter()
+        .enumerate()
+        .map(|(index, m)| {
+            let id = rt
+                .register_keyed_instance(&kind("modulator"), &[device, index as u64])
+                .map_err(|e| format!("modulator: {e:?}"))?;
+            set(rt, id, "device", Value::Instance(device))?;
+            set(rt, id, "index", Value::Number(index as f64))?;
+            set(rt, id, "slot", Value::Number(m.slot as f64))?;
+            set(rt, id, "label", Value::String(format!("Mod {}", m.slot)))?;
+            set(rt, id, "ext", Value::Number(m.ext.unwrap_or(0) as f64))?;
+            Ok(Value::Instance(id))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    set(rt, device, "modulators", list(modulators))?;
+
     let mut ids = Vec::with_capacity(spec.params.len());
     for (index, p) in spec.params.iter().enumerate() {
         let id = rt
@@ -561,16 +739,21 @@ fn publish_kinds(rt: &mut Runtime, spec: &PluginSpec, params: &ParamStore) -> Re
         let value = p.to_display(stored) as f64;
         let options: Vec<Value> = p.options.iter().map(|o| Value::String(o.clone())).collect();
         let text = p.option_label(stored).unwrap_or_default().to_string();
+        let type_name = match p.kind {
+            ParamKind::Continuous => "continuous",
+            ParamKind::Enum => "enum",
+            ParamKind::Boolean => "boolean",
+        };
         for (field, v) in [
             ("device", Value::Instance(device)),
             ("index", Value::Number(index as f64)),
             ("name", Value::String(p.name.clone())),
-            ("label", Value::String(p.name.clone())),
+            ("label", Value::String(p.label.clone())),
             ("display-name", Value::String(p.label.clone())),
-            ("section", Value::String("main".into())),
-            ("mod-slot", Value::Number(0.0)),
-            ("visible", Value::Bool(true)),
-            ("type", Value::String(if p.options.is_empty() { "continuous" } else { "enum" }.into())),
+            ("section", Value::String(p.section.clone())),
+            ("mod-slot", Value::Number(p.mod_slot as f64)),
+            ("visible", Value::Bool(p.section != "hidden")),
+            ("type", Value::String(type_name.into())),
             ("options", list(options)),
             ("asset-options", Value::Nil),
             ("text", Value::String(text)),
@@ -599,15 +782,41 @@ fn publish_kinds(rt: &mut Runtime, spec: &PluginSpec, params: &ParamStore) -> Re
         }
         ids.push(id);
     }
+    // Each depth lane, on its base param, in lane order.
+    let mut lanes_of: Vec<Vec<Value>> = vec![Vec::new(); spec.params.len()];
+    for target in &spec.dsp.layout.mod_targets {
+        let lane = lanes_of[target.base].len();
+        let id = rt
+            .register_keyed_instance(&kind("mod-target"), &[ids[target.base], lane as u64])
+            .map_err(|e| format!("mod-target: {e:?}"))?;
+        for (field, v) in [
+            ("param", Value::Instance(ids[target.base])),
+            ("index", Value::Number(lane as f64)),
+            ("slot", Value::Number(target.slot as f64)),
+            ("source", Value::Nil),
+            ("depth", Value::Instance(ids[target.depth])),
+            ("depth-min", Value::Number(target.depth_min as f64)),
+            ("depth-max", Value::Number(target.depth_max as f64)),
+            ("unit", Value::String(target.unit.clone())),
+        ] {
+            set(rt, id, field, v)?;
+        }
+        lanes_of[target.base].push(Value::Instance(id));
+    }
+    for (index, lanes) in lanes_of.into_iter().enumerate() {
+        if !lanes.is_empty() {
+            set(rt, ids[index], "mod-targets", list(lanes))?;
+        }
+    }
     set(rt, device, "params", list(ids.iter().map(|&id| Value::Instance(id)).collect()))?;
     set(rt, track, "devices", list(vec![Value::Instance(device)]))?;
     rt.run_reactive_cycle();
-    Ok(ids)
+    Ok(PublishedKinds { device, params: ids })
 }
 
-/// The cells the instrument panel occupies, from the layout's top-left:
-/// the bottom-right of the panel body (`instrument-synth-panel-body`'s
-/// wrapper), else of everything laid out.
+/// The cells the panel occupies, from the layout's top-left: the furthest
+/// extent of the root's content (header + panel body, the mods column when
+/// open).
 fn content_extent(root: &eseqlisp::layout::LayoutNode) -> (f32, f32) {
     fn find<'a>(node: &'a eseqlisp::layout::LayoutNode, name: &str) -> Option<&'a eseqlisp::layout::LayoutNode> {
         if matches!(node.props.get("debug-name"), Some(Value::String(v)) if v == name) {
@@ -615,15 +824,12 @@ fn content_extent(root: &eseqlisp::layout::LayoutNode) -> (f32, f32) {
         }
         node.children.iter().find_map(|child| find(child, name))
     }
-    fn leaves(node: &eseqlisp::layout::LayoutNode) -> (f32, f32) {
-        node.children.iter().map(leaves).fold(
+    fn extent(node: &eseqlisp::layout::LayoutNode) -> (f32, f32) {
+        node.children.iter().map(extent).fold(
             (node.rect.col + node.rect.width, node.rect.row + node.rect.height),
             |(r, b), (cr, cb)| (r.max(cr), b.max(cb)),
         )
     }
-    let body = find(root, "custom-synth-wrapper").or_else(|| find(root, "fallback-synth-wrapper"));
-    match body {
-        Some(node) => (node.rect.col + node.rect.width, node.rect.row + node.rect.height),
-        None => leaves(root),
-    }
+    let content = find(root, "plugin-root").and_then(|r| r.children.first()).unwrap_or(root);
+    extent(content)
 }

@@ -197,7 +197,9 @@ extern "C-unwind" fn mouse_dragged(view: *mut AnyObject, _: Sel, event: *mut Any
 }
 
 extern "C-unwind" fn mouse_up(view: *mut AnyObject, _: Sel, event: *mut AnyObject) {
-    mouse(unsafe { &*view }, event, MouseEventKind::Up(MouseButton::Left));
+    let view = unsafe { &*view };
+    mouse(view, event, MouseEventKind::Up(MouseButton::Left));
+    follow_panel_size(view);
 }
 
 extern "C-unwind" fn right_down(view: *mut AnyObject, _: Sel, event: *mut AnyObject) {
@@ -261,6 +263,16 @@ extern "C-unwind" fn tick(view: *mut AnyObject, _: Sel, _timer: *mut AnyObject) 
         let Some(state) = state_of(view) else { return };
         state.panel.frame();
         state.forward_edits();
+    }
+}
+
+/// After a click: when the mods tab opened or closed, ask the host for the
+/// window size that fits it (it answers through `set_size`).
+fn follow_panel_size(view: &AnyObject) {
+    let Some(state) = (unsafe { state_of(view) }) else { return };
+    let wanted = state.panel.wanted_size();
+    if wanted != state.panel.size() {
+        state.shared.request_resize(wanted.0.ceil() as u32, wanted.1.ceil() as u32);
     }
 }
 
@@ -332,7 +344,7 @@ unsafe extern "C" fn gui_create(plugin: *const clap_plugin, api: *const c_char, 
     }
     let shared = unsafe { crate::shell::shared_of(plugin) };
     let started = std::time::Instant::now();
-    match PanelHost::boot(&shared.shell.payload, shared.params.clone(), main_screen_scale()) {
+    match PanelHost::boot(&shared.shell.payload, shared.params.clone(), shared.mod_display.clone(), main_screen_scale()) {
         Ok(panel) => {
             crate::shell::log(&format!("panel booted in {:?}", started.elapsed()));
             let size = panel.size();
@@ -382,10 +394,26 @@ unsafe extern "C" fn gui_adjust_size(_: *const clap_plugin, _: *mut u32, _: *mut
     false
 }
 
+/// The host's answer to `request_resize` (or its own resize): the view, its
+/// layer and the panel's grid follow.
 unsafe extern "C" fn gui_set_size(plugin: *const clap_plugin, width: u32, height: u32) -> bool {
-    let Ok(slot) = unsafe { crate::shell::editor_slot(plugin) }.try_borrow() else { return false };
-    let Some(editor) = slot.as_ref() else { return false };
-    width == editor.size.0.ceil() as u32 && height == editor.size.1.ceil() as u32
+    let Ok(mut slot) = unsafe { crate::shell::editor_slot(plugin) }.try_borrow_mut() else { return false };
+    let Some(editor) = slot.as_mut() else { return false };
+    let size = (width as f64, height as f64);
+    editor.size = size;
+    if let Some(panel) = editor.pending.as_mut() {
+        panel.resize(size.0, size.1);
+    }
+    if let Some(view) = &editor.view {
+        unsafe {
+            let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(size.0, size.1));
+            let _: () = msg_send![&**view, setFrame: frame];
+        }
+    }
+    if let Some(state) = editor.state() {
+        state.panel.resize(size.0, size.1);
+    }
+    true
 }
 
 unsafe extern "C" fn gui_set_parent(plugin: *const clap_plugin, window: *const clap_window) -> bool {

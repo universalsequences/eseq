@@ -25,7 +25,7 @@ use clap_sys::process::*;
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::CLAP_VERSION;
 
-use crate::engine::{DspLib, Engine, Event, NoteEvent, ParamStore, TimedEvent, Transport};
+use crate::engine::{DspLib, Engine, Event, ModDisplay, NoteEvent, ParamStore, TimedEvent, Transport};
 use crate::payload::{ParamSpec, Payload, param_id};
 
 /// Events one process call holds without allocating; note-ending events
@@ -218,9 +218,14 @@ pub(crate) enum GuiEdit {
 pub(crate) struct Shared {
     pub shell: Arc<Shell>,
     pub params: Arc<ParamStore>,
+    /// The newest voice's modulation, written by the engine for the editor.
+    pub mod_display: Arc<ModDisplay>,
     gui_edits: Mutex<Vec<GuiEdit>>,
     host: *const clap_host,
     host_params: Option<&'static clap_host_params>,
+    host_state: Option<&'static clap_host_state>,
+    #[cfg(target_os = "macos")]
+    host_gui: Option<&'static clap_sys::ext::gui::clap_host_gui>,
 }
 
 unsafe impl Send for Shared {}
@@ -231,9 +236,18 @@ impl Shared {
     /// written the values into the store. A pending value for the same param
     /// is replaced, so a fast drag never piles up between audio blocks.
     pub fn send_edits(&self, edits: impl IntoIterator<Item = GuiEdit>) {
+        let params = &self.shell.payload.spec.params;
+        let mut state_only = false;
         {
             let mut queue = self.gui_edits.lock().unwrap_or_else(|p| p.into_inner());
             for edit in edits {
+                let (GuiEdit::Begin(index) | GuiEdit::Value(index, _) | GuiEdit::End(index)) = edit;
+                // Modulation-source settings are not host params: saving the
+                // state is all they need.
+                if !params[index].host_visible() {
+                    state_only = true;
+                    continue;
+                }
                 if let GuiEdit::Value(index, _) = edit {
                     if let Some(GuiEdit::Value(last, value)) = queue.last_mut() {
                         if *last == index {
@@ -248,11 +262,34 @@ impl Shared {
                 queue.push(edit);
             }
             if queue.is_empty() {
+                if state_only {
+                    self.mark_state_dirty();
+                }
                 return;
             }
         }
+        if state_only {
+            self.mark_state_dirty();
+        }
         if let Some(request_flush) = self.host_params.and_then(|p| p.request_flush) {
             unsafe { request_flush(self.host) };
+        }
+    }
+}
+
+impl Shared {
+    fn mark_state_dirty(&self) {
+        if let Some(mark_dirty) = self.host_state.and_then(|state| state.mark_dirty) {
+            unsafe { mark_dirty(self.host) };
+        }
+    }
+
+    /// Ask the host to resize the editor window (main thread).
+    #[cfg(target_os = "macos")]
+    pub fn request_resize(&self, width: u32, height: u32) -> bool {
+        match self.host_gui.and_then(|gui| gui.request_resize) {
+            Some(request_resize) => unsafe { request_resize(self.host, width, height) },
+            None => false,
         }
     }
 }
@@ -306,9 +343,13 @@ impl Instance {
             shared: Arc::new(Shared {
                 shell,
                 params,
+                mod_display: Arc::new(ModDisplay::default()),
                 gui_edits: Mutex::new(Vec::with_capacity(256)),
                 host,
                 host_params: None,
+                host_state: None,
+                #[cfg(target_os = "macos")]
+                host_gui: None,
             }),
             audio: UnsafeCell::new(Audio {
                 engine: None,
@@ -466,6 +507,7 @@ impl Instance {
         }
         .max(0.25);
         audio.transport.bar_inc = t.tempo / 60.0 / audio.sample_rate as f64 / beats_per_bar;
+        audio.transport.bpm = t.tempo as f32;
         if t.flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE != 0 && t.flags & CLAP_TRANSPORT_IS_PLAYING != 0 {
             let pos = t.song_pos_beats as f64 / CLAP_BEATTIME_FACTOR as f64;
             let bar_start = t.bar_start as f64 / CLAP_BEATTIME_FACTOR as f64;
@@ -518,6 +560,13 @@ unsafe extern "C" fn plugin_init(plugin: *const clap_plugin) -> bool {
     let inst = unsafe { &mut *((*plugin).plugin_data as *mut Instance) };
     if let Some(shared) = Arc::get_mut(&mut inst.shared) {
         shared.host_params = unsafe { host_extension::<clap_host_params>(shared.host, CLAP_EXT_PARAMS) };
+        shared.host_state = unsafe { host_extension::<clap_host_state>(shared.host, CLAP_EXT_STATE) };
+        #[cfg(target_os = "macos")]
+        {
+            shared.host_gui = unsafe {
+                host_extension::<clap_sys::ext::gui::clap_host_gui>(shared.host, clap_sys::ext::gui::CLAP_EXT_GUI)
+            };
+        }
     }
     true
 }
@@ -533,7 +582,8 @@ unsafe extern "C" fn plugin_activate(plugin: *const clap_plugin, sample_rate: f6
     audio.transport = Transport::free_running(audio.sample_rate);
     audio.mono_scratch = vec![0.0; max.max(1) as usize];
     let shell = &inst.shared.shell;
-    match Engine::new(&shell.payload, &shell.lib, inst.shared.params.clone(), audio.sample_rate) {
+    let shared = &inst.shared;
+    match Engine::new(&shell.payload, &shell.lib, shared.params.clone(), shared.mod_display.clone(), audio.sample_rate) {
         Ok(engine) => {
             audio.engine = Some(engine);
             true
@@ -698,12 +748,17 @@ unsafe extern "C" fn params_get_info(plugin: *const clap_plugin, index: u32, inf
         return false;
     };
     info.id = inst.shared.shell.param_ids[index as usize];
-    info.flags = CLAP_PARAM_IS_AUTOMATABLE;
+    // Modulation-source settings and plumbing are saved with the state but
+    // kept out of the host's automation lists.
+    info.flags = if spec.host_visible() { CLAP_PARAM_IS_AUTOMATABLE } else { CLAP_PARAM_IS_HIDDEN };
+    if !spec.options.is_empty() || spec.kind != crate::payload::ParamKind::Continuous {
+        info.flags |= CLAP_PARAM_IS_STEPPED;
+    }
     if !spec.options.is_empty() {
-        info.flags |= CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM;
+        info.flags |= CLAP_PARAM_IS_ENUM;
     }
     info.cookie = std::ptr::null_mut();
-    write_name(&mut info.name, &spec.label);
+    write_name(&mut info.name, &spec.name);
     write_name(&mut info.module, "");
     info.min_value = spec.min as f64;
     info.max_value = spec.max as f64;

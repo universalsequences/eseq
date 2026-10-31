@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 clap-sys = "0.5"
 eseq-plugin-format = { path = "../eseq-plugin-format" }
+eseq-voice-mod = { path = "../eseq-voice-mod" }
 clap-wrapper = { version = "0.3.1", default-features = false, features = ["vst3", "parallel"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

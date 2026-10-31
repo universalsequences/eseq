@@ -8,7 +8,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::payload::{DspLayout, HostSignal, ParamSpec, Payload};
+use eseq_voice_mod as vm;
+
+use crate::payload::{DspLayout, HostSignal, ParamSpec, ParamTarget, Payload};
 
 const DGEN_ABI_VERSION_V1: u32 = 1;
 
@@ -163,17 +165,40 @@ pub struct TimedEvent {
 pub struct Transport {
     pub bar_phase: f64,
     pub bar_inc: f64,
+    /// Beats per minute, for tempo-synced modulation.
+    pub bpm: f32,
 }
 
 impl Transport {
     pub fn free_running(sample_rate: f32) -> Self {
         // 120 BPM in 4/4 when the host provides no transport.
-        Self { bar_phase: 0.0, bar_inc: 2.0 / 4.0 / sample_rate.max(1.0) as f64 }
+        Self { bar_phase: 0.0, bar_inc: 2.0 / 4.0 / sample_rate.max(1.0) as f64, bpm: 120.0 }
+    }
+}
+
+/// The newest sounding voice's modulation, for the editor: each slot's last
+/// 0..1 output and cycle phase (`-1` when its source has none).
+#[derive(Default)]
+pub struct ModDisplay {
+    values: [AtomicU32; vm::SLOT_COUNT],
+    phases: [AtomicU32; vm::SLOT_COUNT],
+}
+
+impl ModDisplay {
+    pub fn value(&self, slot: usize) -> f32 {
+        f32::from_bits(self.values[slot].load(Ordering::Relaxed))
+    }
+
+    pub fn phase(&self, slot: usize) -> f32 {
+        f32::from_bits(self.phases[slot].load(Ordering::Relaxed))
     }
 }
 
 struct Voice {
     memory: Box<[f32]>,
+    /// The voice modulator's state (`eseq-voice-mod` layout).
+    modulation: Box<[f32]>,
+    mod_prev_gate: f32,
     slot: usize,
     key: i16,
     channel: i16,
@@ -209,6 +234,19 @@ pub struct Engine {
     /// The `clock` ramp of the current span, shared by every voice.
     clock: Vec<f32>,
     note_counter: u64,
+    /// Modulator scratch: per-voice gate and trigger, the bar-phase
+    /// increment, zeroed ext inputs, and the four slot outputs.
+    mod_gate: Vec<f32>,
+    mod_trigger: Vec<f32>,
+    mod_clock_inc: Vec<f32>,
+    mod_ext: Vec<f32>,
+    mod_out: [Vec<f32>; vm::SLOT_COUNT],
+    /// Each slot's source with `(ext N)` claims pinned (`None` = from state).
+    ext_claims: [Option<usize>; vm::SLOT_COUNT],
+    /// Slots some depth lane reads (bit per slot): the app's lease rule —
+    /// an unleased slot is off unless it is an envelope.
+    leased: u8,
+    mod_display: Arc<ModDisplay>,
 }
 
 // The raw pointers are the static host-services table and pointers into this
@@ -221,7 +259,13 @@ const QUIET_RETIRE_SECONDS: f32 = 0.5;
 const QUIET_THRESHOLD: f32 = 1.0e-5;
 
 impl Engine {
-    pub fn new(payload: &Payload, lib: &DspLib, params: Arc<ParamStore>, sample_rate: f32) -> Result<Self, String> {
+    pub fn new(
+        payload: &Payload,
+        lib: &DspLib,
+        params: Arc<ParamStore>,
+        mod_display: Arc<ModDisplay>,
+        sample_rate: f32,
+    ) -> Result<Self, String> {
         let layout = payload.spec.dsp.layout.clone();
         let outputs_ok = [Some(layout.audio_left), Some(layout.audio_right), layout.amp_channel]
             .into_iter()
@@ -231,9 +275,29 @@ impl Engine {
             return Err("the DSP layout names channels outside its inputs/outputs".into());
         }
         for spec in &payload.spec.params {
-            if spec.cell + spec.span > layout.total_memory_slots {
-                return Err(format!("param '{}' cells out of range", spec.name));
+            let in_range = match spec.target {
+                ParamTarget::Cell { cell, span } => cell + span <= layout.total_memory_slots,
+                ParamTarget::Modulator { index } => index < vm::KERNEL_STATE_SIZE,
+                ParamTarget::Host => true,
+            };
+            if !in_range {
+                return Err(format!("param '{}' outside its state", spec.name));
             }
+        }
+        let n_params = payload.spec.params.len();
+        let lanes_ok = layout.mod_targets.iter().all(|t| {
+            t.base < n_params && t.depth < n_params && t.active.is_none_or(|a| a < n_params)
+        });
+        let modulators_ok = layout
+            .modulators
+            .iter()
+            .all(|m| (1..=vm::SLOT_COUNT).contains(&m.slot) && m.channel < layout.n_inputs);
+        if !lanes_ok || !modulators_ok {
+            return Err("the modulation layout names params or channels that do not exist".into());
+        }
+        let mut ext_claims = [None; vm::SLOT_COUNT];
+        for m in &layout.modulators {
+            ext_claims[m.slot - 1] = m.ext;
         }
         let slot_pool = SlotPool::global(payload.spec.dsp.voice_slots);
         let slots = slot_pool.claim(payload.spec.polyphony.max(1));
@@ -246,6 +310,8 @@ impl Engine {
             .map(|&slot| {
                 let mut voice = Voice {
                     memory: initial_state.to_vec().into_boxed_slice(),
+                    modulation: fresh_modulation(sample_rate),
+                    mod_prev_gate: 0.0,
                     slot,
                     key: -1,
                     channel: -1,
@@ -289,6 +355,14 @@ impl Engine {
             output_ptrs,
             clock: vec![0.0; max_frames],
             note_counter: 0,
+            mod_gate: vec![0.0; max_frames],
+            mod_trigger: vec![0.0; max_frames],
+            mod_clock_inc: vec![0.0; max_frames],
+            mod_ext: vec![0.0; max_frames],
+            mod_out: std::array::from_fn(|_| vec![0.0; max_frames]),
+            ext_claims,
+            leased: 0,
+            mod_display,
         };
         engine.sync_params();
         Ok(engine)
@@ -308,6 +382,8 @@ impl Engine {
     pub fn reset(&mut self) {
         for voice in &mut self.voices {
             voice.memory.copy_from_slice(&self.initial_state);
+            voice.modulation = fresh_modulation(self.sample_rate);
+            voice.mod_prev_gate = 0.0;
             if let Some(cell) = self.layout.voice_cell {
                 voice.memory[cell] = voice.slot as f32;
             }
@@ -323,12 +399,18 @@ impl Engine {
     }
 
     /// Write every param whose store value moved since the last write into
-    /// all voices (idle ones too, so a new note starts from current values).
+    /// all voices (idle ones too, so a new note starts from current values):
+    /// DSP cells, or the voice modulator's state. A moved depth lane
+    /// recomputes its destination's active flag; a moved sync, division or
+    /// retrigger setting restarts the slot cycles on the bar.
     /// Runs at block start and after a param event within the block.
     fn sync_params(&mut self) {
         if !std::mem::take(&mut self.params_dirty) {
             return;
         }
+        let first = self.applied.first().is_some_and(|v| v.is_nan());
+        let mut depth_moved = false;
+        let mut resync = false;
         for index in 0..self.specs.len() {
             let value = self.params.get(index);
             if value.to_bits() == self.applied[index].to_bits() {
@@ -336,11 +418,43 @@ impl Engine {
             }
             self.applied[index] = value;
             let spec = &self.specs[index];
+            depth_moved |= spec.section == "mod";
+            resync |= spec.resync && !first;
             let value = spec.clamp(value);
+            write_target(&mut self.voices, spec.target, value);
+        }
+        if depth_moved || first {
+            self.sync_active_flags();
+        }
+        if resync {
             for voice in &mut self.voices {
-                voice.memory[spec.cell..spec.cell + spec.span].fill(value);
+                unsafe { vm::reset_slot_cycles(voice.modulation.as_mut_ptr()) };
             }
         }
+    }
+
+    /// A destination's `__dgen_mod_active__` flag is on while any of its
+    /// lanes has depth (the app's `sync_instrument_mod_active_default`).
+    fn sync_active_flags(&mut self) {
+        let targets = std::mem::take(&mut self.layout.mod_targets);
+        self.leased = targets
+            .iter()
+            .filter(|t| self.params.get(t.depth) != 0.0 && (1..=vm::SLOT_COUNT).contains(&t.slot))
+            .fold(0, |mask, t| mask | 1 << (t.slot - 1));
+        for target in &targets {
+            let Some(active) = target.active else { continue };
+            let on = targets
+                .iter()
+                .filter(|t| t.active == Some(active))
+                .any(|t| self.params.get(t.depth) != 0.0);
+            let value = if on { 1.0 } else { 0.0 };
+            if self.params.get(active) != value {
+                self.params.set(active, value);
+            }
+            self.applied[active] = value;
+            write_target(&mut self.voices, self.specs[active].target, value);
+        }
+        self.layout.mod_targets = targets;
     }
 
     fn apply_event(&mut self, event: Event) {
@@ -466,7 +580,51 @@ impl Engine {
         transport.bar_phase = phase;
         let retire_after = (QUIET_RETIRE_SECONDS * self.sample_rate) as u32;
         let (audio_left, audio_right) = (self.layout.audio_left, self.layout.audio_right);
-        for voice in self.voices.iter_mut().filter(|v| v.active) {
+        let newest = self
+            .voices
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.active)
+            .max_by_key(|(_, v)| v.started)
+            .map(|(i, _)| i);
+        for (voice_index, voice) in self.voices.iter_mut().enumerate().filter(|(_, v)| v.active) {
+            if !self.layout.modulators.is_empty() {
+                self.mod_gate[..n].fill(if voice.gate { 1.0 } else { 0.0 });
+                self.mod_trigger[..n].fill(0.0);
+                if voice.trigger_pending {
+                    self.mod_trigger[0] = 1.0;
+                }
+                self.mod_clock_inc[..n].fill(transport.bar_inc as f32);
+                let mut outputs: [*mut f32; vm::SLOT_COUNT] = std::array::from_fn(|i| self.mod_out[i].as_mut_ptr());
+                let ext = self.mod_ext.as_mut_ptr();
+                unsafe {
+                    run_modulator(
+                        voice,
+                        &self.ext_claims,
+                        self.leased,
+                        &mut outputs,
+                        [ext; vm::EXT_INPUT_COUNT],
+                        &self.mod_gate,
+                        &self.mod_trigger,
+                        &self.clock,
+                        &self.mod_clock_inc,
+                        n,
+                        self.sample_rate,
+                        transport.bpm,
+                    );
+                }
+                for m in &self.layout.modulators {
+                    self.inputs[m.channel][..n].copy_from_slice(&self.mod_out[m.slot - 1][..n]);
+                }
+                if Some(voice_index) == newest {
+                    for slot in 0..vm::SLOT_COUNT {
+                        let value = voice.modulation[vm::STATE_DISPLAY_SLOT_VALUE + slot];
+                        let phase = voice.modulation[vm::STATE_DISPLAY_SLOT_PHASE + slot];
+                        self.mod_display.values[slot].store(value.to_bits(), Ordering::Relaxed);
+                        self.mod_display.phases[slot].store(phase.to_bits(), Ordering::Relaxed);
+                    }
+                }
+            }
             for route in &self.layout.routes {
                 let buffer = &mut self.inputs[route.channel][..n];
                 match route.signal {
@@ -538,5 +696,104 @@ impl Engine {
 impl Drop for Engine {
     fn drop(&mut self) {
         self.slot_pool.release(&self.slots);
+    }
+}
+
+fn write_target(voices: &mut [Voice], target: ParamTarget, value: f32) {
+    match target {
+        ParamTarget::Cell { cell, span } => {
+            for voice in voices {
+                voice.memory[cell..cell + span].fill(value);
+            }
+        }
+        ParamTarget::Modulator { index } => {
+            for voice in voices {
+                voice.modulation[index] = value;
+            }
+        }
+        ParamTarget::Host => {}
+    }
+}
+
+/// A voice modulator before its params are written: seeded, input-clocked
+/// (the bar phase arrives per frame, as the app's custom-engine voices get it).
+fn fresh_modulation(sample_rate: f32) -> Box<[f32]> {
+    let mut state = vec![0.0f32; vm::KERNEL_STATE_SIZE].into_boxed_slice();
+    unsafe { vm::init_state(state.as_mut_ptr(), sample_rate) };
+    state[vm::IDX_TRANSPORT_CLOCK_SOURCE] = 1.0;
+    state
+}
+
+/// One span of a voice's modulator: the four slot outputs into `outputs`
+/// (zero for an off slot), display tails updated. The graph node's process
+/// body without the app's voice identity, leases and stats.
+#[allow(clippy::too_many_arguments)]
+unsafe fn run_modulator(
+    voice: &mut Voice,
+    ext_claims: &[Option<usize>; vm::SLOT_COUNT],
+    leased: u8,
+    outputs: &mut [*mut f32; vm::SLOT_COUNT],
+    ext_inputs: [*mut f32; vm::EXT_INPUT_COUNT],
+    gate: &[f32],
+    trigger: &[f32],
+    clock: &[f32],
+    clock_inc: &[f32],
+    n: usize,
+    sample_rate: f32,
+    bpm: f32,
+) {
+    let s = voice.modulation.as_mut_ptr();
+    unsafe {
+        *s.add(vm::PARAM_BPM) = bpm.clamp(20.0, 400.0);
+        // As the app's node: an `(ext N)` claim is always ext N; a slot no
+        // depth lane reads is off, except an envelope, which follows the
+        // gate so it is in the right stage the moment a lane engages.
+        let sources: [usize; vm::SLOT_COUNT] = std::array::from_fn(|slot| match ext_claims[slot] {
+            Some(ext) => vm::SOURCE_EXT1 + ext.clamp(1, vm::EXT_INPUT_COUNT) - 1,
+            None => match vm::slot_source(s, slot) {
+                source if leased & (1 << slot) == 0 && source != vm::SOURCE_ENV => vm::SOURCE_OFF,
+                source => source,
+            },
+        });
+        for (slot, &source) in sources.iter().enumerate() {
+            if source == vm::SOURCE_OFF {
+                std::slice::from_raw_parts_mut(outputs[slot], n).fill(0.0);
+            }
+        }
+        let clock = vm::BlockTransportClock {
+            phase_in: clock.as_ptr(),
+            phase_inc_in: clock_inc.as_ptr(),
+            param_phase: 0.0,
+            param_phase_inc: 0.0,
+            event_slice_start: 0,
+        };
+        let mut bars = vm::BarTracker::load(s);
+        if sources.iter().any(|&source| source != vm::SOURCE_OFF) {
+            let mut started = true;
+            vm::render_frames(
+                s,
+                outputs.as_ptr(),
+                &ext_inputs,
+                &sources,
+                gate.as_ptr(),
+                trigger.as_ptr(),
+                &clock,
+                &mut bars,
+                &mut voice.mod_prev_gate,
+                &mut started,
+                false,
+                n,
+                sample_rate,
+                *s.add(vm::PARAM_BPM),
+            );
+        } else {
+            for i in 0..n {
+                let (phase, advancing) = clock.frame(i);
+                bars.note_frame(phase, advancing);
+            }
+            voice.mod_prev_gate = gate.get(n.wrapping_sub(1)).copied().unwrap_or(voice.mod_prev_gate);
+        }
+        bars.store(s);
+        vm::publish_slot_display_values(s, outputs.as_ptr(), n);
     }
 }
