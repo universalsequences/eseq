@@ -796,6 +796,17 @@ impl BarTracker {
         self.prev_bar_phase = bar_phase;
     }
 
+    /// Count the bar wraps of `nf` frames of `clock` without rendering them
+    /// (a block every slot sits out).
+    ///
+    /// # Safety
+    /// `clock`'s lanes, when set, must hold `nf` frames.
+    pub unsafe fn note_frames(&mut self, clock: &BlockTransportClock, nf: usize) {
+        for i in 0..nf {
+            let (phase, advancing) = unsafe { clock.frame(i) };
+            self.note_frame(phase, advancing);
+        }
+    }
 }
 
 
@@ -934,4 +945,256 @@ pub fn selected_source_settings(sources: &[(usize, &str)], mut value: impl FnMut
         }
     }
     out
+}
+
+// ── Effective values: what a modulated destination displays ─────────────
+
+/// How a destination combines its modulation with the base value. The host
+/// needs this to *display* the effective value (knob dots, curve visualizers);
+/// the DSP has always known it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ModulationMode {
+    /// `base + sum(depth * mod)`, in the destination's own units.
+    #[default]
+    Additive,
+    /// `base * 2^(sum(depth * mod))` — depth in octaves, for frequency
+    /// destinations where musical modulation has to be exponential (the
+    /// built-in Filter's cutoff). Reading such a depth as if it were additive
+    /// makes a ±4 look like ±4 Hz on a 20..20000 Hz control.
+    Octaves,
+}
+
+impl ModulationMode {
+    /// Map a DGenLisp manifest `@mod-mode`. Unknown modes fall back to
+    /// additive, which is what every generated destination but one uses;
+    /// `semitone` is additive too in practice — its one user
+    /// (`oberheim-sem`'s `osc_a_semi`) is itself a semitone-valued param, so
+    /// the modulation lands in the destination's own units.
+    pub fn from_manifest_mode(mode: &str) -> Self {
+        match mode.trim().to_ascii_lowercase().as_str() {
+            "octave" | "octaves" => Self::Octaves,
+            _ => Self::Additive,
+        }
+    }
+
+    /// Apply the mode to one already-summed modulation amount.
+    pub fn apply(self, base: f32, amount: f32) -> f32 {
+        match self {
+            Self::Additive => base + amount,
+            Self::Octaves => base * 2.0_f32.powf(amount),
+        }
+    }
+}
+
+/// Whether a depth lane's depth turns its destination's
+/// `__dgen_mod_active__` flag on.
+pub fn depth_engages(depth: f32) -> bool {
+    depth.abs() > f32::EPSILON
+}
+
+/// One destination's lane depths by slot and its combining mode, from its
+/// `(slot, depth, mode)` lanes (1-based slot; lanes whose active flag is off
+/// are the caller's to drop). Lanes with no slot or a zero or non-finite
+/// depth contribute nothing; `None` when no lane is left, so the destination
+/// shows its base. Every lane of one destination shares its mode (the DSP
+/// reads a single `(mod <dest>)`); the last contributing lane's is returned.
+pub fn lane_depths(
+    lanes: impl IntoIterator<Item = (usize, f32, ModulationMode)>,
+) -> Option<(ModulationMode, [f32; SLOT_COUNT])> {
+    let mut depths = [0.0_f32; SLOT_COUNT];
+    let mut mode = None;
+    for (slot, depth, lane_mode) in lanes {
+        if slot == 0 || slot > SLOT_COUNT || depth == 0.0 || !depth.is_finite() {
+            continue;
+        }
+        depths[slot - 1] += depth;
+        mode = Some(lane_mode);
+    }
+    mode.map(|mode| (mode, depths))
+}
+
+/// A param's range and taper, in stored units: what quantizing its
+/// effective value needs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ParamRange {
+    pub min: f32,
+    pub max: f32,
+    /// Continuous (not enum or boolean).
+    pub continuous: bool,
+    /// Log-spaced steps (`ParamScaling::Exponential`).
+    pub exponential: bool,
+}
+
+impl ParamRange {
+    /// Value → 0..1 (linear, or log-space for an exponential range above 0).
+    pub fn normalize(&self, value: f32) -> f32 {
+        let range = self.max - self.min;
+        if range <= 0.0 {
+            return 0.0;
+        }
+        if !self.exponential || self.min <= 0.0 || self.max <= 0.0 {
+            return ((value - self.min) / range).clamp(0.0, 1.0);
+        }
+        let log_min = self.min.ln();
+        let log_range = self.max.ln() - log_min;
+        if log_range <= 0.0 {
+            return 0.0;
+        }
+        ((value.max(self.min).ln() - log_min) / log_range).clamp(0.0, 1.0)
+    }
+
+    /// 0..1 → a continuous value (the inverse of [`Self::normalize`]).
+    pub fn denormalize_continuous(&self, normalized: f32) -> f32 {
+        let normalized = normalized.clamp(0.0, 1.0);
+        if !self.exponential || self.min <= 0.0 || self.max <= 0.0 {
+            return self.min + normalized * (self.max - self.min);
+        }
+        let log_min = self.min.ln();
+        (log_min + normalized * (self.max.ln() - log_min)).exp()
+    }
+
+    /// Quantize an effective value so audio-rate jitter below a pixel of
+    /// travel does not dirty the widget every tick. Quantizing in the
+    /// normalized space (log-spaced for exponential params like cutoff
+    /// frequencies) keeps the churn threshold perceptually even across the
+    /// whole range instead of stair-stepping the bottom of a decade.
+    pub fn quantize_effective(&self, value: f32) -> f64 {
+        const STEPS: f32 = 2048.0;
+        let clamped = value.clamp(self.min, self.max);
+        if !self.continuous {
+            return clamped as f64;
+        }
+        self.denormalize_continuous((self.normalize(clamped) * STEPS).round() / STEPS) as f64
+    }
+}
+
+/// A destination's displayed modulation, in stored units: the effective
+/// value, its offset from the base, and its ratio to the base (1 unless
+/// octave-modulated).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EffectiveValue {
+    pub value: f64,
+    pub offset: f64,
+    pub scale: f64,
+}
+
+impl EffectiveValue {
+    pub fn unmodulated(base: f32) -> Self {
+        Self { value: base as f64, offset: 0.0, scale: 1.0 }
+    }
+}
+
+/// Apply one destination's modulation the way its DSP does, for display.
+///
+/// `slot_values` are the modulator slots' unipolar outputs; `depths` (from
+/// [`lane_depths`]) carry the sign and the scale.
+pub fn effective_value(
+    mode: ModulationMode,
+    base: f32,
+    depths: &[f32; SLOT_COUNT],
+    slot_values: &[f32; SLOT_COUNT],
+    range: &ParamRange,
+) -> EffectiveValue {
+    let amount: f32 = (0..SLOT_COUNT).map(|slot| depths[slot] * slot_values[slot].clamp(0.0, 1.0)).sum();
+    let modulated = mode.apply(base, amount);
+    let value = if modulated == base {
+        // Modulators resting at zero settle back to the base value exactly,
+        // not to base-rounded-to-the-quantization-grid: an assigned-but-idle
+        // lane must leave a knob's dot hidden and a curve identical to the
+        // unmodulated one.
+        base as f64
+    } else {
+        // Quantization damps audio-rate jitter below a pixel of travel; the
+        // DSP clips each control to its declared range before using it, so
+        // the display sees the same bounds.
+        range.quantize_effective(modulated)
+    };
+    // The offset is derived from the same sample, so an idle destination is
+    // exactly 0.0 rather than a rounding residue. The exponential form is
+    // derived from the *published* value rather than recomputed from
+    // `2^amount`, so a knob drawing `base * scale` lands on exactly the same
+    // number a curve visualizer binds.
+    let scale = match mode {
+        ModulationMode::Octaves if base != 0.0 => value / base as f64,
+        _ => 1.0,
+    };
+    EffectiveValue { value, offset: value - base as f64, scale }
+}
+
+// ── Source selection ────────────────────────────────────────────────────
+
+/// The source reading ext input `ext` (1-4).
+pub fn ext_source(ext: usize) -> usize {
+    SOURCE_EXT1 + ext.clamp(1, EXT_INPUT_COUNT) - 1
+}
+
+/// The source each slot renders this block: a slot the patch claimed with
+/// `(ext N)` (`ext_claims[slot] = Some(N)`) is read by the DSP directly, not
+/// through a depth lane: always ext N, always on. Otherwise its `modN_source`
+/// setting, except that a slot no depth lane leases (`leased` bit per slot)
+/// is off — unless it is an envelope, which follows the gate history so it
+/// is in the right stage the moment a lease starts mid-note.
+///
+/// # Safety
+/// `s` must point at a kernel state of at least [`KERNEL_STATE_SIZE`] slots.
+pub unsafe fn effective_sources(
+    s: *const f32,
+    ext_claims: &[Option<usize>; SLOT_COUNT],
+    leased: u8,
+) -> [usize; SLOT_COUNT] {
+    std::array::from_fn(|slot| match ext_claims[slot] {
+        Some(ext) => ext_source(ext),
+        None => match unsafe { slot_source(s, slot) } {
+            source if leased & (1 << slot) == 0 && source != SOURCE_ENV => SOURCE_OFF,
+            source => source,
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RANGE: ParamRange = ParamRange { min: 0.0, max: 2000.0, continuous: true, exponential: false };
+
+    #[test]
+    fn an_idle_lane_displays_the_base_exactly() {
+        // 1234.567 is off the quantization grid: a resting modulator must not
+        // round it into a nonzero offset (a stray knob dot).
+        let (_, depths) = lane_depths([(1, 500.0, ModulationMode::Additive)]).expect("a lane");
+        let idle = effective_value(ModulationMode::Additive, 1234.567, &depths, &[0.0; SLOT_COUNT], &RANGE);
+        assert_eq!(idle, EffectiveValue { value: 1234.567f32 as f64, offset: 0.0, scale: 1.0 });
+        let moved = effective_value(ModulationMode::Additive, 1234.567, &depths, &[0.5, 0.0, 0.0, 0.0], &RANGE);
+        assert!((moved.value - 1484.567).abs() < 1.0 && moved.offset > 0.0);
+    }
+
+    #[test]
+    fn lanes_without_slot_or_depth_leave_the_destination_unmodulated() {
+        use ModulationMode::{Additive, Octaves};
+        assert_eq!(lane_depths([(0, 1.0, Octaves), (1, 0.0, Octaves), (5, 1.0, Octaves), (2, f32::NAN, Octaves)]), None);
+        // The mode is the last contributing lane's, not a dropped lane's.
+        assert_eq!(
+            lane_depths([(2, 0.25, Octaves), (2, 0.5, Octaves), (3, 0.0, Additive)]),
+            Some((Octaves, [0.0, 0.75, 0.0, 0.0]))
+        );
+    }
+
+    #[test]
+    fn octave_lanes_scale_from_the_published_value() {
+        let range = ParamRange { min: 20.0, max: 20_000.0, continuous: true, exponential: true };
+        let shown = effective_value(ModulationMode::Octaves, 1000.0, &[1.0, 0.0, 0.0, 0.0], &[1.0, 0.0, 0.0, 0.0], &range);
+        assert!((shown.value - 2000.0).abs() < 5.0);
+        assert_eq!(shown.scale, shown.value / 1000.0);
+    }
+
+    #[test]
+    fn sources_pin_ext_claims_to_their_ext_and_switch_off_unleased_slots() {
+        let mut s = vec![0.0f32; KERNEL_STATE_SIZE];
+        for (slot, source) in [SOURCE_LFO, SOURCE_ENV, SOURCE_RAND, SOURCE_DRIFT].into_iter().enumerate() {
+            s[slot_source_param_idx(slot)] = source as f32;
+        }
+        // Slot 1 claimed by `(ext 3)`; only slot 3 leased.
+        let sources = unsafe { effective_sources(s.as_ptr(), &[Some(3), None, None, None], 0b0100) };
+        assert_eq!(sources, [SOURCE_EXT3, SOURCE_ENV, SOURCE_RAND, SOURCE_OFF]);
+    }
 }

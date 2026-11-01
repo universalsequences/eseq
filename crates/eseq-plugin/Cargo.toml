@@ -10,11 +10,18 @@ description = "The prebuilt plugin shell eseq copies into every exported instrum
 # shared with the exporter in `sequencer`, and the engine tests.
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# The VST3 entry (clap-wrapper's C++ VST3 layer). On for the shell; tests in
+# other crates that only need the engine or the panel turn it off.
+default = ["vst3"]
+vst3 = ["dep:clap-wrapper"]
+
 [dependencies]
 clap-sys = "0.5"
+eseq-dgen-abi = { path = "../eseq-dgen-abi" }
 eseq-plugin-format = { path = "../eseq-plugin-format" }
 eseq-voice-mod = { path = "../eseq-voice-mod" }
-clap-wrapper = { version = "0.3.1", default-features = false, features = ["vst3", "parallel"] }
+clap-wrapper = { version = "0.3.1", default-features = false, features = ["vst3", "parallel"], optional = true }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,5 +40,3 @@ libc = "0.2"
 eseqlisp = { path = "../eseqlisp" }
 crossterm = "0.28"
 
-[build-dependencies]
-cc = "1"

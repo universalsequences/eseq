@@ -14,7 +14,7 @@ fn usage() {
          Options:\n\
            --format LIST      clap,vst3 (default: both)\n\
            --out DIR          Write bundles to DIR (default: ~/Library/Audio/Plug-Ins/<format>)\n\
-           --polyphony N      Voices per instance (default: 8 drums, 16 otherwise)\n\
+           --polyphony N      Most voices an instance may play (default: 16; instances start at 6)\n\
            --preset NAME      Plugin defaults from this preset\n\
            --param name=value Override a default; repeatable\n\
            --name NAME        Plugin display name"

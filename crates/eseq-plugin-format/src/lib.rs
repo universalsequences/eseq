@@ -2,8 +2,8 @@
 //! `Contents/Resources/eseq-payload/`. The exporter (`sequencer::plugin_export`)
 //! resolves everything the shell needs from eseq's own manifest parser into
 //! [`PluginSpec`] — params with their state cells, the DSP's input routes,
-//! audio channels and cell defaults — so the shell (`eseq-plugin`) reads plain
-//! numbers and never re-derives DGen manifest rules.
+//! audio channels and a voice's initial state — so the shell (`eseq-plugin`)
+//! reads plain numbers and never re-derives DGen manifest rules.
 
 use std::path::{Path, PathBuf};
 
@@ -13,15 +13,12 @@ use serde::{Deserialize, Serialize};
 pub const PAYLOAD_DIR: &str = "eseq-payload";
 /// The payload's identity, params and DSP layout.
 pub const SPEC_FILE: &str = "plugin.json";
-pub const SPEC_FORMAT: u32 = 1;
+pub const SPEC_FORMAT: u32 = 2;
 /// The plugin's own voice-count param (the voice-stealing pool size),
 /// appended after the instrument descriptor's params.
 pub const VOICES_PARAM: &str = "eseq:voices";
 /// The voice count a fresh instance plays with (eseq's default pool).
 pub const DEFAULT_VOICES: usize = 6;
-
-/// Slots after a voice's state span the host keeps zeroed.
-pub const STATE_REDZONE_SLOTS: usize = 256;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PluginSpec {
@@ -54,9 +51,6 @@ pub struct PluginSpec {
 pub struct DspSpec {
     /// Payload-relative path of the compiled DGen library.
     pub library: String,
-    /// Payload-relative path of its manifest; the shell reads only its
-    /// `tensorInitData` (weights baked in at compile time).
-    pub manifest: String,
     /// `--voices` the library was compiled with: the number of scratch slices
     /// in its file-scope statics. Instances of one plugin share the image, so
     /// voices claim distinct slices process-wide.
@@ -80,8 +74,10 @@ pub struct DspLayout {
     /// The `@amp` output: nonzero while a released voice still sounds.
     pub amp_channel: Option<usize>,
     pub routes: Vec<Route>,
-    /// Every manifest param's default (hidden ones included), by cell.
-    pub cell_defaults: Vec<CellDefault>,
+    /// A voice's nonzero initial cells (param defaults, then tensor data,
+    /// later runs winning), exactly as the app initializes a voice
+    /// (`lisp_host::init_state_entries`), before its voice cell is set.
+    pub init: Vec<InitRun>,
     /// The voice modulator's slots the DSP reads, with the input each feeds.
     #[serde(default)]
     pub modulators: Vec<ModulatorSpec>,
@@ -128,11 +124,26 @@ pub struct Route {
     pub signal: HostSignal,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub struct CellDefault {
-    pub cell: usize,
-    pub span: usize,
-    pub value: f32,
+/// Consecutive cells starting at `offset`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InitRun {
+    pub offset: usize,
+    pub values: Vec<f32>,
+}
+
+impl InitRun {
+    /// Coalesce `(cell, value)` entries into runs of consecutive cells,
+    /// keeping their order (a later entry for a cell still wins).
+    pub fn from_entries(entries: impl IntoIterator<Item = (usize, f32)>) -> Vec<Self> {
+        let mut runs: Vec<Self> = Vec::new();
+        for (cell, value) in entries {
+            match runs.last_mut() {
+                Some(run) if run.offset + run.values.len() == cell => run.values.push(value),
+                _ => runs.push(Self { offset: cell, values: vec![value] }),
+            }
+        }
+        runs
+    }
 }
 
 /// The per-sample host signals a DGen instrument input can ask for.
@@ -170,6 +181,9 @@ pub struct ParamSpec {
     /// A `%` param stored as a 0-1 ratio: shown and entered ×100.
     #[serde(default)]
     pub percent: bool,
+    /// Log-spaced steps (the app's `ParamScaling::Exponential`).
+    #[serde(default)]
+    pub exponential: bool,
     pub kind: ParamKind,
     pub target: ParamTarget,
     /// Panel placement: `main`, `mod` (a depth lane), `source` (a modulation
@@ -218,7 +232,27 @@ impl ParamSpec {
 
     /// The option `value` selects, for an enum param.
     pub fn option_label(&self, value: f32) -> Option<&str> {
-        self.options.get(value.round().max(0.0) as usize).map(String::as_str)
+        option_label_at(&self.options, value)
+    }
+
+    /// Host-facing text for a stored value, as eseq shows it.
+    pub fn format_value(&self, value: f32) -> String {
+        match self.kind {
+            ParamKind::Boolean => format_boolean(value),
+            ParamKind::Enum => format_enum(&self.options, value),
+            ParamKind::Continuous => format_continuous(Some(self.unit.as_str()).filter(|u| !u.is_empty()), self.to_display(value)),
+        }
+    }
+
+    /// Range, kind and taper in stored units, for the voice-mod kernel's
+    /// effective-value display.
+    pub fn range(&self) -> eseq_voice_mod::ParamRange {
+        eseq_voice_mod::ParamRange {
+            min: self.min,
+            max: self.max,
+            continuous: self.kind == ParamKind::Continuous,
+            exponential: self.exponential,
+        }
     }
 
     /// Stored → display units.
@@ -229,6 +263,37 @@ impl ParamSpec {
     /// Display → stored units.
     pub fn from_display(&self, value: f32) -> f32 {
         if self.percent { value / 100.0 } else { value }
+    }
+}
+
+// ── Value text: eseq's, shared by the app's `ParamDescriptor` ──
+
+/// The label `value` selects (rounded and clamped into the list; NaN picks
+/// the first); `None` for an empty list.
+pub fn option_label_at(labels: &[String], value: f32) -> Option<&str> {
+    let last = labels.len().checked_sub(1)?;
+    let index = if value.is_nan() { 0 } else { (value.round().max(0.0) as usize).min(last) };
+    Some(labels[index].as_str())
+}
+
+pub fn format_boolean(value: f32) -> String {
+    if value > 0.5 { "ON" } else { "OFF" }.to_string()
+}
+
+/// An enum value's label, else its index.
+pub fn format_enum(labels: &[String], value: f32) -> String {
+    let index = value.round() as usize;
+    labels.get(index).cloned().unwrap_or_else(|| format!("{index}"))
+}
+
+/// A continuous value in display units (a percent ratio already ×100).
+pub fn format_continuous(unit: Option<&str>, display: f32) -> String {
+    match unit {
+        Some("Hz") => format!("{display:.0} Hz"),
+        Some("ms") => format!("{display:.0} ms"),
+        Some("%") => format!("{display:.0}%"),
+        Some(unit) => format!("{display:.2} {unit}"),
+        None => format!("{display:.2}"),
     }
 }
 
@@ -260,26 +325,12 @@ pub fn param_id(name: &str) -> u32 {
     if hash == u32::MAX { 0x7fff_ffff } else { hash }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct TensorInit {
-    pub offset: usize,
-    pub data: Vec<f32>,
-}
-
-/// The part of a DGen manifest the shell reads.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ManifestTensors {
-    #[serde(default)]
-    tensor_init_data: Vec<TensorInit>,
-}
-
 /// A loaded payload: spec, the voice's initial state and resolved paths.
 pub struct Payload {
     pub dir: PathBuf,
     pub spec: PluginSpec,
-    /// One voice's state before its voice cell is set: param defaults and
-    /// tensor data, plus the zeroed redzone.
+    /// One voice's state before its voice cell is set, plus the zeroed
+    /// redzone.
     pub initial_state: Vec<f32>,
 }
 
@@ -292,10 +343,7 @@ impl Payload {
         if spec.format != SPEC_FORMAT {
             return Err(format!("unsupported payload format {}", spec.format));
         }
-        let manifest_path = dir.join(&spec.dsp.manifest);
-        let tensors: ManifestTensors = serde_json::from_slice(&read(&manifest_path)?)
-            .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
-        let initial_state = initial_state(&spec.dsp.layout, &tensors.tensor_init_data);
+        let initial_state = initial_state(&spec.dsp.layout);
         Ok(Self { dir: dir.to_path_buf(), spec, initial_state })
     }
 
@@ -310,21 +358,33 @@ impl Payload {
     }
 }
 
-/// Zeroed state with the param defaults and tensor data written in.
-pub fn initial_state(layout: &DspLayout, tensors: &[TensorInit]) -> Vec<f32> {
+/// Zeroed state (plus the redzone) with the layout's init runs written in.
+pub fn initial_state(layout: &DspLayout) -> Vec<f32> {
     let total = layout.total_memory_slots;
-    let mut memory = vec![0.0f32; total + STATE_REDZONE_SLOTS];
-    for default in &layout.cell_defaults {
-        let end = (default.cell + default.span).min(total);
-        if default.cell < end {
-            memory[default.cell..end].fill(default.value);
-        }
-    }
-    for tensor in tensors {
-        let end = (tensor.offset + tensor.data.len()).min(total);
-        if tensor.offset < end {
-            memory[tensor.offset..end].copy_from_slice(&tensor.data[..end - tensor.offset]);
+    let mut memory = vec![0.0f32; total + eseq_dgen_abi::DGEN_STATE_REDZONE_SLOTS];
+    for run in &layout.init {
+        let end = (run.offset + run.values.len()).min(total);
+        if run.offset < end {
+            memory[run.offset..end].copy_from_slice(&run.values[..end - run.offset]);
         }
     }
     memory
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_runs_coalesce_consecutive_cells_in_order() {
+        let runs = InitRun::from_entries([(2, 1.0), (3, 2.0), (7, 3.0), (3, 4.0)]);
+        assert_eq!(
+            runs,
+            [
+                InitRun { offset: 2, values: vec![1.0, 2.0] },
+                InitRun { offset: 7, values: vec![3.0] },
+                InitRun { offset: 3, values: vec![4.0] },
+            ]
+        );
+    }
 }

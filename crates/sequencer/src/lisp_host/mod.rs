@@ -19,9 +19,9 @@ never name the submodules directly (the lone exception is the
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::io::{self, Write};
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_int, c_void};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

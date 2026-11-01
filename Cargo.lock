@@ -1119,13 +1119,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "eseq-plugin"
+name = "eseq-dgen-abi"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "libc",
+]
+
+[[package]]
+name = "eseq-plugin"
+version = "0.1.0"
+dependencies = [
  "clap-sys",
  "clap-wrapper",
  "crossterm",
+ "eseq-dgen-abi",
  "eseq-plugin-format",
  "eseq-voice-mod",
  "eseqlisp",
@@ -1142,6 +1150,8 @@ dependencies = [
 name = "eseq-plugin-format"
 version = "0.1.0"
 dependencies = [
+ "eseq-dgen-abi",
+ "eseq-voice-mod",
  "serde",
  "serde_json",
 ]
@@ -3535,6 +3545,8 @@ dependencies = [
  "cpal",
  "crossbeam-queue",
  "crossterm",
+ "eseq-dgen-abi",
+ "eseq-plugin",
  "eseq-plugin-format",
  "eseq-voice-mod",
  "eseqlisp",

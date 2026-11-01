@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/eseq-dgen-abi",
     "crates/eseq-plugin",
     "crates/eseq-plugin-format",
     "crates/eseq-voice-mod",

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use eseq_plugin_format::{
-    CellDefault, DspLayout, DspSpec, HostSignal, ModTargetSpec, ModulatorSpec, PAYLOAD_DIR,
+    DspLayout, DspSpec, HostSignal, InitRun, ModTargetSpec, ModulatorSpec, PAYLOAD_DIR,
     ParamKind as PluginParamKind, ParamSpec, ParamTarget, PluginSpec, Route, SPEC_FILE, SPEC_FORMAT,
     UiSpec, DEFAULT_VOICES, VOICES_PARAM,
 };
@@ -18,9 +18,6 @@ use eseq_plugin_format::{
 use crate::effects::panel_section::PanelSection;
 use crate::effects::{EffectDescriptor, ModulationMode, ParamKind};
 use crate::lisp_host::{DGenCompileKind, DGenManifest};
-
-// The shell zeroes the same redzone after each voice's state as the app.
-const _: () = assert!(crate::lisp_host::DGEN_STATE_REDZONE_SLOTS == eseq_plugin_format::STATE_REDZONE_SLOTS);
 
 /// Scratch slices the exported DGen image is compiled with. Every instance of
 /// one plugin shares the image, and each sounding voice needs its own slice,
@@ -159,9 +156,9 @@ fn resolve_instrument(target: &str) -> Result<InstrumentSource, String> {
 fn logical_instrument_name(id: &str) -> String {
     let logical = match crate::app_paths::ContentTier::parse_id(id) {
         Ok(Some((_, path))) => path,
-        _ => id.trim_end_matches('/'),
+        _ => id,
     };
-    logical.split('@').next().unwrap_or(logical).to_string()
+    crate::app_paths::ContentTier::split_release(logical).0.to_string()
 }
 
 /// `content/instruments/Drums/Latent Kick` → `Drums/Latent Kick`.
@@ -234,6 +231,7 @@ fn param_specs(desc: &EffectDescriptor) -> Vec<ParamSpec> {
                 unit: p.kind.unit().unwrap_or_default().to_string(),
                 options,
                 percent: p.is_percent(),
+                exponential: p.range().exponential,
                 kind,
                 target,
                 section: section.name().to_string(),
@@ -286,12 +284,7 @@ fn dsp_layout(manifest: &DGenManifest, desc: &EffectDescriptor, raw: &serde_json
         audio_right: audio_right.copied().unwrap_or(audio_left),
         amp_channel: manifest.amp_output_channel.filter(|&c| c < manifest.n_outputs),
         routes,
-        cell_defaults: manifest
-            .params
-            .iter()
-            .filter(|p| p.default != 0.0)
-            .map(|p| CellDefault { cell: p.cell_id, span: p.cell_span, value: p.default })
-            .collect(),
+        init: InitRun::from_entries(crate::lisp_host::init_state_entries(manifest)),
         modulators: manifest
             .modulators
             .iter()
@@ -314,8 +307,8 @@ fn dsp_layout(manifest: &DGenManifest, desc: &EffectDescriptor, raw: &serde_json
     })
 }
 
-/// Compile the instrument for plugin use into `dir` (`instrument.<ext>` +
-/// `instrument.json`, the host manifest with `tensorInitData`) and parse it.
+/// Compile the instrument for plugin use into `dir` (`instrument.<ext>`, plus
+/// by-products) and resolve its descriptor and layout from the manifest.
 fn compile_for_plugin(source: &InstrumentSource, dir: &Path) -> Result<(EffectDescriptor, DspLayout), String> {
     let effective = crate::lisp_host::effective_dgen_source(DGenCompileKind::Instrument, &source.dsp, COMPILE_SAMPLE_RATE)?;
     let json = crate::lisp_host::compile_effective_dgen_source_to_dir_with_voices(
@@ -379,20 +372,6 @@ fn info_plist(spec: &PluginSpec, executable: &str, format: PluginFormat) -> Stri
     )
 }
 
-fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
-    for entry in std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let target = to.join(entry.file_name());
-        if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
-            copy_dir(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), &target).map_err(|e| format!("{}: {e}", target.display()))?;
-        }
-    }
-    Ok(())
-}
-
 /// Ad-hoc sign: inner DSP library first, then the bundle. Exporting rewrites
 /// the bundle, so any release signature on the shell cannot survive; ad-hoc
 /// is what hosts on this Mac need (spec §11).
@@ -432,11 +411,12 @@ fn build_payload(
 ) -> Result<PluginSpec, String> {
     let dsp_dir = payload.join("dsp");
     let (desc, layout) = compile_for_plugin(source, &dsp_dir)?;
-    // Only the library and the host manifest ship; drop compile by-products.
+    // Only the library ships (its init state is in the spec); drop the
+    // manifest and the other compile by-products.
     let library = library_file();
     for entry in std::fs::read_dir(&dsp_dir).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
-        let keep = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == library || n == "instrument.json");
+        let keep = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == library);
         if !keep {
             let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
         }
@@ -453,6 +433,7 @@ fn build_payload(
         unit: String::new(),
         options: Vec::new(),
         percent: false,
+        exponential: false,
         kind: PluginParamKind::Continuous,
         target: ParamTarget::Host,
         section: "hidden".into(),
@@ -511,7 +492,6 @@ fn build_payload(
         features: features.into_iter().map(str::to_string).collect(),
         dsp: DspSpec {
             library: format!("dsp/{library}"),
-            manifest: "dsp/instrument.json".into(),
             voice_slots: VOICE_SLOTS,
             layout,
         },
@@ -549,7 +529,8 @@ fn build_ui_payload(source: &InstrumentSource, payload: &Path) -> Result<Option<
     let ui_dir = payload.join("ui");
     let content = ui_dir.join("content");
     for dir in UI_RUNTIME_DIRS {
-        copy_dir(&factory.join(dir), &content.join(dir))?;
+        // Unfiltered, symlinks skipped (factory content has none).
+        crate::package_install::copy_dir_recursive(&factory.join(dir), &content.join(dir))?;
     }
     let instrument_rel = Path::new("instruments").join(&source.content_rel);
     crate::package_export::copy_dir_filtered(&source.dir, &content.join(&instrument_rel))?;
@@ -637,7 +618,9 @@ fn write_bundle(
     std::fs::write(contents.join("Info.plist"), info_plist(spec, &executable, format)).map_err(|e| e.to_string())?;
     std::fs::write(contents.join("PkgInfo"), "BNDL????").map_err(|e| e.to_string())?;
     let resources_payload = contents.join("Resources").join(PAYLOAD_DIR);
-    copy_dir(payload, &resources_payload)?;
+    // Unfiltered (the payload carries the DSP dylib); symlinks skipped, and
+    // the exporter writes none.
+    crate::package_install::copy_dir_recursive(payload, &resources_payload)?;
     codesign(&building, &[resources_payload.join(&spec.dsp.library)])?;
     match std::fs::remove_dir_all(&bundle) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -666,12 +649,81 @@ mod tests {
     fn tier_and_release_pins_do_not_change_the_logical_name() {
         assert_eq!(logical_instrument_name("factory:Drums/Latent Kick@2"), "Drums/Latent Kick");
         assert_eq!(logical_instrument_name("Drums/Latent Kick/"), "Drums/Latent Kick");
+        // Only a trailing `@<digits>` is a release pin.
+        assert_eq!(logical_instrument_name("user:Synths/Me@Home"), "Synths/Me@Home");
     }
 
     #[test]
     fn plugin_ids_are_stable_slugs() {
         assert_eq!(plugin_id_for("Drums/Latent Kick Morph"), "com.universalsequences.eseq.drums-latent-kick-morph");
         assert_eq!(slug("  Hello,  World!! "), "hello-world");
+    }
+
+    /// The plugin panel stubs every app native (`eseq-plugin/src/app_natives.rs`,
+    /// generated by `tools/gen_app_natives.py`); a native added since would
+    /// fail its callback with an unknown variable inside the plugin.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn plugin_app_native_stubs_cover_every_app_native() {
+        fn scan(dir: &Path, names: &mut std::collections::BTreeSet<String>) {
+            for entry in std::fs::read_dir(dir).expect("read src") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    scan(&path, names);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("read source");
+                    let mut pieces = text.split("register_native(");
+                    let mut before = pieces.next().unwrap_or_default();
+                    for rest in pieces {
+                        // `"register_native("` inside a string literal (this
+                        // test) is not a registration.
+                        let quoted = std::mem::replace(&mut before, rest).ends_with('"');
+                        let rest = rest.trim_start();
+                        if quoted {
+                            continue;
+                        }
+                        if let Some(name) = rest.strip_prefix('"').and_then(|r| r.split('"').next()) {
+                            names.insert(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let mut app = std::collections::BTreeSet::new();
+        scan(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut app);
+        let stubbed: std::collections::BTreeSet<String> =
+            eseq_plugin::app_natives::APP_NATIVES.iter().map(|n| n.to_string()).collect();
+        assert_eq!(
+            app.difference(&stubbed).collect::<Vec<_>>(),
+            Vec::<&String>::new(),
+            "app natives the plugin does not stub: run crates/eseq-plugin/tools/gen_app_natives.py"
+        );
+    }
+
+    /// The exported panel's kinds cover every `:host` field `eseq.kinds`
+    /// declares for the instrument panel (or name it app-only), and the
+    /// payload's init runs are the app's voice init.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn exported_payload_boots_a_panel_publishing_every_panel_kind_field() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let payload_dir = dir.path().join(PAYLOAD_DIR);
+        std::fs::create_dir_all(&payload_dir).expect("payload dir");
+        let source = resolve_instrument("Drums/808 Kick").expect("instrument");
+        build_payload(&source, &ExportOptions::new("Drums/808 Kick"), &payload_dir).expect("payload");
+        let payload = eseq_plugin_format::Payload::load(&payload_dir).expect("load payload");
+        assert!(!payload.spec.dsp.layout.init.is_empty(), "the voice starts from its param defaults");
+
+        let params = std::sync::Arc::new(eseq_plugin::engine::ParamStore::new(
+            payload.spec.params.iter().map(|p| p.default),
+        ));
+        let display = std::sync::Arc::new(eseq_plugin::engine::ModDisplay::default());
+        let panel = eseq_plugin::panel::PanelHost::boot(&payload, params, display, 2.0).expect("panel boots");
+        assert_eq!(
+            panel.unpublished_host_fields(),
+            &[] as &[String],
+            "publish these in eseq-plugin's panel.rs (publish_kinds) or list them in APP_ONLY_HOST_FIELDS"
+        );
     }
 
     #[test]

@@ -10,6 +10,7 @@
 //! routed through `apply_command` for uniformity — they just don't trigger a
 //! publish.
 
+use crate::instruments::voice_modulator::depth_engages;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -41,11 +42,11 @@ fn sync_instrument_mod_active_default(app: &mut App, track: usize, changed_param
         .iter()
         .filter(|target| target.active_param_idx == Some(active_param_idx))
         .any(|target| {
-            app.state.pattern.instrument_slots[track]
-                .defaults
-                .get(target.depth_param_idx)
-                .abs()
-                > f32::EPSILON
+            depth_engages(
+                app.state.pattern.instrument_slots[track]
+                    .defaults
+                    .get(target.depth_param_idx),
+            )
         });
     let value = if active { 1.0 } else { 0.0 };
     let slot = &app.state.pattern.instrument_slots[track];
@@ -84,11 +85,11 @@ fn sync_instrument_mod_active_plock(
         return;
     }
     let active = targets.iter().any(|target| {
-            slot.plocks
-                .get(step, target.depth_param_idx)
-                .unwrap_or_else(|| slot.defaults.get(target.depth_param_idx))
-                .abs()
-                > f32::EPSILON
+            depth_engages(
+                slot.plocks
+                    .get(step, target.depth_param_idx)
+                    .unwrap_or_else(|| slot.defaults.get(target.depth_param_idx)),
+            )
         });
     slot.set_plock(step, active_param_idx, if active { 1.0 } else { 0.0 });
 }
@@ -124,11 +125,11 @@ fn sync_instrument_mod_active_key_lock(
         return;
     }
     let active = targets.iter().any(|target| {
-            slot.key_locks
-                .get(note, target.depth_param_idx)
-                .unwrap_or_else(|| slot.defaults.get(target.depth_param_idx))
-                .abs()
-                > f32::EPSILON
+            depth_engages(
+                slot.key_locks
+                    .get(note, target.depth_param_idx)
+                    .unwrap_or_else(|| slot.defaults.get(target.depth_param_idx)),
+            )
         });
     slot.set_key_lock(note, active_param_idx, if active { 1.0 } else { 0.0 });
 }
@@ -173,7 +174,7 @@ fn sync_effect_mod_active_default(
         .instrument_modulation_targets
         .iter()
         .filter(|target| target.active_param_idx == Some(active_param_idx))
-        .any(|target| slot.defaults.get(target.depth_param_idx).abs() > f32::EPSILON);
+        .any(|target| depth_engages(slot.defaults.get(target.depth_param_idx)));
     let value = if active { 1.0 } else { 0.0 };
     slot.defaults.set(active_param_idx, value);
     app.send_slot_param(track, slot_idx, active_param_idx, value);
@@ -219,11 +220,11 @@ fn sync_effect_mod_active_plock(
         return;
     }
     let active = targets.iter().any(|target| {
-            slot.plocks
-                .get(step, target.depth_param_idx)
-                .unwrap_or_else(|| slot.defaults.get(target.depth_param_idx))
-                .abs()
-                > f32::EPSILON
+            depth_engages(
+                slot.plocks
+                    .get(step, target.depth_param_idx)
+                    .unwrap_or_else(|| slot.defaults.get(target.depth_param_idx)),
+            )
         });
     slot.set_plock(step, active_param_idx, if active { 1.0 } else { 0.0 });
 }

@@ -932,7 +932,7 @@ pub(in crate::lisp_host) fn append_dgen_modulation_target_params(
                 .any(|candidate| {
                     desc.params
                         .get(candidate.depth_param_idx)
-                        .map(|param| param.default.abs() > f32::EPSILON)
+                        .map(|param| crate::instruments::voice_modulator::depth_engages(param.default))
                         .unwrap_or(false)
                 });
             if let Some(param) = desc.params.get_mut(active_param_idx) {
@@ -945,39 +945,11 @@ pub(in crate::lisp_host) fn append_dgen_modulation_target_params(
 // ── Load dylib ──
 
 pub fn load_dylib(path: &Path) -> Result<LoadedDGenLib, String> {
-    let c_path =
-        CString::new(path.to_str().ok_or("Invalid dylib path")?).map_err(|e| e.to_string())?;
-
-    unsafe {
-        let handle = dlopen(c_path.as_ptr(), RTLD_NOW);
-        if handle.is_null() {
-            let err = CStr::from_ptr(dlerror()).to_string_lossy().to_string();
-            return Err(format!("dlopen failed: {err}"));
-        }
-
-        let process_sym = CString::new("dgen_process_v1").unwrap();
-        let process_ptr = dlsym(handle, process_sym.as_ptr());
-        if process_ptr.is_null() {
-            let err = CStr::from_ptr(dlerror()).to_string_lossy().to_string();
-            return Err(format!("dlsym 'dgen_process_v1' failed: {err}"));
-        }
-
-        // The v1 export set also includes dgen_set_param_value_v1 (a no-op
-        // stub today — ESeq writes state memory directly). Resolve it so a
-        // dylib missing the export is caught at load, keeping the export
-        // audit and a future non-stub implementation honest.
-        let set_param_sym = CString::new("dgen_set_param_value_v1").unwrap();
-        let set_param_ptr = dlsym(handle, set_param_sym.as_ptr());
-        if set_param_ptr.is_null() {
-            let err = CStr::from_ptr(dlerror()).to_string_lossy().to_string();
-            return Err(format!("dlsym 'dgen_set_param_value_v1' failed: {err}"));
-        }
-
-        Ok(LoadedDGenLib {
-            process_fn: std::mem::transmute(process_ptr),
-            _handle: handle,
-        })
-    }
+    let lib = eseq_dgen_abi::open_library(path, libc::RTLD_NOW)?;
+    Ok(LoadedDGenLib {
+        process_fn: lib.process,
+        _handle: lib.handle,
+    })
 }
 
 /// Load a compiled DGen dylib and, when it needs one, run a short warm-up
@@ -1104,7 +1076,7 @@ pub(in crate::lisp_host) fn prewarm_dgen_process_with_host_services(
 /// builders (which ship them to the audio thread as sparse pairs) and by the
 /// warm-up render (which writes them straight into its scratch span), so a
 /// warmed-up dylib sees the same state a live node does.
-pub(in crate::lisp_host) fn init_state_entries(manifest: &DGenManifest) -> Vec<(usize, f32)> {
+pub fn init_state_entries(manifest: &DGenManifest) -> Vec<(usize, f32)> {
     let mut entries: Vec<(usize, f32)> = Vec::new();
 
     for param in &manifest.params {

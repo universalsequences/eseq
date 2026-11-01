@@ -938,4 +938,108 @@ mod tests {
         assert_eq!(trigger, [0.0; 4]);
         assert_eq!(gate, [0.0; 4]);
     }
+
+    /// An exported plugin's engine (`eseq-plugin`) synthesizes the same
+    /// per-voice control lanes for a DGen instrument as this node does in the
+    /// app: one note through both, compared lane by lane through a
+    /// passthrough DSP (each input copied to the same output).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn plugin_engine_voice_lanes_match_gatepitch() {
+        use eseq_plugin::engine::{DspLib, Engine, Event, ModDisplay, NoteEvent, ParamStore, TimedEvent, Transport};
+        use eseq_plugin_format as pf;
+        const FRAMES: usize = 8;
+        const LANES: [(pf::HostSignal, usize); 5] = [
+            (pf::HostSignal::Gate, OUTPUT_GATE),
+            (pf::HostSignal::Pitch, OUTPUT_PITCH),
+            (pf::HostSignal::Velocity, OUTPUT_VELOCITY),
+            (pf::HostSignal::Trigger, OUTPUT_TRIGGER),
+            (pf::HostSignal::NoteOn, OUTPUT_NOTE_ON),
+        ];
+        let (note_on, gate_off) = (2u32, 6u32);
+
+        let mut app = [[0.0_f32; FRAMES]; OUTPUT_COUNT];
+        let pointers = app.each_mut().map(|output| output.as_mut_ptr());
+        let mut state = [0.0_f32; GATEPITCH_STATE_SIZE];
+        unsafe {
+            gatepitch_init(state.as_mut_ptr().cast(), 48_000, FRAMES as c_int, std::ptr::null());
+            gatepitch_begin_event_slice(state.as_mut_ptr().cast(), 1, 0, FRAMES as c_int);
+            for change in [event(note_on, GBE_NOTE_ON, &[440.0, 0.5]), event(gate_off, GBE_GATE_OFF, &[])] {
+                assert!(gatepitch_schedule_event(state.as_mut_ptr().cast(), &change));
+            }
+            gatepitch_process(std::ptr::null(), pointers.as_ptr(), FRAMES as c_int,
+                state.as_mut_ptr().cast(), std::ptr::null_mut());
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let c_path = dir.path().join("passthrough.c");
+        let dylib = dir.path().join("passthrough.dylib");
+        std::fs::write(&c_path, format!(r#"
+#include <stdint.h>
+__attribute__((visibility("default"))) void dgen_process_v1(
+    const float *const *in, float *const *out, uint32_t n, void *state, const void *ctx, const void *host) {{
+  for (int ch = 0; ch < {lanes}; ch++) for (uint32_t i = 0; i < n; i++) out[ch][i] = in[ch][i];
+}}
+__attribute__((visibility("default"))) void dgen_set_param_value_v1(int32_t cell, float value) {{}}
+"#, lanes = LANES.len())).expect("write passthrough source");
+        let built = std::process::Command::new("cc")
+            .args(["-dynamiclib", "-O1", "-o"]).arg(&dylib).arg(&c_path)
+            .output().expect("run cc");
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let lib = DspLib::open(&dylib).expect("open passthrough");
+
+        // The plugin mixes two channels to its bus: read the lanes in pairs.
+        let render = |left: usize, right: usize| {
+            let layout = pf::DspLayout {
+                total_memory_slots: 4,
+                voice_cell: None,
+                max_frames: FRAMES,
+                n_inputs: LANES.len(),
+                n_outputs: LANES.len(),
+                audio_left: left,
+                audio_right: right,
+                amp_channel: None,
+                routes: LANES.iter().enumerate().map(|(channel, &(signal, _))| pf::Route { channel, signal }).collect(),
+                init: Vec::new(),
+                modulators: Vec::new(),
+                mod_targets: Vec::new(),
+            };
+            let spec = pf::PluginSpec {
+                format: pf::SPEC_FORMAT,
+                id: "test.passthrough".into(),
+                name: "passthrough".into(),
+                vendor: String::new(),
+                version: String::new(),
+                description: String::new(),
+                url: String::new(),
+                features: Vec::new(),
+                dsp: pf::DspSpec { library: String::new(), voice_slots: 4, layout },
+                polyphony: 1,
+                params: Vec::new(),
+                ui: None,
+                source_instrument: String::new(),
+            };
+            let payload = pf::Payload { dir: dir.path().into(), initial_state: pf::initial_state(&spec.dsp.layout), spec };
+            let mut engine = Engine::new(
+                &payload, &lib, std::sync::Arc::new(ParamStore::new([])),
+                std::sync::Arc::new(ModDisplay::default()), 48_000.0,
+            ).expect("engine");
+            let events = [
+                TimedEvent { frame: note_on, event: Event::Note(NoteEvent::On { key: 69, channel: 0, note_id: -1, velocity: 0.5 }) },
+                TimedEvent { frame: gate_off, event: Event::Note(NoteEvent::Off { key: 69, channel: 0, note_id: -1 }) },
+            ];
+            let (mut l, mut r) = ([0.0_f32; FRAMES], [0.0_f32; FRAMES]);
+            engine.process(&mut l, &mut r, &events, &mut Transport::free_running(48_000.0));
+            (l, r)
+        };
+        for pair in [[0, 1], [2, 3], [4, 4]] {
+            let (l, r) = render(pair[0], pair[1]);
+            for (lane, plugin) in [(pair[0], l), (pair[1], r)] {
+                let (signal, output) = LANES[lane];
+                // Before the note no plugin voice sounds; from it on, every
+                // lane is the app's.
+                assert_eq!(&plugin[note_on as usize..], &app[output][note_on as usize..], "{signal:?}");
+            }
+        }
+    }
 }

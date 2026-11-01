@@ -12,10 +12,11 @@ pub mod shell;
 #[cfg(target_os = "macos")]
 pub mod editor;
 #[cfg(target_os = "macos")]
-mod app_natives;
+pub mod app_natives;
 #[cfg(target_os = "macos")]
 pub mod panel;
 
 pub use shell::clap_entry;
 
+#[cfg(feature = "vst3")]
 clap_wrapper::export_vst3!();

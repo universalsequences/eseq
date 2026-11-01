@@ -3,42 +3,15 @@
 //! and param writes into voice state. Nothing here allocates after
 //! [`Engine::new`]; `process` is real-time safe.
 
-use std::ffi::{CString, c_void};
+use std::ffi::c_void;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use eseq_dgen_abi::{DGenHostServicesV1, DGenProcessContextV1, DGenProcessFn};
 use eseq_voice_mod as vm;
 
 use crate::payload::{DspLayout, HostSignal, ParamSpec, ParamTarget, Payload};
-
-const DGEN_ABI_VERSION_V1: u32 = 1;
-
-#[repr(C)]
-pub struct DGenProcessContextV1 {
-    pub abi_version: u32,
-    pub struct_size: u32,
-    pub sample_rate: f32,
-    pub reserved: u32,
-}
-
-#[repr(C)]
-pub struct DGenHostServicesV1 {
-    _private: [u8; 0],
-}
-
-pub type DGenProcessFn = unsafe extern "C" fn(
-    *const *const f32,
-    *const *mut f32,
-    u32,
-    *mut c_void,
-    *const DGenProcessContextV1,
-    *const DGenHostServicesV1,
-);
-
-unsafe extern "C" {
-    fn eseq_dgen_host_services_v1() -> *const DGenHostServicesV1;
-}
 
 /// A dlopen'ed DGen library. Kept open for the life of the process: instances
 /// come and go, and the image's scratch statics are shared by all of them.
@@ -48,21 +21,19 @@ pub struct DspLib {
 
 impl DspLib {
     pub fn open(path: &Path) -> Result<Self, String> {
-        let c_path = CString::new(path.as_os_str().as_encoded_bytes())
-            .map_err(|_| format!("bad library path {}", path.display()))?;
-        unsafe {
-            let handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
-            if handle.is_null() {
-                let err = std::ffi::CStr::from_ptr(libc::dlerror()).to_string_lossy().into_owned();
-                return Err(format!("dlopen {}: {err}", path.display()));
-            }
-            let sym = libc::dlsym(handle, c"dgen_process_v1".as_ptr());
-            if sym.is_null() {
-                return Err(format!("{} exports no dgen_process_v1", path.display()));
-            }
-            Ok(Self { process: std::mem::transmute::<*mut c_void, DGenProcessFn>(sym) })
-        }
+        let lib = eseq_dgen_abi::open_library(path, libc::RTLD_NOW | libc::RTLD_LOCAL)?;
+        Ok(Self { process: lib.process })
     }
+}
+
+/// The host-services table: Accelerate on Apple, as the app's; elsewhere the
+/// portable C kernel (the app's rustfft table lives in `sequencer`; the shell
+/// ships on macOS only).
+fn host_services() -> *const DGenHostServicesV1 {
+    #[cfg(target_vendor = "apple")]
+    return eseq_dgen_abi::accelerate_host_services_v1();
+    #[cfg(not(target_vendor = "apple"))]
+    return eseq_dgen_abi::portable_host_services_v1();
 }
 
 /// The voice-scratch slices of the shared DGen image. Generated code indexes
@@ -341,7 +312,7 @@ impl Engine {
         let specs = payload.spec.params.clone();
         let mut engine = Self {
             process: lib.process,
-            host_services: unsafe { eseq_dgen_host_services_v1() },
+            host_services: host_services(),
             sample_rate,
             layout,
             initial_state,
@@ -455,7 +426,9 @@ impl Engine {
     }
 
     /// A destination's `__dgen_mod_active__` flag is on while any of its
-    /// lanes has depth (the app's `sync_instrument_mod_active_default`).
+    /// lanes has depth (`depth_engages`, as the app's
+    /// `sync_instrument_mod_active_default`). A slot is leased while any lane
+    /// reading it is nonzero (the app's `leased_slots`).
     fn sync_active_flags(&mut self) {
         let targets = std::mem::take(&mut self.layout.mod_targets);
         self.leased = targets
@@ -467,7 +440,7 @@ impl Engine {
             let on = targets
                 .iter()
                 .filter(|t| t.active == Some(active))
-                .any(|t| self.params.get(t.depth) != 0.0);
+                .any(|t| vm::depth_engages(self.params.get(t.depth)));
             let value = if on { 1.0 } else { 0.0 };
             if self.params.get(active) != value {
                 self.params.set(active, value);
@@ -588,12 +561,7 @@ impl Engine {
 
     fn render_span(&mut self, out_l: &mut [f32], out_r: &mut [f32], transport: &mut Transport) {
         let n = out_l.len();
-        let context = DGenProcessContextV1 {
-            abi_version: DGEN_ABI_VERSION_V1,
-            struct_size: std::mem::size_of::<DGenProcessContextV1>() as u32,
-            sample_rate: self.sample_rate,
-            reserved: 0,
-        };
+        let context = DGenProcessContextV1::v1(self.sample_rate);
         let mut phase = transport.bar_phase;
         for sample in &mut self.clock[..n] {
             *sample = phase as f32;
@@ -748,7 +716,8 @@ fn fresh_modulation(sample_rate: f32) -> Box<[f32]> {
 
 /// One span of a voice's modulator: the four slot outputs into `outputs`
 /// (zero for an off slot), display tails updated. The graph node's process
-/// body without the app's voice identity, leases and stats.
+/// body without the app's voice identity and stats; the source choice and
+/// the skipped-block bar count are the kernel's, shared with it.
 #[allow(clippy::too_many_arguments)]
 unsafe fn run_modulator(
     voice: &mut Voice,
@@ -767,16 +736,7 @@ unsafe fn run_modulator(
     let s = voice.modulation.as_mut_ptr();
     unsafe {
         *s.add(vm::PARAM_BPM) = bpm.clamp(20.0, 400.0);
-        // As the app's node: an `(ext N)` claim is always ext N; a slot no
-        // depth lane reads is off, except an envelope, which follows the
-        // gate so it is in the right stage the moment a lane engages.
-        let sources: [usize; vm::SLOT_COUNT] = std::array::from_fn(|slot| match ext_claims[slot] {
-            Some(ext) => vm::SOURCE_EXT1 + ext.clamp(1, vm::EXT_INPUT_COUNT) - 1,
-            None => match vm::slot_source(s, slot) {
-                source if leased & (1 << slot) == 0 && source != vm::SOURCE_ENV => vm::SOURCE_OFF,
-                source => source,
-            },
-        });
+        let sources = vm::effective_sources(s, ext_claims, leased);
         for (slot, &source) in sources.iter().enumerate() {
             if source == vm::SOURCE_OFF {
                 std::slice::from_raw_parts_mut(outputs[slot], n).fill(0.0);
@@ -809,10 +769,7 @@ unsafe fn run_modulator(
                 *s.add(vm::PARAM_BPM),
             );
         } else {
-            for i in 0..n {
-                let (phase, advancing) = clock.frame(i);
-                bars.note_frame(phase, advancing);
-            }
+            bars.note_frames(&clock, n);
             voice.mod_prev_gate = gate.get(n.wrapping_sub(1)).copied().unwrap_or(voice.mod_prev_gate);
         }
         bars.store(s);

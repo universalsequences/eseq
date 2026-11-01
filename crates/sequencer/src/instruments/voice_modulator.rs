@@ -1,7 +1,7 @@
 //! Per-voice modulation DSP and modulation-parameter metadata.
 
 use std::os::raw::{c_int, c_void};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 use crate::audiograph::NodeVTable;
 use crate::effects::output_lanes::OutputLanes;
@@ -109,25 +109,28 @@ static CUSTOM_ENGINE_DISABLED_FRAMES: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
     [INIT; MAX_INSTRUMENT_ENGINES]
 };
-/// Per custom engine, a bit per slot whose patch read it with `(ext N)`:
-/// that slot's source is ext N whatever its source param says.
-static CUSTOM_ENGINE_EXT_CLAIMS: [AtomicU8; MAX_INSTRUMENT_ENGINES] = {
-    const INIT: AtomicU8 = AtomicU8::new(0);
+/// Per custom engine, the ext input each slot's patch read it with
+/// `(ext N)`: a nibble per slot, 0 for an unclaimed slot. A claimed slot's
+/// source is ext N whatever its source param says.
+static CUSTOM_ENGINE_EXT_CLAIMS: [AtomicU16; MAX_INSTRUMENT_ENGINES] = {
+    const INIT: AtomicU16 = AtomicU16::new(0);
     [INIT; MAX_INSTRUMENT_ENGINES]
 };
 
-/// Publish which of `engine_id`'s slots its patch claimed with `(ext N)`
-/// (`claimed_slots` are 1-based). Called whenever the engine registry
+/// Publish which of `engine_id`'s slots its patch claimed with `(ext N)`, as
+/// `(slot, N)` pairs (both 1-based). Called whenever the engine registry
 /// (re)registers the engine's manifest.
-pub fn set_custom_engine_ext_claims(engine_id: usize, claimed_slots: impl IntoIterator<Item = usize>) {
+pub fn set_custom_engine_ext_claims(engine_id: usize, claims: impl IntoIterator<Item = (usize, usize)>) {
     let Some(cell) = CUSTOM_ENGINE_EXT_CLAIMS.get(engine_id) else {
         return;
     };
-    let mask = claimed_slots
+    let packed = claims
         .into_iter()
-        .filter(|slot| (1..=SLOT_COUNT).contains(slot))
-        .fold(0u8, |mask, slot| mask | 1 << (slot - 1));
-    cell.store(mask, Ordering::Release);
+        .filter(|(slot, _)| (1..=SLOT_COUNT).contains(slot))
+        .fold(0u16, |packed, (slot, ext)| {
+            packed | (ext.clamp(1, EXT_INPUT_COUNT) as u16) << (4 * (slot - 1))
+        });
+    cell.store(packed, Ordering::Release);
 }
 
 static SAMPLER_TRACK_CALLS: [AtomicU64; MAX_SAMPLER_POOLS] = {
@@ -376,10 +379,7 @@ unsafe fn skip_block(bars: &mut BarTracker, clock: &BlockTransportClock, nf: usi
         idle_fast_path_tests::DECLARED_RAMP_SKIPS.fetch_add(1, Ordering::Relaxed);
         return;
     }
-    for i in 0..nf {
-        let (phase, advancing) = clock.frame(i);
-        bars.note_frame(phase, advancing);
-    }
+    bars.note_frames(clock, nf);
 }
 
 fn sync_division_index(division: SyncDivision) -> f32 {
@@ -882,13 +882,17 @@ fn gate_and_trigger_declared_constant() -> bool {
 
 /// The `modN_source` value selecting ext input `ext` (1-4).
 pub fn ext_source_value(ext: usize) -> f32 {
-    (SOURCE_EXT1 + ext.clamp(1, EXT_INPUT_COUNT) - 1) as f32
+    ext_source(ext) as f32
 }
 
-fn engine_ext_claims(engine_id: usize) -> u8 {
-    CUSTOM_ENGINE_EXT_CLAIMS
+fn engine_ext_claims(engine_id: usize) -> [Option<usize>; SLOT_COUNT] {
+    let packed = CUSTOM_ENGINE_EXT_CLAIMS
         .get(engine_id)
-        .map_or(0, |cell| cell.load(Ordering::Acquire))
+        .map_or(0, |cell| cell.load(Ordering::Acquire));
+    std::array::from_fn(|slot| match (packed >> (4 * slot)) & 0xf {
+        0 => None,
+        ext => Some(ext as usize),
+    })
 }
 
 
@@ -1399,29 +1403,14 @@ unsafe extern "C" fn voice_modulator_process(
         }
     }
 
-    let mut slot_sources = [
-        slot_source(s, 0),
-        slot_source(s, 1),
-        slot_source(s, 2),
-        slot_source(s, 3),
-    ];
-    if let Some((engine_id, voice_idx)) = custom_identity {
-        let leased = leased_slots(engine_id, voice_idx);
-        let claims = engine_ext_claims(engine_id);
-        for (slot, source) in slot_sources.iter_mut().enumerate() {
-            // A slot the patch claimed with `(ext N)` is read by the DSP
-            // directly, not through a depth lane: always ext N, always on.
-            if claims & (1 << slot) != 0 {
-                *source = SOURCE_EXT1 + slot;
-                continue;
-            }
-            // Envelopes follow the gate history, so they keep running to be
-            // in the right stage the moment a lease starts mid-note.
-            if leased & (1 << slot) == 0 && *source != SOURCE_ENV {
-                *source = SOURCE_OFF;
-            }
-        }
-    }
+    let slot_sources = match custom_identity {
+        Some((engine_id, voice_idx)) => effective_sources(
+            s,
+            &engine_ext_claims(engine_id),
+            leased_slots(engine_id, voice_idx),
+        ),
+        None => std::array::from_fn(|slot| slot_source(s, slot)),
+    };
     if slot_sources.iter().all(|source| *source == SOURCE_OFF) {
         record_all_slots_off(nf);
         clear_outputs(&lanes, out, nf);
@@ -2304,7 +2293,7 @@ mod tests {
     fn ext_claimed_slot_reads_its_ext_input_whatever_its_source_param_says() {
         let engine_id = 61;
         crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, 4);
-        set_custom_engine_ext_claims(engine_id, [2]);
+        set_custom_engine_ext_claims(engine_id, [(2, 2)]);
         let mut state = init_custom_engine_state(engine_id, 0);
         state[slot_source_param_idx(0)] = SOURCE_EXT2 as f32;
         state[slot_source_param_idx(1)] = SOURCE_LFO as f32;

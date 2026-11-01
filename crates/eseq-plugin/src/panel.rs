@@ -8,6 +8,7 @@
 //! Lives on the host's main thread (`Runtime` is not `Send`).
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -49,7 +50,10 @@ pub struct PanelHost {
     /// The engine's newest-voice modulation (slot values and phases).
     mod_display: Arc<ModDisplay>,
     /// Last published (mod-value, mod-offset, mod-scale) per param.
-    mod_shown: Vec<(f32, f32, f32)>,
+    mod_shown: Vec<(f64, f64, f64)>,
+    /// Each modulated param with its depth lanes (indices into the layout's
+    /// `mod_targets`), resolved once.
+    lanes_by_base: Vec<(usize, Vec<usize>)>,
     phases_shown: [f32; vm::SLOT_COUNT],
     /// A modulation source setting moved: re-decide which settings show.
     sources_dirty: bool,
@@ -68,7 +72,8 @@ pub struct PanelHost {
     /// The latest pointer drag, applied once per frame (as the app coalesces).
     pending_drag: Option<(crossterm::event::MouseEvent, f32, f32)>,
     trace: bool,
-    unsupported_logged: std::collections::BTreeSet<String>,
+    unsupported_logged: BTreeSet<String>,
+    unpublished: Vec<String>,
 }
 
 fn list(values: Vec<Value>) -> Value {
@@ -186,6 +191,7 @@ impl PanelHost {
         let cell = backend.cell_dimensions();
         let shown = (0..params.len()).map(|i| params.get(i)).collect();
         let n_params = spec.params.len();
+        let lanes_by_base = lanes_by_base(&spec);
         let mut host = Self {
             editor,
             backend,
@@ -195,7 +201,8 @@ impl PanelHost {
             param_instances: kinds.params,
             shown,
             mod_display,
-            mod_shown: vec![(f32::NAN, f32::NAN, f32::NAN); n_params],
+            mod_shown: vec![(f64::NAN, f64::NAN, f64::NAN); n_params],
+            lanes_by_base,
             phases_shown: [f32::NAN; vm::SLOT_COUNT],
             sources_dirty: true,
             cell,
@@ -208,7 +215,11 @@ impl PanelHost {
             pending_drag: None,
             trace: std::env::var_os("ESEQ_PLUGIN_TRACE").is_some(),
             unsupported_logged: Default::default(),
+            unpublished: kinds.unpublished,
         };
+        if !host.unpublished.is_empty() {
+            crate::shell::log(&format!("panel kinds: unpublished host fields {:?}", host.unpublished));
+        }
         host.sizes = host.measure(ui.width, ui.height);
         let (width, height) = host.sizes[0];
         host.resize(width, height);
@@ -259,6 +270,13 @@ impl PanelHost {
         self.size
     }
 
+    /// `kind.field` of every declared `:host` field of the panel's kinds the
+    /// plugin neither publishes nor lists in [`APP_ONLY_HOST_FIELDS`]: the
+    /// app's `eseq.kinds` grew a field the panel would read as nil.
+    pub fn unpublished_host_fields(&self) -> &[String] {
+        &self.unpublished
+    }
+
     /// Grid size in cells for the current size.
     fn grid(&self) -> (usize, usize) {
         let (cell_w, cell_h) = self.cell;
@@ -307,7 +325,7 @@ impl PanelHost {
             }
             let _ = rt.set_instance_field(id, "text", Value::String(text));
             // The modulated value follows in `sync_modulation`.
-            self.mod_shown[index] = (f32::NAN, f32::NAN, f32::NAN);
+            self.mod_shown[index] = (f64::NAN, f64::NAN, f64::NAN);
             self.sources_dirty |= self.spec.params[index].section == "source";
             changed = true;
         }
@@ -343,9 +361,8 @@ impl PanelHost {
     }
 
     /// The live modulation: each slot's cycle phase (the LFO editor's
-    /// playhead) and each modulated param's effective value — base plus
-    /// every active lane's depth × slot output (×2^ for octave lanes), in
-    /// display units, as the app's `mod-value`/`mod-offset`/`mod-scale`.
+    /// playhead) and each modulated param's effective value (the kernel's
+    /// `effective_value`, as the app's `mod-value`/`mod-offset`/`mod-scale`).
     fn sync_modulation(&mut self) -> bool {
         let mut changed = false;
         let phases: [f32; vm::SLOT_COUNT] = std::array::from_fn(|slot| {
@@ -368,45 +385,33 @@ impl PanelHost {
             }
             changed = true;
         }
-        let slot_values: [f32; vm::SLOT_COUNT] = std::array::from_fn(|slot| self.mod_display.value(slot).clamp(0.0, 1.0));
-        let n = self.spec.params.len();
-        for base in 0..n {
-            let lanes = self.spec.dsp.layout.mod_targets.iter().filter(|t| t.base == base);
-            let mut amount = 0.0f32;
-            let mut octaves = false;
-            let mut any = false;
-            for lane in lanes {
-                any = true;
-                let active = lane.active.is_none_or(|a| self.params.get(a) > 0.5);
-                let depth = self.spec.params[lane.depth].to_display(self.params.get(lane.depth));
-                if active && depth != 0.0 && (1..=vm::SLOT_COUNT).contains(&lane.slot) {
-                    amount += depth * slot_values[lane.slot - 1];
-                    octaves |= lane.octaves;
-                }
-            }
-            if !any {
-                continue;
-            }
+        let slot_values: [f32; vm::SLOT_COUNT] = std::array::from_fn(|slot| self.mod_display.value(slot));
+        let targets = &self.spec.dsp.layout.mod_targets;
+        for (base, lanes) in &self.lanes_by_base {
+            let base = *base;
+            // The app's display rule (`effect_mod_lanes`): the active lanes'
+            // depths by slot, in stored units, combined by the kernel.
+            let lanes = lanes.iter().map(|&lane| &targets[lane]).filter(|t| t.active.is_none_or(|a| self.params.get(a) > 0.5));
+            let mode = |octaves| if octaves { vm::ModulationMode::Octaves } else { vm::ModulationMode::Additive };
             let spec = &self.spec.params[base];
-            let display_base = spec.to_display(self.params.get(base));
-            let (lo, hi) = (spec.to_display(spec.min), spec.to_display(spec.max));
-            let value = if octaves { display_base * amount.exp2() } else { display_base + amount };
-            let value = value.clamp(lo.min(hi), hi.max(lo));
-            // Two decimals of display precision: no repaint for sub-visible motion.
-            let value = (value * 100.0).round() / 100.0;
-            let scale = if octaves && display_base != 0.0 { value / display_base } else { 1.0 };
-            let shown = (value, value - display_base, scale);
+            let stored = self.params.get(base);
+            let effective = match vm::lane_depths(lanes.map(|t| (t.slot, self.params.get(t.depth), mode(t.octaves)))) {
+                Some((mode, depths)) => vm::effective_value(mode, stored, &depths, &slot_values, &spec.range()),
+                None => vm::EffectiveValue::unmodulated(stored),
+            };
+            let user = |value: f64| spec.to_display(value as f32) as f64;
+            let shown = (user(effective.value), user(effective.offset), effective.scale);
             if shown == self.mod_shown[base] {
                 continue;
             }
             self.mod_shown[base] = shown;
             let id = self.param_instances[base];
-            let rt = self.editor.runtime_mut();
-            let _ = rt.set_instance_field(id, "mod-value", Value::Number(shown.0 as f64));
-            let _ = rt.set_instance_field(id, "mod-offset", Value::Number(shown.1 as f64));
-            let _ = rt.set_instance_field(id, "mod-scale", Value::Number(shown.2 as f64));
             let ratio = if spec.percent { shown.0 / 100.0 } else { shown.0 };
-            let _ = rt.set_instance_field(id, "mod-ratio", Value::Number(ratio as f64));
+            let rt = self.editor.runtime_mut();
+            let _ = rt.set_instance_field(id, "mod-value", Value::Number(shown.0));
+            let _ = rt.set_instance_field(id, "mod-offset", Value::Number(shown.1));
+            let _ = rt.set_instance_field(id, "mod-scale", Value::Number(shown.2));
+            let _ = rt.set_instance_field(id, "mod-ratio", Value::Number(ratio));
             changed = true;
         }
         changed
@@ -752,23 +757,101 @@ const PLUGIN_ROOT: &str = r#"
 struct PublishedKinds {
     device: InstanceId,
     params: Vec<InstanceId>,
+    /// `kind.field` of each declared `:host` field nothing here publishes.
+    unpublished: Vec<String>,
+}
+
+/// `eseq.kinds:` — the module the panel's kinds are declared in.
+const KINDS_PREFIX: &str = "eseq.kinds:";
+
+fn kind_id(kind: &str) -> String {
+    format!("{KINDS_PREFIX}{kind}")
+}
+
+/// The kinds whose every `:host` field the panel's fixtures must cover: what
+/// the instrument panel lays out from. (The track, project and selection
+/// singletons carry the whole app; the panel reads a handful of their fields.)
+const PANEL_KINDS: [&str; 4] = ["device", "param", "mod-target", "modulator"];
+
+/// `:host` fields of [`PANEL_KINDS`] the plugin deliberately leaves unset
+/// (nil): app features a plugin has no counterpart for. A field the app adds
+/// to `eseq.kinds` shows up in [`PanelHost::unpublished_host_fields`] until it
+/// is published here or listed.
+pub const APP_ONLY_HOST_FIELDS: &[&str] = &[
+    // The track's mixer strip and its locks.
+    "device.bus", "device.gain", "device.gain-display", "device.gain-locked", "device.pan",
+    "device.pan-display", "device.pan-locked", "device.muted", "device.muted-display",
+    "device.muted-locked", "device.soloed", "device.soloed-display", "device.soloed-locked",
+    "device.strip-locks", "device.strip-macros",
+    // Sequencing: playhead, key locks, variants, banks, sound binding.
+    "device.playhead", "device.base-note", "device.base-note-display", "device.base-note-locked",
+    "device.key-locked-notes", "device.variants", "device.banks", "device.sound-binding",
+    // Racks and device chains.
+    "device.devices", "device.container", "device.delete-target", "device.macros", "device.choke",
+    "device.voices", "device.voices-display",
+    // Fixed modulator nodes (the plugin's sources live in the voice kernel).
+    "device.modulator-phase", "device.modulator-level",
+    // Effect tables and IRs.
+    "device.table-name", "device.table-options", "device.table-mode", "device.table-engine",
+    "device.table-data-key", "device.ir-name",
+    // Sampler media and analysis.
+    "device.sample-buffer", "device.sample-duration", "device.start-time", "device.end-time",
+    "device.slices", "device.slice-active", "device.onsets", "device.analysis-status",
+    "device.analysis-message", "device.analysis-bpm", "device.analysis-confidence",
+    "device.downbeat-time",
+    // P-locks, overrides, live printing and process mapping.
+    "param.locked", "param.overridden", "param.has-locks", "param.printing",
+    "param.process-mapped", "param.process-clamped",
+];
+
+/// Instance field writes, remembering which `kind.field`s were written.
+struct KindsWriter<'a> {
+    rt: &'a mut Runtime,
+    written: BTreeSet<String>,
+}
+
+impl KindsWriter<'_> {
+    fn set(&mut self, id: InstanceId, field: &str, value: Value) -> Result<(), String> {
+        set(self.rt, id, field, value)?;
+        if let Some(kind) = self.rt.instance_kind(id) {
+            self.written.insert(format!("{}.{field}", kind.strip_prefix(KINDS_PREFIX).unwrap_or(kind)));
+        }
+        Ok(())
+    }
+
+    fn unpublished_host_fields(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for kind in PANEL_KINDS {
+            let Some(schema) = self.rt.instance_kind_schema(&kind_id(kind)) else {
+                out.push(format!("{kind} (kind not declared)"));
+                continue;
+            };
+            for declared in &schema.host {
+                let name = format!("{kind}.{}", declared.field.name);
+                if !self.written.contains(&name) && !APP_ONLY_HOST_FIELDS.contains(&name.as_str()) {
+                    out.push(name);
+                }
+            }
+        }
+        out
+    }
 }
 
 fn publish_kinds(rt: &mut Runtime, spec: &PluginSpec, params: &ParamStore) -> Result<PublishedKinds, String> {
-    let kind = |k: &str| format!("eseq.kinds:{k}");
-    let track = rt.register_keyed_instance(&kind("track"), &[0]).map_err(|e| format!("track: {e:?}"))?;
-    set(rt, track, "index", Value::Number(0.0))?;
-    set(rt, track, "tid", Value::Number(0.0))?;
-    set(rt, track, "selected", Value::Bool(true))?;
-    set(rt, track, "name", Value::String(spec.name.clone()))?;
-    let project = rt.singleton_instance(&kind("project")).ok_or("no project kind")?;
-    set(rt, project, "tracks", list(vec![Value::Instance(track)]))?;
-    let selection = rt.singleton_instance(&kind("selection")).ok_or("no selection kind")?;
-    set(rt, selection, "track", Value::Instance(track))?;
-    set(rt, selection, "rack-slot", Value::Number(-1.0))?;
+    let mut w = KindsWriter { rt, written: BTreeSet::new() };
+    let track = w.rt.register_keyed_instance(&kind_id("track"), &[0]).map_err(|e| format!("track: {e:?}"))?;
+    w.set(track, "index", Value::Number(0.0))?;
+    w.set(track, "tid", Value::Number(0.0))?;
+    w.set(track, "selected", Value::Bool(true))?;
+    w.set(track, "name", Value::String(spec.name.clone()))?;
+    let project = w.rt.singleton_instance(&kind_id("project")).ok_or("no project kind")?;
+    w.set(project, "tracks", list(vec![Value::Instance(track)]))?;
+    let selection = w.rt.singleton_instance(&kind_id("selection")).ok_or("no selection kind")?;
+    w.set(selection, "track", Value::Instance(track))?;
+    w.set(selection, "rack-slot", Value::Number(-1.0))?;
 
-    let device = rt
-        .register_keyed_instance(&kind("device"), &[track, 0])
+    let device = w.rt
+        .register_keyed_instance(&kind_id("device"), &[track, 0])
         .map_err(|e| format!("device: {e:?}"))?;
     let name = spec.source_instrument.clone();
     for (field, value) in [
@@ -787,7 +870,7 @@ fn publish_kinds(rt: &mut Runtime, spec: &PluginSpec, params: &ParamStore) -> Re
         ("tensors", list(Vec::new())),
         ("mod-phases", list(vec![Value::Number(-1.0); vm::SLOT_COUNT])),
     ] {
-        set(rt, device, field, value)?;
+        w.set(device, field, value)?;
     }
     let modulators = spec
         .dsp
@@ -796,23 +879,23 @@ fn publish_kinds(rt: &mut Runtime, spec: &PluginSpec, params: &ParamStore) -> Re
         .iter()
         .enumerate()
         .map(|(index, m)| {
-            let id = rt
-                .register_keyed_instance(&kind("modulator"), &[device, index as u64])
+            let id = w.rt
+                .register_keyed_instance(&kind_id("modulator"), &[device, index as u64])
                 .map_err(|e| format!("modulator: {e:?}"))?;
-            set(rt, id, "device", Value::Instance(device))?;
-            set(rt, id, "index", Value::Number(index as f64))?;
-            set(rt, id, "slot", Value::Number(m.slot as f64))?;
-            set(rt, id, "label", Value::String(format!("Mod {}", m.slot)))?;
-            set(rt, id, "ext", Value::Number(m.ext.unwrap_or(0) as f64))?;
+            w.set(id, "device", Value::Instance(device))?;
+            w.set(id, "index", Value::Number(index as f64))?;
+            w.set(id, "slot", Value::Number(m.slot as f64))?;
+            w.set(id, "label", Value::String(format!("Mod {}", m.slot)))?;
+            w.set(id, "ext", Value::Number(m.ext.unwrap_or(0) as f64))?;
             Ok(Value::Instance(id))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    set(rt, device, "modulators", list(modulators))?;
+    w.set(device, "modulators", list(modulators))?;
 
     let mut ids = Vec::with_capacity(spec.params.len());
     for (index, p) in spec.params.iter().enumerate() {
-        let id = rt
-            .register_keyed_instance(&kind("param"), &[device, index as u64])
+        let id = w.rt
+            .register_keyed_instance(&kind_id("param"), &[device, index as u64])
             .map_err(|e| format!("param {}: {e:?}", p.name))?;
         let stored = params.get(index);
         let value = p.to_display(stored) as f64;
@@ -857,7 +940,7 @@ fn publish_kinds(rt: &mut Runtime, spec: &PluginSpec, params: &ParamStore) -> Re
             ("key-locks", list(Vec::new())),
             ("step-locks", list(Vec::new())),
         ] {
-            set(rt, id, field, v)?;
+            w.set(id, field, v)?;
         }
         ids.push(id);
     }
@@ -865,8 +948,8 @@ fn publish_kinds(rt: &mut Runtime, spec: &PluginSpec, params: &ParamStore) -> Re
     let mut lanes_of: Vec<Vec<Value>> = vec![Vec::new(); spec.params.len()];
     for target in &spec.dsp.layout.mod_targets {
         let lane = lanes_of[target.base].len();
-        let id = rt
-            .register_keyed_instance(&kind("mod-target"), &[ids[target.base], lane as u64])
+        let id = w.rt
+            .register_keyed_instance(&kind_id("mod-target"), &[ids[target.base], lane as u64])
             .map_err(|e| format!("mod-target: {e:?}"))?;
         for (field, v) in [
             ("param", Value::Instance(ids[target.base])),
@@ -878,19 +961,32 @@ fn publish_kinds(rt: &mut Runtime, spec: &PluginSpec, params: &ParamStore) -> Re
             ("depth-max", Value::Number(target.depth_max as f64)),
             ("unit", Value::String(target.unit.clone())),
         ] {
-            set(rt, id, field, v)?;
+            w.set(id, field, v)?;
         }
         lanes_of[target.base].push(Value::Instance(id));
     }
     for (index, lanes) in lanes_of.into_iter().enumerate() {
         if !lanes.is_empty() {
-            set(rt, ids[index], "mod-targets", list(lanes))?;
+            w.set(ids[index], "mod-targets", list(lanes))?;
         }
     }
-    set(rt, device, "params", list(ids.iter().map(|&id| Value::Instance(id)).collect()))?;
-    set(rt, track, "devices", list(vec![Value::Instance(device)]))?;
-    rt.run_reactive_cycle();
-    Ok(PublishedKinds { device, params: ids })
+    w.set(device, "params", list(ids.iter().map(|&id| Value::Instance(id)).collect()))?;
+    w.set(track, "devices", list(vec![Value::Instance(device)]))?;
+    w.rt.run_reactive_cycle();
+    let unpublished = w.unpublished_host_fields();
+    Ok(PublishedKinds { device, params: ids, unpublished })
+}
+
+/// Each param with depth lanes, and its lanes' indices into `mod_targets`.
+fn lanes_by_base(spec: &PluginSpec) -> Vec<(usize, Vec<usize>)> {
+    let mut out: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (lane, target) in spec.dsp.layout.mod_targets.iter().enumerate() {
+        match out.iter_mut().find(|(base, _)| *base == target.base) {
+            Some((_, lanes)) => lanes.push(lane),
+            None => out.push((target.base, vec![lane])),
+        }
+    }
+    out
 }
 
 /// The cells the panel occupies, from the layout's top-left: the furthest

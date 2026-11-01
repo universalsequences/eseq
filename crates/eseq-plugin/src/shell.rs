@@ -775,24 +775,6 @@ unsafe extern "C" fn params_get_value(plugin: *const clap_plugin, id: clap_id, v
     true
 }
 
-/// Host-facing text for a stored value: enum label, else the display value
-/// (×100 for a percent ratio) and unit.
-pub(crate) fn format_value(spec: &ParamSpec, value: f32) -> String {
-    if !spec.options.is_empty() {
-        return spec.option_label(value).map_or_else(|| format!("{}", value.round()), str::to_string);
-    }
-    let value = spec.to_display(value);
-    let magnitude = value.abs();
-    let text = if magnitude >= 100.0 {
-        format!("{value:.0}")
-    } else if magnitude >= 10.0 {
-        format!("{value:.1}")
-    } else {
-        format!("{value:.2}")
-    };
-    if spec.unit.is_empty() { text } else { format!("{text} {}", spec.unit) }
-}
-
 unsafe extern "C" fn params_value_to_text(
     plugin: *const clap_plugin,
     id: clap_id,
@@ -804,7 +786,7 @@ unsafe extern "C" fn params_value_to_text(
     if display.is_null() || size == 0 {
         return false;
     }
-    let text = format_value(spec, value as f32);
+    let text = spec.format_value(value as f32);
     let bytes = text.as_bytes();
     let n = bytes.len().min(size as usize - 1);
     unsafe {
@@ -829,6 +811,15 @@ unsafe extern "C" fn params_text_to_value(
     if let Some(i) = spec.options.iter().position(|o| o.eq_ignore_ascii_case(text.trim())) {
         *value = i as f64;
         return true;
+    }
+    // The text `format_value` gives a boolean.
+    if spec.kind == crate::payload::ParamKind::Boolean {
+        for on in [1.0, 0.0] {
+            if text.trim().eq_ignore_ascii_case(&crate::payload::format_boolean(on)) {
+                *value = on as f64;
+                return true;
+            }
+        }
     }
     let number: String = text
         .trim()
