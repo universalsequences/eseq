@@ -1415,21 +1415,24 @@ struct PresetBankCache {
 
 struct PresetBankCacheEntry {
     paths: Vec<PathBuf>,
+    bank: CachedPresetBank,
+}
+
+/// One instrument's merged presets plus the names only its writable bank
+/// holds (the browser's Library section), read from the same files.
+#[derive(Clone)]
+struct CachedPresetBank {
     presets: std::sync::Arc<Vec<InstrumentPreset>>,
+    user_names: std::sync::Arc<Vec<String>>,
 }
 
 impl PresetBankCache {
-    fn get(&self, key: &PresetBankCacheKey) -> Option<std::sync::Arc<Vec<InstrumentPreset>>> {
-        self.entries.get(key).map(|entry| entry.presets.clone())
+    fn get(&self, key: &PresetBankCacheKey) -> Option<CachedPresetBank> {
+        self.entries.get(key).map(|entry| entry.bank.clone())
     }
 
-    fn insert(
-        &mut self,
-        key: PresetBankCacheKey,
-        paths: Vec<PathBuf>,
-        presets: std::sync::Arc<Vec<InstrumentPreset>>,
-    ) {
-        self.entries.insert(key, PresetBankCacheEntry { paths, presets });
+    fn insert(&mut self, key: PresetBankCacheKey, paths: Vec<PathBuf>, bank: CachedPresetBank) {
+        self.entries.insert(key, PresetBankCacheEntry { paths, bank });
     }
 
     fn invalidate_path(&mut self, path: &Path) {
@@ -1603,18 +1606,42 @@ fn cached_instrument_presets_with_paths(
     paths: &crate::app_paths::AppPaths,
     name: &str,
 ) -> io::Result<std::sync::Arc<Vec<InstrumentPreset>>> {
+    Ok(cached_preset_bank_with_paths(paths, name)?.presets)
+}
+
+fn cached_preset_bank_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+) -> io::Result<CachedPresetBank> {
     let key = preset_bank_cache_key(paths, name);
     let mut cache = preset_bank_cache().lock().unwrap();
-    if let Some(presets) = cache.get(&key) {
-        return Ok(presets);
+    if let Some(bank) = cache.get(&key) {
+        return Ok(bank);
     }
 
     // Resolve and read while holding the cache lock so a concurrent save cannot
     // publish a new bank and then have this load install stale contents over it.
     let bank_paths = instrument_preset_bank_paths_with_paths(paths, name)?;
+    // Saves go to the user overlay, or to the base bank when there is none
+    // (`instrument_preset_bank_paths_with_paths`): that bank's names, less any
+    // a read-only bank also ships, are the user's own.
+    let writable = bank_paths.user_overlay.as_ref().unwrap_or(&bank_paths.base);
+    let mut shipped = std::collections::HashSet::new();
+    let mut user_names = Vec::new();
+    let mut note_bank = |path: &PathBuf, bank: &[InstrumentPreset]| {
+        if path == writable {
+            user_names = bank.iter().map(|preset| preset.name.clone()).collect();
+        } else {
+            shipped.extend(bank.iter().map(|preset| preset.name.clone()));
+        }
+    };
     let mut base = read_preset_bank(&bank_paths.base)?;
+    if let Some(bank) = &base {
+        note_bank(&bank_paths.base, bank);
+    }
     for overlay in &bank_paths.package_overlays {
         if let Some(pack) = read_preset_bank(overlay)? {
+            note_bank(overlay, &pack);
             base = Some(match base {
                 Some(base) => merge_preset_banks(&base, &pack),
                 None => pack,
@@ -1622,21 +1649,36 @@ fn cached_instrument_presets_with_paths(
         }
     }
     let overlay = match &bank_paths.user_overlay {
-        Some(overlay) => read_preset_bank(overlay)?,
+        Some(path) => {
+            let overlay = read_preset_bank(path)?;
+            if let Some(bank) = &overlay {
+                note_bank(path, bank);
+            }
+            overlay
+        }
         None => None,
     };
     let presets = match (base, overlay) {
         // No bank anywhere is not cached: there is no entry to invalidate
         // later, so caching it would make "this instrument has no presets"
         // permanent for the life of the process even after a bank appears.
-        (None, None) => return Ok(std::sync::Arc::new(Vec::new())),
+        (None, None) => {
+            return Ok(CachedPresetBank {
+                presets: std::sync::Arc::new(Vec::new()),
+                user_names: std::sync::Arc::new(Vec::new()),
+            })
+        }
         (Some(base), None) => base,
         (None, Some(overlay)) => overlay,
         (Some(base), Some(overlay)) => merge_preset_banks(&base, &overlay),
     };
-    let presets = std::sync::Arc::new(presets);
-    cache.insert(key, bank_paths.all(), presets.clone());
-    Ok(presets)
+    user_names.retain(|name| !shipped.contains(name));
+    let bank = CachedPresetBank {
+        presets: std::sync::Arc::new(presets),
+        user_names: std::sync::Arc::new(user_names),
+    };
+    cache.insert(key, bank_paths.all(), bank.clone());
+    Ok(bank)
 }
 
 fn cached_instrument_presets(name: &str) -> io::Result<std::sync::Arc<Vec<InstrumentPreset>>> {
@@ -1771,25 +1813,7 @@ fn load_user_instrument_preset_names_with_paths(
     paths: &crate::app_paths::AppPaths,
     name: &str,
 ) -> io::Result<Vec<String>> {
-    let writable = instrument_preset_save_path_with_paths(paths, name)?;
-    let Some(user) = read_preset_bank(&writable)? else {
-        return Ok(Vec::new());
-    };
-    let bank_paths = instrument_preset_bank_paths_with_paths(paths, name)?;
-    let mut shipped = std::collections::HashSet::new();
-    for path in std::iter::once(&bank_paths.base).chain(&bank_paths.package_overlays) {
-        if *path == writable {
-            continue;
-        }
-        for preset in read_preset_bank(path)?.unwrap_or_default() {
-            shipped.insert(preset.name);
-        }
-    }
-    Ok(user
-        .into_iter()
-        .map(|preset| preset.name)
-        .filter(|name| !shipped.contains(name))
-        .collect())
+    Ok(cached_preset_bank_with_paths(paths, name)?.user_names.as_ref().clone())
 }
 
 fn preset_path_for_writable_instrument_source(source: &Path) -> PathBuf {
@@ -3279,6 +3303,17 @@ mod tier_id_tests {
             load_user_instrument_preset_names_with_paths(&paths, "factory:split").unwrap(),
             vec!["Mine"]
         );
+        // The names are cached with the bank: a save after a read is seen.
+        save_instrument_presets_with_paths(
+            &paths,
+            "factory:split",
+            &[preset("Mine"), preset("Fresh")],
+        )
+        .unwrap();
+        let mut saved =
+            load_user_instrument_preset_names_with_paths(&paths, "factory:split").unwrap();
+        saved.sort();
+        assert_eq!(saved, vec!["Fresh", "Mine"]);
 
         // A user instrument's whole bank is the user's.
         write_folder_instrument(&paths.user_instruments_dir(), "Own", "user");

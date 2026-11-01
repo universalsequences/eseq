@@ -35,88 +35,15 @@ pub(in crate::lisp_host) fn eseqlisp_init_candidates() -> Vec<PathBuf> {
     crate::paths::eseqlisp_init_candidates()
 }
 
-// ── dlopen FFI (macOS) ──
+// ── DGen ABI v1 (eseq-dgen-abi: mirrors audiograph/dgen_abi_v1.h, vendored
+// from the staged toolchain's include/dgen_runtime.h; shared with exported
+// plugins) ──
 
-extern "C" {
-    pub(in crate::lisp_host) fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-    pub(in crate::lisp_host) fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    pub(in crate::lisp_host) fn dlerror() -> *const c_char;
-}
-
-pub(in crate::lisp_host) const RTLD_NOW: c_int = 2;
-
-// ── DGen ABI v1 (mirrors audiograph/dgen_abi_v1.h, vendored from the staged
-// toolchain's include/dgen_runtime.h) ──
-
-pub const DGEN_ABI_VERSION_V1: u32 = 1;
-
-/// Manifest `processAbi` value the vendored DGenLisp emits for ABI v1.
-pub const DGEN_PROCESS_ABI_V1: &str = "dgen-host-abi-v1";
-
-pub(in crate::lisp_host) type DGenFFTSetupV1 = *mut c_void;
-
-#[repr(C)]
-pub struct DGenProcessContextV1 {
-    pub abi_version: u32,
-    pub struct_size: u32,
-    pub sample_rate: f32,
-    pub reserved: u32,
-}
-
-#[repr(C)]
-pub struct DGenHostServicesV1 {
-    pub abi_version: u32,
-    pub struct_size: u32,
-    pub fft_setup_create_fn: Option<unsafe extern "C" fn(log2_size: u32) -> DGenFFTSetupV1>,
-    pub fft_forward_fn: Option<
-        unsafe extern "C" fn(
-            setup: DGenFFTSetupV1,
-            real: *mut f32,
-            imaginary: *mut f32,
-            log2_size: u32,
-        ),
-    >,
-    pub fft_inverse_fn: Option<
-        unsafe extern "C" fn(
-            setup: DGenFFTSetupV1,
-            real: *mut f32,
-            imaginary: *mut f32,
-            log2_size: u32,
-        ),
-    >,
-    pub complex_multiply_accumulate_fn: Option<
-        unsafe extern "C" fn(
-            lhs_real: *const f32,
-            lhs_imaginary: *const f32,
-            rhs_real: *const f32,
-            rhs_imaginary: *const f32,
-            accumulator_real: *mut f32,
-            accumulator_imaginary: *mut f32,
-            element_count: u32,
-        ),
-    >,
-}
-
-/// `dgen_process_v1` — the ABI v1 export of a compiled DGen dylib. `state` is
-/// the single `float *memory` span (generated code casts it directly).
-pub(in crate::lisp_host) type DGenProcessFn = unsafe extern "C" fn(
-    inputs: *const *const f32,
-    outputs: *const *mut f32,
-    frame_count: u32,
-    state: *mut c_void,
-    context: *const DGenProcessContextV1,
-    host: *const DGenHostServicesV1,
-);
-
-extern "C" {
-    /// Portable C host-services table; process-lifetime static on every target.
-    fn eseq_dgen_portable_host_services_v1() -> *const DGenHostServicesV1;
-
-    #[cfg(target_vendor = "apple")]
-    /// ESeq's Accelerate-backed host-services table
-    /// (audiograph/dgen_host_services.c); process-lifetime static.
-    fn eseq_dgen_host_services_v1() -> *const DGenHostServicesV1;
-}
+pub use eseq_dgen_abi::{
+    DGenHostServicesV1, DGenProcessContextV1, DGEN_ABI_VERSION_V1, DGEN_PROCESS_ABI_V1,
+    DGEN_STATE_REDZONE_SLOTS,
+};
+pub(in crate::lisp_host) use eseq_dgen_abi::{DGenFFTSetupV1, DGenProcessFn};
 
 /// The ABI v1 host-services table generated dylibs are handed on every
 /// `dgen_process_v1` call, so this stays a pointer read with no work in it.
@@ -127,7 +54,7 @@ extern "C" {
 /// spectral effects into ALSA underruns (eseq-linux.78).
 #[cfg(target_vendor = "apple")]
 pub(in crate::lisp_host) fn dgen_host_services_v1() -> *const DGenHostServicesV1 {
-    unsafe { eseq_dgen_host_services_v1() }
+    eseq_dgen_abi::accelerate_host_services_v1()
 }
 
 #[cfg(not(target_vendor = "apple"))]
@@ -139,16 +66,11 @@ pub(in crate::lisp_host) fn dgen_host_services_v1() -> *const DGenHostServicesV1
 /// table. Keeping this selectable lets callers load and prewarm a fresh dylib
 /// image against the same table they will use to render it.
 pub(in crate::lisp_host) fn dgen_portable_host_services_v1() -> *const DGenHostServicesV1 {
-    unsafe { eseq_dgen_portable_host_services_v1() }
+    eseq_dgen_abi::portable_host_services_v1()
 }
 
 pub(in crate::lisp_host) fn dgen_process_context_v1(sample_rate: f32) -> DGenProcessContextV1 {
-    DGenProcessContextV1 {
-        abi_version: DGEN_ABI_VERSION_V1,
-        struct_size: std::mem::size_of::<DGenProcessContextV1>() as u32,
-        sample_rate,
-        reserved: 0,
-    }
+    DGenProcessContextV1::v1(sample_rate)
 }
 
 pub const MAX_CUSTOM_FX: usize = 8;
@@ -182,7 +104,6 @@ pub const DGEN_HOST_SAMPLE_RATE_IDX: usize = 5;
 pub(in crate::lisp_host) const DGEN_PROCESS_FN_START_IDX: usize = 6;
 pub(in crate::lisp_host) const DGEN_PROCESS_FN_CHUNKS: usize = 4;
 pub const HEADER_SLOTS: usize = 10;
-pub const DGEN_STATE_REDZONE_SLOTS: usize = 256;
 pub(in crate::lisp_host) const HEADER_CANARY: f32 = f32::from_bits(0x4cd35a1d);
 
 pub(in crate::lisp_host) fn ensure_enabled_param(params: &mut Vec<crate::effects::ParamDescriptor>) {

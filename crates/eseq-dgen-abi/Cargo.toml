@@ -1,0 +1,12 @@
+[package]
+name = "eseq-dgen-abi"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "The DGen ABI v1 surface (process fn, context, host services, dylib loading) shared by eseq and exported plugins."
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+cc = "1"

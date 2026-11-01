@@ -465,7 +465,7 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), String> {
     Err(format!("could not extract {}: {last_error}", archive.display()))
 }
 
-fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
     std::fs::create_dir_all(destination)
         .map_err(|error| format!("failed to create {}: {error}", destination.display()))?;
     let entries = std::fs::read_dir(source)

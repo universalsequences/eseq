@@ -27,6 +27,7 @@ pub mod filter_table_editor;
 pub mod filter_table_presets;
 #[allow(dead_code)]
 pub(crate) mod gatepitch;
+pub mod panel_section;
 #[allow(dead_code)]
 pub(crate) mod limiter;
 pub mod multiverb;
@@ -342,42 +343,9 @@ pub struct InstrumentModulatorDescriptor {
     pub ext: Option<usize>,
 }
 
-/// How a destination combines its modulation with the base value. The host
-/// needs this to *display* the effective value (knob dots, curve visualizers);
-/// the DSP has always known it, it just was not carried into the descriptor.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ModulationMode {
-    /// `base + sum(depth * mod)`, in the destination's own units.
-    #[default]
-    Additive,
-    /// `base * 2^(sum(depth * mod))` — depth in octaves, for frequency
-    /// destinations where musical modulation has to be exponential (the
-    /// built-in Filter's cutoff). Reading such a depth as if it were additive
-    /// makes a ±4 look like ±4 Hz on a 20..20000 Hz control.
-    Octaves,
-}
-
-impl ModulationMode {
-    /// Map a DGenLisp manifest `@mod-mode`. Unknown modes fall back to
-    /// additive, which is what every generated destination but one uses;
-    /// `semitone` is additive too in practice — its one user
-    /// (`oberheim-sem`'s `osc_a_semi`) is itself a semitone-valued param, so
-    /// the modulation lands in the destination's own units.
-    pub fn from_manifest_mode(mode: &str) -> Self {
-        match mode.trim().to_ascii_lowercase().as_str() {
-            "octave" | "octaves" => Self::Octaves,
-            _ => Self::Additive,
-        }
-    }
-
-    /// Apply the mode to one already-summed modulation amount.
-    pub fn apply(self, base: f32, amount: f32) -> f32 {
-        match self {
-            Self::Additive => base + amount,
-            Self::Octaves => base * 2.0_f32.powf(amount),
-        }
-    }
-}
+/// How a destination combines its modulation with the base value (the
+/// voice-mod kernel's, shared with exported plugins).
+pub use eseq_voice_mod::ModulationMode;
 
 #[derive(Clone, Debug)]
 pub struct InstrumentModulationTarget {
@@ -484,24 +452,17 @@ impl ParamDescriptor {
 
     /// Normalize value to 0.0..1.0 for display (linear or log-space).
     pub fn normalize(&self, val: f32) -> f32 {
-        let range = self.max - self.min;
-        if range <= 0.0 {
-            return 0.0;
-        }
-        match self.scaling {
-            ParamScaling::Linear => ((val - self.min) / range).clamp(0.0, 1.0),
-            ParamScaling::Exponential => {
-                if self.min <= 0.0 || self.max <= 0.0 {
-                    return ((val - self.min) / range).clamp(0.0, 1.0);
-                }
-                let log_min = self.min.ln();
-                let log_max = self.max.ln();
-                let log_range = log_max - log_min;
-                if log_range <= 0.0 {
-                    return 0.0;
-                }
-                ((val.max(self.min).ln() - log_min) / log_range).clamp(0.0, 1.0)
-            }
+        self.range().normalize(val)
+    }
+
+    /// Range, kind and taper as the voice-mod kernel's effective-value
+    /// display reads them.
+    pub fn range(&self) -> eseq_voice_mod::ParamRange {
+        eseq_voice_mod::ParamRange {
+            min: self.min,
+            max: self.max,
+            continuous: matches!(self.kind, ParamKind::Continuous { .. }),
+            exponential: self.scaling == ParamScaling::Exponential,
         }
     }
 
@@ -526,18 +487,7 @@ impl ParamDescriptor {
                         .clamp(self.min, self.max)
                 }
             }
-            ParamKind::Continuous { .. } => match self.scaling {
-                ParamScaling::Linear => self.min + normalized * (self.max - self.min),
-                ParamScaling::Exponential => {
-                    if self.min <= 0.0 || self.max <= 0.0 {
-                        self.min + normalized * (self.max - self.min)
-                    } else {
-                        let log_min = self.min.ln();
-                        let log_max = self.max.ln();
-                        (log_min + normalized * (log_max - log_min)).exp()
-                    }
-                }
-            },
+            ParamKind::Continuous { .. } => self.range().denormalize_continuous(normalized),
         }
     }
 
@@ -589,31 +539,13 @@ impl ParamDescriptor {
             && value <= self.max
     }
 
+    /// The value's text (shared with exported plugins' host-facing text).
     pub fn format_value(&self, val: f32) -> String {
         match &self.kind {
-            ParamKind::Boolean => {
-                if val > 0.5 {
-                    "ON".to_string()
-                } else {
-                    "OFF".to_string()
-                }
-            }
-            ParamKind::Enum { labels } => {
-                let idx = val.round() as usize;
-                labels
-                    .get(idx)
-                    .cloned()
-                    .unwrap_or_else(|| format!("{}", idx))
-            }
+            ParamKind::Boolean => eseq_plugin_format::format_boolean(val),
+            ParamKind::Enum { labels } => eseq_plugin_format::format_enum(labels, val),
             ParamKind::Continuous { unit } => {
-                let display_val = self.stored_to_user(val);
-                match unit.as_deref() {
-                    Some("Hz") => format!("{:.0} Hz", display_val),
-                    Some("ms") => format!("{:.0} ms", display_val),
-                    Some("%") => format!("{:.0}%", display_val),
-                    Some(u) => format!("{:.2} {}", display_val, u),
-                    None => format!("{:.2}", display_val),
-                }
+                eseq_plugin_format::format_continuous(unit.as_deref(), self.stored_to_user(val))
             }
         }
     }
@@ -640,15 +572,7 @@ impl ParamDescriptor {
 
 /// The option `value` selects from `labels`: rounded, clamped into the list;
 /// `None` when the list is empty.
-pub fn option_label_at(labels: &[String], value: f32) -> Option<&str> {
-    let last = labels.len().checked_sub(1)?;
-    let index = if value.is_nan() {
-        0
-    } else {
-        (value.round().max(0.0) as usize).min(last)
-    };
-    Some(labels[index].as_str())
-}
+pub use eseq_plugin_format::option_label_at;
 
 fn param_kinds_are_compatible(old: &ParamKind, new: &ParamKind) -> bool {
     match (old, new) {

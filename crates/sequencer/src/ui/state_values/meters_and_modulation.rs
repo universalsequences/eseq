@@ -381,21 +381,6 @@ impl ModulatorSlotDisplay {
     };
 }
 
-/// Quantize an effective value so audio-rate jitter below a pixel of travel
-/// does not dirty the widget every tick. Quantizing in the param's *normalized*
-/// space (which is log-spaced for `ParamScaling::Exponential` params like
-/// cutoff frequencies) keeps the churn threshold perceptually even across the
-/// whole range instead of stair-stepping the bottom of a decade.
-fn quantize_effective_value(pdesc: &sequencer::effects::ParamDescriptor, value: f32) -> f64 {
-    const STEPS: f32 = 2048.0;
-    let clamped = value.clamp(pdesc.min, pdesc.max);
-    if !matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. }) {
-        return clamped as f64;
-    }
-    let normalized = (pdesc.normalize(clamped) * STEPS).round() / STEPS;
-    pdesc.denormalize(normalized) as f64
-}
-
 fn read_effect_modulator_slot_values(
     lg: sequencer::audiograph::LiveGraphPtr,
     modulator_node_id: i32,
@@ -440,61 +425,22 @@ fn effect_mod_lanes(
     sequencer::effects::ModulationMode,
     [f32; sequencer::instruments::voice_modulator::SLOT_COUNT],
 )> {
-    use sequencer::instruments::voice_modulator::SLOT_COUNT;
-    let mut depths = [0.0_f32; SLOT_COUNT];
-    let mut mode = sequencer::effects::ModulationMode::default();
-    let mut any = false;
-    for target in &desc.instrument_modulation_targets {
-        if target.base_param_idx != base_param_idx {
-            continue;
-        }
-        if let Some(active_idx) = target.active_param_idx {
-            if value_of(active_idx) <= 0.5 {
-                continue;
-            }
-        }
-        // Two lane shapes reach here. dgen effects and custom instruments bake
-        // the slot into the descriptor (`modulator_slot`, with a
-        // `__dgen_mod_active__` flag); the sampler's lanes instead carry a
-        // `mod <dest> src` param whose *value* picks the slot, with 0 = off.
+    let targets = desc
+        .instrument_modulation_targets
+        .iter()
+        .filter(|target| target.base_param_idx == base_param_idx)
+        .filter(|target| target.active_param_idx.is_none_or(|active| value_of(active) > 0.5));
+    // Two lane shapes reach here. dgen effects and custom instruments bake
+    // the slot into the descriptor (`modulator_slot`, with a
+    // `__dgen_mod_active__` flag); the sampler's lanes instead carry a
+    // `mod <dest> src` param whose *value* picks the slot, with 0 = off.
+    sequencer::instruments::voice_modulator::lane_depths(targets.map(|target| {
         let slot = match target.source_param_idx {
             Some(source_idx) => value_of(source_idx).round().max(0.0) as usize,
             None => target.modulator_slot,
         };
-        if slot == 0 || slot > SLOT_COUNT {
-            continue;
-        }
-        let depth = value_of(target.depth_param_idx);
-        if depth == 0.0 || !depth.is_finite() {
-            continue;
-        }
-        depths[slot - 1] += depth;
-        // Every lane of one destination shares its combining mode; the DSP
-        // reads a single `(mod <dest>)`.
-        mode = target.mod_mode;
-        any = true;
-    }
-    any.then_some((mode, depths))
-}
-
-/// Apply one destination's modulation the way its DSP does.
-///
-/// The slot values are the modulator nodes' unipolar outputs; depth carries the
-/// sign and the scale. `Additive` sums in the destination's own units,
-/// `Octaves` scales exponentially — the built-in Filter multiplies its cutoff
-/// by `2^octaves`, so treating its ±4 octave depth as ±4 Hz on a 20..20000 Hz
-/// control would move the display by nothing.
-fn modulated_value(
-    mode: sequencer::effects::ModulationMode,
-    base: f32,
-    depths: &[f32; sequencer::instruments::voice_modulator::SLOT_COUNT],
-    slot_values: &[f32; sequencer::instruments::voice_modulator::SLOT_COUNT],
-) -> f32 {
-    use sequencer::instruments::voice_modulator::SLOT_COUNT;
-    let amount: f32 = (0..SLOT_COUNT)
-        .map(|slot| depths[slot] * slot_values[slot].clamp(0.0, 1.0))
-        .sum();
-    mode.apply(base, amount)
+        (slot, value_of(target.depth_param_idx), target.mod_mode)
+    }))
 }
 
 /// The param indices this descriptor declares as modulation destinations,
@@ -570,39 +516,21 @@ fn effect_mod_values_for_lanes(
             continue;
         };
         let base = value_of(param_idx);
-        let (value, mode) = match lanes {
-            Some((mode, depths)) => {
-                let modulated = modulated_value(mode, base, &depths, slot_values);
-                let value = if modulated == base {
-                    // Modulators resting at zero settle back to the base value
-                    // exactly, not to base-rounded-to-the-quantization-grid:
-                    // an assigned-but-idle lane must leave a knob's dot hidden
-                    // and a curve identical to the unmodulated one.
-                    base as f64
-                } else {
-                    // Quantization damps audio-rate jitter below a pixel of
-                    // travel; the DSP clips each control to its declared range
-                    // before using it, so the display sees the same bounds.
-                    quantize_effective_value(pdesc, modulated)
-                };
-                (value, Some(mode))
-            }
-            None => (base as f64, None),
-        };
-        // The offset is derived from the same sample, so an idle destination
-        // is exactly 0.0 rather than a rounding residue. The exponential form
-        // is derived from the *published* value rather than recomputed from
-        // `2^amount`, so a knob drawing `base * scale` lands on exactly the
-        // same number a curve visualizer binds.
-        let scale = match mode {
-            Some(sequencer::effects::ModulationMode::Octaves) if base != 0.0 => value / base as f64,
-            _ => 1.0,
+        let effective = match lanes {
+            Some((mode, depths)) => sequencer::instruments::voice_modulator::effective_value(
+                mode,
+                base,
+                &depths,
+                slot_values,
+                &pdesc.range(),
+            ),
+            None => sequencer::instruments::voice_modulator::EffectiveValue::unmodulated(base),
         };
         values.push(ParamModValue {
             param_idx,
-            offset: value - base as f64,
-            value,
-            scale,
+            offset: effective.offset,
+            value: effective.value,
+            scale: effective.scale,
         });
     }
     EffectModValues {

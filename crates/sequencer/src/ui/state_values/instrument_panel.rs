@@ -1,120 +1,57 @@
 use super::*;
 
-/// Where a param sits on its device's panel: the main controls, a
-/// modulation lane's own params (`mod …`), a modulation source's settings
-/// (voice modulator source params), or host plumbing nobody shows. Shared by
-/// the instrument panel builders and the host kinds' `param.section`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PanelSection {
-    Main,
-    Mod,
-    Source,
-    Hidden,
-}
+pub(crate) use sequencer::effects::panel_section::PanelSection;
+use sequencer::effects::panel_section::{is_generated_host_mod_param, is_hidden_dgen_mod_param};
 
-impl PanelSection {
-    pub(crate) fn of(pdesc: &sequencer::effects::ParamDescriptor) -> Self {
-        if is_generated_host_mod_param(&pdesc.name) || is_hidden_dgen_mod_param(&pdesc.name) {
-            Self::Hidden
-        } else if is_source_param(pdesc.node_param_idx) {
-            Self::Source
-        } else if is_mod_param(&pdesc.name) {
-            Self::Mod
-        } else {
-            Self::Main
-        }
-    }
-
+/// [`PanelSection`] for a param on a particular device (effects place their
+/// modulation routing differently from instruments).
+pub(crate) trait PanelSectionOfDevice: Sized {
     /// Where param `index` of `desc` sits on `device`'s panel. An effect's
     /// (a track chain, bus or drum rack slot effect) has no `mod` split: it
     /// lists every param (main) but its voice-modulator source settings
     /// (source; a host-routed sidechain param stays main), its modulation
     /// routing (a lane's depth, source and switch params) and the host
     /// plumbing (both hidden). Any other device's is [`Self::of`].
-    pub(crate) fn of_device(
+    fn of_device(
         device: DeviceSlot,
         desc: &sequencer::effects::EffectDescriptor,
         index: usize,
-    ) -> Self {
+    ) -> PanelSection;
+}
+
+impl PanelSectionOfDevice for PanelSection {
+    fn of_device(
+        device: DeviceSlot,
+        desc: &sequencer::effects::EffectDescriptor,
+        index: usize,
+    ) -> PanelSection {
         let Some(pdesc) = desc.params.get(index) else {
-            return Self::Hidden;
+            return PanelSection::Hidden;
         };
         if !device.is_effect() {
-            return Self::of(pdesc);
+            return PanelSection::of(pdesc);
         }
         let sidechain = matches!(
             pdesc.host_control,
             Some(sequencer::effects::HostControl::FxSidechain { .. })
         );
         if is_generated_host_mod_param(&pdesc.name) || is_hidden_dgen_mod_param(&pdesc.name) {
-            Self::Hidden
+            PanelSection::Hidden
         } else if sequencer::instruments::voice_modulator::is_source_param(pdesc.node_param_idx)
             && !sidechain
         {
             // A host-only control (u32::MAX) is no modulation source's.
             match pdesc.node_param_idx {
-                u32::MAX => Self::Hidden,
-                _ => Self::Source,
+                u32::MAX => PanelSection::Hidden,
+                _ => PanelSection::Source,
             }
         } else if modulation_routing_param_indices(desc).contains(&index) {
-            Self::Hidden
+            PanelSection::Hidden
         } else {
-            Self::Main
+            PanelSection::Main
         }
     }
 
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Main => "main",
-            Self::Mod => "mod",
-            Self::Source => "source",
-            Self::Hidden => "hidden",
-        }
-    }
-
-    /// The name the panel shows: a mod param without its `mod ` prefix, a
-    /// source param by its role (`type`, `rate`, …).
-    pub(crate) fn label(self, pdesc: &sequencer::effects::ParamDescriptor) -> String {
-        match self {
-            Self::Mod => (pdesc.name.strip_prefix("mod ").unwrap_or(&pdesc.name)).to_string(),
-            Self::Source => rename_source_param(&pdesc.name),
-            Self::Main | Self::Hidden => pdesc.name.clone(),
-        }
-    }
-
-    /// The modulation source (1-based) a source param sets; 0 otherwise.
-    pub(crate) fn mod_slot(self, pdesc: &sequencer::effects::ParamDescriptor) -> usize {
-        match self {
-            Self::Source => {
-                sequencer::instruments::voice_modulator::slot_from_param_name(&pdesc.name)
-                    .unwrap_or(0)
-            }
-            _ => 0,
-        }
-    }
-}
-
-fn is_mod_param(name: &str) -> bool {
-    name.starts_with("mod ")
-}
-
-fn is_generated_host_mod_param(name: &str) -> bool {
-    name.starts_with("__host_mod__")
-}
-
-fn is_hidden_dgen_mod_param(name: &str) -> bool {
-    name.starts_with("__dgen_mod_active__")
-}
-
-fn is_source_param(node_param_idx: u32) -> bool {
-    // u32::MAX marks host-only controls such as sampler slicing; it is not a
-    // packed voice-modulator source index.
-    node_param_idx != u32::MAX
-        && sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
-}
-
-fn rename_source_param(name: &str) -> String {
-    sequencer::instruments::voice_modulator::source_param_display_name(name)
 }
 
 /// An instrument's visible key locks: per param, `(note, value)` in display

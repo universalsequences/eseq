@@ -19,9 +19,9 @@ never name the submodules directly (the lone exception is the
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::io::{self, Write};
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_int, c_void};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -58,6 +58,7 @@ mod value_helpers;
 pub use dgen::dylib_cache; // module path compat: `lisp_host::dylib_cache::`
 pub use dgen::dylib_cache::{DGenCompileKind, DGenSourceOrigin, DylibLease, DGEN_INSTRUMENT_VOICES};
 pub use dgen::compile_report::dgen_compile_failure_report;
+pub use dgen::dgen_audit::audit_dylib;
 pub use dgen::dgen_ffi::*;
 #[cfg(test)]
 use dgen::dgen_ffi::dgenlisp_wrapper_process;

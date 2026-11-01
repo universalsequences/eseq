@@ -2718,6 +2718,9 @@ fragment float4 live_spectrogram_frag(
         initial_window_visible: bool,
         monospace_font_size_pt: f64,
         monospace_font_path: Option<PathBuf>,
+        /// Pixels per point when there is no winit window: the capture
+        /// scale, or the host view's backing scale when embedded.
+        embed_scale: f64,
     }
 
     impl MetalBackend {
@@ -2772,7 +2775,37 @@ fragment float4 live_spectrogram_frag(
         /// `scale` is pixels per logical point in the requested capture.
         pub fn initialize_offscreen(&mut self, scale: f64) -> Result<(), BackendError> {
             if !scale.is_finite() || scale <= 0.0 { return Err(BackendError::MetalError); }
+            self.embed_scale = scale;
+            self.layer.setContentsScale(scale);
             self.initialize_graphics(scale)
+        }
+
+        /// Draw into a view someone else owns — a plugin host's editor
+        /// window — instead of a winit window: the view becomes layer-backed
+        /// by this backend's Metal layer. Initialize with
+        /// [`Self::initialize_offscreen`] at the view's backing scale first,
+        /// then size the drawable with [`Self::set_drawable_pixel_size`].
+        ///
+        /// # Safety
+        /// `ns_view` must be a live `NSView` used on the main thread.
+        pub unsafe fn attach_to_ns_view(&mut self, ns_view: *mut std::ffi::c_void) {
+            let Some(view) = (unsafe { (ns_view as *const NSView).as_ref() }) else {
+                return;
+            };
+            view.setWantsLayer(true);
+            view.setLayer(Some(&self.layer));
+            // While the host resizes the view, show the last frame pinned to
+            // its corner instead of stretched to the new bounds.
+            let gravity = NSString::from_str("topLeft");
+            let _: () = unsafe { objc2::msg_send![&*self.layer, setContentsGravity: &*gravity] };
+        }
+
+        /// The drawable size in pixels of an embedded backend.
+        pub fn set_drawable_pixel_size(&mut self, width: u32, height: u32) {
+            self.layer.setDrawableSize(CGSize {
+                width: width.max(1) as f64,
+                height: height.max(1) as f64,
+            });
         }
 
         fn new_with_size_font_size_and_visibility(
@@ -2887,6 +2920,7 @@ fragment float4 live_spectrogram_frag(
                 initial_window_visible: visible,
                 monospace_font_size_pt,
                 monospace_font_path: None,
+                embed_scale: 1.0,
             })
         }
 
@@ -4406,7 +4440,7 @@ fragment float4 live_spectrogram_frag(
                 .window
                 .as_ref()
                 .map(|w| w.scale_factor())
-                .unwrap_or(1.0);
+                .unwrap_or(self.embed_scale);
             let measurer = PropTextMeasurer::new(scale)?;
             Some(Box::new(measurer))
         }
@@ -4441,7 +4475,7 @@ fragment float4 live_spectrogram_frag(
                     .window
                     .as_ref()
                     .map(|w| w.scale_factor())
-                    .unwrap_or(1.0);
+                    .unwrap_or(self.embed_scale);
                 let next = self
                     .create_monospace_atlas(self.monospace_font_size_pt * zoom as f64 * scale)
                     .ok()?;
@@ -7488,7 +7522,7 @@ fragment float4 live_spectrogram_frag(
                 .window
                 .as_ref()
                 .map(|w| w.scale_factor())
-                .unwrap_or(1.0);
+                .unwrap_or(self.embed_scale);
             self.initialize_graphics(scale)
         }
 

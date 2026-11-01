@@ -355,7 +355,7 @@ fn materialize_dsp(dsp: &Path, label: &str, report: &mut ExportReport) -> Result
     Ok(())
 }
 
-fn copy_dir_filtered(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn copy_dir_filtered(source: &Path, destination: &Path) -> Result<(), String> {
     std::fs::create_dir_all(destination)
         .map_err(|error| format!("failed to create {}: {error}", destination.display()))?;
     let entries = std::fs::read_dir(source)

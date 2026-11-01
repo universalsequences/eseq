@@ -444,14 +444,16 @@ fn a_capture_in_flight_grows_the_rack_row() {
         items(&h.eval("(eseq.arrangement/rack-lane-items (first (eseq.kinds/groups)))"));
     assert_eq!(rack_items.len(), 1, "the provisional rack-lane clip draws");
     assert_eq!(get(&rack_items[0], "id"), Value::Nil, "inert");
-    // The pushed head trails the wall clock read above by up to a frame.
-    let Value::Number(end) = get(&rack_items[0], "end") else { panic!("end") };
-    assert!(end > 0.0 && end <= head + 1.0, "to the record head: {end} vs {head}");
+    // The growing span is pushed with no span of its own: the timeline
+    // stretches it to the playhead, so no lane reruns on a head tick.
+    assert_eq!(get(&rack_items[0], "end"), Value::Number(0.0));
+    assert_eq!(get(&rack_items[0], "grow"), Value::Bool(true));
     let member_items = items(&h.eval("(eseq.arrangement/track-items 0)"));
-    assert!(
-        member_items.iter().any(|item| get(item, "end") == Value::Number(end)),
-        "the member's row grows too"
-    );
+    let member = member_items
+        .iter()
+        .find(|item| get(item, "grow") == Value::Bool(true))
+        .expect("the member's row grows too");
+    assert_eq!(get(member, "end"), Value::Number(0.0));
 
     h.app.song_capture_cancel().expect("cancel");
     h.settle();

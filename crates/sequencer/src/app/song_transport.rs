@@ -796,7 +796,10 @@ impl App {
         // hand the engine the lane owner's sound, or a defaults push, in the
         // window before `sync_track_sound_bindings` re-resolves below.
         let device_hold_mask = self.row_device_hold_mask(row);
+        let profile = std::env::var_os("METAL_SEQ_PROFILE_PATTERN_SWITCH").is_some();
+        let profile_started = std::time::Instant::now();
         self.apply_song_row_control(row.scene, &row.overrides, false, device_hold_mask)?;
+        let apply_elapsed = profile_started.elapsed();
         self.song_mirrored_row = Some(notice.row_ordinal);
         self.song_row_mirror_epoch += 1;
         // The row apply released any bound device loan and pushed the row's
@@ -805,6 +808,15 @@ impl App {
         // Re-resolve the bindings synchronously so an audible take re-borrows
         // its own device snapshot and re-pushes it in the same mirror step.
         self.sync_track_sound_bindings();
+        if profile {
+            eprintln!(
+                "[pattern-switch-profile][song-row-mirror] row={} total={:.2}ms apply={:.2}ms sound_bindings={:.2}ms",
+                notice.row_ordinal,
+                profile_started.elapsed().as_secs_f64() * 1000.0,
+                apply_elapsed.as_secs_f64() * 1000.0,
+                (profile_started.elapsed() - apply_elapsed).as_secs_f64() * 1000.0,
+            );
+        }
         Ok(())
     }
 
@@ -853,9 +865,17 @@ impl App {
         // (scene-keyed reactive bindings audibly follow it) while the
         // performer holds the launch.
         let scene_latched = self.state.song_scene_latch();
+        let profile = std::env::var_os("METAL_SEQ_PROFILE_PATTERN_SWITCH").is_some();
+        let mut step_started = std::time::Instant::now();
+        let mut step_ms = || {
+            let ms = step_started.elapsed().as_secs_f64() * 1000.0;
+            step_started = std::time::Instant::now();
+            ms
+        };
         if !scene_latched && scene != self.state.current_scene_index() {
             self.switch_bus_pattern(scene);
         }
+        let bus_ms = step_ms();
         let sample_ids = self.state.apply_song_row_latched(
             scene,
             overrides,
@@ -869,10 +889,22 @@ impl App {
             scene_latched,
             device_hold_mask,
         )?;
+        let row_ms = step_ms();
         self.graph_controller().apply_sample_ids(&sample_ids);
+        let samples_ms = step_ms();
         self.graph_controller().sync_track_instrument_run_modes_from_live_state()?;
+        let run_modes_ms = step_ms();
         self.graph_controller().sync_current_pattern_mod_routes();
+        let mod_routes_ms = step_ms();
         self.push_all_restored_defaults_except(device_hold_mask);
+        let defaults_ms = step_ms();
+        if profile {
+            eprintln!(
+                "[pattern-switch-profile][song-row-apply] bus={bus_ms:.2}ms row={row_ms:.2}ms \
+                 samples={samples_ms:.2}ms run_modes={run_modes_ms:.2}ms \
+                 mod_routes={mod_routes_ms:.2}ms defaults={defaults_ms:.2}ms"
+            );
+        }
         Ok(())
     }
 }

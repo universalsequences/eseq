@@ -458,7 +458,7 @@ impl EngineRegistry {
 fn publish_ext_claims(engine_id: usize, manifest: &DGenManifest) {
     crate::instruments::voice_modulator::set_custom_engine_ext_claims(
         engine_id,
-        manifest.modulators.iter().filter(|m| m.ext.is_some()).map(|m| m.slot),
+        manifest.modulators.iter().filter_map(|m| Some((m.slot, m.ext?))),
     );
 }
 

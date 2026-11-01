@@ -154,12 +154,18 @@ export ESEQ_PACKAGED=1
 cargo build --release -p sequencer --bin metal_seq --bin eseq
 [[ -x "$METAL_SEQ" ]] || fail "Cargo did not produce $METAL_SEQ"
 [[ -x "$ESEQ_CLI" ]] || fail "Cargo did not produce $ESEQ_CLI"
+# The plugin shell Export Instrument as Plugin… copies into every bundle
+# (docs/plugin-export-spec.md); AppPaths::plugin_shell finds it here.
+readonly PLUGIN_SHELL="$TARGET_DIR/release/libeseq_plugin.dylib"
+cargo build --release -p eseq-plugin --lib
+[[ -f "$PLUGIN_SHELL" ]] || fail "Cargo did not produce $PLUGIN_SHELL"
 
 mkdir -p "$MACOS" "$RESOURCES"
 ditto "$METAL_SEQ" "$MACOS/metal_seq"
 ditto "$ESEQ_CLI" "$MACOS/eseq"
 ditto "$DGEN_TOOL" "$MACOS/DGenLisp-macos-arm64"
 ditto "$DGEN_TOOLCHAIN" "$RESOURCES/dgen-toolchain"
+ditto "$PLUGIN_SHELL" "$RESOURCES/plugin-shell/libeseq_plugin.dylib"
 ditto "$CONTENT_DIR" "$RESOURCES"
 ditto "$REPO_ROOT/docs/manual" "$RESOURCES/manual"
 # The DGenLisp language reference and operator catalog belong to the coding-
@@ -229,6 +235,7 @@ if [[ -n "$SIGNING_IDENTITY" ]]; then
     "$MACOS/DGenLisp-macos-arm64"
     "$RESOURCES/dgen-toolchain/bin/dgen-clang"
     "$RESOURCES/dgen-toolchain/bin/ld64.lld"
+    "$RESOURCES/plugin-shell/libeseq_plugin.dylib"
   )
   while IFS= read -r -d '' executable; do
     for known in "${HELPERS[@]}" "$MACOS/metal_seq"; do

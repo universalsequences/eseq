@@ -54,6 +54,7 @@ pub(crate) fn dispatch_custom_host_command(
         n if super::sampler_slices::COMMANDS.contains(&n) => super::sampler_slices::handle(name, payload, app, editor, ctx),
         n if super::scripts::COMMANDS.contains(&n) => super::scripts::handle(name, payload, app, editor, ctx),
         n if super::packages::COMMANDS.contains(&n) => super::packages::handle(name, payload, app, editor, ctx),
+        n if super::plugin_export::COMMANDS.contains(&n) => super::plugin_export::handle(name, payload, app, editor, ctx),
         n if super::audio_settings::COMMANDS.contains(&n) => super::audio_settings::handle(name, payload, app, editor, ctx),
         n if super::customize::COMMANDS.contains(&n) => super::customize::handle(name, payload, app, editor, ctx),
         n if super::drafts::COMMANDS.contains(&n) => super::drafts::handle(name, payload, app, editor, ctx),

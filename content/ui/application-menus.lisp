@@ -146,6 +146,8 @@
   (host-command "menu-import-package" (dict)))
 (def export-package () :doc "Bundle a package into an .eseqpack file." :command "Export Package…" :icon :upload :group "File"
   (host-command "menu-export-package" (dict)))
+(def export-instrument-plugin () :doc "Export the current track's instrument, panel included, as CLAP and VST3 plugins (installed to ~/Library/Audio/Plug-Ins)." :command "Export Instrument as Plugin…" :icon :upload :group "File"
+  (host-command "export-instrument-plugin" (dict)))
 (def show-settings () :doc "Open the Settings window." :command "Settings…" :icon :sliders :shortcut "s-," :group "File"
   (host-command "settings-open" (dict)))
 (def open-init () :doc "Open your init.lisp, loaded at every start." :command "Open init.lisp" :icon :document :group "File"
@@ -212,6 +214,7 @@
       (application-menu-entry "file-menu-import" "Import Samples…" "" (lambda () (import-samples)))
       (application-menu-entry "file-menu-import-package" "Import Package…" "" (lambda () (import-package)))
       (application-menu-entry "file-menu-export-package" "Export Package…" "" (lambda () (export-package)))
+      (application-menu-entry "file-menu-export-plugin" "Export Instrument as Plugin…" "" (lambda () (export-instrument-plugin)))
       (application-menu-entry "file-menu-settings" "Settings…" "," (lambda () (show-settings)))
       (application-menu-entry "file-menu-customize" "Customize…" "" (lambda () (eseq.customize/customize)))
       (application-menu-entry "file-menu-open-init" "Open init.lisp" "" (lambda () (open-init)))

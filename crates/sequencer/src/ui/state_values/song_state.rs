@@ -414,7 +414,7 @@ pub(crate) fn pattern_events_value(events: &[(f64, f64, f64, f64)]) -> Value {
 /// capture's record head is the honest clock; see
 /// `App::pending_capture_head_beat`).
 pub(crate) fn song_position(state: &SequencerState, capture_head: Option<f64>) -> Option<f64> {
-    state.song_position_beats().or(capture_head)
+    state.song_position_beats_at(std::time::Instant::now()).or(capture_head)
 }
 
 /// [`song_position`] as shown: 0 while inactive, quantized to a milli-beat

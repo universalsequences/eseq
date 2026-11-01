@@ -325,6 +325,7 @@ impl SequencerState {
                 .collect(),
             active_note_trigger_sequence: AtomicU64::new(0),
             audio_rendered_sample: AtomicU64::new(0),
+            audio_clock: AudioClockStamp::default(),
             scheduler_rendered_beats_bits: AtomicU64::new(0.0_f64.to_bits()),
             scratch_source: Mutex::new(String::new()),
             scratch_source_version: AtomicU64::new(0),

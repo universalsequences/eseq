@@ -377,7 +377,100 @@ pub(crate) fn track_loaded_presets(app: &app::App, count: usize) -> Vec<String> 
 /// Record what the browser sidebar shows for `track` (the `browser` host
 /// kind reads it through `presented`).
 pub(crate) fn sync_sidebar_browser(app: &app::App, track: usize) {
-    crate::presented::present_sidebar(sidebar_browser(app, track));
+    present_sidebar_from(app, sidebar_inputs(app, track));
+}
+
+fn present_sidebar_from(app: &app::App, inputs: SidebarInputs) {
+    let track = inputs.track;
+    LAST_SIDEBAR_INPUTS.with(|last| *last.borrow_mut() = Some(inputs));
+    let started = std::time::Instant::now();
+    let sidebar = sidebar_browser(app, track);
+    let build_elapsed = started.elapsed();
+    crate::presented::present_sidebar(sidebar);
+    if crate::profile::pattern_switch_profile_enabled() {
+        eprintln!(
+            "[pattern-switch-profile][sidebar] track={track} build={:.2}ms present={:.2}ms",
+            crate::profile::duration_ms(build_elapsed),
+            crate::profile::duration_ms(started.elapsed() - build_elapsed),
+        );
+    }
+}
+
+/// [`sync_sidebar_browser`], skipped while the sidebar's inputs match the
+/// ones it was last synced from (by any caller). A song-row change moves
+/// these only when the row swaps the track's sound; rebuilding regardless
+/// re-resolves the preset banks on every row (~30-60ms on the UI thread,
+/// a visible hitch in the arrangement scroll). Preset saves change the lists
+/// without changing the inputs, so they call the unconditional sync.
+pub(crate) fn sync_sidebar_browser_if_inputs_changed(app: &app::App, track: usize) {
+    let inputs = sidebar_inputs(app, track);
+    if LAST_SIDEBAR_INPUTS.with(|last| last.borrow().as_ref() == Some(&inputs)) {
+        return;
+    }
+    present_sidebar_from(app, inputs);
+}
+
+thread_local! {
+    /// The inputs the presented sidebar was last built from.
+    static LAST_SIDEBAR_INPUTS: std::cell::RefCell<Option<SidebarInputs>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Everything [`sidebar_browser`] reads except the preset banks themselves.
+#[derive(PartialEq)]
+struct SidebarInputs {
+    track: usize,
+    instrument_type: Option<sequencer::sequencer::InstrumentType>,
+    instrument: Option<String>,
+    engine_id: Option<usize>,
+    track_name: Option<String>,
+    sample: Option<std::path::PathBuf>,
+    preset: Option<String>,
+    slots: Vec<(sequencer::sequencer::InstrumentType, String, Option<String>)>,
+    engines: Vec<String>,
+}
+
+fn sidebar_inputs(app: &app::App, track: usize) -> SidebarInputs {
+    let slots = app
+        .state
+        .pattern
+        .rack_tracks
+        .lock()
+        .unwrap()
+        .get(track)
+        .and_then(Option::as_ref)
+        .map(|rack| {
+            rack.slots
+                .iter()
+                .enumerate()
+                .map(|(slot_idx, slot)| {
+                    (
+                        slot.instrument_type,
+                        rack_slot_raw_name(app, slot_idx, slot),
+                        slot.track_sound_state.loaded_preset.clone(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    SidebarInputs {
+        track,
+        instrument_type: app.graph.track_instrument_types.get(track).copied(),
+        instrument: current_custom_instrument_name(app, track),
+        engine_id: app.graph.track_engine_ids.get(track).copied().flatten(),
+        track_name: app.tracks.get(track).cloned(),
+        sample: app.sampler_path_for_track(track),
+        preset: app
+            .state
+            .pattern
+            .track_sound_state
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(|meta| meta.loaded_preset.clone()),
+        slots,
+        engines: project_instrument_engine_names(app),
+    }
 }
 
 /// What the browser sidebar shows for `track`: its instrument (a sampler's

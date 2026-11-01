@@ -29,6 +29,7 @@ pub(crate) mod shape_lab;
 pub(crate) mod script_solves;
 pub(crate) mod notes;
 pub(crate) mod packages;
+pub(crate) mod plugin_export;
 mod panel;
 mod process_edit;
 mod project;

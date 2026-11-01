@@ -12,12 +12,10 @@ fn main() {
             "audiograph/hot_swap.c",
             "audiograph/ready_queue.c",
             "audiograph/wrapper.c",
-            "audiograph/dgen_host_services.c",
-            // Compiled on every target, not just the ones whose host-services
-            // table uses it: the tests that pin the portable FFT to the same
-            // reference vDSP is pinned to have to run on macOS too, or the two
-            // backends were never actually compared (eseq-linux.9).
-            "audiograph/dgen_fft.c",
+            // dgen_host_services.c and dgen_fft.c are compiled by eseq-dgen-abi
+            // (shared with exported plugins), on every target: the tests that
+            // pin the portable FFT to the same reference vDSP is pinned to
+            // have to run on macOS too (eseq-linux.9).
         ])
         .include("audiograph")
         .flag("-std=c11")

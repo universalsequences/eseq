@@ -1,0 +1,8 @@
+[package]
+name = "eseq-voice-mod"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "eseq's per-voice modulation kernel (LFO / envelope / random / drift), shared by the app and exported plugins."
+
+[dependencies]

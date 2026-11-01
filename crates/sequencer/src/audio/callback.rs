@@ -844,6 +844,7 @@ pub(super) fn render_audio_block(
     data.rendered_samples
         .store(block_end_sample, Ordering::Release);
     data.state.set_audio_rendered_sample(block_end_sample);
+    data.state.stamp_audio_clock(block_start_sample, nframes as u64, data.sample_rate, callback_start);
 
     if purpose == AudioOutputPurpose::Playback {
         data.master_recorder.capture(output);
