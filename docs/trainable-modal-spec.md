@@ -1,6 +1,6 @@
 # Trainable modal patches (`eseq.modal.train`)
 
-Status: draft rev 1 (2026-11-01). Epic: see `bd show` for "Trainable modal patches".
+Status: rev 2 (2026-11-02): slices 1-3 built (eseq-jnct). User guide: tools/modal/train/README.md.
 
 ## 1. Why
 
@@ -137,13 +137,16 @@ start on the hit). Seeders and scoring stay Python (scipy) for now:
 `hf-rise` for a second stroke, `template-energy` for a template's level).
 The patch names them; porting them to Lisp is not a goal.
 
-## 7. The one Rust change
+## 7. No Rust change
 
-The generator result map (`tools/gen/README.md`) has `:name :dsp :ui
-:voice-mode :assets :kind`. Add a generic **`:files`** key: a dict of
-relative path -> text, written beside dsp.lisp by
-`crates/sequencer/src/lisp_host/eseq/generator.rs`. Paths must stay inside
-the instrument folder. Useful to any generator; nothing modal-specific.
+Rev 1 planned a generic `:files` key on the generator result map. Not needed:
+`eseq lisp run SCRIPT` already registers `write-text-file` (CLI only, so app UI
+code cannot write files), and module imports resolve there. An experiment script
+ends with `(t/emit-experiment e DIR)`, which writes `voice.lisp`, `morph.lisp`,
+`layout.json` and `experiment.json`. The runner (`tools/modal/train/run.py`,
+Python because the dataset, seeding and scoring code already is) reads them.
+The instrument's own `dsp.lisp` is still made from a trained run by the
+latent-snare builders (`build_instrument.py`, `build_morph.py`).
 
 ## 8. Variants and lineage
 
@@ -176,7 +179,15 @@ the two object lists gives:
 - Training from inside the app (C-c C-c -> train) needs a process-spawn
   native; wait until the CLI workflow has proven itself.
 
-## 10. Slices
+## 10. Slices (status 2026-11-02)
+
+Built: 1 (snare3 port renders identically: static 37 renders, max 1.3e-7 of peak;
+Morph 26 renders incl. real morphs, 1.1e-7), 2 (runner: data / seed / superset /
+train with GPU batch splitting / eval / ship), 3 (variants: `t/variant`, lineage,
+exact relative-to-absolute stroke conversion, superset check). Open: 4 / 5 below,
+porting the latent-snare scoring + instrument builders out of .local/research.
+
+Original plan:
 
 1. **Spec** (this document).
 2. **`:files` + module skeleton + snare3 port**: `eseq.modal.train` with the
