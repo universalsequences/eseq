@@ -801,6 +801,8 @@ pub enum TrackInstrumentSource {
         slots: Vec<RackContainerSlotState>,
     },
     Modulator,
+    /// An audio track: no device; its regions are arrangement content.
+    Audio,
 }
 
 #[derive(Clone, Debug)]
@@ -844,7 +846,7 @@ pub struct TrackCreationPatch {
 impl TrackCreationPatch {
     pub fn retained_bytes(&self) -> usize {
         let source_bytes = match &self.state.source {
-            TrackInstrumentSource::Empty | TrackInstrumentSource::Custom { .. } | TrackInstrumentSource::Modulator => 0,
+            TrackInstrumentSource::Empty | TrackInstrumentSource::Custom { .. } | TrackInstrumentSource::Modulator | TrackInstrumentSource::Audio => 0,
             TrackInstrumentSource::Sampler { path, .. } => path
                 .as_ref()
                 .map(|path| path.as_os_str().len())
@@ -878,6 +880,9 @@ pub struct TrackDeletionPatch {
     pub record_armed: bool,
     pub groups: Vec<crate::project::ProjectTrackGroup>,
     pub macro_mappings: crate::macro_engine::TrackTopologyMacroMappings,
+    /// The track's audio regions (docs/audio-tracks-spec.md): arrangement
+    /// content that the topology remap drops with the lane.
+    pub audio_lane: Vec<crate::sequencer::AudioRegion>,
 }
 
 impl TrackDeletionPatch {
@@ -895,7 +900,7 @@ impl InstrumentBindingPatch {
     pub fn retained_bytes(&self) -> usize {
         fn state_bytes(state: &TrackInstrumentState) -> usize {
             let source_bytes = match &state.source {
-                TrackInstrumentSource::Empty | TrackInstrumentSource::Custom { .. } | TrackInstrumentSource::Modulator => 0,
+                TrackInstrumentSource::Empty | TrackInstrumentSource::Custom { .. } | TrackInstrumentSource::Modulator | TrackInstrumentSource::Audio => 0,
                 TrackInstrumentSource::Sampler { path, .. } => path
                     .as_ref()
                     .map(|path| path.as_os_str().len())

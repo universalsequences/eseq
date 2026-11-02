@@ -8,6 +8,7 @@
 (import eseq.effects.effect-panels :as ep)
 (import eseq.effects.panel-frame :as pf)
 (import eseq.effects.instrument-modulation :as im)
+(import eseq.view-kit :refer (open-menu! menu-of prop-if))
 ;; Mutual import with eseq.effects.instrument-panel (it renders sampler-panel;
 ;; this file routes rack-targeted drops back to it). Load-once terminates the
 ;; cycle, per the panel-widgets <-> process-panel precedent.
@@ -38,6 +39,33 @@
           (cursor-time 0.0)
           (active-marker "none")
           (selected-slice -1)))
+
+;; The waveform's context menu, and the sampler and range it was opened on
+;; (track, rack slot or -1, start and end in seconds).
+(def-kind sampler-region-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)
+          (target :any :default nil)))
+
+(def open-sampler-region-menu (inst d event)
+  (set! sampler-region-menu.target
+    (dict :track (if (pc/instrument-rack-target? inst) (get inst :rack-track) (get inst :track))
+          :rack-slot (if (pc/instrument-rack-target? inst) (get inst :rack-slot) -1)
+          :start d.start-time
+          :end d.end-time))
+  (open-menu! sampler-region-menu event))
+
+;; Save Region… keeps the start/end range as a library sample of its own
+;; (eseq.sample-region).
+(def sampler-region-context-menu ()
+  (menu-of sampler-region-menu
+    (menu-item "Save Region…"
+      :key "sampler-menu-save-region"
+      :on-select (lambda (event)
+        (do
+          (set! sampler-region-menu.open false)
+          (host-command "sample-region-open" sampler-region-menu.target))))))
 
 (def sampler-reset-view ()
   (set! sampler-view.start 0.0)
@@ -452,7 +480,12 @@
   (let ((duration d.sample-duration)
         (slicing (sampler-slice-active? (get inst :synth))))
     (subtree :key (str "sampler-waveform-" d.sample-buffer)
-      (box :width 89.7 :height 5.2 :padding 0.2
+      ;; Right-click saves the range as a region. Not in slice mode, which
+      ;; has no range and where a right-click on a marker deletes it.
+      (apply box :width 89.7 :height 5.2 :padding 0.2
+        (append
+          (prop-if :on-right-click (if slicing nil |event| (open-sampler-region-menu inst d event)))
+          (list
         (waveform
           :height 3.6
           :header-height 0.3
@@ -483,7 +516,7 @@
           :selection-start (sampler-selection-start-prop slicing d)
           :selection-end (sampler-selection-end-prop slicing d)
           :time-ruler (dict :mode :seconds)
-          :on-action |event| (handle-sampler-waveform-action inst event duration))))))
+          :on-action |event| (handle-sampler-waveform-action inst event duration))))))))
 
 (def sampler-panel-content (inst)
   (let ((d (dv/inst-device inst))
@@ -500,7 +533,8 @@
                     (box :width 75 :height 4.2 :h-align :center :v-align :center
                       (label "No sample" :font-size 12 :color :dim :bg :transparent)))
                   (sampler-param-pickers (get inst :synth) inst)))))
-          (sampler-param-knobs (get inst :synth) inst))))
+          (sampler-param-knobs (get inst :synth) inst)
+          (sampler-region-context-menu))))
     (if instrument-view.mods-open
       (h-stack :debug-name "sampler-mods-inline-body" :height :fill :gap 0.45 :align :stretch
         (im/mod-control-panel inst)

@@ -2,6 +2,7 @@
 
 use crate::audiograph::*;
 use crate::instruments::beats_warp::{one_pole_coeff, BeatsBlock, BeatsFrame, BeatsWarp, FadeVoice};
+use crate::instruments::sample_core::{self, playback_step as sampler_playback_step, read_interpolated};
 use std::ffi::CString;
 use std::os::raw::{c_int, c_void};
 use std::path::Path;
@@ -339,45 +340,6 @@ unsafe fn store_beats_warp(s: *mut f32, warp: &BeatsWarp) {
         *s.add(base + 3) = fade.remaining;
         *s.add(base + 4) = fade.total;
     }
-}
-
-fn sampler_playback_step(source_sample_rate: f32, host_sample_rate: f32, rate: f32) -> f32 {
-    let source_sample_rate = source_sample_rate.max(1.0);
-    let host_sample_rate = host_sample_rate.max(1.0);
-    rate * source_sample_rate / host_sample_rate
-}
-
-unsafe fn read_interpolated(
-    sample_data: *mut f32,
-    sample_len: usize,
-    channel_count: usize,
-    playhead: f32,
-) -> (f32, f32) {
-    let idx = playhead as usize;
-    let frac = playhead - idx as f32;
-    let sample_index = idx * channel_count;
-    let next_sample_index = (idx + 1) * channel_count;
-    let s0_l = if idx < sample_len {
-        *sample_data.add(sample_index)
-    } else {
-        0.0
-    };
-    let s1_l = if idx + 1 < sample_len {
-        *sample_data.add(next_sample_index)
-    } else {
-        0.0
-    };
-    let s0_r = if channel_count > 1 && idx < sample_len {
-        *sample_data.add(sample_index + 1)
-    } else {
-        s0_l
-    };
-    let s1_r = if channel_count > 1 && idx + 1 < sample_len {
-        *sample_data.add(next_sample_index + 1)
-    } else {
-        s1_l
-    };
-    (s0_l + frac * (s1_l - s0_l), s0_r + frac * (s1_r - s0_r))
 }
 
 unsafe fn modulation_input(
@@ -1740,7 +1702,7 @@ pub fn load_wav_buffer(lg: *mut LiveGraph, wav_path: &Path) -> Result<LoadedSamp
     // Content-addressed references ("samples/<sha>.wav") resolve against the
     // sample store; absolute and cwd-reachable paths pass through.
     let wav_path = &crate::app_paths::resolve_sample_ref(wav_path);
-    let decoded = eseqlisp::audio::sample::load_wav_file(wav_path).map_err(|e| {
+    let decoded = sample_core::decode_stereo(wav_path).map_err(|e| {
         let file_len = std::fs::metadata(wav_path).map(|meta| meta.len()).ok();
         eprintln!(
             "sampler: failed to open WAV {}; exists={}; len={file_len:?}; error={e}",
@@ -1757,28 +1719,7 @@ pub fn load_wav_buffer(lg: *mut LiveGraph, wav_path: &Path) -> Result<LoadedSamp
         );
     }
 
-    let channels = decoded.channels as usize;
-    let stereo: Vec<f32> = if channels == 1 {
-        decoded
-            .samples
-            .iter()
-            .flat_map(|&sample| [sample, sample])
-            .collect()
-    } else if channels == 2 {
-        decoded.samples.clone()
-    } else {
-        decoded
-            .samples
-            .chunks(channels)
-            .flat_map(|ch| {
-                let left = ch.iter().step_by(2).copied().sum::<f32>()
-                    / ch.iter().step_by(2).count() as f32;
-                let right = ch.iter().skip(1).step_by(2).copied().sum::<f32>()
-                    / ch.iter().skip(1).step_by(2).count().max(1) as f32;
-                [left, right]
-            })
-            .collect()
-    };
+    let stereo = &decoded.samples;
 
     // Skip leading silence: scan with 64-sample RMS windows, threshold -60dB (~0.001)
     let skip = {
@@ -1801,19 +1742,15 @@ pub fn load_wav_buffer(lg: *mut LiveGraph, wav_path: &Path) -> Result<LoadedSamp
         .chunks_exact(2)
         .map(|frame| 0.5 * (frame[0] + frame[1]))
         .collect();
-    let decoded_peak = stereo
-        .iter()
-        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
-    let trimmed_peak = trimmed
-        .iter()
-        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+    let decoded_peak = decoded.peak();
+    let trimmed_peak = sample_core::peak(trimmed);
     eprintln!(
         "sampler: decoded {} successfully; sample_rate={}; channels={}; frames={}; decoded_samples={}; stereo_frames={}; skipped_frames={}; trimmed_frames={}; decoded_peak={:.6}; trimmed_peak={:.6}",
         wav_path.display(),
         decoded.sample_rate,
-        decoded.channels,
-        decoded.frames,
-        decoded.samples.len(),
+        decoded.source_channels,
+        decoded.frames(),
+        decoded.frames() * decoded.source_channels as usize,
         stereo.len() / 2,
         skip,
         trimmed.len() / 2,

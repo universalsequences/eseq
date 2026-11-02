@@ -426,6 +426,9 @@ mod tests {
             end_beat: 48.0,
             loop_enabled: false,
             next_clip_id: 6,
+            audio_lanes: Vec::new(),
+            audio_sources: Default::default(),
+            next_audio_source_id: 0,
         }
     }
 

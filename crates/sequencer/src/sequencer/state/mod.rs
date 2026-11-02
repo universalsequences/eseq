@@ -89,6 +89,8 @@ pub use song_runtime::*;
 mod audio_clock;
 use audio_clock::AudioClockStamp;
 mod arrangement;
+mod audio_regions;
+pub use audio_regions::*;
 pub use arrangement::*;
 mod track_delete_remap;
 use track_delete_remap::*;

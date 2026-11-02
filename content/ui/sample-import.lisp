@@ -43,7 +43,8 @@
         add-file-tag
         ;; Tag editing pieces shared with the resample modal.
         chip-row
-        tag-entry)
+        tag-entry
+        suggestion-chip)
 
 ;; The modal: open, `generation` (bumped after every draft mutation: the
 ;; natives are plain calls and are not reactive on their own), and the

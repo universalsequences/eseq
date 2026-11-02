@@ -376,6 +376,12 @@ impl GraphController<'_> {
                 crate::audiograph::delete_node(self.app.graph.lg.0, sampler_id);
             }
         }
+        if let Some(player) = track.audio_player {
+            self.app.audio_players.clear(player.slot);
+            unsafe {
+                crate::audiograph::delete_node(self.app.graph.lg.0, player.node_id);
+            }
+        }
         for &modulator_id in &track.sampler_modulator_ids {
             unsafe {
                 crate::audiograph::delete_node(self.app.graph.lg.0, modulator_id);

@@ -84,6 +84,9 @@ pub(super) struct SongState {
     rack_lanes_key: Option<RackLanesKey>,
     /// The provisional capture surface (`pending`).
     pub(super) pending: PendingState,
+    /// What the tracks' `audio-regions` were last pushed under:
+    /// `App::audio_view_key` and the track instances.
+    audio_key: Option<((u64, u32, usize), Vec<Option<InstanceId>>)>,
 }
 
 impl SongState {
@@ -608,6 +611,44 @@ impl HostKinds {
         if structure_synced || content_moved {
             self.sync_clip_note_dots(pusher);
         }
+    }
+
+    /// Every track's `audio-regions` (docs/audio-tracks-spec.md §8.1): maps
+    /// the arrangement lane draws as waveform items, when an arrangement
+    /// install, the tempo, a decoded source or the track list moved.
+    pub(super) fn sync_audio_regions(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
+        let key = (app.audio_view_key(), self.track_ids.clone());
+        if self.song.audio_key.as_ref() == Some(&key) {
+            return;
+        }
+        let views = app.audio_region_views();
+        for (track, id) in self.track_ids.iter().enumerate() {
+            let Some(track_id) = *id else { continue };
+            let regions = views.get(track).map(Vec::as_slice).unwrap_or(&[]);
+            let list = crate::values::list_value(regions.iter().map(|region| {
+                crate::values::map_value([
+                    ("cid", number(region.id as f64)),
+                    ("start", number(region.start_beat)),
+                    ("end", number(region.end_beat)),
+                    ("name", text(&region.name)),
+                    ("sample", text(&region.waveform_key)),
+                    ("offset", number(region.offset_seconds)),
+                    ("span", number(region.span_seconds)),
+                    ("duration", number(region.source_seconds)),
+                    ("gain", number(region.gain_db)),
+                    ("fade-in", number(region.fade_in_seconds)),
+                    ("fade-out", number(region.fade_out_seconds)),
+                    ("muted", Value::Bool(region.muted)),
+                    ("loaded", Value::Bool(region.loaded)),
+                    ("pitch", number(region.transpose)),
+                    ("loop", Value::Bool(region.loop_seconds.is_some())),
+                    ("loop-start", number(region.loop_seconds.map_or(0.0, |(start, _)| start))),
+                    ("loop-end", number(region.loop_seconds.map_or(0.0, |(_, end)| end))),
+                ])
+            }));
+            pusher.push(track_id, f::TRACK_AUDIO_REGIONS, list);
+        }
+        self.song.audio_key = Some(key);
     }
 
     /// The song's `exists`, `end`, `loop` and `spans`, and every track's

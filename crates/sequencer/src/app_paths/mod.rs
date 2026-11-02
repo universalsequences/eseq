@@ -627,6 +627,12 @@ impl AppPaths {
     pub fn samples_dir(&self) -> PathBuf {
         self.user_data_root().join("samples")
     }
+    /// Content-addressed store of audio-track sources (`<sha256>.wav`):
+    /// audio dropped or recorded into a project is copied here, so a project
+    /// never depends on where its audio came from.
+    pub fn audio_dir(&self) -> PathBuf {
+        self.user_data_root().join("audio")
+    }
     pub fn sample_db_path(&self) -> PathBuf {
         self.user_data_root().join("samples.db")
     }

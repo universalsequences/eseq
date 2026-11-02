@@ -841,6 +841,14 @@ impl SequencerState {
         self.song_playback.drain_notices()
     }
 
+    /// What an audio-track region player reads each block
+    /// (docs/audio-tracks-spec.md §9.2): the song position atomics and the
+    /// rendered-sample clock, which holds a block's first sample while the
+    /// graph renders it.
+    pub fn audio_render_clock(&self) -> (&SongPositionShared, &AtomicU64) {
+        (self.song_playback.shared(), &self.audio_rendered_sample)
+    }
+
     /// Render-rate `song-position-beats` read (spec 10.2): derived from the
     /// scheduler-published anchor atomics plus the audio-published rendered
     /// sample clock. No locks. `None` while song playback is inactive.

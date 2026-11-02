@@ -301,7 +301,7 @@ pub(super) fn collect_rack_slot_active_voice_releases(
                 note_offs.push(RackSlotNoteOff::Custom { logical_id: lid });
             }
         }
-        InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
+        InstrumentType::Empty | InstrumentType::Audio | InstrumentType::Modulator | InstrumentType::Rack => {}
     }
     for note_off in &note_offs {
         let logical_id = match *note_off {
@@ -416,7 +416,7 @@ pub(super) fn collect_track_active_voice_releases(
                 note_offs.push(RackSlotNoteOff::Custom { logical_id: lid });
             }
         }
-        InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
+        InstrumentType::Empty | InstrumentType::Audio | InstrumentType::Modulator | InstrumentType::Rack => {}
     }
 }
 
@@ -1038,7 +1038,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                     },
                 );
             }
-            InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
+            InstrumentType::Empty | InstrumentType::Audio | InstrumentType::Modulator | InstrumentType::Rack => {}
         }
     }
 
@@ -1322,7 +1322,7 @@ pub(super) fn fire_rack_slot_note(
                 voices, count: 1, engine_id, free_patch, gated: gate_mode > 0.5,
             });
         }
-        InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
+        InstrumentType::Empty | InstrumentType::Audio | InstrumentType::Modulator | InstrumentType::Rack => {}
     }
     None
 }
@@ -1583,7 +1583,7 @@ fn dispatch_rack_slot_params_to_active_voices(
                 }
             }
         }
-        InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
+        InstrumentType::Empty | InstrumentType::Audio | InstrumentType::Modulator | InstrumentType::Rack => {}
     }
 }
 

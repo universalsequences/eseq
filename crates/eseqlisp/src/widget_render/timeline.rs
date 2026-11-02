@@ -128,6 +128,18 @@ enum TimelineItemContent {
         wrap: bool,
     },
     Peaks(Vec<PeakBucket>),
+    /// An audio region's waveform (docs/audio-tracks-spec.md §8.1): the item
+    /// shows `span` seconds of a registered sample from `offset` on, drawn
+    /// from the sample's peak pyramid, so no peak data crosses into Lisp.
+    /// Audio plays at its native speed, so the window is in source seconds
+    /// and simply maps onto the item's width.
+    Waveform {
+        sample: std::sync::Arc<crate::audio::sample::SampleBuffer>,
+        offset: f64,
+        span: f64,
+        /// `[start, end)` source seconds a looping region repeats.
+        loop_window: Option<(f64, f64)>,
+    },
     /// A rack-lane clip's ring summary (docs/arrangement-rack-lanes-spec.md
     /// §6, after Logic's Drum Machine Designer cells): one concentric ring
     /// per rack member, outermost first, each listing its hits as offsets
@@ -148,7 +160,19 @@ impl TimelineItemContent {
                 cycle, phase, wrap, ..
             } => Some((*cycle, *phase, *wrap)),
             Self::Rings { cycle, phase, .. } => Some((*cycle, *phase, true)),
-            Self::Peaks(_) => None,
+            // A looping waveform repeats like a pattern clip: one cycle is
+            // its loop over the item's span, phased by where the item starts
+            // inside the loop, so the clip draws a segment per repeat.
+            Self::Waveform {
+                offset,
+                span,
+                loop_window: Some((start, end)),
+                ..
+            } if *end > *start && *span > 0.0 => {
+                let length = end - start;
+                Some((length / span, ((offset - start) / length).rem_euclid(1.0), true))
+            }
+            Self::Peaks(_) | Self::Waveform { .. } => None,
         }
     }
 }
@@ -525,7 +549,8 @@ a ruler header, playhead and cursor. Time is in steps. :lanes is a list of maps 
 the labels, :sidebar-style :piano draws keys). :items is a list of maps {:id \
 :lane (index) :start :end :label :color :selected} with optional :content \
 ({:dots ({:offset :value :width}) :cycle :phase} note previews, {:rings ...}, \
-{:peaks ...}). The visible window is :view-start/:view-duration (default 0/16, \
+{:sample registry-key :offset seconds :span seconds [:loop-start :loop-end]} an audio \
+waveform). The visible window is :view-start/:view-duration (default 0/16, \
 zoom clamped to :zoom-min-duration..:zoom-max-duration); bind them to reactive \
 fields to scroll several lanes together. :playhead-time and :cursor-time draw \
 lines; :time-ruler (dict :mode :bars-beats :beats-per-bar 4) or :seconds labels \
@@ -541,11 +566,11 @@ is the step grid (:snap-mode :floor, :resize-snap :grid, :move-snap-mode \
 :time-b :lane-a :lane-b), :delete-items (:ids), :scroll-view (:view-start \
 :delta-time :delta-lanes), :zoom-view (:anchor-time :factor), :zoom-lanes, \
 :nudge-selection (:ids :delta-time :delta-lane), :copy-items, :paste-items \
-(:time), :set-tool (:tool), :clear-selection, :double-click-item (with \
+(:time), :split-items (:ids :time, Cmd+E at the cursor), :set-tool (:tool), :clear-selection, :double-click-item (with \
 :double-click-items true); the host updates :items in response. While \
 :placement-active is 1 a ghost of :placement-item follows the pointer and a \
 click sends :place-item (:time), Esc :cancel-placement. With \
-:focusable true it takes arrows, Backspace, Cmd+C/V/A, Esc and p/d/e tool keys. \
+:focusable true it takes arrows, Backspace, Cmd+C/V/A/E, Esc and p/d/e tool keys. \
 Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
 :view-start #'view.start :view-duration #'view.duration :on-action (lambda \
 (a) (on-roll-action a)))"
@@ -2377,9 +2402,140 @@ fn push_item_content_primitives(
         Some(TimelineItemContent::Rings { rings, .. }) => {
             push_ring_glyphs(primitives, view, item, rect, rings, viewport);
         }
-        // Peaks rendering lands with the audio-track asset pipeline
-        // (docs/arrangement-timeline-ui-spec.md 3, Slice D).
+        Some(TimelineItemContent::Waveform { sample, offset, span, loop_window }) => {
+            push_waveform_columns(
+                primitives, view, item, rect, title_bar, sample, *offset, *span, *loop_window, viewport,
+            );
+        }
+        // Inline peak lists are parsed but unused: audio items name their
+        // sample instead (`Waveform`).
         Some(TimelineItemContent::Peaks(_)) | None => {}
+    }
+}
+
+/// An audio item's waveform (docs/audio-tracks-spec.md §8.1), drawn with the
+/// same GPU waveform shader the clip view uses, so it is smooth at any zoom
+/// and steady while the view scrolls. One shader instance per stretch of
+/// source the item plays: the whole span for a one-shot region, one per pass
+/// for a looping one. Past the source's end the body stays empty, as the
+/// region plays silence there.
+#[allow(clippy::too_many_arguments)]
+fn push_waveform_columns(
+    primitives: &mut Vec<GpuPrimitive>,
+    view: &TimelineView,
+    item: &TimelineItem,
+    (x, y, width, height): (f32, f32, f32, f32),
+    title_bar: Option<(f32, f32)>,
+    sample: &crate::audio::sample::SampleBuffer,
+    offset: f64,
+    span: f64,
+    loop_window: Option<(f64, f64)>,
+    viewport: super::WidgetViewport,
+) {
+    let duration = sample.duration_seconds;
+    if item.end <= item.start || span <= 0.0 || duration <= 0.0 || sample.peaks.is_empty() {
+        return;
+    }
+    // The body is what the title bar leaves.
+    let (body_y, body_height) = match title_bar {
+        Some((bar_y, bar_height)) if (bar_y - y).abs() < 1e-4 => {
+            (bar_y + bar_height, (height - bar_height).max(0.0))
+        }
+        _ => (y, height),
+    };
+    if body_height * viewport.cell_h < 4.0 {
+        return;
+    }
+    // `x_for_time` clamps to the view, so extend its in-view mapping
+    // linearly instead.
+    let view_x0 = view.x_for_time(view.view_start);
+    let view_x1 = view.x_for_time(view.view_start + view.view_duration);
+    let per_time = (view_x1 - view_x0) as f64 / view.view_duration.max(0.0001);
+    let unclamped_x = |time: f64| view_x0 + ((time - view.view_start) * per_time) as f32;
+    let (item_x0, item_x1) = (unclamped_x(item.start), unclamped_x(item.end));
+    if item_x1 <= item_x0 {
+        return;
+    }
+    let seconds_per_col = span / (item_x1 - item_x0) as f64;
+    let color = view.item_content_color.with_alpha(0.82);
+    let transparent = crate::backend::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    // Source passes as (item-relative seconds where it starts, source start,
+    // source end): straight through, or folded at the loop.
+    let mut passes: Vec<(f64, f64, f64)> = Vec::new();
+    match loop_window {
+        Some((loop_start, loop_end)) if loop_end > loop_start => {
+            let mut played = 0.0;
+            let mut source = offset;
+            if source >= loop_end {
+                source = loop_start + (source - loop_end).rem_euclid(loop_end - loop_start);
+            }
+            while played < span && passes.len() < 4096 {
+                let length = (loop_end - source).min(span - played);
+                if length <= 0.0 {
+                    break;
+                }
+                passes.push((played, source, source + length));
+                played += length;
+                source = loop_start;
+            }
+        }
+        _ => passes.push((0.0, offset, offset + span)),
+    }
+    let (clip_x0, clip_x1) = (x, x + width);
+    for (played, source_start, source_end) in passes {
+        // Only the audio that exists draws.
+        let audible_start = source_start.max(0.0);
+        let audible_end = source_end.min(duration);
+        if audible_end <= audible_start {
+            continue;
+        }
+        let pass_x = |source: f64| item_x0 + ((played + source - source_start) / seconds_per_col) as f32;
+        let (mut sx0, mut sx1) = (pass_x(audible_start), pass_x(audible_end));
+        let (mut s0, mut s1) = (audible_start, audible_end);
+        if sx1 <= clip_x0 || sx0 >= clip_x1 {
+            continue;
+        }
+        if sx0 < clip_x0 {
+            s0 += (clip_x0 - sx0) as f64 * seconds_per_col;
+            sx0 = clip_x0;
+        }
+        if sx1 > clip_x1 {
+            s1 -= (sx1 - clip_x1) as f64 * seconds_per_col;
+            sx1 = clip_x1;
+        }
+        if sx1 - sx0 <= 0.0 || s1 <= s0 {
+            continue;
+        }
+        // The coarsest peak level that still resolves half a pixel.
+        let frames_per_px =
+            (s1 - s0) * sample.sample_rate as f64 / ((sx1 - sx0) * viewport.cell_w).max(1.0) as f64;
+        let level = sample
+            .peaks
+            .iter()
+            .take_while(|level| level.samples_per_bucket as f64 <= (frames_per_px * 0.5).max(1.0))
+            .last()
+            .unwrap_or(&sample.peaks[0]);
+        primitives.push(GpuPrimitive::Waveform(super::GpuWaveformPrimitive {
+            rect: Rect { row: body_y, col: sx0, width: sx1 - sx0, height: body_height },
+            sample_key: sample.cache_key(),
+            sample_start: (s0 / duration) as f32,
+            sample_end: (s1 / duration) as f32,
+            samples_per_bucket: level.samples_per_bucket as u32,
+            bucket_count: level.buckets.len() as u32,
+            selection_start: 0.0,
+            selection_end: 1.0,
+            show_selection_start: false,
+            show_selection_end: false,
+            playhead_position: 0.0,
+            show_playhead: false,
+            waveform_color: color,
+            inactive_waveform_color: color,
+            marker_color: transparent,
+            active_marker_color: transparent,
+            active_selection_start: false,
+            active_selection_end: false,
+            selection_color: transparent,
+        }));
     }
 }
 
@@ -2787,6 +2943,9 @@ impl TimelineView {
         }
         let ghost_id = get_num(props, "ghost-id", f64::NAN);
         let max_end = self.content_length.unwrap_or(f64::INFINITY);
+        // The host's :min-duration, as the commit honours it, not a fixed
+        // beat: zoomed in, an audio region trims to a fraction of one.
+        let min_span = self.minimum_duration();
         let Some(item) = self
             .items
             .iter_mut()
@@ -2803,7 +2962,7 @@ impl TimelineView {
             item.end += delta;
         } else if ghost_kind < 2.5 {
             // Start-edge resize: phase re-anchors by the split rule.
-            let new_start = ghost_time.max(0.0).min(item.end - 1.0);
+            let new_start = ghost_time.max(0.0).min(item.end - min_span);
             let delta = new_start - item.start;
             item.start = new_start;
             let new_span = (item.end - item.start).max(1e-9);
@@ -2822,13 +2981,25 @@ impl TimelineView {
                 }
                 *cycle = (*cycle * old_span / new_span).max(1e-9);
             }
+            // Audio plays at a fixed rate: trimming the start skips the
+            // audio under it instead of squeezing the rest into the span.
+            if let Some(TimelineItemContent::Waveform { offset, span, .. }) = item.content.as_mut() {
+                let rate = *span / old_span;
+                *offset += delta * rate;
+                *span = new_span * rate;
+            }
         } else {
             // End-edge resize: pure occlusion, clamped to the song end.
-            let new_end = ghost_time.min(max_end).max(item.start + 1.0);
+            let new_end = ghost_time.min(max_end).max(item.start + min_span);
             item.end = new_end;
             let new_span = (item.end - item.start).max(1e-9);
             if let Some(TimelineItemContent::Dots { cycle, .. }) = item.content.as_mut() {
                 *cycle = (*cycle * old_span / new_span).max(1e-9);
+            }
+            // Growing reveals more audio (or more loop passes); it never
+            // stretches what is there.
+            if let Some(TimelineItemContent::Waveform { span, .. }) = item.content.as_mut() {
+                *span *= new_span / old_span;
             }
         }
     }
@@ -3138,12 +3309,12 @@ impl TimelineView {
     }
 
     /// Ordered marquee span, grid-quantized under `:marquee-snap :grid`
-    /// (docs/arrangement-region-editing-spec.md 4.3): the low edge floors and
-    /// the high edge ceils onto the zoom-adaptive ladder, so the selection is
-    /// always whole grid cells and "grab exactly 4 bars" is a sloppy drag.
-    /// A span that quantizes to nothing (a vertical-only drag landing on a
-    /// grid line) widens to the one cell the pointer is in rather than
-    /// selecting zero time.
+    /// (docs/arrangement-region-editing-spec.md 4.3): each edge snaps to the
+    /// NEAREST line of the zoom-adaptive ladder, as Ableton's selection does,
+    /// so a drag started in a clip's second half selects from there instead
+    /// of jumping back a whole cell to the clip's start. A span that snaps to
+    /// nothing (a short or vertical-only drag between two lines) widens to
+    /// the one cell the pointer is in rather than selecting zero time.
     fn marquee_span(&self, time_a: f64, time_b: f64) -> (f64, f64) {
         let low = time_a.min(time_b);
         let high = time_a.max(time_b);
@@ -3151,13 +3322,13 @@ impl TimelineView {
             return (low, high);
         }
         let grid = self.alignment_helper_grid_step();
-        let start = (low / grid).floor() * grid;
-        let end = (high / grid).ceil() * grid;
-        if end <= start + f64::EPSILON {
-            (start, start + grid)
-        } else {
-            (start, end)
+        let start = (low / grid).round() * grid;
+        let end = (high / grid).round() * grid;
+        if end > start + f64::EPSILON {
+            return (start, end);
         }
+        let cell = (low / grid).floor() * grid;
+        (cell, cell + grid)
     }
 
     fn effective_resize_snap(&self) -> f64 {
@@ -4279,6 +4450,20 @@ impl TimelineView {
                     ),
                 ]))
             }
+            // Cmd+E (Ableton's Split): cut the items under the cursor there.
+            // The host decides which items the cursor splits.
+            KeyCode::Char('e') | KeyCode::Char('E')
+                if self.cursor_time.is_some()
+                    && key
+                        .modifiers
+                        .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL) =>
+            {
+                Some(action_map(vec![
+                    ("type", keyword(":split-items")),
+                    ("ids", list_value(selected_ids)),
+                    ("time", Value::Number(self.cursor_time.unwrap_or(0.0))),
+                ]))
+            }
             KeyCode::Char('a') | KeyCode::Char('A')
                 if key
                     .modifiers
@@ -4790,6 +4975,20 @@ fn parse_item_content(value: &Value) -> Option<TimelineItemContent> {
             .map(|phase| phase.rem_euclid(1.0))
             .unwrap_or(0.0);
         return Some(TimelineItemContent::Rings { rings, cycle, phase });
+    }
+    if let Some(key) = map.get("sample").and_then(as_string) {
+        let sample = crate::audio::sample::get_registered_sample(&key)?;
+        let number = |name: &str| map.get(name).and_then(as_number).filter(|n| n.is_finite());
+        let loop_window = match (number("loop-start"), number("loop-end")) {
+            (Some(start), Some(end)) if end > start => Some((start, end)),
+            _ => None,
+        };
+        return Some(TimelineItemContent::Waveform {
+            sample,
+            offset: number("offset").unwrap_or(0.0).max(0.0),
+            span: number("span").filter(|span| *span > 0.0)?,
+            loop_window,
+        });
     }
     if let Some(Value::List(entries)) = map.get("peaks") {
         let peaks = entries
@@ -8380,22 +8579,22 @@ mod tests {
         assert!((action_number(&finish, "row-delta") - 8.0).abs() < 1e-9);
     }
 
-    /// `:marquee-snap :grid` (region spec 4.3): the low edge floors and the
-    /// high edge ceils onto the zoom-adaptive ladder, so a sloppy drag still
-    /// selects whole grid cells. Hosts that pass nothing — the piano roll —
-    /// keep the raw pointer times.
+    /// `:marquee-snap :grid` (region spec 4.3): each edge snaps to the
+    /// nearest line of the zoom-adaptive ladder. Hosts that pass nothing —
+    /// the piano roll — keep the raw pointer times.
     #[test]
-    fn marquee_snap_grid_floors_min_and_ceils_max() {
+    fn marquee_snap_grid_rounds_each_edge_to_the_nearest_line() {
         let snapped = single_lane_marquee_view(vec![("marquee-snap", keyword_value("grid"))]);
         let grid = snapped.alignment_helper_grid_step();
         assert_eq!(grid, 0.5, "fixture must sit on a known grid rung");
 
-        // 76.8 cells -> beat 2.4, 108.8 -> beat 3.4: neither is on a grid line.
+        // 76.8 cells -> beat 2.4, 108.8 -> beat 3.4: neither is on a grid
+        // line; 2.4 is nearer 2.5 than 2.0, 3.4 nearer 3.5 than 3.0.
         let gesture = snapped.begin_gesture(76.8, 1.0).expect("marquee gesture");
         let action = snapped
             .handle_pointer_drag(108.8, 1.0, Some(&gesture))
             .expect("marquee action");
-        assert!((action_number(&action, "time-a") - 2.0).abs() < 1e-9);
+        assert!((action_number(&action, "time-a") - 2.5).abs() < 1e-9);
         assert!((action_number(&action, "time-b") - 3.5).abs() < 1e-9);
 
         // Dragging right-to-left snaps the same span: order is normalized
@@ -8404,7 +8603,7 @@ mod tests {
         let action = snapped
             .handle_pointer_drag(76.8, 1.0, Some(&back))
             .expect("marquee action");
-        assert!((action_number(&action, "time-a") - 2.0).abs() < 1e-9);
+        assert!((action_number(&action, "time-a") - 2.5).abs() < 1e-9);
         assert!((action_number(&action, "time-b") - 3.5).abs() < 1e-9);
 
         // A vertical-only drag (no horizontal travel) would quantize to an
@@ -9884,8 +10083,8 @@ mod tests {
         );
         assert_eq!(
             view.marquee_span(70.0, 140.0),
-            (64.0, 160.0),
-            "selection bounds floor/ceil to that same interval"
+            (64.0, 128.0),
+            "selection bounds snap to the nearest line of that same interval"
         );
     }
 
@@ -9941,5 +10140,75 @@ mod tests {
         assert_eq!(rings, &vec![vec![0.0, 0.25], vec![0.5]]);
         assert_eq!((*cycle, *phase), (0.25, 0.75));
         assert_eq!(parsed.cycle(), Some((0.25, 0.75, true)), "rings repeat");
+    }
+
+    /// A looping waveform reports a cycle, so the clip draws a segment per
+    /// repeat like a pattern clip does; a one-shot waveform does not.
+    #[test]
+    fn a_looping_waveform_cycles_like_a_pattern_clip() {
+        let sample = std::sync::Arc::new(crate::audio::sample::SampleBuffer::from_pcm(
+            std::path::PathBuf::from("loop-test"),
+            48_000,
+            1,
+            vec![0.0; 48_000],
+        ));
+        let looping = TimelineItemContent::Waveform {
+            sample: std::sync::Arc::clone(&sample),
+            offset: 0.25,
+            span: 4.0,
+            loop_window: Some((0.25, 0.75)),
+        };
+        assert_eq!(looping.cycle(), Some((0.125, 0.0, true)), "eight half-second repeats");
+        let one_shot = TimelineItemContent::Waveform { sample, offset: 0.0, span: 1.0, loop_window: None };
+        assert_eq!(one_shot.cycle(), None);
+    }
+
+    /// A resize ghost on an audio item reveals or trims audio at its fixed
+    /// rate instead of stretching the waveform across the new span.
+    #[test]
+    fn audio_resize_ghosts_keep_the_waveform_rate() {
+        crate::audio::sample::SampleBuffer::from_pcm(
+            std::path::PathBuf::from("ghost-rate-test"),
+            48_000,
+            1,
+            vec![0.1; 48_000 * 8],
+        )
+        .register();
+        let rect = Rect { row: 0.0, col: 0.0, width: 40.0, height: 3.0 };
+        let props = |kind: f64, time: f64| {
+            HashMap::from([
+                (
+                    "items".to_string(),
+                    list_value_raw(vec![map_value_raw(vec![
+                        ("id", number_value(7.0)),
+                        ("start", number_value(4.0)),
+                        ("end", number_value(8.0)),
+                        (
+                            "content",
+                            map_value_raw(vec![
+                                ("sample", Value::String("ghost-rate-test".to_string())),
+                                ("offset", number_value(1.0)),
+                                ("span", number_value(2.0)),
+                            ]),
+                        ),
+                    ])]),
+                ),
+                ("view-duration".to_string(), number_value(32.0)),
+                ("ghost-kind".to_string(), number_value(kind)),
+                ("ghost-id".to_string(), number_value(7.0)),
+                ("ghost-time".to_string(), number_value(time)),
+            ])
+        };
+        let window = |view: &TimelineView| match view.items[0].content.as_ref() {
+            Some(TimelineItemContent::Waveform { offset, span, .. }) => (*offset, *span),
+            _ => panic!("waveform content"),
+        };
+        // Four beats hold two seconds: half a second per beat.
+        let grown = TimelineView::build(&props(3.0, 12.0), rect, None);
+        assert_eq!(window(&grown), (1.0, 4.0), "the end edge reveals two more seconds");
+        let trimmed = TimelineView::build(&props(2.0, 6.0), rect, None);
+        assert_eq!(window(&trimmed), (2.0, 1.0), "the start edge skips the audio under it");
+        let moved = TimelineView::build(&props(1.0, 10.0), rect, None);
+        assert_eq!(window(&moved), (1.0, 2.0), "a move carries the audio unchanged");
     }
 }

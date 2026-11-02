@@ -6667,6 +6667,52 @@ pub(crate) fn init_runtime(
         build_sample_tree_value_from_db(&sample_db_for_filter, query, &[], &[])
             .map_err(|error| format!("failed to filter samples.db sample tree: {error}"))
     });
+    let sample_db_for_region = sample_db.clone();
+    runtime.register_native("seq-sample-region", move |args, _ctx| {
+        let Some(Value::String(path)) = args.first() else { return Ok(Value::Nil) };
+        let Some(hash) = std::path::Path::new(path).file_stem().and_then(|stem| stem.to_str()) else {
+            return Ok(Value::Nil);
+        };
+        let Some(info) = sample_db_for_region
+            .region_for(hash)
+            .map_err(|error| format!("failed to query the region of {hash}: {error}"))?
+        else {
+            return Ok(Value::Nil);
+        };
+        let rate = f64::from(info.origin.sample_rate.max(1));
+        let (start, end) = (info.origin.start_frame as f64 / rate, info.origin.end_frame as f64 / rate);
+        let parent_path = if info.parent_in_library {
+            Value::String(format!("samples/{}.wav", info.origin.parent_hash))
+        } else {
+            Value::Nil
+        };
+        Ok(map_value([
+            ("parent", Value::String(info.parent_title.unwrap_or_else(|| "(deleted sample)".into()))),
+            ("parent-path", parent_path),
+            ("parent-hash", Value::String(info.origin.parent_hash.clone())),
+            ("span", Value::String(crate::host_commands::sample_region::span_text(start, end))),
+            ("start", Value::Number(start)),
+            ("end", Value::Number(end)),
+        ]))
+    });
+    let sample_db_for_packs = sample_db.clone();
+    runtime.register_native("seq-sample-packs", move |args, _ctx| {
+        let hash = match args.first() {
+            Some(Value::String(path)) => std::path::Path::new(path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("")
+                .to_string(),
+            _ => String::new(),
+        };
+        let packs = sample_db_for_packs
+            .packs()
+            .map_err(|error| format!("failed to list sample packs: {error}"))?;
+        Ok(list_value(packs.into_iter().map(|pack| {
+            let member = pack.samples.iter().any(|sample| sample.eq_ignore_ascii_case(&hash));
+            map_value([("name", Value::String(pack.name)), ("member", Value::Bool(member))])
+        })))
+    });
     let sample_db_for_tags = sample_db.clone();
     runtime.register_native("seq-sample-tags-for-path", move |args, _ctx| {
         let path = match args.first() {
@@ -7926,6 +7972,16 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-sample-browser",
             "(seq-sample-browser query selected-tags [selected-origins])",
             "Request an asynchronous sample search and return its latest completed tag facets and flat list. Reactive readers update when the current search completes.",
+        ),
+        (
+            "seq-sample-packs",
+            "(seq-sample-packs path)",
+            "Every sample pack as a map of :name and :member (whether the sample at path is in it).",
+        ),
+        (
+            "seq-sample-region",
+            "(seq-sample-region path)",
+            "Where a region sample was cut from: a map of :parent (title), :parent-path (nil once the parent left the library), :parent-hash, :span (display text), :start and :end (seconds); nil for a sample that is not a region.",
         ),
         (
             "seq-sample-tags-for-path",

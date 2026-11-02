@@ -130,6 +130,20 @@ CREATE TABLE IF NOT EXISTS sample_origins (
 CREATE INDEX IF NOT EXISTS idx_sample_origins_sample ON sample_origins(sample_id);
 CREATE INDEX IF NOT EXISTS idx_sample_origins_source ON sample_origins(source_id);
 
+CREATE TABLE IF NOT EXISTS packs (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE
+);
+
+CREATE TABLE IF NOT EXISTS pack_members (
+    pack_id  INTEGER NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
+    hash     TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    PRIMARY KEY (pack_id, hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pack_members_hash ON pack_members(hash);
+
 CREATE TABLE IF NOT EXISTS source_metadata_guesses (
     id         INTEGER PRIMARY KEY,
     source_id  INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
@@ -164,7 +178,68 @@ pub struct SampleDb {
     conn: Connection,
     journal_path: Option<PathBuf>,
     store_path: Option<PathBuf>,
+    /// `sample-packs.json`: the packs' source of truth, beside the journal.
+    /// A file of its own (not journal facts) so builds that predate packs
+    /// still read the journal, and so tools can read a pack without SQLite.
+    packs_path: Option<PathBuf>,
 }
+
+/// A curated list of samples (a training set, a kit in progress), kept apart
+/// from tags so it does not clutter them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pack {
+    pub name: String,
+    /// Sample hashes, in the order they were added.
+    pub samples: Vec<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PacksFile {
+    packs: Vec<Pack>,
+}
+
+/// The file name of the packs beside `samples.db`.
+pub const PACKS_FILE: &str = "sample-packs.json";
+
+/// Where a region sample was cut from: frames `[start_frame, end_frame)` of
+/// the parent at `sample_rate`. The parent is named by content hash (or the
+/// analysis path digest for a file outside the store) and by the title it
+/// had when the region was saved, so the line still reads after the parent
+/// is renamed away or deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegionOrigin {
+    pub parent_hash: String,
+    pub parent_title: Option<String>,
+    pub start_frame: u64,
+    pub end_frame: u64,
+    pub sample_rate: u32,
+}
+
+impl RegionOrigin {
+    fn ms(&self, frame: u64) -> i64 {
+        (frame as f64 * 1000.0 / f64::from(self.sample_rate.max(1))).round() as i64
+    }
+}
+
+/// A region sample's parent as the library knows it now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionInfo {
+    pub origin: RegionOrigin,
+    /// The parent's current title, else the one saved with the region.
+    pub parent_title: Option<String>,
+    /// False when the parent is no longer a sample in the library.
+    pub parent_in_library: bool,
+}
+
+/// The `sample_origins.method` of a region, and the browser's origin facet
+/// that filters to them.
+pub const REGION_METHOD: &str = "region";
+
+/// An origin filter `pack/<name>` keeps a pack's members.
+pub const PACK_FILTER_PREFIX: &str = "pack/";
+/// A browser filter naming one sample by hash (`sample/<hash>`): the "from"
+/// line of a region jumps to its parent with it.
+pub const SAMPLE_FILTER_PREFIX: &str = "sample/";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -174,6 +249,9 @@ enum UserFact {
         title: Option<String>,
         tags: Vec<String>,
         favorited: bool,
+        // Optional so journals stay readable by builds that predate regions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<RegionOrigin>,
     },
     AddTag {
         hash: String,
@@ -191,6 +269,9 @@ enum UserFact {
         hash: String,
         title: Option<String>,
     },
+    /// A fact written by a newer build; replay skips it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl SampleDb {
@@ -202,6 +283,7 @@ impl SampleDb {
             conn,
             journal_path: None,
             store_path: Some(path.parent().unwrap_or_else(|| Path::new(".")).join("samples")),
+            packs_path: None,
         })
     }
 
@@ -217,6 +299,7 @@ impl SampleDb {
             conn,
             journal_path: Some(journal_path.clone()),
             store_path: Some(store_path.clone()),
+            packs_path: Some(parent.join(PACKS_FILE)),
         };
         if existed {
             if !journal_path.is_file() {
@@ -226,6 +309,7 @@ impl SampleDb {
             db.rebuild_store_rows(&store_path)?;
         }
         db.replay_user_facts(&journal_path)?;
+        db.load_packs()?;
         Ok(db)
     }
 
@@ -237,6 +321,7 @@ impl SampleDb {
             conn,
             journal_path: None,
             store_path: None,
+            packs_path: None,
         })
     }
 
@@ -252,7 +337,7 @@ impl SampleDb {
         let mut stmt = self.conn.prepare(
             "SELECT origin, COUNT(*) FROM sample_provenance GROUP BY origin ORDER BY origin COLLATE NOCASE",
         )?;
-        let origins = stmt
+        let mut origins = stmt
             .query_map([], |row| {
                 Ok(TagFacet {
                     name: row.get(0)?,
@@ -260,8 +345,16 @@ impl SampleDb {
                     selected: false,
                 })
             })?
-            .collect();
-        origins
+            .collect::<Result<Vec<_>>>()?;
+        let regions: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT sample_id) FROM sample_origins WHERE method = ?",
+            params![REGION_METHOD],
+            |row| row.get(0),
+        )?;
+        if regions > 0 {
+            origins.push(TagFacet { name: REGION_METHOD.to_string(), count: regions as usize, selected: false });
+        }
+        Ok(origins)
     }
 
     pub fn list_tags(&self) -> Result<Vec<String>> {
@@ -547,6 +640,28 @@ impl SampleDb {
         title: Option<&str>,
         tags: &[String],
     ) -> Result<bool> {
+        self.insert_user_sample(hash, title, tags, None)
+    }
+
+    /// [`Self::insert_sample_with_tags`] for audio cut from another sample:
+    /// also records where it came from (`sample_origins`, method `region`).
+    pub fn insert_region_sample(
+        &mut self,
+        hash: &str,
+        title: Option<&str>,
+        tags: &[String],
+        region: &RegionOrigin,
+    ) -> Result<bool> {
+        self.insert_user_sample(hash, title, tags, Some(region))
+    }
+
+    fn insert_user_sample(
+        &mut self,
+        hash: &str,
+        title: Option<&str>,
+        tags: &[String],
+        region: Option<&RegionOrigin>,
+    ) -> Result<bool> {
         let hash = hash.trim();
         if hash.is_empty() {
             return Ok(false);
@@ -561,6 +676,7 @@ impl SampleDb {
             title: title.clone(),
             tags: tags.clone(),
             favorited: false,
+            region: region.cloned(),
         })?;
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -581,8 +697,167 @@ impl SampleDb {
         for tag in &tags {
             insert_tag_contribution(&tx, sample_id, tag, "user")?;
         }
+        if let Some(region) = region {
+            insert_region_origin(&tx, sample_id, region)?;
+        }
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Every pack, by name, with its samples in the order they were added.
+    pub fn packs(&self) -> Result<Vec<Pack>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, p.name FROM packs p ORDER BY p.name COLLATE NOCASE",
+        )?;
+        let heads = stmt
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>>>()?;
+        let mut members = self.conn.prepare(
+            "SELECT hash FROM pack_members WHERE pack_id = ? ORDER BY position, hash",
+        )?;
+        heads
+            .into_iter()
+            .map(|(id, name)| {
+                let samples = members.query_map(params![id], |row| row.get(0))?.collect::<Result<_>>()?;
+                Ok(Pack { name, samples })
+            })
+            .collect()
+    }
+
+    /// The packs holding the sample `hash`.
+    pub fn packs_for(&self, hash: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.name FROM packs p JOIN pack_members m ON m.pack_id = p.id \
+             WHERE m.hash = ? ORDER BY p.name COLLATE NOCASE",
+        )?;
+        let names = stmt.query_map(params![hash.trim()], |row| row.get(0))?.collect();
+        names
+    }
+
+    /// Add `hash` to the pack `name`, creating the pack when it is new.
+    pub fn add_to_pack(&self, name: &str, hash: &str) -> Result<()> {
+        let (name, hash) = (name.trim(), hash.trim());
+        if name.is_empty() || hash.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute("INSERT OR IGNORE INTO packs(name) VALUES (?)", params![name])?;
+        let pack_id: i64 = self.conn.query_row(
+            "SELECT id FROM packs WHERE name = ?",
+            params![name],
+            |row| row.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO pack_members(pack_id, hash, position) \
+             VALUES (?, ?, (SELECT COALESCE(MAX(position) + 1, 0) FROM pack_members WHERE pack_id = ?))",
+            params![pack_id, hash, pack_id],
+        )?;
+        self.save_packs()
+    }
+
+    pub fn remove_from_pack(&self, name: &str, hash: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM pack_members WHERE hash = ? \
+             AND pack_id IN (SELECT id FROM packs WHERE name = ?)",
+            params![hash.trim(), name.trim()],
+        )?;
+        self.save_packs()
+    }
+
+    pub fn delete_pack(&self, name: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM packs WHERE name = ?", params![name.trim()])?;
+        self.save_packs()
+    }
+
+    /// Replace the pack tables with `sample-packs.json` (none when absent).
+    fn load_packs(&mut self) -> Result<()> {
+        let Some(path) = &self.packs_path else {
+            return Ok(());
+        };
+        let file: PacksFile = match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(sql_json_error)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => PacksFile::default(),
+            Err(error) => return Err(sql_io_error(error)),
+        };
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM packs", [])?;
+        for pack in &file.packs {
+            tx.execute("INSERT OR IGNORE INTO packs(name) VALUES (?)", params![pack.name])?;
+            let id: i64 =
+                tx.query_row("SELECT id FROM packs WHERE name = ?", params![pack.name], |row| row.get(0))?;
+            for (position, hash) in pack.samples.iter().enumerate() {
+                tx.execute(
+                    "INSERT OR IGNORE INTO pack_members(pack_id, hash, position) VALUES (?, ?, ?)",
+                    params![id, hash, position as i64],
+                )?;
+            }
+        }
+        tx.commit()
+    }
+
+    fn save_packs(&self) -> Result<()> {
+        let Some(path) = &self.packs_path else {
+            return Ok(());
+        };
+        let file = PacksFile { packs: self.packs()? };
+        let mut encoded = serde_json::to_vec_pretty(&file).map_err(sql_json_error)?;
+        encoded.push(b'\n');
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, encoded).map_err(sql_io_error)?;
+        fs::rename(&tmp, path).map_err(sql_io_error)
+    }
+
+    /// Where the sample `hash` was cut from, when it is a region.
+    pub fn region_for(&self, hash: &str) -> Result<Option<RegionInfo>> {
+        let notes: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT o.notes FROM sample_origins o JOIN samples s ON s.id = o.sample_id \
+                 WHERE s.hash = ? AND o.method = ? ORDER BY o.id LIMIT 1",
+                params![hash.trim(), REGION_METHOD],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let Some(origin) = notes.and_then(|notes| serde_json::from_str::<RegionOrigin>(&notes).ok())
+        else {
+            return Ok(None);
+        };
+        let parent: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT title FROM samples WHERE hash = ?",
+                params![origin.parent_hash],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let parent_in_library = parent.is_some();
+        let parent_title = parent
+            .flatten()
+            .and_then(clean_display_title)
+            .or_else(|| origin.parent_title.clone());
+        Ok(Some(RegionInfo { origin, parent_title, parent_in_library }))
+    }
+
+    /// Regions cut from the sample `parent_hash`, in start order, as
+    /// `(region hash, origin)`.
+    pub fn regions_of(&self, parent_hash: &str) -> Result<Vec<(String, RegionOrigin)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.hash, o.notes FROM sample_origins o JOIN samples s ON s.id = o.sample_id \
+             WHERE o.method = ? ORDER BY o.source_start_ms, s.hash",
+        )?;
+        let rows = stmt.query_map(params![REGION_METHOD], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        let mut regions = Vec::new();
+        for row in rows {
+            let (hash, notes) = row?;
+            if let Some(origin) = notes.and_then(|n| serde_json::from_str::<RegionOrigin>(&n).ok()) {
+                if origin.parent_hash.eq_ignore_ascii_case(parent_hash.trim()) {
+                    regions.push((hash, origin));
+                }
+            }
+        }
+        Ok(regions)
     }
 
     pub fn add_tag(&self, hash: &str, tag: &str) -> Result<()> {
@@ -933,11 +1208,13 @@ impl SampleDb {
         })?;
         for row in rows {
             let (id, hash, title, favorited) = row?;
+            let region = self.region_for(&hash)?.map(|info| info.origin);
             let fact = UserFact::Sample {
                 hash,
                 title,
                 tags: self.tags_for_origin_id(id, "user")?,
                 favorited,
+                region,
             };
             serde_json::to_writer(&mut writer, &fact).map_err(sql_json_error)?;
             writer.write_all(b"\n").map_err(sql_io_error)?;
@@ -1033,6 +1310,7 @@ impl SampleDb {
                 title,
                 tags,
                 favorited,
+                region,
             } => {
                 self.conn.execute(
                     "INSERT OR IGNORE INTO samples(hash) VALUES (?)",
@@ -1070,6 +1348,9 @@ impl SampleDb {
                     "UPDATE samples SET favorited = ? WHERE id = ?",
                     params![favorited as i64, id],
                 )?;
+                if let Some(region) = &region {
+                    insert_region_origin(&self.conn, id, region)?;
+                }
                 refresh_sample_title(&self.conn, id)?;
             }
             UserFact::AddTag { hash, tag } => {
@@ -1101,6 +1382,7 @@ impl SampleDb {
                     refresh_sample_title(&self.conn, id)?;
                 }
             }
+            UserFact::Unknown => {}
         }
         Ok(())
     }
@@ -1249,15 +1531,61 @@ fn escape_like(value: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// Each origin narrows the rows to samples carrying it. Two are not
+/// provenances: `region` (the samples cut from another one) and
+/// `pack/<name>` (a pack's members).
 fn append_origin_filter(sql: &mut String, values: &mut Vec<String>, origins: &[&str]) {
     for origin in origins
         .iter()
         .map(|origin| origin.trim())
         .filter(|origin| !origin.is_empty())
     {
-        sql.push_str(" AND EXISTS (SELECT 1 FROM sample_provenance sp_filter WHERE sp_filter.sample_id = s.id AND sp_filter.origin = ?)");
+        if origin == REGION_METHOD {
+            sql.push_str(" AND EXISTS (SELECT 1 FROM sample_origins so_filter WHERE so_filter.sample_id = s.id AND so_filter.method = ?)");
+        } else if let Some(hash) = origin.strip_prefix(SAMPLE_FILTER_PREFIX) {
+            sql.push_str(" AND s.hash = ?");
+            values.push(hash.to_ascii_lowercase());
+            continue;
+        } else if let Some(pack) = origin.strip_prefix(PACK_FILTER_PREFIX) {
+            sql.push_str(" AND EXISTS (SELECT 1 FROM pack_members pm_filter JOIN packs p_filter ON p_filter.id = pm_filter.pack_id WHERE pm_filter.hash = s.hash AND p_filter.name = ?)");
+            values.push(pack.to_string());
+            continue;
+        } else {
+            sql.push_str(" AND EXISTS (SELECT 1 FROM sample_provenance sp_filter WHERE sp_filter.sample_id = s.id AND sp_filter.origin = ?)");
+        }
         values.push(origin.to_string());
     }
+}
+
+/// The `sample_origins` row of a region (one per sample: the dedupe key is
+/// the sample's id, so replaying the journal does not duplicate it).
+fn insert_region_origin(conn: &Connection, sample_id: i64, region: &RegionOrigin) -> Result<()> {
+    let parent_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM samples WHERE hash = ?",
+            params![region.parent_hash],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let notes = serde_json::to_string(region).map_err(sql_json_error)?;
+    conn.execute(
+        "INSERT INTO sample_origins(dedupe_key, sample_id, parent_sample_id, method, \
+         source_start_ms, source_end_ms, captured_at, notes) \
+         VALUES (?, ?, ?, ?, ?, ?, unixepoch(), ?) \
+         ON CONFLICT(dedupe_key) DO UPDATE SET parent_sample_id = excluded.parent_sample_id, \
+         source_start_ms = excluded.source_start_ms, source_end_ms = excluded.source_end_ms, \
+         notes = excluded.notes",
+        params![
+            format!("{REGION_METHOD}:{sample_id}"),
+            sample_id,
+            parent_id,
+            REGION_METHOD,
+            region.ms(region.start_frame),
+            region.ms(region.end_frame),
+            notes,
+        ],
+    )?;
+    Ok(())
 }
 
 fn sql_io_error(error: std::io::Error) -> rusqlite::Error {
@@ -1569,6 +1897,7 @@ mod tests {
                 title: None,
                 tags: Vec::new(),
                 favorited: false,
+                region: None,
             })
             .unwrap();
         }
@@ -1608,6 +1937,7 @@ mod tests {
                 title: None,
                 tags: Vec::new(),
                 favorited: false,
+                region: None,
             })
             .unwrap();
             db.append_user_fact(&UserFact::AddTag {
@@ -1619,6 +1949,113 @@ mod tests {
         }
         let reopened = SampleDb::open(&db_path).unwrap();
         assert_eq!(reopened.tags_for("abc123").unwrap(), vec!["Recovered"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn region_of(parent: &str) -> RegionOrigin {
+        RegionOrigin {
+            parent_hash: parent.to_string(),
+            parent_title: Some("Think".to_string()),
+            start_frame: 22_050,
+            end_frame: 44_100,
+            sample_rate: 44_100,
+        }
+    }
+
+    #[test]
+    fn regions_filter_through_the_region_origin_facet() {
+        let mut db = SampleDb::open_in_memory().unwrap();
+        db.insert_sample_with_tags("parent", Some("Think"), &[]).unwrap();
+        db.insert_region_sample("cut", Some("Snare"), &[], &region_of("parent")).unwrap();
+
+        let rows = db.query(&[], &[], None, false, &[REGION_METHOD]).unwrap();
+        assert_eq!(rows.iter().map(|row| row.hash.as_str()).collect::<Vec<_>>(), vec!["cut"]);
+        // The "from" line's jump filters to the parent alone.
+        let rows = db.query(&[], &[], None, false, &["sample/PARENT"]).unwrap();
+        assert_eq!(rows.iter().map(|row| row.hash.as_str()).collect::<Vec<_>>(), vec!["parent"]);
+        let facet = db.list_origins().unwrap().into_iter().find(|o| o.name == REGION_METHOD);
+        assert_eq!(facet.map(|facet| facet.count), Some(1));
+        let info = db.region_for("cut").unwrap().unwrap();
+        assert_eq!(info.parent_title.as_deref(), Some("Think"));
+        assert!(db.region_for("parent").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_region_keeps_its_saved_parent_title_when_the_parent_is_gone() {
+        let mut db = SampleDb::open_in_memory().unwrap();
+        db.insert_region_sample("cut", None, &[], &region_of("missing")).unwrap();
+        let info = db.region_for("cut").unwrap().unwrap();
+        assert!(!info.parent_in_library);
+        assert_eq!(info.parent_title.as_deref(), Some("Think"));
+    }
+
+    #[test]
+    fn rebuilding_the_index_from_the_journal_restores_regions_and_skips_unknown_facts() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-sample-db-region-rebuild-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("samples")).unwrap();
+        let db_path = root.join("samples.db");
+        {
+            let mut db = SampleDb::open(&db_path).unwrap();
+            db.insert_sample_with_tags("parent", Some("Think"), &[]).unwrap();
+            db.insert_region_sample("cut", Some("Snare"), &[], &region_of("parent")).unwrap();
+        }
+        let mut journal = OpenOptions::new().append(true).open(root.join("samples.jsonl")).unwrap();
+        journal.write_all(b"{\"kind\":\"from_the_future\",\"x\":1}\n").unwrap();
+        fs::remove_file(&db_path).unwrap();
+        let rebuilt = SampleDb::open(&db_path).unwrap();
+        let info = rebuilt.region_for("cut").unwrap().expect("region replayed");
+        assert_eq!(info.origin, region_of("parent"));
+        assert!(info.parent_in_library);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn packs_persist_in_their_own_file_and_filter_the_browser() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-sample-db-packs-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("samples")).unwrap();
+        let db_path = root.join("samples.db");
+        {
+            let mut db = SampleDb::open(&db_path).unwrap();
+            for hash in ["a", "b", "c"] {
+                db.insert_sample_with_tags(hash, None, &[]).unwrap();
+            }
+            db.add_to_pack("Training Set 1", "c").unwrap();
+            db.add_to_pack("training set 1", "a").unwrap();
+            db.add_to_pack("training set 1", "a").unwrap();
+            db.add_to_pack("Kit", "b").unwrap();
+            db.remove_from_pack("Kit", "b").unwrap();
+            let rows = db.query(&[], &[], None, false, &["pack/training set 1"]).unwrap();
+            assert_eq!(rows.iter().map(|r| r.hash.as_str()).collect::<Vec<_>>(), vec!["a", "c"]);
+            assert_eq!(db.packs_for("a").unwrap(), vec!["Training Set 1"]);
+            assert!(db.tags_for("a").unwrap().is_empty(), "packs are not tags");
+        }
+        let file: PacksFile =
+            serde_json::from_slice(&fs::read(root.join(PACKS_FILE)).unwrap()).unwrap();
+        assert_eq!(
+            file.packs,
+            vec![
+                Pack { name: "Kit".into(), samples: vec![] },
+                Pack { name: "Training Set 1".into(), samples: vec!["c".into(), "a".into()] },
+            ]
+        );
+        // The file is the source of truth: a rebuilt index reads it back.
+        fs::remove_file(&db_path).unwrap();
+        let rebuilt = SampleDb::open(&db_path).unwrap();
+        assert_eq!(rebuilt.packs().unwrap(), file.packs);
+        rebuilt.delete_pack("kit").unwrap();
+        assert_eq!(rebuilt.packs().unwrap().len(), 1);
         let _ = fs::remove_dir_all(root);
     }
 

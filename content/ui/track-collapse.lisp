@@ -31,6 +31,7 @@
 (def instrument-icon (track-type)
   (match track-type
     "sampler" :waveform
+    "audio" :waveform
     "custom" :piano
     "rack" :sampler
     "modulator" :sine

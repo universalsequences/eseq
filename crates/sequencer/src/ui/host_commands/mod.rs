@@ -1,5 +1,6 @@
 mod agent;
 mod arrangement;
+mod audio_tracks;
 pub(crate) mod content_reload;
 pub(crate) mod audio_settings;
 pub(crate) mod customize;
@@ -42,6 +43,7 @@ pub(crate) mod rack_kinds;
 pub(crate) mod rack_grooves;
 pub(crate) mod factory_promote;
 pub(crate) mod resample;
+pub(crate) mod sample_region;
 mod routing;
 mod sample_import;
 mod samples;
@@ -68,6 +70,7 @@ pub(crate) use learn::open_patch_learn_buffer;
 #[cfg(test)]
 pub(crate) use tracks::apply_rename_group_host_command;
 pub(crate) use song::{apply_song_edit_command, apply_sound_palette_view_command};
+pub(crate) use audio_tracks::apply_audio_track_command;
 pub(crate) use arrangement::apply_capture_selection_command;
 pub(crate) use lanes::apply_capture_command as apply_capture_process_command;
 

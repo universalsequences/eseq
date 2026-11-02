@@ -92,6 +92,7 @@ pub(crate) fn instrument_type_label(
 ) -> &'static str {
     match instrument_type {
         sequencer::sequencer::InstrumentType::Empty => "empty",
+        sequencer::sequencer::InstrumentType::Audio => "audio",
         sequencer::sequencer::InstrumentType::Sampler => "sampler",
         sequencer::sequencer::InstrumentType::Custom => "custom",
         sequencer::sequencer::InstrumentType::Modulator => "modulator",

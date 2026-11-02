@@ -6199,6 +6199,7 @@ mod tests {
             rack_slots: Vec::new(),
             rack_signature: None,
             applied_output: None,
+            audio_player: None,
         }];
         app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
         app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
@@ -6249,6 +6250,7 @@ mod tests {
             rack_slots: Vec::new(),
             rack_signature: None,
             applied_output: None,
+            audio_player: None,
         }];
         app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
         app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
@@ -6374,6 +6376,7 @@ mod tests {
             rack_slots: Vec::new(),
             rack_signature: None,
             applied_output: None,
+            audio_player: None,
         }];
         app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
         app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
@@ -6467,6 +6470,7 @@ mod tests {
             rack_slots: Vec::new(),
             rack_signature: None,
             applied_output: None,
+            audio_player: None,
         }];
         app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
         app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
@@ -10620,6 +10624,7 @@ mod tests {
             rack_slots: Vec::new(),
             rack_signature: None,
             applied_output: None,
+            audio_player: None,
         }];
         app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
         app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
@@ -10803,6 +10808,7 @@ mod tests {
             rack_slots: Vec::new(),
             rack_signature: None,
             applied_output: None,
+            audio_player: None,
         }];
         app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
         app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];

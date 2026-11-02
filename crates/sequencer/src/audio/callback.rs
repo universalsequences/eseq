@@ -258,7 +258,7 @@ pub(super) fn render_audio_block(
         let instrument_type = InstrumentType::from_runtime_flag(
             data.state.runtime.instrument_type_flags[kt.track].load(Ordering::Relaxed),
         );
-        if instrument_type == InstrumentType::Empty {
+        if matches!(instrument_type, InstrumentType::Empty | InstrumentType::Audio) {
             continue;
         }
         let is_custom = instrument_type == InstrumentType::Custom;

@@ -133,6 +133,8 @@ pub(crate) fn build_sample_tree_node(dir: &std::path::Path) -> Vec<SampleTreeNod
 fn sample_origin_label(origin: &str) -> &str {
     match origin {
         "user" => "Yours",
+        sequencer::sample_db::REGION_METHOD => "Regions",
+        _ if origin.starts_with(sequencer::sample_db::SAMPLE_FILTER_PREFIX) => "Original",
         "factory" | sequencer::package_samples::FACTORY_SAMPLES_ORIGIN => "Factory",
         _ => origin.strip_prefix("pkg:").unwrap_or(origin),
     }
@@ -243,6 +245,8 @@ pub(crate) fn build_sample_browser_value_with_origins_from_db(
 struct SampleBrowserData {
     tags: Vec<TagFacet>,
     origins: Vec<TagFacet>,
+    /// Packs, named by their `pack/<name>` origin filter.
+    packs: Vec<TagFacet>,
     items: Vec<SampleTreeNode>,
 }
 
@@ -255,6 +259,15 @@ impl SampleBrowserData {
                 ("label", Value::String(sample_origin_label(&origin.name).to_string())),
                 ("count", Value::Number(origin.count as f64)),
                 ("selected", Value::Bool(origin.selected)),
+            ])))),
+            ("packs", list_value(self.packs.iter().map(|pack| map_value([
+                ("name", Value::String(pack.name.clone())),
+                ("label", Value::String(
+                    pack.name.strip_prefix(sequencer::sample_db::PACK_FILTER_PREFIX)
+                        .unwrap_or(&pack.name).to_string(),
+                )),
+                ("count", Value::Number(pack.count as f64)),
+                ("selected", Value::Bool(pack.selected)),
             ])))),
             ("items", sample_tree_nodes_to_value(&self.items)),
         ])
@@ -300,7 +313,21 @@ fn query_sample_browser(
     for origin in &mut origins {
         origin.selected = selected_origin_names.contains(&origin.name.to_lowercase());
     }
-    Ok(SampleBrowserData { tags, origins, items })
+    // A one-sample filter (a region's "from" jump) is not a facet of the
+    // library; list it while selected so it shows as a chip to remove.
+    origins.extend(selected_origins.iter()
+        .filter(|origin| origin.starts_with(sequencer::sample_db::SAMPLE_FILTER_PREFIX))
+        .map(|origin| TagFacet { name: origin.to_string(), count: 1, selected: true }));
+    let packs = db
+        .packs()?
+        .into_iter()
+        .map(|pack| {
+            let name = format!("{}{}", sequencer::sample_db::PACK_FILTER_PREFIX, pack.name);
+            let selected = selected_origin_names.contains(&name.to_lowercase());
+            TagFacet { name, count: pack.samples.len(), selected }
+        })
+        .collect();
+    Ok(SampleBrowserData { tags, origins, packs, items })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2458,7 +2485,7 @@ mod tests {
             release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             if request.query == "old-error" { return Err("obsolete failure".to_string()); }
             Ok(SampleBrowserData {
-                tags: vec![], origins: vec![],
+                tags: vec![], origins: vec![], packs: vec![],
                 items: sample_rows_to_tree_nodes(vec![sample("hash", Some(&request.query), &[])], false),
             })
         });
@@ -2482,7 +2509,7 @@ mod tests {
     fn debounced_sample_browser_reports_current_error_and_recovers() {
         let mut browser = DebouncedSampleBrowser::with_query(Duration::ZERO, move |request| {
             if request.query == "bad" { return Err("query failed".to_string()); }
-            Ok(SampleBrowserData { tags: vec![], origins: vec![], items: vec![] })
+            Ok(SampleBrowserData { tags: vec![], origins: vec![], packs: vec![], items: vec![] })
         });
         browser.query("bad", &[]).unwrap();
         assert_eq!(settle_sample_browser(&mut browser), Err("query failed".to_string()));
@@ -2498,7 +2525,7 @@ mod tests {
         let mut browser = DebouncedSampleBrowser::with_query(Duration::ZERO, move |request| {
             started_tx.send(request.query.clone()).unwrap();
             release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-            Ok(SampleBrowserData { tags: vec![], origins: vec![], items: vec![] })
+            Ok(SampleBrowserData { tags: vec![], origins: vec![], packs: vec![], items: vec![] })
         });
         browser.query("kick", &[]).unwrap();
         assert_eq!(started_rx.recv_timeout(Duration::from_secs(5)).unwrap(), "kick");

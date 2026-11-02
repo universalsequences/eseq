@@ -326,7 +326,8 @@ mod tests {
         let _kind = conductor_kind(app);
         let id = create_in(app, Some(bank_b));
         let saved = app.capture_project("instance-parking").unwrap();
-        assert_eq!(saved.version, 20);
+        // Written at or past v20, the first version that parks instances.
+        assert!(saved.version >= 20, "saved version {}", saved.version);
         assert_eq!(saved.scene_parked_instances, vec![vec![id], vec![id], vec![], vec![]]);
         let mut legacy = saved.clone();
         legacy.scene_parked_instances.clear();

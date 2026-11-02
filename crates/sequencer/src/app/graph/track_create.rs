@@ -94,6 +94,41 @@ impl GraphController<'_> {
         Ok(idx)
     }
 
+    /// Register an audio track: the track shell plus a region player feeding
+    /// its voice sums (docs/audio-tracks-spec.md §9.2).
+    pub fn add_audio_track(&mut self) -> Result<usize, String> {
+        let idx = self.app.state.active_track_count();
+        if idx >= MAX_TRACKS {
+            return Err("Maximum number of tracks reached".to_string());
+        }
+        self.force_reap_all_rack_teardowns();
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        let track_name = format!("Audio {}", idx + 1);
+        let shell = self.create_track_shell(idx, &track_name)?;
+        let state = std::sync::Arc::clone(&self.app.state);
+        let (song, rendered) = state.audio_render_clock();
+        let player = unsafe {
+            self.app.audio_players.create_player(
+                self.app.graph.lg.0,
+                &track_name,
+                song,
+                rendered,
+                shell.voice_sum_id,
+                shell.voice_sum_r_id,
+            )?
+        };
+        self.finish_track_registration(TrackRegistration {
+            idx,
+            track_name,
+            shell,
+            voice_lids: Vec::new(),
+            instrument: InstrumentRegistration::Audio { player },
+        })?;
+        self.app.sampler_paths.push(None);
+        self.debug_assert_track_vectors_aligned();
+        Ok(idx)
+    }
+
     pub fn add_blank_sampler_track(&mut self) -> Result<usize, String> {
         let idx = self.app.state.active_track_count();
         if idx >= MAX_TRACKS {
@@ -139,6 +174,9 @@ impl GraphController<'_> {
     pub fn clear_track_instrument(&mut self, track: usize) -> Result<(), String> {
         let previous_type = self.app.graph.track_instrument_types.get(track).copied()
             .ok_or_else(|| format!("Invalid track index {}", track + 1))?;
+        if previous_type == InstrumentType::Audio {
+            return Err("An audio track has no instrument to clear".to_string());
+        }
         if previous_type == InstrumentType::Empty {
             return Ok(());
         }
@@ -174,7 +212,7 @@ impl GraphController<'_> {
                     .map(|engine| engine.synth_ids.len()).sum();
                 effect_deletes + mod_disconnects
             }
-            InstrumentType::Empty | InstrumentType::Modulator => unreachable!("handled above"),
+            InstrumentType::Empty | InstrumentType::Audio | InstrumentType::Modulator => unreachable!("handled above"),
         };
         require_graph_edit_queue_capacity(self.app.graph.lg.0, delete_commands, "Clear instrument")?;
         let batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
@@ -187,7 +225,7 @@ impl GraphController<'_> {
                 self.delete_rack_effect_chains(track, batch.serial)?;
                 self.retire_rack_slot_graph_generation(track);
             }
-            InstrumentType::Empty | InstrumentType::Modulator => unreachable!("handled above"),
+            InstrumentType::Empty | InstrumentType::Audio | InstrumentType::Modulator => unreachable!("handled above"),
         }
         self.clear_sampler_runtime_pool(track);
         let nodes = &mut self.app.graph.track_node_ids[track];

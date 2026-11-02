@@ -55,6 +55,10 @@
         add-layer-rack-track
         audition
         select-sample
+        show-region-parent
+        sample-menu
+        open-sample-menu
+        sample-pack-command
         activate-sample
         sample-selected-path
         add-selected-rack-layer
@@ -122,12 +126,17 @@
 ;; tree cursor last landed on and its waveform-buffer map from
 ;; `seq-sample-waveform` (false while nothing decodable is focused), cached
 ;; so the strip's build path never decodes. While `auto` (the headphone
-;; toggle) is on, landing on a sample also plays it once.
+;; toggle) is on, landing on a sample also plays it once. A region (a sample
+;; saved from a sampler's range) carries where it came from
+;; (`seq-sample-region`); jumping to its parent shows the parent with the
+;; region's span highlighted.
 (def-kind sample-preview
   :key ()
   :state ((path "")
           (buffer :any :default false)
-          (auto false)))
+          (auto false)
+          (region :any :default nil)
+          (span :any :default nil)))
 
 ;; The Instruments and Audio FX tabs: the saved-instrument tier filter, the
 ;; favorites chip, the instrument and custom effect last highlighted (Fork
@@ -173,6 +182,15 @@
   :state ((open false)
           (at :point :default nil)
           (item :any :default nil)))
+
+;; A sample row's context menu: the row, and every pack with whether the
+;; sample is in it (`seq-sample-packs`), read when the menu opens.
+(def-kind sample-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)
+          (item :any :default nil)
+          (packs :any :default '())))
 
 (def-kind instrument-menu
   :key ()
@@ -574,7 +592,43 @@
       (status (str (get item :label))))))
 
 (def sync-sample-preview (path)
+  (if (= path sample-preview.path) nil
+    (do
+      (set! sample-preview.region (if (= path "") nil (seq-sample-region path)))
+      (set! sample-preview.span nil)))
   (sync-preview! sample-preview path))
+
+;; Go to the region's parent: the list narrows to just that sample (an
+;; "Original" chip, removed like any filter), which is selected and
+;; previewed with the region's span marked.
+(def show-region-parent ()
+  (let ((region sample-preview.region))
+    (if (and region (get region :parent-path))
+      (let ((path (get region :parent-path)))
+        (set! browser-view.search "")
+        (set! sample-pick.tags (list))
+        (set! sample-pick.origins (list (str "sample/" (get region :parent-hash))))
+        (set! sample-pick.sample path)
+        (sync-sample-preview path)
+        (set! sample-preview.span (list (get region :start) (get region :end))))
+      nil)))
+
+;; "from <parent> · <span>" under the preview of a region; the parent's
+;; name opens it while it is still in the library.
+;; Wraps rather than widening the sidebar: parent titles are long. The
+;; whole line is the click target that previews the parent.
+(def region-origin-line ()
+  (let ((region sample-preview.region))
+    (if region
+      (let ((text (str "from " (get region :parent) " · " (get region :span))))
+        (if (get region :parent-path)
+          (box :key "sample-region-parent" :width :fill :bg :transparent
+            :on-click |x y r| (show-region-parent)
+            (label text :key "sample-region-origin" :bg :transparent :font-size 11
+              :color :white :width :fill :wrap true))
+          (label text :key "sample-region-origin" :bg :transparent :font-size 11
+            :color :dim :width :fill :wrap true)))
+      (box :height 0 :width 0))))
 
 (def select-sample (item)
   (let ((path (get item :path)))
@@ -745,6 +799,38 @@
         (set! browser-view.search "") 
         (toggle-tag name)
         ))))
+
+(def open-sample-menu (event)
+  (let ((item (get event :item)))
+    (if (and item (get item :path))
+      (do
+        (set! sample-menu.item item)
+        (set! sample-menu.packs (seq-sample-packs (get item :path)))
+        (open-menu! sample-menu event))
+      nil)))
+
+(def sample-pack-command (command pack)
+  (set! sample-menu.open false)
+  (host-command command (dict :pack pack :path (get sample-menu.item :path))))
+
+;; Add to / Remove from each pack, then New Pack… (eseq.sample-region).
+(def sample-context-menu ()
+  (apply menu-of sample-menu
+    (append
+      (map (lambda (pack)
+             (let ((name (get pack :name)))
+               (if (get pack :member)
+                 (menu-item (str "Remove from " name) :key (str "sample-menu-remove/" name)
+                   :on-select (lambda (e) (sample-pack-command "sample-pack-remove" name)))
+                 (menu-item (str "Add to " name) :key (str "sample-menu-add/" name)
+                   :on-select (lambda (e) (sample-pack-command "sample-pack-add" name))))))
+           sample-menu.packs)
+      (list
+        (menu-item "New Pack…" :key "sample-menu-new-pack"
+          :on-select (lambda (e)
+            (do
+              (set! sample-menu.open false)
+              (host-command "sample-pack-new" (dict :path (get sample-menu.item :path))))))))))
 
 (def origin-chip (origin)
   (let ((name (get origin :name))
@@ -1477,13 +1563,17 @@ Previews each preset as you move through the list; Esc puts the loaded one back.
                 (get tab :icon)))))))))
 
 (def sample-preview-strip ()
-  (preview-strip sample-preview "sample-" :buffer-bg (box :height 0)
-    (lambda () (toggle-auto-preview))))
+  (v-stack :width :fill :gap 0.15
+    (preview-strip sample-preview "sample-" :buffer-bg (box :height 0)
+      (lambda () (toggle-auto-preview))
+      :span sample-preview.span)
+    (region-origin-line)))
 
 (def samples-panel-with-activation (tree-key activation)
   (let ((listing (seq-sample-browser browser-view.search sample-pick.tags sample-pick.origins)))
     (let ((tags (get listing :tags))
         (origins (get listing :origins))
+        (packs (if (get listing :packs) (get listing :packs) (list)))
         (items (get listing :items)))
       (v-stack :key "samples-browser-panel" :width :fill :gap 0.35 :flex 1
         ;; The filter chips size to their content but shrink (scrolling) once
@@ -1504,6 +1594,13 @@ Previews each preset as you move through the list; Esc puts the loaded one back.
                 (wrap :width :fill :gap 0.25 :row-gap 0.18 :align :center
                   (each (range 0 (len origins)) |i|
                     (origin-chip (nth origins i)))))
+              ;; Packs filter like origins (`pack/<name>`); their own row
+              ;; so curated sets read apart from where samples came from.
+              (if (> (len packs) 0)
+                (wrap :key "sample-pack-filter" :width :fill :gap 0.25 :row-gap 0.18 :align :center
+                  (label "Packs" :bg :transparent :font-size 11 :color :dim)
+                  (each (range 0 (len packs)) |i|
+                    (origin-chip (nth packs i)))))
               (wrap :width :fill :gap 0.20 :row-gap 0.10 :align :center
                 (each (range 0 (len tags)) |i|
                   (tag-chip (nth tags i)))))))
@@ -1530,8 +1627,10 @@ Previews each preset as you move through the list; Esc puts the loaded one back.
                 :on-select (lambda (item) (select-sample item))
                 :on-cursor-change (lambda (item) (select-sample item))
                 :on-activate activation
-                :on-modified-activate (lambda (item) (modified-activate-sample item))))))
-        (sample-preview-strip)))))
+                :on-modified-activate (lambda (item) (modified-activate-sample item))
+                :on-right-click (lambda (event) (open-sample-menu event))))))
+        (sample-preview-strip)
+        (sample-context-menu)))))
 
 (def samples-panel ()
   (samples-panel-with-activation

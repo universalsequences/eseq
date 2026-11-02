@@ -114,7 +114,7 @@ pub(super) fn fire_resolved(
         chord,
         voice_policy.base_note_offset,
     );
-    if instrument_type == InstrumentType::Empty {
+    if matches!(instrument_type, InstrumentType::Empty | InstrumentType::Audio) {
         return;
     }
     if instrument_type == InstrumentType::Rack {
@@ -924,9 +924,12 @@ pub(super) fn dispatch_retrig_event(
 ) {
     let track_idx = event.track_idx;
     if track_idx >= data.state.active_track_count()
-        || InstrumentType::from_runtime_flag(
-            data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Acquire),
-        ) == InstrumentType::Empty
+        || matches!(
+            InstrumentType::from_runtime_flag(
+                data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Acquire),
+            ),
+            InstrumentType::Empty | InstrumentType::Audio
+        )
     {
         return;
     }

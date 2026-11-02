@@ -164,6 +164,10 @@ pub struct SongPositionShared {
     /// there (it would pin every lane's playhead at the old end marker).
     open_ended: AtomicBool,
     anchor_sample: AtomicU64,
+    /// First sample of the current playback pass: the scheduler publishes
+    /// the start anchor a lookahead ahead of rendering, and samples rendered
+    /// before it belong to the stopped transport, not to the song.
+    pass_start_sample: AtomicU64,
     anchor_beat_bits: AtomicU64,
     samples_per_quarter_bits: AtomicU64,
     end_beat_bits: AtomicU64,
@@ -179,6 +183,7 @@ impl Default for SongPositionShared {
             loop_enabled: AtomicBool::new(false),
             open_ended: AtomicBool::new(false),
             anchor_sample: AtomicU64::new(0),
+            pass_start_sample: AtomicU64::new(0),
             anchor_beat_bits: AtomicU64::new(0.0_f64.to_bits()),
             samples_per_quarter_bits: AtomicU64::new(0.0_f64.to_bits()),
             end_beat_bits: AtomicU64::new(0.0_f64.to_bits()),
@@ -231,6 +236,41 @@ impl SongPositionShared {
         }
     }
 
+    /// The song-timeline mapping audio rendering needs for a block starting
+    /// at `block_start` (docs/audio-tracks-spec.md §9.2). `None` while song
+    /// playback is inactive. The scheduler marks the end a lookahead before
+    /// rendering reaches it, so an ended song still maps: frames past the end
+    /// fall out in [`SongRenderMapping::song_beat`]. Unlike [`Self::position_beats`]
+    /// the beat is neither wrapped nor clamped: a renderer advances it per
+    /// frame and applies [`SongRenderMapping::song_beat`] itself, so a loop
+    /// wrap inside a block lands on the exact frame.
+    pub fn render_mapping(&self, block_start: u64) -> Option<SongRenderMapping> {
+        if !self.is_active() {
+            return None;
+        }
+        let samples_per_quarter =
+            f64::from_bits(self.samples_per_quarter_bits.load(Ordering::Relaxed));
+        if !(samples_per_quarter > 0.0) {
+            return None;
+        }
+        let anchor_sample = self.anchor_sample.load(Ordering::Relaxed);
+        let anchor_beat = f64::from_bits(self.anchor_beat_bits.load(Ordering::Relaxed));
+        let delta = block_start as f64 - anchor_sample as f64;
+        let end_beat = f64::from_bits(self.end_beat_bits.load(Ordering::Relaxed));
+        Some(SongRenderMapping {
+            beat: anchor_beat + delta / samples_per_quarter,
+            beats_per_sample: 1.0 / samples_per_quarter,
+            pass_start_sample: self.pass_start_sample.load(Ordering::Relaxed),
+            end_beat,
+            loop_enabled: self.loop_enabled.load(Ordering::Relaxed) && end_beat > 0.0,
+            open_ended: self.open_ended.load(Ordering::Relaxed),
+        })
+    }
+
+    fn mark_pass_start(&self, sample: u64) {
+        self.pass_start_sample.store(sample, Ordering::Relaxed);
+    }
+
     fn publish(
         &self,
         anchor_sample: u64,
@@ -264,6 +304,36 @@ impl SongPositionShared {
     fn clear(&self) {
         self.active.store(false, Ordering::Release);
         self.ended.store(false, Ordering::Relaxed);
+    }
+}
+
+/// See [`SongPositionShared::render_mapping`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SongRenderMapping {
+    /// Unwrapped song beat at the block's first sample.
+    pub beat: f64,
+    pub beats_per_sample: f64,
+    pub pass_start_sample: u64,
+    pub end_beat: f64,
+    pub loop_enabled: bool,
+    pub open_ended: bool,
+}
+
+impl SongRenderMapping {
+    /// The song beat heard at `sample` (`offset` frames into the block), or
+    /// `None` before the pass started or past a non-looping song's end.
+    pub fn song_beat(&self, sample: u64, offset: usize) -> Option<f64> {
+        if sample < self.pass_start_sample {
+            return None;
+        }
+        let beat = self.beat + offset as f64 * self.beats_per_sample;
+        if self.loop_enabled {
+            Some(beat.rem_euclid(self.end_beat))
+        } else if beat < 0.0 || (beat >= self.end_beat && !self.open_ended) {
+            None
+        } else {
+            Some(beat)
+        }
     }
 }
 
@@ -632,6 +702,7 @@ impl SongPlaybackRuntime {
                 effective_sample: at_sample,
                 wrapped: false,
             }));
+            mailbox.shared().mark_pass_start(at_sample);
             self.publish_position(mailbox, at_sample, song_beat);
         }
 

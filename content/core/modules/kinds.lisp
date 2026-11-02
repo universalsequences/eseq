@@ -1155,6 +1155,7 @@
                     :doc "The settings a p-lock supplies at the displayed step (the current track's selected, else playing, step): (dict :name :value) per lock, name timebase (a label), swing or swing-resolution (a label); empty otherwise. The fields above are the track's own values")
          ;; The arrangement.
          (clips     (list-of clip) :doc "The clips on the track's arrangement lane, in time order")
+         (audio-regions (list-of :any) :doc "An audio track's regions in time order: maps with :cid :start :end (beats) :name :sample (waveform key) :offset :span :duration (seconds) :gain (dB) :fade-in :fade-out :muted :loaded :pitch (semitones) :loop :loop-start :loop-end (seconds)")
          (cells     (list-of cell) :doc "The track's patterns (the mixer's clip grid), by pattern id")
          (clip-playing :bool :doc "One of the track's cells plays (a cell's `active`): what the mixer's clip stop stops")
          (used-banks (list-of bank) :doc "The banks with a scene that uses the track: one that gives it a pattern cell (steps or none); a kit's pad follows its kit (the kit's used-banks); empty when no scene does. Bank-scoped views hide a track the viewed bank does not use (docs/rig-spec.md §9, eseq.scene-banks/used-in-viewed-bank?)")
@@ -2015,14 +2016,15 @@
 ;; Add a track playing saved instrument `name` (as the browser lists it).
 (def add-instrument-track! (name) (host-command "add-track-instrument" (dict :name name)))
 
-;; Add a track playing builtin `name`: sampler, modulator, rack (a drum rack)
-;; or layer-rack.
+;; Add a track playing builtin `name`: sampler, modulator, rack (a drum rack),
+;; layer-rack, or audio (an audio track).
 (def add-builtin-track! (name)
   (match name
     "sampler" (host-command "add-track-sampler" (dict))
     "modulator" (host-command "add-track-modulator" (dict))
     "rack" (host-command "add-track-rack" (dict))
     "layer-rack" (host-command "add-track-layer-rack" (dict))
+    "audio" (host-command "add-track-audio" (dict))
     _ (status (str "No builtin instrument " name))))
 
 ;; track.governed values.

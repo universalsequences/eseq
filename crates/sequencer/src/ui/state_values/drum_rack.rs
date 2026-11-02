@@ -20,7 +20,7 @@ pub(crate) fn rack_slot_raw_name(
             .map(|engine| engine.name.clone())
             .or_else(|| slot.track_sound_state.loaded_preset.clone())
             .unwrap_or_else(|| format!("Instrument {}", slot_idx + 1)),
-        sequencer::sequencer::InstrumentType::Empty | sequencer::sequencer::InstrumentType::Rack => format!("Unsupported {}", slot_idx + 1),
+        sequencer::sequencer::InstrumentType::Empty | sequencer::sequencer::InstrumentType::Audio | sequencer::sequencer::InstrumentType::Rack => format!("Unsupported {}", slot_idx + 1),
     }
 }
 

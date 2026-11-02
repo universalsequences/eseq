@@ -1,0 +1,313 @@
+//! Audio lanes in the arrangement view (docs/audio-tracks-spec.md §8): a
+//! dropped sample draws as a waveform region, gestures on the lane edit
+//! regions, and a double-click opens the clip editor in the lower panel.
+
+use super::views::{distro, widgets_with_prop};
+use super::*;
+
+/// A 16-bit mono WAV of `frames` frames at 48 kHz.
+fn write_wav(dir: &std::path::Path, name: &str, frames: usize) -> std::path::PathBuf {
+    let path = dir.join(name);
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 48_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+    for n in 0..frames {
+        writer.write_sample(((n % 480) as i16 - 240) * 50).unwrap();
+    }
+    writer.finalize().unwrap();
+    path
+}
+
+struct Fixture {
+    h: Harness,
+    dir: tempfile::TempDir,
+    track: usize,
+}
+
+fn fixture() -> Fixture {
+    let mut h = distro();
+    let dir = tempfile::tempdir().unwrap();
+    h.app.set_audio_store_dir(dir.path().join("store"));
+    h.app.state.transport.bpm.store(120, Ordering::Relaxed);
+    let track = h.app.add_audio_track().unwrap();
+    audio_settle(&mut h);
+    Fixture { h, dir, track }
+}
+
+impl Harness {
+    fn lane_items(&self, track: usize) -> Vec<HashMap<String, Value>> {
+        let mut lanes = Vec::new();
+        widgets_with_prop(&self.buffer_tree("*arrangement*").0, "lane-key", &mut lanes);
+        let lane = lanes
+            .into_iter()
+            .find(|lane| lane.get("lane-key") == Some(&Value::Number(track as f64)))
+            .unwrap_or_else(|| panic!("track lane {track}"));
+        match lane.get("items") {
+            Some(Value::List(items)) => items
+                .iter()
+                .map(|item| match &*item.borrow() {
+                    Value::Map(map) => {
+                        map.iter().map(|(k, v)| (k.clone(), v.borrow().clone())).collect()
+                    }
+                    other => panic!("item is not a map: {other:?}"),
+                })
+                .collect(),
+            other => panic!("lane items: {other:?}"),
+        }
+    }
+
+    fn has_widget_key(&self, buffer: &str, key: &str) -> bool {
+        let mut keyed = Vec::new();
+        widgets_with_prop(&self.buffer_tree(buffer).0, "key", &mut keyed);
+        keyed.iter().any(|widget| widget.get("key") == Some(&Value::String(key.to_string())))
+    }
+}
+
+/// Apply what the view queued, push the kinds and re-render.
+fn audio_settle(h: &mut Harness) {
+    h.drain();
+    h.sync();
+    h.show_all();
+}
+
+fn number(value: Option<&Value>) -> f64 {
+    match value {
+        Some(Value::Number(n)) => *n,
+        other => panic!("not a number: {other:?}"),
+    }
+}
+
+#[test]
+fn a_sample_dropped_on_an_audio_lane_draws_as_a_waveform_region() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "hit.wav", 48_000);
+    // Drop at the lane's left edge (sx -1): the view starts at beat 0.
+    f.h.eval(&format!(
+        r#"(eseq.arrangement/audio-drop {} (dict :drag-type "sample" :payload (dict :path "{}") :sx -1))"#,
+        f.track,
+        wav.display()
+    ));
+    audio_settle(&mut f.h);
+
+    let items = f.h.lane_items(f.track);
+    assert_eq!(items.len(), 1, "{items:?}");
+    let item = &items[0];
+    assert_eq!(item.get("kind"), Some(&Value::Keyword("audio".to_string())));
+    // One second at 120 bpm is two beats.
+    assert_eq!((number(item.get("start")), number(item.get("end"))), (0.0, 2.0));
+    let Some(Value::Map(content)) = item.get("content") else {
+        panic!("a loaded region carries waveform content: {item:?}");
+    };
+    let Value::String(key) = content["sample"].borrow().clone() else {
+        panic!("content names its sample");
+    };
+    assert!(
+        eseqlisp::audio::sample::get_registered_sample(&key).is_some(),
+        "the waveform is registered under {key}"
+    );
+}
+
+#[test]
+fn double_clicking_a_region_opens_the_clip_editor() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "hit.wav", 24_000);
+    let id = f.h.app.audio_regions_drop(f.track, 4.0, &[wav]).unwrap()[0];
+    audio_settle(&mut f.h);
+    f.h.eval(&format!(
+        "(eseq.arrangement/audio-lane-action {} (dict :type :double-click-item :ids (list {}) :time 4))",
+        f.track, id.0
+    ));
+    audio_settle(&mut f.h);
+    audio_settle(&mut f.h);
+    assert!(
+        f.h.has_widget_key("*piano-roll*", "audio-clip-editor"),
+        "the lower panel shows the audio clip editor"
+    );
+    assert!(f.h.has_widget_key("*piano-roll*", "audio-clip-waveform"));
+    let bound = f.h.eval("(let ((c eseq.audio-clip/audio-clip)) c.region)");
+    assert_eq!(bound, Value::Number(id.0 as f64));
+}
+
+#[test]
+fn the_lane_deletes_copies_and_pastes_regions() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "hit.wav", 24_000);
+    let id = f.h.app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap()[0];
+    audio_settle(&mut f.h);
+    let act = |h: &mut Harness, event: String| {
+        h.eval(&format!("(eseq.arrangement/audio-lane-action {} {event})", f.track));
+        audio_settle(h);
+    };
+    act(&mut f.h, format!("(dict :type :select :ids (list {}) :time 0)", id.0));
+    act(&mut f.h, "(dict :type :copy-items)".to_string());
+    act(&mut f.h, "(dict :type :paste-items :time 8)".to_string());
+    let starts: Vec<f64> =
+        f.h.lane_items(f.track).iter().map(|item| number(item.get("start"))).collect();
+    assert_eq!(starts, vec![0.0, 8.0]);
+
+    act(&mut f.h, format!("(dict :type :delete-items :ids (list {}))", id.0));
+    let starts: Vec<f64> =
+        f.h.lane_items(f.track).iter().map(|item| number(item.get("start"))).collect();
+    assert_eq!(starts, vec![8.0]);
+}
+
+#[test]
+fn moving_and_trimming_on_the_lane_commit_once_on_release() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "hit.wav", 48_000 * 2);
+    let id = f.h.app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap()[0];
+    audio_settle(&mut f.h);
+    let act = |h: &mut Harness, event: String| {
+        h.eval(&format!("(eseq.arrangement/audio-lane-action {} {event})", f.track));
+        audio_settle(h);
+    };
+    act(&mut f.h, format!("(dict :type :move-items-absolute :anchor-id {} :start 4)", id.0));
+    act(&mut f.h, format!("(dict :type :move-items-absolute :anchor-id {} :start 6)", id.0));
+    act(&mut f.h, "(dict :type :finish-move-items)".to_string());
+    act(&mut f.h, format!("(dict :type :resize-item-absolute :id {} :edge :start :time 7)", id.0));
+    act(&mut f.h, "(dict :type :finish-resize-items)".to_string());
+    let item = f.h.lane_items(f.track).remove(0);
+    assert_eq!((number(item.get("start")), number(item.get("end"))), (7.0, 10.0));
+    let undo_len = f.h.app.history.undo_len();
+    assert!(undo_len >= 3, "drop, move and trim are one entry each: {undo_len}");
+}
+
+/// A press in a region's body is a region surface (the user's report): it
+/// parks the transport-start cursor where it lands and selects nothing, so
+/// the drag that follows sweeps a time selection.
+#[test]
+fn a_body_press_places_the_cursor_and_selects_nothing() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "hit.wav", 48_000 * 2);
+    let id = f.h.app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap()[0];
+    audio_settle(&mut f.h);
+    f.h.eval(&format!(
+        "(eseq.arrangement/audio-lane-action {} (dict :type :clear-selection :ids (list {}) :time 1.5))",
+        f.track, id.0
+    ));
+    audio_settle(&mut f.h);
+    assert_eq!(f.h.eval("(let ((v eseq.arrangement/arr-view)) v.cursor-time)"), Value::Number(1.5));
+    assert_eq!(f.h.eval("(let ((v eseq.arrangement/arr-select)) v.clip)"), Value::Number(-1.0));
+    assert_eq!(f.h.app.arrangement_cursor_beat, 1.5, "the transport starts from the press");
+}
+
+/// Sweep part of a region, copy, paste: the pasted region plays exactly the
+/// swept slice of the audio.
+#[test]
+fn a_swept_slice_of_a_region_copies_and_pastes_its_own_audio() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "hit.wav", 48_000 * 2);
+    f.h.app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap();
+    audio_settle(&mut f.h);
+    let act = |h: &mut Harness, event: String| {
+        h.eval(&format!("(eseq.arrangement/audio-lane-action {} {event})", f.track));
+        audio_settle(h);
+    };
+    // The region spans beats 0-4; sweep its second half.
+    act(&mut f.h, "(dict :type :finish-marquee-select :time-a 2 :time-b 3 :row-delta 0)".to_string());
+    act(&mut f.h, "(dict :type :copy-items)".to_string());
+    act(&mut f.h, "(dict :type :paste-items :time 8)".to_string());
+    let items = f.h.lane_items(f.track);
+    assert_eq!(items.len(), 2, "{items:?}");
+    let pasted = &items[1];
+    assert_eq!((number(pasted.get("start")), number(pasted.get("end"))), (8.0, 9.0));
+    let Some(Value::Map(content)) = pasted.get("content") else {
+        panic!("pasted region draws its audio");
+    };
+    let offset = match &*content["offset"].borrow() {
+        Value::Number(n) => *n,
+        other => panic!("offset: {other:?}"),
+    };
+    assert!((offset - 1.0).abs() < 1e-6, "the slice starts one second in: {offset}");
+}
+
+#[test]
+fn cmd_e_splits_the_region_under_the_cursor() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "hit.wav", 48_000 * 2);
+    f.h.app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap();
+    audio_settle(&mut f.h);
+    f.h.eval(&format!(
+        "(eseq.arrangement/audio-lane-action {} (dict :type :split-items :ids (list) :time 1))",
+        f.track
+    ));
+    audio_settle(&mut f.h);
+    let spans: Vec<(f64, f64)> = f
+        .h
+        .lane_items(f.track)
+        .iter()
+        .map(|item| (number(item.get("start")), number(item.get("end"))))
+        .collect();
+    assert_eq!(spans, vec![(0.0, 1.0), (1.0, 4.0)]);
+}
+
+/// Ableton: a drag across the clip editor's waveform selects that stretch of
+/// audio there and the same stretch of the timeline, so it can be copied;
+/// the start/end markers stay where they were.
+#[test]
+fn a_waveform_drag_selects_the_same_stretch_of_the_timeline() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "hit.wav", 48_000 * 2);
+    let id = f.h.app.audio_regions_drop(f.track, 4.0, &[wav]).unwrap()[0];
+    audio_settle(&mut f.h);
+    f.h.eval(&format!(
+        "(eseq.arrangement/audio-lane-action {} (dict :type :double-click-item :ids (list {}) :time 4))",
+        f.track, id.0
+    ));
+    audio_settle(&mut f.h);
+    // Seconds 0.5-1.0 of the source: beats 5-6 at 120 bpm.
+    f.h.eval(&format!(
+        "(eseq.audio-clip/waveform-action (eseq.audio-clip/bound-region (track {}))
+           (dict :type :end-range :start 0.5 :end 1.0))",
+        f.track
+    ));
+    audio_settle(&mut f.h);
+    let region = f.h.app.song_region_selection.expect("a timeline region");
+    assert_eq!((region.start_beat, region.end_beat), (5.0, 6.0));
+    assert!(region.contains_track(f.track));
+    let lane = f.h.app.state.with_committed_arrangement(|a| a.unwrap().audio_lane(f.track).to_vec());
+    assert_eq!((lane[0].start_beat, lane[0].end_beat, lane[0].source_offset), (4.0, 8.0, 0), "the markers did not move");
+}
+
+/// Cmd+C in the clip editor (the *piano-roll* buffer) copies the arrangement
+/// region a waveform drag selected; the clip editor binds the song position
+/// as its playhead.
+#[test]
+fn the_clip_editor_copies_the_selected_range_and_follows_the_song() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "hit.wav", 48_000 * 2);
+    let id = f.h.app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap()[0];
+    audio_settle(&mut f.h);
+    f.h.eval(&format!(
+        "(eseq.arrangement/audio-lane-action {} (dict :type :double-click-item :ids (list {}) :time 0))",
+        f.track, id.0
+    ));
+    audio_settle(&mut f.h);
+    f.h.eval(&format!(
+        "(eseq.audio-clip/waveform-action (eseq.audio-clip/bound-region (track {}))
+           (dict :type :end-range :start 0.5 :end 1.0))",
+        f.track
+    ));
+    audio_settle(&mut f.h);
+    // Edit > Copy reaches the focused waveform first; it refuses the key and
+    // hands it to its :on-focus-key, which copies the region.
+    assert_eq!(f.h.eval(r#"(eseq.audio-clip/focus-key "s-c" false)"#), Value::Bool(true));
+    let mut waveforms = Vec::new();
+    widgets_with_prop(&f.h.buffer_tree("*piano-roll*").0, "on-focus-key", &mut waveforms);
+    assert!(!waveforms.is_empty(), "the waveform takes refused keys");
+    audio_settle(&mut f.h);
+    f.h.eval(&format!("(eseq.arrangement/set-cursor 8 {})", f.track));
+    assert_eq!(f.h.eval(r#"(eseq.audio-clip/focus-key "s-v" false)"#), Value::Bool(true));
+    audio_settle(&mut f.h);
+    let starts: Vec<f64> =
+        f.h.lane_items(f.track).iter().map(|item| number(item.get("start"))).collect();
+    assert_eq!(starts, vec![0.0, 8.0], "the copied stretch pasted at the cursor");
+
+    let mut waveforms = Vec::new();
+    widgets_with_prop(&f.h.buffer_tree("*piano-roll*").0, "playhead-map", &mut waveforms);
+    assert_eq!(waveforms.len(), 1, "the clip editor maps the song position");
+}
