@@ -18,7 +18,7 @@ Stages, each cached in EXPDIR (delete its output to run it again):
   ship     the instrument + Morph twin, installed to .local/instruments/<folder>, `eseq instrument check`
 
 Tools: DGenLisp from $D, else $ESEQ_DGENLISP_TOOL, else eseq's pinned compiler (content/dgenlisp.lock, installed
-by scripts/fetch_dgenlisp.sh; train-dataset needs >= dgenlisp-v0.1.43 for :hf-weight); the scoring and
+by scripts/fetch_dgenlisp.sh; train-dataset needs >= dgenlisp-v0.1.43 for :hf-weight, v0.1.44 is ~3.5x faster); the scoring and
 instrument builders of the latent-snare research toolkit from $ESEQ_TRAIN_TOOLKIT (default
 .local/research/latent-snare-from-samples, with .local/research/break-snares for fidelity / knobs).
 """
