@@ -12,7 +12,8 @@
 (import eseq.kinds :refer (track song piano-roll select-region! clear-region!))
 
 (export audio-clip bind! clear! bound-region editor region-label waveform-action
-        region-copy-key region-paste-key region-duplicate-key focus-key)
+        audio-track? song-region-copy song-region-paste song-region-duplicate
+        song-region-key region-copy-key region-paste-key region-duplicate-key focus-key)
 
 ;; The bound region (track position and region id, -1 for none), the marker
 ;; window a drag is previewing (nil when none), the range a body drag selects
@@ -249,10 +250,10 @@
         ;; is inside THIS region (a region being viewed while another plays
         ;; shows none) and only while it plays.
         :playhead-beat (if (= song.mode "stopped") nil #'song.position)
-        :playhead-map (if r.loop
-                        (dict :start r.start :end r.end :offset r.offset :span r.span
-                          :loop-start r.loop-start :loop-end r.loop-end)
-                        (dict :start r.start :end r.end :offset r.offset :span r.span))
+        ;; loop-start/-end are 0 when the region does not loop, which the
+        ;; widget reads as no loop.
+        :playhead-map (dict :start r.start :end r.end :offset r.offset :span r.span
+                        :loop-start r.loop-start :loop-end r.loop-end)
         :selection-start (window-start r)
         :selection-end (window-end r)
         :range-start (when audio-clip.range (get audio-clip.range :start))
@@ -263,43 +264,45 @@
 
 ;; The editor for track t's bound region.
 ;; ── Keys ───────────────────────────────────────────────────────────────────
-;; The editor shares the *piano-roll* buffer. Its keymap adds the arrangement
-;; region keys while an audio track is being edited, so a range dragged
-;; across the waveform (which selects the same timeline stretch) copies,
-;; pastes and duplicates with Cmd+C / Cmd+V / Cmd+D. Each returns false
-;; otherwise and the key falls through to the piano roll as before.
+;; The arrangement region's copy / paste / duplicate, shared with the
+;; arrangement lanes. Each returns whether it handled the key.
 
-(def editing-audio? ()
-  (let ((t piano-roll.track))
-    (and t (= t.instrument-type "audio"))))
+(def audio-track? (t)
+  (and (not (= t nil)) (= t.instrument-type "audio")))
 
-(def region-copy-key ()
-  (if (and (editing-audio?) (not (= song.region nil)))
-    (do (seq-song-region-copy) true)
-    false))
+(def song-region-copy ()
+  (if (= song.region nil) false (do (seq-song-region-copy) true)))
 
-(def region-paste-key ()
-  (if (editing-audio?)
-    (do (seq-song-region-paste) true)
-    false))
+(def song-region-paste ()
+  (seq-song-region-paste)
+  true)
 
-(def region-duplicate-key ()
-  (if (and (editing-audio?) (not (= song.region nil)))
-    (do (seq-song-region-duplicate) true)
-    false))
+(def song-region-duplicate ()
+  (if (= song.region nil) false (do (seq-song-region-duplicate) true)))
 
-;; The same keys while the waveform has focus: Edit > Copy/Paste reach a
-;; focused widget first, and a widget that refuses them hands them to its
-;; :on-focus-key, which is this. Cmd on macOS, Ctrl elsewhere.
-(def focus-key (key text)
+;; The region keys as a focused widget's :on-focus-key receives them: Edit >
+;; Copy/Paste reach a focused widget first, and one that refuses them hands
+;; them on. Cmd on macOS, Ctrl elsewhere.
+(def song-region-key (key)
   (match key
-    "s-c" (region-copy-key)
-    "C-c" (region-copy-key)
-    "s-v" (region-paste-key)
-    "C-v" (region-paste-key)
-    "s-d" (region-duplicate-key)
-    "C-d" (region-duplicate-key)
+    "s-c" (song-region-copy)
+    "C-c" (song-region-copy)
+    "s-v" (song-region-paste)
+    "C-v" (song-region-paste)
+    "s-d" (song-region-duplicate)
+    "C-d" (song-region-duplicate)
     _ false))
+
+;; The editor shares the *piano-roll* buffer. Its keymap adds the region keys
+;; while an audio track is being edited, so a range dragged across the
+;; waveform (which selects the same timeline stretch) copies, pastes and
+;; duplicates with Cmd+C / Cmd+V / Cmd+D. Otherwise each returns false and
+;; the key falls through to the piano roll as before.
+(def editing-audio? () (audio-track? piano-roll.track))
+(def region-copy-key () (if (editing-audio?) (song-region-copy) false))
+(def region-paste-key () (if (editing-audio?) (song-region-paste) false))
+(def region-duplicate-key () (if (editing-audio?) (song-region-duplicate) false))
+(def focus-key (key text) (if (editing-audio?) (song-region-key key) false))
 
 (define-mode "audio-clip-mode" :read-only true :live-keys true
   :inherit "eseq.sequencer-keys/sequencer-keys")

@@ -116,7 +116,7 @@ fn sync_publishes_the_regions_and_follows_edits() {
     assert_eq!((published.regions[0].start_beat, published.regions[0].end_beat), (0.0, 2.0));
     assert_eq!(published.regions[0].pcm.frames(), 48_000);
 
-    app.audio_region_set_params(id, None, None, None, Some(true)).unwrap();
+    app.audio_region_update(id, AudioRegionPatch { muted: Some(true), ..Default::default() }, false).unwrap();
     app.sync_audio_track_playback();
     assert!(app.audio_players.published(slot).unwrap().regions.is_empty(), "muted regions are silent");
 }
@@ -128,7 +128,7 @@ fn moving_resizing_splitting_and_deleting_regions() {
     let app = f.rig.app();
     let id = app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap()[0];
 
-    app.audio_region_move(id, 8.0, None).unwrap();
+    app.audio_region_place(id, 8.0, None, Place::Move).unwrap();
     assert_eq!(lane(app, f.track)[0].start_beat, 8.0);
 
     // Trim the left edge by one beat: the audio under the rest stays put.
@@ -158,7 +158,7 @@ fn a_moved_region_truncates_what_it_lands_on() {
     let app = f.rig.app();
     let ids = app.audio_regions_drop(f.track, 0.0, &[wav.clone(), wav]).unwrap();
     // Two 8-beat regions at [0, 8) and [8, 16); move the second to beat 4.
-    app.audio_region_move(ids[1], 4.0, None).unwrap();
+    app.audio_region_place(ids[1], 4.0, None, Place::Move).unwrap();
     let spans: Vec<_> = lane(app, f.track).iter().map(|r| (r.id, r.start_beat, r.end_beat)).collect();
     assert_eq!(spans, vec![(ids[0], 0.0, 4.0), (ids[1], 4.0, 12.0)]);
 }
@@ -169,7 +169,12 @@ fn audio_tracks_and_regions_survive_save_and_load() {
     let wav = write_wav(f.dir.path(), "a.wav", 48_000, 48_000);
     let app = f.rig.app();
     let id = app.audio_regions_drop(f.track, 2.0, &[wav]).unwrap()[0];
-    app.audio_region_set_params(id, Some(-6.0), Some(0.01), None, None).unwrap();
+    app.audio_region_update(
+        id,
+        AudioRegionPatch { gain_db: Some(-6.0), fade_in_seconds: Some(0.01), ..Default::default() },
+        false,
+    )
+    .unwrap();
     let saved = app.capture_project("audio-roundtrip").unwrap();
     assert!(matches!(saved.tracks[f.track].kind, crate::project::ProjectTrackKind::Audio));
     let before = lane(app, f.track);
@@ -214,10 +219,10 @@ fn the_clip_window_slips_the_audio_under_a_fixed_start() {
     let app = f.rig.app();
     let id = app.audio_regions_drop(f.track, 4.0, &[wav]).unwrap()[0];
     // Play 1.5 s from 0.5 s in: the region stays at beat 4 and lasts 3 beats.
-    app.audio_region_set_window(id, 0.5, 1.5).unwrap();
+    app.audio_region_set_window(id, 0.5, 1.5, false).unwrap();
     let region = lane(app, f.track)[0];
     assert_eq!((region.start_beat, region.end_beat, region.source_offset), (4.0, 7.0, 24_000));
-    let error = app.audio_region_set_window(id, 5.0, 1.0).unwrap_err();
+    let error = app.audio_region_set_window(id, 5.0, 1.0, false).unwrap_err();
     assert!(error.contains("past the end"), "{error}");
 }
 
@@ -228,7 +233,7 @@ fn a_live_gain_drag_is_one_undo_step() {
     let app = f.rig.app();
     let id = app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap()[0];
     for gain in [-1.0, -2.0, -3.0] {
-        app.audio_region_set_params_keyed(id, Some(gain), None, None, None, true).unwrap();
+        app.audio_region_update(id, AudioRegionPatch { gain_db: Some(gain), ..Default::default() }, true).unwrap();
     }
     assert_eq!(lane(app, f.track)[0].gain_db, -3.0);
     crate::app::edit::undo(app);
@@ -297,14 +302,14 @@ fn a_looping_region_keeps_its_window_while_it_grows() {
     let wav = write_wav(f.dir.path(), "a.wav", 48_000 * 4, 48_000);
     let app = f.rig.app();
     let id = app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap()[0];
-    app.audio_region_set_window(id, 1.0, 1.0).unwrap();
+    app.audio_region_set_window(id, 1.0, 1.0, false).unwrap();
     app.audio_region_set_loop(id, true).unwrap();
     let region = lane(app, f.track)[0];
     assert_eq!((region.loop_start, region.loop_end), (48_000, 96_000));
     // Growing it past the window repeats the loop instead of running on.
     app.audio_region_resize(id, 0.0, 16.0).unwrap();
     // The clip window now edits the loop and leaves the length alone.
-    app.audio_region_set_window(id, 0.5, 0.5).unwrap();
+    app.audio_region_set_window(id, 0.5, 0.5, false).unwrap();
     let region = lane(app, f.track)[0];
     assert_eq!((region.loop_start, region.loop_end, region.end_beat), (24_000, 48_000, 16.0));
     app.sync_audio_track_playback();
@@ -319,9 +324,9 @@ fn pitch_speeds_playback_and_shortens_a_set_window() {
     let wav = write_wav(f.dir.path(), "a.wav", 48_000 * 4, 48_000);
     let app = f.rig.app();
     let id = app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap()[0];
-    app.audio_region_set_pitch(id, 12.0, false).unwrap();
+    app.audio_region_update(id, AudioRegionPatch { transpose: Some(12.0), ..Default::default() }, false).unwrap();
     // An octave up plays a one-second window in half a second: one beat.
-    app.audio_region_set_window(id, 0.0, 1.0).unwrap();
+    app.audio_region_set_window(id, 0.0, 1.0, false).unwrap();
     assert_eq!(lane(app, f.track)[0].end_beat, 1.0);
     app.sync_audio_track_playback();
     let slot = player_slot(app, f.track);

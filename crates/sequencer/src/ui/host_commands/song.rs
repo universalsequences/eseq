@@ -149,14 +149,14 @@ fn map_entity_id(
     Ok(id as u64)
 }
 
-fn payload_map(payload: &Value) -> Result<&HashMap<String, Rc<RefCell<Value>>>, String> {
+pub(super) fn payload_map(payload: &Value) -> Result<&HashMap<String, Rc<RefCell<Value>>>, String> {
     match payload {
         Value::Map(map) => Ok(map),
         _ => Err("invalid payload: expected a map".to_string()),
     }
 }
 
-fn require_number(
+pub(super) fn require_number(
     map: &HashMap<String, Rc<RefCell<Value>>>,
     key: &str,
 ) -> Result<f64, String> {

@@ -689,7 +689,7 @@
   (let ((t piano-roll.track))
     ;; An audio track has no notes: the lower panel shows its clip editor
     ;; (docs/audio-tracks-spec.md §8.2) in the piano roll's place.
-    (if (and t (= t.instrument-type "audio"))
+    (if (eseq.audio-clip/audio-track? t)
       (subtree :key "audio-clip" (eseq.audio-clip/editor t))
     (if (and piano-roll-view.arrangement (not piano-roll.clip))
       (box

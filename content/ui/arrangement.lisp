@@ -26,7 +26,8 @@
 ;; while the buffer tree is being built. These two edges are the ordering
 ;; ui/main.lisp used to encode by listing those files above us.
 (import eseq.track-collapse)
-(import eseq.audio-clip)
+(import eseq.audio-clip :refer (audio-track? song-region-copy song-region-paste
+                               song-region-duplicate song-region-key))
 (import eseq.sound-palette)
 (import eseq.sample-import)
 (import eseq.retrospective)
@@ -618,9 +619,6 @@
 ;; :cid :start :end :name :sample :offset :span ...). Region ids come from the
 ;; clip-id allocator, so the lanes' shared selection and ghost channels
 ;; address them like clips.
-
-(def audio-track? (t)
-  (and (not (= t nil)) (= t.instrument-type "audio")))
 
 (def audio-regions (i)
   (let ((t (track i)))
@@ -1406,17 +1404,21 @@
         (unless (or (= c nil) (= (get drag :start) c.start))
           (clip-edit i c (dict :type :clip-move :start (get drag :start))))))))
 
-;; Cmd+E on a track lane: split the clips under the cursor (the selected
-;; ones when the selection holds one there).
-(def track-split (i time)
+;; Cmd+E: split the items (clips or audio regions) under the cursor at
+;; `time` -- the selected ones when the selection holds one there, else
+;; whichever the cursor is inside. `split` sends one item's split.
+(def split-under (items time noun split)
   (unless (= time nil)
-    (let ((under (filter |c| (and (> time c.start) (< time c.end)) (track-clips i)))
+    (let ((under (filter |c| (and (> time c.start) (< time c.end)) items))
           (selected (filter |c| (listed? c.cid arr-select.clips) under))
           (targets (if (empty? selected) under selected)))
       (if (empty? targets)
-        (status "Place the cursor inside a clip to split it")
-        (each targets |c|
-          (host-command "arrangement-clip-split" (dict :clip-id c.cid :beat time)))))))
+        (status (str "Place the cursor inside a " noun " to split it"))
+        (each targets |c| (split c))))))
+
+(def track-split (i time)
+  (split-under (track-clips i) time "clip"
+    |c| (host-command "arrangement-clip-split" (dict :clip-id c.cid :beat time))))
 
 (def track-delete (i ids)
   (let ((member (selected-rack-member i)))
@@ -2002,17 +2004,9 @@
       (eseq.audio-clip/clear!)
       (eseq.audio-clip/bind! i (first ids)))))
 
-;; Cmd+E: split the regions under the cursor on lane i — the selected ones
-;; when the selection holds one there, else whichever the cursor is inside.
 (def audio-split (i time)
-  (unless (= time nil)
-    (let ((under (filter |r| (and (> time r.start) (< time r.end)) (audio-regions i)))
-          (selected (filter |r| (listed? r.cid arr-select.clips) under))
-          (targets (if (empty? selected) under selected)))
-      (if (empty? targets)
-        (status "Place the cursor inside a region to split it")
-        (each targets |r|
-          (host-command "audio-region-split" (dict :id r.cid :beat time)))))))
+  (split-under (audio-regions i) time "region"
+    |r| (host-command "audio-region-split" (dict :id r.cid :beat time))))
 
 (def audio-open-editor (i event)
   (when (audio-select i event)
@@ -2092,11 +2086,10 @@
         :kind :audio
         :label (eseq.audio-clip/region-label r)
         ;; An offline source draws an empty body: there is nothing to show.
+        ;; loop-start/-end are 0 (no loop) unless the region loops.
         :content (when r.loaded
-                   (if r.loop
-                     (dict :sample r.sample :offset r.offset :span r.span
-                       :loop-start r.loop-start :loop-end r.loop-end)
-                     (dict :sample r.sample :offset r.offset :span r.span)))
+                   (dict :sample r.sample :offset r.offset :span r.span
+                     :loop-start r.loop-start :loop-end r.loop-end))
         :color (if r.muted (override-dim color) color))
       (audio-regions i))))
 
@@ -2977,32 +2970,14 @@
   (begin-placement)
   true)
 
-(def arrangement-region-copy-key ()
-  (if (= song.region nil)
-    false
-    (do (seq-song-region-copy) true)))
-
-(def arrangement-region-paste-key ()
-  (seq-song-region-paste)
-  true)
-
-(def arrangement-region-duplicate-key ()
-  (if (= song.region nil)
-    false
-    (do (seq-song-region-duplicate) true)))
+(def arrangement-region-copy-key () (song-region-copy))
+(def arrangement-region-paste-key () (song-region-paste))
+(def arrangement-region-duplicate-key () (song-region-duplicate))
 
 ;; Edit > Copy/Paste/Duplicate reach a focused lane first; the lane widget
 ;; copies selected clips itself but refuses the keys for a swept time region
 ;; (no clip ids), which then arrive here through its :on-focus-key.
-(def lane-focus-key (key text)
-  (match key
-    "s-c" (arrangement-region-copy-key)
-    "C-c" (arrangement-region-copy-key)
-    "s-v" (arrangement-region-paste-key)
-    "C-v" (arrangement-region-paste-key)
-    "s-d" (arrangement-region-duplicate-key)
-    "C-d" (arrangement-region-duplicate-key)
-    _ false))
+(def lane-focus-key (key text) (song-region-key key))
 
 (define-mode "arrangement-mode" :read-only true :live-keys true
   :inherit "eseq.sequencer-keys/sequencer-keys")

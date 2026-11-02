@@ -50,6 +50,25 @@ pub struct AudioRegionView {
     pub loop_seconds: Option<(f64, f64)>,
 }
 
+/// Whether [`App::audio_region_place`] moves the region or places a copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    Move,
+    Copy,
+}
+
+/// The region fields [`App::audio_region_update`] sets; `None` leaves one
+/// as it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AudioRegionPatch {
+    pub gain_db: Option<f32>,
+    pub fade_in_seconds: Option<f32>,
+    pub fade_out_seconds: Option<f32>,
+    pub muted: Option<bool>,
+    /// Semitones.
+    pub transpose: Option<f32>,
+}
+
 /// Decoded sources and the last snapshot inputs each player was given.
 #[derive(Default)]
 pub struct AudioTrackRuntime {
@@ -58,6 +77,9 @@ pub struct AudioTrackRuntime {
     /// Per player slot: the regions and tempo its current snapshot was built
     /// from, so unchanged tracks are not republished.
     published: HashMap<usize, PublishedKey>,
+    /// What the last sync saw; an unchanged gate skips the per-track
+    /// comparison entirely (the sync runs every frame).
+    sync_gate: Option<SyncGate>,
     /// Overrides the user-data audio store (tests).
     store_dir: Option<PathBuf>,
 }
@@ -66,7 +88,17 @@ pub struct AudioTrackRuntime {
 struct PublishedKey {
     regions: Vec<AudioRegion>,
     bpm: u32,
+    host_rate: u32,
     loaded: usize,
+}
+
+#[derive(Clone, PartialEq)]
+struct SyncGate {
+    /// [`App::audio_view_key`]: song revision, tempo, decoded-source count.
+    view: (u64, u32, usize),
+    host_rate: u32,
+    /// `(track, player slot)` per audio track.
+    players: Vec<(usize, usize)>,
 }
 
 impl AudioTrackRuntime {
@@ -114,7 +146,7 @@ fn source_display_name(path: &Path) -> String {
 
 impl App {
     pub(crate) fn seconds_per_beat(&self) -> f64 {
-        60.0 / self.state.transport.bpm.load(std::sync::atomic::Ordering::Relaxed).max(1) as f64
+        60.0 / self.bpm() as f64
     }
 
     fn bpm(&self) -> u32 {
@@ -268,40 +300,30 @@ impl App {
             .ok_or_else(|| format!("Audio region {} does not exist", id.0))
     }
 
-    /// Move a region rigidly to `start_beat`, optionally onto another audio
-    /// track. It plays the same audio there and truncates what it lands on.
-    pub fn audio_region_move(
+    /// Move (or copy) a region rigidly to `start_beat`, optionally onto
+    /// another audio track. It plays the same audio there and truncates what
+    /// it lands on. Returns the placed region's id.
+    pub fn audio_region_place(
         &mut self,
         id: ClipId,
         start_beat: f64,
         to_track: Option<usize>,
-    ) -> Result<(), String> {
-        if let Some(track) = to_track {
-            self.require_audio_track(track)?;
-        }
-        let spb = self.seconds_per_beat();
-        self.edit_arrangement("Move audio", move |arrangement, _scenes| {
-            move_region_in(arrangement, id, start_beat, to_track, spb, false).map(|_| ())
-        })
-    }
-
-    /// Copy a region to `start_beat` (on `to_track`, else its own track).
-    pub fn audio_region_copy_to(
-        &mut self,
-        id: ClipId,
-        start_beat: f64,
-        to_track: Option<usize>,
+        mode: Place,
     ) -> Result<ClipId, String> {
         if let Some(track) = to_track {
             self.require_audio_track(track)?;
         }
         let spb = self.seconds_per_beat();
-        let mut new_id = None;
-        self.edit_arrangement("Copy audio", |arrangement, _scenes| {
-            new_id = Some(move_region_in(arrangement, id, start_beat, to_track, spb, true)?);
+        let label = match mode {
+            Place::Move => "Move audio",
+            Place::Copy => "Copy audio",
+        };
+        let mut placed = id;
+        self.edit_arrangement(label, |arrangement, _scenes| {
+            placed = place_region_in(arrangement, id, start_beat, to_track, spb, mode)?;
             Ok(())
         })?;
-        new_id.ok_or_else(|| "Copy produced no region".to_string())
+        Ok(placed)
     }
 
     /// Paste copies of `ids` so the earliest lands at `at_beat`, keeping
@@ -333,7 +355,7 @@ impl App {
             };
             for region in sources {
                 let start = at_beat + (region.start_beat - anchor);
-                pasted.push(move_region_in(arrangement, region.id, start, to_track, spb, true)?);
+                pasted.push(place_region_in(arrangement, region.id, start, to_track, spb, Place::Copy)?);
             }
             Ok(())
         })?;
@@ -345,7 +367,7 @@ impl App {
         let region = self
             .require_arrangement()
             .and_then(|arrangement| Self::locate_audio_region(&arrangement, id).map(|(_, r)| r))?;
-        self.audio_region_copy_to(id, region.end_beat, None)
+        self.audio_region_place(id, region.end_beat, None, Place::Copy)
     }
 
     /// Resize a region to `[start_beat, end_beat)`. The left edge trims into
@@ -366,10 +388,7 @@ impl App {
         let spb = self.seconds_per_beat();
         self.edit_arrangement("Resize audio", move |arrangement, _scenes| {
             let (track, region) = Self::locate_audio_region(arrangement, id)?;
-            let rate = arrangement
-                .audio_source(region.source)
-                .map(|meta| meta.sample_rate)
-                .ok_or_else(|| "Audio region's source is missing".to_string())?;
+            let rate = arrangement.region_source(&region)?.sample_rate;
             let shift_frames = (start_beat - region.start_beat) * spb * rate as f64;
             let offset = region.source_offset as f64 + shift_frames;
             if offset < 0.0 {
@@ -396,10 +415,7 @@ impl App {
             if !(beat > region.start_beat && beat < region.end_beat) {
                 return Err(format!("Beat {beat} is not inside the region"));
             }
-            let rate = arrangement
-                .audio_source(region.source)
-                .map(|meta| meta.sample_rate)
-                .ok_or_else(|| "Audio region's source is missing".to_string())?;
+            let rate = arrangement.region_source(&region)?.sample_rate;
             let mut tail = region.tail_at(beat, spb, rate);
             tail.id = arrangement.allocate_clip_id()?;
             tail_id = Some(tail.id);
@@ -429,18 +445,8 @@ impl App {
     /// end markers do (Ableton clip view): the region keeps its timeline
     /// start and plays `length_seconds` of its source from `offset_seconds`,
     /// so its end moves with the length. What it grows over is truncated.
+    /// With `live`, a field drag is one undo step.
     pub fn audio_region_set_window(
-        &mut self,
-        id: ClipId,
-        offset_seconds: f64,
-        length_seconds: f64,
-    ) -> Result<(), String> {
-        self.audio_region_set_window_keyed(id, offset_seconds, length_seconds, false)
-    }
-
-    /// [`Self::audio_region_set_window`]; with `live`, a field drag is one
-    /// undo step.
-    pub fn audio_region_set_window_keyed(
         &mut self,
         id: ClipId,
         offset_seconds: f64,
@@ -457,9 +463,7 @@ impl App {
             live.then(|| crate::app::history::MergeKey::new(format!("audio-window-{}", id.0)));
         self.edit_arrangement_keyed("Audio clip window", merge_key, move |arrangement, _scenes| {
             let (track, region) = Self::locate_audio_region(arrangement, id)?;
-            let meta = arrangement
-                .audio_source(region.source)
-                .ok_or_else(|| "Audio region's source is missing".to_string())?;
+            let meta = arrangement.region_source(&region)?;
             let offset = (offset_seconds * meta.sample_rate as f64).round() as u64;
             if offset >= meta.frames {
                 return Err("The clip start is past the end of its audio".to_string());
@@ -490,10 +494,8 @@ impl App {
     pub fn audio_region_set_loop(&mut self, id: ClipId, enabled: bool) -> Result<(), String> {
         let spb = self.seconds_per_beat();
         self.edit_arrangement("Audio clip loop", move |arrangement, _scenes| {
-            let (track, region) = Self::locate_audio_region(arrangement, id)?;
-            let meta = arrangement
-                .audio_source(region.source)
-                .ok_or_else(|| "Audio region's source is missing".to_string())?;
+            let (_, region) = Self::locate_audio_region(arrangement, id)?;
+            let meta = arrangement.region_source(&region)?;
             let mut looped = region;
             looped.loop_enabled = enabled;
             if enabled {
@@ -507,53 +509,18 @@ impl App {
                     return Err("The region plays no audio to loop".to_string());
                 }
             }
-            let lane = arrangement.audio_lane_mut(track);
-            *lane.iter_mut().find(|candidate| candidate.id == id).expect("located above") = looped;
+            *region_mut(arrangement, id)? = looped;
             Ok(())
         })
     }
 
-    /// Repitch a region by `semitones` (warp off: speed follows). With
-    /// `live`, a knob drag is one undo step.
-    pub fn audio_region_set_pitch(&mut self, id: ClipId, semitones: f32, live: bool) -> Result<(), String> {
-        if !semitones.is_finite() {
-            return Err(format!("Pitch {semitones} must be finite"));
-        }
-        let merge_key =
-            live.then(|| crate::app::history::MergeKey::new(format!("audio-pitch-{}", id.0)));
-        self.edit_arrangement_keyed("Audio clip pitch", merge_key, move |arrangement, _scenes| {
-            let (track, _) = Self::locate_audio_region(arrangement, id)?;
-            let lane = arrangement.audio_lane_mut(track);
-            let region = lane.iter_mut().find(|candidate| candidate.id == id).expect("located above");
-            region.transpose = semitones.clamp(-48.0, 48.0);
-            Ok(())
-        })
-    }
-
-    /// Set a region's clip gain (dB) and/or edge fades (seconds). With
-    /// `live`, consecutive calls for the same region coalesce into one undo
-    /// step (a slider drag).
-    pub fn audio_region_set_params(
-        &mut self,
-        id: ClipId,
-        gain_db: Option<f32>,
-        fade_in_seconds: Option<f32>,
-        fade_out_seconds: Option<f32>,
-        muted: Option<bool>,
-    ) -> Result<(), String> {
-        self.audio_region_set_params_keyed(id, gain_db, fade_in_seconds, fade_out_seconds, muted, false)
-    }
-
-    pub fn audio_region_set_params_keyed(
-        &mut self,
-        id: ClipId,
-        gain_db: Option<f32>,
-        fade_in_seconds: Option<f32>,
-        fade_out_seconds: Option<f32>,
-        muted: Option<bool>,
-        live: bool,
-    ) -> Result<(), String> {
-        for value in [gain_db, fade_in_seconds, fade_out_seconds].into_iter().flatten() {
+    /// Apply `patch` to a region: clip gain (dB), edge fades (seconds),
+    /// mute and pitch (semitones; warp off, so speed follows). With `live`,
+    /// consecutive calls for the same region coalesce into one undo step (a
+    /// slider or knob drag).
+    pub fn audio_region_update(&mut self, id: ClipId, patch: AudioRegionPatch, live: bool) -> Result<(), String> {
+        let AudioRegionPatch { gain_db, fade_in_seconds, fade_out_seconds, muted, transpose } = patch;
+        for value in [gain_db, fade_in_seconds, fade_out_seconds, transpose].into_iter().flatten() {
             if !value.is_finite() {
                 return Err(format!("Audio region parameter {value} must be finite"));
             }
@@ -561,11 +528,7 @@ impl App {
         let merge_key =
             live.then(|| crate::app::history::MergeKey::new(format!("audio-region-{}", id.0)));
         self.edit_arrangement_keyed("Audio region", merge_key, move |arrangement, _scenes| {
-            let (track, _) = Self::locate_audio_region(arrangement, id)?;
-            let region = arrangement.audio_lanes[track]
-                .iter_mut()
-                .find(|region| region.id == id)
-                .expect("located above");
+            let region = region_mut(arrangement, id)?;
             if let Some(gain) = gain_db {
                 region.gain_db = gain.clamp(-60.0, 24.0);
             }
@@ -578,13 +541,16 @@ impl App {
             if let Some(muted) = muted {
                 region.muted = muted;
             }
+            if let Some(semitones) = transpose {
+                region.transpose = semitones.clamp(-48.0, 48.0);
+            }
             Ok(())
         })
     }
 
     /// Publish each audio track's regions to its player when what it would
     /// play changed. Cheap when nothing did: one arrangement borrow and a
-    /// region-list comparison per audio track.
+    /// gate comparison (song revision, tempo, sources, players).
     pub fn sync_audio_track_playback(&mut self) {
         self.audio_players.reclaim();
         let bpm = self.bpm();
@@ -599,6 +565,16 @@ impl App {
         if players.is_empty() {
             return;
         }
+        let gate = SyncGate { view: self.audio_view_key(), host_rate: host_rate.to_bits(), players };
+        if self.audio_tracks.sync_gate.as_ref() == Some(&gate) {
+            return;
+        }
+        // Forget snapshots of players that are gone (track deleted, project
+        // reloaded).
+        self.audio_tracks
+            .published
+            .retain(|slot, _| gate.players.iter().any(|&(_, live)| live == *slot));
+        let players = gate.players.clone();
         let loaded = self.audio_tracks.pcm.len();
         let mut publish = Vec::new();
         self.state.with_committed_arrangement(|arrangement| {
@@ -606,7 +582,7 @@ impl App {
                 let regions = arrangement
                     .map(|arrangement| arrangement.audio_lane(track).to_vec())
                     .unwrap_or_default();
-                let key = PublishedKey { regions, bpm, loaded };
+                let key = PublishedKey { regions, bpm, host_rate: host_rate.to_bits(), loaded };
                 if self.audio_tracks.published.get(&slot) == Some(&key) {
                     continue;
                 }
@@ -629,6 +605,7 @@ impl App {
             self.audio_players.publish(slot, playback);
             self.audio_tracks.published.insert(slot, key);
         }
+        self.audio_tracks.sync_gate = Some(gate);
     }
 
     /// What the region views depend on beyond track topology: the committed
@@ -679,15 +656,6 @@ impl App {
         })
     }
 
-    /// Waveform registry key for a region's source, for the arrangement view.
-    pub fn audio_source_waveform_key(&self, meta: &AudioSourceMeta) -> String {
-        self.audio_tracks.waveform_key(meta)
-    }
-
-    pub fn audio_source_loaded(&self, meta: &AudioSourceMeta) -> bool {
-        self.audio_tracks.pcm.contains_key(&meta.file)
-    }
-
     /// Keep audio sources in `dir` instead of the user-data audio store
     /// (tests and tools that must not write into the user's data).
     pub fn set_audio_store_dir(&mut self, dir: PathBuf) {
@@ -699,7 +667,7 @@ impl App {
 /// absolute beats. A region the window cuts into keeps playing the same
 /// audio: its source offset advances to the cut. Region ids are kept (the
 /// caller assigns fresh ones when it stores copies).
-pub(crate) fn audio_regions_in(
+pub(super) fn audio_regions_in(
     arrangement: &ProjectArrangement,
     track: usize,
     start_beat: f64,
@@ -726,7 +694,7 @@ pub(crate) fn audio_regions_in(
 /// Slide `track`'s audio regions at or after `insert_beat` right by
 /// `len_beats`, splitting one that straddles it so the moving part keeps
 /// playing the audio it played there.
-pub(crate) fn ripple_audio_lane_right(
+pub(super) fn ripple_audio_lane_right(
     arrangement: &mut ProjectArrangement,
     track: usize,
     insert_beat: f64,
@@ -739,10 +707,7 @@ pub(crate) fn ripple_audio_lane_right(
         .find(|region| region.start_beat < insert_beat && region.end_beat > insert_beat)
         .copied();
     if let Some(region) = straddling {
-        let rate = arrangement
-            .audio_source(region.source)
-            .map(|meta| meta.sample_rate)
-            .ok_or_else(|| "Audio region's source is missing".to_string())?;
+        let rate = arrangement.region_source(&region)?.sample_rate;
         let mut tail = region.tail_at(insert_beat, seconds_per_beat, rate);
         tail.id = arrangement.allocate_clip_id()?;
         let lane = arrangement.audio_lane_mut(track);
@@ -760,16 +725,25 @@ pub(crate) fn ripple_audio_lane_right(
     Ok(())
 }
 
-/// Move (or, with `copy`, duplicate) region `id` to `start_beat` on
-/// `to_track` (else its own track). Returns the placed region's id.
-fn move_region_in(
+/// A region `id`, mutably, or an error naming it.
+fn region_mut(arrangement: &mut ProjectArrangement, id: ClipId) -> Result<&mut AudioRegion, String> {
+    arrangement
+        .find_audio_region_mut(id)
+        .map(|(_, region)| region)
+        .ok_or_else(|| format!("Audio region {} does not exist", id.0))
+}
+
+/// Move or copy region `id` to `start_beat` on `to_track` (else its own
+/// track). Returns the placed region's id.
+fn place_region_in(
     arrangement: &mut ProjectArrangement,
     id: ClipId,
     start_beat: f64,
     to_track: Option<usize>,
     seconds_per_beat: f64,
-    copy: bool,
+    mode: Place,
 ) -> Result<ClipId, String> {
+    let copy = mode == Place::Copy;
     if !start_beat.is_finite() || start_beat < 0.0 {
         return Err(format!("Region start must be finite and non-negative (got {start_beat})"));
     }

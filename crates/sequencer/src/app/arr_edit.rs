@@ -134,7 +134,7 @@ impl App {
 
     /// Run `edit` against a clone of the committed arrangement inside the
     /// project's live scene context, then install and commit it as one entry.
-    pub(crate) fn edit_arrangement(
+    pub(super) fn edit_arrangement(
         &mut self,
         label: &'static str,
         edit: impl FnOnce(&mut ProjectArrangement, &ProjectScenes) -> Result<(), String>,
@@ -169,7 +169,7 @@ impl App {
 
     /// `edit_arrangement` with an optional coalescing merge key: the
     /// one-shot and continuous variants of the `_impl` primitives.
-    pub(crate) fn edit_arrangement_keyed(
+    pub(super) fn edit_arrangement_keyed(
         &mut self,
         label: &'static str,
         merge_key: Option<crate::app::history::MergeKey>,
@@ -1431,10 +1431,7 @@ impl App {
         let mut empty = self.empty_arrangement();
         if let Some(before) = &before {
             empty.next_clip_id = before.next_clip_id;
-            // Sources are project assets, not content: keep them (and their
-            // allocator) so ids are never reused.
-            empty.audio_sources = before.audio_sources.clone();
-            empty.next_audio_source_id = before.next_audio_source_id;
+            empty.inherit_audio_sources(before);
         }
         if before.as_ref().is_none_or(|before| *before == empty) {
             return Ok(());
@@ -1472,8 +1469,7 @@ impl App {
         // carry over unchanged.
         if let Some(before) = &before {
             arrangement.audio_lanes = before.audio_lanes.clone();
-            arrangement.audio_sources = before.audio_sources.clone();
-            arrangement.next_audio_source_id = before.next_audio_source_id;
+            arrangement.inherit_audio_sources(before);
         }
         self.commit_arrangement_edit("Replace arrangement", before, Some(arrangement))
     }

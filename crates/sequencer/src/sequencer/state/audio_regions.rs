@@ -182,8 +182,29 @@ impl ProjectArrangement {
         })
     }
 
+    /// [`Self::find_audio_region`], mutably.
+    pub fn find_audio_region_mut(&mut self, id: ClipId) -> Option<(usize, &mut AudioRegion)> {
+        self.audio_lanes.iter_mut().enumerate().find_map(|(track, lane)| {
+            lane.iter_mut().find(|region| region.id == id).map(|region| (track, region))
+        })
+    }
+
     pub fn audio_source(&self, id: AudioSourceId) -> Option<&AudioSourceMeta> {
         self.audio_sources.get(&id.0)
+    }
+
+    /// Take `before`'s sources and source-id allocator. Sources are project
+    /// assets, not content: an edit that rebuilds the arrangement keeps them
+    /// so source ids are never reused.
+    pub fn inherit_audio_sources(&mut self, before: &ProjectArrangement) {
+        self.audio_sources = before.audio_sources.clone();
+        self.next_audio_source_id = before.next_audio_source_id;
+    }
+
+    /// The source meta `region` plays, or an error when it is missing.
+    pub fn region_source(&self, region: &AudioRegion) -> Result<&AudioSourceMeta, String> {
+        self.audio_source(region.source)
+            .ok_or_else(|| "Audio region's source is missing".to_string())
     }
 
     /// Register `meta` as a new source, or return the existing source that

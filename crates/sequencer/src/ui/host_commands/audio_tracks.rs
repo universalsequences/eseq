@@ -5,7 +5,11 @@
 
 use crate::*;
 
+use sequencer::app::audio_tracks::{AudioRegionPatch, Place};
 use sequencer::sequencer::ClipId;
+
+use super::song::{payload_map, require_number};
+use crate::history_commands::map_bool;
 
 pub(super) const COMMANDS: &[&str] = &[
     "audio-regions-drop",
@@ -20,17 +24,6 @@ pub(super) const COMMANDS: &[&str] = &[
 ];
 
 type PayloadMap = HashMap<String, Rc<RefCell<Value>>>;
-
-fn payload_map(payload: &Value) -> Result<&PayloadMap, String> {
-    match payload {
-        Value::Map(map) => Ok(map),
-        _ => Err("invalid payload: expected a map".to_string()),
-    }
-}
-
-fn require_number(map: &PayloadMap, key: &str) -> Result<f64, String> {
-    map_number(map, key).ok_or_else(|| format!("missing or non-numeric :{key}"))
-}
 
 fn require_whole(map: &PayloadMap, key: &str) -> Result<u64, String> {
     let value = require_number(map, key)?;
@@ -85,6 +78,14 @@ fn optional_f32(map: &PayloadMap, key: &str) -> Option<f32> {
     map_number(map, key).map(|value| value as f32)
 }
 
+/// `:key` as a bool when present (`false` and absent differ).
+fn optional_bool(map: &PayloadMap, key: &str) -> Option<bool> {
+    match map.get(key).map(|cell| cell.borrow().clone()) {
+        Some(Value::Bool(value)) => Some(value),
+        _ => None,
+    }
+}
+
 fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String> {
     let map = payload_map(payload)?;
     match name {
@@ -103,11 +104,11 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let id = region_id(map)?;
             let start = require_number(map, "start")?;
             let track = optional_track(map)?;
-            if matches!(map.get("copy").map(|cell| cell.borrow().clone()), Some(Value::Bool(true))) {
-                app.audio_region_copy_to(id, start, track)?;
+            if map_bool(map, "copy") {
+                app.audio_region_place(id, start, track, Place::Copy)?;
                 Ok("Copied audio region".to_string())
             } else {
-                app.audio_region_move(id, start, track)?;
+                app.audio_region_place(id, start, track, Place::Move)?;
                 Ok("Moved audio region".to_string())
             }
         }
@@ -135,25 +136,19 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
         }
         "audio-region-set" => {
             let id = region_id(map)?;
-            let live = matches!(map.get("live").map(|cell| cell.borrow().clone()), Some(Value::Bool(true)));
-            if let Some(Value::Bool(enabled)) = map.get("loop").map(|cell| cell.borrow().clone()) {
+            if let Some(enabled) = optional_bool(map, "loop") {
                 app.audio_region_set_loop(id, enabled)?;
             }
-            if let Some(pitch) = optional_f32(map, "pitch") {
-                app.audio_region_set_pitch(id, pitch, live)?;
-            }
-            let muted = match map.get("muted").map(|cell| cell.borrow().clone()) {
-                Some(Value::Bool(muted)) => Some(muted),
-                _ => None,
+            let patch = AudioRegionPatch {
+                gain_db: optional_f32(map, "gain"),
+                fade_in_seconds: optional_f32(map, "fade-in"),
+                fade_out_seconds: optional_f32(map, "fade-out"),
+                muted: optional_bool(map, "muted"),
+                transpose: optional_f32(map, "pitch"),
             };
-            app.audio_region_set_params_keyed(
-                id,
-                optional_f32(map, "gain"),
-                optional_f32(map, "fade-in"),
-                optional_f32(map, "fade-out"),
-                muted,
-                live,
-            )?;
+            if patch != AudioRegionPatch::default() {
+                app.audio_region_update(id, patch, map_bool(map, "live"))?;
+            }
             Ok("Audio region updated".to_string())
         }
         "audio-regions-paste" => {
@@ -163,12 +158,11 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
         }
         "audio-region-set-window" => {
             let id = region_id(map)?;
-            let live = matches!(map.get("live").map(|cell| cell.borrow().clone()), Some(Value::Bool(true)));
-            app.audio_region_set_window_keyed(
+            app.audio_region_set_window(
                 id,
                 require_number(map, "offset")?,
                 require_number(map, "length")?,
-                live,
+                map_bool(map, "live"),
             )?;
             Ok("Audio clip window set".to_string())
         }
