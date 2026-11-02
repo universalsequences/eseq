@@ -8,6 +8,7 @@ usage: build_instrument.py RUN OUT_DIR [--name "Latent Snare (Samples)"] [--blen
 Latent range and index range are sized from the data (codes beyond +-3 must stay reachable)."""
 import argparse, hashlib, json, os, re, shutil
 import numpy as np
+import panel_dims
 HERE = os.path.dirname(os.path.abspath(__file__)); R = HERE
 ESEQ = os.path.abspath(os.path.join(HERE, "../../../.."))
 OLD = os.path.join(ESEQ, "content/instruments/Drums/Latent Snare")
@@ -110,10 +111,11 @@ if __name__ == "__main__":
     new_tone = "".join(f'        (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 2 "{p}" "{p}" 5.6 (ls-accent) 2)\n'
                        for p in ("tune", "decay", "snappy", "level")).rstrip("\n") + "))))\n\n"
     ui = ui.replace(old_tone, new_tone)
+    ui = panel_dims.offsets(ui, Z.shape[1])
     ui = (f";; {a.name} A/B panel: layout from the Latent Snare panel; codes, labels and map data from\n"
           ";; tools/modal/train/build/build_instrument.py. The map is the latent space: two latent dims as the axes, the 32 MF DOOM\n"
           ";; snares at their learned codes, the ring at the z the decoder decodes on the next hit (Blend walks\n"
-          ";; the straight line from Snare A to Snare B, plus the z1..z4 offsets). The other knobs (bend, attack,\n"
+          ";; the straight line from Snare A to Snare B, plus the z offsets). The other knobs (bend, attack,\n"
           ";; punch, wire_decay, shape, drive, record, noise, length, vel_amt) stay params at their defaults:\n"
           ";; reachable from mods and automation, off the panel.\n") + ui
     open(os.path.join(inst, "ui.lisp"), "w").write(ui)
