@@ -2700,6 +2700,10 @@
       (eseq.resample/panel))
     (subtree :key "arr-factory-promote"
       (eseq.factory-promote/panel))
+    (subtree :key "arr-sample-region"
+      (eseq.sample-region/panel))
+    (subtree :key "arr-sample-new-pack"
+      (eseq.sample-region/new-pack-panel))
     ;; The scene row: the placement toolbar (with its hint), the starting
     ;; scene and the scene lane each re-render on their own (a selection, a
     ;; scene change, a scene-lane edit).
@@ -2769,7 +2773,3 @@
 (mode-bind-key "arrangement-mode" "s-d" "arrangement-region-duplicate-key")
 (mode-bind-key "arrangement-mode" "C-d" "arrangement-region-duplicate-key")
 (set-buffer-mode-for "*arrangement*" "arrangement-mode")
-    (subtree :key "arr-sample-region"
-      (eseq.sample-region/panel))
-    (subtree :key "arr-sample-new-pack"
-      (eseq.sample-region/new-pack-panel))

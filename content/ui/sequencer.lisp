@@ -4258,11 +4258,11 @@
     (subtree :key "seq-resample"
       (eseq.resample/panel))
     (subtree :key "seq-factory-promote"
+      (eseq.factory-promote/panel))
     (subtree :key "seq-sample-region"
       (eseq.sample-region/panel))
     (subtree :key "seq-sample-new-pack"
       (eseq.sample-region/new-pack-panel))
-      (eseq.factory-promote/panel))
     (subtree :key "seq-rack-clip-menu"
       (rack-clip-context-menu))
     (subtree :key "seq-rack-clip-rename"
