@@ -105,3 +105,18 @@
     :ship (t/ship "Latent Break Snare v3 L6" :folder "Research")))
 
 (t/emit-experiment v3l6 ".local/train/break-snare-v3-l6")
+
+;; v5: v4's voice and rows, refit with the band loss's bands above 4 kHz weighted x3 (B28's ride hit is
+;; +3 dB above 4 kHz at ~210 ms; at weight 1 the fit ignores it). Needs a DGenLisp with --hf-weight.
+(def v5
+  (t/experiment "break-snare-v5" :voice break-snare-v4
+    :notes "v4 refit with the >4 kHz bands weighted x3 in the band loss"
+    :data (t/data :packs '("set") :tags '(("snare" "mf doom")) :keep-crops ".local/train/break-snare-v3/data")
+    :seed (t/seed :parent ".local/train/break-snare-v4")
+    :train (t/recipe (t/refine :steps 300 :lr 0.01 :freeze :roles :refit :all :hf-weight 3)
+                     (t/pick :band 0.3 :mr 1)
+                     (t/pretrain :steps 3000)
+                     (t/path 0.02 :steps 4000))
+    :ship (t/ship "Latent Break Snare v5" :folder "Research")))
+
+(t/emit-experiment v5 ".local/train/break-snare-v5")

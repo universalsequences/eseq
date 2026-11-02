@@ -1111,8 +1111,10 @@
   (dict :parent parent :parent-voice parent-voice :rows rows :analyze analyze :level level))
 
 ;; Training stages, in order.
-(def refine (&key (steps 400) (lr 0.02) (freeze :roles) (wave 0) (refit :all))
-  (dict :stage "refine" :steps steps :lr lr :freeze freeze :wave wave :refit refit))
+;; :hf-weight weights the band loss's bands above 4 kHz (a dgen build with --hf-weight): short high
+;; strokes (a ride hit after the snare) are a few dB in a few bands and get ignored at 1.
+(def refine (&key (steps 400) (lr 0.02) (freeze :roles) (wave 0) (refit :all) (hf-weight 1))
+  (dict :stage "refine" :steps steps :lr lr :freeze freeze :wave wave :refit refit :hf-weight hf-weight))
 (def pick (&key (band 0.3) (mr 1)) (dict :stage "pick" :band band :mr mr))
 (def pretrain (&key (steps 3000) (lr 0.003)) (dict :stage "pretrain" :steps steps :lr lr))
 (def path (lam &key (steps 4000) (lr 0.002) (seed 1)) (dict :stage "path" :lambda lam :steps steps :lr lr :seed seed))

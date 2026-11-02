@@ -106,7 +106,7 @@ def rows_doc(exp, rows):
     return {"layout": exp.layout["layout"], "rows": rows}
 
 
-def refine(exp, name, rows, names, steps, lr, freeze=(), wave=0.0):
+def refine(exp, name, rows, names, steps, lr, freeze=(), wave=0.0, hf=1.0):
     """Refine `names` from `rows`; returns the fitted rows. Splits the batch on GPU index overflow."""
     out = exp.p("runs", name)
     if os.path.exists(os.path.join(out, "export/rows.json")):
@@ -122,13 +122,15 @@ def refine(exp, name, rows, names, steps, lr, freeze=(), wave=0.0):
         cmd += ["--freeze", ",".join(freeze)]
     if wave:
         cmd += ["--wave-weight", str(wave)]
+    if hf != 1:
+        cmd += ["--hf-weight", str(hf)]
     r = sh(cmd, check=False)
     if r.returncode != 0 and "32-bit index range" in (r.stdout + r.stderr) and len(names) > 1:
         log(f"  {name}: {len(names)} rows overflow one GPU batch; splitting")
         shutil.rmtree(out, ignore_errors=True)
         half = sorted(names)
-        a = refine(exp, name + "_a", rows, half[0::2], steps, lr, freeze, wave)
-        b = refine(exp, name + "_b", rows, half[1::2], steps, lr, freeze, wave)
+        a = refine(exp, name + "_a", rows, half[0::2], steps, lr, freeze, wave, hf)
+        b = refine(exp, name + "_b", rows, half[1::2], steps, lr, freeze, wave, hf)
         merged = dict(a, **b)
         os.makedirs(os.path.join(out, "export"), exist_ok=True)
         save(rows_doc(exp, merged), os.path.join(out, "export/rows.json"))
@@ -332,8 +334,9 @@ def stage_train(exp, rows):
             if freeze == "roles":
                 freeze = [s["name"] for s in exp.layout["segments"] if s["role"] in ("freq", "time")]
             log(f"{nm}: {len(fit)} samples, {st['steps']} steps, lr {st['lr']}"
-                + (f", wave {st['wave']}" if st.get("wave") else "") + (f", frozen {','.join(freeze)}" if freeze else ""))
-            new = refine(exp, nm, cur, fit, st["steps"], st["lr"], freeze or (), st.get("wave", 0))
+                + (f", wave {st['wave']}" if st.get("wave") else "")
+                + (f", hf-weight {st['hf-weight']}" if st.get("hf-weight", 1) != 1 else "") + (f", frozen {','.join(freeze)}" if freeze else ""))
+            new = refine(exp, nm, cur, fit, st["steps"], st["lr"], freeze or (), st.get("wave", 0), st.get("hf-weight", 1))
             cur = dict(cur, **new)
             save(rows_doc(exp, cur), exp.p("rows", nm + ".json"))
             job = score(exp, nm + "_all", cur)
