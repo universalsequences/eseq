@@ -433,8 +433,9 @@ def report(exp, f, fit, lat):
     sup = exp.p("runs/superset/superset.json")
     if os.path.exists(sup):
         s = load(sup)
+        sw = load(exp.p("rows/seed-info.json")).get("swapped") or []
         L += ["", f"superset check (parent samples, new parts silent): max |diff|/peak {s['max_rel']:.1e} "
-                  + ("OK" if s["ok"] else "DIFFERS")]
+                  + ("OK" if s["ok"] else (f"differs, as expected (swapped: {', '.join(sw)})" if sw else "DIFFERS"))]
     open(exp.p("report.md"), "w").write("\n".join(L) + "\n")
     print("\n".join(L))
 
