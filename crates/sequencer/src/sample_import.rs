@@ -245,6 +245,20 @@ pub fn import_pcm_sample(
     sample_dir: &Path,
     db: &mut SampleDb,
 ) -> Result<ImportedPcm, String> {
+    store_pcm(samples, sample_rate, channels, sample_dir, |hash| {
+        db.insert_sample_with_tags(hash, Some(title), &normalize_tags(tags))
+    })
+}
+
+/// Write interleaved PCM into the store under its content hash and add its
+/// library row with `insert` (false when the audio was already there).
+fn store_pcm(
+    samples: Vec<f32>,
+    sample_rate: u32,
+    channels: u16,
+    sample_dir: &Path,
+    insert: impl FnOnce(&str) -> rusqlite::Result<bool>,
+) -> Result<ImportedPcm, String> {
     if samples.is_empty() || channels == 0 || sample_rate == 0 {
         return Err("The clip is empty".into());
     }
@@ -267,10 +281,52 @@ pub fn import_pcm_sample(
         let _ = fs::remove_file(&tmp);
         format!("failed to store {}: {error}", path.display())
     })?;
-    let inserted = db
-        .insert_sample_with_tags(&hash, Some(title), &normalize_tags(tags))
-        .map_err(|error| format!("failed to insert sample row: {error}"))?;
+    let inserted = insert(&hash).map_err(|error| format!("failed to insert sample row: {error}"))?;
     Ok(ImportedPcm { path, hash, inserted })
+}
+
+/// Cut `[start_seconds, end_seconds)` out of the sample at `parent` and store
+/// it as a library sample that remembers where it came from (a region).
+pub fn import_region_sample(
+    parent: &Path,
+    start_seconds: f64,
+    end_seconds: f64,
+    title: &str,
+    tags: &[String],
+    sample_dir: &Path,
+    db: &mut SampleDb,
+) -> Result<ImportedPcm, String> {
+    if !start_seconds.is_finite() || !end_seconds.is_finite() {
+        return Err("Choose a region inside the sample".into());
+    }
+    let decoded = decode_audio_file(parent)?;
+    let channels = usize::from(decoded.channels.max(1));
+    let frames = (decoded.samples.len() / channels) as u64;
+    let rate = f64::from(decoded.sample_rate.max(1));
+    let frame_at = |seconds: f64| ((seconds.max(0.0) * rate).round() as u64).min(frames);
+    let (from, to) = (frame_at(start_seconds.min(end_seconds)), frame_at(start_seconds.max(end_seconds)));
+    if to <= from {
+        return Err("Choose a non-empty region inside the sample".into());
+    }
+    let parent_text = parent.to_string_lossy();
+    let parent_hash = crate::analysis::sample_path_hash(&parent_text)
+        .ok_or("The sample has no path to remember")?;
+    let parent_title = db
+        .title_for_hash(&parent_hash)
+        .ok()
+        .flatten()
+        .or_else(|| Some(default_title_for_path(parent)));
+    let region = crate::sample_db::RegionOrigin {
+        parent_hash,
+        parent_title,
+        start_frame: from,
+        end_frame: to,
+        sample_rate: decoded.sample_rate,
+    };
+    let samples = decoded.samples[from as usize * channels..to as usize * channels].to_vec();
+    store_pcm(samples, decoded.sample_rate, decoded.channels, sample_dir, |hash| {
+        db.insert_region_sample(hash, Some(title), &normalize_tags(tags), &region)
+    })
 }
 
 pub fn transcode_to_store(source: &Path, hash: &str, sample_dir: &Path) -> Result<PathBuf, String> {
@@ -517,6 +573,48 @@ mod tests {
         writer.write_sample(0i16).unwrap();
         writer.write_sample(1200i16).unwrap();
         writer.finalize().unwrap();
+    }
+
+    #[test]
+    fn import_region_sample_cuts_the_range_and_remembers_its_parent() {
+        let dir = unique_temp_dir("region");
+        let store = dir.join("samples");
+        let samples: Vec<f32> = (0..1000).map(|i| i as f32 / 1000.0).collect();
+        let parent_hash = "a".repeat(64);
+        let parent = store.join(format!("{parent_hash}.wav"));
+        fs::create_dir_all(&store).unwrap();
+        write_wav(&parent, &DecodedAudio { sample_rate: 1000, channels: 1, samples }).unwrap();
+        let mut db = SampleDb::open_in_memory().unwrap();
+        db.insert_sample_with_tags(&parent_hash, Some("Think Break"), &[]).unwrap();
+
+        let stored = import_region_sample(
+            &parent, 0.25, 0.5, "snare+hats", &["snare".to_string()], &store, &mut db,
+        )
+        .unwrap();
+
+        assert!(stored.inserted);
+        let cut = decode_audio_file(&stored.path).unwrap();
+        assert_eq!(cut.samples.len(), 250);
+        assert!((cut.samples[0] - 0.25).abs() < 1e-3, "starts at frame 250");
+        let info = db.region_for(&stored.hash).unwrap().expect("region recorded");
+        assert_eq!(info.origin.parent_hash, parent_hash);
+        assert_eq!((info.origin.start_frame, info.origin.end_frame), (250, 500));
+        assert_eq!(info.parent_title.as_deref(), Some("Think Break"));
+        assert!(info.parent_in_library);
+        assert_eq!(db.regions_of(&parent_hash).unwrap().len(), 1);
+        assert_eq!(db.tags_for(&stored.hash).unwrap(), vec!["snare"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn import_region_sample_rejects_an_empty_range() {
+        let dir = unique_temp_dir("region-empty");
+        let parent = dir.join("break.wav");
+        write_wav(&parent, &DecodedAudio { sample_rate: 1000, channels: 1, samples: vec![0.1; 100] })
+            .unwrap();
+        let mut db = SampleDb::open_in_memory().unwrap();
+        assert!(import_region_sample(&parent, 0.5, 0.5, "x", &[], &dir, &mut db).is_err());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

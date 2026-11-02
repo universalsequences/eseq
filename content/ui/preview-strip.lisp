@@ -69,8 +69,9 @@
 
 ;; p's strip: headphone toggle + waveform with the shared preview playhead.
 ;; `prefix` starts its keys, `bg` fills it, `empty` stands in while p has no
-;; waveform, and `on-toggle` runs on a headphone click.
-(def preview-strip (p prefix bg empty on-toggle)
+;; waveform, and `on-toggle` runs on a headphone click. `span` (start end),
+;; in seconds, marks part of the sample instead of the whole of it.
+(def preview-strip (p prefix bg empty on-toggle &key (span nil))
   (if p.buffer
     (box :key (str prefix "preview-strip") :width :fill :height 1.5
       :background-color bg :corner-radius 8 :padding 0.03
@@ -90,8 +91,8 @@
               :inactive-waveform-color '(rgba 0.25 0.25 0.25 1)
               :view-start 0
               :view-duration (get p.buffer :duration)
-              :selection-start 0
-              :selection-end (get p.buffer :duration)
+              :selection-start (if span (first span) 0)
+              :selection-end (if span (nth span 1) (get p.buffer :duration))
               :playhead-time #'browser.preview-position
               :buffer p.buffer)))))
     empty))

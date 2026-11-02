@@ -31,6 +31,7 @@
 (import eseq.retrospective)
 (import eseq.resample)
 (import eseq.factory-promote)
+(import eseq.sample-region)
 (import eseq.export-song)
 (import eseq.file-dialogs)
 (import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of rgb-part))
@@ -2768,3 +2769,7 @@
 (mode-bind-key "arrangement-mode" "s-d" "arrangement-region-duplicate-key")
 (mode-bind-key "arrangement-mode" "C-d" "arrangement-region-duplicate-key")
 (set-buffer-mode-for "*arrangement*" "arrangement-mode")
+    (subtree :key "arr-sample-region"
+      (eseq.sample-region/panel))
+    (subtree :key "arr-sample-new-pack"
+      (eseq.sample-region/new-pack-panel))

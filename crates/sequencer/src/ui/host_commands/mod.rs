@@ -43,6 +43,7 @@ pub(crate) mod rack_grooves;
 pub(crate) mod factory_promote;
 pub(crate) mod resample;
 mod routing;
+pub(crate) mod sample_region;
 mod sample_import;
 mod samples;
 mod sampler_slices;

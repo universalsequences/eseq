@@ -41,6 +41,7 @@
 (import eseq.sample-import)
 (import eseq.retrospective)
 (import eseq.resample)
+(import eseq.sample-region)
 (import eseq.factory-promote)
 (import eseq.export-song)
 (import eseq.file-dialogs)
@@ -4257,6 +4258,10 @@
     (subtree :key "seq-resample"
       (eseq.resample/panel))
     (subtree :key "seq-factory-promote"
+    (subtree :key "seq-sample-region"
+      (eseq.sample-region/panel))
+    (subtree :key "seq-sample-new-pack"
+      (eseq.sample-region/new-pack-panel))
       (eseq.factory-promote/panel))
     (subtree :key "seq-rack-clip-menu"
       (rack-clip-context-menu))

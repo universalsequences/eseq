@@ -26,6 +26,8 @@ mod instrument_header_ui_tests;
 mod retrospective_ui_tests;
 #[path = "resample_ui_tests.rs"]
 mod resample_ui_tests;
+#[path = "sample_region_ui_tests.rs"]
+mod sample_region_ui_tests;
 #[path = "factory_promote_ui_tests.rs"]
 mod factory_promote_ui_tests;
 #[path = "draft_save_ui_tests.rs"]
@@ -2104,6 +2106,9 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .register_native("seq-sample-waveform", |_args, _ctx| Ok(Value::Bool(false)));
+        editor
+            .runtime_mut()
+            .register_native("seq-sample-region", |_args, _ctx| Ok(Value::Nil));
         editor
             .runtime_mut()
             .register_native("seq-project-tree", |_args, _ctx| Ok(test_list(vec![])));
@@ -4900,6 +4905,89 @@ use panel_kinds_seed::*;
             browser_view_field(&mut editor, "sample-pick", "sample"),
             Value::String("samples/kick.wav".to_string())
         );
+    }
+
+    #[test]
+    fn metal_seq_browser_region_preview_names_its_parent_and_jumps_to_it() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor.runtime_mut().register_native("seq-sample-region", |args, _ctx| {
+            Ok(match args.first() {
+                Some(Value::String(path)) if path == "samples/cut.wav" => map_value([
+                    ("parent", Value::String("Think Break".into())),
+                    ("parent-path", Value::String("samples/think.wav".into())),
+                    ("parent-hash", Value::String("think".into())),
+                    ("span", Value::String("250–500 ms".into())),
+                    ("start", Value::Number(0.25)),
+                    ("end", Value::Number(0.5)),
+                ]),
+                _ => Value::Nil,
+            })
+        });
+        let eval = |editor: &mut Editor, src: &str| {
+            editor.runtime_mut().eval_str(src).unwrap().unwrap_or(Value::Nil)
+        };
+        eval(&mut editor, r#"(eseq.browser/select-sample (dict :label "cut" :path "samples/cut.wav"))"#);
+        assert_eq!(
+            eval(&mut editor, "(let ((p eseq.browser/sample-preview)) (get p.region :parent))"),
+            Value::String("Think Break".into())
+        );
+
+        // The "from" line goes to the parent: the list narrows to it alone
+        // (whatever filters were on), and it is previewed with the region marked.
+        eval(&mut editor, "(let ((p eseq.browser/sample-pick)) (set! p.origins (list \"region\")))");
+        eval(&mut editor, "(eseq.browser/show-region-parent)");
+        assert_eq!(
+            eval(&mut editor, "(let ((p eseq.browser/sample-pick)) (str p.origins))"),
+            eval(&mut editor, "(str (list \"sample/think\"))")
+        );
+        assert_eq!(
+            eval(&mut editor, "(let ((p eseq.browser/sample-pick)) p.sample)"),
+            Value::String("samples/think.wav".into())
+        );
+        assert_eq!(
+            eval(&mut editor, "(let ((p eseq.browser/sample-preview)) p.path)"),
+            Value::String("samples/think.wav".into())
+        );
+        assert_eq!(
+            eval(&mut editor, "(let ((p eseq.browser/sample-preview)) (nth p.span 1))"),
+            Value::Number(0.5)
+        );
+        assert_eq!(eval(&mut editor, "(let ((p eseq.browser/sample-preview)) p.region)"), Value::Nil);
+
+        // Landing on another sample drops the mark.
+        eval(&mut editor, r#"(eseq.browser/select-sample (dict :label "kick" :path "samples/kick.wav"))"#);
+        assert_eq!(eval(&mut editor, "(let ((p eseq.browser/sample-preview)) p.span)"), Value::Nil);
+    }
+
+    #[test]
+    fn metal_seq_browser_sample_menu_adds_to_packs_it_lists() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor.runtime_mut().register_native("seq-sample-packs", |_args, _ctx| {
+            Ok(list_value([
+                map_value([("name", Value::String("training set 1".into())), ("member", Value::Bool(false))]),
+                map_value([("name", Value::String("kit".into())), ("member", Value::Bool(true))]),
+            ]))
+        });
+        let eval = |editor: &mut Editor, src: &str| {
+            editor.runtime_mut().eval_str(src).unwrap().unwrap_or(Value::Nil)
+        };
+        eval(&mut editor, r#"(eseq.browser/open-sample-menu
+            (dict :item (dict :label "cut" :path "samples/cut.wav") :at nil))"#);
+        assert_eq!(eval(&mut editor, "(let ((m eseq.browser/sample-menu)) m.open)"), Value::Bool(true));
+        assert_eq!(
+            eval(&mut editor, "(let ((m eseq.browser/sample-menu)) (len m.packs))"),
+            Value::Number(2.0)
+        );
+        editor.drain_host_commands();
+        eval(&mut editor, r#"(eseq.browser/sample-pack-command "sample-pack-add" "training set 1")"#);
+        let payload = editor.drain_host_commands().into_iter().find_map(|command| match command {
+            HostCommand::Custom { name, payload } if name == "sample-pack-add" => Some(payload),
+            _ => None,
+        }).expect("add command");
+        let Value::Map(map) = payload else { panic!("payload") };
+        assert_eq!(map.get("pack").unwrap().borrow().clone(), Value::String("training set 1".into()));
+        assert_eq!(map.get("path").unwrap().borrow().clone(), Value::String("samples/cut.wav".into()));
+        assert_eq!(eval(&mut editor, "(let ((m eseq.browser/sample-menu)) m.open)"), Value::Bool(false));
     }
 
     #[test]
@@ -12712,6 +12800,9 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .register_native("seq-sample-waveform", |_args, _ctx| Ok(Value::Bool(false)));
+        editor
+            .runtime_mut()
+            .register_native("seq-sample-region", |_args, _ctx| Ok(Value::Nil));
         editor
             .runtime_mut()
             .register_native("seq-project-tree", |_args, _ctx| Ok(test_list(vec![])));

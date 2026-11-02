@@ -50,6 +50,7 @@ pub(crate) fn dispatch_custom_host_command(
         n if super::samples::COMMANDS.contains(&n) => super::samples::handle(name, payload, app, editor, ctx),
         n if super::resample::COMMANDS.contains(&n) => super::resample::handle(name, payload, app, editor, ctx),
         n if super::factory_promote::COMMANDS.contains(&n) => super::factory_promote::handle(name, payload, app, editor, ctx),
+        n if super::sample_region::COMMANDS.contains(&n) => super::sample_region::handle(name, payload, app, editor, ctx),
         n if super::sample_import::COMMANDS.contains(&n) => super::sample_import::handle(name, payload, app, editor, ctx),
         n if super::sampler_slices::COMMANDS.contains(&n) => super::sampler_slices::handle(name, payload, app, editor, ctx),
         n if super::scripts::COMMANDS.contains(&n) => super::scripts::handle(name, payload, app, editor, ctx),
