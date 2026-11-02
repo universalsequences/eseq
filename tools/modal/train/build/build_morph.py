@@ -11,7 +11,8 @@ OLD = os.path.join(ESEQ, "content/instruments/Drums/Latent Snare Morph")
 def fmt(xs): return " ".join(f"{float(x):.5f}" for x in xs)
 ap = argparse.ArgumentParser(); ap.add_argument("static"); ap.add_argument("out")
 ap.add_argument("--name", default="Latent Snare (Samples) Morph"); ap.add_argument("--category", default="Research")
-ap.add_argument("--presets"); ap.add_argument("--voice", default=os.path.join(R, "voice/snare1_morph.lisp")); a = ap.parse_args()
+ap.add_argument("--presets"); ap.add_argument("--voice", default=os.path.join(R, "voice/snare1_morph.lisp"))
+ap.add_argument("--member", default="snare"); ap.add_argument("--tone", default="tune,decay,snappy,level"); a = ap.parse_args()
 inst = os.path.join(a.out, a.name); os.makedirs(os.path.join(inst, "data"), exist_ok=True)
 cs = json.load(open(os.path.join(a.static, "codes_std.json"))); names = cs["names"]; Z = np.array(cs["codes"]); N = len(names)
 # latent range: covers every learned code with a margin (at least 3); the template voice and panel assume [-3, 3]
@@ -29,8 +30,8 @@ for f in ("w1.json", "b1.json", "w2.json", "b2.json", "w3.json", "b3.json", "cod
 shutil.copy(os.path.join(a.static, "data/family.json"), os.path.join(inst, "data/family.json"))
 ui = open(os.path.join(OLD, "ui.lisp")).read()
 ui = ui[ui.index("(import eseq.kinds"):]  # the map binds transport.recording / playing
-ui = (f";; {a.name} panel: the Latent Snare Morph layout (one map of the latent space with the 32 MF DOOM\n"
-      ";; snares at their learned codes; START ring z1..z4 = where the hit strikes, END ring b1..b4 = where it\n"
+ui = (f";; {a.name} panel: the Latent Snare Morph layout (one map of the latent space with the\n"
+      f";; {a.member}s at their learned codes; START ring z1..z4 = where the hit strikes, END ring b1..b4 = where it\n"
       ";; rings out to; MORPH; TONE) over this model's latent space; codes, labels and map from\n"
       ";; tools/modal/train/build/build_morph.py.\n") + ui
 ui = ui.replace(";; Written by e6/build_panel.py; do not edit by hand.", ";; Written by build/build_morph.py; do not edit by hand.")
@@ -42,8 +43,9 @@ for old, new in (("(def lm-z (name) (min 3 (max -3 (lm-effective name 0))))", f"
 ui, k = re.subn(r"\(def ls-codes \(\)\n  '\(\n.*?\)\)\)\n", "(def ls-codes ()\n  '(\n" + block + "))\n", ui, flags=re.S); assert k == 1
 ui, k = re.subn(r"\(def ls-slot-labels \(\) '\(.*?\)\)\)\n", "(def ls-slot-labels () '(" + " ".join(f'({i} "{n}")' for i, n in enumerate(names)) + "))\n", ui, flags=re.S); assert k == 1
 old_tone = ui[ui.index('        (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 5 "tune"'):ui.index("\n", ui.index('(eseq.effects.custom-ui-lego/ui-lego-knob-full-s 5 "level"')) + 1]
-new_tone = "".join(f'        (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 5 "{p}" "{p}" 5.6 (lm-accent) 2)\n'
-                   for p in ("tune", "decay", "snappy")) + '        (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 5 "level" "level" 5.6 (lm-accent) 2)))))\n'
+tone, w = panel_dims.tone_row(a.tone, voice)
+new_tone = "".join(f'        (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 5 "{p}" "{p}" {w:g} (lm-accent) 2)\n'
+                   for p in tone).rstrip("\n") + "))))\n"
 ui = ui.replace(old_tone, new_tone)
 ui = panel_dims.depth(ui, D)
 # The template panel is 4-D: names, nearest snare and code loading are rewritten for this model's D dims

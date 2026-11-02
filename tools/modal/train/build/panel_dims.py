@@ -3,6 +3,13 @@ Morph panels, which were laid out for a 4-number latent."""
 import re
 
 
+def tone_row(spec, voice):
+    """The TONE row's knobs (comma-separated `spec`, only those the voice has a param for) and the knob
+    width that keeps the row as wide as the template's 4 knobs at 5.6."""
+    tone = [k for k in spec.split(",") if f"(param {k} " in voice]
+    return tone, round(4 * 5.6 / max(4, len(tone)), 2)
+
+
 def offsets(ui, D):
     """A/B panel: the OFFSET row gets one knob per dim, narrowed to fit the same block."""
     old = re.search(r"""\(each '\("z1" "z2" "z3" "z4"\) \|name\|\n( *)\(eseq\.effects\.custom-ui-lego/ui-lego-knob-full-s 1 name name 4\.8 """, ui)

@@ -6,7 +6,8 @@
 Stages, each cached in EXPDIR (delete its output to run it again):
   data     the training set (dataset.py) -> EXPDIR/data
   seed     starting rows -> EXPDIR/rows/seed.json: the parent's fitted rows for the samples and
-           segments it has; for the others a dgen drum analysis (analyze-drums + drum-rows snare1)
+           segments it has; for the others a dgen drum analysis (analyze-drums + drum-rows snare1, or
+           kick-rows v3 with (t/seed :analyze :kick))
            on the parts it covers, a base refine with the remaining parts silent and frozen, then
            each remaining part's seeder from that render (seeders.py), then the :level factors
   superset with a parent: the parent's samples rendered by this voice with every part the parent
@@ -203,8 +204,10 @@ def stage_seed(exp):
     if any(converted.values()):
         log(f"  absolute second strokes seeded from the parent's relative ones: {sorted(set(sum(converted.values(), [])))}")
     analyze = (exp.spec.get("seed") or {}).get("analyze", "drum")
-    if fresh and analyze == "drum":
-        rows = analyse_fresh(exp, rows, fresh)
+    if analyze not in ANALYSES and analyze != "neutral":
+        raise SystemExit(f"seed :analyze {analyze!r}: one of {', '.join(ANALYSES)}, neutral")
+    if fresh and analyze in ANALYSES:
+        rows = analyse_fresh(exp, rows, fresh, analyze)
     known = [n for n in names if n not in fresh]
     if known and new_parts:
         rows = seed_parts(exp, rows, known, new_parts, "seed_known_render")
@@ -242,25 +245,42 @@ def seed_parts(exp, rows, names, parts, job_name):
     return rows
 
 
-def analyse_fresh(exp, rows, fresh):
-    """dgen drum analysis for the head / strikes / chain / wires / record parts, a base refine with the
-    other parts silent and frozen, then the other parts' seeders from that render."""
+# (t/seed :analyze ...): the dgen drum analysis and the row layout it writes, and how its rows fill a voice's
+#   drum  analyze-drums --kind snare + drum-rows snare1: the head / strikes / chain / wires / record, by field
+#   kick  analyze-drums --kind kick --v3 (strike sines, crackle, noise events, 4th-order bands) + kick-rows v3:
+#         every segment of the kick voice, by segment name
+ANALYSES = {
+    "drum": dict(args=["--kind", "snare"], rows=["drum-rows", "--layout", "snare1"], file="snare1.json", fill=seeders.from_snare1),
+    "kick": dict(args=["--kind", "kick", "--v3"], rows=["kick-rows", "--layout", "v3"], file="kick-v3.json", fill=seeders.by_name),
+}
+
+
+def analyse_fresh(exp, rows, fresh, analyze):
+    """dgen drum analysis for the parts it covers, a base refine with the other parts silent and frozen,
+    then the other parts' seeders from that render."""
     lay = exp.layout
+    an = ANALYSES[analyze]
     adir = exp.p("seed")
     os.makedirs(adir, exist_ok=True)
     ds = exp.p("seed/data")
     subset_dataset(exp.data, set(fresh), ds)
-    if not os.path.exists(os.path.join(adir, "snare1.json")):
-        log(f"  analyze-drums on {len(fresh)} samples")
-        sh([D, "analyze-drums", "--kind", "snare", "--dataset", ds, "-o", os.path.join(adir, "analysis.json"),
+    if not os.path.exists(os.path.join(adir, an["file"])):
+        log(f"  analyze-drums {' '.join(an['args'])} on {len(fresh)} samples")
+        sh([D, "analyze-drums"] + an["args"] + ["--dataset", ds, "-o", os.path.join(adir, "analysis.json"),
             "--resynth-dir", os.path.join(adir, "resynth")])
-        sh([D, "drum-rows", "--layout", "snare1", "--slots", "16", "--analysis", os.path.join(adir, "analysis.json"),
-            "-o", os.path.join(adir, "snare1.json")])
-    s1 = load(os.path.join(adir, "snare1.json"))["rows"]
+        head = seeders.head_part(lay)
+        if head is None:
+            raise SystemExit("seed :analyze needs a note-tracked (t/modes ...) part for the analysis' slots")
+        slots = seeders.segs(lay, part=head)[0]["count"]
+        sh([D] + an["rows"] + ["--slots", str(slots), "--analysis", os.path.join(adir, "analysis.json"),
+            "-o", os.path.join(adir, an["file"])])
+    s1 = load(os.path.join(adir, an["file"]))["rows"]
     covered = set()
     for n in fresh:
-        covered |= seeders.from_snare1(rows[n], s1.get(n, {}), lay)
+        covered |= an["fill"](rows[n], s1.get(n, {}), lay)
     others = [p for p in lay["parts"] if p["id"] not in covered]
+    if not others:
+        return rows
     frozen = [s["name"] for s in lay["segments"] if s["part"] in {p["id"] for p in others}]
     freq = [s["name"] for s in lay["segments"] if s["role"] in ("freq", "time") and s["name"] not in frozen]
     log(f"  base refine of {len(fresh)} samples, silent + frozen: {', '.join(p['id'] for p in others)}")
@@ -456,19 +476,19 @@ def stage_ship(exp):
     os.makedirs(stage)
     env = {"ESEQ_DGENLISP_TOOL": D, "DS": exp.data}
     B = os.path.join(HERE, "build")
+    # the panel: what one sample is (Snare A / Kick A), its TONE knobs then the extra ones (the builders keep
+    # only knobs the voice has)
+    panel = ["--member", sp["member"], "--tone", ",".join(sp["tone"] + (sp.get("extra-knobs") or []))]
     sh([sys.executable, os.path.join(B, "pick_pairs.py"), fin, os.path.join(fin, "pairs.json")], env=env)
     sh([sys.executable, os.path.join(B, "build_instrument.py"), fin, stage, "--name", name, "--voice", exp.voice,
-        "--blends", os.path.join(fin, "pairs.json"), "--category", sp.get("folder", "Research")], env=env)
+        "--blends", os.path.join(fin, "pairs.json"), "--category", sp.get("folder", "Research")] + panel, env=env)
     if sp.get("morph", True):
         sh([sys.executable, os.path.join(B, "build_morph.py"), os.path.join(stage, name), stage, "--name", mname,
-            "--voice", exp.morph, "--presets", os.path.join(fin, "pairs.json"), "--category", sp.get("folder", "Research")], env=env)
+            "--voice", exp.morph, "--presets", os.path.join(fin, "pairs.json"), "--category", sp.get("folder", "Research")] + panel,
+           env=env)
     built = [name] + ([mname] if sp.get("morph", True) else [])
-    for n, v in ((name, exp.voice), (mname, exp.morph)):
-        if n in built:
-            extra = sp.get("extra-knobs") or []
-            if extra:
-                sh([sys.executable, os.path.join(B, "add_rhythm_knob.py"), os.path.join(stage, n, "ui.lisp"), v, ",".join(extra)], env=env)
-            sh([sys.executable, os.path.join(B, "label_presets.py"), os.path.join(stage, n + ".presets")], env=env)
+    for n in built:
+        sh([sys.executable, os.path.join(B, "label_presets.py"), os.path.join(stage, n + ".presets")], env=env)
     dest = os.path.join(ROOT, ".local/instruments", sp.get("folder", "Research"))
     os.makedirs(dest, exist_ok=True)
     for n in built:

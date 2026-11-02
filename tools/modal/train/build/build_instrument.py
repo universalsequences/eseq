@@ -21,7 +21,7 @@ def fmt(xs): return " ".join(f"{float(x):.6g}" for x in xs)
 
 def onehot(d, D): return "[" + " ".join("1" if k == d else "0" for k in range(D)) + "]"
 
-def front(codes, N):
+def front(codes, N, member="snare"):
     B = code_box(codes)
     D = np.asarray(codes).shape[1]
     zs = "\n".join(
@@ -29,21 +29,22 @@ def front(codes, N):
         for d in range(D))
     zparams = "\n".join(f"(param z{d+1} @default 0 @min -{B:g} @max {B:g} @mod true @mod-mode additive)" for d in range(D))
     fz = " ".join(f"(* e-z{d+1} (tensor @shape [1 {D}] @data {onehot(d, D)}))" for d in range(D))
-    return f""";; ---- front end (build/build_instrument.py): Snare A, Snare B, Blend, z offsets ----
-;; Blend moves along the straight line between the two snares' codes (no per-pair warp table).
+    M = member.capitalize()
+    return f""";; ---- front end (build/build_instrument.py): {M} A, {M} B, Blend, z offsets ----
+;; Blend moves along the straight line between the two {member}s' codes (no per-pair warp table).
 (def clock (in 5 @name clock))
 (def mod1 (in 6 @name mod1 @modulator 1))
 (def mod2 (in 7 @name mod2 @modulator 2))
 (def mod3 (in 8 @name mod3 @modulator 3))
 (def mod4 (in 9 @name mod4 @modulator 4))
 {zparams}
-(param snare_a @default 0 @min 0 @max {N-1})
-(param snare_b @default 0 @min 0 @max {N-1})
+(param {member}_a @default 0 @min 0 @max {N-1})
+(param {member}_b @default 0 @min 0 @max {N-1})
 (param blend @default 0 @min 0 @max 1 @mod true @mod-mode additive)
 ;; learned codes [{N} x {D}]; data channel-major, as peek reads it
 (def LSS-CODE (tensor @shape [{N} {D}] @data [{fmt(np.array(codes).T.ravel())}]))
-(def e-a (floor (+ (clip snare_a 0 {N-1}) 0.5)))
-(def e-b (floor (+ (clip snare_b 0 {N-1}) 0.5)))
+(def e-a (floor (+ (clip {member}_a 0 {N-1}) 0.5)))
+(def e-b (floor (+ (clip {member}_b 0 {N-1}) 0.5)))
 (def e-t (clip (mod blend) 0 1))
 {zs}
 (def front-z (+ {fz}))
@@ -78,6 +79,8 @@ if __name__ == "__main__":
     ap.add_argument("--name", default="Latent Snare (Samples)"); ap.add_argument("--category", default="Research")
     ap.add_argument("--voice", default=os.path.join(R, "voice/snare1.lisp"))
     ap.add_argument("--blends", help="json list of {a, b} pairs: blend-0.5 presets")
+    ap.add_argument("--member", default="snare", help="what one sample is: Snare A / Snare B, params snare_a / snare_b")
+    ap.add_argument("--tone", default="tune,decay,snappy,level", help="the TONE row's knobs (the voice's params)")
     a = ap.parse_args()
     ex = os.path.join(a.run, "export")
     codes = json.load(open(os.path.join(ex, "codes.json")))
@@ -87,7 +90,7 @@ if __name__ == "__main__":
     open(os.path.join(inst, "dsp.lisp"), "w").write(
         f";; {a.name} -- built by tools/modal/train/build/build_instrument.py\n"
         f";; voice sha256 {hashlib.sha256(voice.encode()).hexdigest()} (trained source, verbatim below)\n\n"
-        + front(Z, N) + voice + TAIL)
+        + front(Z, N, a.member) + voice + TAIL)
     for f in ("w1.json", "b1.json", "w2.json", "b2.json", "w3.json", "b3.json"):
         shutil.copy(os.path.join(ex, f), inst)
     json.dump({"version": 1, "run_mode": "instrument"}, open(os.path.join(inst, "instrument.json"), "w"))
@@ -106,27 +109,30 @@ if __name__ == "__main__":
                      ('\n        (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 0 "even" "even" 6.4 (ls-accent) 0)', "")):
         assert old in ui, old
         ui = ui.replace(old, new)
-    # tone: tune (ratio here, not semitones), decay, snappy (wires), level; the rest stay params
+    # tone: the given knobs (tune is a ratio here, not semitones) in the width of 4 at 5.6; the rest stay params
+    tone, w = panel_dims.tone_row(a.tone, voice)
     old_tone = ui[ui.index('        (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 2 "tune"'):ui.index("(defsynth-ui")]
-    new_tone = "".join(f'        (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 2 "{p}" "{p}" 5.6 (ls-accent) 2)\n'
-                       for p in ("tune", "decay", "snappy", "level")).rstrip("\n") + "))))\n\n"
+    new_tone = "".join(f'        (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 2 "{p}" "{p}" {w:g} (ls-accent) 2)\n'
+                       for p in tone).rstrip("\n") + "))))\n\n"
     ui = ui.replace(old_tone, new_tone)
+    # the member: Snare A / B slots and params, the SNARES badge
+    if a.member != "snare":
+        ui = ui.replace('"snare_a"', f'"{a.member}_a"').replace('"snare_b"', f'"{a.member}_b"').replace('"SNARES"', f'"{a.member.upper()}S"')
     ui = panel_dims.offsets(ui, Z.shape[1])
     ui = (f";; {a.name} A/B panel: layout from the Latent Snare panel; codes, labels and map data from\n"
-          ";; tools/modal/train/build/build_instrument.py. The map is the latent space: two latent dims as the axes, the 32 MF DOOM\n"
-          ";; snares at their learned codes, the ring at the z the decoder decodes on the next hit (Blend walks\n"
-          ";; the straight line from Snare A to Snare B, plus the z offsets). The other knobs (bend, attack,\n"
-          ";; punch, wire_decay, shape, drive, record, noise, length, vel_amt) stay params at their defaults:\n"
-          ";; reachable from mods and automation, off the panel.\n") + ui
+          ";; tools/modal/train/build/build_instrument.py. The map is the latent space: two latent dims as the axes, the\n"
+          f";; {a.member}s at their learned codes, the ring at the z the decoder decodes on the next hit (Blend walks\n"
+          f";; the straight line from {a.member.capitalize()} A to {a.member.capitalize()} B, plus the z offsets). The\n"
+          ";; knobs off the panel stay params at their defaults: reachable from mods and automation.\n") + ui
     open(os.path.join(inst, "ui.lisp"), "w").write(ui)
     # presets: every snare + blend midpoints of the given pairs
     pid = re.sub(r"[^a-z0-9]+", "-", a.name.lower()).strip("-")
     zero = {f"z{d+1}": 0 for d in range(Z.shape[1])}
     presets = [{"id": f"{pid}-{n.lower()}", "name": f"{a.name} {n}", "base_note_offset": 0,
-                "params": {"snare_a": i, "snare_b": i, "blend": 0, **zero}} for i, n in enumerate(names)]
+                "params": {f"{a.member}_a": i, f"{a.member}_b": i, "blend": 0, **zero}} for i, n in enumerate(names)]
     for p in (json.load(open(a.blends)) if a.blends else []):
         presets.append({"id": f"{pid}-{p['a'].lower()}-x-{p['b'].lower()}", "name": f"{a.name} {p['a']} x {p['b']}",
-                        "base_note_offset": 0, "params": {"snare_a": names.index(p["a"]), "snare_b": names.index(p["b"]),
+                        "base_note_offset": 0, "params": {f"{a.member}_a": names.index(p["a"]), f"{a.member}_b": names.index(p["b"]),
                                                           "blend": 0.5, **zero}})
     json.dump({"version": 1, "engine_name": f"{a.category}/{a.name}", "source_file": f"instruments/{a.category}/{a.name}/dsp.lisp",
                "presets": presets}, open(os.path.join(a.out, f"{a.name}.presets"), "w"), indent=2)

@@ -79,6 +79,20 @@ def from_snare1(row, snare1, layout):
     return filled
 
 
+def by_name(row, src, layout):
+    """Every segment the analysis rows have under its own name (kick-rows v3 names = the kick voice's);
+    returns the parts whose segments were all filled."""
+    filled, missed = set(), set()
+    for s in layout["segments"]:
+        v = src.get(s["name"])
+        if v is not None and len(v) == s["count"]:
+            row[s["name"]] = [float(x) for x in v]
+            filled.add(s["part"])
+        else:
+            missed.add(s["part"])
+    return filled - missed
+
+
 def spectra(x):
     """The target's spectra every line needs: Welch after 40 ms, and a 4096 / 256 STFT power."""
     s0 = int(0.04 * SR)

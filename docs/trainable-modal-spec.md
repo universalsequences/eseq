@@ -184,8 +184,13 @@ the two object lists gives:
 Built: 1 (snare3 port renders identically: static 37 renders, max 1.3e-7 of peak;
 Morph 26 renders incl. real morphs, 1.1e-7), 2 (runner: data / seed / superset /
 train with GPU batch splitting / eval / ship), 3 (variants: `t/variant`, lineage,
-exact relative-to-absolute stroke conversion, superset check). Open: 4 / 5 below,
-porting the latent-snare scoring + instrument builders out of .local/research.
+exact relative-to-absolute stroke conversion, superset check), kicks (eseq-jnct.5:
+`tools/modal/examples/train-kick.lisp`, the latent-from-samples voice3 as parts --
+per-mode drops, growl, burst, bark, a noise-bed `bands` -- renders the research rows
+within 3.5e-7 of peak; seeded from `analyze-drums --kind kick --v3` + `kick-rows v3`
+identically to the research run; the 94 DOOM + Neptunes kicks trained end to end:
+instrument band 0.967 / 1.385, research 0.998 / 1.420; Morph START = END parity
+1.2e-4 median). Open: 4 / 5 below, porting the latent-snare scoring out of .local/research.
 
 Original plan:
 

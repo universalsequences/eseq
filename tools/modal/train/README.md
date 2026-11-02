@@ -56,16 +56,26 @@ segments with their part, field, role and range; the parts; the lineage) and
 | kind | what | notes |
 |---|---|---|
 | `modes` | decaying sines | `:follow-note`, `:glide` (one shared tension glide), `:tail`, `:rise :shared/:instant`, `:strokes`, `:bus :body/:drum`, `:knob` |
+| `modes :glide :per-mode` | a kick's slots: every mode its own pitch drop (x `drop_time`) | `:rise :per-mode`, `:second-drop` (slot 0's slow drop), `:tail` |
+| `growl` / `burst` | a clipped sine gliding down under the body / a windowed mid burst | body bus; `growl` knob |
+| `bark` | tanh harmonics of the body bus | needs a `shaper` before it |
 | `strikes` | short gliding sines (the stick) | body bus |
 | `shaper` | odd + even body saturation | reads the body bus, DC removed in closed form |
 | `clipper` | asymmetric recording clipper | over the drum bus |
 | `record-lp` | record low-pass as per-component gains | defines `rlg` / `rlg-hit` / `rlg-at` |
-| `timing` | onset delay, end, fade, gain | required |
-| `bands` | 16 fixed noise bands, two-stage envelope | snare wires; other parts reuse its `bands` |
-| `hiss` / `crackle` / `events` | record noise, crackle, two noise events | `:on` a bank |
+| `timing` | onset delay, end, fade, gain | required; `:rhythm false` |
+| `bands` | 16 fixed noise bands, two-stage envelope | snare wires; other parts reuse its `bands`. A record's noise bed: `:t0 false :snap false :level '(noise record) :decay-knob 'decay` |
+| `hiss` / `crackle` / `events` | record noise, crackle, two noise events | `:on` a bank; events `:rhythm false` |
 | `template` | a fixed mode table warped by size / level / tilt / decay | `:keep N` strongest; `:second :absolute` |
 | `wash` | a bank's bands swelling after the stroke | `:second :absolute` |
 | `restrike` | a second stroke (time, level) | parts with `:strokes true` follow it |
+
+`(t/with-ranges part '(("end" 0.02 1.2)))` replaces fields' ranges on any part.
+
+Two patches: `tools/modal/examples/train-break-snare.lisp` (snares) and
+`tools/modal/examples/train-kick.lisp` (kicks: `(t/seed :analyze :kick)` seeds every segment from
+dgen `analyze-drums --kind kick` + `kick-rows --layout v3`; `(t/ship ... :member "kick" :tone '(...))`
+labels the panel Kick A / Kick B with its own TONE knobs).
 
 ## Variants
 

@@ -7,6 +7,7 @@ spec (experiment.json "data"):
   packs       pack names (sample-packs.json)
   tags        tag sets; a sample carrying every tag of one set is in (case-insensitive)
   keep-crops  a dataset dir (manifest.json with hashes): its samples keep their exact files and names
+  only-kept   true: only the keep-crops samples the packs / tags select (a fixed set to compare runs on)
   crop        "first-hit" or "none"
 Names: a kept sample keeps its name; a pack member B<k> by pack position; a tagged sample a short
 code from its title. The first-hit detector is the break-snares one (spectral-flux onsets, refined
@@ -185,6 +186,8 @@ def build(spec, out, library, root):
     nb = max([int(n[1:]) for n in taken if re.fullmatch(r"B\d+", n)] + [0])
     man, crops = [], []
     for h, title, region, origin in sources(spec, library):
+        if spec.get("only-kept") and h not in keep:
+            continue
         if h in keep:
             kd, m = keep[h]
             shutil.copyfile(os.path.join(kd, m["name"] + ".wav"), os.path.join(out, m["name"] + ".wav"))

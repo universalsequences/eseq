@@ -44,7 +44,7 @@
 (export voice modes strikes shaper clipper record-lp timing bands hiss crackle events
         template wash restrike voice-forms morph-forms layout-json emit segment-count
         knob-table data seed refine pick pretrain path recipe ship experiment emit-experiment to-json
-        variant strongest modes-of strings rattle)
+        variant strongest modes-of strings rattle growl burst bark with-ranges)
 
 ;; ── helpers ───────────────────────────────────────────────────────────────
 
@@ -92,11 +92,28 @@
   (let ((p (merged opts (dict :kind kind :id id :fields fields :build build))))
     (merged p (dict :seg (seg-table p fields) :segments (seg-forms p fields)))))
 
+;; A part with some fields' ranges replaced: table is a list of (field lo hi),
+;; field names as the kind gives them ("end", "dec", ...).
+;;   (t/with-ranges (t/timing 'time) '(("end" 0.02 1.2)))
+(def with-ranges (p table)
+  (let ((fields (map (lambda (f)
+                       (let ((hit (filter (lambda (r) (= (first r) (first f))) table)))
+                         (if (empty? hit) f
+                           (list (first f) (nth f 1) (nth f 2) (nth (first hit) 1) (nth (first hit) 2)))))
+                     (get p :fields))))
+    (merged p (dict :fields fields :segments (seg-forms p fields)))))
+
 ;; Alias guard: 1 below 0.44 sr, fading to 0 at 0.48 sr.
 (def alias-form (hz) `(clip (/ (- (* 0.48 samplerate) ,hz) (* 0.04 samplerate)) 0 1))
 
 ;; `[1 n]` shape literal.
 (def shape (n) (rng (str "[1 " n "]")))
+
+;; The part's level knob as a list to splice (empty without one).
+(def knob-list (p) (if (get p :knob) (list (get p :knob)) (list)))
+
+;; `(def <id>-slot0 [1 0 0 ...])`: a [1 n] mask of slot 0.
+(def slot0-form (p n) (tensor-row (s p "slot0") (cons 1 (map (lambda (k) 0) (range (- n 1))))))
 
 ;; The first part of `kind` in ctx (or the one named id).
 (def find-part (ctx kind id)
@@ -113,8 +130,18 @@
 ;; :rise :shared (one learned attack) or :instant (0.1 ms)  :strokes (a second
 ;; stroke re-excites them)  :bus :body or :drum  :knob a level knob symbol
 ;; :ranges (dict :f (lo hi) :amp (lo hi) :dec (lo hi)) segment ranges
+;; :glide :per-mode  every mode its own pitch drop (depth g, time td, x drop_time:
+;;   a kick's slots), its record low-pass and alias guard per sample (the drops are
+;;   deep); :rise :per-mode one attack per mode; :second-drop slot 0 also gets a
+;;   second, slower drop (g2, t2: a kick's long pitch tail).
 (def modes (id &key (count 16) (follow-note true) (glide false) (tail false) (rise :instant)
-                   (strokes false) (bus :drum) (knob nil) (ranges nil) (names nil))
+                   (strokes false) (bus :drum) (knob nil) (ranges nil) (names nil) (second-drop false))
+  (if (= glide :per-mode)
+    (let ((d (drops id count follow-note tail rise second-drop strokes bus knob names)))
+      (if ranges
+        (with-ranges d (concat-all (map (lambda (k) (let ((r (get ranges k))) (if r (list (cons (kind-name k) r)) (list))))
+                                        (list :f :amp :dec))))
+        d))
   (let ((rg (lambda (k lo hi) (let ((r (if ranges (get ranges k) nil))) (if r r (list lo hi))))))
     (let ((fields (concat-all
                     (list (list (append (list "f" count 'log) (rg :f 30 16000))
@@ -126,18 +153,18 @@
                           (if tail (list (list "tamp" 1 'log 0.000001 4) (list "tdec" 1 'log 0.005 4)) (list))))))
       (part :modes id fields
             (dict :count count :follow-note follow-note :glide glide :tail tail :rise rise
-                  :strokes strokes :bus bus :knob knob :names names)
-            modes-build))))
+                  :strokes strokes :bus bus :knob knob :names names :second-drop second-drop)
+            modes-build)))))
 
 (def modes-build (p ctx v)
   (let ((n (get p :count)) (follow (get p :follow-note)) (glide (get p :glide)) (tail (get p :tail))
         (shared (= (get p :rise) :shared)) (st (if (get p :strokes) (stroke-of ctx) nil))
-        (knobs (if (get p :knob) (list (get p :knob)) (list)))
+        (knobs (knob-list p))
         (F (s p "F")) (iT (s p "iT")) (FGT (s p "FGT")) (G (s p "G")) (iD (s p "iD")) (iR (s p "iR"))
         (PH (s p "PH")) (iTD (s p "iTD")) (A (s p "A")) (TA (s p "TA")) (FHZ (s p "fhz"))
         (SLOT0 (s p "slot0")) (E1 (s p "e1")) (ENV (s p "env")) (OUT (s p "out")))
     (let ((fhz (if follow FHZ (D p "f")))
-          (slot0 (if tail (list (df SLOT0 `(tensor @shape ,(shape n) @data ,(rng (str "[1" (apply str (map (lambda (k) " 0") (range (- n 1)))) "]"))))) (list)))
+          (slot0 (if tail (list (slot0-form p n)) (list)))
           (outs (if (= (get p :bus) :body) (dict :body (list OUT) :ms (list ENV)) (dict :drum (list OUT)))))
      (if (= v :static)
       (merged outs (dict
@@ -212,6 +239,172 @@
                      `(* ,A (+ (* ,DN (- 1 (exp (* -10000 t)))) (* ,(s st "on2") ,DN2)))
                      `(* ,A ,DN (- 1 (exp (* -10000 t))))))))
                (list (df OUT `(sum-axis (* ,ENV (sin ,(if glide PHS `(+ (* twopi ,F t) ,PH)))) @axis 1 @keepdims true))))))))))))
+
+;; ── modes with per-mode pitch drops (t/modes ... :glide :per-mode) ────────
+;; Mode k: f_k (1 + g_k e^{-t/td_k}) Hz (+ slot 0's second drop), its own attack
+;; (:rise :per-mode) or one, a decay, slot 0's slow tail. Fields in this order:
+;; f g td amp dec rise ph [g2 t2] [tamp tdec].
+(def drops (id count follow-note tail rise second-drop strokes bus knob names)
+  (part :modes id
+        (concat-all (list (list (list "f" count 'log 30 16000) (list "g" count 'lin 0 8) (list "td" count 'log 0.001 0.5)
+                                (list "amp" count 'log 0.000001 20) (list "dec" count 'log 0.001 4)
+                                (list "rise" (if (= rise :per-mode) count 1) 'log 0.00001 0.05) (list "ph" count 'raw))
+                          (if second-drop (list (list "g2" 1 'lin 0 8) (list "t2" 1 'log 0.0003 0.05)) (list))
+                          (if tail (list (list "tamp" 1 'log 0.000001 4) (list "tdec" 1 'log 0.005 4)) (list))))
+        (dict :count count :follow-note follow-note :glide :per-mode :tail tail :rise rise :second-drop second-drop
+              :strokes strokes :bus bus :knob knob :names names)
+        drops-build))
+
+(def drops-build (p ctx v)
+  (let ((n (get p :count)) (follow (get p :follow-note)) (tail (get p :tail)) (d2 (get p :second-drop))
+        (knobs (knob-list p))
+        (F (s p "F")) (G (s p "G")) (iT (s p "iT")) (FGT (s p "FGT")) (A (s p "A")) (iD (s p "iD")) (iR (s p "iR"))
+        (PH (s p "PH")) (iT2 (s p "iT2")) (FGT2 (s p "FGT2")) (TA (s p "TA")) (iTD (s p "iTD"))
+        (SLOT0 (s p "slot0")) (E1 (s p "e1")) (E2 (s p "e2")) (HZ (s p "hz")) (ENV (s p "env")) (OUT (s p "out")))
+    (let ((rt (if follow '(ratio) '()))
+          (amp (if (empty? knobs) (D p "amp") `(* ,@knobs ,(D p "amp"))))
+          (slot0 (if (or tail d2) (list (slot0-form p n)) (list)))
+          (outs (if (= (get p :bus) :body) (dict :body (list OUT) :ms (list ENV)) (dict :drum (list OUT))))
+          ;; slot 0's second drop (held for the hit in both variants)
+          (d2-hit (if d2 (list (df iT2 `(at-hit (/ 1 (* drop_time ,(D p "t2")))))
+                               (df FGT2 `(at-hit (* ,@(if follow '(ratio) '()) (shrink ,(D p "f") @ranges ,(rng "[:,0:1]"))
+                                                    bendv ,(D p "g2") drop_time ,(D p "t2")))))
+                    (list)))
+          ;; instantaneous frequency (slot 0's second drop on top)
+          (hz (if d2 `(+ (* ,F (+ 1 (* ,G ,E1))) (* ,SLOT0 ,FGT2 ,iT2 ,E2)) `(* ,F (+ 1 (* ,G ,E1))))))
+     (if (= v :static)
+      (merged outs (dict
+        :prelude slot0
+        :hit (concat-all (list
+               (list (df F `(at-hit ,(if follow `(* ratio ,(D p "f")) (D p "f"))))
+                     (df G `(at-hit (* bendv ,(D p "g"))))
+                     (df iT `(at-hit (/ 1 (* drop_time ,(D p "td")))))
+                     (df FGT `(at-hit (* ,@rt ,(D p "f") bendv ,(D p "g") drop_time ,(D p "td"))))
+                     (df A `(at-hit ,amp))
+                     (df iD `(at-hit (/ 1 (* decay ,(D p "dec")))))
+                     (df iR `(at-hit (/ 1 (* attack ,(D p "rise")))))
+                     (df PH `(at-hit ,(D p "ph"))))
+               d2-hit
+               (if tail (list (df TA `(at-hit ,(D p "tamp"))) (df iTD `(at-hit (/ 1 (* decay ,(D p "tdec")))))) (list))))
+        :dsp (concat-all (list
+               (list (df E1 `(exp (* -1 t ,iT))))
+               (if d2 (list (df E2 `(exp (* -1 t ,iT2)))) (list))
+               (list (df HZ hz)
+                     (df ENV `(* ,(alias-form HZ) (rlg ,HZ) (- 1 (exp (* -1 t ,iR)))
+                                 ,(plus (append (list `(* ,A (exp (* -1 t ,iD))))
+                                                (if tail (list `(* ,SLOT0 ,TA (exp (* -1 t ,iTD)))) (list))))))
+                     (df OUT `(sum-axis (* ,ENV (sin (+ (* twopi ,(plus (append (list `(* ,F t) `(* ,FGT (- 1 ,E1)))
+                                                                                (if d2 (list `(* ,SLOT0 ,FGT2 (- 1 ,E2))) (list)))))
+                                                       ,PH)))
+                                        @axis 1 @keepdims true)))))))
+      ;; morph: frequency, drop depth and time and decays ramp (the phase integrates the
+      ;; instantaneous frequency), levels fall; attack, phase and slot 0's second drop are START's
+      (let ((DN (s p "dn")) (TDN (s p "tdn")) (PHH (s p "ph-h")) (PHS (s p "phs")) (TN (s p "tn"))
+            (K1 (s p "k1")) (K2 (s p "k2")) (INC (s p "inc")) (PHN (s p "ph-next")))
+       (let ((closed (lambda (tt e1 e2) `(+ ,PH (* twopi ,(plus (append (list `(* ,F ,tt) `(* ,F ,G (/ 1 ,iT) (- 1 ,e1)))
+                                                                       (if d2 (list `(* ,SLOT0 ,FGT2 (- 1 ,e2))) (list)))))))))
+        (merged outs (dict
+          :prelude slot0
+          :hit (concat-all (list
+                 (list (df F (if follow `(ramped (* ratio ,(D p "f")) ,(shape n)) `(at-hit ,(D p "f"))))
+                       (df G `(ramped (* bendv ,(D p "g")) ,(shape n)))
+                       (df iT `(ramped (/ 1 (* drop_time ,(D p "td"))) ,(shape n)))
+                       (df iD `(ramped (/ 1 (* decay ,(D p "dec"))) ,(shape n)))
+                       (df A `(falling ,amp ,(shape n))))
+                 (if tail (list (df iTD `(ramped (/ 1 (* decay ,(D p "tdec"))) ,(shape 1)))
+                                (df TA `(falling ,(D p "tamp") ,(shape 1))))
+                   (list))))
+          :fixed (concat-all (list
+                   (list (df iR `(at-hit (/ 1 (* attack ,(D p "rise")))))
+                         (df PH `(at-hit ,(D p "ph"))))
+                   d2-hit
+                   (if d2 (list (df K2 `(at-hit (exp (* -1 ,iT2 isr))))) (list))))
+          :dsp (concat-all (list
+                 (list (df E1 `(decaying ,iT T0 ,(shape n)))
+                       (df DN `(decaying ,iD T0 ,(shape n))))
+                 (if d2 (list (df E2 `(exp (* -1 t ,iT2)))) (list))
+                 (if tail (list (df TDN `(decaying ,iTD T0 ,(shape 1)))) (list))
+                 ;; phase: integrated while active; before that, the closed form at the next sample
+                 (list `(make-tensor-history ,PHH @shape ,(shape n))
+                       (df TN '(max 0 (- (+ tm isr) T0)))
+                       (df PHS `(gswitch hit ,(closed 't E1 E2) (read-tensor-history ,PHH)))
+                       (df K1 `(exp (* -1 ,iT isr)))
+                       (df INC `(* twopi ,(plus (append (list `(* ,F isr) `(/ (* ,F ,G ,E1 (- 1 ,K1)) ,iT))
+                                                        (if d2 (list `(* ,SLOT0 ,FGT2 ,E2 (- 1 ,K2))) (list))))))
+                       (df PHN `(gswitch act (+ ,PHS ,INC) ,(closed TN `(exp (* -1 ,TN ,iT)) `(exp (* -1 ,TN ,iT2)))))
+                       `(write-tensor-history ,PHH (- ,PHN (* twopi (floor (/ ,PHN twopi)))))
+                       (df HZ hz)
+                       (df ENV `(* ,(alias-form HZ) (rlg ,HZ) (- 1 (exp (* -1 t ,iR)))
+                                   ,(plus (append (list `(* ,A ,DN)) (if tail (list `(* ,SLOT0 ,TA ,TDN)) (list))))))
+                       (df OUT `(sum-axis (* ,ENV (sin ,PHS)) @axis 1 @keepdims true)))))))))))))
+
+;; ── growl and burst: a kick's low gliding growl and its mid burst ─────────
+;; A level held for the hit (static) or falling through a morph, with the part's other
+;; per-hit controls fixed from START.
+(def level-split (v name level rest)
+  (if (= v :static)
+    (dict :hit (cons (df name `(at-hit ,level)) rest))
+    (dict :hit (list (df name `(falling ,level ,(shape 1)))) :fixed rest)))
+
+;; growl: a clipped sine gliding down to f (depth g, time td, x drop_time), two-stage
+;; decay (mix m), x the `growl` knob. Body bus.
+(def growl (id &key (knob 'growl) (names nil))
+  (part :growl id (list (list "amp" 1 'log 0.000001 2) (list "f" 1 'log 20 90) (list "g" 1 'lin 0 6) (list "td" 1 'log 0.002 0.3)
+                        (list "clip" 1 'lin 0.05 1) (list "d1" 1 'log 0.005 1) (list "d2" 1 'log 0.01 2) (list "m" 1 'lin 0 1))
+        (dict :knob knob :names names) growl-build))
+
+(def growl-build (p ctx v)
+  (let ((GRA (s p "A")) (GRF (s p "F")) (GRFGT (s p "FGT")) (iGRT (s p "iT")) (GRC (s p "C")) (iGR1 (s p "iD1"))
+        (iGR2 (s p "iD2")) (GRM (s p "M")) (GRE (s p "e")) (GRS (s p "s")) (GRW (s p "w")) (GRENV (s p "env"))
+        (AMP (s p "amp")) (OUT (s p "out")))
+    (let ((a `(* ,@(knob-list p) ,(D p "amp")))
+          (rest (list (df GRF `(at-hit (* ratio ,(D p "f"))))
+                      (df GRFGT `(at-hit (* ratio ,(D p "f") bendv ,(D p "g") drop_time ,(D p "td"))))
+                      (df iGRT `(at-hit (/ 1 (* drop_time ,(D p "td")))))
+                      (df GRC `(at-hit ,(D p "clip")))
+                      (df iGR1 `(at-hit (/ 1 (* decay ,(D p "d1")))))
+                      (df iGR2 `(at-hit (/ 1 (* decay ,(D p "d2")))))
+                      (df GRM `(at-hit ,(D p "m"))))))
+      (merged (level-split v GRA a rest)
+              (dict :dsp (list (df GRE `(exp (* -1 t ,iGRT)))
+                               (df GRS `(sin (* twopi (+ (* ,GRF t) (* ,GRFGT (- 1 ,GRE))))))
+                               (df GRW `(/ (clip ,GRS (* -1 ,GRC) ,GRC) ,GRC))
+                               (df GRENV `(* (+ (* ,GRM (exp (* -1 t ,iGR1))) (* (- 1 ,GRM) (exp (* -1 t ,iGR2)))) (- 1 (exp (* -250 t)))))
+                               (df AMP `(* ,GRA ,GRENV (rlg (* ,GRF (+ 1 (/ (* ,GRFGT ,iGRT ,GRE) ,GRF))))))
+                               (df OUT `(* ,AMP ,GRW)))
+                    :body (list OUT) :ms (list AMP))))))
+
+;; burst: a Gaussian-windowed sine around tc (width w), x punch and velocity snap. Body bus.
+(def burst (id &key (names nil))
+  (part :burst id (list (list "amp" 1 'log 0.000001 2) (list "f" 1 'log 50 8000) (list "tc" 1 'lin 0 0.03)
+                        (list "w" 1 'log 0.0003 0.02) (list "ph" 1 'raw))
+        (dict :names names) burst-build))
+
+(def burst-build (p ctx v)
+  (let ((BUA (s p "A")) (BUF (s p "F")) (BUT (s p "T")) (iBUW (s p "iW")) (BUPH (s p "PH")) (BDT (s p "dt")) (BZ (s p "z"))
+        (BUENV (s p "env")) (OUT (s p "out")))
+    (let ((a `(* punch vsnap ,(D p "amp")))
+          (rest (list (df BUF `(at-hit (* ratio ,(D p "f"))))
+                      (df BUT `(at-hit ,(D p "tc")))
+                      (df iBUW `(at-hit (/ 1 ,(D p "w"))))
+                      (df BUPH `(at-hit ,(D p "ph"))))))
+      (merged (level-split v BUA a rest)
+              (dict :dsp (list (df BDT `(- t ,BUT))
+                               (df BZ `(* ,BDT ,iBUW))
+                               (df BUENV `(* ,BUA (rlg ,BUF) (exp (* -0.5 (min 60 (* ,BZ ,BZ))))))
+                               (df OUT `(* ,BUENV (sin (+ (* twopi ,BUF ,BDT) ,BUPH)))))
+                    :body (list OUT) :ms (list BUENV))))))
+
+;; bark: the distortion harmonics of tanh(8 body + 0.3) (its DC and linear terms
+;; removed), x shape; reads the shaper's body bus, adds to the drum bus.
+(def bark (id &key (names nil))
+  (part :bark id (list (list "amt" 1 'log 0.000001 2)) (dict :names names) bark-build))
+
+(def bark-build (p ctx v)
+  (let ((BKA (s p "A")) (OUT (s p "out")) (body (s (find-part ctx :shaper nil) "body")))
+    (dict :hit (list (df BKA (if (= v :static) `(at-hit (* shape ,(D p "amt"))) `(ramped (* shape ,(D p "amt")) ,(shape 1)))))
+          :dsp (list (df OUT `(* ,BKA (- (tanh (+ (* 8 ,body) 0.3)) 0.29131261 (* 7.32109568 ,body)))))
+          :drum (list OUT))))
 
 ;; ── strike sines: short gliding sines (the stick) ─────────────────────────
 (def strikes (id &key (count 4) (names nil))
@@ -317,15 +510,16 @@
 ;; Timing and output gain: onset delay t0 (the whole voice starts t0 after the
 ;; hit), end of the hit (x length; x rhythm above 1), fade, gain. Required: the
 ;; assembler reads T0, EE / emax-v, FD and LV.
-(def timing (id &key (names nil))
+(def timing (id &key (rhythm true) (names nil))
   (part :timing id (list (list "t0" 1 'lin -0.002 0.008) (list "end" 1 'lin 0.02 1.6) (list "fade" 1 'log 0.0002 0.2)
                          (list "gain" 1 'log 0.05 20))
-        (dict :names names) timing-build))
+        (dict :rhythm rhythm :names names) timing-build))
 
 (def timing-build (p ctx v)
+  (let ((len-k (if (get p :rhythm) '(length (max 1 rhythm)) '(length))))
   (if (= v :static)
     (dict :prelude (list (df 'T0 `(at-hit (max 0 ,(D p "t0")))))
-          :hit (list (df 'EE `(at-hit (* length (max 1 rhythm) ,(D p "end"))))
+          :hit (list (df 'EE `(at-hit (* ,@len-k ,(D p "end"))))
                      (df 'FD `(at-hit ,(D p "fade")))
                      (df 'out-trim '(training-value 1 0.5))
                      (df 'LV `(at-hit (* out-trim level vgain ,(D p "gain"))))))
@@ -333,10 +527,10 @@
           :hit (list (df 'FD `(ramped ,(D p "fade") ,(shape 1)))
                      (df 'LV `(falling (* out-trim level vgain ,(D p "gain")) ,(shape 1)))
                      ;; end gate time: the LATEST end decoded so far this hit, so a morph never cuts a hit short
-                     (df 'Enow `(latch (* length (max 1 rhythm) ,(D p "end")) dclk))
+                     (df 'Enow `(latch (* ,@len-k ,(D p "end")) dclk))
                      '(make-tensor-history emax @shape [1 1])
                      '(def emax-v (gswitch hit Enow (max (read-tensor-history emax) Enow)))
-                     '(write-tensor-history emax emax-v)))))
+                     '(write-tensor-history emax emax-v))))))
 
 ;; ── noise bands ───────────────────────────────────────────────────────────
 ;; 16 fixed bands (2 cascaded RBJ band-pass sections each) on one white noise,
@@ -346,15 +540,20 @@
                       2040.149 2966.816 4314.39 6274.052 9123.823 13268))
 
 ;; :envelope false: only the bank (for rattles, washes, events), no wires of its own.
+;; :t0 false no onset delay of their own; :snap false the fast stage ignores velocity;
+;; :level the knobs scaling both stages ('(snappy) wires, '(noise record) a record's
+;; noise bed); :decay-knob the knob scaling both decays.
 ;; The bank's centre frequencies (every bands part defines them; one bank per voice).
 (def band-fc-form () `(def band-fc (tensor @shape [1 16] @data ,(rng (str "[" (apply str (map (lambda (x) (str x " ")) band-fc-values)) "]")))))
 
-(def bands (id &key (envelope true) (names nil))
+(def bands (id &key (envelope true) (names nil) (t0 true) (snap true) (level '(snappy)) (decay-knob 'wire_decay))
   (part :bands id (if envelope
-                    (list (list "wl" 16 'log 0.0000001 4) (list "wm" 16 'lin 0 1) (list "wd1" 16 'log 0.0002 0.1)
-                          (list "wd2" 16 'log 0.002 2) (list "w_t0" 1 'lin 0 0.02) (list "wrise" 1 'log 0.00001 0.05))
+                    (concat-all (list (list (list "wl" 16 'log 0.0000001 4) (list "wm" 16 'lin 0 1) (list "wd1" 16 'log 0.0002 0.1)
+                                            (list "wd2" 16 'log 0.002 2))
+                                      (if t0 (list (list "w_t0" 1 'lin 0 0.02)) (list))
+                                      (list (list "wrise" 1 'log 0.00001 0.05))))
                     (list))
-        (dict :envelope envelope :names names) bands-build))
+        (dict :envelope envelope :names names :t0 t0 :snap snap :level level :decay-knob decay-knob) bands-build))
 
 (def bank-only (v)
   (dict :prelude (list (band-fc-form))
@@ -396,39 +595,42 @@
 (def bands-build (p ctx v)
   (if (= (get p :envelope) false) (bank-only v)
   (let ((iW1 (s p "iW1")) (iW2 (s p "iW2")) (WT0 (s p "WT0")) (iWR (s p "iWR")) (WGF (s p "WGF")) (WGS (s p "WGS"))
-        (TW (s p "tw")) (RISE (s p "rise-env")) (WENV (s p "wenv")) (OUT (s p "out"))
+        (t0 (get p :t0)) (TW (if (get p :t0) (s p "tw") 't)) (RISE (s p "rise-env")) (WENV (s p "wenv")) (OUT (s p "out"))
+        (lv (get p :level)) (sn (if (get p :snap) '(vsnap) '())) (dk (get p :decay-knob))
+        (wstart (if (get p :t0) `(+ T0 ,(s p "WT0")) 'T0))
         (att (filter (lambda (q) (and (get q :attach) (= (get q :on) (get p :id)))) (get ctx :parts))))
     (let ((attached (map (lambda (q) ((get q :attach) q ctx v)) att)))
      (if (= v :static)
       (dict :prelude (list (band-fc-form))
             :iwr iWR
-            :hit (list (df iW1 `(at-hit (/ 1 (* wire_decay ,(D p "wd1")))))
-                       (df iW2 `(at-hit (/ 1 (* wire_decay ,(D p "wd2")))))
-                       (df WT0 `(at-hit ,(D p "w_t0")))
-                       (df iWR `(at-hit (/ 1 (* attack ,(D p "wrise")))))
-                       (df WGF `(at-hit (* snappy vsnap ,(D p "wl") ,(D p "wm") (rlg-hit band-fc))))
-                       (df WGS `(at-hit (* snappy ,(D p "wl") (- 1 ,(D p "wm")) (rlg-hit band-fc)))))
+            :hit (concat-all (list
+                   (list (df iW1 `(at-hit (/ 1 (* ,dk ,(D p "wd1")))))
+                         (df iW2 `(at-hit (/ 1 (* ,dk ,(D p "wd2"))))))
+                   (if t0 (list (df WT0 `(at-hit ,(D p "w_t0")))) (list))
+                   (list (df iWR `(at-hit (/ 1 (* attack ,(D p "wrise")))))
+                         (df WGF `(at-hit (* ,@lv ,@sn ,(D p "wl") ,(D p "wm") (rlg-hit band-fc))))
+                         (df WGS `(at-hit (* ,@lv ,(D p "wl") (- 1 ,(D p "wm")) (rlg-hit band-fc)))))))
             :dsp (concat-all (list
                    (bank-forms)
-                   (list (df TW `(max 0 (- t ,WT0)))
-                         (df RISE `(- 1 (exp (* -1 ,TW ,iWR))))
+                   (if t0 (list (df TW `(max 0 (- t ,WT0)))) (list))
+                   (list (df RISE `(- 1 (exp (* -1 ,TW ,iWR))))
                          (df WENV `(+ (* ,WGF (exp (* -1 ,TW ,iW1))) (* ,WGS (exp (* -1 ,TW ,iW2))))))
                    (concat-all (map (lambda (a) ((get a :dsp) iWR)) attached))
                    (list (df OUT `(sum-axis (* ,(plus (cons `(* ,RISE ,WENV) (map (lambda (a) (get a :term)) attached))) bands)
                                             @axis 1 @keepdims true)))))
             :drum (list OUT))
       (dict :prelude (list (band-fc-form))
-            :hit (list (df iW1 `(ramped (/ 1 (* wire_decay ,(D p "wd1"))) ,(shape 16)))
-                       (df iW2 `(ramped (/ 1 (* wire_decay ,(D p "wd2"))) ,(shape 16)))
-                       (df WGF `(falling (* snappy vsnap ,(D p "wl") ,(D p "wm") (rlg-at band-fc rlm-d rlf-d)) ,(shape 16)))
-                       (df WGS `(falling (* snappy ,(D p "wl") (- 1 ,(D p "wm")) (rlg-at band-fc rlm-d rlf-d)) ,(shape 16))))
-            :fixed (list (df WT0 `(at-hit ,(D p "w_t0")))
-                         (df iWR `(at-hit (/ 1 (* attack ,(D p "wrise"))))))
+            :hit (list (df iW1 `(ramped (/ 1 (* ,dk ,(D p "wd1"))) ,(shape 16)))
+                       (df iW2 `(ramped (/ 1 (* ,dk ,(D p "wd2"))) ,(shape 16)))
+                       (df WGF `(falling (* ,@lv ,@sn ,(D p "wl") ,(D p "wm") (rlg-at band-fc rlm-d rlf-d)) ,(shape 16)))
+                       (df WGS `(falling (* ,@lv ,(D p "wl") (- 1 ,(D p "wm")) (rlg-at band-fc rlm-d rlf-d)) ,(shape 16))))
+            :fixed (append (if t0 (list (df WT0 `(at-hit ,(D p "w_t0")))) (list))
+                           (list (df iWR `(at-hit (/ 1 (* attack ,(D p "wrise")))))))
             :dsp (concat-all (list
                    (bank-forms)
-                   (list (df TW `(max 0 (- t ,WT0)))
-                         (df (s p "n1") `(decaying ,iW1 (+ T0 ,WT0) ,(shape 16)))
-                         (df (s p "n2") `(decaying ,iW2 (+ T0 ,WT0) ,(shape 16)))
+                   (if t0 (list (df TW `(max 0 (- t ,WT0)))) (list))
+                   (list (df (s p "n1") `(decaying ,iW1 ,wstart ,(shape 16)))
+                         (df (s p "n2") `(decaying ,iW2 ,wstart ,(shape 16)))
                          (df WENV `(* (- 1 (exp (* -1 ,TW ,iWR))) (+ (* ,WGF ,(s p "n1")) (* ,WGS ,(s p "n2"))))))
                    (concat-all (map (lambda (a) ((get a :dsp) iWR)) attached))
                    (list (df OUT `(sum-axis (* ,(plus (cons WENV (map (lambda (a) (get a :term)) attached))) bands)
@@ -506,10 +708,10 @@
 ;; Two noise events on a bank's bands, each with its own time (x length, x rhythm
 ;; past 50 ms), level (x record), decay, rise and band colour: second hits,
 ;; ghost notes, a hat after the snare.
-(def events (id &key (on 'wires) (names nil))
+(def events (id &key (on 'wires) (rhythm true) (names nil))
   (part :events id (list (list "ev_t" 2 'lin 0 1.2) (list "ev_lvl" 2 'log 0.000001 4) (list "ev_dec" 2 'log 0.002 1)
                          (list "ev_rise" 2 'log 0.0001 0.02) (list "ev_col" 32 'log 0.0001 1))
-        (dict :on on :names names) events-build))
+        (dict :on on :rhythm rhythm :names names) events-build))
 
 ;; rhythm: events in the first 25 ms (attack texture) stay put; from 50 ms on a
 ;; time is multiplied by rhythm; a smoothstep joins the two.
@@ -520,8 +722,9 @@
 (def events-build (p ctx v)
   (let ((EVT0 (s p "EVT0")) (EVT (s p "EVT")) (EVL (s p "EVL")) (iEVD (s p "iEVD")) (iEVR (s p "iEVR"))
         (C1 (s p "C1")) (C2 (s p "C2")) (ET (s p "evt")) (ENV (s p "env")) (O1 (s p "out1")) (O2 (s p "out2")))
-    (let ((hit (append (list (df EVT0 `(at-hit (* length ,(D p "ev_t")))))
-                       (rhythm-forms EVT0 (s p "w") EVT)
+    (let ((hit (append (if (get p :rhythm)
+                         (append (list (df EVT0 `(at-hit (* length ,(D p "ev_t"))))) (rhythm-forms EVT0 (s p "w") EVT))
+                         (list (df EVT `(at-hit (* length ,(D p "ev_t"))))))
                        (list (df EVL `(at-hit (* record ,(D p "ev_lvl"))))
                              (df iEVD `(at-hit (/ 1 (* decay ,(D p "ev_dec")))))
                              (df iEVR `(at-hit (/ 1 ,(D p "ev_rise"))))
@@ -590,7 +793,7 @@
 
 (def template-build (p ctx v)
   (let ((n (len (get p :freqs))) (st (if (get p :strokes) (stroke-of ctx) nil)) (abs2 (= (get p :second) :absolute))
-        (knobs (if (get p :knob) (list (get p :knob)) (list)))
+        (knobs (knob-list p))
         (TF (s p "F0")) (TT (s p "TAU")) (TM (s p "M")) (TP (s p "PH0")) (A2 (s p "A2"))
         (RBF (s p "F")) (RBA (s p "A")) (iRBD (s p "iD")) (RF (s p "f")) (ENV (s p "env")) (OUT (s p "out")))
     (let ((pre (list (tensor-row TF (get p :freqs)) (tensor-row TT (get p :taus))
@@ -636,7 +839,7 @@
 
 (def wash-build (p ctx v)
   (let ((st (if (get p :strokes) (stroke-of ctx) nil)) (abs2 (= (get p :second) :absolute))
-        (knobs (if (get p :knob) (list (get p :knob)) (list)))
+        (knobs (knob-list p))
         (G (s p "G")) (G2 (s p "G2")) (iR (s p "iR")) (iD (s p "iD")) (W1 (s p "w1")) (W2 (s p "w2")) (OUT (s p "out")))
     (let ((gain2 (if (and st abs2) (list (df G2 (if (= v :static) `(at-hit (* ,@knobs ,(D p "l2") (rlg-hit band-fc)))
                                                   `(falling (* ,@knobs ,(D p "l2") (rlg-at band-fc rlm-d rlf-d)) ,(shape 16)))))
@@ -710,7 +913,7 @@
         strings-build))
 
 (def strings-build (p ctx v)
-  (let ((n (get p :count)) (st (if (get p :strokes) (stroke-of ctx) nil)) (knobs (if (get p :knob) (list (get p :knob)) (list)))
+  (let ((n (get p :count)) (st (if (get p :strokes) (stroke-of ctx) nil)) (knobs (knob-list p))
         (K (s p "k")) (F (s p "F")) (A (s p "A")) (iD (s p "iD")) (PH (s p "PH")) (FHZ (s p "fhz"))
         (ENV (s p "env")) (OUT (s p "out")))
     (let ((kt (list (df K `(tensor @shape ,(shape n) @data ,(rng (str "[" (apply str (map (lambda (k) (str (if (= k 0) "" " ") (+ k 1))) (range n))) "]"))))))
@@ -787,7 +990,7 @@
 
 ;; ── knobs (identity at their defaults); only the ones the voice reads ─────
 (def knob-table
-  '((tune 1 0.5 2) (decay 1 0.25 4) (bend 1 0 3) (attack 1 0.25 4) (punch 1 0 3) (snappy 1 0 3)
+  '((tune 1 0.5 2) (decay 1 0.25 4) (drop_time 1 0.25 4) (bend 1 0 3) (attack 1 0.25 4) (punch 1 0 3) (growl 1 0 3) (snappy 1 0 3)
     (wire_decay 1 0.25 4) (shape 1 0 3) (drive 1 0.25 8) (record 1 0 2) (noise 1 0 4) (length 1 0.25 4)
     (rhythm 1 0.25 4) (metal 1 0 4) (level 1 0 2) (vel_amt 1 0 2)))
 
@@ -814,6 +1017,14 @@
         (if (> (len (filter (lambda (p) (= (get p :kind) :restrike)) ps)) 1) (list "one restrike per voice for now") nil))
       ;; every bands part defines the same bank names (band-fc, bands, its filter state)
       (if (> (len (filter (lambda (p) (= (get p :kind) :bands)) ps)) 1) (list "one bands part per voice for now") nil)
+      (if (and (find-part (dict :parts ps) :bark nil) (not (find-part (dict :parts ps) :shaper nil)))
+        (list "a bark part reads the body bus: it needs a (shaper ...) part") nil)
+      (concat-all (map (lambda (p) (if (and (= (get p :kind) :modes) (= (get p :glide) :per-mode) (get p :strokes))
+                                     (list (str (source (get p :id)) ": :glide :per-mode modes have no second stroke (:strokes)"))
+                                     (if (and (= (get p :kind) :modes) (not (= (get p :glide) :per-mode)) (get p :second-drop))
+                                       (list (str (source (get p :id)) ": :second-drop needs :glide :per-mode"))
+                                       nil)))
+                       ps))
       (concat-all (map (lambda (p) (if (and (= (get p :kind) :rattle) (not (get p :of)))
                                      (list (str (source (get p :id)) ": a rattle needs :of (the part whose loudness gates it)"))
                                      nil))
@@ -1034,7 +1245,8 @@
 (def roles '((:modes "f" freq) (:modes "amp" level) (:strikes "xamp" level) (:bands "wl" level)
              (:hiss "hl" level) (:crackle "cr_lvl" level) (:events "ev_lvl" level) (:template "lvl" level)
              (:wash "l" level) (:restrike "t" time) (:restrike "lvl" level) (:template "lvl2" level)
-             (:wash "l2" level) (:strings "amp" level) (:rattle "l" level)))
+             (:wash "l2" level) (:strings "amp" level) (:rattle "l" level) (:growl "amp" level) (:burst "amp" level)
+             (:bark "amt" level)))
 
 (def role-of (kind field)
   (let ((hits (filter (lambda (r) (and (= (first r) kind) (= (nth r 1) field))) roles)))
@@ -1092,10 +1304,11 @@
 ;;   packs       sample-library pack names (Save Region's packs)
 ;;   tags        tag sets: a sample with every tag of one set is in
 ;;   keep-crops  a dataset dir whose samples (by hash) keep its exact crops
+;;   only-kept   true: only those samples (of the packs / tags): a fixed set to compare runs on
 ;;   crop        :first-hit (2 ms before the first hit) or :none
 ;;   frames      training length in samples (44.1 kHz)
-(def data (&key (packs nil) (tags nil) (keep-crops nil) (crop :first-hit) (frames 32768))
-  (dict :packs packs :tags tags :keep-crops keep-crops :crop crop :frames frames))
+(def data (&key (packs nil) (tags nil) (keep-crops nil) (only-kept false) (crop :first-hit) (frames 32768))
+  (dict :packs packs :tags tags :keep-crops keep-crops :only-kept only-kept :crop crop :frames frames))
 
 ;; Where the starting rows come from, per sample, in order of preference:
 ;;   parent   a previous experiment dir (or run dir): its fitted rows, by segment
@@ -1120,10 +1333,12 @@
 (def path (lam &key (steps 4000) (lr 0.002) (seed 1)) (dict :stage "path" :lambda lam :steps steps :lr lr :seed seed))
 (def recipe (&rest stages) stages)
 
-;; The instrument: name, library folder, Morph twin, which knobs go on the panel
-;; next to the stock ones.
-(def ship (name &key (folder "Research") (morph true) (extra-knobs '(rhythm metal)))
-  (dict :name name :folder folder :morph morph :extra-knobs extra-knobs))
+;; The instrument: name, library folder, Morph twin, the panel's member word ("snare":
+;; Snare A / Snare B, params snare_a / snare_b), its TONE knobs, and knobs added after
+;; them when the voice has them.
+(def ship (name &key (folder "Research") (morph true) (member "snare") (tone '(tune decay snappy level))
+                     (extra-knobs '(rhythm metal)))
+  (dict :name name :folder folder :morph morph :member member :tone tone :extra-knobs extra-knobs))
 
 (def experiment (name &key (voice nil) (data nil) (seed nil) (train nil) (ship nil) (notes ""))
   (dict :kind :experiment :name name :voice voice :data data :seed seed :train train :ship ship :notes notes))
