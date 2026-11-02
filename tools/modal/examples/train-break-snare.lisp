@@ -107,7 +107,7 @@
 (t/emit-experiment v3l6 ".local/train/break-snare-v3-l6")
 
 ;; v5: v4's voice and rows, refit with the band loss's bands above 4 kHz weighted x3 (B28's ride hit is
-;; +3 dB above 4 kHz at ~210 ms; at weight 1 the fit ignores it). Needs a DGenLisp with --hf-weight.
+;; +3 dB above 4 kHz at ~210 ms; at weight 1 the fit ignores it). Needs DGenLisp >= v0.1.43 (--hf-weight).
 (def v5
   (t/experiment "break-snare-v5" :voice break-snare-v4
     :notes "v4 refit with the >4 kHz bands weighted x3 in the band loss"

@@ -16,7 +16,8 @@ Stages, each cached in EXPDIR (delete its output to run it again):
   eval     fidelity (band / MR per sample), latent smoothness, report.md vs the parent
   ship     the instrument + Morph twin, installed to .local/instruments/<folder>, `eseq instrument check`
 
-Tools: DGenLisp from $D (default ~/code/swift/dgen-lss/.build/release/DGenLisp); the scoring and
+Tools: DGenLisp from $D, else $ESEQ_DGENLISP_TOOL, else eseq's pinned compiler (content/dgenlisp.lock, installed
+by scripts/fetch_dgenlisp.sh; train-dataset needs >= dgenlisp-v0.1.43 for :hf-weight); the scoring and
 instrument builders of the latent-snare research toolkit from $ESEQ_TRAIN_TOOLKIT (default
 .local/research/latent-snare-from-samples, with .local/research/break-snares for fidelity / knobs).
 """
@@ -36,7 +37,8 @@ sys.path.insert(0, HERE)
 import dataset  # noqa: E402
 import seeders  # noqa: E402
 
-D = os.environ.get("D", os.path.expanduser("~/code/swift/dgen-lss/.build/release/DGenLisp"))
+D = (os.environ.get("D") or os.environ.get("ESEQ_DGENLISP_TOOL")
+     or os.path.join(ROOT, "crates/sequencer/tools", "DGenLisp-" + ("macos-arm64" if sys.platform == "darwin" else "linux-x86_64")))
 KIT = os.environ.get("ESEQ_TRAIN_TOOLKIT", os.path.join(ROOT, ".local/research/latent-snare-from-samples"))
 BREAKS = os.path.join(ROOT, ".local/research/break-snares")
 LIBRARY = os.environ.get("ESEQ_LIBRARY", os.path.join(ROOT, ".local"))
@@ -452,7 +454,7 @@ def stage_ship(exp):
     stage = exp.p("stage")
     shutil.rmtree(stage, ignore_errors=True)
     os.makedirs(stage)
-    env = {"ESEQ_DGENLISP_TOOL": os.path.join(KIT, "tools/dgenlisp/DGenLisp"), "DS": exp.data}
+    env = {"ESEQ_DGENLISP_TOOL": D, "DS": exp.data}
     B = os.path.join(HERE, "build")
     sh([sys.executable, os.path.join(B, "pick_pairs.py"), fin, os.path.join(fin, "pairs.json")], env=env)
     sh([sys.executable, os.path.join(B, "build_instrument.py"), fin, stage, "--name", name, "--voice", exp.voice,
