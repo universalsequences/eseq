@@ -129,7 +129,11 @@ pub use crate::groove::{
 //       load with every instance on everywhere, which is what they played.
 //       Older builds would drop both and run parked conductors, so they must
 //       refuse the file.
-const PROJECT_FILE_VERSION: u32 = 20;
+//  21 - audio tracks (docs/audio-tracks-spec.md): tracks of kind `audio`,
+//       and the arrangement's `audio_lanes`/`audio_sources` naming files in
+//       the user-data audio store. Older files have neither. Older builds
+//       cannot parse the track kind, so they refuse the file.
+const PROJECT_FILE_VERSION: u32 = 21;
 
 /// The first file version whose rack slots and scenes carry the scene-owned
 /// swap state (version history entry 18).
@@ -501,7 +505,10 @@ impl ProjectFile {
                         }
                     }
                 }
-                ProjectTrackKind::Empty | ProjectTrackKind::Sampler { .. } | ProjectTrackKind::Modulator => {}
+                ProjectTrackKind::Empty
+                | ProjectTrackKind::Sampler { .. }
+                | ProjectTrackKind::Modulator
+                | ProjectTrackKind::Audio => {}
             }
         }
         Ok(())
@@ -922,7 +929,10 @@ impl ProjectFile {
                     .map(|slot| (slot.sample_path.clone(), slot.sample_name.clone()))
                     .collect(),
                 ProjectTrackKind::Sampler { sample_path } => vec![(sample_path.clone(), None)],
-                ProjectTrackKind::Empty | ProjectTrackKind::Custom { .. } | ProjectTrackKind::Modulator => Vec::new(),
+                ProjectTrackKind::Empty
+                | ProjectTrackKind::Custom { .. }
+                | ProjectTrackKind::Modulator
+                | ProjectTrackKind::Audio => Vec::new(),
             })
             .collect();
         for pattern in &mut self.patterns {
@@ -2155,6 +2165,9 @@ pub enum ProjectTrackKind {
         #[serde(default)]
         slots: Vec<ProjectRackTrackSlot>,
     },
+    /// An audio track (docs/audio-tracks-spec.md). Its regions and sources
+    /// are arrangement content (`ProjectArrangement::audio_lanes`).
+    Audio,
 }
 
 #[derive(Deserialize)]
@@ -3361,7 +3374,7 @@ impl ProjectTrackSoundState {
 impl From<InstrumentType> for ProjectInstrumentType {
     fn from(value: InstrumentType) -> Self {
         match value {
-            InstrumentType::Empty => Self::Empty,
+            InstrumentType::Empty | InstrumentType::Audio => Self::Empty,
             InstrumentType::Sampler => Self::Sampler,
             InstrumentType::Custom => Self::Custom,
             InstrumentType::Modulator => Self::Modulator,
@@ -5554,6 +5567,9 @@ mod tests {
             end_beat: 33.25,
             loop_enabled: true,
             next_clip_id: 1,
+            audio_lanes: Vec::new(),
+            audio_sources: std::collections::BTreeMap::new(),
+            next_audio_source_id: 0,
         }
     }
 
@@ -5813,6 +5829,9 @@ mod tests {
             end_beat: 16.0,
             loop_enabled: false,
             next_clip_id: 1,
+        audio_lanes: Vec::new(),
+        audio_sources: std::collections::BTreeMap::new(),
+        next_audio_source_id: 0,
         };
 
         let migrated = migrate_legacy_backdrops(&v5, &scenes).expect("migrates");

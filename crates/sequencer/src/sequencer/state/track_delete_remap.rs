@@ -149,6 +149,9 @@ pub(super) fn remap_arrangement_after_track_delete(
     if deleted_track < arrangement.track_lanes.len() {
         arrangement.track_lanes.remove(deleted_track);
     }
+    if deleted_track < arrangement.audio_lanes.len() {
+        arrangement.audio_lanes.remove(deleted_track);
+    }
 }
 
 /// Arrangement sibling of `remap_song_overrides_after_track_move`: the lane
@@ -168,6 +171,12 @@ pub(super) fn remap_arrangement_after_track_move(
     }
     let lane = arrangement.track_lanes.remove(from);
     arrangement.track_lanes.insert(to, lane);
+    // Audio lanes are sparse: grow them only as far as the move reaches.
+    if arrangement.audio_lanes.len() > from.min(to) {
+        arrangement.audio_lane_mut(from.max(to));
+        let audio = arrangement.audio_lanes.remove(from);
+        arrangement.audio_lanes.insert(to, audio);
+    }
 }
 
 /// Keep authored arrangement events attached to the same scene after a scene

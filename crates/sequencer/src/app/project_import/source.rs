@@ -340,6 +340,7 @@ impl ImportSource {
         let (kind, label, slots) = match &project_track.kind {
             ProjectTrackKind::Empty => (DeviceKind::Empty, String::new(), 0),
             ProjectTrackKind::Modulator => (DeviceKind::Modulator, String::new(), 0),
+            ProjectTrackKind::Audio => (DeviceKind::Empty, String::new(), 0),
             ProjectTrackKind::Custom { instrument_name } => {
                 (DeviceKind::Synth, instrument_leaf(instrument_name), 1)
             }

@@ -28,6 +28,7 @@ use crate::sequencer::{
 use crate::track_color::TrackColor;
 
 pub mod arr_edit;
+pub mod audio_tracks;
 mod browser;
 pub mod command;
 pub mod edit;
@@ -781,7 +782,7 @@ impl GraphState {
                 .and_then(|engine| engine.as_ref())
                 .map(|engine| !engine.mod_output_channels.is_empty())
                 .unwrap_or(false),
-            Some(InstrumentType::Empty | InstrumentType::Sampler | InstrumentType::Rack) | None => false,
+            Some(InstrumentType::Empty | InstrumentType::Audio | InstrumentType::Sampler | InstrumentType::Rack) | None => false,
         }
     }
 }
@@ -872,6 +873,8 @@ pub struct TrackNodeIds {
     /// from `pdc_id`; `None` until the first apply. Lets a scene switch skip
     /// the rewire when the incoming pattern routes the track the same way.
     pub applied_output: Option<crate::sequencer::TrackOutput>,
+    /// The region player of an audio track (docs/audio-tracks-spec.md §9.2).
+    pub audio_player: Option<crate::audio_track::AudioPlayerNode>,
 }
 
 #[derive(Clone)]
@@ -1119,6 +1122,10 @@ pub struct App {
     /// (docs/jaki-mixer-control-routes-spec.md §3); values are release samples.
     pub(crate) mixer_control_holds: crate::mixer_control::MixerControlHolds<mixer_controls::MixerControlHoldKey>,
     pub sampler_paths: Vec<Option<PathBuf>>,
+    /// Audio-track region players and their published snapshots.
+    pub(crate) audio_players: crate::audio_track::AudioTrackPlayers,
+    /// Decoded audio sources and what each player last published.
+    pub(crate) audio_tracks: audio_tracks::AudioTrackRuntime,
     pub rack_selected_slots: Vec<usize>,
     pub sample_path_registry: HashMap<String, PathBuf>,
     pub sample_buffer_path_registry: HashMap<i32, PathBuf>,
@@ -3062,6 +3069,8 @@ impl App {
             instances: crate::project::ProjectInstances::default(),
             mixer_control_holds: crate::mixer_control::MixerControlHolds::default(),
             sampler_paths: Vec::new(),
+            audio_players: Default::default(),
+            audio_tracks: Default::default(),
             rack_selected_slots: Vec::new(),
             sample_path_registry: HashMap::new(),
             sample_buffer_path_registry: HashMap::new(),

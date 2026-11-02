@@ -3361,7 +3361,8 @@
           (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
             (v-stack (box :height 0.1)
               (track-header t bare))
-            (track-grid t)
+            ;; Audio tracks play regions, not steps (docs/audio-tracks-spec.md).
+            (if (not (= t.instrument-type "audio")) (track-grid t))
             (box :flex 1 :width :fill :height 0.1 :bg :transparent)
             (track-actions t))))))
 
@@ -4257,12 +4258,12 @@
       (eseq.retrospective/panel))
     (subtree :key "seq-resample"
       (eseq.resample/panel))
-    (subtree :key "seq-factory-promote"
-      (eseq.factory-promote/panel))
     (subtree :key "seq-sample-region"
       (eseq.sample-region/panel))
     (subtree :key "seq-sample-new-pack"
       (eseq.sample-region/new-pack-panel))
+    (subtree :key "seq-factory-promote"
+      (eseq.factory-promote/panel))
     (subtree :key "seq-rack-clip-menu"
       (rack-clip-context-menu))
     (subtree :key "seq-rack-clip-rename"

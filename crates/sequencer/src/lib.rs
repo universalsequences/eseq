@@ -64,6 +64,7 @@ pub mod authoring_kit;
 pub mod audio;
 pub use audio::{audiograph, engine};
 pub mod audio_tap;
+pub mod audio_track;
 pub mod crash;
 pub mod custom_ui_codegen;
 pub mod groove;

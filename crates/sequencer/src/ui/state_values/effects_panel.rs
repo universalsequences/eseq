@@ -119,7 +119,7 @@ pub(crate) fn track_device_chain(
             .cloned()
             .or_else(|| Some("rack".to_string())),
         Some(sequencer::sequencer::InstrumentType::Modulator) => Some("modulator".to_string()),
-        Some(sequencer::sequencer::InstrumentType::Empty) | None => None,
+        Some(sequencer::sequencer::InstrumentType::Empty | sequencer::sequencer::InstrumentType::Audio) | None => None,
     };
     if let Some(name) = instrument_name {
         entries.push(DeviceChainEntry {

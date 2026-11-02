@@ -27,6 +27,13 @@ pub struct WaveformWidget;
 pub static WAVEFORM_WIDGET: WaveformWidget = WaveformWidget;
 
 const WAVEFORM_BODY_TOP_INSET: f32 = 0.45;
+/// Height of the start/end bar strip `:marker-style :bar` draws between the
+/// ruler and the waveform, in cells.
+const MARKER_BAR_STRIP_HEIGHT: f32 = 0.7;
+/// Width of a bar's end handle, in cells: the grab zone for one marker.
+const MARKER_BAR_HANDLE_WIDTH: f32 = 0.6;
+/// A marker line's width in cells: constant at any widget size.
+const MARKER_LINE_WIDTH: f32 = 0.125;
 const WAVEFORM_BODY_BOTTOM_INSET: f32 = 0.25;
 const MARKER_FLAG_HEIGHT_NORM: f32 = 0.1575;
 const MARKER_LINE_SLOP_PX: f32 = 2.0;
@@ -115,6 +122,13 @@ struct WaveformView {
     selection_start: Option<f64>,
     selection_end: Option<f64>,
     marker_selection: bool,
+    /// `:marker-style :bar`: Ableton's start/end bar in a strip under the
+    /// ruler with thin lines through the body, instead of the flags.
+    bar_markers: bool,
+    /// A time range highlighted over the body, separate from the markers
+    /// (`:range-start`/`:range-end`): in bar mode a body drag sets it.
+    range_start: Option<f64>,
+    range_end: Option<f64>,
     active_marker: Option<String>,
     slices: Vec<f64>,
     /// Parallel to `slices`: whether sensitivity keeps that marker as a real
@@ -136,6 +150,9 @@ enum HitRegion {
     Header,
     StartMarker,
     EndMarker,
+    /// The bar between the markers (`:marker-style :bar`): dragging it
+    /// slides the whole selection.
+    SelectionBar,
     SliceMarker { index: usize, time: f64 },
     Content { time: f64 },
 }
@@ -154,8 +171,12 @@ carries :sample-rate :duration :peaks itself). All times are in seconds. The vie
 controlled: :view-start and :view-duration pick the visible window and the widget \
 never changes them itself; :zoom-min-duration/:zoom-max-duration bound zoom requests. \
 :selection-start/:selection-end draw the selection (with :marker-selection true as \
-grabbable start/end handles, :active-marker :start or :end highlighting one); \
-:playhead-time and :cursor-time draw lines (bind the playhead live, e.g. \
+grabbable start/end handles — flags, or with :marker-style :bar a draggable bar in a \
+strip under the ruler, as in Ableton's clip view, where a body drag instead \
+sets :range-start/:range-end via :set-range then :end-range — :active-marker :start or :end highlighting one); \
+:playhead-time and :cursor-time draw lines (or :playhead-beat bound to the song position \
+with :playhead-map {:start :end :offset :span [:loop-start :loop-end]} maps an \
+arrangement region's beats to source seconds; bind the playhead live, e.g. \
 #'browser.preview-position; -1 hides it). :slices is a list of slice times, \
 :slice-active a parallel list of 0/1, :active-slice the selected index, and \
 :slice-select true turns clicks into slice picking (shift-click adds a slice, \
@@ -174,7 +195,8 @@ Example: (waveform :buffer buf :view-start v.start :view-duration v.dur \
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "buffer", "on-action", "view-start", "view-duration", "zoom-min-duration",
-            "zoom-max-duration", "selection-start", "selection-end", "marker-selection",
+            "zoom-max-duration", "selection-start", "selection-end", "marker-selection", "marker-style", "range-start",
+            "range-end", "playhead-beat", "playhead-map",
             "active-marker", "playhead-time", "cursor-time", "slices", "slice-active",
             "active-slice", "slice-select", "header-height", "sidebar-width", "time-ruler",
             "ruler-font-size", "ruler-color", "ruler-bg", "grid-major-color",
@@ -192,6 +214,7 @@ Example: (waveform :buffer buf :view-start v.start :view-duration v.dur \
     fn bindable_props(&self) -> &'static [&'static str] {
         &[
             "playhead-time",
+            "playhead-beat",
             "selection-start",
             "selection-end",
             "active-slice",
@@ -563,6 +586,125 @@ Example: (waveform :buffer buf :view-start v.start :view-duration v.dur \
     }
 }
 
+/// `:marker-style :bar` (Ableton's clip view): a strip under the ruler with a
+/// bar from start to end, a handle at each end, and one constant-width line
+/// per marker down through the body.
+#[allow(clippy::too_many_arguments)]
+fn push_marker_bar(
+    primitives: &mut Vec<GpuPrimitive>,
+    view: &WaveformView,
+    props: &HashMap<String, Value>,
+    strip: Rect,
+    body: Rect,
+    start: f64,
+    end: f64,
+) {
+    let bar_color = marker_color(props);
+    let active = active_marker_color(props);
+    let mut strip_bg = bar_color;
+    strip_bg.a *= 0.12;
+    primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+        x: strip.col,
+        y: strip.row,
+        width: strip.width,
+        height: strip.height,
+        color: strip_bg,
+    }));
+    let view_end = view.view_start + view.view_duration;
+    if end <= view.view_start || start >= view_end {
+        return;
+    }
+    let (start_x, end_x) = (view.x_for_time(start), view.x_for_time(end));
+    let inset = strip.height * 0.18;
+    primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+        x: start_x,
+        y: strip.row + inset,
+        width: (end_x - start_x).max(MARKER_LINE_WIDTH),
+        height: strip.height - inset * 2.0,
+        color: bar_color,
+    }));
+    let handle = MARKER_BAR_HANDLE_WIDTH.min(((end_x - start_x) / 2.0).max(0.2));
+    for (time, x, marker, handle_x) in [
+        (start, start_x, "start", start_x),
+        (end, end_x, "end", end_x - handle),
+    ] {
+        if !view.time_visible(time) {
+            continue;
+        }
+        let color = if view.active_marker_is(marker) || view.active_marker_is("window") {
+            active
+        } else {
+            let mut darker = bar_color;
+            darker.r *= 0.6;
+            darker.g *= 0.6;
+            darker.b *= 0.6;
+            darker
+        };
+        primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+            x: handle_x,
+            y: strip.row + inset,
+            width: handle,
+            height: strip.height - inset * 2.0,
+            color,
+        }));
+        primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+            x: x - MARKER_LINE_WIDTH / 2.0,
+            y: strip.row,
+            width: MARKER_LINE_WIDTH,
+            height: (body.row + body.height - strip.row).max(0.0),
+            color: if view.active_marker_is(marker) { active } else { bar_color },
+        }));
+    }
+}
+
+/// Bar mode's range highlight, drawn under the waveform.
+fn push_bar_mode_range(
+    primitives: &mut Vec<GpuPrimitive>,
+    view: &WaveformView,
+    props: &HashMap<String, Value>,
+    body: Rect,
+) {
+    let view_end = view.view_start + view.view_duration;
+    if let (Some(a), Some(b)) = (view.range_start, view.range_end) {
+        let (start, end) = (a.min(b).max(view.view_start), a.max(b).min(view_end));
+        if end > start {
+            let mut color = marker_color(props);
+            color.a *= 0.2;
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+                x: view.x_for_time(start),
+                y: body.row,
+                width: view.x_for_time(end) - view.x_for_time(start),
+                height: body.height,
+                color,
+            }));
+        }
+    }
+}
+
+/// Bar mode's constant-width cursor and playhead.
+fn push_bar_mode_lines(
+    primitives: &mut Vec<GpuPrimitive>,
+    view: &WaveformView,
+    props: &HashMap<String, Value>,
+    body: Rect,
+) {
+    for (time, color) in [
+        (view.cursor_time, cursor_color(props)),
+        (view.playhead_time, playhead_color(props)),
+    ] {
+        let Some(time) = time.filter(|time| view.time_visible(*time)) else {
+            continue;
+        };
+        primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+            x: view.x_for_time(time) - MARKER_LINE_WIDTH / 2.0,
+            y: body.row,
+            width: MARKER_LINE_WIDTH,
+            height: body.height,
+            color,
+        }));
+    }
+}
+
 fn build_primitives(node: &LayoutNode) -> Vec<GpuPrimitive> {
     if node.widget_type != "waveform" {
         return Vec::new();
@@ -677,6 +819,10 @@ fn build_primitives(node: &LayoutNode) -> Vec<GpuPrimitive> {
         }
     }
 
+    if view.bar_markers {
+        push_bar_mode_range(&mut primitives, &view, &node.props, waveform_rect);
+    }
+
     if let Some(buffer) = &view.buffer {
         let selection = view.normalized_selection();
         // No selection props at all (slice mode drops them) means nothing is
@@ -697,10 +843,13 @@ fn build_primitives(node: &LayoutNode) -> Vec<GpuPrimitive> {
             selection_end: selection
                 .map(|(_, end)| end)
                 .unwrap_or(if has_selection { 0.0 } else { 1.0 }),
-            show_selection_start: view.selection_start_visible(),
-            show_selection_end: view.selection_end_visible(),
+            // The bar style draws its own thin markers below.
+            show_selection_start: view.selection_start_visible() && !view.bar_markers,
+            show_selection_end: view.selection_end_visible() && !view.bar_markers,
             playhead_position: playhead.unwrap_or(0.0),
-            show_playhead: playhead.is_some(),
+            // The shader's line widens with the widget; bar mode draws its
+            // own thin cursor and playhead below.
+            show_playhead: playhead.is_some() && !view.bar_markers,
             waveform_color: waveform_color(&node.props),
             inactive_waveform_color: inactive_waveform_color(&node.props),
             marker_color: marker_color(&node.props),
@@ -709,6 +858,13 @@ fn build_primitives(node: &LayoutNode) -> Vec<GpuPrimitive> {
             active_selection_end: view.active_marker_is("end"),
             selection_color: selection_color(&node.props),
         }));
+    }
+
+    if let (Some(strip), Some((start, end))) = (view.marker_bar_strip(), view.selection_range()) {
+        push_marker_bar(&mut primitives, &view, &node.props, strip, waveform_rect, start, end);
+    }
+    if view.bar_markers {
+        push_bar_mode_lines(&mut primitives, &view, &node.props, waveform_rect);
     }
 
     let lod = view.slice_lod();
@@ -799,6 +955,29 @@ fn build_primitives(node: &LayoutNode) -> Vec<GpuPrimitive> {
     primitives
 }
 
+/// `:playhead-beat` (bind the song position) through `:playhead-map`
+/// `{:start :end beats, :offset :span seconds, [:loop-start :loop-end]}`: the
+/// source second an arrangement region is playing, for a clip view whose
+/// playhead must follow the song without its host re-rendering every frame.
+/// `None` while the song is outside the region.
+fn mapped_playhead(props: &HashMap<String, Value>) -> Option<f64> {
+    let beat = props.get("playhead-beat").and_then(as_number)?;
+    let map = props.get("playhead-map").and_then(get_map)?;
+    let number = |key: &str| map.get(key).and_then(as_number).filter(|n| n.is_finite());
+    let (start, end) = (number("start")?, number("end")?);
+    let (offset, span) = (number("offset")?, number("span")?);
+    if !(beat >= start && beat < end) || end <= start {
+        return None;
+    }
+    let mut second = offset + (beat - start) / (end - start) * span;
+    if let (Some(loop_start), Some(loop_end)) = (number("loop-start"), number("loop-end")) {
+        if loop_end > loop_start && second >= loop_end {
+            second = loop_start + (second - loop_end).rem_euclid(loop_end - loop_start);
+        }
+    }
+    Some(second)
+}
+
 fn metal_header_text_row(rect: Rect, header_height: f32) -> f32 {
     let usable_header_height = header_height.min(rect.height).max(0.0);
     rect.row + ((usable_header_height - 1.0) / 2.0).max(0.0)
@@ -807,7 +986,10 @@ fn metal_header_text_row(rect: Rect, header_height: f32) -> f32 {
 impl WaveformView {
     fn from_props(props: &HashMap<String, Value>, rect: Rect) -> Self {
         let slices = props.get("slices").map(parse_number_list).unwrap_or_default();
-        let playhead_time = props.get("playhead-time").and_then(as_number);
+        let playhead_time = props
+            .get("playhead-time")
+            .and_then(as_number)
+            .or_else(|| mapped_playhead(props));
         let selected_slice = props
             .get("active-slice")
             .and_then(as_number)
@@ -837,6 +1019,9 @@ impl WaveformView {
             selection_start: props.get("selection-start").and_then(as_number),
             selection_end: props.get("selection-end").and_then(as_number),
             marker_selection: get_bool(props, "marker-selection", false),
+            bar_markers: props.get("marker-style").and_then(as_name).as_deref() == Some("bar"),
+            range_start: props.get("range-start").and_then(as_number),
+            range_end: props.get("range-end").and_then(as_number),
             active_marker: props.get("active-marker").and_then(as_name),
             slices,
             slice_active: props
@@ -1047,9 +1232,27 @@ impl WaveformView {
         (start.is_finite() && end.is_finite() && end > start).then_some((start, end))
     }
 
+    /// The `:marker-style :bar` strip between the ruler and the body.
+    fn marker_bar_strip(&self) -> Option<Rect> {
+        if !self.bar_markers || !self.marker_selection {
+            return None;
+        }
+        let content = self.content_rect();
+        Some(Rect {
+            row: content.row,
+            col: content.col,
+            width: content.width,
+            height: MARKER_BAR_STRIP_HEIGHT.min(content.height.max(0.0)),
+        })
+    }
+
     fn waveform_body_rect(&self) -> Rect {
         let content = self.content_rect();
-        let top_inset = WAVEFORM_BODY_TOP_INSET.min(content.height.max(0.0));
+        let top_inset = match self.marker_bar_strip() {
+            Some(strip) => strip.height + 0.15,
+            None => WAVEFORM_BODY_TOP_INSET,
+        }
+        .min(content.height.max(0.0));
         let bottom_inset = WAVEFORM_BODY_BOTTOM_INSET.min((content.height - top_inset).max(0.0));
         Rect {
             row: content.row + top_inset,
@@ -1072,6 +1275,14 @@ impl WaveformView {
             return Some(HitRegion::Header);
         }
         let waveform = self.waveform_body_rect();
+        if let Some(strip) = self.marker_bar_strip()
+            && local_row >= strip.row
+            && local_row < waveform.row
+        {
+            return Some(self.marker_bar_hit(local_col).unwrap_or(HitRegion::Content {
+                time: self.time_at_col(local_col),
+            }));
+        }
         // Slice flags are drawn from `content_rect().row`, which is
         // WAVEFORM_BODY_TOP_INSET above the waveform body, so the triangle head
         // — the obvious thing to grab — lands in a band the body hit test
@@ -1140,6 +1351,24 @@ impl WaveformView {
         }
     }
 
+    /// In the bar strip: an end handle grabs that marker, the bar between
+    /// them slides the selection.
+    fn marker_bar_hit(&self, local_col: f32) -> Option<HitRegion> {
+        let (start, end) = self.selection_range()?;
+        let (start_x, end_x) = (self.x_for_time(start), self.x_for_time(end));
+        let start_visible = self.time_visible(start);
+        let end_visible = self.time_visible(end);
+        // Handles sit inside the bar, so a narrow bar still has both.
+        let handle = MARKER_BAR_HANDLE_WIDTH.min(((end_x - start_x) / 2.0).max(0.2));
+        if start_visible && local_col >= start_x - 0.2 && local_col <= start_x + handle {
+            return Some(HitRegion::StartMarker);
+        }
+        if end_visible && local_col <= end_x + 0.2 && local_col >= end_x - handle {
+            return Some(HitRegion::EndMarker);
+        }
+        (local_col > start_x && local_col < end_x).then_some(HitRegion::SelectionBar)
+    }
+
     fn marker_hit(
         &self,
         local_col: f32,
@@ -1148,6 +1377,10 @@ impl WaveformView {
         marker_x: f32,
         points_right: bool,
     ) -> bool {
+        if self.bar_markers {
+            // A thin line gets a narrow grab: the strip is the handle.
+            return (local_col - marker_x).abs() <= MARKER_BAR_HANDLE_WIDTH;
+        }
         let line_hit = (local_col - marker_x).abs() <= MARKER_LINE_SLOP_PX;
         let flag_height = (waveform.height * MARKER_FLAG_HEIGHT_NORM).max(1.0);
         let flag_width = flag_height;
@@ -1186,6 +1419,14 @@ impl WaveformView {
                 Some(map_value(vec![
                     ("kind", keyword(":drag-end-marker")),
                     ("offset", Value::Number(self.time_at_col(local_col) - end)),
+                ]))
+            }
+            HitRegion::SelectionBar => {
+                let (start, end) = self.selection_range()?;
+                Some(map_value(vec![
+                    ("kind", keyword(":drag-bar")),
+                    ("offset", Value::Number(self.time_at_col(local_col) - start)),
+                    ("length", Value::Number(end - start)),
                 ]))
             }
             HitRegion::SliceMarker { index, time } => Some(map_value(vec![
@@ -1251,6 +1492,10 @@ impl WaveformView {
                 ("type", keyword(":begin-marker-drag")),
                 ("marker", keyword(":end")),
             ])),
+            HitRegion::SelectionBar => Some(action_map(vec![
+                ("type", keyword(":begin-marker-drag")),
+                ("marker", keyword(":window")),
+            ])),
             HitRegion::SliceMarker { index, time } if modifiers.contains(KeyModifiers::ALT) => {
                 Some(action_map(vec![
                     ("type", keyword(":delete-slice")),
@@ -1283,8 +1528,11 @@ impl WaveformView {
             Some(Value::Keyword(kind)) if kind == "select-range" => {
                 let start = as_number(gesture.get("time")?)?;
                 let end = self.time_at_col(local_col);
+                // Bar mode: the body selects a range; only the bar moves the
+                // markers.
+                let action = if self.bar_markers { ":set-range" } else { ":set-selection" };
                 Some(action_map(vec![
-                    ("type", keyword(":set-selection")),
+                    ("type", keyword(action)),
                     ("start", Value::Number(start.min(end))),
                     ("end", Value::Number(start.max(end))),
                 ]))
@@ -1309,6 +1557,22 @@ impl WaveformView {
                     ("end", Value::Number(end)),
                 ]))
             }
+            Some(Value::Keyword(kind)) if kind == "drag-bar" => {
+                let offset = gesture.get("offset").and_then(as_number).unwrap_or(0.0);
+                let length = gesture.get("length").and_then(as_number).unwrap_or(0.0);
+                // Never slide the window off either end of the sample.
+                let limit = self
+                    .buffer
+                    .as_ref()
+                    .map(|buffer| buffer.sample.duration_seconds)
+                    .unwrap_or(f64::INFINITY);
+                let start = (self.time_at_col(local_col) - offset).clamp(0.0, (limit - length).max(0.0));
+                Some(action_map(vec![
+                    ("type", keyword(":set-selection")),
+                    ("start", Value::Number(start)),
+                    ("end", Value::Number(start + length)),
+                ]))
+            }
             Some(Value::Keyword(kind)) if kind == "scrub" => Some(action_map(vec![
                 ("type", keyword(":set-cursor")),
                 ("time", Value::Number(self.time_at_col(local_col))),
@@ -1328,14 +1592,23 @@ impl WaveformView {
 
     fn handle_pointer_up(
         &self,
-        _local_col: f32,
+        local_col: f32,
         _local_row: f32,
         gesture: Option<&Value>,
     ) -> Option<Value> {
         let gesture = get_map(gesture?)?;
         match gesture.get("kind") {
+            Some(Value::Keyword(kind)) if kind == "select-range" && self.bar_markers => {
+                let start = as_number(gesture.get("time")?)?;
+                let end = self.time_at_col(local_col);
+                Some(action_map(vec![
+                    ("type", keyword(":end-range")),
+                    ("start", Value::Number(start.min(end))),
+                    ("end", Value::Number(start.max(end))),
+                ]))
+            }
             Some(Value::Keyword(kind))
-                if kind == "drag-start-marker" || kind == "drag-end-marker" =>
+                if kind == "drag-start-marker" || kind == "drag-end-marker" || kind == "drag-bar" =>
             {
                 Some(action_map(vec![("type", keyword(":end-marker-drag"))]))
             }
@@ -1716,6 +1989,7 @@ mod tests {
             WAVEFORM_WIDGET.bindable_props(),
             &[
                 "playhead-time",
+                "playhead-beat",
                 "selection-start",
                 "selection-end",
                 "active-slice",
@@ -2294,5 +2568,104 @@ mod tests {
 
         assert!(has_custom_waveform, "expected waveform color override");
         assert!(has_custom_background, "expected background color override");
+    }
+
+    /// `:marker-style :bar`: the strip under the ruler grabs the start and end
+    /// at the bar's ends and slides the whole window from its middle; the
+    /// body only grabs the thin lines.
+    #[test]
+    fn bar_markers_grab_ends_and_slide_the_window() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(4.0)),
+            ("header-height".to_string(), number_value(0.5)),
+            ("selection-start".to_string(), number_value(1.0)),
+            ("selection-end".to_string(), number_value(3.0)),
+            ("marker-selection".to_string(), Value::Bool(true)),
+            ("marker-style".to_string(), Value::Keyword("bar".to_string())),
+        ]);
+        let view = WaveformView::from_props(
+            &props,
+            Rect { row: 0.0, col: 0.0, width: 40.0, height: 10.0 },
+        );
+        let strip = view.marker_bar_strip().expect("bar strip");
+        let row = strip.row + strip.height / 2.0;
+        let (start_x, end_x) = (view.x_for_time(1.0), view.x_for_time(3.0));
+        assert!(matches!(view.hit_test(start_x + 0.1, row), Some(HitRegion::StartMarker)));
+        assert!(matches!(view.hit_test(end_x - 0.1, row), Some(HitRegion::EndMarker)));
+        assert!(matches!(view.hit_test((start_x + end_x) / 2.0, row), Some(HitRegion::SelectionBar)));
+        let body = view.waveform_body_rect();
+        assert!(body.row >= strip.row + strip.height, "the body starts below the strip");
+        // Away from a line the body is content, not a flag.
+        assert!(matches!(
+            view.hit_test(start_x + 2.0, body.row + 0.2),
+            Some(HitRegion::Content { .. })
+        ));
+
+        // Dragging the bar by one second slides both ends.
+        let mid = (start_x + end_x) / 2.0;
+        let gesture = view
+            .begin_gesture(mid, row, KeyModifiers::empty())
+            .expect("bar gesture");
+        let one_second = view.x_for_time(2.0) - view.x_for_time(1.0);
+        let action = view
+            .handle_pointer_drag(mid + one_second, row, Some(&gesture))
+            .expect("bar drag");
+        let Value::Map(map) = action else { panic!("action map") };
+        let number = |key: &str| match &*map[key].borrow() {
+            Value::Number(n) => *n,
+            other => panic!("{key}: {other:?}"),
+        };
+        assert!((number("start") - 2.0).abs() < 1e-3, "{}", number("start"));
+        assert!((number("end") - 4.0).abs() < 1e-3, "{}", number("end"));
+
+        // A drag across the body selects a range and leaves the markers.
+        let body_row = body.row + body.height / 2.0;
+        let from = view.x_for_time(0.5);
+        let gesture = view
+            .begin_gesture(from, body_row, KeyModifiers::empty())
+            .expect("range gesture");
+        let drag = view
+            .handle_pointer_drag(view.x_for_time(1.5), body_row, Some(&gesture))
+            .expect("range drag");
+        let Value::Map(drag) = drag else { panic!("action map") };
+        assert_eq!(*drag["type"].borrow(), Value::Keyword("set-range".to_string()));
+        let up = view
+            .handle_pointer_up(view.x_for_time(1.5), body_row, Some(&gesture))
+            .expect("range release");
+        let Value::Map(up) = up else { panic!("action map") };
+        assert_eq!(*up["type"].borrow(), Value::Keyword("end-range".to_string()));
+    }
+
+    /// A clip view's playhead follows the song: the bound beat maps through
+    /// the region onto source seconds, folding into a loop, and vanishes
+    /// outside the region.
+    #[test]
+    fn playhead_beat_maps_through_the_region_and_its_loop() {
+        let map = |loop_window: Option<(f64, f64)>| {
+            let mut entries = vec![
+                ("start", number_value(4.0)),
+                ("end", number_value(12.0)),
+                ("offset", number_value(1.0)),
+                ("span", number_value(4.0)),
+            ];
+            if let Some((a, b)) = loop_window {
+                entries.push(("loop-start", number_value(a)));
+                entries.push(("loop-end", number_value(b)));
+            }
+            map_value_raw(entries)
+        };
+        let props = |beat: f64, loop_window| {
+            HashMap::from([
+                ("playhead-beat".to_string(), number_value(beat)),
+                ("playhead-map".to_string(), map(loop_window)),
+            ])
+        };
+        // Eight beats span four seconds: beat 6 is one second in.
+        assert_eq!(mapped_playhead(&props(6.0, None)), Some(2.0));
+        assert_eq!(mapped_playhead(&props(3.0, None)), None, "before the region");
+        assert_eq!(mapped_playhead(&props(12.0, None)), None, "past its end");
+        // A one-second loop from 1 s: beat 8 is 3 s of playback -> 1 s again.
+        assert_eq!(mapped_playhead(&props(8.0, Some((1.0, 2.0)))), Some(1.0));
     }
 }

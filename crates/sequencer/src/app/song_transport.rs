@@ -443,6 +443,21 @@ impl App {
         if !silent_start {
             return;
         }
+        // Audio regions are arrangement content the rows never see
+        // (docs/audio-tracks-spec.md §9.3): with audio still to come, Play
+        // plays the arrangement rather than latching the scene over it.
+        let start_beat = self.active_song_start_beat.unwrap_or(0.0);
+        let audio_ahead = self.state.with_committed_arrangement(|arrangement| {
+            arrangement.is_some_and(|arrangement| {
+                arrangement.audio_lanes.iter().enumerate().any(|(track, lane)| {
+                    self.is_audio_track(track)
+                        && lane.iter().any(|region| region.end_beat > start_beat)
+                })
+            })
+        });
+        if audio_ahead {
+            return;
+        }
         let scene = self.state.current_scene_index();
         let touched = self.reset_scene_launch_state();
         self.send_macro_targets(touched);

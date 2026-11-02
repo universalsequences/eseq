@@ -21,12 +21,18 @@ impl GraphController<'_> {
             InstrumentRegistration::Sampler { .. } => InstrumentType::Sampler,
             InstrumentRegistration::Custom { .. } => InstrumentType::Custom,
             InstrumentRegistration::Modulator => InstrumentType::Modulator,
+            InstrumentRegistration::Audio { .. } => InstrumentType::Audio,
+        };
+        let audio_player = match &instrument {
+            InstrumentRegistration::Audio { player } => Some(*player),
+            _ => None,
         };
         let run_mode = match &instrument {
             InstrumentRegistration::Custom { run_mode, .. } => *run_mode,
-            InstrumentRegistration::Empty | InstrumentRegistration::Sampler { .. } | InstrumentRegistration::Modulator => {
-                CustomInstrumentRunMode::Instrument
-            }
+            InstrumentRegistration::Empty
+            | InstrumentRegistration::Sampler { .. }
+            | InstrumentRegistration::Modulator
+            | InstrumentRegistration::Audio { .. } => CustomInstrumentRunMode::Instrument,
         };
 
         for (v, &lid) in voice_lids.iter().enumerate() {
@@ -121,6 +127,7 @@ impl GraphController<'_> {
                     rack_slots: Vec::new(),
                     rack_signature: None,
                     applied_output: None,
+                    audio_player: None,
                 });
                 self.app.graph.track_synth_node_ids.push(Vec::new());
                 self.app.graph.track_gatepitch_node_ids.push(Vec::new());
@@ -174,6 +181,7 @@ impl GraphController<'_> {
                     rack_slots: Vec::new(),
                     rack_signature: None,
                     applied_output: None,
+                    audio_player: None,
                 });
                 let engine = self.app.graph.engine_node_ids[engine_id]
                     .as_ref()
@@ -189,7 +197,9 @@ impl GraphController<'_> {
                 self.app.graph.track_engine_ids.push(Some(engine_id));
                 self.initialize_instrument_slot(idx, &track_name, manifest);
             }
-            InstrumentRegistration::Empty | InstrumentRegistration::Modulator => {
+            InstrumentRegistration::Empty
+            | InstrumentRegistration::Modulator
+            | InstrumentRegistration::Audio { .. } => {
                 self.clear_sampler_runtime_pool(idx);
                 if instrument_type == InstrumentType::Modulator {
                     unsafe {
@@ -238,6 +248,7 @@ impl GraphController<'_> {
                     rack_slots: Vec::new(),
                     rack_signature: None,
                     applied_output: None,
+                    audio_player,
                 });
                 self.app.graph.track_synth_node_ids.push(Vec::new());
                 self.app.graph.track_gatepitch_node_ids.push(Vec::new());
@@ -294,7 +305,7 @@ impl GraphController<'_> {
         self.app.ui.sidebar_tab = super::super::SidebarTab::Tools;
         self.app.ui.sidebar_mode = match instrument_type {
             InstrumentType::Custom => super::super::SidebarMode::Presets,
-            InstrumentType::Empty | InstrumentType::Sampler | InstrumentType::Modulator | InstrumentType::Rack => {
+            InstrumentType::Empty | InstrumentType::Audio | InstrumentType::Sampler | InstrumentType::Modulator | InstrumentType::Rack => {
                 super::super::SidebarMode::Audition
             }
         };

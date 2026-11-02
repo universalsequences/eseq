@@ -188,6 +188,21 @@ pub struct ProjectArrangement {
     pub loop_enabled: bool,
     /// Monotonic allocator for `ClipId`; never reused within a project.
     pub next_clip_id: u64,
+    /// Audio-track lanes (docs/audio-tracks-spec.md §9), outer index = track.
+    /// Sparse: shorter than `track_lanes` when the last tracks hold no audio,
+    /// and empty in projects without audio tracks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_lanes: Vec<Vec<AudioRegion>>,
+    /// The project's audio sources by `AudioSourceId`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub audio_sources: BTreeMap<u64, AudioSourceMeta>,
+    /// Monotonic allocator for `AudioSourceId`.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub next_audio_source_id: u64,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 /// The stored length of a brand-new empty arrangement (empty-arrangement
@@ -208,6 +223,9 @@ impl ProjectArrangement {
             end_beat,
             loop_enabled: false,
             next_clip_id: 0,
+            audio_lanes: Vec::new(),
+            audio_sources: BTreeMap::new(),
+            next_audio_source_id: 0,
         }
     }
 
@@ -222,6 +240,9 @@ impl ProjectArrangement {
             end_beat: DEFAULT_ARRANGEMENT_END,
             loop_enabled: false,
             next_clip_id: 0,
+            audio_lanes: Vec::new(),
+            audio_sources: BTreeMap::new(),
+            next_audio_source_id: 0,
         }
     }
 
@@ -231,6 +252,7 @@ impl ProjectArrangement {
         self.scene_lane.is_empty()
             && self.track_lanes.iter().all(|lane| lane.is_empty())
             && self.rack_lanes.values().all(|lane| lane.is_empty())
+            && self.audio_lanes.iter().all(|lane| lane.is_empty())
     }
 
     /// Allocate a fresh `ClipId`. Ids are monotonic and never reused within a
@@ -439,6 +461,8 @@ impl ProjectArrangement {
             }
         }
 
+        self.validate_audio_lanes(ctx.song_track_count(), &mut seen_ids)?;
+
         // --- rack lanes (docs/arrangement-rack-lanes-spec.md §2) ----------
         // A rack clip that no longer exists is NOT an error: deleting a rack
         // clip does not edit the arrangement (its undo step does not cover
@@ -465,7 +489,7 @@ impl ProjectArrangement {
     /// has a unique id under the allocator; the lane is sorted and
     /// non-overlapping. `lane_name` ("Track 2", "Rack 7 lane") prefixes
     /// every message.
-    fn validate_lane_spans<C: LaneSpan>(
+    pub(super) fn validate_lane_spans<C: LaneSpan>(
         &self,
         lane: &[C],
         lane_name: &str,
@@ -812,7 +836,7 @@ pub fn occlude_span(
 /// `lane` with `[start, end)` cleared. `tail_at(clip, end)` is the part of
 /// `clip` from `end` on (`None` drops it); a split's right fragment takes a
 /// fresh id from `allocate`.
-fn occlude_lane<C: LaneSpan>(
+pub(super) fn occlude_lane<C: LaneSpan>(
     lane: Vec<C>,
     start: f64,
     end: f64,
@@ -857,7 +881,7 @@ fn occlude_lane<C: LaneSpan>(
 }
 
 /// Insert `clip` into `lane` keeping it sorted by start beat.
-fn insert_sorted<C: LaneSpan>(lane: &mut Vec<C>, clip: C) {
+pub(super) fn insert_sorted<C: LaneSpan>(lane: &mut Vec<C>, clip: C) {
     let position = lane
         .iter()
         .position(|existing| existing.start_beat() > clip.start_beat())
@@ -1484,6 +1508,9 @@ pub fn lower_rows_to_arrangement<C: ArrangementContext>(
         end_beat,
         loop_enabled,
         next_clip_id,
+    audio_lanes: Vec::new(),
+    audio_sources: std::collections::BTreeMap::new(),
+    next_audio_source_id: 0,
     };
 
     // Scene lane: one event per *change*. An unscened row (`scene: None`)
@@ -1753,6 +1780,9 @@ mod tests {
             end_beat,
             loop_enabled: false,
             next_clip_id,
+            audio_lanes: Vec::new(),
+            audio_sources: BTreeMap::new(),
+            next_audio_source_id: 0,
         }
     }
 

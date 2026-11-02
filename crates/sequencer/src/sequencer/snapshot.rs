@@ -227,7 +227,7 @@ impl SequencerSnapshot {
             InstrumentType::Custom | InstrumentType::Modulator => self
                 .engine_instrument_descriptors
                 .get(slot.track_sound_state.engine_id?),
-            InstrumentType::Empty | InstrumentType::Rack => None,
+            InstrumentType::Empty | InstrumentType::Audio | InstrumentType::Rack => None,
         }
     }
 

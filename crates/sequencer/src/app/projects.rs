@@ -856,8 +856,8 @@ pub(crate) fn sound_preset_from_project(
                 },
             )
         }
-        ProjectTrackKind::Empty | ProjectTrackKind::Modulator => {
-            return Err("Empty and modulator tracks cannot be saved as Sounds".to_string())
+        ProjectTrackKind::Empty | ProjectTrackKind::Modulator | ProjectTrackKind::Audio => {
+            return Err("Empty, modulator and audio tracks cannot be saved as Sounds".to_string())
         }
     };
     let sound = crate::project::ProjectSoundPreset {
@@ -3518,7 +3518,7 @@ impl App {
                                     instrument_name: Some(instrument_name),
                                 });
                             }
-                            InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {
+                            InstrumentType::Empty | InstrumentType::Audio | InstrumentType::Modulator | InstrumentType::Rack => {
                                 return Err(format!(
                                     "Rack track '{}' slot {} has unsupported instrument type",
                                     name,
@@ -3559,7 +3559,7 @@ impl App {
                         },
                     })
                 } else if matches!(self.graph.track_instrument_types.get(track_idx),
-                    Some(InstrumentType::Empty | InstrumentType::Modulator))
+                    Some(InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Audio))
                 {
                     Ok(ProjectTrack {
                         id,
@@ -3570,10 +3570,10 @@ impl App {
                             .unwrap_or(false),
                         color,
                         collapsed,
-                        kind: if self.graph.track_instrument_types[track_idx] == InstrumentType::Empty {
-                            ProjectTrackKind::Empty
-                        } else {
-                            ProjectTrackKind::Modulator
+                        kind: match self.graph.track_instrument_types[track_idx] {
+                            InstrumentType::Empty => ProjectTrackKind::Empty,
+                            InstrumentType::Audio => ProjectTrackKind::Audio,
+                            _ => ProjectTrackKind::Modulator,
                         },
                     })
                 } else {
@@ -4137,6 +4137,9 @@ impl App {
                         ProjectTrackKind::Modulator => {
                             eprintln!("project-load: add modulator track index={track_idx}");
                             self.graph_controller().add_modulator_track()?;
+                        }
+                        ProjectTrackKind::Audio => {
+                            self.graph_controller().add_audio_track()?;
                         }
                         ProjectTrackKind::Rack { routing, slots } => {
                             eprintln!(
@@ -5035,6 +5038,17 @@ impl App {
         self.state
             .set_committed_arrangement(Some(arrangement))
             .map_err(|error| format!("Project arrangement failed to load: {error}"))?;
+        // Audio-track sources (docs/audio-tracks-spec.md §9.4): a missing
+        // file loads offline (drawn, silent) rather than failing the load —
+        // except for a bounce, which must not render silence in its place.
+        let offline_audio = self.load_audio_sources();
+        if pending.strict_samples && !offline_audio.is_empty() {
+            return Err(offline_audio.join("; "));
+        }
+        for error in offline_audio {
+            eprintln!("Project load: {error}");
+        }
+        self.sync_audio_track_playback();
         // Reconcile group routing: a group's members must reach its backing bus
         // in every scene. Output is stored per-scene, so older saves (or any
         // pre-fix grouping) can have members still pointing at Mix in some/all
@@ -5424,7 +5438,7 @@ impl App {
                             slot.instrument_slot.plocks.truncate_params(num_params);
                             slot.instrument_slot.rebuild_lock_param_ids();
                         }
-                        InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
+                        InstrumentType::Empty | InstrumentType::Audio | InstrumentType::Modulator | InstrumentType::Rack => {}
                     }
                     slot.effect_descriptors = graph_slot.effect_descriptors.clone();
                     slot.custom_effect_names = graph_slot.custom_effect_names.clone();

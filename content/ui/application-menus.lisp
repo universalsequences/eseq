@@ -165,6 +165,8 @@
   (host-command "add-bus" (dict)))
 (def add-midi-track () :doc "Add an empty MIDI track." :command "Add MIDI Track" :pinned true :icon :midi :group "Create"
   (host-command "add-track-empty" (dict)))
+(def add-audio-track () :doc "Add an audio track: drop samples on its lane." :command "Add Audio Track" :pinned true :icon :waveform :group "Create"
+  (host-command "add-track-audio" (dict)))
 (def add-drum-rack () :doc "Add a drum rack track." :command "Add Drum Rack" :pinned true :icon :sampler :group "Create"
   (host-command "add-track-rack" (dict)))
 (def add-layer-rack () :doc "Add a layer rack track." :command "Add Layer Rack" :group "Create"
@@ -235,6 +237,7 @@
         nil
         (application-menu-entry "create-menu-bus" "Bus" "" (lambda () (add-bus)))
         (application-menu-entry "create-menu-midi" "MIDI Track" "" (lambda () (add-midi-track)))
+        (application-menu-entry "create-menu-audio" "Audio Track" "" (lambda () (add-audio-track)))
         (application-menu-entry "create-menu-sampler" "Sampler Track" ""
           (lambda () (eseq.browser/add-sampler-track)))
         (application-menu-entry "create-menu-drum-rack" "Drum Rack" "" (lambda () (add-drum-rack)))

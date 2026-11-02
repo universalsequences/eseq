@@ -14,6 +14,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "add-track-rack",
     "add-track-layer-rack",
     "add-track-modulator",
+    "add-track-audio",
     "swap-track-builtin-instrument",
     "add-track-sample",
     "add-track-instrument",
@@ -449,6 +450,36 @@ pub(super) fn handle(
                 }
             }
         }
+        "add-track-audio" => match app.add_audio_track().and_then(|idx| {
+                app.commit_created_track(idx, "Add audio track")?;
+                Ok(idx)
+            }) {
+            Ok(idx) => {
+                sync_after_instrument_track_apply(
+                    &mut app,
+                    &mut editor,
+                    &state,
+                    idx,
+                    &current_track,
+                    &mut *ctx.track_names,
+                    &track_pan_ids,
+                    &record_armed,
+                    &accumulator_names,
+                    &ui_epoch,
+                    lg_raw,
+                );
+                let new_name = app.tracks[idx].clone();
+                editor.handle_host_event(HostEvent::Status(format!(
+                    "Added audio track {}: {new_name}",
+                    idx + 1
+                )));
+            }
+            Err(e) => {
+                editor.handle_host_event(HostEvent::Status(format!(
+                    "Error adding audio track: {e}"
+                )));
+            }
+        },
         "add-track-modulator" => match app.graph_controller().add_modulator_track()
             .and_then(|idx| {
                 app.commit_created_track(idx, "Add modulator track")?;

@@ -344,6 +344,8 @@ pub(crate) mod f {
     pub(crate) const TRACK_DELETE_TARGET: FieldKey = (TRACK, "delete-target");
     pub(crate) const TRACK_SETTING_LOCKS: FieldKey = (TRACK, "setting-locks");
     pub(crate) const TRACK_CLIPS: FieldKey = (TRACK, "clips");
+    /// An audio track's regions (docs/audio-tracks-spec.md), as maps.
+    pub(crate) const TRACK_AUDIO_REGIONS: FieldKey = (TRACK, "audio-regions");
     pub(crate) const TRACK_CELLS: FieldKey = (TRACK, "cells");
     /// Whether one of the track's cells plays (the mixer's clip stop).
     pub(crate) const TRACK_CLIP_PLAYING: FieldKey = (TRACK, "clip-playing");
@@ -1398,6 +1400,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     // model syncs, `governed` per tick behind its inputs, `latched` from the
     // shared latch mask.
     (f::TRACK_CLIPS, "(list-of clip)", Model),
+    (f::TRACK_AUDIO_REGIONS, "(list-of :any)", Model),
     (f::TRACK_CELLS, "(list-of cell)", Model),
     (f::TRACK_CLIP_PLAYING, ":bool", Model),
     // Bank-scoped display (`bank_usage`), when the scenes moved.
@@ -3057,6 +3060,7 @@ impl HostKinds {
         sync_phase("sync-rack-model", || self.sync_rack_model(&mut pusher, app));
         sync_phase("sync-groove-library", || self.sync_groove_library(&mut pusher, app));
         sync_phase("sync-song-model", || self.sync_song_model(&mut pusher, app));
+        sync_phase("sync-audio-regions", || self.sync_audio_regions(&mut pusher, app));
         sync_phase("sync-rack-lanes", || self.sync_rack_lanes(&mut pusher, app));
         sync_phase("sync-song-pushed", || self.sync_song_pushed(&mut pusher, app));
         sync_phase("sync-song-pending", || self.sync_song_pending(&mut pusher, app));

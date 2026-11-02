@@ -232,6 +232,9 @@ enum CaptureTrackKind {
     Instrument(String),
     Modulator,
     LayerRack,
+    /// An audio track; its `:samples` become regions laid end to end from
+    /// beat 0 (docs/audio-tracks-spec.md §7).
+    Audio,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -508,6 +511,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
         }
         "modulator" => CaptureTrackKind::Modulator,
         "layer-rack" => CaptureTrackKind::LayerRack,
+        "audio" => CaptureTrackKind::Audio,
         other => return Err(format!("unsupported track kind {other:?}")),
     };
 
@@ -603,8 +607,8 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
         cursor += 2;
     }
 
-    if !samples.is_empty() && kind != CaptureTrackKind::LayerRack {
-        return Err(":samples is only supported for :layer-rack tracks".to_string());
+    if !samples.is_empty() && !matches!(kind, CaptureTrackKind::LayerRack | CaptureTrackKind::Audio) {
+        return Err(":samples is only supported for :layer-rack and :audio tracks".to_string());
     }
     if !instruments.is_empty() && kind != CaptureTrackKind::LayerRack {
         return Err(":instruments is only supported for :layer-rack tracks".to_string());
@@ -757,8 +761,19 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
             CaptureTrackKind::Instrument(name) => app.add_saved_instrument_track_sync(name),
             CaptureTrackKind::Modulator => app.graph_controller().add_modulator_track(),
             CaptureTrackKind::LayerRack => app.graph_controller().add_empty_layer_rack_track(),
+            CaptureTrackKind::Audio => {
+                // Captures never write into the user's audio store.
+                app.set_audio_store_dir(std::env::temp_dir().join("eseq-capture-audio"));
+                app.add_audio_track()
+            }
         }
         .map_err(|error| format!("failed to create track {}: {error}", spec_index + 1))?;
+        if spec.kind == CaptureTrackKind::Audio && !spec.samples.is_empty() {
+            let paths: Vec<std::path::PathBuf> = spec.samples.iter().map(std::path::PathBuf::from).collect();
+            app.audio_regions_drop(track, 0.0, &paths)
+                .map_err(|error| format!("failed to drop samples on audio track {}: {error}", track + 1))?;
+            app.sync_audio_track_playback();
+        }
 
         if let Some(name) = &spec.display_name {
             app.tracks[track] = name.clone();
@@ -780,7 +795,7 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
             app.state.pattern.patterns[track].set_step_active(step, true);
             app.state.pattern.step_data[track].set(step, StepParam::Transpose, transpose);
         }
-        for sample in &spec.samples {
+        for sample in spec.samples.iter().filter(|_| spec.kind != CaptureTrackKind::Audio) {
             let result = match spec.kind {
                 CaptureTrackKind::LayerRack => app
                     .graph_controller()
@@ -1013,6 +1028,13 @@ fn apply_capture_host_commands(
         // Song/arrangement editing primitives (def-song lowers to
         // arrangement-replace) so arrangement fixtures can commit a song
         // during capture setup.
+        // Audio-region edits, so a fixture can show a trimmed, pitched or
+        // looping region (docs/audio-tracks-spec.md).
+        if let Some(result) = crate::host_commands::apply_audio_track_command(&name, &payload, app) {
+            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
+            applied = true;
+            continue;
+        }
         if let Some(result) = crate::host_commands::apply_song_edit_command(&name, &payload, app) {
             result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
             applied = true;

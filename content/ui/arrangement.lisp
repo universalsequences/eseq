@@ -26,12 +26,13 @@
 ;; while the buffer tree is being built. These two edges are the ordering
 ;; ui/main.lisp used to encode by listing those files above us.
 (import eseq.track-collapse)
+(import eseq.audio-clip)
 (import eseq.sound-palette)
 (import eseq.sample-import)
 (import eseq.retrospective)
 (import eseq.resample)
-(import eseq.factory-promote)
 (import eseq.sample-region)
+(import eseq.factory-promote)
 (import eseq.export-song)
 (import eseq.file-dialogs)
 (import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of rgb-part))
@@ -236,7 +237,10 @@
           ;; The rack member item under the pointer when no clip is.
           (rack-item :any :default nil)))
 
-(def min-view-duration 4)
+;; The narrowest view, in beats: a sixteenth of a beat across the whole lane
+;; (Ableton zooms to a few ms), so grid-quantized moves and trims — the grid
+;; refines with the zoom — can make micro edits.
+(def min-view-duration 0.0625)
 (def max-view-duration 1024)
 (def view-padding 8)
 (def beats-per-bar 4)
@@ -552,7 +556,9 @@
 
 ;; f folded over every stored clip of every track, from init.
 (def fold-clips (f init)
-  (reduce |acc t| (reduce f acc t.clips) init (tracks)))
+  (reduce |acc t|
+      (reduce f acc (if (audio-track? t) (or t.audio-regions '()) t.clips))
+    init (tracks)))
 
 ;; f folded over every committed rack-lane clip's start and end, from init.
 (def fold-rack-spans (f init)
@@ -602,7 +608,29 @@
 ;; of lane with no clip is silence and draws as empty.
 (def track-clips (i)
   (let ((t (track i)))
-    (if (= t nil) '() t.clips)))
+    ;; An audio track's scene patterns play nothing (audio-tracks spec
+    ;; §9.3), so any clip scene stamping left on its lane is not shown or
+    ;; edited: the lane is its regions.
+    (if (or (= t nil) (audio-track? t)) '() t.clips)))
+
+;; ── Audio regions (docs/audio-tracks-spec.md §8.1) ─────────────────────────
+;; An audio track's lane holds its regions (`t.audio-regions`, host maps with
+;; :cid :start :end :name :sample :offset :span ...). Region ids come from the
+;; clip-id allocator, so the lanes' shared selection and ghost channels
+;; address them like clips.
+
+(def audio-track? (t)
+  (and (not (= t nil)) (= t.instrument-type "audio")))
+
+(def audio-regions (i)
+  (let ((t (track i)))
+    (if (audio-track? t) (or t.audio-regions '()) '())))
+
+(def find-audio-region (i id)
+  (first (filter |r| (= r.cid id) (audio-regions i))))
+
+(def real-region-ids (i ids)
+  (filter |id| (not (= (find-audio-region i id) nil)) (or ids '())))
 
 (def find-track-clip (i clip-id)
   (first (filter |c| (= c.cid clip-id) (track-clips i))))
@@ -1378,6 +1406,18 @@
         (unless (or (= c nil) (= (get drag :start) c.start))
           (clip-edit i c (dict :type :clip-move :start (get drag :start))))))))
 
+;; Cmd+E on a track lane: split the clips under the cursor (the selected
+;; ones when the selection holds one there).
+(def track-split (i time)
+  (unless (= time nil)
+    (let ((under (filter |c| (and (> time c.start) (< time c.end)) (track-clips i)))
+          (selected (filter |c| (listed? c.cid arr-select.clips) under))
+          (targets (if (empty? selected) under selected)))
+      (if (empty? targets)
+        (status "Place the cursor inside a clip to split it")
+        (each targets |c|
+          (host-command "arrangement-clip-split" (dict :clip-id c.cid :beat time)))))))
+
 (def track-delete (i ids)
   (let ((member (selected-rack-member i)))
     (if (and member (empty? (real-clip-ids i ids)))
@@ -1451,7 +1491,7 @@
   ;; These reads invalidate the selector when the scene or a pattern's
   ;; activity changes.
   transport.scene
-  (let ((cells t.cells))
+  (let ((cells (if (audio-track? t) '() t.cells)))
     (unless (empty? cells)
       (map |c| c.active cells)
       (let ((choice arr-placement.choice)
@@ -1552,7 +1592,11 @@
       (if (and (eseq.piano-roll/piano-roll-arrangement-mode?)
             (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
             (not (empty? (real-clip-ids i (or (get event :ids) '())))))
-        (track-select i event)
+        ;; Retarget the editor, but the cursor still lands where the press
+        ;; did: the body is where the transport start is placed.
+        (do
+          (track-select i event)
+          (set-cursor (get event :time) i))
         (track-clear-selection i event))
       :set-cursor
       (do
@@ -1577,6 +1621,8 @@
       (seq-song-region-copy)
       :paste-items
       (seq-song-region-paste (get event :time))
+      :split-items
+      (track-split i (get event :time))
       ;; Title-bar drag (region spec 6): one rigid clip move, or a move of the
       ;; whole region when the dragged clip lies inside it.
       :move-items-absolute
@@ -1915,6 +1961,184 @@
 ;; Headerless, sidebar-less, single-lane track instance (spec 4.2). Lane
 ;; scrolling is inert; the outer buffer viewport owns vertical navigation.
 ;; `top?`: the lane is the first visible one.
+;; ── Audio lane gestures (docs/audio-tracks-spec.md §8) ─────────────────────
+;; A title-bar click selects a region (and its span as a one-track region,
+;; as a clip click does), a double-click opens the clip editor, title-bar
+;; drags move and edge drags trim through the same ghost channel clips use,
+;; Backspace deletes. A press in the body is a region surface, as on a clip:
+;; it parks the cursor where it lands and a drag sweeps a time selection, so
+;; part of a region can be copied, pasted, deleted or duplicated with the
+;; shared region verbs. Cmd+E splits at the cursor, and a sample dropped from
+;; the browser becomes a region where it lands.
+
+(def audio-select (i event)
+  (let ((ids (real-region-ids i (get event :ids)))
+        (r (if (empty? ids) nil (find-audio-region i (first ids)))))
+    (eseq.sequencer/select-track-for-edit (track i))
+    (set! arr-select.scenes '())
+    (set! arr-select.rect nil)
+    (release-selection!)
+    (set! arr-select.clips ids)
+    (set! arr-select.rack-item nil)
+    (set! arr-rack.selected -1)
+    (select-lane-clip! i (if (= r nil) -1 r.cid))
+    (if (= r nil)
+      (eseq.audio-clip/clear!)
+      (do
+        (eseq.audio-clip/bind! i r.cid)
+        ;; The region's span becomes a one-track region, so Cmd+C / Cmd+D /
+        ;; Backspace act on it through the region verbs like a clip's.
+        (select-region! (track i) (track i) r.start r.end)))
+    (set-cursor (if (= r nil) (get event :time) r.start) i)
+    r))
+
+;; A press in a region's body: the cursor lands where the press did and the
+;; selection goes, so the drag that follows sweeps a time region. The clip
+;; editor follows the region pressed.
+(def audio-body-press (i event)
+  (track-clear-selection i event)
+  (let ((ids (real-region-ids i (get event :ids))))
+    (if (empty? ids)
+      (eseq.audio-clip/clear!)
+      (eseq.audio-clip/bind! i (first ids)))))
+
+;; Cmd+E: split the regions under the cursor on lane i — the selected ones
+;; when the selection holds one there, else whichever the cursor is inside.
+(def audio-split (i time)
+  (unless (= time nil)
+    (let ((under (filter |r| (and (> time r.start) (< time r.end)) (audio-regions i)))
+          (selected (filter |r| (listed? r.cid arr-select.clips) under))
+          (targets (if (empty? selected) under selected)))
+      (if (empty? targets)
+        (status "Place the cursor inside a region to split it")
+        (each targets |r|
+          (host-command "audio-region-split" (dict :id r.cid :beat time)))))))
+
+(def audio-open-editor (i event)
+  (when (audio-select i event)
+    (eseq.seq-panels/seq-open-arrangement-piano-roll-bottom-for-track i)))
+
+(def audio-move-ghost (i event)
+  (let ((r (find-audio-region i (get event :anchor-id)))
+        (start (max 0 (get event :start))))
+    (if (= r nil)
+      (set! arr-drag.track nil)
+      (do
+        (set! arr-drag.track (dict :kind :audio-move :track i :id r.cid :start start))
+        (ghost-clip! i 1 r.cid start)))))
+
+(def audio-move-finish (i)
+  (let ((drag arr-drag.track)
+        (mine (and drag (= (get drag :kind) :audio-move) (= (get drag :track) i)))
+        (r (when mine (find-audio-region i (get drag :id)))))
+    (set! arr-drag.track nil)
+    (clear-region-ghost!)
+    (unless (or (= r nil) (= (get drag :start) r.start))
+      (host-command "audio-region-move" (dict :id r.cid :start (get drag :start))))))
+
+(def audio-resize-ghost (i event)
+  (let ((edge (if (= (get event :edge) :start) :start :end))
+        (id (get event :id)))
+    (set! arr-drag.track
+      (dict :kind :audio-resize :track i :id id :edge edge :time (get event :time)))
+    (ghost-clip! i (if (= edge :start) 2 3) (if (= id nil) -1 id) (get event :time))))
+
+;; An edge dragged past the other one deletes the region, as for clips.
+(def audio-resize-finish (i)
+  (let ((drag arr-drag.track)
+        (mine (and drag (= (get drag :kind) :audio-resize) (= (get drag :track) i)))
+        (r (when mine (find-audio-region i (get drag :id))))
+        (time (when mine (max 0 (get drag :time)))))
+    (set! arr-drag.track nil)
+    (clear-ghost!)
+    (unless (= r nil)
+      (let ((start (if (= (get drag :edge) :start) time r.start))
+            (end (if (= (get drag :edge) :start) r.end time)))
+        (if (>= start end)
+          (audio-delete i (list r.cid))
+          (unless (and (= start r.start) (= end r.end))
+            (host-command "audio-region-resize" (dict :id r.cid :start start :end end))))))))
+
+(def audio-delete (i ids)
+  (let ((ids (real-region-ids i ids)))
+    (deselect-clips!)
+    (release-selection!)
+    (eseq.audio-clip/clear!)
+    (unless (empty? ids)
+      (host-command "audio-regions-delete" (dict :ids ids)))))
+
+;; A sample dropped on the lane: a region at the drop beat (the beat grid,
+;; finer than the bar snap scene drops use).
+(def audio-drop (i event)
+  (let ((payload (get event :payload))
+        (paths (get payload :paths))
+        (path (get payload :path)))
+    (if (and (= paths nil) (or (= path nil) (= path "")))
+      (status "Drop a sample file, not a folder")
+      (let ((beat (max 0 (floor (pointer-time event)))))
+        (host-command "audio-regions-drop"
+          (if (= paths nil)
+            (dict :track i :beat beat :path path)
+            (dict :track i :beat beat :paths paths)))))))
+
+(def audio-items (i)
+  (let ((color (lane-clip-color i)))
+    (map |r|
+      (dict
+        :id r.cid
+        :lane 0
+        :start r.start
+        :end r.end
+        :kind :audio
+        :label (eseq.audio-clip/region-label r)
+        ;; An offline source draws an empty body: there is nothing to show.
+        :content (when r.loaded
+                   (if r.loop
+                     (dict :sample r.sample :offset r.offset :span r.span
+                       :loop-start r.loop-start :loop-end r.loop-end)
+                     (dict :sample r.sample :offset r.offset :span r.span)))
+        :color (if r.muted (override-dim color) color))
+      (audio-regions i))))
+
+(def audio-lane-action (i event)
+  (if (view-action? event)
+    (view-action event)
+    (match event.type
+      :select
+      (audio-select i event)
+      :double-click-item
+      (audio-open-editor i event)
+      :clear-selection
+      (audio-body-press i event)
+      :set-cursor
+      (do
+        (eseq.sequencer/select-track-for-edit (track i))
+        (set-cursor (get event :time) i))
+      :move-items-absolute
+      (audio-move-ghost i event)
+      :finish-move-items
+      (audio-move-finish i)
+      :resize-item-absolute
+      (audio-resize-ghost i event)
+      :finish-resize-items
+      (audio-resize-finish i)
+      :delete-items
+      (audio-delete i (get event :ids))
+      ;; The region verbs carry audio (copy keeps each slice's audio).
+      :copy-items
+      (seq-song-region-copy)
+      :paste-items
+      (seq-song-region-paste (get event :time))
+      :split-items
+      (audio-split i (get event :time))
+      ;; A region sweep still selects time across lanes (region spec 4.2).
+      :marquee-select
+      (ghost-region! (region-from-event i event) 4 0)
+      :finish-marquee-select
+      (region-commit (region-from-event i event))
+      ;; Background double-clicks create nothing: there is no empty audio.
+      _ nil)))
+
 (def track-lane (i t top?)
   (timeline
     :key (str "track-lane-" i)
@@ -1968,13 +2192,17 @@
     :cursor-color cursor-color
     :placement-active (if (= (placement-target-source i) nil) 0 1)
     :placement-item (placement-item i)
-    :on-right-click |event| (open-placement-menu i event)
-    :drop-types (list "transport-scene" (str "track-pattern-" t.tid))
+    :on-right-click |event| (unless (audio-track? t) (open-placement-menu i event))
+    :drop-types (if (audio-track? t)
+                  (list "sample" "transport-scene")
+                  (list "transport-scene" (str "track-pattern-" t.tid)))
     :on-drop |event|
-      (if (= (get (get event :payload) :pattern-id) nil)
-        (drop-scene event)
-        (drop-track-pattern i event))
-    :items (track-items i)
+      (if (= (get event :drag-type) "sample")
+        (audio-drop i event)
+        (if (= (get (get event :payload) :pattern-id) nil)
+          (drop-scene event)
+          (drop-track-pattern i event)))
+    :items (if (audio-track? t) (audio-items i) (track-items i))
     :selected-id #'arr-select.clip
     :selected-lane #'arr-select.lane
     :bound-id #'arr-lanes.bound-clip
@@ -2002,7 +2230,9 @@
     :content-length #'arr-view.content-length
     :lane-scroll 0
     :snap snap
-    :min-duration 1
+    ;; Audio regions trim to a 64th of a beat (micro edits at deep zoom);
+    ;; pattern clips keep one beat.
+    :min-duration (if (audio-track? t) 0.015625 1)
     ;; A background double-click creates an editable take clip. Give that
     ;; discrete gesture a musically useful span instead of falling back to
     ;; the timeline's one-beat resize minimum.
@@ -2015,7 +2245,8 @@
     :move-snap-mode :alignment-helper
     :resize-snap-mode :alignment-helper
     :scroll-mode :smooth
-    :on-action |event| (track-action i event)))
+    :on-focus-key lane-focus-key
+    :on-action |event| (if (audio-track? t) (audio-lane-action i event) (track-action i event))))
 
 ;; ── Rack rows (docs/arrangement-rack-lanes-spec.md §6) ─────────────────────
 ;; A drum rack with a clip bank has a lane of its own: its rack-lane clips,
@@ -2698,12 +2929,12 @@
       (eseq.retrospective/panel))
     (subtree :key "arr-resample"
       (eseq.resample/panel))
-    (subtree :key "arr-factory-promote"
-      (eseq.factory-promote/panel))
     (subtree :key "arr-sample-region"
       (eseq.sample-region/panel))
     (subtree :key "arr-sample-new-pack"
       (eseq.sample-region/new-pack-panel))
+    (subtree :key "arr-factory-promote"
+      (eseq.factory-promote/panel))
     ;; The scene row: the placement toolbar (with its hint), the starting
     ;; scene and the scene lane each re-render on their own (a selection, a
     ;; scene change, a scene-lane edit).
@@ -2759,6 +2990,19 @@
   (if (= song.region nil)
     false
     (do (seq-song-region-duplicate) true)))
+
+;; Edit > Copy/Paste/Duplicate reach a focused lane first; the lane widget
+;; copies selected clips itself but refuses the keys for a swept time region
+;; (no clip ids), which then arrive here through its :on-focus-key.
+(def lane-focus-key (key text)
+  (match key
+    "s-c" (arrangement-region-copy-key)
+    "C-c" (arrangement-region-copy-key)
+    "s-v" (arrangement-region-paste-key)
+    "C-v" (arrangement-region-paste-key)
+    "s-d" (arrangement-region-duplicate-key)
+    "C-d" (arrangement-region-duplicate-key)
+    _ false))
 
 (define-mode "arrangement-mode" :read-only true :live-keys true
   :inherit "eseq.sequencer-keys/sequencer-keys")

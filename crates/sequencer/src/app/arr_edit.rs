@@ -134,7 +134,7 @@ impl App {
 
     /// Run `edit` against a clone of the committed arrangement inside the
     /// project's live scene context, then install and commit it as one entry.
-    fn edit_arrangement(
+    pub(crate) fn edit_arrangement(
         &mut self,
         label: &'static str,
         edit: impl FnOnce(&mut ProjectArrangement, &ProjectScenes) -> Result<(), String>,
@@ -169,7 +169,7 @@ impl App {
 
     /// `edit_arrangement` with an optional coalescing merge key: the
     /// one-shot and continuous variants of the `_impl` primitives.
-    fn edit_arrangement_keyed(
+    pub(crate) fn edit_arrangement_keyed(
         &mut self,
         label: &'static str,
         merge_key: Option<crate::app::history::MergeKey>,
@@ -1431,6 +1431,10 @@ impl App {
         let mut empty = self.empty_arrangement();
         if let Some(before) = &before {
             empty.next_clip_id = before.next_clip_id;
+            // Sources are project assets, not content: keep them (and their
+            // allocator) so ids are never reused.
+            empty.audio_sources = before.audio_sources.clone();
+            empty.next_audio_source_id = before.next_audio_source_id;
         }
         if before.as_ref().is_none_or(|before| *before == empty) {
             return Ok(());
@@ -1449,12 +1453,12 @@ impl App {
         loop_enabled: bool,
     ) -> Result<(), String> {
         self.require_song_edit_unlocked()?;
-        let next_clip_id = self
-            .state
-            .committed_arrangement()
+        let before = self.state.committed_arrangement();
+        let next_clip_id = before
+            .as_ref()
             .map(|arrangement| arrangement.next_clip_id)
             .unwrap_or(0);
-        let arrangement = self.state.with_project_scenes(|scenes| {
+        let mut arrangement = self.state.with_project_scenes(|scenes| {
             lower_row_specs_to_arrangement(
                 rows,
                 end_beat,
@@ -1464,7 +1468,13 @@ impl App {
                 scenes,
             )
         })?;
-        let before = self.state.committed_arrangement();
+        // Rows say nothing about audio: the audio lanes and their sources
+        // carry over unchanged.
+        if let Some(before) = &before {
+            arrangement.audio_lanes = before.audio_lanes.clone();
+            arrangement.audio_sources = before.audio_sources.clone();
+            arrangement.next_audio_source_id = before.next_audio_source_id;
+        }
         self.commit_arrangement_edit("Replace arrangement", before, Some(arrangement))
     }
 }
@@ -1637,6 +1647,9 @@ mod tests {
             end_beat: 16.0,
             loop_enabled: true,
             next_clip_id: 1,
+        audio_lanes: Vec::new(),
+        audio_sources: std::collections::BTreeMap::new(),
+        next_audio_source_id: 0,
         };
         let revision = app.state.committed_song_revision();
         app.state
@@ -1776,6 +1789,9 @@ mod tests {
             end_beat: 16.0,
             loop_enabled: false,
             next_clip_id: 1,
+        audio_lanes: Vec::new(),
+        audio_sources: std::collections::BTreeMap::new(),
+        next_audio_source_id: 0,
         };
         let depth = app.history.undo_len();
         app.arr_replace(arrangement.clone()).expect("arr_replace");

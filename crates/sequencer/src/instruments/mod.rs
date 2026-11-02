@@ -2,6 +2,7 @@
 
 pub mod beats_warp;
 pub mod mod_trigger_lanes;
+pub mod sample_core;
 pub mod sampler;
 pub mod track_modulator;
 pub mod voice_modulator;

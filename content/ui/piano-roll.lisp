@@ -24,6 +24,7 @@
 ;; eseq.seq-step-tabs (the layout hub).
 (import eseq.seq-step-tabs)
 (import eseq.track-collapse)
+(import eseq.audio-clip)
 (import eseq.view-kit :refer (nothing listed? color-rgba))
 (import eseq.kinds :refer (track piano-roll pitch-min pitch-max focus-step-params
                            focus-step-value set-focus-step! lock-param! unlock-param!
@@ -686,6 +687,10 @@
 ;; edit re-renders the grid (and the lane), a lane pick the row alone.
 (def buffer-content ()
   (let ((t piano-roll.track))
+    ;; An audio track has no notes: the lower panel shows its clip editor
+    ;; (docs/audio-tracks-spec.md §8.2) in the piano roll's place.
+    (if (and t (= t.instrument-type "audio"))
+      (subtree :key "audio-clip" (eseq.audio-clip/editor t))
     (if (and piano-roll-view.arrangement (not piano-roll.clip))
       (box
         :key "no-clip-selected"
@@ -701,10 +706,12 @@
               (subtree :key "clip-panel" (clip-panel t))
               (subtree :key "note-grid" (piano-roll-timeline t))))
           (subtree :key "automation-row" (automation-row t)))
-        (nothing)))))
+        (nothing))))))
 
 ;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
-(set-buffer-mode-for "*piano-roll*" "eseq.sequencer-keys/sequencer-keys")
+;; The audio clip editor's mode: sequencer keys plus the arrangement region
+;; keys while an audio track is being edited (eseq.audio-clip).
+(set-buffer-mode-for "*piano-roll*" "audio-clip-mode")
 (effect-buffer "*piano-roll*"
   (box :key "piano-roll-panel" :width :fill :height :fill
     (buffer-content)))

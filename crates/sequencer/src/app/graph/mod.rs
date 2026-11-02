@@ -69,7 +69,7 @@ fn rack_topology_signature(rack: &RackTrackSnapshot) -> RackTopologySignature {
                     InstrumentType::Custom | InstrumentType::Modulator => {
                         slot.track_sound_state.engine_id
                     }
-                    InstrumentType::Empty | InstrumentType::Sampler | InstrumentType::Rack => None,
+                    InstrumentType::Empty | InstrumentType::Audio | InstrumentType::Sampler | InstrumentType::Rack => None,
                 },
                 fx_chain: slot
                     .effect_slots
@@ -200,6 +200,9 @@ enum InstrumentRegistration<'a> {
         run_mode: CustomInstrumentRunMode,
     },
     Modulator,
+    Audio {
+        player: crate::audio_track::AudioPlayerNode,
+    },
 }
 
 struct TrackRegistration<'a> {

@@ -200,11 +200,15 @@ pub enum InstrumentType {
     Custom,
     Modulator,
     Rack,
+    /// Plays recorded/imported audio regions from the arrangement
+    /// (docs/audio-tracks-spec.md): no device, voice pool, or patterns.
+    Audio,
 }
 
 impl InstrumentType {
-    pub const COUNT: usize = 5;
-    pub const ALL: [Self; Self::COUNT] = [Self::Sampler, Self::Custom, Self::Modulator, Self::Rack, Self::Empty];
+    pub const COUNT: usize = 6;
+    pub const ALL: [Self; Self::COUNT] =
+        [Self::Sampler, Self::Custom, Self::Modulator, Self::Rack, Self::Empty, Self::Audio];
     pub const ADD_TRACK_TYPES: [Self; 4] = [Self::Empty, Self::Sampler, Self::Custom, Self::Modulator];
 
     pub fn label(&self) -> &'static str {
@@ -214,6 +218,7 @@ impl InstrumentType {
             InstrumentType::Custom => "Custom",
             InstrumentType::Modulator => "Modulator",
             InstrumentType::Rack => "Rack",
+            InstrumentType::Audio => "Audio",
         }
     }
 
@@ -224,6 +229,7 @@ impl InstrumentType {
             InstrumentType::Custom => 1,
             InstrumentType::Modulator => 2,
             InstrumentType::Rack => 3,
+            InstrumentType::Audio => 5,
         }
     }
 
@@ -233,6 +239,7 @@ impl InstrumentType {
             2 => InstrumentType::Modulator,
             3 => InstrumentType::Rack,
             4 => InstrumentType::Empty,
+            5 => InstrumentType::Audio,
             _ => InstrumentType::Sampler,
         }
     }

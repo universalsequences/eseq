@@ -393,9 +393,14 @@
 
 (def drop-sample-on-track (event)
   (clear-delete-target)
-  (if event.payload.path
-    (eseq.browser/drop-sample-on-track event)
-    (status "Drop a sample file, not a folder")))
+  (let ((t (track event.target.track)))
+    (if event.payload.path
+      ;; An audio track takes the sample as a region at the arrangement
+      ;; cursor (docs/audio-tracks-spec.md §7.1); other tracks load it.
+      (if (and t (= t.instrument-type "audio"))
+        (host-command "audio-regions-drop" (dict :track t.index :path event.payload.path))
+        (eseq.browser/drop-sample-on-track event))
+      (status "Drop a sample file, not a folder"))))
 
 (def drop-sample-new-track (event)
   (if (= event.drag-type "track-badge")

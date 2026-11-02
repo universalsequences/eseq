@@ -801,6 +801,7 @@
                 rack_slots: Vec::new(),
                 rack_signature: None,
                 applied_output: None,
+                audio_player: None,
             };
             {
                 let _batch = GraphEditBatchGuard::new(graph.ptr.0);

@@ -16,6 +16,7 @@ use crate::sequencer::{
     TakeId, TrackPatternData,
 };
 
+use super::audio_tracks::{audio_regions_in, ripple_audio_lane_right};
 use super::edit::finish_active_gesture;
 use super::history::{ArrangementStructurePatch, EditPatch, SceneStructurePatch};
 use super::App;
@@ -207,22 +208,29 @@ pub struct ArrangementClipboard {
     /// covered. A rack lane silent throughout still appears, so paste
     /// silences it.
     pub racks: Vec<(u64, Vec<RackClipboardSpan>)>,
+    /// Audio track index → the slices of its regions inside the rectangle
+    /// (docs/audio-tracks-spec.md §8.1), beats relative to the region start,
+    /// offsets already advanced to each slice. An audio track silent
+    /// throughout still appears, so paste silences it.
+    pub audio: Vec<(usize, Vec<crate::sequencer::AudioRegion>)>,
 }
 
 impl ArrangementClipboard {
     pub fn is_empty(&self) -> bool {
-        (self.tracks.is_empty() && self.racks.is_empty()) || !(self.len_beats > 0.0)
+        (self.tracks.is_empty() && self.racks.is_empty() && self.audio.is_empty())
+            || !(self.len_beats > 0.0)
     }
 
     /// Number of sounding spans, for the status line.
     pub fn span_count(&self) -> usize {
         let tracks: usize = self.tracks.iter().map(|(_, spans)| spans.len()).sum();
-        tracks + self.racks.iter().map(|(_, spans)| spans.len()).sum::<usize>()
+        let audio: usize = self.audio.iter().map(|(_, regions)| regions.len()).sum();
+        tracks + audio + self.racks.iter().map(|(_, spans)| spans.len()).sum::<usize>()
     }
 
-    /// Number of lanes it pastes onto (tracks and rack lanes).
+    /// Number of lanes it pastes onto (tracks, audio tracks and rack lanes).
     pub fn lane_count(&self) -> usize {
-        self.tracks.len() + self.racks.len()
+        self.tracks.len() + self.racks.len() + self.audio.len()
     }
 
     /// Floor a paste destination onto the grid the copied rectangle sat on,
@@ -456,8 +464,24 @@ impl App {
         let scenes = self.state.capture_project_scenes();
 
         let mut tracks = Vec::new();
+        let mut audio = Vec::new();
+        let spb = self.seconds_per_beat();
         for track in self.region_tracks(&region) {
             if track >= arrangement.track_lanes.len() {
+                continue;
+            }
+            // An audio track's lane is its regions; its clip lane holds only
+            // inert stamps, never copied.
+            if self.is_audio_track(track) {
+                let regions = audio_regions_in(&arrangement, track, start_beat, end_beat, spb)
+                    .into_iter()
+                    .map(|mut region| {
+                        region.start_beat -= start_beat;
+                        region.end_beat -= start_beat;
+                        region
+                    })
+                    .collect();
+                audio.push((track, regions));
                 continue;
             }
             // Clip-free tracks stay in the rectangle (with no spans) so paste
@@ -489,7 +513,7 @@ impl App {
                 (group_id, spans)
             })
             .collect();
-        if tracks.is_empty() && racks.is_empty() {
+        if tracks.is_empty() && racks.is_empty() && audio.is_empty() {
             return Err("The selected region covers no existing track".to_string());
         }
         let len_beats = end_beat - start_beat;
@@ -519,6 +543,7 @@ impl App {
             scene_lane: region.scene_lane,
             scene_events,
             racks,
+            audio,
         })
     }
 
@@ -642,6 +667,10 @@ impl App {
             for (group_id, _) in &clipboard.racks {
                 ripple_rack_lane_right(&mut arrangement, *group_id, insert_beat, len_beats)?;
             }
+            let spb = self.seconds_per_beat();
+            for (track, _) in &clipboard.audio {
+                ripple_audio_lane_right(&mut arrangement, *track, insert_beat, len_beats, spb)?;
+            }
             if covers_every_track {
                 for event in &mut arrangement.scene_lane {
                     if event.start_beat >= insert_beat && event.start_beat > 0.0 {
@@ -752,6 +781,10 @@ impl App {
             }
             for (group_id, _) in &clipboard.racks {
                 occlude_rack_span(&mut arrangement, *group_id, source_start, source_end)?;
+            }
+            let spb = self.seconds_per_beat();
+            for (track, _) in &clipboard.audio {
+                arrangement.occlude_audio_span(*track, source_start, source_end, spb)?;
             }
             // A scene-lane region moves its scene events too, restoring what
             // governed the vacated span's end so nothing after it changes.
@@ -921,6 +954,27 @@ impl App {
                     anchor_beat: dest_beat + span.rel_anchor,
                 };
                 insert_rack_clip_sorted(arrangement, *group_id, clip);
+            }
+        }
+        let spb = self.seconds_per_beat();
+        for (track, regions) in &clipboard.audio {
+            // Paste is same-track, like clips; a track that is no longer an
+            // audio track takes nothing.
+            if !self.is_audio_track(*track) {
+                continue;
+            }
+            arrangement.occlude_audio_span(*track, dest_beat, dest_end, spb)?;
+            for region in regions {
+                // A source dropped since the copy (an undone import) pastes
+                // as silence rather than an invalid region.
+                if arrangement.audio_source(region.source).is_none() {
+                    continue;
+                }
+                let mut pasted = *region;
+                pasted.id = arrangement.allocate_clip_id()?;
+                pasted.start_beat += dest_beat;
+                pasted.end_beat += dest_beat;
+                arrangement.insert_audio_region_sorted(*track, pasted);
             }
         }
         if clipboard.scene_lane {
@@ -1137,6 +1191,10 @@ impl App {
         for group_id in self.region_racks(&region) {
             occlude_rack_span(&mut arrangement, group_id, start_beat, end_beat)?;
             cleared += 1;
+        }
+        let spb = self.seconds_per_beat();
+        for track in self.region_tracks(&region).into_iter().filter(|t| self.is_audio_track(*t)) {
+            arrangement.occlude_audio_span(track, start_beat, end_beat, spb)?;
         }
         if cleared == 0 {
             return Err("The selected region covers no existing track".to_string());

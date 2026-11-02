@@ -1850,6 +1850,7 @@ impl App {
     ) -> Result<TrackInstrumentState, String> {
         let source = match self.graph.track_instrument_types.get(track).copied() {
             Some(crate::sequencer::InstrumentType::Empty) => TrackInstrumentSource::Empty,
+            Some(crate::sequencer::InstrumentType::Audio) => TrackInstrumentSource::Audio,
             Some(crate::sequencer::InstrumentType::Custom) => {
                 let engine_id = self
                     .graph
@@ -4003,7 +4004,9 @@ impl App {
             return self.restore_rack_instrument_container_state(track, target);
         }
         let target_descriptor = match &target.source {
-            TrackInstrumentSource::Empty => crate::effects::EffectDescriptor::empty_custom_slot(),
+            TrackInstrumentSource::Empty | TrackInstrumentSource::Audio => {
+                crate::effects::EffectDescriptor::empty_custom_slot()
+            }
             TrackInstrumentSource::Custom { engine_id } => {
                 let retained = self
                     .editor
@@ -4044,6 +4047,11 @@ impl App {
         }
         match &target.source {
             TrackInstrumentSource::Empty => self.graph_controller().clear_track_instrument(track)?,
+            TrackInstrumentSource::Audio => {
+                if !self.is_audio_track(track) {
+                    return Err(format!("Track {} is not an audio track", track + 1));
+                }
+            }
             TrackInstrumentSource::Custom { engine_id } => {
                 let retained = self
                     .editor
@@ -4162,7 +4170,9 @@ impl App {
         self.track_name_user_authored[track] = target.display_name_user_authored;
         let descriptor = self.graph.instrument_descriptors[track].clone();
         let (node_id, modulator_node_id) = match self.graph.track_instrument_types[track] {
-            crate::sequencer::InstrumentType::Empty => (None, None),
+            crate::sequencer::InstrumentType::Empty | crate::sequencer::InstrumentType::Audio => {
+                (None, None)
+            }
             crate::sequencer::InstrumentType::Custom => {
                 let engine_id = self.graph.track_engine_ids[track]
                     .ok_or_else(|| format!("Custom track {} lost its engine", track + 1))?;
@@ -4233,6 +4243,7 @@ impl App {
         }
         let track = match patch.state.source {
             TrackInstrumentSource::Modulator => self.graph_controller().add_modulator_track()?,
+            TrackInstrumentSource::Audio => self.graph_controller().add_audio_track()?,
             _ => self.graph_controller().add_empty_track()?,
         };
         let allocated = self.track_registry.replace_at(track, patch.track)
@@ -4393,6 +4404,9 @@ impl App {
             record_armed: self.graph.record_armed.get(track).copied().unwrap_or(false),
             groups: self.groups.clone(),
             macro_mappings: self.macro_engine.capture_track_topology_mappings(track),
+            audio_lane: self.state.with_committed_arrangement(|arrangement| {
+                arrangement.map(|arrangement| arrangement.audio_lane(track).to_vec()).unwrap_or_default()
+            }),
         };
         let retained_bytes = patch.retained_bytes();
         let selected = self.graph_controller().delete_track(track)?;
@@ -4417,6 +4431,7 @@ impl App {
         }
         let appended = match patch.instrument.source {
             TrackInstrumentSource::Modulator => self.graph_controller().add_modulator_track()?,
+            TrackInstrumentSource::Audio => self.graph_controller().add_audio_track()?,
             _ => self.graph_controller().add_empty_track()?,
         };
         let allocated = self.track_registry.replace_at(appended, patch.track)
@@ -4436,6 +4451,11 @@ impl App {
         self.graph.record_armed[appended] = patch.record_armed;
         self.state.move_appended_track_pattern_lane_to(patch.index, &patch.patterns)?;
         self.graph_controller().move_appended_track_to(patch.index)?;
+        if !patch.audio_lane.is_empty() {
+            let mut arrangement = self.require_arrangement()?;
+            *arrangement.audio_lane_mut(patch.index) = patch.audio_lane.clone();
+            self.state.set_committed_arrangement(Some(arrangement))?;
+        }
         self.groups = patch.groups.clone();
         // The runtime choke table still holds the post-delete reindexed keys;
         // restoring the pre-delete groups has to republish it or choke fires

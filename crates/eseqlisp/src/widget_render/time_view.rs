@@ -202,7 +202,13 @@ impl TimeViewport {
         match ruler.map(|r| &r.mode) {
             Some(TimeRulerMode::BarsBeats { .. }) => {
                 let cells_per_beat = content.width as f64 / self.view_duration.max(0.0001);
-                let step = if cells_per_beat >= 384.0 {
+                // Deep zoom keeps halving, so grid-quantized moves and trims
+                // can make micro edits (Ableton zooms to a few ms).
+                let step = if cells_per_beat >= 1536.0 {
+                    0.0078125
+                } else if cells_per_beat >= 768.0 {
+                    0.015625
+                } else if cells_per_beat >= 384.0 {
                     0.03125
                 } else if cells_per_beat >= 192.0 {
                     0.0625

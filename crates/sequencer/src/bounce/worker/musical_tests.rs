@@ -377,3 +377,58 @@ fn saved_kind_instance_plays_after_the_worker_registers_its_scratch_kind() {
     assert!(error.to_string().contains("scratch:pulse"), "{error}");
 }
 
+
+/// An audio track region renders through the export: silent before its
+/// start, its source from the authored sample on (docs/audio-tracks-spec.md
+/// §9.2).
+#[test]
+fn saved_audio_region_plays_from_its_start_beat() {
+    audio_region_export(true);
+}
+
+/// The same with no scene events: an arrangement of nothing but audio still
+/// plays.
+#[test]
+fn an_audio_only_arrangement_plays() {
+    audio_region_export(false);
+}
+
+fn audio_region_export(with_scene: bool) {
+    let folder = tempfile::tempdir().unwrap();
+    // SAFETY: nextest runs each test in its own process.
+    unsafe { std::env::set_var("ESEQ_AUDIO_STORE_DIR", folder.path().join("audio")) };
+    let source = folder.path().join("tone.wav");
+    let mut writer = hound::WavWriter::create(&source, hound::WavSpec {
+        channels: 1, sample_rate: SAMPLE_RATE, bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    }).unwrap();
+    for frame in 0..12_000 {
+        let value = 0.5 * (std::f32::consts::TAU * 220.0 * frame as f32 / SAMPLE_RATE as f32).sin();
+        writer.write_sample(value).unwrap();
+    }
+    writer.finalize().unwrap();
+
+    let owner = WorkerEngine(engine::init_headless_engine(SAMPLE_RATE, 2).unwrap());
+    let engine = &owner.0;
+    let mut app = App::new(Arc::clone(&engine.state), engine.lg_ptr, SAMPLE_RATE,
+        engine.buses.clone(), Arc::clone(&engine.master_recorder), engine.keyboard_tx.clone());
+    app.graph_controller().add_empty_track().unwrap();
+    let track = app.add_audio_track().unwrap();
+    let mut arrangement = ProjectArrangement::new(2, 4.0);
+    if !with_scene {
+        arrangement.scene_lane.clear();
+    }
+    app.state.set_committed_arrangement(Some(arrangement)).unwrap();
+    app.audio_regions_drop(track, 1.0, &[source]).unwrap();
+    let project = app.capture_project("audio-region-export").unwrap();
+    drop(app);
+
+    let audio = render(folder.path(), "audio", &project, None, 0.0);
+    let onset = audio.chunks_exact(2).position(|frame| peak(frame) > 1e-6).expect("the region sounds");
+    assert!((FRAMES_PER_BEAT..FRAMES_PER_BEAT + 3).contains(&onset),
+        "the region starts on its beat: onset {onset}");
+    let body = &audio[(FRAMES_PER_BEAT + 2_000) * 2..(FRAMES_PER_BEAT + 10_000) * 2];
+    assert!(peak(body) > 0.2, "the source plays at level: {}", peak(body));
+    let after = &audio[(FRAMES_PER_BEAT + 12_100) * 2..];
+    assert!(peak(after) < 1e-6, "silence past the source's end: {}", peak(after));
+}
