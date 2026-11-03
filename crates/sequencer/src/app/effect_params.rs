@@ -700,19 +700,30 @@ impl App {
 
     /// The push itself, shared by the live gesture and arrangement replay.
     pub(super) fn apply_scene_push_begin(&mut self, target_scene: usize, value: f32) {
-        if target_scene >= self.state.scene_count() {
+        let Some(mappings) = self.scene_push_mappings(target_scene) else {
             return;
+        };
+        let touched = self.macro_engine.begin_scene_push(mappings, value);
+        self.send_macro_targets(touched);
+    }
+
+    /// What a push toward `target_scene` morphs: every param it holds
+    /// differently from the playing scene (`None`: no such scene). Shared by
+    /// the push itself and the scheduler's push schedule.
+    pub(super) fn scene_push_mappings(
+        &self,
+        target_scene: usize,
+    ) -> Option<Vec<crate::macro_engine::MacroMapping>> {
+        if target_scene >= self.state.scene_count() {
+            return None;
         }
-        let config = crate::macro_engine::SceneMacroConfig {
+        Some(self.scene_macro_mappings(&crate::macro_engine::SceneMacroConfig {
             target_scene,
             morph_params: true,
             steal_patterns: false,
             quantize: crate::macro_engine::StealQuantize::Off,
             track_mask: None,
-        };
-        let mappings = self.scene_macro_mappings(&config);
-        let touched = self.macro_engine.begin_scene_push(mappings, value);
-        self.send_macro_targets(touched);
+        }))
     }
 
     pub(super) fn apply_scene_push_value(&mut self, value: f32) {

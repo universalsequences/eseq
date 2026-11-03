@@ -19964,6 +19964,96 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
     }
 
 
+/// A prebuilt chunk (a song row, frozen at Play) plays the LIVE macro layer
+/// (eseq-vum0): a scene push published after preflight reaches the row's
+/// device defaults — what every note-on stamps — so the push holds across
+/// row boundaries and onsets instead of reverting to the row's values. The
+/// fold is cached per (row, table) and skipped with no overrides.
+#[test]
+fn prebuilt_chunks_play_the_live_macro_layer() {
+    use std::sync::Arc;
+    let state = SequencerState::new(1, vec![vec![]]);
+    let desc = crate::effects::EffectDescriptor::builtin_sampler();
+    crate::effects::EffectSlotSnapshot::new_default(&desc, 1)
+        .restore(&state.pattern.instrument_slots[0]);
+    let prebuilt = Arc::new(crate::sequencer::SequencerSnapshot::capture(&state));
+    let slot = &prebuilt.tracks[0].instrument_slot;
+    assert!(slot.num_params > 0 && !slot.defaults.is_empty(), "a sampler has params");
+    let param_id = slot.node_param_idx(0).and_then(|raw| {
+        crate::neural::ParamNodeId::from_slot_param(slot.node_id, slot.modulator_node_id, raw)
+    });
+    let key = crate::macro_engine::MacroParamKey::for_instrument(0, 0, param_id);
+    let before = slot.defaults[0];
+    let pushed = if before == 0.75 { 0.25 } else { 0.75 };
+
+    let mut cache = None;
+    let quiet = crate::sequencer::SequencerSnapshot::capture(&state);
+    let same = super::lookahead::with_live_macro_overrides(&mut cache, Arc::clone(&prebuilt), &quiet, 0.0);
+    assert!(Arc::ptr_eq(&same, &prebuilt), "no overrides: the row as built");
+
+    state.publish_macro_overrides(std::collections::HashMap::from([(key, pushed)]));
+    let base = crate::sequencer::SequencerSnapshot::capture(&state);
+    let patched = super::lookahead::with_live_macro_overrides(&mut cache, Arc::clone(&prebuilt), &base, 0.0);
+    assert_eq!(patched.tracks[0].instrument_slot.defaults[0], pushed, "the push reaches the row");
+    assert_eq!(prebuilt.tracks[0].instrument_slot.defaults[0], before, "the row itself is untouched");
+    let again = super::lookahead::with_live_macro_overrides(&mut cache, Arc::clone(&prebuilt), &base, 0.0);
+    assert!(Arc::ptr_eq(&again, &patched), "one fold per (row, table)");
+}
+
+/// A recorded push replays at the RENDERED position, but note-ons are
+/// stamped up to a lookahead earlier, when they are scheduled: the
+/// scheduler plays the push from its schedule at each chunk's beat. A chunk
+/// past the push's end plays the row's value even while the replay (behind
+/// it) still holds the push in the live table, and a chunk inside the push
+/// plays it before the replay has begun it (eseq-vum0).
+#[test]
+fn prebuilt_chunks_play_scheduled_pushes_at_their_own_beat() {
+    use std::sync::Arc;
+    let state = SequencerState::new(1, vec![vec![]]);
+    let desc = crate::effects::EffectDescriptor::builtin_sampler();
+    crate::effects::EffectSlotSnapshot::new_default(&desc, 1)
+        .restore(&state.pattern.instrument_slots[0]);
+    let prebuilt = Arc::new(crate::sequencer::SequencerSnapshot::capture(&state));
+    let slot = &prebuilt.tracks[0].instrument_slot;
+    let param_id = slot.node_param_idx(0).and_then(|raw| {
+        crate::neural::ParamNodeId::from_slot_param(slot.node_id, slot.modulator_node_id, raw)
+    });
+    let key = crate::macro_engine::MacroParamKey::for_instrument(0, 0, param_id);
+    let row_value = slot.defaults[0];
+    let (from, to) = (row_value, row_value + 1.0);
+    let region = crate::sequencer::ScenePushRegion {
+        id: crate::sequencer::ClipId(7),
+        start_beat: 4.0,
+        end_beat: 8.0,
+        target_scene: 1,
+        points: vec![crate::sequencer::ScenePushPoint { beat: 0.0, value: 1.0 }],
+    };
+    state.publish_scene_push_schedule(Some(Arc::new(crate::sequencer::ScenePushSchedule {
+        regions: vec![crate::sequencer::ScheduledScenePush {
+            region,
+            params: vec![crate::macro_engine::ScenePushParam {
+                key: key.clone(),
+                from,
+                to,
+                curve: crate::macro_engine::MacroCurve::Linear,
+            }],
+        }],
+    })));
+    let value_at = |state: &SequencerState, beat: f64| {
+        let base = crate::sequencer::SequencerSnapshot::capture(state);
+        let mut cache = None;
+        super::lookahead::with_live_macro_overrides(&mut cache, Arc::clone(&prebuilt), &base, beat)
+            .tracks[0]
+            .instrument_slot
+            .defaults[0]
+    };
+    assert_eq!(value_at(&state, 3.9), row_value, "before the push: the row");
+    assert_eq!(value_at(&state, 4.0), to, "inside: pushed, though the replay has not begun it");
+    // The replay, a lookahead behind, still holds the push...
+    state.publish_macro_overrides(std::collections::HashMap::from([(key, to)]));
+    assert_eq!(value_at(&state, 8.0), row_value, "...but past its end the row plays");
+}
+
 /// A prebuilt chunk (a quantized launch, a song row) plays the live groove
 /// table of ITS scene, so a rack clip with its own groove switches on the
 /// launch boundary rather than when the control thread catches up.

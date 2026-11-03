@@ -63,11 +63,90 @@ impl App {
     }
 
     /// [`Self::drive_arrangement_scene_push`] at rendered sample
-    /// `rendered_sample` of the song clock.
+    /// `rendered_sample` of the song clock, then the schedule of the pushes
+    /// the scheduler is about to stamp note-ons through
+    /// ([`Self::schedule_arrangement_scene_pushes`]).
     pub fn drive_arrangement_scene_push_at_sample(&mut self, rendered_sample: u64) {
         let beat = self.state.song_playback().shared().position_beats(rendered_sample);
         self.drive_arrangement_scene_push(beat);
+        self.schedule_arrangement_scene_pushes(rendered_sample);
     }
+}
+
+/// How far past the scheduler's lookahead the push schedule reaches: the
+/// frames between two passes of the UI loop.
+const SCHEDULE_SLACK_LOOKAHEADS: f64 = 0.5;
+
+impl App {
+    /// Hand the scheduler the recorded pushes it is about to schedule
+    /// through: every push region overlapping song time from rendered
+    /// sample `rendered_sample` to the scheduler's lookahead past it (plus
+    /// slack). Republished only when that set, the song or the playing scene
+    /// (what a push morphs from) changes; cleared while a live gesture owns
+    /// the push or the song is stopped.
+    pub fn schedule_arrangement_scene_pushes(&mut self, rendered_sample: u64) {
+        let lookahead = self.state.scheduler_lookahead_samples();
+        let frontier_sample =
+            rendered_sample + (lookahead as f64 * (1.0 + SCHEDULE_SLACK_LOOKAHEADS)) as u64;
+        let shared = self.state.song_playback().shared();
+        let window = shared
+            .position_beats(rendered_sample)
+            .zip(shared.position_beats(frontier_sample));
+        let regions: Vec<crate::sequencer::ScenePushRegion> = match window {
+            Some((now, frontier)) if !self.scene_push_owner.is_live() => {
+                self.state.with_committed_arrangement(|arrangement| {
+                    let Some(arrangement) = arrangement else {
+                        return Vec::new();
+                    };
+                    // A loop wrap inside the window: it runs to the end, then
+                    // on from zero.
+                    let (first, wrapped) = if frontier >= now {
+                        ((now, frontier), None)
+                    } else {
+                        ((now, arrangement.end_beat), Some((0.0, frontier)))
+                    };
+                    (arrangement.push_lane.iter())
+                        .filter(|region| {
+                            std::iter::once(first)
+                                .chain(wrapped)
+                                .any(|(a, b)| region.start_beat <= b && region.end_beat > a)
+                        })
+                        .cloned()
+                        .collect()
+                })
+            }
+            _ => Vec::new(),
+        };
+        let key = ScheduledScenePushesKey {
+            revision: self.state.committed_song_revision(),
+            scene: self.state.current_scene_index(),
+            ids: regions.iter().map(|region| region.id).collect(),
+        };
+        if self.scheduled_scene_pushes == key {
+            return;
+        }
+        let regions: Vec<_> = regions
+            .into_iter()
+            .filter_map(|region| {
+                let mappings = self.scene_push_mappings(region.target_scene)?;
+                let params = self.macro_engine.scene_push_params(&mappings);
+                Some(crate::sequencer::ScheduledScenePush { region, params })
+            })
+            .collect();
+        let schedule = (!regions.is_empty())
+            .then(|| std::sync::Arc::new(crate::sequencer::ScenePushSchedule { regions }));
+        self.state.publish_scene_push_schedule(schedule);
+        self.scheduled_scene_pushes = key;
+    }
+}
+
+/// What the published push schedule was built from: the push params' `from`
+/// values are the playing scene's, so a scene change rebuilds it.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct ScheduledScenePushesKey {
+    revision: u64,
+    scene: usize,
+    ids: Vec<ClipId>,
 }
 
 impl App {

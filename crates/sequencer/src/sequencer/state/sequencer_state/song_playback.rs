@@ -426,7 +426,9 @@ impl SequencerState {
     ) -> Result<Arc<RuntimeSong>, String> {
         let mut rows = Vec::with_capacity(staged.len());
         for staging in staged {
-            let mut snapshot = SequencerSnapshot::capture_from_track_pattern_data(
+            // No macro layer baked in: the scheduler folds the live one into
+            // each row as it plays (`SequencerSnapshot::with_macro_overrides`).
+            let mut snapshot = SequencerSnapshot::capture_from_track_pattern_data_with_overrides(
                 self,
                 &staging.track_data,
                 staging.mod_connections,
@@ -435,6 +437,7 @@ impl SequencerState {
                 staging.scene_slots,
                 staging.project_process_chain,
                 staging.parking,
+                &HashMap::new(),
             );
             // Row snapshots are only ever scheduled while the song transport
             // is playing; stamp them so the deterministic clock treats them

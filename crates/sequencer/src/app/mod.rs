@@ -1186,6 +1186,9 @@ pub struct App {
     /// The scene push gesture state shared by the live transport gesture
     /// and arrangement replay (epic eseq-vum0, `scene_push_lane`).
     pub(crate) scene_push_owner: scene_push_lane::ScenePushOwner,
+    /// What `schedule_arrangement_scene_pushes` last handed the scheduler:
+    /// (committed song revision, push region ids).
+    pub(crate) scheduled_scene_pushes: scene_push_lane::ScheduledScenePushesKey,
     /// True when the most recent arrangement capture failed to commit
     /// (overflow, normalization, validation). Cleared when the next capture
     /// starts. Read as `song.capture-failed` (the host kinds).
@@ -3197,6 +3200,7 @@ impl App {
             bus_pattern_restore_epoch: 0,
             song_capture_take: None,
             scene_push_owner: Default::default(),
+            scheduled_scene_pushes: Default::default(),
             song_capture_failed: false,
             song_capture_error: None,
             song_edit_error: None,

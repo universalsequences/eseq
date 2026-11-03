@@ -165,9 +165,62 @@ pub struct SequencerSnapshot {
     /// Instrument descriptors by engine id, for naming rack-slot instrument
     /// params at landing (see [`Self::rack_slot_instrument_descriptor`]).
     pub engine_instrument_descriptors: Arc<Vec<EffectDescriptor>>,
+    /// The live macro layer (scene pushes, macros) folded into `tracks`, on
+    /// the LIVE session snapshot only (empty on prebuilt ones). Prebuilt
+    /// song-row snapshots are frozen at preflight, so the scheduler folds
+    /// this table into them per chunk ([`Self::with_macro_overrides`]):
+    /// without it a push reverts at every row boundary and note-on.
+    pub macro_overrides: Arc<HashMap<MacroParamKey, f32>>,
+    /// The recorded pushes about to play (live snapshot only), folded into
+    /// prebuilt chunks at each chunk's beat (`ScenePushSchedule::fold_at`).
+    pub scene_push_schedule: Option<Arc<crate::sequencer::ScenePushSchedule>>,
 }
 
 impl SequencerSnapshot {
+    /// This (prebuilt) snapshot with the live macro layer `overrides`
+    /// folded into the tracks it names, as the live snapshot folds it: the
+    /// overridden params' defaults are what every note-on stamps. Tracks
+    /// no override names stay shared.
+    pub fn with_macro_overrides(&self, overrides: &HashMap<MacroParamKey, f32>) -> Self {
+        let mut patched = self.clone();
+        patched.apply_macro_overrides(overrides);
+        patched
+    }
+
+    /// [`Self::with_macro_overrides`] in place.
+    pub fn apply_macro_overrides(&mut self, overrides: &HashMap<MacroParamKey, f32>) {
+        let touched = self.macro_override_tracks(overrides);
+        for (track_idx, track) in self.tracks.iter_mut().enumerate() {
+            if touched[track_idx] {
+                apply_track_macro_overrides(track_idx, Arc::make_mut(track), overrides);
+            }
+        }
+    }
+
+    /// Whether folding `overrides` changes any track.
+    pub fn macro_overrides_touch_tracks(&self, overrides: &HashMap<MacroParamKey, f32>) -> bool {
+        !overrides.is_empty() && self.macro_override_tracks(overrides).contains(&true)
+    }
+
+    /// Per track, whether `overrides` holds a key
+    /// [`apply_track_macro_overrides`] applies to it.
+    fn macro_override_tracks(&self, overrides: &HashMap<MacroParamKey, f32>) -> Vec<bool> {
+        let mut touched = vec![false; self.tracks.len()];
+        for key in overrides.keys() {
+            let track = match key {
+                MacroParamKey::Node { track, .. }
+                | MacroParamKey::Instrument { track, .. }
+                | MacroParamKey::Effect { track, .. }
+                | MacroParamKey::RackMacro { track, .. } => *track,
+                _ => continue,
+            };
+            if let Some(slot) = touched.get_mut(track) {
+                *slot = true;
+            }
+        }
+        touched
+    }
+
     /// The rack groove `track` plays through, if any.
     #[inline]
     pub fn track_groove(&self, track: usize) -> Option<&crate::groove::TrackGrooveSnapshot> {
@@ -255,6 +308,8 @@ impl SequencerSnapshot {
             scene_slot_table: Arc::new(Vec::new()),
             process_trace: false,
             engine_instrument_descriptors: Arc::new(Vec::new()),
+            macro_overrides: Arc::new(HashMap::new()),
+            scene_push_schedule: None,
         }
     }
 
@@ -302,7 +357,8 @@ impl SequencerSnapshot {
             ));
         }
 
-        apply_macro_overrides(&mut tracks, &state.live_macro_overrides());
+        let macro_overrides = state.live_macro_overrides();
+        apply_macro_overrides(&mut tracks, &macro_overrides);
         let tracks = tracks.into_iter().map(Arc::new).collect();
         let (mod_connections, neural_networks, graph_overrides) = state.current_scene_metadata();
         let scene_slots = state.current_scene_slots();
@@ -323,6 +379,8 @@ impl SequencerSnapshot {
             scene_slot_table,
             process_trace: state.process_trace_enabled(),
             engine_instrument_descriptors: state.engine_instrument_descriptors(),
+            macro_overrides,
+            scene_push_schedule: state.scene_push_schedule(),
         };
         // The playing scene's switched-off kits and project-owned
         // instances (docs/rig-spec.md §6, §10).
@@ -362,6 +420,7 @@ impl SequencerSnapshot {
         Some(snapshot)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn capture_from_track_pattern_data(
         state: &SequencerState,
         tracks: &[TrackPatternData],
@@ -374,6 +433,36 @@ impl SequencerSnapshot {
         // plays switches off (docs/rig-spec.md §6, §10): required, so no
         // builder can forget them.
         parking: crate::sequencer::SceneParking,
+    ) -> Self {
+        Self::capture_from_track_pattern_data_with_overrides(
+            state,
+            tracks,
+            mod_connections,
+            neural_networks,
+            graph_overrides,
+            scene_slots,
+            project_process_chain,
+            parking,
+            &state.live_macro_overrides(),
+        )
+    }
+
+    /// [`Self::capture_from_track_pattern_data`] folding `macro_overrides`
+    /// instead of the live table. Song rows pass none: they are frozen at
+    /// preflight, and the scheduler folds the live table in per chunk
+    /// ([`Self::with_macro_overrides`]), so a push live at Play is not baked
+    /// into the song.
+    #[allow(clippy::too_many_arguments)]
+    pub fn capture_from_track_pattern_data_with_overrides(
+        state: &SequencerState,
+        tracks: &[TrackPatternData],
+        mod_connections: Vec<ModConnection>,
+        neural_networks: Vec<ProjectNeuralNetwork>,
+        graph_overrides: Vec<ProjectGraphOverrides>,
+        scene_slots: SceneSlotStore,
+        project_process_chain: crate::process::TrackProcessChain,
+        parking: crate::sequencer::SceneParking,
+        macro_overrides: &HashMap<MacroParamKey, f32>,
     ) -> Self {
         let num_tracks = tracks.len();
         let transport = SequencerTransportSnapshot {
@@ -431,7 +520,7 @@ impl SequencerSnapshot {
             }
         }
 
-        apply_macro_overrides(&mut tracks, &state.live_macro_overrides());
+        apply_macro_overrides(&mut tracks, macro_overrides);
         let tracks = tracks.into_iter().map(Arc::new).collect();
 
         let mut snapshot = Self {
@@ -452,6 +541,8 @@ impl SequencerSnapshot {
             scene_slot_table: Arc::new(state.scene_slot_table()),
             process_trace: state.process_trace_enabled(),
             engine_instrument_descriptors: state.engine_instrument_descriptors(),
+            macro_overrides: Arc::new(HashMap::new()),
+            scene_push_schedule: None,
         };
         snapshot.apply_scene_parking(parking);
         snapshot

@@ -61,6 +61,10 @@ pub(super) struct SchedulerLookaheadState {
     /// ([`with_live_rack_config`]), so a song row that plays for many
     /// chunks after a groove or member edit is cloned once, not per chunk.
     pub(super) live_rack_config_chunk: Option<LiveRackConfigChunk>,
+    /// The last prebuilt chunk snapshot with the live macro layer folded in
+    /// ([`with_live_macro_overrides`]), so a held scene push costs one clone
+    /// per change, not one per chunk.
+    pub(super) live_macro_override_chunk: Option<LiveMacroOverrideChunk>,
     /// The manual-override latch mask and launch generations the latched
     /// lanes last scheduled from during song playback, to spot a lane whose
     /// source changed (a latched launch, or a latch just taken) at a chunk
@@ -146,6 +150,59 @@ pub(super) fn with_live_rack_config(
     patched
 }
 
+/// A prebuilt chunk snapshot (`source`) with the macro table `table` (the
+/// live layer and the scheduled push, folded) applied: `patched`. Keyed on
+/// the folded table rather than its inputs, so the replay republishing the
+/// live table with the values the schedule already sets is free.
+pub(super) struct LiveMacroOverrideChunk {
+    source: Arc<SequencerSnapshot>,
+    table: HashMap<crate::macro_engine::MacroParamKey, f32>,
+    patched: Arc<SequencerSnapshot>,
+}
+
+/// `prebuilt` (a song row's snapshot, a quantized launch's) with the live
+/// macro layer published on `base` folded in, as of song beat `beat` (this
+/// chunk's start). Prebuilt snapshots are frozen when they are built — a
+/// song row at Play — so without this a scene push and any macro moved
+/// since reverted at every row boundary and every note-on, which stamps the
+/// device defaults from the snapshot it is scheduled from. Recorded pushes
+/// come from `base.scene_push_schedule` at `beat` rather than from the live
+/// table, which the replay drives at the rendered position, a lookahead
+/// behind this chunk. Folding is idempotent (an override is an absolute
+/// value), so a launch snapshot that already carries the live table is
+/// unharmed.
+pub(super) fn with_live_macro_overrides(
+    cache: &mut Option<LiveMacroOverrideChunk>,
+    mut prebuilt: Arc<SequencerSnapshot>,
+    base: &SequencerSnapshot,
+    beat: f64,
+) -> Arc<SequencerSnapshot> {
+    let table = match base.scene_push_schedule.as_deref() {
+        Some(schedule) => std::borrow::Cow::Owned(schedule.fold_at(&base.macro_overrides, beat)),
+        None => std::borrow::Cow::Borrowed(base.macro_overrides.as_ref()),
+    };
+    if !prebuilt.macro_overrides_touch_tracks(&table) {
+        return prebuilt;
+    }
+    // A merge built for this chunk alone: patch it in place.
+    if let Some(unique) = Arc::get_mut(&mut prebuilt) {
+        unique.apply_macro_overrides(&table);
+        return prebuilt;
+    }
+    if let Some(cached) = cache.as_ref() {
+        if Arc::ptr_eq(&cached.source, &prebuilt) && cached.table == *table {
+            return Arc::clone(&cached.patched);
+        }
+    }
+    let patched = Arc::new(prebuilt.with_macro_overrides(&table));
+    *cache = Some(LiveMacroOverrideChunk {
+        source: prebuilt,
+        table: table.into_owned(),
+        patched: Arc::clone(&patched),
+    });
+    patched
+}
+
 /// One enqueued graph emission, as the graph produced it (before the rack
 /// groove), for a resync replay (`replay_retained_graph_emissions`).
 #[derive(Clone, Debug)]
@@ -189,6 +246,7 @@ impl SchedulerLookaheadState {
             last_scene_slot_debug: None,
             graph_replay: Vec::new(),
             live_rack_config_chunk: None,
+            live_macro_override_chunk: None,
             latched_sources: LatchedSources::default(),
         }
     }
@@ -873,7 +931,17 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         let prebuilt_snapshot = song_row_snapshot
             .or(session_launch_snapshot)
             .map(|prebuilt| {
-                with_live_rack_config(&mut scheduler.live_rack_config_chunk, prebuilt, base_snapshot)
+                let prebuilt = with_live_rack_config(
+                    &mut scheduler.live_rack_config_chunk,
+                    prebuilt,
+                    base_snapshot,
+                );
+                with_live_macro_overrides(
+                    &mut scheduler.live_macro_override_chunk,
+                    prebuilt,
+                    base_snapshot,
+                    clock.total_beats,
+                )
             });
         let snapshot: &SequencerSnapshot = prebuilt_snapshot.as_deref().unwrap_or(base_snapshot);
         // A launch that lands mid-step (an unquantized live launch at the

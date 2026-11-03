@@ -942,6 +942,7 @@ pub fn spawn_scheduler_thread(
         .stack_size(SCHEDULER_THREAD_STACK_SIZE)
         .spawn(move || {
             let lookahead_samples = (scheduler_block_size.max(1) * 4) as u64;
+            state.set_scheduler_lookahead_samples(lookahead_samples);
             let mut driver = SchedulerDriver::new(state, sample_rate, scheduler_block_size, queue);
             raise_scheduler_thread_qos();
             let mut meter = super::load_meter::LoadMeter::new(sample_rate);

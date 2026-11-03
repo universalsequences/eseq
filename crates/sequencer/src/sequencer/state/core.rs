@@ -719,8 +719,12 @@ pub struct SequencerState {
     pub(super) publish_coalesce_depth: AtomicU64,
     pub(super) pending_coalesced_publish: AtomicBool,
     /// Command-thread macro values waiting to be folded into the next
-    /// immutable scheduler snapshot. The scheduler never reads this lock.
-    pub(super) live_macro_overrides: Mutex<HashMap<crate::macro_engine::MacroParamKey, f32>>,
+    /// immutable scheduler snapshot. The scheduler never reads this lock:
+    /// the live snapshot carries the same table (`macro_overrides`).
+    pub(super) live_macro_overrides: Mutex<Arc<HashMap<crate::macro_engine::MacroParamKey, f32>>>,
+    /// The recorded scene pushes about to play, for the scheduler
+    /// (`SequencerSnapshot::scene_push_schedule`).
+    pub(super) scene_push_schedule: Mutex<Option<Arc<crate::sequencer::ScenePushSchedule>>>,
     pub(super) rack_macro_runtime_values: Arc<RackMacroRuntimeValues>,
     pub(super) neural_visualization: Mutex<NeuralVisualizationSnapshot>,
     /// The next native neural network id to mint (`mint_neural_network_id`):
@@ -774,6 +778,9 @@ pub struct SequencerState {
     pub(super) active_note_trigger_ids: Vec<[AtomicU64; 128]>,
     pub(super) active_note_trigger_sequence: AtomicU64,
     pub(super) audio_rendered_sample: AtomicU64,
+    /// How far past `audio_rendered_sample` the scheduler thread schedules
+    /// (its lookahead, in samples; 0 until it starts).
+    pub(super) scheduler_lookahead_samples: AtomicU64,
     /// The audio regions selected for locking and what the effect knobs
     /// show for them (eseq-a921), published by `App`.
     pub(super) audio_lock_view: Mutex<AudioLockView>,

@@ -557,7 +557,11 @@ pub(crate) fn run_event_loop(
             }
         }
         // Recorded scene pushes replay after this frame's rows mirrored, so
-        // a push starting on a scene change morphs from the new scene.
+        // a push starting on a scene change morphs from the new scene. The
+        // replay drives held notes at the rendered position; the scheduler,
+        // which stamps note-ons up to its lookahead ahead of that, gets the
+        // pushes about to play as a schedule (half a lookahead more covers
+        // the frames between two passes of this loop).
         app.drive_arrangement_scene_push_at_sample(shared.state.audio_rendered_sample());
         // Generator tick failures (eseq-85a.5): the scheduler reports the
         // first failure per generator and parks it; surface it here instead

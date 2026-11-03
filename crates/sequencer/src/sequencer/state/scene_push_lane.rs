@@ -179,6 +179,57 @@ pub fn thin_scene_push_points(points: &[ScenePushPoint], tolerance: f32) -> Vec<
         .collect()
 }
 
+/// The recorded pushes the scheduler is about to play through, handed to it
+/// ahead of time (on the live snapshot, `SequencerSnapshot::
+/// scene_push_schedule`). A note-on stamps its device params when it is
+/// SCHEDULED, up to a lookahead before it sounds, while replay drives the
+/// macro engine at the RENDERED position; without this the onsets in that
+/// window kept the previous values — the start of a push missed them, and
+/// at its end they kept the pushed values after the push let go.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ScenePushSchedule {
+    pub regions: Vec<ScheduledScenePush>,
+}
+
+/// One push region with the params it moves.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScheduledScenePush {
+    pub region: ScenePushRegion,
+    pub params: Vec<crate::macro_engine::ScenePushParam>,
+}
+
+impl ScenePushSchedule {
+    /// The region playing at `beat` and its push amount there.
+    fn playing_at(&self, beat: f64) -> Option<(&ScheduledScenePush, f32)> {
+        let push = self.regions.iter().find(|push| push.region.contains(beat))?;
+        Some((push, push.region.value_at(beat)))
+    }
+
+    /// The macro table to stamp at song beat `beat`: `live` with every
+    /// scheduled push param replaced by the schedule's value — the region
+    /// playing at `beat` sets it, and outside every region it is dropped so
+    /// the row's own value plays. The replay's copy in `live` may lag or
+    /// lead the beat being scheduled; the schedule never does.
+    pub fn fold_at(
+        &self,
+        live: &HashMap<crate::macro_engine::MacroParamKey, f32>,
+        beat: f64,
+    ) -> HashMap<crate::macro_engine::MacroParamKey, f32> {
+        let mut table = live.clone();
+        for push in &self.regions {
+            for param in &push.params {
+                table.remove(&param.key);
+            }
+        }
+        if let Some((push, amount)) = self.playing_at(beat) {
+            for param in &push.params {
+                table.insert(param.key.clone(), param.at(amount));
+            }
+        }
+        table
+    }
+}
+
 impl ProjectArrangement {
     /// The push region playing at `beat`, if any (the lane is sorted and
     /// non-overlapping, so only the last region starting by `beat` can).
