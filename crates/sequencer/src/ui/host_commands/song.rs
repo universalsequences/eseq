@@ -38,6 +38,8 @@ pub(super) const COMMANDS: &[&str] = &[
     // Recorded scene pushes (eseq-vum0): `:ids` / `:clip-id :start-beat`.
     "arrangement-push-delete",
     "arrangement-push-move",
+    "arrangement-push-resize",
+    "arrangement-push-clear",
     "song-set-end",
     "song-set-loop",
     // Row path: the declarative/capture commit surface only (lane spec 9 —
@@ -554,6 +556,19 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let start_beat = require_number(map, "start-beat")?;
             app.scene_push_move(clip_id, start_beat)?;
             Ok(format!("Moved scene push to beat {start_beat}"))
+        }
+        "arrangement-push-resize" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map)?;
+            let (start, end) = (require_number(map, "start")?, require_number(map, "end")?);
+            app.scene_push_resize(clip_id, start, end)?;
+            Ok(format!("Resized scene push to beats {start}-{end}"))
+        }
+        "arrangement-push-clear" => {
+            let map = payload_map(payload)?;
+            let (start, end) = (require_number(map, "start")?, require_number(map, "end")?);
+            app.scene_pushes_clear_span(start, end)?;
+            Ok(format!("Cleared scene pushes from beat {start} to {end}"))
         }
         "arrangement-clip-delete" => {
             let map = payload_map(payload)?;

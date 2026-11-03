@@ -204,6 +204,9 @@ pub struct ArrangementClipboard {
     /// what the scene lane sounded like, not just its change points.
     pub scene_lane: bool,
     pub scene_events: Vec<(f64, usize)>,
+    /// The scene pushes inside the span, for a scene-lane region
+    /// (eseq-vum0): cut at its edges, beats relative to its start.
+    pub scene_pushes: Vec<crate::sequencer::ScenePushRegion>,
     /// Rack group id → its rack-lane spans, for every rack row the region
     /// covered. A rack lane silent throughout still appears, so paste
     /// silences it.
@@ -536,12 +539,18 @@ impl App {
         } else {
             Vec::new()
         };
+        let scene_pushes = if region.scene_lane {
+            arrangement.scene_pushes_in(start_beat, end_beat)
+        } else {
+            Vec::new()
+        };
         Ok(ArrangementClipboard {
             len_beats,
             snap_beats: region_snap_beats(start_beat, len_beats),
             tracks,
             scene_lane: region.scene_lane,
             scene_events,
+            scene_pushes,
             racks,
             audio,
         })
@@ -677,6 +686,10 @@ impl App {
                         event.start_beat += len_beats;
                     }
                 }
+                // Pushes ride the timeline like scene changes do. Without
+                // the scene lane the copy pastes no pushes, so one cut by
+                // the insert holds across the opening instead.
+                arrangement.ripple_scene_pushes_right(insert_beat, len_beats, !clipboard.scene_lane)?;
             }
             // Both paths leave exactly [insert, insert + len) vacated on the
             // rippled lanes; the duplicate fills it.
@@ -792,6 +805,7 @@ impl App {
                 let tail_scene =
                     Self::clear_scene_lane_span(&mut arrangement, source_start, source_end);
                 Self::restore_scene_tail(&mut arrangement, source_end, tail_scene);
+                arrangement.occlude_scene_push_span(source_start, source_end)?;
             }
             // Destination second — it clears its own rectangle and stamps the
             // lifted clips (and, for a scene-lane region, the scene events).
@@ -979,6 +993,7 @@ impl App {
         }
         if clipboard.scene_lane {
             Self::paste_scene_events(arrangement, &clipboard.scene_events, dest_beat, dest_end);
+            arrangement.paste_scene_pushes(&clipboard.scene_pushes, dest_beat, clipboard.len_beats)?;
         }
         Ok(())
     }
@@ -1205,6 +1220,7 @@ impl App {
         if region.scene_lane {
             let tail_scene = Self::clear_scene_lane_span(&mut arrangement, start_beat, end_beat);
             Self::restore_scene_tail(&mut arrangement, end_beat, tail_scene);
+            arrangement.occlude_scene_push_span(start_beat, end_beat)?;
         }
         if arrangement == existing {
             return Ok("The region is already empty".to_string());
@@ -2302,6 +2318,72 @@ mod tests {
 
         undo(&mut app);
         assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 1)]);
+    }
+
+    /// Seed a push toward scene 1 over `[start, end)`, ramping 0 → 1.
+    fn add_push(app: &mut App, start: f64, end: f64) {
+        let mut arrangement = app.state.committed_arrangement().expect("arrangement");
+        let id = arrangement.allocate_clip_id().expect("id");
+        arrangement.push_lane.push(crate::sequencer::ScenePushRegion {
+            id,
+            start_beat: start,
+            end_beat: end,
+            target_scene: 1,
+            points: vec![
+                crate::sequencer::ScenePushPoint { beat: 0.0, value: 0.0 },
+                crate::sequencer::ScenePushPoint { beat: end - start, value: 1.0 },
+            ],
+        });
+        app.state.set_committed_arrangement(Some(arrangement)).expect("commit");
+    }
+
+    fn pushes(app: &App) -> Vec<(f64, f64)> {
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        arrangement.push_lane.iter().map(|push| (push.start_beat, push.end_beat)).collect()
+    }
+
+    /// eseq-vum0: a scene-lane region (Cmd+A) carries the scene pushes it
+    /// covers. Delete clears them (cutting one it straddles), duplicate
+    /// ripples and repeats them, move lifts them; a track-lane region leaves
+    /// them alone. Each is one undo step.
+    #[test]
+    fn scene_lane_regions_carry_scene_pushes() {
+        let mut app = app_with_scene_change();
+        add_push(&mut app, 2.0, 6.0);
+        add_push(&mut app, 10.0, 14.0);
+
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 4.0, 12.0, false));
+        app.song_region_delete().expect("track-lane delete");
+        assert_eq!(pushes(&app), vec![(2.0, 6.0), (10.0, 14.0)], "a track lane region");
+        undo(&mut app);
+
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 4.0, 12.0, true));
+        let depth = app.history.undo_len();
+        app.song_region_delete().expect("delete");
+        assert_eq!(app.history.undo_len(), depth + 1);
+        assert_eq!(pushes(&app), vec![(2.0, 4.0), (12.0, 14.0)], "cut at the region edges");
+        undo(&mut app);
+        assert_eq!(pushes(&app), vec![(2.0, 6.0), (10.0, 14.0)]);
+
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 0.0, 8.0, true));
+        app.song_region_duplicate().expect("duplicate");
+        assert_eq!(
+            pushes(&app),
+            vec![(2.0, 6.0), (10.0, 14.0), (18.0, 22.0)],
+            "the copy lands after the region, later pushes ripple right"
+        );
+        undo(&mut app);
+
+        // Every track but not the scene lane: the timeline still opens, the
+        // straddling push holds across the opening.
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 0.0, 4.0, false));
+        app.song_region_duplicate().expect("track-only duplicate");
+        assert_eq!(pushes(&app), vec![(2.0, 10.0), (14.0, 18.0)], "no hole in the cut push");
+        undo(&mut app);
+
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 0.0, 8.0, true));
+        app.song_region_move(16.0).expect("move");
+        assert_eq!(pushes(&app), vec![(10.0, 14.0), (18.0, 22.0)], "lifted and set down");
     }
 
     /// The same rectangle swept in a TRACK lane never touches the scene lane.

@@ -79,6 +79,8 @@
         begin-placement
         cancel-placement
         push-items
+        pending-push-items
+        push-selection-rect
         push-lane-action)
 
 ;; ── View state (`:key ()` singletons) ──────────────────────────────────────
@@ -1043,6 +1045,7 @@
 ;; which a track-lane marquee covering the same rectangle never does.
 (def region-commit (region)
   (clear-region-ghost!)
+  (drop-push-selection!)
   (let ((row-a (when region (get region :row-a)))
         (row-b (when region (get region :row-b)))
         (a (when region (track (row-key-track row-a))))
@@ -1062,6 +1065,7 @@
 ;; (negative id, lane spec 12): a gap is not a clip, so there is nothing to
 ;; bind or select.
 (def select-clip (c)
+  (drop-push-selection!)
   (set! song.bound-clip c)
   (when (= c nil) (clear-region!)))
 
@@ -1080,21 +1084,30 @@
                             (fold-clips |acc c| (min acc c.start) hi)))
         :end hi))))
 
-;; The clip span widened to every scene event; nil when the song holds
-;; neither clips nor scene events.
+;; The clip span widened to every scene event and recorded scene push; nil
+;; when the song holds none of them.
 (def everything-span ()
   (let ((clips (clip-span-all-tracks))
-        (spans song.spans))
-    (if (empty? spans)
-      clips
-      ;; Spans are ordered and contiguous (as content-length-min reads them).
-      (let ((first-span (first spans))
-            (last-span (nth spans (- (len spans) 1)))
-            (lo first-span.start)
-            (hi last-span.end))
-        (if (= clips nil)
-          (dict :start lo :end hi)
-          (dict :start (min lo (get clips :start)) :end (max hi (get clips :end))))))))
+        (spans song.spans)
+        (pushes (or song.pushes '()))
+        ;; Both lanes are in time order (scene spans contiguous, pushes never
+        ;; overlapping), so their first and last entries bound them.
+        (scene-span
+          (unless (empty? spans)
+            (let ((a (first spans)) (b (nth spans (- (len spans) 1))))
+              (dict :start a.start :end b.end))))
+        (push-span
+          (unless (empty? pushes)
+            (let ((a (first pushes)) (b (nth pushes (- (len pushes) 1))))
+              (dict :start a.start :end b.end)))))
+    (reduce |acc span|
+      (cond
+        ((= span nil) acc)
+        ((= acc nil) span)
+        (else (dict :start (min (get acc :start) (get span :start))
+                :end (max (get acc :end) (get span :end)))))
+      nil
+      (list clips scene-span push-span))))
 
 (def select-all-clips ()
   (let ((span (everything-span))
@@ -1113,13 +1126,20 @@
 ;; this is really about the in-flight ghost and the scene-row path.
 (def drop-region! ()
   (clear-region-ghost!)
-  (clear-region!))
+  (clear-region!)
+  (drop-push-selection!))
 
 ;; What a gesture that names no single clip does: drop the region and release
 ;; the sound binding (takes spec 16.6 cause 2).
 (def release-selection! ()
   (drop-region!)
   (set! song.bound-clip nil))
+
+;; The push lane's own selection (picked pushes, a swept range) yields to
+;; any other selection gesture, as the lanes' selections yield to it.
+(def drop-push-selection! ()
+  (set! arr-push.selected '())
+  (set! arr-push.range nil))
 
 ;; The scene lane draws its own marquee echo while a drag is live, then keeps
 ;; the committed rect lit for a SCENE-LANE region (region spec 4.4) — the
@@ -1969,51 +1989,128 @@
 ;; select, dragged by their title bar to move, and deleted with Backspace;
 ;; playback replays them through the live push path.
 (def push-lane-height 3.2)
+;; The shortest a push resizes to, in beats (the ghost clamps to it).
+(def push-min-length 0.25)
 
 (def-kind arr-push
   :key ()
   :state ((selected '())
-          ;; The live move ghost: {:id :start} while a title-bar drag runs.
-          (drag :any :default nil)))
+          ;; The live drag ghost while a gesture runs: {:id :start} for a
+          ;; title-bar move, {:id :edge :time} for an edge resize.
+          (drag :any :default nil)
+          ;; A time range swept on the lane: {:start :end}. Backspace clears
+          ;; just that range of the push lane, cutting what straddles it.
+          (range :any :default nil)))
 
-(def push-target-label (push)
-  (let ((all (scenes)))
-    (str "→ "
-      (if (< push.target (len all)) (scene-name (nth all push.target)) "?"))))
+;; "→ <scene>" for a push toward scene index `target` of `all`.
+(def push-target-label (all push)
+  (str "→ "
+    (if (< push.target (len all)) (scene-name (nth all push.target)) "?")))
 
-(def push-ghost-start (push)
-  (let ((drag arr-push.drag))
-    (if (and drag (= (get drag :id) push.cid)) (get drag :start) push.start)))
+;; Where push `push` draws while a drag of it runs: (start end).
+(def push-ghost-span (push)
+  (let ((drag arr-push.drag)
+        (mine (and drag (= (get drag :id) push.cid)))
+        (length (- push.end push.start)))
+    (cond
+      ((not mine) (list push.start push.end))
+      ((= (get drag :edge) :start)
+       (list (min (max 0 (get drag :time)) (- push.end push-min-length)) push.end))
+      ((= (get drag :edge) :end)
+       (list push.start (max (get drag :time) (+ push.start push-min-length))))
+      (else (list (get drag :start) (+ (get drag :start) length))))))
 
 (def push-items ()
-  (map |push|
-    (let ((start (push-ghost-start push)))
+  (let ((all (scenes)))
+    (map |push|
+      (let ((span (push-ghost-span push)))
+        (dict
+          :id push.cid
+          :lane 0
+          :start (first span)
+          :end (nth span 1)
+          :label (push-target-label all push)
+          :content (dict :curve push.points)
+          :selected (listed? push.cid arr-push.selected)
+          :color (scene-color)))
+      (or song.pushes '()))))
+
+;; The pushes the running capture has recorded so far, drawn over the
+;; committed ones they will replace. Like the other provisional items they
+;; carry no :id, so no gesture can select or move them; a held push ends
+;; at the record head and grows with it.
+(def pending-push-items ()
+  (let ((all (scenes)))
+    (map |push|
       (dict
-        :id push.cid
         :lane 0
-        :start start
-        :end (+ start (- push.end push.start))
-        :label (push-target-label push)
+        :start push.start
+        :end push.end
+        :label (push-target-label all push)
         :content (dict :curve push.points)
-        :selected (listed? push.cid arr-push.selected)
-        :color (scene-color)))
-    (or song.pushes '())))
+        :color (scene-color))
+      (or song.pending-pushes '()))))
 
 (def find-push (id)
   (first (filter |push| (= push.cid id) (or song.pushes '()))))
+
+;; The swept range ordered, from a marquee event.
+(def push-range (event)
+  (let ((a (get event :time-a)) (b (get event :time-b)))
+    (dict :start (max 0 (min a b)) :end (max a b))))
+
+;; The lane's highlight: its own swept range, else a scene-lane region
+;; (Cmd+A, a scene-lane sweep), whose copy/move/duplicate/delete carry the
+;; pushes it covers. Drawn in the :region style, so it lights exactly the
+;; span inside each push, as the track lanes do.
+(def push-selection-rect ()
+  (let ((range arr-push.range))
+    (if range
+      (dict :time-a (get range :start) :time-b (get range :end) :lane-a 0 :lane-b 0)
+      (scene-region-rect))))
+
+;; A push-lane selection replaces every other one: the region, the bound
+;; clip, scene and clip picks, and its own previous range or picks.
+(def drop-other-selections! ()
+  (release-selection!)
+  (set! arr-select.scenes '())
+  (set! arr-select.rect nil)
+  (deselect-clips!))
 
 (def push-lane-action (event)
   (if (view-action? event)
     (view-action event)
     (match event.type
+      ;; Picking pushes is a selection of its own: it drops the region, as a
+      ;; scene-lane click does.
       :select
-      (set! arr-push.selected (or (get event :ids) '()))
+      (do
+        (drop-other-selections!)
+        (set! arr-push.selected (or (get event :ids) '())))
       :clear-selection
-      (set! arr-push.selected '())
+      (do
+        (set! arr-push.range nil)
+        (set! arr-push.selected '()))
+      ;; A sweep on the lane selects a time range of the push lane alone.
+      :marquee-select
+      (do
+        (drop-other-selections!)
+        (set! arr-push.range (push-range event)))
+      :finish-marquee-select
+      (let ((range (push-range event)))
+        (set! arr-push.range
+          (when (> (get range :end) (get range :start)) range)))
       :move-items-absolute
       (let ((push (find-push (get event :anchor-id))))
         (set! arr-push.drag
           (when push (dict :id push.cid :start (max 0 (get event :start))))))
+      :resize-item-absolute
+      (let ((push (find-push (get event :id))))
+        (set! arr-push.drag
+          (when push
+            (dict :id push.cid
+              :edge (if (= (get event :edge) :start) :start :end)
+              :time (get event :time)))))
       :finish-move-items
       (let ((drag arr-push.drag)
             (push (when drag (find-push (get drag :id)))))
@@ -2021,9 +2118,33 @@
         (unless (or (= push nil) (= (get drag :start) push.start))
           (host-command "arrangement-push-move"
             (dict :clip-id push.cid :start-beat (get drag :start)))))
+      :finish-resize-items
+      (let ((drag arr-push.drag)
+            (push (when drag (find-push (get drag :id))))
+            (span (when push (push-ghost-span push))))
+        (set! arr-push.drag nil)
+        (unless (or (= push nil)
+                  (and (= (first span) push.start) (= (nth span 1) push.end)))
+          (host-command "arrangement-push-resize"
+            (dict :clip-id push.cid :start (first span) :end (nth span 1)))))
+      ;; Backspace with nothing picked: the lane's own swept range clears
+      ;; just that span of the push lane; a song region (Cmd+A, a sweep
+      ;; elsewhere) deletes as a region, clips and all.
+      :delete-range
+      (let ((range arr-push.range))
+        (cond
+          (range
+           (do
+             (set! arr-push.range nil)
+             (host-command "arrangement-push-clear"
+               (dict :start (get range :start) :end (get range :end)))))
+          ((not (= song.region nil))
+           (seq-song-region-delete))
+          (else nil)))
       :delete-items
       (let ((ids (or (get event :ids) '())))
         (set! arr-push.selected '())
+        (set! arr-push.range nil)
         (unless (empty? ids)
           (host-command "arrangement-push-delete" (dict :ids ids))))
       _ nil)))
@@ -2050,7 +2171,10 @@
     :item-color :scene-clip-bg
     :loop-visible false
     :playhead-time #'song.position
-    :items (push-items)
+    :items (append (push-items) (pending-push-items))
+    :selection-rect (push-selection-rect)
+    ;; Light the swept span inside the pushes, as the track lanes do.
+    :selection-rect-style :region
     :view-start #'arr-view.start
     :view-duration #'arr-view.duration
     :zoom-min-duration min-view-duration
@@ -2058,20 +2182,22 @@
     :content-length #'arr-view.content-length
     :snap snap
     :move-snap-mode :alignment-helper
+    :resize-snap :grid
+    :resize-snap-mode :alignment-helper
+    :marquee-snap :grid
     :snap-mode :floor
     :scroll-mode :smooth
     :on-action |event| (push-lane-action event)))
 
-;; The row: a labeled header and the lane, only while the song holds pushes.
+;; The row: a labeled header and the lane. Always shown, so the layout
+;; does not jump the moment a take records its first push.
 (def push-row ()
-  (if (empty? (or song.pushes '()))
-    (nothing)
-    (h-stack :width :fill :align :start :gap 0
-      (box :key "push-header" :width header-width :height push-lane-height
-        :padding 0.4
-        (label "Scene pushes" :font-size 9.5 :color :gray :bg :transparent))
-      (h-stack :width 0 :flex 1 :align :start :gap 0
-        (push-lane)))))
+  (h-stack :width :fill :align :start :gap 0
+    (box :key "push-header" :width header-width :height push-lane-height
+      :padding 0.4
+      (label "Scene pushes" :font-size 9.5 :color :gray :bg :transparent))
+    (h-stack :width 0 :flex 1 :align :start :gap 0
+      (push-lane))))
 
 ;; The footer and the unused track area share the same time transform as
 ;; real lanes, but cannot create scene clips or acquire track selection.

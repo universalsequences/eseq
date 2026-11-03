@@ -24654,28 +24654,40 @@ use panel_kinds_seed::*;
             scene_lane.rect.width,
             layout.rect.width
         );
+        // The scene push lane (eseq-vum0) is always shown between the scene
+        // lane and the track rows, so the layout does not jump when a take
+        // records its first push. A thin deliberate separator strip (and row
+        // border chrome) may sit between lanes; anything larger is a layout
+        // regression that would let the pointer fall between them.
+        let push_lane = find_layout_node_by_stable_key_suffix(&layout, "/push-lane")
+            .expect("the push lane, even with no pushes");
+        assert_finite_nonzero_rect(push_lane, "push lane");
         let scene_bottom = scene_lane.rect.row + scene_lane.rect.height;
-        // A thin deliberate separator strip (and row border chrome) may sit
-        // between the scene lane and the track rows; anything larger is a
-        // layout regression that would let the pointer fall between lanes.
-        let track_gap = track_lane.rect.row - scene_bottom;
+        let push_gap = push_lane.rect.row - scene_bottom;
+        assert!(
+            (-0.01..0.5).contains(&push_gap),
+            "push lane must sit just under the scene lane (scene bottom {scene_bottom}, push top {})",
+            push_lane.rect.row
+        );
+        let push_bottom = push_lane.rect.row + push_lane.rect.height;
+        let track_gap = track_lane.rect.row - push_bottom;
         assert!(
             (-0.01..0.5).contains(&track_gap),
-            "track lane must sit just under the scene lane (scene bottom {scene_bottom}, track top {})",
+            "track lane must sit just under the push lane (push bottom {push_bottom}, track top {})",
             track_lane.rect.row
         );
 
         // Sticky ruler: the track rows live inside a scroll container that
-        // starts flush under the pinned scene lane and absorbs the rest of
-        // the pane, so vertical track scrolling never moves the ruler.
+        // starts flush under the pinned scene and push lanes and absorbs the
+        // rest of the pane, so vertical track scrolling never moves the ruler.
         let track_scroll = find_layout_node_by_stable_key_suffix(&layout, "/track-scroll")
             .expect("track scroll container");
         assert_eq!(track_scroll.widget_type, "scroll");
         assert_finite_nonzero_rect(track_scroll, "arrangement-track-scroll");
-        let scroll_gap = track_scroll.rect.row - scene_bottom;
+        let scroll_gap = track_scroll.rect.row - push_bottom;
         assert!(
             (-0.01..0.5).contains(&scroll_gap),
-            "scroll container starts just under the scene lane (gap {scroll_gap})"
+            "scroll container starts just under the push lane (gap {scroll_gap})"
         );
         assert!(
             find_layout_node_by_stable_key(track_scroll, "arr-track-0").is_some(),

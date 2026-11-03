@@ -568,7 +568,8 @@ is the step grid (:snap-mode :floor, :resize-snap :grid, :move-snap-mode \
 :start :end), :move-items-absolute (:ids :anchor-id :start :lane) then \
 :finish-move-items, :resize-item-absolute (:id :ids :edge :time :duration) then \
 :finish-resize-items, :resize-content-length (:length), :marquee-select (:time-a \
-:time-b :lane-a :lane-b), :delete-items (:ids), :scroll-view (:view-start \
+:time-b :lane-a :lane-b), :delete-items (:ids), :delete-range (:time-a :time-b, \
+Backspace with no items selected but a :selection-rect-style :region rect), :scroll-view (:view-start \
 :delta-time :delta-lanes), :zoom-view (:anchor-time :factor), :zoom-lanes, \
 :nudge-selection (:ids :delta-time :delta-lane), :copy-items, :paste-items \
 (:time), :split-items (:ids :time, Cmd+E at the cursor), :set-tool (:tool), :clear-selection, :double-click-item (with \
@@ -4619,6 +4620,21 @@ impl TimelineView {
                 Some(action_map(vec![
                     ("type", keyword(":delete-items")),
                     ("ids", list_value(selected_ids)),
+                ]))
+            }
+            // No items selected but a region range is: delete what it covers
+            // (the host decides; lanes that keep no range ignore it). Only
+            // the `:region` style opts in, so a marquee-style rect (a crop,
+            // a lasso) never swallows Backspace.
+            KeyCode::Backspace | KeyCode::Delete
+                if self.selection_rect.is_some()
+                    && self.selection_rect_style == SelectionRectStyle::Region =>
+            {
+                let rect = self.selection_rect.as_ref()?;
+                Some(action_map(vec![
+                    ("type", keyword(":delete-range")),
+                    ("time-a", Value::Number(rect.time_a.min(rect.time_b))),
+                    ("time-b", Value::Number(rect.time_a.max(rect.time_b))),
                 ]))
             }
             // Escape clears whatever is selected — items OR a region
@@ -10105,6 +10121,49 @@ mod tests {
         );
         let action = escape(&TimelineView::from_props(&props, rect)).expect("item escape");
         assert_eq!(action_type(&action), "clear-selection");
+    }
+
+    /// Backspace over a range with no items selected deletes the range
+    /// (`:delete-range`, ordered); with items selected it deletes those.
+    #[test]
+    fn backspace_deletes_a_range_when_no_item_is_selected() {
+        let backspace = |view: &TimelineView| {
+            view.handle_key(WidgetKeyEvent {
+                code: KeyCode::Backspace,
+                modifiers: KeyModifiers::empty(),
+            })
+        };
+        let field = |value: &Value, key: &str| {
+            let Value::Map(map) = value else {
+                panic!("expected action map, got {value:?}");
+            };
+            map.get(key).map(|cell| cell.borrow().clone())
+        };
+        let mut props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(0.0)),
+        ]);
+        let rect = Rect { row: 0.0, col: 0.0, width: 16.0, height: 4.0 };
+        assert!(backspace(&TimelineView::from_props(&props, rect)).is_none());
+        props.insert(
+            "selection-rect".to_string(),
+            map_value_raw(vec![
+                ("time-a", number_value(8.0)),
+                ("time-b", number_value(2.0)),
+                ("lane-a", number_value(0.0)),
+                ("lane-b", number_value(0.0)),
+            ]),
+        );
+        assert!(
+            backspace(&TimelineView::from_props(&props, rect)).is_none(),
+            "a marquee-style rect (a crop) lets Backspace fall through"
+        );
+        props.insert("selection-rect-style".to_string(), Value::Keyword("region".to_string()));
+        let action = backspace(&TimelineView::from_props(&props, rect)).expect("range delete");
+        assert_eq!(field(&action, "type"), Some(Value::Keyword("delete-range".to_string())));
+        assert_eq!(field(&action, "time-a"), Some(Value::Number(2.0)));
+        assert_eq!(field(&action, "time-b"), Some(Value::Number(8.0)));
     }
 
     /// `:grid-density` requests a finer initial candidate. When that would

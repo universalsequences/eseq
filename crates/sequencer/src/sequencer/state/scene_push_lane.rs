@@ -104,6 +104,32 @@ impl ScenePushRegion {
         Some(Self { start_beat: beat.max(self.start_beat), points, ..self.clone() })
     }
 
+    /// This region over `[start, end)` instead, its curve staying where it
+    /// was in time: a later start cuts it there, an earlier one holds the
+    /// first value back to it, and the end trims or holds the same way.
+    pub fn resized(&self, start: f64, end: f64) -> Self {
+        let mut region = if start >= self.start_beat {
+            self.tail_from(start).unwrap_or_else(|| Self {
+                start_beat: start,
+                end_beat: start,
+                points: vec![ScenePushPoint { beat: 0.0, value: self.value_at(start) }],
+                ..self.clone()
+            })
+        } else {
+            let lead = self.start_beat - start;
+            let points = (self.points.iter())
+                .map(|point| ScenePushPoint { beat: point.beat + lead, value: point.value })
+                .collect();
+            Self { start_beat: start, points, ..self.clone() }
+        };
+        if end < region.end_beat {
+            region.set_end_beat(end);
+        } else {
+            region.end_beat = end;
+        }
+        region
+    }
+
     /// This region moved to start at `start_beat`, length and curve kept.
     pub fn moved_to(&self, start_beat: f64) -> Self {
         Self {
@@ -180,6 +206,78 @@ impl ProjectArrangement {
             || self.allocate_clip_id(),
         );
         self.push_lane = kept?;
+        Ok(())
+    }
+
+    /// The parts of the push regions inside `[start, end)`, cut at its
+    /// edges and rebased to `start` (what a region copy lifts; ids are
+    /// reassigned on paste).
+    pub fn scene_pushes_in(&self, start: f64, end: f64) -> Vec<ScenePushRegion> {
+        (self.push_lane.iter())
+            .filter(|region| region.start_beat < end && region.end_beat > start)
+            .map(|region| {
+                let part = region.resized(region.start_beat.max(start), region.end_beat.min(end));
+                part.moved_to(part.start_beat - start)
+            })
+            .collect()
+    }
+
+    /// Paste `pushes` (beats relative to `dest`) into `[dest, dest + len)`,
+    /// replacing whatever pushes were there.
+    pub fn paste_scene_pushes(
+        &mut self,
+        pushes: &[ScenePushRegion],
+        dest: f64,
+        len: f64,
+    ) -> Result<(), String> {
+        self.occlude_scene_push_span(dest, dest + len)?;
+        for push in pushes {
+            let mut pasted = push.moved_to(dest + push.start_beat);
+            pasted.id = self.allocate_clip_id()?;
+            self.insert_scene_push_sorted(pasted);
+        }
+        Ok(())
+    }
+
+    /// Open `[insert, insert + len)` on the push lane: pushes from `insert`
+    /// on slide right by `len`. One straddling `insert` is split there,
+    /// its tail sliding with the rest; with `hold_gap` (nothing will be
+    /// pasted into the opening) its head instead holds its value at
+    /// `insert` across the opening, so the push does not drop out there.
+    pub fn ripple_scene_pushes_right(
+        &mut self,
+        insert: f64,
+        len: f64,
+        hold_gap: bool,
+    ) -> Result<(), String> {
+        let mut tails = Vec::new();
+        for region in &mut self.push_lane {
+            if region.start_beat >= insert {
+                *region = region.moved_to(region.start_beat + len);
+            } else if region.end_beat > insert {
+                tails.extend(region.tail_from(insert));
+                *region = region.resized(region.start_beat, insert);
+                if hold_gap {
+                    *region = region.resized(region.start_beat, insert + len);
+                }
+            }
+        }
+        for tail in tails {
+            let mut moved = tail.moved_to(insert + len);
+            moved.id = self.allocate_clip_id()?;
+            if hold_gap {
+                // The head now reaches the tail: join them back into one.
+                if let Some(head) = self.push_lane.iter_mut().find(|region| region.end_beat == moved.start_beat && region.target_scene == moved.target_scene) {
+                    let offset = moved.start_beat - head.start_beat;
+                    head.points.extend(
+                        moved.points.iter().map(|point| ScenePushPoint { beat: point.beat + offset, value: point.value }),
+                    );
+                    head.end_beat = moved.end_beat;
+                    continue;
+                }
+            }
+            self.insert_scene_push_sorted(moved);
+        }
         Ok(())
     }
 
@@ -320,6 +418,57 @@ mod tests {
         let thinned = thin_scene_push_points(&slow, 2.0e-3);
         assert_eq!(thinned.len(), 3, "a slow up-then-down keeps its peak: {thinned:?}");
         assert!((thinned[1].value - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn region_copy_paste_and_ripple_cut_pushes_at_the_edges() {
+        let mut arrangement = ProjectArrangement::new(0, 64.0);
+        let mut push = region(2.0, 10.0, &[(0.0, 0.0), (8.0, 1.0)]);
+        push.id = arrangement.allocate_clip_id().unwrap();
+        arrangement.push_lane = vec![push.clone()];
+
+        let lifted = arrangement.scene_pushes_in(4.0, 8.0);
+        assert_eq!(lifted.len(), 1);
+        assert_eq!((lifted[0].start_beat, lifted[0].end_beat), (0.0, 4.0));
+        assert!((lifted[0].value_at(0.0) - push.value_at(4.0)).abs() < 1.0e-6);
+        assert!((lifted[0].value_at(3.9) - push.value_at(7.9)).abs() < 1.0e-3);
+
+        arrangement.paste_scene_pushes(&lifted, 20.0, 4.0).unwrap();
+        let spans: Vec<_> = arrangement.push_lane.iter().map(|p| (p.start_beat, p.end_beat)).collect();
+        assert_eq!(spans, vec![(2.0, 10.0), (20.0, 24.0)]);
+
+        arrangement.ripple_scene_pushes_right(6.0, 4.0, false).unwrap();
+        let spans: Vec<_> = arrangement.push_lane.iter().map(|p| (p.start_beat, p.end_beat)).collect();
+        assert_eq!(spans, vec![(2.0, 6.0), (10.0, 14.0), (24.0, 28.0)]);
+        assert!((arrangement.push_lane[1].value_at(10.0) - push.value_at(6.0)).abs() < 1.0e-6);
+        let mut ids: Vec<_> = arrangement.push_lane.iter().map(|p| p.id).collect();
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "every part has its own id");
+
+        // Nothing pasted into the opening: the straddler holds across it.
+        let mut held = ProjectArrangement::new(0, 64.0);
+        held.push_lane = vec![push.clone()];
+        held.ripple_scene_pushes_right(6.0, 4.0, true).unwrap();
+        let spans: Vec<_> = held.push_lane.iter().map(|p| (p.start_beat, p.end_beat)).collect();
+        assert_eq!(spans, vec![(2.0, 14.0)], "one push, opened by the gap");
+        let joined = &held.push_lane[0];
+        assert!((joined.value_at(8.0) - push.value_at(6.0)).abs() < 1.0e-6, "holds across the gap");
+        assert!((joined.value_at(12.0) - push.value_at(8.0)).abs() < 1.0e-6, "the tail kept its curve");
+    }
+
+    #[test]
+    fn resizing_keeps_the_curve_in_time() {
+        let push = region(4.0, 12.0, &[(0.0, 0.0), (8.0, 1.0)]);
+        let cut = push.resized(6.0, 10.0);
+        assert_eq!((cut.start_beat, cut.end_beat), (6.0, 10.0));
+        for beat in [6.0, 8.0, 9.9] {
+            assert!((cut.value_at(beat) - push.value_at(beat)).abs() < 1.0e-3, "beat {beat}");
+        }
+        let grown = push.resized(2.0, 16.0);
+        assert_eq!((grown.start_beat, grown.end_beat), (2.0, 16.0));
+        assert_eq!(grown.value_at(2.0), 0.0, "holds the first value back");
+        assert!((grown.value_at(8.0) - push.value_at(8.0)).abs() < 1.0e-6);
+        assert_eq!(grown.value_at(15.0), 1.0, "holds the last value on");
     }
 
     #[test]

@@ -1243,6 +1243,7 @@
                      :doc "When a rack member's pattern is bound from its arrangement rack lane instead: that member item id (rack-CID-TRACK); empty otherwise")
          (spans (list-of scene-span) :doc "The scene lane, in time order")
          (pushes (list-of :any) :doc "Recorded scene pushes in time order: maps with :cid :start :end (beats) :target (scene index) :points (maps with :offset 0..1 of the region and :value 0..1 push amount)")
+         (pending-pushes (list-of :any) :doc "The scene pushes an arrangement capture has recorded so far, shaped like pushes without :cid; a held push ends at the record head")
          ;; The provisional capture surface, while an arrangement capture
          ;; runs (all empty / false otherwise).
          (pending :bool :doc "An arrangement capture runs: the pending-* fields show what it would commit")

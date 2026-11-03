@@ -31,7 +31,7 @@ impl Harness {
     }
 
     /// Apply what the view queued, push the kinds and re-render.
-    fn settle(&mut self) {
+    pub(super) fn settle(&mut self) {
         self.drain();
         self.sync();
         self.show_all();
@@ -857,4 +857,98 @@ fn recorded_scene_pushes_draw_and_delete_on_the_push_lane() {
     h.settle();
     assert!(h.app.state.committed_arrangement().expect("arrangement").push_lane.is_empty());
     assert_eq!(h.eval("(len (eseq.arrangement/push-items))"), Value::Number(0.0));
+
+    // Cmd+A selects the pushes with everything else (they light up), and
+    // the region delete Backspace sends takes them too.
+    sequencer::app::edit::undo(&mut h.app);
+    h.settle();
+    assert_eq!(h.eval("(len (eseq.arrangement/push-items))"), Value::Number(1.0));
+    assert_eq!(h.eval("(eseq.arrangement/select-all-clips)"), Value::Bool(true));
+    h.settle();
+    assert_eq!(
+        h.eval("(let ((r (eseq.arrangement/push-selection-rect))) (and (<= (get r :time-a) 4) (>= (get r :time-b) 8)))"),
+        Value::Bool(true),
+        "Cmd+A lights the push lane over the push"
+    );
+    h.command("song-region-delete", Value::Nil);
+    h.settle();
+    assert!(
+        h.app.state.committed_arrangement().expect("arrangement").push_lane.is_empty(),
+        "Cmd+A, Backspace deletes the push"
+    );
+}
+
+/// eseq-vum0: a sweep on the push lane selects a time range of it alone;
+/// Backspace clears just that range (cutting the push it straddles). An
+/// edge drag resizes a push: in trims the curve, out holds its value.
+#[test]
+fn push_lane_sweeps_clear_a_range_and_edges_resize() {
+    use sequencer::sequencer::{ScenePushPoint, ScenePushRegion};
+    let mut h = distro();
+    h.app.set_arrangement_view_visible(true);
+    h.command("clone-pattern", Value::Nil);
+    h.settle();
+    let mut arrangement = h.app.state.committed_arrangement().expect("arrangement");
+    let id = arrangement.allocate_clip_id().expect("id");
+    arrangement.end_beat = arrangement.end_beat.max(32.0);
+    arrangement.push_lane.push(ScenePushRegion {
+        id,
+        start_beat: 4.0,
+        end_beat: 12.0,
+        target_scene: 1,
+        points: vec![
+            ScenePushPoint { beat: 0.0, value: 0.0 },
+            ScenePushPoint { beat: 8.0, value: 1.0 },
+        ],
+    });
+    h.app.state.set_committed_arrangement(Some(arrangement)).expect("commit");
+    h.settle();
+    let spans = |h: &Harness| -> Vec<(f64, f64)> {
+        let arrangement = h.app.state.committed_arrangement().expect("arrangement");
+        arrangement.push_lane.iter().map(|push| (push.start_beat, push.end_beat)).collect()
+    };
+
+    h.eval("(eseq.arrangement/push-lane-action (dict :type :marquee-select :time-a 10 :time-b 6))");
+    h.eval("(eseq.arrangement/push-lane-action (dict :type :finish-marquee-select :time-a 10 :time-b 6))");
+    h.settle();
+    assert_eq!(
+        h.eval("(get (first (eseq.arrangement/push-items)) :selected)"),
+        Value::Bool(false),
+        "a range lights its span, not the whole push"
+    );
+    assert_eq!(
+        h.eval("(let ((r (eseq.arrangement/push-selection-rect))) (list (get r :time-a) (get r :time-b)))"),
+        h.eval("(list 6 10)"),
+        "the swept range, ordered"
+    );
+    h.eval("(eseq.arrangement/push-lane-action (dict :type :delete-range :time-a 6 :time-b 10))");
+    h.settle();
+    assert_eq!(spans(&h), vec![(4.0, 6.0), (10.0, 12.0)], "only the range goes");
+
+    let first = h.app.state.committed_arrangement().unwrap().push_lane[0].id;
+    h.eval(&format!(
+        "(eseq.arrangement/push-lane-action (dict :type :resize-item-absolute :id {} :edge :end :time 9))",
+        first.0
+    ));
+    h.settle();
+    assert_eq!(
+        h.eval("(get (first (eseq.arrangement/push-items)) :end)"),
+        Value::Number(9.0),
+        "the edge ghosts while dragged"
+    );
+    h.eval("(eseq.arrangement/push-lane-action (dict :type :finish-resize-items))");
+    h.settle();
+    assert_eq!(spans(&h), vec![(4.0, 9.0), (10.0, 12.0)]);
+    let pushed = h.app.state.committed_arrangement().unwrap().push_lane[0].clone();
+    assert!((pushed.value_at(8.5) - 0.25).abs() < 1.0e-4, "pulled out, it holds where it was cut");
+
+    h.eval(&format!(
+        "(eseq.arrangement/push-lane-action (dict :type :resize-item-absolute :id {} :edge :start :time 5))",
+        first.0
+    ));
+    h.eval("(eseq.arrangement/push-lane-action (dict :type :finish-resize-items))");
+    h.settle();
+    assert_eq!(spans(&h), vec![(5.0, 9.0), (10.0, 12.0)]);
+    let pushed = h.app.state.committed_arrangement().unwrap().push_lane[0].clone();
+    assert!((pushed.value_at(5.0) - 0.125).abs() < 1.0e-4, "the curve stays in time");
 }

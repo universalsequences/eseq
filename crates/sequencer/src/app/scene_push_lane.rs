@@ -90,14 +90,51 @@ impl App {
         if !start_beat.is_finite() || start_beat < 0.0 {
             return Err(format!("Scene push start {start_beat} must be a non-negative beat"));
         }
-        self.edit_arrangement("Move scene push", move |arrangement, _scenes| {
+        self.replace_scene_push("Move scene push", id, move |region| region.moved_to(start_beat))
+    }
+
+    /// Clear `[start, end)` of the push lane (a range swept on the lane):
+    /// pushes inside go, ones it cuts keep the parts outside.
+    pub fn scene_pushes_clear_span(&mut self, start: f64, end: f64) -> Result<(), String> {
+        let (start, end) = (start.min(end).max(0.0), start.max(end));
+        if !(start.is_finite() && end.is_finite()) || end <= start {
+            return Err(format!("Scene push range {start}..{end} is empty"));
+        }
+        self.edit_arrangement("Clear scene pushes", move |arrangement, _scenes| {
+            arrangement.occlude_scene_push_span(start, end)
+        })
+    }
+
+    /// Resize push region `id` to `[start_beat, end_beat)`. Cutting an edge
+    /// in trims the curve there; pulling one out holds the curve's value at
+    /// that edge. What the new span covers is trimmed, as a clip resize
+    /// truncates its neighbour.
+    pub fn scene_push_resize(&mut self, id: ClipId, start_beat: f64, end_beat: f64) -> Result<(), String> {
+        if !(start_beat.is_finite() && end_beat.is_finite()) || start_beat < 0.0 || end_beat <= start_beat {
+            return Err(format!("Scene push span {start_beat}..{end_beat} is not a valid span"));
+        }
+        self.replace_scene_push("Resize scene push", id, move |region| {
+            region.resized(start_beat, end_beat)
+        })
+    }
+
+    /// Replace push region `id` with `edit` of it (one undo step): what the
+    /// new span lands on is trimmed, as a clip edit truncates its
+    /// neighbour, and the song grows to hold it.
+    fn replace_scene_push(
+        &mut self,
+        label: &'static str,
+        id: ClipId,
+        edit: impl FnOnce(&crate::sequencer::ScenePushRegion) -> crate::sequencer::ScenePushRegion,
+    ) -> Result<(), String> {
+        self.edit_arrangement(label, move |arrangement, _scenes| {
             let region = arrangement
                 .take_scene_push(id)
                 .ok_or_else(|| format!("Scene push {} does not exist", id.0))?;
-            let moved = region.moved_to(start_beat);
-            arrangement.occlude_scene_push_span(moved.start_beat, moved.end_beat)?;
-            arrangement.end_beat = arrangement.end_beat.max(moved.end_beat);
-            arrangement.insert_scene_push_sorted(moved);
+            let edited = edit(&region);
+            arrangement.occlude_scene_push_span(edited.start_beat, edited.end_beat)?;
+            arrangement.end_beat = arrangement.end_beat.max(edited.end_beat);
+            arrangement.insert_scene_push_sorted(edited);
             Ok(())
         })
     }

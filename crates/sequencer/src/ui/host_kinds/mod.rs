@@ -902,6 +902,7 @@ pub(crate) mod f {
     pub(crate) const SONG_BOUND_RACK_ITEM: FieldKey = (SONG, "bound-rack-item");
     pub(crate) const SONG_SPANS: FieldKey = (SONG, "spans");
     pub(crate) const SONG_PUSHES: FieldKey = (SONG, "pushes");
+    pub(crate) const SONG_PENDING_PUSHES: FieldKey = (SONG, "pending-pushes");
     pub(crate) const SONG_PENDING: FieldKey = (SONG, "pending");
     pub(crate) const SONG_PENDING_ORIGIN: FieldKey = (SONG, "pending-origin");
     pub(crate) const SONG_PENDING_HEAD: FieldKey = (SONG, "pending-head");
@@ -1509,6 +1510,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     // Recorded scene pushes (eseq-vum0): {:cid :start :end :target
     // :points ({:offset :value})}, offsets 0..1 of the region.
     (f::SONG_PUSHES, "(list-of :any)", Model),
+    (f::SONG_PENDING_PUSHES, "(list-of :any)", Model),
     // The provisional capture surface (`pending`): rebuilt with the pending
     // content key, the lanes' ends with the quantized record head.
     (f::SONG_PENDING, ":bool", Model),
