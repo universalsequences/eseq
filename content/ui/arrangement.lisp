@@ -133,7 +133,10 @@
           ;; The selected rack member item's string id (rack-member-select,
           ;; then song.bound-rack-item), or nil: the widget's :selected-id is
           ;; numeric, so these light through the item's own :selected.
-          (rack-item :any :default nil)))
+          (rack-item :any :default nil)
+          ;; The audio regions effect edits lock (eseq-a921), as last sent
+          ;; to the host: the selected regions of one audio lane.
+          (lock-ids '())))
 
 ;; The host's song selection as the lanes draw it (the lane sync below): the
 ;; bound clip (takes spec 16.6) and the committed region (region spec 4.4),
@@ -306,8 +309,20 @@
   (set! arr-select.lane i)
   (set! arr-select.clip clip-id))
 
+;; Regions `ids` of audio lane i are what effect edits lock (i -1: none):
+;; with them selected, turning an effect knob p-locks the regions instead
+;; of moving the track's one value (eseq-a921). Only "none again" is
+;; skipped: the host drops a deleted or undone region from its copy on its
+;; own, so re-selecting the same ids must still be sent.
+(def set-lock-regions! (i ids)
+  (unless (and (empty? ids) (empty? arr-select.lock-ids))
+    (set! arr-select.lock-ids ids)
+    (host-command "audio-lock-select"
+      (if (< i 0) (dict :ids '()) (dict :track i :ids ids)))))
+
 ;; No clip is clicked on any lane.
 (def deselect-clips! ()
+  (set-lock-regions! -1 '())
   (set! arr-select.clips '())
   (set! arr-select.rack-item nil)
   (set! arr-rack.selected -1)
@@ -1458,6 +1473,7 @@
     ;; A clip and a region are mutually exclusive (region spec 4.1); the
     ;; host drops the region too, this clears the in-flight ghost.
     (clear-region-ghost!)
+    (set-lock-regions! -1 '())
     (set! arr-select.clips ids)
     (set! arr-select.rack-item nil)
     (set! arr-rack.selected -1)
@@ -1988,6 +2004,7 @@
     (set! arr-select.rect nil)
     (release-selection!)
     (set! arr-select.clips ids)
+    (set-lock-regions! (if (empty? ids) -1 i) ids)
     (set! arr-select.rack-item nil)
     (set! arr-rack.selected -1)
     (select-lane-clip! i (if (= r nil) -1 r.cid))

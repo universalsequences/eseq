@@ -21,6 +21,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "audio-region-set",
     "audio-region-set-window",
     "audio-regions-paste",
+    "audio-lock-select",
 ];
 
 type PayloadMap = HashMap<String, Rc<RefCell<Value>>>;
@@ -166,6 +167,11 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             )?;
             Ok("Audio clip window set".to_string())
         }
+        "audio-lock-select" => {
+            let ids = region_ids(map)?;
+            app.set_audio_lock_selection(optional_track(map)?.map(|track| (track, ids)));
+            Ok("Selected regions for locking".to_string())
+        }
         _ => Err(format!("unknown audio command {name}")),
     }
 }
@@ -192,7 +198,19 @@ pub(super) fn handle(
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) {
-    let result = run(name, &payload, app).map(Some);
+    let result = run(name, &payload, app);
+    if name == "audio-lock-select" {
+        // Mirrors the arrangement's clip selection: no status line, no song
+        // edit; the knobs re-read the locks they show.
+        match result {
+            Ok(_) => {
+                ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(error) => editor.handle_host_event(HostEvent::Error(format!("{name} failed: {error}"))),
+        }
+        return;
+    }
+    let result = result.map(Some);
     // Publish at once rather than on the next frame, so playback started
     // right after an edit already hears it.
     app.sync_audio_track_playback();

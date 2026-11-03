@@ -874,6 +874,25 @@ impl SequencerState {
         (self.song_playback.shared(), &self.audio_rendered_sample)
     }
 
+    pub fn audio_lock_view(&self) -> std::sync::MutexGuard<'_, AudioLockView> {
+        self.audio_lock_view.lock().unwrap()
+    }
+
+    /// The lock view, only when it holds a selection or a lock on an audio
+    /// track `track`: a cheap `None` for every other knob read.
+    pub fn audio_lock_view_for(&self, track: usize) -> Option<std::sync::MutexGuard<'_, AudioLockView>> {
+        (self.audio_locks_present.load(Ordering::Acquire) && self.is_audio_track_lane(track))
+            .then(|| self.audio_lock_view())
+    }
+
+    pub fn set_audio_locks_present(&self, present: bool) {
+        self.audio_locks_present.store(present, Ordering::Release);
+    }
+
+    pub fn audio_player_slots(&self) -> &crate::audio_track::AudioSlotRegistry {
+        &self.audio_player_slots
+    }
+
     /// Render-rate `song-position-beats` read (spec 10.2): derived from the
     /// scheduler-published anchor atomics plus the audio-published rendered
     /// sample clock. No locks. `None` while song playback is inactive.

@@ -474,3 +474,75 @@ fn an_audio_track_has_one_mix_whatever_plays_it() {
         f.h.app.song_transport_stop().expect("stop");
     }
 }
+
+/// eseq-a921: with a region selected on the timeline, an effect knob turn
+/// locks that region (the track value stays), the knob reads the lock as
+/// locked and the dot lights; selecting nothing edits the track value and
+/// shows it; "Clear p-locks" removes the region locks.
+#[test]
+fn an_effect_edit_with_a_region_selected_locks_the_region() {
+    let mut f = fixture();
+    let slot = f.h.app.add_builtin_effect_sync(f.track, "Reverb").unwrap();
+    let wav = write_wav(f.dir.path(), "hit.wav", 24_000);
+    let ids = f.h.app.audio_regions_drop(f.track, 0.0, &[wav.clone(), wav]).unwrap();
+    audio_settle(&mut f.h);
+    let param = 0;
+    let name = f.h.app.graph.effect_descriptors[f.track][slot].params[param].name.clone();
+    let base = f.h.app.state.pattern.effect_chains[f.track][slot].defaults.get(param);
+    let (min, max) = {
+        let desc = &f.h.app.graph.effect_descriptors[f.track][slot].params[param];
+        (desc.min, desc.max)
+    };
+    let locked = if base > (min + max) / 2.0 { min } else { max };
+    f.h.eval_all(&format!(
+        r#"(def fxd (let ((t (track {}))) (first (filter (lambda (d) (= d.slot {slot})) (filter (lambda (d) (not (= d.role "instrument"))) t.devices)))))
+           (def prm (device-param fxd "{name}"))"#,
+        f.track
+    ));
+    let read = |h: &mut Harness| h.eval_all("(list prm.value prm.locked prm.has-locks)");
+    let select = |h: &mut Harness, id: u64| {
+        h.eval_all(&format!("(eseq.arrangement/audio-lane-action {} (dict :type :select :ids (list {id}) :time 0))", f.track));
+        audio_settle(h);
+    };
+    let set = |h: &mut Harness, value: f32| {
+        let payload = h.eval_all(&format!("(dict :slot-idx {slot} :param-idx {param} :value {value})"));
+        h.command("set-effect-param", payload);
+        audio_settle(h);
+    };
+
+    select(&mut f.h, ids[0].0);
+    set(&mut f.h, locked);
+    assert_eq!(f.h.app.audio_region_effect_locks(f.track, slot, param), vec![(ids[0], locked)]);
+    assert_eq!(
+        f.h.app.state.pattern.effect_chains[f.track][slot].defaults.get(param),
+        base,
+        "the track value is untouched"
+    );
+    let shown = read(&mut f.h);
+    assert_eq!(f.h.eval_all("(list prm.locked prm.has-locks)"), f.h.eval_all("(list true true)"), "{shown:?}");
+    let unlocked_value = f.h.eval_all("prm.base");
+    assert_ne!(f.h.eval_all("prm.value"), unlocked_value, "the knob shows the lock, not the track value");
+
+    // The other region shows the track value, unlocked; the dot stays lit.
+    select(&mut f.h, ids[1].0);
+    assert_eq!(f.h.eval_all("(list prm.locked prm.has-locks)"), f.h.eval_all("(list false true)"));
+
+    // Nothing selected: an edit moves the track value.
+    f.h.eval_all(&format!("(eseq.arrangement/audio-lane-action {} (dict :type :clear-selection))", f.track));
+    audio_settle(&mut f.h);
+    assert_eq!(f.h.app.audio_lock_regions(f.track), None);
+    let moved = (base + locked) / 2.0;
+    set(&mut f.h, moved);
+    assert_eq!(f.h.app.state.pattern.effect_chains[f.track][slot].defaults.get(param), moved);
+    assert_eq!(f.h.app.audio_region_effect_locks(f.track, slot, param), vec![(ids[0], locked)]);
+
+    // Clear p-locks from the knob's menu.
+    let payload = f.h.eval_all(&format!(
+        r#"(dict :track {} :target "effect" :slot-idx {slot} :rack-slot 0 :param-idx {param} :scope "all")"#,
+        f.track
+    ));
+    f.h.command("clear-param-plocks", payload);
+    audio_settle(&mut f.h);
+    assert!(f.h.app.audio_region_effect_locks(f.track, slot, param).is_empty());
+    assert_eq!(f.h.eval_all("prm.has-locks"), Value::Bool(false));
+}

@@ -52,7 +52,7 @@ pub use state::{
     TrackTake, TrackTakePool,
     ActiveNoteActivity, AudibleSongRowApplied, RuntimeSong, RuntimeSongRow, SongChunkPlan,
     SongPlaybackCommand, SongPlaybackMailbox, SongPlaybackNotice, SongPlaybackRuntime,
-    SongPositionShared, SongRenderMapping, AudioRegion, AudioSourceId, AudioSourceMeta,
+    SongPositionShared, SongRenderMapping, AudioRegion, AudioSourceId, AudioSourceMeta, AudioLockView, RegionLock, RegionLockTarget,
     audio_frames_to_beats,
     DeviceParamPrintOverride, DeviceParamPrintTarget, DeviceParamPrintValues, RackMacroPrintOverride,
     EffectInstanceId, InstrumentDeviceValuesSnapshot, InstrumentSlotResetSummary,

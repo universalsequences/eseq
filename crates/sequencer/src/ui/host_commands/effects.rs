@@ -643,6 +643,18 @@ pub(super) fn handle(
                             })
                         })
                         .collect::<Vec<_>>();
+                    if name == "set-effect-param-batch" {
+                        let values: Vec<(usize, f32)> = commands
+                            .iter()
+                            .filter_map(|command| match command {
+                                app::AppCommand::SetEffectParam { param_idx, value, .. } => Some((*param_idx, *value)),
+                                _ => None,
+                            })
+                            .collect();
+                        if lock_selected_regions(&mut app, &mut editor, &fx_epoch, track, slot_idx, &values) {
+                            return;
+                        }
+                    }
                     let neural_selection = selected_neural_neurons.lock().unwrap().clone();
                     let print_updates = commands
                         .iter()
@@ -743,6 +755,9 @@ pub(super) fn handle(
                         .as_ref()
                         .map(|p| value.clamp(p.min, p.max))
                         .unwrap_or(value);
+                    if lock_selected_regions(&mut app, &mut editor, &fx_epoch, track, slot_idx, &[(param_idx, clamped)]) {
+                        return;
+                    }
                     let (neural_selection, wrote_neural_plock, neural_history_before) =
                         record_selected_neural_effect_plock(
                             &mut editor,
@@ -2066,6 +2081,29 @@ pub(super) fn handle(
 /// record/play/no-selection gate is active. Values have already been clamped
 /// against the descriptor, and `slot_idx` has already been resolved from the
 /// control's stable node identity.
+/// With regions selected on audio track `track`, an effect edit locks them
+/// (eseq-a921) instead of moving the track's one value: `true` when it did
+/// (the caller stops there).
+fn lock_selected_regions(
+    app: &mut app::App,
+    editor: &mut Editor,
+    fx_epoch: &std::sync::atomic::AtomicUsize,
+    track: usize,
+    slot: usize,
+    values: &[(usize, f32)],
+) -> bool {
+    let Some(ids) = app.audio_lock_regions(track) else {
+        return false;
+    };
+    let values: Vec<(usize, Option<f32>)> = values.iter().map(|&(param, value)| (param, Some(value))).collect();
+    if let Err(error) = app.audio_region_set_effect_locks(track, &ids, slot, &values, true) {
+        editor.handle_host_event(HostEvent::Error(error));
+    }
+    app.sync_audio_track_playback();
+    fx_epoch.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
 fn try_latch_effect_param_print(
     shared: &SharedHandles,
     track: usize,

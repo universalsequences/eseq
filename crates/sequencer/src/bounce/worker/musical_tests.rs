@@ -437,3 +437,67 @@ fn audio_region_export(with_scene: bool) {
     let after = &audio[(FRAMES_PER_BEAT + 12_100) * 2..];
     assert!(peak(after) < 1e-6, "silence past the source's end: {}", peak(after));
 }
+
+/// eseq-a921, through the real audio callback: an effect parameter locked
+/// on the second of two regions changes only that region's audio. A render
+/// without the lock matches it up to the locked region's start.
+#[test]
+fn a_region_lock_changes_only_its_region_in_the_export() {
+    fn export(lock: bool) -> Vec<f32> {
+        let folder = tempfile::tempdir().unwrap();
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::set_var("ESEQ_AUDIO_STORE_DIR", folder.path().join("audio")) };
+        let source = folder.path().join("tone.wav");
+        let mut writer = hound::WavWriter::create(&source, hound::WavSpec {
+            channels: 1, sample_rate: SAMPLE_RATE, bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        }).unwrap();
+        for frame in 0..24_000 {
+            let value = 0.5 * (std::f32::consts::TAU * 220.0 * frame as f32 / SAMPLE_RATE as f32).sin();
+            writer.write_sample(value).unwrap();
+        }
+        writer.finalize().unwrap();
+        let owner = WorkerEngine(engine::init_headless_engine(SAMPLE_RATE, 2).unwrap());
+        let engine = &owner.0;
+        let mut app = App::new(Arc::clone(&engine.state), engine.lg_ptr, SAMPLE_RATE,
+            engine.buses.clone(), Arc::clone(&engine.master_recorder), engine.keyboard_tx.clone());
+        app.graph_controller().add_empty_track().unwrap();
+        let track = app.add_audio_track().unwrap();
+        let mut arrangement = ProjectArrangement::new(2, 4.0);
+        arrangement.scene_lane.clear();
+        app.state.set_committed_arrangement(Some(arrangement)).unwrap();
+        let slot = app.add_builtin_effect_sync(track, "Reverb").unwrap();
+        let ids = app.audio_regions_drop(track, 0.0, &[source.clone(), source]).unwrap();
+        let mix = app.graph.effect_descriptors[track][slot]
+            .params
+            .iter()
+            .position(|param| param.name == "mix")
+            .expect("reverb mix");
+        let base = app.state.pattern.effect_chains[track][slot].defaults.get(mix);
+        if lock {
+            let locked = if base > 0.5 { 0.0 } else { 1.0 };
+            app.audio_region_set_effect_locks(track, &ids[1..], slot, &[(mix, Some(locked))], false).unwrap();
+        }
+        let project = app.capture_project("region-lock-export").unwrap();
+        drop(app);
+        drop(owner);
+        render(folder.path(), "audio", &project, None, 0.0)
+    }
+    let plain = export(false);
+    let locked = export(true);
+    assert_eq!(plain.len(), locked.len());
+    // Region 1 is beats 0..1, region 2 beats 1..2 (half a second each at 120).
+    let second = FRAMES_PER_BEAT;
+    let split = plain.iter().zip(&locked).position(|(a, b)| a != b).map(|index| index / 2);
+    assert!(
+        split.is_some_and(|frame| frame + 512 >= second),
+        "the unlocked region renders the same: first difference at frame {split:?}, region 2 at {second}"
+    );
+    let body = (second + 4_000) * 2..(second + 20_000) * 2;
+    let difference = plain[body.clone()]
+        .iter()
+        .zip(&locked[body])
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(difference > 0.01, "the locked region sounds different: {difference}");
+}

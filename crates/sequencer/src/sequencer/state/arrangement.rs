@@ -129,7 +129,7 @@ pub struct RackArrClip {
 /// What track lanes and rack lanes share: each is a sorted list of
 /// non-overlapping half-open spans with ids from one allocator, so the span
 /// mechanics (insertion, occlusion, validation) are written once.
-pub trait LaneSpan: Copy {
+pub trait LaneSpan: Clone {
     fn id(&self) -> ClipId;
     fn set_id(&mut self, id: ClipId);
     fn start_beat(&self) -> f64;
@@ -854,7 +854,7 @@ pub(super) fn occlude_lane<C: LaneSpan>(
             // 2. Fully covered: removed.
         } else if clip_start < start && clip_end > end {
             // 4. The incoming span lands strictly inside.
-            let mut left = clip;
+            let mut left = clip.clone();
             left.set_end_beat(start);
             kept.push(left);
             split_tails.extend(tail_at(&clip, end));

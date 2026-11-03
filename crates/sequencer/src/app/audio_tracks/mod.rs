@@ -15,11 +15,11 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use crate::audio_track::{AudioTrackPlayback, PlaybackRegion, SourcePcm, DECLICK_FRAMES};
+use crate::audio_track::{AudioTrackPlayback, LockParam, PlaybackRegion, SourcePcm, DECLICK_FRAMES};
 use crate::instruments::sample_core;
 use crate::sequencer::{
     audio_frames_to_beats, AudioRegion, AudioSourceMeta, ClipId, InstrumentType,
-    ProjectArrangement,
+    ProjectArrangement, RegionLockTarget,
 };
 
 use super::App;
@@ -82,11 +82,16 @@ pub struct AudioTrackRuntime {
     sync_gate: Option<SyncGate>,
     /// Overrides the user-data audio store (tests).
     store_dir: Option<PathBuf>,
+    /// Per player slot: every lock target its published snapshot carries
+    /// (the regions' locks plus any earlier ones, so a removed lock still
+    /// reverts its parameter to the track value).
+    lock_targets: HashMap<usize, Vec<RegionLockTarget>>,
 }
 
 #[derive(Clone, PartialEq)]
 struct PublishedKey {
     regions: Vec<AudioRegion>,
+    lock_params: Vec<LockParam>,
     bpm: u32,
     host_rate: u32,
     loaded: usize,
@@ -99,6 +104,10 @@ struct SyncGate {
     host_rate: u32,
     /// `(track, player slot)` per audio track.
     players: Vec<(usize, usize)>,
+    /// The resolved lock parameters per slot that locks anything: a track
+    /// value edit (the value a lock reverts to) or an effect rebuild
+    /// republishes the snapshot.
+    locks: Vec<(usize, Vec<LockParam>)>,
 }
 
 impl AudioTrackRuntime {
@@ -296,7 +305,7 @@ impl App {
     ) -> Result<(usize, AudioRegion), String> {
         arrangement
             .find_audio_region(id)
-            .map(|(track, region)| (track, *region))
+            .map(|(track, region)| (track, region.clone()))
             .ok_or_else(|| format!("Audio region {} does not exist", id.0))
     }
 
@@ -506,7 +515,7 @@ impl App {
             if offset >= meta.frames {
                 return Err("The clip start is past the end of its audio".to_string());
             }
-            let mut windowed = region;
+            let mut windowed = region.clone();
             windowed.source_offset = offset;
             if region.loop_enabled {
                 // A looping region's window is its loop; its length on the
@@ -521,8 +530,8 @@ impl App {
             windowed.end_beat = region.start_beat + length_seconds / (spb * region.speed());
             arrangement.take_audio_region(id);
             arrangement.occlude_audio_span(track, windowed.start_beat, windowed.end_beat, spb)?;
-            arrangement.insert_audio_region_sorted(track, windowed);
             arrangement.end_beat = arrangement.end_beat.max(windowed.end_beat);
+            arrangement.insert_audio_region_sorted(track, windowed);
             Ok(())
         })
     }
@@ -534,7 +543,7 @@ impl App {
         self.edit_arrangement("Audio clip loop", move |arrangement, _scenes| {
             let (_, region) = Self::locate_audio_region(arrangement, id)?;
             let meta = arrangement.region_source(&region)?;
-            let mut looped = region;
+            let mut looped = region.clone();
             looped.loop_enabled = enabled;
             if enabled {
                 let played = (region.end_beat - region.start_beat)
@@ -583,6 +592,175 @@ impl App {
                 region.transpose = semitones.clamp(-48.0, 48.0);
             }
             Ok(())
+        })
+    }
+
+    /// The lock target for effect parameter `slot`:`param` of the effect
+    /// `track`'s slot holds now; `None` when there is no such parameter.
+    fn effect_lock_target(&self, track: usize, slot: usize, param: usize) -> Option<RegionLockTarget> {
+        let descriptor = self.graph.effect_descriptors.get(track)?.get(slot)?;
+        (param < descriptor.params.len()).then(|| RegionLockTarget::Effect {
+            slot: slot as u16,
+            effect: descriptor.name.clone(),
+            param: param as u16,
+        })
+    }
+
+    /// Whether `track`'s slot still holds `effect` (the one rule, exact, by
+    /// which a stored lock applies).
+    fn slot_holds(&self, track: usize, slot: usize, effect: &str) -> bool {
+        (self.graph.effect_descriptors.get(track))
+            .and_then(|chain| chain.get(slot))
+            .is_some_and(|descriptor| descriptor.name == effect)
+    }
+
+    /// Lock (`Some`) or unlock (`None`) each `(param, value)` of effect slot
+    /// `slot` on every region in `ids`, all on `track` (eseq-a921), as one
+    /// undo step: while a region plays its locks replace the track values,
+    /// like step p-locks. With `live`, consecutive calls for the same
+    /// regions and slot coalesce into one undo step (a knob drag).
+    pub fn audio_region_set_effect_locks(
+        &mut self,
+        track: usize,
+        ids: &[ClipId],
+        slot: usize,
+        values: &[(usize, Option<f32>)],
+        live: bool,
+    ) -> Result<(), String> {
+        self.require_audio_track(track)?;
+        if ids.is_empty() {
+            return Err("No audio region to lock".to_string());
+        }
+        if values.iter().any(|(_, value)| value.is_some_and(|value| !value.is_finite())) {
+            return Err("A region lock value must be finite".to_string());
+        }
+        let locks = values
+            .iter()
+            .map(|&(param, value)| {
+                let target = self
+                    .effect_lock_target(track, slot, param)
+                    .ok_or_else(|| format!("Track {track} has no effect parameter {slot}:{param}"))?;
+                Ok((target, value))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut sorted = ids.to_vec();
+        sorted.sort_by_key(|id| id.0);
+        let merge_key = live.then(|| {
+            let ids: Vec<String> = sorted.iter().map(|id| id.0.to_string()).collect();
+            crate::app::history::MergeKey::new(format!("audio-region-lock-{}-{slot}", ids.join(",")))
+        });
+        let label = if values.iter().any(|(_, value)| value.is_some()) {
+            "Lock region parameter"
+        } else {
+            "Clear region lock"
+        };
+        self.edit_arrangement_keyed(label, merge_key, move |arrangement, _scenes| {
+            for &id in &sorted {
+                let (owner, region) = arrangement
+                    .find_audio_region_mut(id)
+                    .ok_or_else(|| format!("Audio region {} does not exist", id.0))?;
+                if owner != track {
+                    return Err(format!("Audio region {} is not on track {track}", id.0));
+                }
+                for (target, value) in &locks {
+                    region.set_lock(target.clone(), *value);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Select `regions` on `track` for locking (`None`: no region), as the
+    /// arrangement's clip selection: effect edits on that track then lock
+    /// them, and its knobs show their locks.
+    pub fn set_audio_lock_selection(&mut self, selection: Option<(usize, Vec<ClipId>)>) {
+        let selection = selection.filter(|(track, regions)| self.is_audio_track(*track) && !regions.is_empty());
+        if self.state.audio_lock_view().selection == selection {
+            return;
+        }
+        self.state.audio_lock_view().selection = selection;
+        self.refresh_audio_lock_view();
+    }
+
+    /// The regions an effect edit on `track` locks right now.
+    pub fn audio_lock_regions(&self, track: usize) -> Option<Vec<ClipId>> {
+        self.state.audio_lock_view().regions_for(track).map(<[ClipId]>::to_vec)
+    }
+
+    /// Recompute what the knobs show for region locks: the selection's
+    /// surviving regions, the first one's locks and every locked parameter,
+    /// counting only locks whose slot still holds their effect.
+    pub(crate) fn refresh_audio_lock_view(&mut self) {
+        let selection = self.state.audio_lock_view().selection.clone();
+        let (selection, shown, locked) = self.state.with_committed_arrangement(|arrangement| {
+            let (mut shown, mut locked) = (Vec::new(), Vec::new());
+            let Some(arrangement) = arrangement else {
+                return (None, shown, locked);
+            };
+            let selection = selection.and_then(|(track, regions)| {
+                let lane = arrangement.audio_lane(track);
+                let regions: Vec<ClipId> =
+                    regions.into_iter().filter(|id| lane.iter().any(|region| region.id == *id)).collect();
+                (!regions.is_empty()).then_some((track, regions))
+            });
+            let first = selection.as_ref().map(|(track, regions)| (*track, regions[0]));
+            for (track, lane) in arrangement.audio_lanes.iter().enumerate() {
+                for region in lane {
+                    for lock in &region.locks {
+                        let RegionLockTarget::Effect { slot, effect, param } = &lock.target;
+                        let (slot, param) = (*slot as usize, *param as usize);
+                        if !self.slot_holds(track, slot, effect) {
+                            continue;
+                        }
+                        if !locked.contains(&(track, slot, param)) {
+                            locked.push((track, slot, param));
+                        }
+                        if first == Some((track, region.id)) {
+                            shown.push(((slot, param), lock.value));
+                        }
+                    }
+                }
+            }
+            (selection, shown, locked)
+        });
+        let mut view = self.state.audio_lock_view();
+        view.selection = selection;
+        view.shown = shown;
+        view.locked = locked;
+        // The params projection checks this before taking the view's lock.
+        self.state.set_audio_locks_present(view.selection.is_some() || !view.locked.is_empty());
+    }
+
+    /// Clear every lock on effect parameter `slot`:`param` across `track`'s
+    /// regions (the knob menu's "Clear p-locks").
+    pub fn audio_track_clear_effect_locks(&mut self, track: usize, slot: usize, param: usize) -> Result<(), String> {
+        let ids: Vec<ClipId> = self
+            .audio_region_effect_locks(track, slot, param)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.audio_region_set_effect_locks(track, &ids, slot, &[(param, None)], false)
+    }
+
+    /// `(region, value)` for every region on `track` locking effect
+    /// parameter `slot`:`param` of the effect the slot holds now.
+    pub fn audio_region_effect_locks(&self, track: usize, slot: usize, param: usize) -> Vec<(ClipId, f32)> {
+        let Some(target) = self.effect_lock_target(track, slot, param) else {
+            return Vec::new();
+        };
+        self.state.with_committed_arrangement(|arrangement| {
+            arrangement
+                .map(|arrangement| {
+                    arrangement
+                        .audio_lane(track)
+                        .iter()
+                        .filter_map(|region| Some((region.id, region.lock(&target)?)))
+                        .collect()
+                })
+                .unwrap_or_default()
         })
     }
 
@@ -639,7 +817,8 @@ impl App {
             return;
         }
         self.link_audio_track_sounds(&players);
-        let gate = SyncGate { view: self.audio_view_key(), host_rate: host_rate.to_bits(), players };
+        let locks = self.gate_locks(&players);
+        let gate = SyncGate { view: self.audio_view_key(), host_rate: host_rate.to_bits(), players, locks };
         if self.audio_tracks.sync_gate.as_ref() == Some(&gate) {
             return;
         }
@@ -656,7 +835,21 @@ impl App {
                 let regions = arrangement
                     .map(|arrangement| arrangement.audio_lane(track).to_vec())
                     .unwrap_or_default();
-                let key = PublishedKey { regions, bpm, host_rate: host_rate.to_bits(), loaded };
+                // This snapshot's lock targets: its regions' plus the last
+                // snapshot's (reverted to the track value), while they
+                // still resolve.
+                let (mut targets, mut lock_params): (Vec<RegionLockTarget>, Vec<LockParam>) = Default::default();
+                let earlier = self.audio_tracks.lock_targets.get(&slot).into_iter().flatten();
+                for target in regions.iter().flat_map(|region| region.locks.iter().map(|lock| &lock.target)).chain(earlier) {
+                    if targets.contains(target) {
+                        continue;
+                    }
+                    if let Some(param) = self.resolve_region_lock(track, target) {
+                        targets.push(target.clone());
+                        lock_params.push(param);
+                    }
+                }
+                let key = PublishedKey { regions, lock_params, bpm, host_rate: host_rate.to_bits(), loaded };
                 if self.audio_tracks.published.get(&slot) == Some(&key) {
                     continue;
                 }
@@ -668,18 +861,67 @@ impl App {
                         .filter_map(|region| {
                             let meta = arrangement?.audio_source(region.source)?;
                             let pcm = self.audio_tracks.pcm.get(&meta.file)?;
-                            Some(playback_region(region, pcm, host_rate))
+                            let mut playing = playback_region(region, pcm, host_rate);
+                            playing.locks = region
+                                .locks
+                                .iter()
+                                .filter_map(|lock| {
+                                    let index = targets.iter().position(|target| *target == lock.target)?;
+                                    Some((index as u16, lock.value))
+                                })
+                                .collect();
+                            Some(playing)
                         })
                         .collect(),
+                    lock_params: key.lock_params.clone(),
+                    generation: 0, // set by `publish`
                 };
-                publish.push((slot, key, playback));
+                publish.push((slot, key, playback, targets));
             }
         });
-        for (slot, key, playback) in publish {
+        for (slot, key, playback, targets) in publish {
             self.audio_players.publish(slot, playback);
             self.audio_tracks.published.insert(slot, key);
+            if targets.is_empty() {
+                self.audio_tracks.lock_targets.remove(&slot);
+            } else {
+                self.audio_tracks.lock_targets.insert(slot, targets);
+            }
         }
+        self.refresh_audio_lock_view();
+        // The gate's locks reflect the targets just published, so the next
+        // frame does not see a spurious change.
+        let mut gate = gate;
+        gate.locks = self.gate_locks(&gate.players);
         self.audio_tracks.sync_gate = Some(gate);
+    }
+
+    /// The gate's lock parameters: each locking slot's targets, resolved now
+    /// (a track value edit or an effect rebuild moves them).
+    fn gate_locks(&self, players: &[(usize, usize)]) -> Vec<(usize, Vec<LockParam>)> {
+        players
+            .iter()
+            .filter_map(|&(track, slot)| {
+                let targets = self.audio_tracks.lock_targets.get(&slot)?;
+                Some((slot, targets.iter().filter_map(|target| self.resolve_region_lock(track, target)).collect()))
+            })
+            .collect()
+    }
+
+    /// Where a region lock on `track` writes and the track value it
+    /// reverts to; `None` when its slot is gone or holds another effect.
+    fn resolve_region_lock(&self, track: usize, target: &RegionLockTarget) -> Option<LockParam> {
+        match target {
+            RegionLockTarget::Effect { slot, effect, param } => {
+                let (slot, param) = (*slot as usize, *param as usize);
+                if !self.slot_holds(track, slot, effect) {
+                    return None;
+                }
+                let state = self.state.pattern.effect_chains.get(track)?.get(slot)?;
+                let id = state.param_node_id(param)?;
+                Some(LockParam { logical_id: id.logical_id, idx: id.node_param_idx as u64, base: state.defaults.get(param) })
+            }
+        }
     }
 
     /// What the region views depend on beyond track topology: the committed
@@ -779,7 +1021,7 @@ pub(super) fn ripple_audio_lane_right(
         .audio_lane(track)
         .iter()
         .find(|region| region.start_beat < insert_beat && region.end_beat > insert_beat)
-        .copied();
+        .cloned();
     if let Some(region) = straddling {
         let rate = arrangement.region_source(&region)?.sample_rate;
         let mut tail = region.tail_at(insert_beat, seconds_per_beat, rate);
@@ -826,7 +1068,7 @@ fn place_region_in(
     if !copy && track == from_track && region.start_beat == start_beat {
         return Ok(id);
     }
-    let mut placed = region;
+    let mut placed = region.clone();
     placed.start_beat = start_beat;
     placed.end_beat = start_beat + (region.end_beat - region.start_beat);
     if copy {
@@ -835,9 +1077,10 @@ fn place_region_in(
         arrangement.take_audio_region(id);
     }
     arrangement.occlude_audio_span(track, placed.start_beat, placed.end_beat, seconds_per_beat)?;
-    arrangement.insert_audio_region_sorted(track, placed);
+    let placed_id = placed.id;
     arrangement.end_beat = arrangement.end_beat.max(placed.end_beat);
-    Ok(placed.id)
+    arrangement.insert_audio_region_sorted(track, placed);
+    Ok(placed_id)
 }
 
 fn playback_region(region: &AudioRegion, pcm: &Arc<SourcePcm>, host_rate: f32) -> PlaybackRegion {
@@ -852,6 +1095,7 @@ fn playback_region(region: &AudioRegion, pcm: &Arc<SourcePcm>, host_rate: f32) -
         fade_in: fade(region.fade_in_seconds),
         fade_out: fade(region.fade_out_seconds),
         pcm: Arc::clone(pcm),
+        locks: Vec::new(),
     }
 }
 

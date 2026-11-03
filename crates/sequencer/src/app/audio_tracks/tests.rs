@@ -133,7 +133,7 @@ fn moving_resizing_splitting_and_deleting_regions() {
 
     // Trim the left edge by one beat: the audio under the rest stays put.
     app.audio_region_resize(id, 9.0, 16.0).unwrap();
-    let region = lane(app, f.track)[0];
+    let region = lane(app, f.track)[0].clone();
     assert_eq!((region.start_beat, region.end_beat, region.source_offset), (9.0, 16.0, 24_000));
 
     let tail = app.audio_region_split(id, 12.0).unwrap();
@@ -220,7 +220,7 @@ fn the_clip_window_slips_the_audio_under_a_fixed_start() {
     let id = app.audio_regions_drop(f.track, 4.0, &[wav]).unwrap()[0];
     // Play 1.5 s from 0.5 s in: the region stays at beat 4 and lasts 3 beats.
     app.audio_region_set_window(id, 0.5, 1.5, false).unwrap();
-    let region = lane(app, f.track)[0];
+    let region = lane(app, f.track)[0].clone();
     assert_eq!((region.start_beat, region.end_beat, region.source_offset), (4.0, 7.0, 24_000));
     let error = app.audio_region_set_window(id, 5.0, 1.0, false).unwrap_err();
     assert!(error.contains("past the end"), "{error}");
@@ -304,13 +304,13 @@ fn a_looping_region_keeps_its_window_while_it_grows() {
     let id = app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap()[0];
     app.audio_region_set_window(id, 1.0, 1.0, false).unwrap();
     app.audio_region_set_loop(id, true).unwrap();
-    let region = lane(app, f.track)[0];
+    let region = lane(app, f.track)[0].clone();
     assert_eq!((region.loop_start, region.loop_end), (48_000, 96_000));
     // Growing it past the window repeats the loop instead of running on.
     app.audio_region_resize(id, 0.0, 16.0).unwrap();
     // The clip window now edits the loop and leaves the length alone.
     app.audio_region_set_window(id, 0.5, 0.5, false).unwrap();
-    let region = lane(app, f.track)[0];
+    let region = lane(app, f.track)[0].clone();
     assert_eq!((region.loop_start, region.loop_end, region.end_beat), (24_000, 48_000, 16.0));
     app.sync_audio_track_playback();
     let slot = player_slot(app, f.track);
@@ -449,4 +449,46 @@ fn an_audio_track_volume_survives_play_after_a_scene_launch() {
     app.song_transport_stop().unwrap();
     app.sync_track_sound_bindings();
     assert_eq!(app.state.pattern.track_params[f.track].get_volume(), 0.3, "Stop keeps it");
+}
+
+/// eseq-a921: an effect parameter locked on one region is published with
+/// the region (its graph target and the track value it reverts to), the
+/// other region locks nothing, undo removes the lock, and a copy carries it.
+#[test]
+fn a_region_lock_is_published_with_its_region_and_undoes() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "a.wav", 48_000, 48_000);
+    let app = f.rig.app();
+    let slot = app.add_builtin_effect_sync(f.track, "Reverb").unwrap();
+    let ids = app.audio_regions_drop(f.track, 0.0, &[wav.clone(), wav]).unwrap();
+    let base = app.state.pattern.effect_chains[f.track][slot].defaults.get(0);
+    let locked = if base > 0.5 { 0.1 } else { 0.9 };
+    app.audio_region_set_effect_locks(f.track, &ids[..1], slot, &[(0, Some(locked))], false).unwrap();
+    assert_eq!(app.audio_region_effect_locks(f.track, slot, 0), vec![(ids[0], locked)]);
+    app.sync_audio_track_playback();
+    let player = player_slot(app, f.track);
+    let playback = app.audio_players.published(player).expect("published");
+    assert_eq!(playback.lock_params.len(), 1);
+    assert_eq!(playback.lock_params[0].base, base, "reverts to the track value");
+    assert_eq!(playback.regions[0].locks, vec![(0, locked)]);
+    assert!(playback.regions[1].locks.is_empty());
+
+    // A track-value edit republishes the value the lock reverts to.
+    app.state.pattern.effect_chains[f.track][slot].defaults.set(0, 0.42);
+    app.sync_audio_track_playback();
+    let playback = app.audio_players.published(player).unwrap();
+    assert_eq!(playback.lock_params[0].base, 0.42);
+
+    // Undo clears it; the parameter stays in the snapshot so it reverts.
+    crate::app::edit::undo(app);
+    assert!(app.audio_region_effect_locks(f.track, slot, 0).is_empty());
+    app.sync_audio_track_playback();
+    let playback = app.audio_players.published(player).unwrap();
+    assert!(playback.regions.iter().all(|region| region.locks.is_empty()));
+    assert_eq!(playback.lock_params.len(), 1, "an earlier lock still reverts");
+
+    // Copy/paste carries the lock.
+    crate::app::edit::redo(app);
+    let copied = app.audio_region_place(ids[0], 8.0, None, Place::Copy).unwrap();
+    assert!(app.audio_region_effect_locks(f.track, slot, 0).contains(&(copied, locked)));
 }

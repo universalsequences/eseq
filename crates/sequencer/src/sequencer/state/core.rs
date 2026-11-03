@@ -774,6 +774,14 @@ pub struct SequencerState {
     pub(super) active_note_trigger_ids: Vec<[AtomicU64; 128]>,
     pub(super) active_note_trigger_sequence: AtomicU64,
     pub(super) audio_rendered_sample: AtomicU64,
+    /// The audio regions selected for locking and what the effect knobs
+    /// show for them (eseq-a921), published by `App`.
+    pub(super) audio_lock_view: Mutex<AudioLockView>,
+    /// Whether `audio_lock_view` holds any selection or lock, so every
+    /// other knob read skips its mutex.
+    pub(super) audio_locks_present: AtomicBool,
+    /// Every audio-track player slot, for the callback's region-lock pass.
+    pub(super) audio_player_slots: crate::audio_track::AudioSlotRegistry,
     /// When the block ending at `audio_rendered_sample` started, so the
     /// playhead can move between blocks (audio_clock.rs).
     pub(super) audio_clock: AudioClockStamp,

@@ -970,7 +970,7 @@ impl App {
                 if arrangement.audio_source(region.source).is_none() {
                     continue;
                 }
-                let mut pasted = *region;
+                let mut pasted = region.clone();
                 pasted.id = arrangement.allocate_clip_id()?;
                 pasted.start_beat += dest_beat;
                 pasted.end_beat += dest_beat;

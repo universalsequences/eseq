@@ -14,10 +14,15 @@
 //! Playback is arrangement-only: the node maps each rendered sample to a
 //! song beat through `SongPositionShared::render_mapping`, so session play
 //! and a stopped transport are silence.
+//!
+//! Region locks (eseq-a921) are applied by the audio CALLBACK, not the node:
+//! the param ring has one producer, and nodes run on parallel workers. Once
+//! per block [`apply_region_locks`] finds the region each locked track is in
+//! and pushes its locked values (the track values when it leaves one).
 
 use std::ffi::CString;
 use std::os::raw::{c_int, c_void};
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::audiograph::NodeVTable;
@@ -58,6 +63,18 @@ pub struct PlaybackRegion {
     pub fade_in: f64,
     pub fade_out: f64,
     pub pcm: Arc<SourcePcm>,
+    /// `(index into AudioTrackPlayback::lock_params, value)` this region
+    /// locks.
+    pub locks: Vec<(u16, f32)>,
+}
+
+/// A parameter some region of the track locks: where it is written and the
+/// track's own value it reverts to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LockParam {
+    pub logical_id: u64,
+    pub idx: u64,
+    pub base: f32,
 }
 
 /// Everything one region player plays: its track's regions, sorted and
@@ -65,6 +82,12 @@ pub struct PlaybackRegion {
 #[derive(Clone, Default)]
 pub struct AudioTrackPlayback {
     pub regions: Vec<PlaybackRegion>,
+    /// Every parameter a region locks, plus any a previous snapshot locked
+    /// (so a removed lock still reverts).
+    pub lock_params: Vec<LockParam>,
+    /// Set by [`AudioTrackPlayers::publish`], never reused: how the lock pass
+    /// tells snapshots apart (a freed snapshot's address can come back).
+    pub generation: u64,
 }
 
 impl AudioTrackPlayback {
@@ -116,6 +139,10 @@ impl AudioTrackPlayback {
 /// points at them.
 pub struct AudioTrackSlot {
     playback: AtomicPtr<AudioTrackPlayback>,
+    /// What [`apply_region_locks`] last applied (callback thread only): the
+    /// snapshot's generation and the region index in it, `-1` for none.
+    applied_playback: AtomicU64,
+    applied_region: AtomicI64,
     song: *const SongPositionShared,
     /// `SequencerState::audio_rendered_sample`: while the graph renders a
     /// block it still holds that block's first sample.
@@ -273,6 +300,8 @@ pub struct AudioTrackPlayers {
     /// Swapped-out snapshots with the rendered sample seen at the swap.
     retired: Vec<(*mut AudioTrackPlayback, u64)>,
     rendered: Option<*const AtomicU64>,
+    /// The last [`AudioTrackPlayback::generation`] handed out.
+    generation: u64,
 }
 
 // SAFETY: see `AudioTrackSlot`; retired pointers are owned boxes.
@@ -291,11 +320,14 @@ impl AudioTrackPlayers {
         name: &str,
         song: &SongPositionShared,
         rendered: &AtomicU64,
+        registry: &AudioSlotRegistry,
         voice_sum_l: i32,
         voice_sum_r: i32,
     ) -> Result<AudioPlayerNode, String> {
         let slot = Box::new(AudioTrackSlot {
             playback: AtomicPtr::new(std::ptr::null_mut()),
+            applied_playback: AtomicU64::new(0),
+            applied_region: AtomicI64::new(-1),
             song: song as *const SongPositionShared,
             rendered: rendered as *const AtomicU64,
         });
@@ -318,15 +350,18 @@ impl AudioTrackPlayers {
         }
         crate::audiograph::graph_connect(lg, node_id, 0, voice_sum_l, 0);
         crate::audiograph::graph_connect(lg, node_id, 1, voice_sum_r, 0);
+        registry.register(slot_ptr);
         self.slots.push(slot);
         Ok(AudioPlayerNode { node_id, slot: self.slots.len() - 1 })
     }
 
     /// Publish `playback` to `slot`, retiring what it replaces.
-    pub fn publish(&mut self, slot: usize, playback: AudioTrackPlayback) {
+    pub fn publish(&mut self, slot: usize, mut playback: AudioTrackPlayback) {
         let Some(slot) = self.slots.get(slot) else {
             return;
         };
+        self.generation += 1;
+        playback.generation = self.generation;
         let fresh = Box::into_raw(Box::new(playback));
         let old = slot.playback.swap(fresh, Ordering::AcqRel);
         if !old.is_null() {
@@ -379,6 +414,107 @@ impl AudioTrackPlayers {
     #[cfg(test)]
     pub fn published(&self, slot: usize) -> Option<&AudioTrackPlayback> {
         unsafe { self.slots.get(slot)?.playback.load(Ordering::Acquire).as_ref() }
+    }
+}
+
+/// Every slot, for the audio callback's lock pass. Slots are never freed
+/// (see `Drop for AudioTrackPlayers`), so a registered pointer stays valid.
+pub struct AudioSlotRegistry {
+    slots: [AtomicPtr<AudioTrackSlot>; MAX_AUDIO_SLOTS],
+    len: AtomicUsize,
+}
+
+/// More than `MAX_TRACKS`: a deleted track's slot is not reused.
+const MAX_AUDIO_SLOTS: usize = 256;
+
+impl Default for AudioSlotRegistry {
+    fn default() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
+            len: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl AudioSlotRegistry {
+    fn register(&self, slot: *const AudioTrackSlot) {
+        let index = self.len.load(Ordering::Acquire);
+        if index < MAX_AUDIO_SLOTS {
+            self.slots[index].store(slot as *mut AudioTrackSlot, Ordering::Release);
+            self.len.store(index + 1, Ordering::Release);
+        }
+    }
+}
+
+/// Apply region locks for the block starting at `block_start`: for each
+/// track whose snapshot locks anything, push every lock parameter's value
+/// (the region's lock, else the track value) when the region it is in or
+/// its snapshot changed, and re-assert the region's locks every block
+/// otherwise, so a track-value write (a knob, a Play/Stop resync) cannot
+/// undo a lock while its region plays.
+///
+/// # Safety
+/// Audio callback thread only (the param ring's producer); `lg` is the live
+/// graph the slots' nodes belong to.
+pub unsafe fn apply_region_locks(
+    lg: *mut crate::audiograph::LiveGraph,
+    registry: &AudioSlotRegistry,
+    block_start: u64,
+) {
+    region_lock_pass(registry, block_start, |param, value| unsafe {
+        crate::audiograph::params_push_wrapper(
+            lg,
+            crate::audiograph::ParamMsg { idx: param.idx, logical_id: param.logical_id, fvalue: value },
+        );
+    });
+}
+
+/// [`apply_region_locks`]' body, with the param write abstracted (tests).
+fn region_lock_pass(registry: &AudioSlotRegistry, block_start: u64, mut push: impl FnMut(&LockParam, f32)) {
+    for slot in &registry.slots[..registry.len.load(Ordering::Acquire).min(MAX_AUDIO_SLOTS)] {
+        let Some(slot) = (unsafe { slot.load(Ordering::Acquire).as_ref() }) else {
+            continue;
+        };
+        let pointer = slot.playback.load(Ordering::Acquire);
+        let Some(playback) = (unsafe { pointer.as_ref() }) else {
+            continue;
+        };
+        if playback.lock_params.is_empty() {
+            continue;
+        }
+        let beat = unsafe { (*slot.song).render_mapping(block_start) }
+            .and_then(|mapping| mapping.song_beat(block_start, 0));
+        apply_slot_locks(slot, playback, beat, &mut push);
+    }
+}
+
+/// One slot's step of [`region_lock_pass`] at song `beat` (`None`: the
+/// transport is stopped or outside the song).
+fn apply_slot_locks(
+    slot: &AudioTrackSlot,
+    playback: &AudioTrackPlayback,
+    beat: Option<f64>,
+    push: &mut impl FnMut(&LockParam, f32),
+) {
+    let generation = playback.generation;
+    let previous = slot.applied_region.load(Ordering::Relaxed);
+    let region = beat
+        .and_then(|beat| playback.region_at(beat, previous.max(0) as usize))
+        .map_or(-1, |index| index as i64);
+    let locks = usize::try_from(region).ok().map(|index| playback.regions[index].locks.as_slice());
+    if slot.applied_playback.load(Ordering::Relaxed) != generation || previous != region {
+        for (index, param) in playback.lock_params.iter().enumerate() {
+            let locked = locks.and_then(|locks| locks.iter().find(|(i, _)| *i as usize == index));
+            push(param, locked.map_or(param.base, |&(_, value)| value));
+        }
+        slot.applied_playback.store(generation, Ordering::Relaxed);
+        slot.applied_region.store(region, Ordering::Relaxed);
+    } else if let Some(locks) = locks {
+        for &(index, value) in locks {
+            if let Some(param) = playback.lock_params.get(index as usize) {
+                push(param, value);
+            }
+        }
     }
 }
 

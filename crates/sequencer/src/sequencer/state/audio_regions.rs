@@ -40,7 +40,7 @@ impl AudioSourceMeta {
 /// `loop_start` whenever it reaches `loop_end`, so extending it repeats the
 /// loop; otherwise a span longer than the audio left plays silence past the
 /// end, as a tempo change can produce.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AudioRegion {
     /// Drawn from the same allocator as `ArrClip::id`.
     pub id: ClipId,
@@ -70,6 +70,82 @@ pub struct AudioRegion {
     pub loop_start: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub loop_end: u64,
+    /// Parameter values this region locks while it plays, like step p-locks
+    /// (eseq-a921): the track's one fx/mixer state otherwise. At most one
+    /// lock per target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locks: Vec<RegionLock>,
+}
+
+/// What a region lock sets.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RegionLockTarget {
+    /// A parameter of the track's effect at `slot`. `effect` is that slot's
+    /// effect id when the lock was made: a slot now holding another effect
+    /// leaves the lock inert rather than writing into the wrong device.
+    Effect { slot: u16, effect: String, param: u16 },
+}
+
+/// What the effect knobs show for region locks (eseq-a921): the regions
+/// selected for locking, the locks of the first of them, and every effect
+/// parameter some region of each audio track locks. Entries are validated
+/// against the effect each slot holds now.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AudioLockView {
+    /// `(track, regions)`: an effect edit on `track` locks these regions.
+    pub selection: Option<(usize, Vec<ClipId>)>,
+    /// `(slot, param) -> value` of the first selected region's locks.
+    pub shown: Vec<((usize, usize), f32)>,
+    /// `(track, slot, param)` some region locks.
+    pub locked: Vec<(usize, usize, usize)>,
+}
+
+impl AudioLockView {
+    /// The regions an effect edit on `track` locks, if any are selected.
+    pub fn regions_for(&self, track: usize) -> Option<&[ClipId]> {
+        self.selection
+            .as_ref()
+            .filter(|(owner, regions)| *owner == track && !regions.is_empty())
+            .map(|(_, regions)| regions.as_slice())
+    }
+
+    /// What a knob for `track`'s effect `slot`:`param` shows while regions
+    /// are selected: `Some(Some(value))` locked, `Some(None)` unlocked (the
+    /// track value), `None` when no region is selected there.
+    pub fn shown(&self, track: usize, slot: usize, param: usize) -> Option<Option<f32>> {
+        self.regions_for(track)?;
+        Some(self.shown.iter().find(|(key, _)| *key == (slot, param)).map(|(_, value)| *value))
+    }
+
+    pub fn has_lock(&self, track: usize, slot: usize, param: usize) -> bool {
+        self.locked.contains(&(track, slot, param))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RegionLock {
+    pub target: RegionLockTarget,
+    pub value: f32,
+}
+
+impl AudioRegion {
+    pub fn lock(&self, target: &RegionLockTarget) -> Option<f32> {
+        self.locks.iter().find(|lock| &lock.target == target).map(|lock| lock.value)
+    }
+
+    /// Set (`Some`) or clear (`None`) the lock on `target`.
+    pub fn set_lock(&mut self, target: RegionLockTarget, value: Option<f32>) {
+        let existing = self.locks.iter().position(|lock| lock.target == target);
+        match (existing, value) {
+            (Some(index), Some(value)) => self.locks[index].value = value,
+            (Some(index), None) => {
+                self.locks.remove(index);
+            }
+            (None, Some(value)) => self.locks.push(RegionLock { target, value }),
+            (None, None) => {}
+        }
+    }
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -114,6 +190,7 @@ impl AudioRegion {
             loop_enabled: false,
             loop_start: 0,
             loop_end: 0,
+            locks: Vec::new(),
         }
     }
 
@@ -149,7 +226,7 @@ impl AudioRegion {
         Self {
             start_beat: beat,
             source_offset: position.round() as u64,
-            ..*self
+            ..self.clone()
         }
     }
 }

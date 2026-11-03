@@ -434,9 +434,21 @@ fn read_param(
         true => MAX_STEPS,
         false => sources.num_steps(owner),
     };
+    // Audio-track region locks (eseq-a921): one guard for the whole read,
+    // taken only when some exist on this track.
+    let region_view = matches!(device.device, DeviceSlot::Effect(_))
+        .then(|| state.audio_lock_view_for(owner))
+        .flatten();
     device.device.with_values(state, buses, owner, |values| {
         let display = match values {
             DeviceValues::Live(slot) => shown.then(|| {
+                // Regions selected on an audio track: their lock, else the
+                // track value (eseq-a921).
+                if let (DeviceSlot::Effect(effect), Some(view)) = (device.device, region_view.as_deref()) {
+                    if let Some(region) = view.shown(owner, effect, index) {
+                        return region.map_or((slot.defaults.get(index), false), |value| (value, true));
+                    }
+                }
                 let effective = device.device.macro_key(state, owner, index).map(|key| {
                     let overrides = &shared.borrow().macro_overrides;
                     (overrides.get(&key).copied()).unwrap_or_else(|| slot.defaults.get(index))
@@ -478,7 +490,11 @@ fn read_param(
             shown: display,
             overridden: neural.is_some(),
             base: base.then(|| values.base(pdesc, index)),
-            has_locks: has_locks.then(|| values.has_lock(index, num_steps())),
+            has_locks: has_locks.then(|| {
+                values.has_lock(index, num_steps())
+                    || matches!((device.device, region_view.as_deref()), (DeviceSlot::Effect(effect), Some(view))
+                        if view.has_lock(owner, effect, index))
+            }),
             step_locks: step_locks.then(|| {
                 (0..num_steps())
                     .filter_map(|step| Some((step, values.lock(step, index)?)))
