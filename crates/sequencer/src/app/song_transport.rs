@@ -164,11 +164,7 @@ impl App {
         }
         // Same authority as the stop boundary: the latency-compensated
         // record clock every capture event was stamped against.
-        let end_raw_beats = self
-            .state
-            .record_beats_at_instant(std::time::Instant::now())
-            .unwrap_or_else(|| self.state.scheduler_rendered_beats())
-            .max(0.0);
+        let end_raw_beats = self.state.record_beats_now();
         // Unlock the song editing primitives before committing: the commit
         // itself goes through `song_replace`.
         self.set_song_transport_mode(SongTransportMode::SongPlayback);
@@ -644,11 +640,7 @@ impl App {
         // would place Q one output-latency ahead of the events it
         // bounds; it stays only as the fallback for the case where the
         // audio callback never published a record-clock anchor.
-        let end_raw_beats = self
-            .state
-            .record_beats_at_instant(std::time::Instant::now())
-            .unwrap_or_else(|| self.state.scheduler_rendered_beats())
-            .max(0.0);
+        let end_raw_beats = self.state.record_beats_now();
         // Capture-on-playback teardown (takes spec 9.3): the song
         // was playing underneath; the latch auto-clears at
         // punch-out (spec 10) — the committed song now CONTAINS the

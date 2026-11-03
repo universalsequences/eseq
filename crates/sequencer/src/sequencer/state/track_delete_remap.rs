@@ -190,6 +190,7 @@ pub(super) fn remap_arrangement_after_scene_move(
     for event in &mut arrangement.scene_lane {
         event.scene = remap_scene_index_after_move(event.scene, source, target);
     }
+    remap_push_lane_after_scene_move(arrangement, source, target);
 }
 
 /// Arrangement sibling of `remap_song_after_scene_delete`: decrement scene
@@ -206,6 +207,7 @@ pub(super) fn remap_arrangement_after_scene_delete(
             event.scene -= 1;
         }
     }
+    remap_push_lane_after_scene_delete(arrangement, deleted_scene);
 }
 
 pub(super) fn mod_destination_valid_for_track_count(

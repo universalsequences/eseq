@@ -216,6 +216,14 @@ impl SequencerState {
         Some(anchor_beats + elapsed_secs * bpm / 60.0 - latency_seconds * bpm / 60.0)
     }
 
+    /// The record clock's beat "now", falling back to the rendered scheduler
+    /// position while the stream has not reported yet (never negative).
+    pub fn record_beats_now(&self) -> f64 {
+        self.record_beats_at_instant(Instant::now())
+            .unwrap_or_else(|| self.scheduler_rendered_beats())
+            .max(0.0)
+    }
+
     pub fn is_playing(&self) -> bool {
         self.transport.playing.load(Ordering::Relaxed)
     }

@@ -811,3 +811,50 @@ fn the_view_follows_the_playhead_until_a_hand_scroll() {
     assert_eq!(start(&mut h), 0.0, "follow is off");
     h.app.song_capture_cancel().expect("cancel");
 }
+
+/// eseq-vum0: a recorded scene push draws on the push lane under the scene
+/// lane — labeled with its target scene, its curve as item content — and
+/// the lane's delete gesture removes it as one arrangement edit.
+#[test]
+fn recorded_scene_pushes_draw_and_delete_on_the_push_lane() {
+    use sequencer::sequencer::{ScenePushPoint, ScenePushRegion};
+    let mut h = distro();
+    h.app.set_arrangement_view_visible(true);
+    h.command("clone-pattern", Value::Nil);
+    h.settle();
+    assert_eq!(h.eval("(len (eseq.arrangement/push-items))"), Value::Number(0.0));
+    let mut arrangement = h.app.state.committed_arrangement().expect("arrangement");
+    let id = arrangement.allocate_clip_id().expect("id");
+    arrangement.end_beat = arrangement.end_beat.max(16.0);
+    arrangement.push_lane.push(ScenePushRegion {
+        id,
+        start_beat: 4.0,
+        end_beat: 8.0,
+        target_scene: 1,
+        points: vec![
+            ScenePushPoint { beat: 0.0, value: 0.0 },
+            ScenePushPoint { beat: 2.0, value: 1.0 },
+        ],
+    });
+    h.app.state.set_committed_arrangement(Some(arrangement)).expect("commit");
+    h.settle();
+
+    let pushes = items(&h.eval("(eseq.arrangement/push-items)"));
+    assert_eq!(pushes.len(), 1);
+    let item = &pushes[0];
+    assert_eq!(get(item, "id"), Value::Number(id.0 as f64));
+    assert_eq!(get(item, "start"), Value::Number(4.0));
+    assert_eq!(get(item, "end"), Value::Number(8.0));
+    let Value::String(label) = get(item, "label") else { panic!("a label") };
+    assert!(label.starts_with("→ "), "names the target scene: {label}");
+    assert_eq!(
+        h.eval("(let ((p (first (eseq.arrangement/push-items)))) (len (get (get p :content) :curve)))"),
+        Value::Number(2.0),
+        "the curve rides as item content"
+    );
+
+    h.eval(&format!("(eseq.arrangement/push-lane-action (dict :type :delete-items :ids (list {})))", id.0));
+    h.settle();
+    assert!(h.app.state.committed_arrangement().expect("arrangement").push_lane.is_empty());
+    assert_eq!(h.eval("(len (eseq.arrangement/push-items))"), Value::Number(0.0));
+}

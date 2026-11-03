@@ -8,7 +8,7 @@ use crate::*;
 use sequencer::app::audio_tracks::{AudioRegionPatch, Place};
 use sequencer::sequencer::ClipId;
 
-use super::song::{payload_map, require_number};
+use super::song::{clip_ids, payload_map, require_number, require_whole};
 use crate::history_commands::map_bool;
 
 pub(super) const COMMANDS: &[&str] = &[
@@ -26,14 +26,6 @@ pub(super) const COMMANDS: &[&str] = &[
 
 type PayloadMap = HashMap<String, Rc<RefCell<Value>>>;
 
-fn require_whole(map: &PayloadMap, key: &str) -> Result<u64, String> {
-    let value = require_number(map, key)?;
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
-        return Err(format!("{key} must be a non-negative integer"));
-    }
-    Ok(value as u64)
-}
-
 fn optional_track(map: &PayloadMap) -> Result<Option<usize>, String> {
     match map.get("track").map(|cell| cell.borrow().clone()) {
         None | Some(Value::Nil) => Ok(None),
@@ -43,21 +35,6 @@ fn optional_track(map: &PayloadMap) -> Result<Option<usize>, String> {
 
 fn region_id(map: &PayloadMap) -> Result<ClipId, String> {
     require_whole(map, "id").map(ClipId)
-}
-
-/// `:ids` as a list of region ids.
-fn region_ids(map: &PayloadMap) -> Result<Vec<ClipId>, String> {
-    let Some(Value::List(ids)) = map.get("ids").map(|cell| cell.borrow().clone()) else {
-        return Err("missing :ids list".to_string());
-    };
-    ids.iter()
-        .map(|id| match &*id.borrow() {
-            Value::Number(n) if n.is_finite() && *n >= 0.0 && n.fract() == 0.0 => {
-                Ok(ClipId(*n as u64))
-            }
-            other => Err(format!("region id must be a non-negative integer, got {other:?}")),
-        })
-        .collect()
 }
 
 /// `:paths` (a list) or `:path` (one), as file paths.
@@ -128,7 +105,7 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             Ok("Duplicated audio region".to_string())
         }
         "audio-regions-delete" => {
-            let ids = region_ids(map)?;
+            let ids = clip_ids(map)?;
             app.audio_regions_delete(&ids)?;
             Ok(match ids.len() {
                 1 => "Deleted audio region".to_string(),
@@ -153,7 +130,7 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             Ok("Audio region updated".to_string())
         }
         "audio-regions-paste" => {
-            let ids = region_ids(map)?;
+            let ids = clip_ids(map)?;
             let pasted = app.audio_regions_paste(&ids, require_number(map, "beat")?, optional_track(map)?)?;
             Ok(format!("Pasted {} audio region(s)", pasted.len()))
         }
@@ -168,7 +145,7 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             Ok("Audio clip window set".to_string())
         }
         "audio-lock-select" => {
-            let ids = region_ids(map)?;
+            let ids = clip_ids(map)?;
             app.set_audio_lock_selection(optional_track(map)?.map(|track| (track, ids)));
             Ok("Selected regions for locking".to_string())
         }

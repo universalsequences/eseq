@@ -1310,6 +1310,7 @@ impl App {
                 for group_id in racks {
                     occlude_rack_span(arrangement, group_id, end_beat, old_end)?;
                 }
+                arrangement.occlude_scene_push_span(end_beat, old_end)?;
             }
             Self::set_end_in(arrangement, end_beat)?;
             restamp_changed_scene_spans(arrangement, scenes, &before)
@@ -1329,6 +1330,7 @@ impl App {
             .flatten()
             .map(|clip| clip.end_beat)
             .chain(arrangement.rack_lanes.values().flatten().map(|clip| clip.end_beat))
+            .chain(arrangement.push_lane.iter().map(|push| push.end_beat))
             .fold(0.0f64, f64::max);
         if end_beat < last_clip_end {
             return Err(format!(
@@ -1465,10 +1467,11 @@ impl App {
                 scenes,
             )
         })?;
-        // Rows say nothing about audio: the audio lanes and their sources
-        // carry over unchanged.
+        // Rows say nothing about audio or scene pushes: those lanes (and the
+        // audio sources) carry over unchanged.
         if let Some(before) = &before {
             arrangement.audio_lanes = before.audio_lanes.clone();
+            arrangement.push_lane = before.push_lane.clone();
             arrangement.inherit_audio_sources(before);
         }
         self.commit_arrangement_edit("Replace arrangement", before, Some(arrangement))
@@ -1646,6 +1649,7 @@ mod tests {
         audio_lanes: Vec::new(),
         audio_sources: std::collections::BTreeMap::new(),
         next_audio_source_id: 0,
+        push_lane: Vec::new(),
         };
         let revision = app.state.committed_song_revision();
         app.state
@@ -1788,6 +1792,7 @@ mod tests {
         audio_lanes: Vec::new(),
         audio_sources: std::collections::BTreeMap::new(),
         next_audio_source_id: 0,
+        push_lane: Vec::new(),
         };
         let depth = app.history.undo_len();
         app.arr_replace(arrangement.clone()).expect("arr_replace");

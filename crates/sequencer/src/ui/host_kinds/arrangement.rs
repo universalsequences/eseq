@@ -87,6 +87,8 @@ pub(super) struct SongState {
     /// What the tracks' `audio-regions` were last pushed under:
     /// `App::audio_view_key` and the track instances.
     audio_key: Option<((u64, u32, usize), Vec<Option<InstanceId>>)>,
+    /// The committed song revision `song.pushes` was last pushed under.
+    pushes_key: Option<u64>,
 }
 
 impl SongState {
@@ -118,6 +120,7 @@ impl SongState {
         self.pushed = SongPushed::default();
         self.governed = None;
         self.rack_lanes_key = None;
+        self.pushes_key = None;
         self.pending.invalidate();
     }
 }
@@ -649,6 +652,40 @@ impl HostKinds {
             pusher.push(track_id, f::TRACK_AUDIO_REGIONS, list);
         }
         self.song.audio_key = Some(key);
+    }
+
+    /// `song.pushes` (eseq-vum0): the push lane's regions as maps the
+    /// arrangement draws as curve items, when an arrangement install moved
+    /// the committed song revision.
+    pub(super) fn sync_push_lane(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
+        let revision = app.state.committed_song_revision();
+        if self.song.pushes_key == Some(revision) {
+            return;
+        }
+        let Some(song) = pusher.singleton(SONG) else {
+            return;
+        };
+        let list = app.state.with_committed_arrangement(|arrangement| {
+            let lane = arrangement.map_or(&[][..], |arrangement| arrangement.push_lane.as_slice());
+            crate::values::list_value(lane.iter().map(|region| {
+                let length = (region.end_beat - region.start_beat).max(f64::EPSILON);
+                let points = crate::values::list_value(region.points.iter().map(|point| {
+                    crate::values::map_value([
+                        ("offset", number(point.beat / length)),
+                        ("value", number(point.value as f64)),
+                    ])
+                }));
+                crate::values::map_value([
+                    ("cid", number(region.id.0 as f64)),
+                    ("start", number(region.start_beat)),
+                    ("end", number(region.end_beat)),
+                    ("target", number(region.target_scene as f64)),
+                    ("points", points),
+                ])
+            }))
+        });
+        pusher.push(song, f::SONG_PUSHES, list);
+        self.song.pushes_key = Some(revision);
     }
 
     /// The song's `exists`, `end`, `loop` and `spans`, and every track's

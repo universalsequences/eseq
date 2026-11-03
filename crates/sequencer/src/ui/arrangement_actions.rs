@@ -429,6 +429,7 @@ mod tests {
             audio_lanes: Vec::new(),
             audio_sources: Default::default(),
             next_audio_source_id: 0,
+            push_lane: Vec::new(),
         }
     }
 

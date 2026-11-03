@@ -5209,6 +5209,9 @@ impl App {
             macro_engine.set_value(id, value);
         }
         self.macro_engine = macro_engine;
+        // The new engine holds no scene push; a replay owner from the old
+        // project would otherwise only send values to a push never begun.
+        self.scene_push_owner = super::scene_push_lane::ScenePushOwner::Idle;
         self.restore_project_device_instances(&device_instances)?;
         self.push_all_restored_defaults();
         self.push_all_delay_bpm();

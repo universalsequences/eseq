@@ -5570,6 +5570,7 @@ mod tests {
             audio_lanes: Vec::new(),
             audio_sources: std::collections::BTreeMap::new(),
             next_audio_source_id: 0,
+            push_lane: Vec::new(),
         }
     }
 
@@ -5832,6 +5833,7 @@ mod tests {
         audio_lanes: Vec::new(),
         audio_sources: std::collections::BTreeMap::new(),
         next_audio_source_id: 0,
+        push_lane: Vec::new(),
         };
 
         let migrated = migrate_legacy_backdrops(&v5, &scenes).expect("migrates");

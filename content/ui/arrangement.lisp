@@ -77,7 +77,9 @@
         clip-span-all-tracks
         everything-span
         begin-placement
-        cancel-placement)
+        cancel-placement
+        push-items
+        push-lane-action)
 
 ;; ── View state (`:key ()` singletons) ──────────────────────────────────────
 ;; Every fast-changing surface a lane draws is a field bound with #': scroll
@@ -1960,6 +1962,117 @@
     :scroll-mode :smooth
     :on-action |event| (scene-action event)))
 
+;; ── Push lane (eseq-vum0) ────────────────────────────────────────────────
+;; Scene pushes (Shift/Cmd-drag on a transport scene) recorded during an
+;; arrangement take: one region per gesture, labeled with the scene it
+;; pushed toward, its push amount drawn as a curve. Regions are clicked to
+;; select, dragged by their title bar to move, and deleted with Backspace;
+;; playback replays them through the live push path.
+(def push-lane-height 3.2)
+
+(def-kind arr-push
+  :key ()
+  :state ((selected '())
+          ;; The live move ghost: {:id :start} while a title-bar drag runs.
+          (drag :any :default nil)))
+
+(def push-target-label (push)
+  (let ((all (scenes)))
+    (str "→ "
+      (if (< push.target (len all)) (scene-name (nth all push.target)) "?"))))
+
+(def push-ghost-start (push)
+  (let ((drag arr-push.drag))
+    (if (and drag (= (get drag :id) push.cid)) (get drag :start) push.start)))
+
+(def push-items ()
+  (map |push|
+    (let ((start (push-ghost-start push)))
+      (dict
+        :id push.cid
+        :lane 0
+        :start start
+        :end (+ start (- push.end push.start))
+        :label (push-target-label push)
+        :content (dict :curve push.points)
+        :selected (listed? push.cid arr-push.selected)
+        :color (scene-color)))
+    (or song.pushes '())))
+
+(def find-push (id)
+  (first (filter |push| (= push.cid id) (or song.pushes '()))))
+
+(def push-lane-action (event)
+  (if (view-action? event)
+    (view-action event)
+    (match event.type
+      :select
+      (set! arr-push.selected (or (get event :ids) '()))
+      :clear-selection
+      (set! arr-push.selected '())
+      :move-items-absolute
+      (let ((push (find-push (get event :anchor-id))))
+        (set! arr-push.drag
+          (when push (dict :id push.cid :start (max 0 (get event :start))))))
+      :finish-move-items
+      (let ((drag arr-push.drag)
+            (push (when drag (find-push (get drag :id)))))
+        (set! arr-push.drag nil)
+        (unless (or (= push nil) (= (get drag :start) push.start))
+          (host-command "arrangement-push-move"
+            (dict :clip-id push.cid :start-beat (get drag :start)))))
+      :delete-items
+      (let ((ids (or (get event :ids) '())))
+        (set! arr-push.selected '())
+        (unless (empty? ids)
+          (host-command "arrangement-push-delete" (dict :ids ids))))
+      _ nil)))
+
+(def push-lane ()
+  (timeline
+    :key "push-lane"
+    :border-top-color :transparent
+    :border-bottom-color lane-border-bottom-color
+    :border-width lane-border-width
+    :width 0 :flex 1
+    :height push-lane-height
+    :focusable true
+    :sidebar-width 0
+    :header-height 0
+    :time-ruler (dict :mode :bars-beats :beats-per-bar beats-per-bar)
+    :grid-density grid-density
+    :background-color timeline-background-color
+    :title-bar-height clip-title-bar-height
+    :item-label-font-size clip-label-font-size
+    :item-label-color :scene-clip-fg
+    :item-content-color :scene-clip-fg
+    :item-corner-radius clip-corner-radius
+    :item-color :scene-clip-bg
+    :loop-visible false
+    :playhead-time #'song.position
+    :items (push-items)
+    :view-start #'arr-view.start
+    :view-duration #'arr-view.duration
+    :zoom-min-duration min-view-duration
+    :zoom-max-duration max-view-duration
+    :content-length #'arr-view.content-length
+    :snap snap
+    :move-snap-mode :alignment-helper
+    :snap-mode :floor
+    :scroll-mode :smooth
+    :on-action |event| (push-lane-action event)))
+
+;; The row: a labeled header and the lane, only while the song holds pushes.
+(def push-row ()
+  (if (empty? (or song.pushes '()))
+    (nothing)
+    (h-stack :width :fill :align :start :gap 0
+      (box :key "push-header" :width header-width :height push-lane-height
+        :padding 0.4
+        (label "Scene pushes" :font-size 9.5 :color :gray :bg :transparent))
+      (h-stack :width 0 :flex 1 :align :start :gap 0
+        (push-lane)))))
+
 ;; The footer and the unused track area share the same time transform as
 ;; real lanes, but cannot create scene clips or acquire track selection.
 (def continuation-lane (key height ruler-height)
@@ -2969,6 +3082,9 @@
         (subtree :key "arr-scene-row-lane"
           (h-stack :width 0 :flex 1 :align :start :gap 0
             (scene-lane)))))
+    ;; Recorded scene pushes, pinned under the scene lane (eseq-vum0).
+    (subtree :key "arr-push-row"
+      (push-row))
     (scroll :key "track-scroll" :width :fill :flex 1
       (v-stack :width :fill :height :fill :gap 0.0
         (track-rows)

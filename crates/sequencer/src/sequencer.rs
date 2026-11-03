@@ -41,6 +41,7 @@ pub use state::{
     pattern_play_step, restamp_changed_scene_spans, restamped_clip, stamp_scene_clips, LaneSpan, RackArrClip,
     stamped_clip_override, ArrClip, LegacyBackdropSpan, SceneSpan,
     ArrangementContext, ClipId, ProjectArrangement, SceneEvent, SongCompileContext,
+    ScenePushPoint, ScenePushRegion, thin_scene_push_points,
     DEFAULT_ARRANGEMENT_END,
     default_empty_effect_chain, default_rack_macros, format_song_row_positions, project_lanes,
     VoiceCountTable,

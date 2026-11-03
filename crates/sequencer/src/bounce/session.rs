@@ -124,6 +124,7 @@ impl PreparedExport {
                         if !outcome.errors.is_empty() { return Err(io::Error::other(outcome.errors.join("; "))); }
                         app.mirror_song_row_applied(&row).map_err(io::Error::other)?;
                     }
+                    app.drive_arrangement_scene_push_at_sample(control_frame);
                     let outcome = app.drain_due_mixer_controls(control_frame);
                     if !outcome.errors.is_empty() { return Err(io::Error::other(outcome.errors.join("; "))); }
                     let installed = unsafe { app.prepare_bounce_latency() }.map_err(io::Error::other)?;

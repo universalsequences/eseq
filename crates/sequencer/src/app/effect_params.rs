@@ -667,8 +667,39 @@ impl App {
 
     /// Begins the transport's ephemeral Shift gesture. This deliberately
     /// morphs parameter snapshots only: pattern switching is discrete and
-    /// therefore has no meaningful value between 0 and 1.
+    /// therefore has no meaningful value between 0 and 1. The live gesture
+    /// takes the push over from arrangement replay and is recorded by an
+    /// active capture take.
     pub fn begin_scene_push(&mut self, target_scene: usize, value: f32) {
+        if target_scene >= self.state.scene_count() {
+            return;
+        }
+        self.scene_push_owner = super::scene_push_lane::ScenePushOwner::Live;
+        self.apply_scene_push_begin(target_scene, value);
+        self.observe_scene_push(super::song_capture::ScenePushStep::Begin { target_scene, value });
+    }
+
+    pub fn set_scene_push_value(&mut self, value: f32) {
+        if !self.scene_push_owner.is_live() {
+            return;
+        }
+        self.apply_scene_push_value(value);
+        if value.is_finite() {
+            self.observe_scene_push(super::song_capture::ScenePushStep::Value(value));
+        }
+    }
+
+    pub fn end_scene_push(&mut self) {
+        if !self.scene_push_owner.is_live() {
+            return;
+        }
+        self.scene_push_owner = super::scene_push_lane::ScenePushOwner::Idle;
+        self.apply_scene_push_end();
+        self.observe_scene_push(super::song_capture::ScenePushStep::End);
+    }
+
+    /// The push itself, shared by the live gesture and arrangement replay.
+    pub(super) fn apply_scene_push_begin(&mut self, target_scene: usize, value: f32) {
         if target_scene >= self.state.scene_count() {
             return;
         }
@@ -684,12 +715,12 @@ impl App {
         self.send_macro_targets(touched);
     }
 
-    pub fn set_scene_push_value(&mut self, value: f32) {
+    pub(super) fn apply_scene_push_value(&mut self, value: f32) {
         let touched = self.macro_engine.set_scene_push_value(value);
         self.send_macro_targets(touched);
     }
 
-    pub fn end_scene_push(&mut self) {
+    pub(super) fn apply_scene_push_end(&mut self) {
         let touched = self.macro_engine.end_scene_push();
         self.send_macro_targets(touched);
     }

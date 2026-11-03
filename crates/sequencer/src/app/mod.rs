@@ -71,6 +71,7 @@ mod bus_outputs;
 pub mod pending_capture;
 pub mod retrospective;
 pub mod song_capture;
+pub mod scene_push_lane;
 pub mod song_edit;
 pub mod song_region;
 pub mod sound_binding;
@@ -1182,6 +1183,9 @@ pub struct App {
     /// `apply_pattern_launch` appends one lightweight event per audible
     /// launch.
     pub(crate) song_capture_take: Option<song_capture::SongCaptureTake>,
+    /// The scene push gesture state shared by the live transport gesture
+    /// and arrangement replay (epic eseq-vum0, `scene_push_lane`).
+    pub(crate) scene_push_owner: scene_push_lane::ScenePushOwner,
     /// True when the most recent arrangement capture failed to commit
     /// (overflow, normalization, validation). Cleared when the next capture
     /// starts. Read as `song.capture-failed` (the host kinds).
@@ -2345,10 +2349,7 @@ impl App {
         // 120 BPM). Quantized launches keep their scheduler-stamped grid
         // deadline via `audible_beats`.
         let beat = audible_beats.unwrap_or_else(|| {
-            self.state
-                .record_beats_at_instant(std::time::Instant::now())
-                .unwrap_or_else(|| self.state.scheduler_rendered_beats())
-                .max(0.0)
+            self.state.record_beats_now()
         });
         self.record_song_capture_launch(target, beat);
         Ok(PatternLaunchOutcome {
@@ -2366,6 +2367,10 @@ impl App {
         self.scene_macro_runtime.clear();
         let mut touched = self.macro_engine.release_all_scene_macros();
         touched.extend(self.macro_engine.end_scene_push());
+        if self.scene_push_owner.is_live() {
+            self.observe_scene_push(song_capture::ScenePushStep::End);
+        }
+        self.scene_push_owner = scene_push_lane::ScenePushOwner::Idle;
         touched
     }
 
@@ -3191,6 +3196,7 @@ impl App {
             song_row_mirror_epoch: 0,
             bus_pattern_restore_epoch: 0,
             song_capture_take: None,
+            scene_push_owner: Default::default(),
             song_capture_failed: false,
             song_capture_error: None,
             song_edit_error: None,

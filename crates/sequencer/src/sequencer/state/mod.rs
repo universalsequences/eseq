@@ -91,6 +91,8 @@ use audio_clock::AudioClockStamp;
 mod arrangement;
 mod audio_regions;
 pub use audio_regions::*;
+mod scene_push_lane;
+pub use scene_push_lane::*;
 pub use arrangement::*;
 mod track_delete_remap;
 use track_delete_remap::*;

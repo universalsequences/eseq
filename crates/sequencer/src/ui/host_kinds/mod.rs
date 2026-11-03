@@ -901,6 +901,7 @@ pub(crate) mod f {
     pub(crate) const SONG_BOUND_CLIP: FieldKey = (SONG, "bound-clip");
     pub(crate) const SONG_BOUND_RACK_ITEM: FieldKey = (SONG, "bound-rack-item");
     pub(crate) const SONG_SPANS: FieldKey = (SONG, "spans");
+    pub(crate) const SONG_PUSHES: FieldKey = (SONG, "pushes");
     pub(crate) const SONG_PENDING: FieldKey = (SONG, "pending");
     pub(crate) const SONG_PENDING_ORIGIN: FieldKey = (SONG, "pending-origin");
     pub(crate) const SONG_PENDING_HEAD: FieldKey = (SONG, "pending-head");
@@ -1505,6 +1506,9 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SONG_BOUND_CLIP, "clip", Model),
     (f::SONG_BOUND_RACK_ITEM, ":string", Model),
     (f::SONG_SPANS, "(list-of scene-span)", Model),
+    // Recorded scene pushes (eseq-vum0): {:cid :start :end :target
+    // :points ({:offset :value})}, offsets 0..1 of the region.
+    (f::SONG_PUSHES, "(list-of :any)", Model),
     // The provisional capture surface (`pending`): rebuilt with the pending
     // content key, the lanes' ends with the quantized record head.
     (f::SONG_PENDING, ":bool", Model),
@@ -3061,6 +3065,7 @@ impl HostKinds {
         sync_phase("sync-groove-library", || self.sync_groove_library(&mut pusher, app));
         sync_phase("sync-song-model", || self.sync_song_model(&mut pusher, app));
         sync_phase("sync-audio-regions", || self.sync_audio_regions(&mut pusher, app));
+        sync_phase("sync-push-lane", || self.sync_push_lane(&mut pusher, app));
         sync_phase("sync-rack-lanes", || self.sync_rack_lanes(&mut pusher, app));
         sync_phase("sync-song-pushed", || self.sync_song_pushed(&mut pusher, app));
         sync_phase("sync-song-pending", || self.sync_song_pending(&mut pusher, app));

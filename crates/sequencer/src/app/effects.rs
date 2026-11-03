@@ -7624,11 +7624,114 @@ mod tests {
         graph.process_block();
     }
 
-    /// Per-clip grooves (eseq-d12o): a clip with its own groove plays it
-    /// while the current scene points at that clip, every other clip plays
-    /// the rack's; the per-scene tables the scheduler switches on launch
-    /// agree with the current one; "Apply to All Clips" makes the clip's
-    /// groove the rack's for every clip; and each step undoes.
+    /// eseq-vum0: a scene push performed during an arrangement take lands on
+    /// the push lane as one region (target scene + curve); a later take's
+    /// push replaces only the span it covers, trimming what straddles it.
+    #[test]
+    fn capture_records_scene_pushes_onto_the_push_lane() {
+        use crate::app::song_capture::ScenePushStep::{Begin, End, Value};
+        let graph = TestLiveGraph::new("scene-push-capture", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let second = app
+            .apply_recorded_scene_structure_mutation("Create scene", |app| {
+                Ok(crate::app::test_rig::new_scene(app))
+            })
+            .unwrap();
+
+        app.begin_song_capture_take(0.0);
+        app.record_scene_push_at(Begin { target_scene: second, value: 0.0 }, 4.0);
+        app.record_scene_push_at(Value(0.5), 5.0);
+        app.record_scene_push_at(Value(1.0), 6.0);
+        app.record_scene_push_at(End, 8.0);
+        app.finish_song_capture_take(16.0).expect("commit");
+
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        assert_eq!(arrangement.push_lane.len(), 1);
+        let push = &arrangement.push_lane[0];
+        assert_eq!((push.start_beat, push.end_beat, push.target_scene), (4.0, 8.0, second));
+        assert!((push.value_at(5.0) - 0.5).abs() < 1.0e-6);
+        assert_eq!(push.value_at(7.5), 1.0);
+
+        // Overdub inside the first push: it splits around the new one, and
+        // the tail keeps its curve.
+        app.begin_song_capture_take(0.0);
+        app.record_scene_push_at(Begin { target_scene: 0, value: 1.0 }, 5.0);
+        app.record_scene_push_at(End, 6.0);
+        app.finish_song_capture_take(10.0).expect("commit 2");
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        let lane: Vec<(f64, f64, usize)> = (arrangement.push_lane.iter())
+            .map(|push| (push.start_beat, push.end_beat, push.target_scene))
+            .collect();
+        assert_eq!(lane, vec![(4.0, 5.0, second), (5.0, 6.0, 0), (6.0, 8.0, second)]);
+        assert_eq!(arrangement.push_lane[2].value_at(7.0), 1.0, "the tail keeps its curve");
+
+        // A push held through Stop ends at Stop.
+        app.begin_song_capture_take(0.0);
+        app.record_scene_push_at(Begin { target_scene: 0, value: 0.5 }, 12.0);
+        app.finish_song_capture_take(14.0).expect("commit 3");
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        let last = arrangement.push_lane.last().expect("the held push");
+        assert_eq!((last.start_beat, last.end_beat), (12.0, 14.0));
+        graph.process_block();
+    }
+
+    /// eseq-vum0: a recorded push replays through the live push path — the
+    /// effect morphs toward the target scene by the curve, lets go after the
+    /// region, and a held live gesture wins over the recording.
+    #[test]
+    fn arrangement_replays_recorded_scene_pushes() {
+        use crate::app::song_capture::ScenePushStep::{Begin, End, Value};
+        use crate::quantized_launch::PatternLaunchTarget;
+        let graph = TestLiveGraph::new("scene-push-replay", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let track = app.graph_controller().add_blank_sampler_track().unwrap();
+        app.add_builtin_effect_sync(track, "Filter").unwrap();
+        let desc = app.graph.effect_descriptors[track][0].params[0].clone();
+        let lo = desc.min + (desc.max - desc.min) * 0.2;
+        let hi = desc.min + (desc.max - desc.min) * 0.8;
+        let set = |app: &mut App, value: f32| {
+            crate::app::command::apply_command(app, crate::app::command::AppCommand::SetEffectParam {
+                track, slot_idx: 0, param_idx: 0, value,
+            });
+        };
+        set(&mut app, lo);
+        let second = app
+            .apply_recorded_scene_structure_mutation("Create scene", |app| {
+                Ok(crate::app::test_rig::new_scene(app))
+            })
+            .unwrap();
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: second }).unwrap();
+        set(&mut app, hi);
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 }).unwrap();
+
+        app.begin_song_capture_take(0.0);
+        app.record_scene_push_at(Begin { target_scene: second, value: 0.0 }, 4.0);
+        app.record_scene_push_at(Value(1.0), 6.0);
+        app.record_scene_push_at(End, 8.0);
+        app.finish_song_capture_take(16.0).expect("commit");
+
+        let value = |app: &App| app.effective_slot_param_value(track, 0, 0).unwrap();
+        app.drive_arrangement_scene_push(Some(2.0));
+        assert!((value(&app) - lo).abs() < 1.0e-4, "before the push");
+        app.drive_arrangement_scene_push(Some(5.0));
+        let mid = value(&app);
+        assert!(mid > lo + 1.0e-3 && mid < hi - 1.0e-3, "half way: {mid}");
+        app.drive_arrangement_scene_push(Some(7.0));
+        assert!((value(&app) - hi).abs() < 1.0e-3, "fully pushed");
+        app.drive_arrangement_scene_push(Some(9.0));
+        assert!((value(&app) - lo).abs() < 1.0e-4, "released after the region");
+
+        app.drive_arrangement_scene_push(Some(7.0));
+        app.begin_scene_push(second, 0.0);
+        app.drive_arrangement_scene_push(Some(7.5));
+        assert!((value(&app) - lo).abs() < 1.0e-4, "the live gesture wins");
+        app.end_scene_push();
+        app.drive_arrangement_scene_push(None);
+        assert!((value(&app) - lo).abs() < 1.0e-4, "stopped: nothing pushed");
+        graph.process_block();
+    }
+
     /// docs/arrangement-rack-lanes-spec.md §4: recording scene launches on a
     /// clip-bearing rack writes its rack lane with the rack clip each launch
     /// actually played, resolved at launch time, not at Stop. A rack clip
@@ -7685,6 +7788,11 @@ mod tests {
         app.state.preflight_runtime_song().expect("the recording plays");
     }
 
+    /// Per-clip grooves (eseq-d12o): a clip with its own groove plays it
+    /// while the current scene points at that clip, every other clip plays
+    /// the rack's; the per-scene tables the scheduler switches on launch
+    /// agree with the current one; "Apply to All Clips" makes the clip's
+    /// groove the rack's for every clip; and each step undoes.
     #[test]
     fn rack_clips_play_their_own_groove_or_the_racks() {
         use crate::groove::mpc_swing_groove;

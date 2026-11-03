@@ -150,6 +150,11 @@ enum TimelineItemContent {
         cycle: f64,
         phase: f64,
     },
+    /// An automation curve over the item (a recorded scene push, epic
+    /// eseq-vum0): `(offset, value)` points, both 0..1 relative to the item
+    /// span and body height, sorted by offset. Linear between points; holds
+    /// the first value before the first point and the last after the last.
+    Curve(Vec<(f64, f64)>),
 }
 
 impl TimelineItemContent {
@@ -172,7 +177,7 @@ impl TimelineItemContent {
                 let length = end - start;
                 Some((length / span, ((offset - start) / length).rem_euclid(1.0), true))
             }
-            Self::Peaks(_) | Self::Waveform { .. } => None,
+            Self::Peaks(_) | Self::Waveform { .. } | Self::Curve(_) => None,
         }
     }
 }
@@ -550,7 +555,7 @@ the labels, :sidebar-style :piano draws keys). :items is a list of maps {:id \
 :lane (index) :start :end :label :color :selected} with optional :content \
 ({:dots ({:offset :value :width}) :cycle :phase} note previews, {:rings ...}, \
 {:sample registry-key :offset seconds :span seconds [:loop-start :loop-end]} an audio \
-waveform). The visible window is :view-start/:view-duration (default 0/16, \
+waveform, {:curve ({:offset :value})} an automation curve, both 0..1). The visible window is :view-start/:view-duration (default 0/16, \
 zoom clamped to :zoom-min-duration..:zoom-max-duration); bind them to reactive \
 fields to scroll several lanes together. :playhead-time and :cursor-time draw \
 lines; :time-ruler (dict :mode :bars-beats :beats-per-bar 4) or :seconds labels \
@@ -2407,10 +2412,121 @@ fn push_item_content_primitives(
                 primitives, view, item, rect, title_bar, sample, *offset, *span, *loop_window, viewport,
             );
         }
+        Some(TimelineItemContent::Curve(points)) => {
+            push_curve_area(primitives, view, item, rect, title_bar, points, viewport);
+        }
         // Inline peak lists are parsed but unused: audio items name their
         // sample instead (`Waveform`).
         Some(TimelineItemContent::Peaks(_)) | None => {}
     }
+}
+
+/// The value of a `Curve` content at item offset `offset` (0..1).
+fn curve_value_at(points: &[(f64, f64)], offset: f64) -> f64 {
+    let Some(&(first_offset, first_value)) = points.first() else {
+        return 0.0;
+    };
+    if offset <= first_offset {
+        return first_value;
+    }
+    let next = points.partition_point(|(point, _)| *point <= offset);
+    let Some(&(after_offset, after_value)) = points.get(next) else {
+        return points.last().map_or(0.0, |(_, value)| *value);
+    };
+    let (before_offset, before_value) = points[next - 1];
+    let span = after_offset - before_offset;
+    if span <= 0.0 {
+        return after_value;
+    }
+    before_value + (after_value - before_value) * (offset - before_offset) / span
+}
+
+/// An item's body (y, height): what its title bar leaves, or `None` when
+/// that is under 4 device pixels tall.
+fn item_body(
+    (_, y, _, height): (f32, f32, f32, f32),
+    title_bar: Option<(f32, f32)>,
+    viewport: super::WidgetViewport,
+) -> Option<(f32, f32)> {
+    let (body_y, body_height) = match title_bar {
+        Some((bar_y, bar_height)) if (bar_y - y).abs() < 1e-4 => {
+            (bar_y + bar_height, (height - bar_height).max(0.0))
+        }
+        _ => (y, height),
+    };
+    (body_height * viewport.cell_h >= 4.0).then_some((body_y, body_height))
+}
+
+/// `TimelineView::x_for_time` clamps to the view; this extends its in-view
+/// mapping linearly both ways, for content that runs past the view edges.
+struct UnclampedTimeAxis {
+    view_start: f64,
+    view_x0: f32,
+    per_time: f64,
+}
+
+impl UnclampedTimeAxis {
+    fn new(view: &TimelineView) -> Self {
+        let view_x0 = view.x_for_time(view.view_start);
+        let view_x1 = view.x_for_time(view.view_start + view.view_duration);
+        let per_time = (view_x1 - view_x0) as f64 / view.view_duration.max(0.0001);
+        Self { view_start: view.view_start, view_x0, per_time }
+    }
+
+    fn x(&self, time: f64) -> f32 {
+        self.view_x0 + ((time - self.view_start) * self.per_time) as f32
+    }
+
+    fn time(&self, x: f32) -> f64 {
+        self.view_start + (x - self.view_x0) as f64 / self.per_time.max(f64::EPSILON)
+    }
+}
+
+/// A `Curve` item's automation: a translucent fill under the curve and an
+/// anti-aliased line along it. The curve is linear between its points, so
+/// the geometry is its breakpoints inside the item's visible body plus the
+/// two visible edges, whatever the zoom.
+fn push_curve_area(
+    primitives: &mut Vec<GpuPrimitive>,
+    view: &TimelineView,
+    item: &TimelineItem,
+    rect: (f32, f32, f32, f32),
+    title_bar: Option<(f32, f32)>,
+    points: &[(f64, f64)],
+    viewport: super::WidgetViewport,
+) {
+    let span = item.end - item.start;
+    if span <= 0.0 || points.is_empty() {
+        return;
+    }
+    let Some((body_y, body_height)) = item_body(rect, title_bar, viewport) else {
+        return;
+    };
+    let (x, _, width, _) = rect;
+    // Inset so a full push does not touch the title bar and zero stays
+    // visible above the clip's bottom edge.
+    let inset = (2.0 / viewport.cell_h).min(body_height * 0.25);
+    let (top, bottom) = (body_y + inset, body_y + body_height - inset);
+    let value_y = |value: f64| bottom - (value.clamp(0.0, 1.0) as f32) * (bottom - top);
+    let axis = UnclampedTimeAxis::new(view);
+    let offset_at = |px: f32| ((axis.time(px) - item.start) / span).clamp(0.0, 1.0);
+    let (lo, hi) = (offset_at(x), offset_at(x + width));
+    if hi <= lo {
+        return;
+    }
+    let offsets = std::iter::once(lo)
+        .chain(points.iter().map(|(offset, _)| *offset).filter(|offset| *offset > lo && *offset < hi))
+        .chain(std::iter::once(hi));
+    let (mut tops, mut bottoms) = (Vec::new(), Vec::new());
+    for offset in offsets {
+        let px = axis.x(item.start + offset * span).clamp(x, x + width);
+        tops.push([px, value_y(curve_value_at(points, offset))]);
+        bottoms.push([px, bottom]);
+    }
+    let mut mesh = super::stroke::ShadedMesh::new();
+    mesh.push_band(&tops, &bottoms, view.item_content_color.with_alpha(0.22));
+    mesh.push_polyline(&tops, view.item_content_color.with_alpha(0.9), viewport, 0.75);
+    mesh.push_into(primitives);
 }
 
 /// An audio item's waveform (docs/audio-tracks-spec.md §8.1), drawn with the
@@ -2424,7 +2540,7 @@ fn push_waveform_columns(
     primitives: &mut Vec<GpuPrimitive>,
     view: &TimelineView,
     item: &TimelineItem,
-    (x, y, width, height): (f32, f32, f32, f32),
+    rect: (f32, f32, f32, f32),
     title_bar: Option<(f32, f32)>,
     sample: &crate::audio::sample::SampleBuffer,
     offset: f64,
@@ -2436,22 +2552,12 @@ fn push_waveform_columns(
     if item.end <= item.start || span <= 0.0 || duration <= 0.0 || sample.peaks.is_empty() {
         return;
     }
-    // The body is what the title bar leaves.
-    let (body_y, body_height) = match title_bar {
-        Some((bar_y, bar_height)) if (bar_y - y).abs() < 1e-4 => {
-            (bar_y + bar_height, (height - bar_height).max(0.0))
-        }
-        _ => (y, height),
-    };
-    if body_height * viewport.cell_h < 4.0 {
+    let Some((body_y, body_height)) = item_body(rect, title_bar, viewport) else {
         return;
-    }
-    // `x_for_time` clamps to the view, so extend its in-view mapping
-    // linearly instead.
-    let view_x0 = view.x_for_time(view.view_start);
-    let view_x1 = view.x_for_time(view.view_start + view.view_duration);
-    let per_time = (view_x1 - view_x0) as f64 / view.view_duration.max(0.0001);
-    let unclamped_x = |time: f64| view_x0 + ((time - view.view_start) * per_time) as f32;
+    };
+    let axis = UnclampedTimeAxis::new(view);
+    let unclamped_x = |time: f64| axis.x(time);
+    let (x, _, width, _) = rect;
     let (item_x0, item_x1) = (unclamped_x(item.start), unclamped_x(item.end));
     if item_x1 <= item_x0 {
         return;
@@ -4989,6 +5095,19 @@ fn parse_item_content(value: &Value) -> Option<TimelineItemContent> {
             span: number("span").filter(|span| *span > 0.0)?,
             loop_window,
         });
+    }
+    if let Some(Value::List(entries)) = map.get("curve") {
+        let mut points: Vec<(f64, f64)> = entries
+            .iter()
+            .filter_map(|entry| {
+                let entry = get_map(&entry.borrow())?;
+                let offset = entry.get("offset").and_then(as_number).filter(|n| n.is_finite())?;
+                let value = entry.get("value").and_then(as_number).filter(|n| n.is_finite())?;
+                Some((offset.clamp(0.0, 1.0), value.clamp(0.0, 1.0)))
+            })
+            .collect();
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        return Some(TimelineItemContent::Curve(points));
     }
     if let Some(Value::List(entries)) = map.get("peaks") {
         let peaks = entries

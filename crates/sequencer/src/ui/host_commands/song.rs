@@ -35,6 +35,9 @@ pub(super) const COMMANDS: &[&str] = &[
     "arrangement-clip-move",
     "arrangement-clip-resize",
     "arrangement-clip-split",
+    // Recorded scene pushes (eseq-vum0): `:ids` / `:clip-id :start-beat`.
+    "arrangement-push-delete",
+    "arrangement-push-move",
     "song-set-end",
     "song-set-loop",
     // Row path: the declarative/capture commit surface only (lane spec 9 —
@@ -307,12 +310,27 @@ fn resolve_clip(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<ClipId, Str
 }
 
 /// A non-negative integer field (an id).
-fn require_whole(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Result<u64, String> {
+pub(super) fn require_whole(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Result<u64, String> {
     let value = require_number(map, key)?;
     if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
         return Err(format!("{key} must be a non-negative integer"));
     }
     Ok(value as u64)
+}
+
+/// `:ids` as a list of arrangement clip ids (regions, pushes).
+pub(super) fn clip_ids(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<Vec<ClipId>, String> {
+    let Some(Value::List(ids)) = map.get("ids").map(|cell| cell.borrow().clone()) else {
+        return Err("missing :ids list".to_string());
+    };
+    ids.iter()
+        .map(|id| match &*id.borrow() {
+            Value::Number(n) if n.is_finite() && *n >= 0.0 && n.fract() == 0.0 => {
+                Ok(ClipId(*n as u64))
+            }
+            other => Err(format!("clip id must be a non-negative integer, got {other:?}")),
+        })
+        .collect()
 }
 
 fn parse_overrides(
@@ -521,6 +539,21 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let clip_id = resolve_clip(map)?;
             let copy = app.arr_rack_clip_duplicate(clip_id)?;
             Ok(format!("Duplicated rack clip {} as {}", clip_id.0, copy.0))
+        }
+        "arrangement-push-delete" => {
+            let ids = clip_ids(payload_map(payload)?)?;
+            app.scene_pushes_delete(&ids)?;
+            Ok(match ids.len() {
+                1 => "Deleted scene push".to_string(),
+                n => format!("Deleted {n} scene pushes"),
+            })
+        }
+        "arrangement-push-move" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map)?;
+            let start_beat = require_number(map, "start-beat")?;
+            app.scene_push_move(clip_id, start_beat)?;
+            Ok(format!("Moved scene push to beat {start_beat}"))
         }
         "arrangement-clip-delete" => {
             let map = payload_map(payload)?;

@@ -556,6 +556,9 @@ pub(crate) fn run_event_loop(
                 }
             }
         }
+        // Recorded scene pushes replay after this frame's rows mirrored, so
+        // a push starting on a scene change morphs from the new scene.
+        app.drive_arrangement_scene_push_at_sample(shared.state.audio_rendered_sample());
         // Generator tick failures (eseq-85a.5): the scheduler reports the
         // first failure per generator and parks it; surface it here instead
         // of letting a broken :tick play as silence.

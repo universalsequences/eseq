@@ -199,6 +199,10 @@ pub struct ProjectArrangement {
     /// Monotonic allocator for `AudioSourceId`.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub next_audio_source_id: u64,
+    /// Recorded scene pushes (`scene_push_lane`), sorted and
+    /// non-overlapping; empty in projects that never recorded one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub push_lane: Vec<ScenePushRegion>,
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -226,6 +230,7 @@ impl ProjectArrangement {
             audio_lanes: Vec::new(),
             audio_sources: BTreeMap::new(),
             next_audio_source_id: 0,
+            push_lane: Vec::new(),
         }
     }
 
@@ -243,6 +248,7 @@ impl ProjectArrangement {
             audio_lanes: Vec::new(),
             audio_sources: BTreeMap::new(),
             next_audio_source_id: 0,
+            push_lane: Vec::new(),
         }
     }
 
@@ -253,6 +259,7 @@ impl ProjectArrangement {
             && self.track_lanes.iter().all(|lane| lane.is_empty())
             && self.rack_lanes.values().all(|lane| lane.is_empty())
             && self.audio_lanes.iter().all(|lane| lane.is_empty())
+            && self.push_lane.is_empty()
     }
 
     /// Allocate a fresh `ClipId`. Ids are monotonic and never reused within a
@@ -462,6 +469,7 @@ impl ProjectArrangement {
         }
 
         self.validate_audio_lanes(ctx.song_track_count(), &mut seen_ids)?;
+        self.validate_push_lane(ctx.song_scene_count(), &mut seen_ids)?;
 
         // --- rack lanes (docs/arrangement-rack-lanes-spec.md §2) ----------
         // A rack clip that no longer exists is NOT an error: deleting a rack
@@ -1511,6 +1519,7 @@ pub fn lower_rows_to_arrangement<C: ArrangementContext>(
     audio_lanes: Vec::new(),
     audio_sources: std::collections::BTreeMap::new(),
     next_audio_source_id: 0,
+    push_lane: Vec::new(),
     };
 
     // Scene lane: one event per *change*. An unscened row (`scene: None`)
@@ -1783,6 +1792,7 @@ mod tests {
             audio_lanes: Vec::new(),
             audio_sources: BTreeMap::new(),
             next_audio_source_id: 0,
+            push_lane: Vec::new(),
         }
     }
 
