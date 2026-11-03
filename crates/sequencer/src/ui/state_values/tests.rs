@@ -21571,6 +21571,112 @@ use panel_kinds_seed::*;
         );
     }
 
+    /// Regression: the palette modal is centered on the window but belongs to
+    /// the tile that mounted it (here *step*, at the window's lower right).
+    /// Scroll above/left of that tile's content origin had negative local
+    /// coordinates, failed the clamped `to_local`, and was consumed as
+    /// "outside the panel" -- so the sound list never scrolled.
+    #[test]
+    fn metal_seq_touchpad_scroll_scrolls_open_sound_palette() {
+        fn find_modal<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.widget_type == "modal" && !node.children.is_empty() {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_modal)
+        }
+        fn find_type<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            ty: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.widget_type == ty {
+                return Some(node);
+            }
+            node.children.iter().find_map(|c| find_type(c, ty))
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        assert!(editor.switch_active_tile_to_buffer_named("*step*"));
+        {
+            let rt = editor.runtime_mut();
+            let track = kind_track(rt, 0);
+            let mut sounds = Vec::new();
+            for patch in 0u64..24 {
+                let id = rt.register_keyed_instance("eseq.kinds:sound", &[track, patch]).unwrap();
+                for (field, value) in [
+                    ("track", Value::Instance(track)),
+                    ("patch-id", Value::Number(patch as f64)),
+                    ("mix-id", Value::Number(0.0)),
+                    ("name", Value::String(format!("Patch {patch}"))),
+                    ("referents", Value::String("S1".into())),
+                    ("base", Value::Bool(false)),
+                    ("current", Value::Bool(false)),
+                    ("track-sound", Value::Bool(false)),
+                    ("colored", Value::Bool(false)),
+                    ("color", test_rgb([0.62, 0.62, 0.66])),
+                    ("preset", Value::String("".into())),
+                    ("diff-up", Value::Number(1.0)),
+                    ("diff-down", Value::Number(1.0)),
+                    ("glyph-key", Value::String(format!("sound-glyph:track:0:patch:{patch}"))),
+                ] {
+                    set_field(rt, id, field, value);
+                }
+                sounds.push(id);
+            }
+            let palette = kind_singleton_rt(rt, "sound-palette");
+            for (field, value) in [
+                ("open", Value::Bool(true)),
+                ("track", Value::Instance(track)),
+                ("target", Value::String("take".into())),
+                ("target-id", Value::Number(1.0)),
+                ("instrument", Value::String("ultrakick".into())),
+                ("sounds", instance_list(sounds)),
+            ] {
+                set_field(rt, palette, field, value);
+            }
+            rt.run_reactive_cycle();
+        }
+        editor.refresh_runtime_side_effects();
+        let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 140, 36);
+        let layout = editor.widget_layout().expect("step layout");
+        let _ = eseqlisp::widget_render::collect_gpu_primitives(
+            &layout,
+            eseqlisp::widget_render::WidgetViewport {
+                cell_w: 10.0,
+                cell_h: 20.0,
+                vp_w: 1400.0,
+                vp_h: 720.0,
+                time_seconds: 0.0,
+                focused_widget_id: None,
+                focused_branch: false,
+                overlay_viewport_bottom: 36.0,
+                scroll_top: 0.0,
+                scroll_left: 0.0,
+                inherited_hover: false,
+            },
+            0.0,
+            36,
+        );
+        let entry = eseqlisp::widget_render::topmost_overlay().expect("modal overlay");
+        let modal = find_modal(&layout).expect("open modal").clone();
+        let scroll = find_type(&modal, "scroll").expect("palette scroll").clone();
+        let key = eseqlisp::widget_render::scroll::scroll_state_key(&scroll);
+        let tile = editor.tile_body_rect(editor.active_tile).expect("step tile rect");
+        // Window center: on the panel, but above-left of the step tile.
+        let (col, row) = (70.0, 22.0);
+        assert!(
+            col < tile.col && row > tile.row,
+            "the point must sit left of the modal's owner tile: {tile:?}"
+        );
+        assert!(entry.rect.width > 0.0);
+        let consumed = editor.handle_tiled_touchpad_scroll(col, row, 0, 0.0, -60.0);
+        let offset = eseqlisp::widget_render::scroll::get_scroll_state(key).offset_y;
+        eseqlisp::widget_render::clear_overlay();
+        assert!(consumed, "scroll over the panel is trapped by the modal");
+        assert!(offset > 0.0, "the palette's sound list must scroll");
+    }
+
     /// The overlay's Apply rows dispatch the palette's apply command with
     /// the sound's track id and patch id (takes spec 17.6).
     #[test]

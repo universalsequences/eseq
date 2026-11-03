@@ -2304,8 +2304,13 @@ impl Editor {
         precise_row: f32,
         delta: f64,
     ) {
-        let Some((local_col, local_row)) =
-            hit::to_local(precise_col, precise_row, content_col, content_row)
+        let modal_entry = widget_render::topmost_overlay()
+            .filter(|entry| entry.kind == widget_render::OverlayKind::Modal);
+        // The window-centered panel can extend above/left of its owner
+        // tile's content origin: negative local coordinates are still on it.
+        let Some((local_col, local_row)) = modal_entry
+            .map(|_| hit::to_local_unclamped(precise_col, precise_row, content_col, content_row))
+            .or_else(|| hit::to_local(precise_col, precise_row, content_col, content_row))
         else {
             return;
         };
@@ -2314,8 +2319,8 @@ impl Editor {
         // Like scroll: a topmost modal traps the pinch and hit-tests only its
         // own subtree. A whole-layout hit test lets underlay widgets later in
         // tree order win wherever they sit behind the panel.
-        let node = match widget_render::topmost_overlay() {
-            Some(entry) if entry.kind == widget_render::OverlayKind::Modal => {
+        let node = match modal_entry {
+            Some(entry) => {
                 if !widget_render::overlay_contains(local_col, local_row) {
                     return;
                 }
@@ -2364,6 +2369,10 @@ impl Editor {
         // Topmost dropdown menus scroll their own list; a topmost modal
         // routes normal scroll, hit-tested within the modal subtree only
         // (scroll outside the panel is consumed, never reaching the tile).
+        // Unclamped: the window-centered panel can extend above/left of its
+        // owner tile's content origin, so negative local points are on it.
+        let unclamped =
+            hit::to_local_unclamped(precise_col, precise_row, content_col, content_row);
         let mut modal_root: Option<LayoutNode> = None;
         if let Some(entry) = widget_render::topmost_overlay() {
             match entry.kind {
@@ -2374,11 +2383,8 @@ impl Editor {
                     }
                 }
                 widget_render::OverlayKind::Modal => {
-                    let inside = hit::to_local(precise_col, precise_row, content_col, content_row)
-                        .is_some_and(|(local_col, local_row)| {
-                            widget_render::overlay_contains(local_col, local_row)
-                        });
-                    if !inside {
+                    let (local_col, local_row) = unclamped;
+                    if !widget_render::overlay_contains(local_col, local_row) {
                         return true;
                     }
                     modal_root = self.runtime.current_layout.as_deref().and_then(|layout| {
@@ -2392,8 +2398,10 @@ impl Editor {
             }
         }
 
-        let Some((local_col, local_row)) =
-            hit::to_local(precise_col, precise_row, content_col, content_row)
+        let Some((local_col, local_row)) = modal_root
+            .is_some()
+            .then_some(unclamped)
+            .or_else(|| hit::to_local(precise_col, precise_row, content_col, content_row))
         else {
             return false;
         };
