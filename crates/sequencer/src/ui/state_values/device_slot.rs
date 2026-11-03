@@ -426,19 +426,26 @@ impl DeviceSlot {
         }
     }
 
-    /// The project macro engine's key for a track chain param (an engaged
-    /// macro shows in `param.value`); the other families show no macro
-    /// override, like their legacy fields (a rack's own macros are part of
-    /// the rack slot value derivation).
+    /// The project macro engine's key for a track chain or bus effect param
+    /// (an engaged macro or scene push shows in `param.value`); the other
+    /// families show no macro override, like their legacy fields (a rack's
+    /// own macros are part of the rack slot value derivation). `owner` is
+    /// the track, or the bus position in `buses` for a bus effect.
     pub(crate) fn macro_key(
         self,
         state: &SequencerState,
-        track: usize,
+        buses: &[app::BusChannelState],
+        owner: usize,
         param_idx: usize,
     ) -> Option<sequencer::macro_engine::MacroParamKey> {
         match self {
-            Self::Instrument => app::instrument_param_macro_key(state, track, param_idx),
-            Self::Effect(slot) => app::effect_param_macro_key(state, track, slot, param_idx),
+            Self::Instrument => app::instrument_param_macro_key(state, owner, param_idx),
+            Self::Effect(slot) => app::effect_param_macro_key(state, owner, slot, param_idx),
+            Self::BusEffect(slot) => {
+                let bus = buses.get(owner)?;
+                let values = bus.effect_slots.get(slot)?;
+                app::bus_effect_param_macro_key(bus.id, slot, values, param_idx)
+            }
             _ => None,
         }
     }

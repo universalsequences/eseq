@@ -578,8 +578,9 @@ impl SequencerState {
         read: impl FnOnce(&TrackPatternData) -> R,
     ) -> Option<R> {
         let scenes = self.pattern.scenes.lock().unwrap();
-        let scene = scenes.scenes.get(scene)?;
-        let pattern_id = scene.cells.get(track).copied().flatten()?;
+        // Composed: a clip-bearing rack's member plays its clip's cell, not
+        // the scene's own (rack-clips spec §4.1).
+        let pattern_id = scenes.composed_scene_cell(scene, track)?;
         let pattern = scenes.track_pools.get(track)?.get(pattern_id)?;
         Some(read(&pattern))
     }

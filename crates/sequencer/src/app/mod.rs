@@ -80,7 +80,7 @@ pub mod take_recording;
 pub mod song_transport;
 mod synth;
 
-pub use effect_params::effect_param_macro_key;
+pub use effect_params::{bus_effect_param_macro_key, effect_param_macro_key};
 pub use params::SoloAudibility;
 pub use synth::{instrument_param_macro_key, rack_macro_shown_value};
 #[allow(unused_imports)]
@@ -2988,17 +2988,11 @@ impl App {
                 for (slot_idx, slot) in effect_slots.iter_mut().enumerate() {
                     let count = (slot.num_params as usize).min(slot.defaults.len());
                     for param_idx in 0..count {
-                        let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+                        let Some(key) =
+                            bus_effect_param_macro_key(bus.id, slot_idx, slot, param_idx)
+                        else {
                             continue;
                         };
-                        let param_id = crate::neural::ParamNodeId::from_slot_param(
-                            slot.node_id,
-                            slot.modulator_node_id,
-                            raw_idx,
-                        );
-                        let key = crate::macro_engine::MacroParamKey::for_bus_effect(
-                            bus.id, slot_idx, param_idx, param_id,
-                        );
                         slot.defaults[param_idx] = self
                             .macro_engine
                             .effective_value(&key, slot.defaults[param_idx]);

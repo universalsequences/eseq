@@ -599,15 +599,7 @@ impl App {
         let bus = self.buses.get(bus_idx)?;
         let slot = bus.effect_slots.get(slot_idx)?;
         let base = *slot.defaults.get(param_idx)?;
-        let raw_idx = slot.node_param_idx(param_idx)?;
-        let param_id = crate::neural::ParamNodeId::from_slot_param(
-            slot.node_id,
-            slot.modulator_node_id,
-            raw_idx,
-        );
-        let key = crate::macro_engine::MacroParamKey::for_bus_effect(
-            bus.id, slot_idx, param_idx, param_id,
-        );
+        let key = bus_effect_param_macro_key(bus.id, slot_idx, slot, param_idx)?;
         Some(self.macro_engine.effective_value(&key, base))
     }
 
@@ -1378,5 +1370,26 @@ pub fn effect_param_macro_key(
     );
     Some(crate::macro_engine::MacroParamKey::for_effect(
         track, slot_idx, param_idx, param_id,
+    ))
+}
+
+/// The macro engine's key for param `param_idx` of bus `bus_id`'s effect slot
+/// `slot_idx`; `None` when the param has no live node param. Shared by
+/// [`App::effective_bus_slot_param_value`], the bus runtime publish and the
+/// host kinds, so all three resolve the same key.
+pub fn bus_effect_param_macro_key(
+    bus_id: crate::sequencer::BusId,
+    slot_idx: usize,
+    slot: &crate::effects::EffectSlotSnapshot,
+    param_idx: usize,
+) -> Option<crate::macro_engine::MacroParamKey> {
+    let raw_idx = slot.node_param_idx(param_idx)?;
+    let param_id = crate::neural::ParamNodeId::from_slot_param(
+        slot.node_id,
+        slot.modulator_node_id,
+        raw_idx,
+    );
+    Some(crate::macro_engine::MacroParamKey::for_bus_effect(
+        bus_id, slot_idx, param_idx, param_id,
     ))
 }

@@ -449,7 +449,7 @@ fn read_param(
                         return region.map_or((slot.defaults.get(index), false), |value| (value, true));
                     }
                 }
-                let effective = device.device.macro_key(state, owner, index).map(|key| {
+                let effective = device.device.macro_key(state, buses, owner, index).map(|key| {
                     let overrides = &shared.borrow().macro_overrides;
                     (overrides.get(&key).copied()).unwrap_or_else(|| slot.defaults.get(index))
                 });
@@ -478,9 +478,15 @@ fn read_param(
                     false,
                 ),
             }),
-            // A bus effect shows its own value (no p-lock), as its legacy
-            // field does.
-            DeviceValues::Snapshot(_) => Some((values.base(pdesc, index), false)),
+            // A bus effect shows its own value (no p-lock), under an engaged
+            // macro / scene push like a track chain param does. Always read:
+            // `mod-ratio` falls back on it without observing `shown`.
+            DeviceValues::Snapshot(_) => {
+                let overrides = &shared.borrow().macro_overrides;
+                let pushed = (device.device.macro_key(state, buses, owner, index))
+                    .and_then(|key| overrides.get(&key).copied());
+                Some((pushed.unwrap_or_else(|| values.base(pdesc, index)), false))
+            }
         };
         let display = match neural {
             Some(stored) => display.map(|(_, locked)| (stored, locked)),

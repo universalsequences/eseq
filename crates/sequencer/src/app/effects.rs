@@ -10269,6 +10269,76 @@ mod tests {
     }
 
     #[test]
+    fn scene_push_morphs_group_fx_edited_per_scene_through_real_launches() {
+        use crate::quantized_launch::PatternLaunchTarget;
+        let graph = TestLiveGraph::new("scene-push-group-fx", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let bus_id = app.group_tracks_recorded(vec![0, 1]).unwrap();
+        let bus_idx = app.buses.iter().position(|bus| bus.id == bus_id).unwrap();
+        app.add_builtin_bus_effect_sync(bus_idx, "OTT").unwrap();
+        let desc = app.buses[bus_idx].effect_descriptors[0].params[0].clone();
+        let lo = desc.min + (desc.max - desc.min) * 0.2;
+        let hi = desc.min + (desc.max - desc.min) * 0.8;
+        app.set_bus_effect_param(bus_idx, 0, 0, lo).unwrap();
+        let second = app
+            .apply_recorded_scene_structure_mutation("Create scene", |app| {
+                Ok(crate::app::test_rig::new_scene(app))
+            })
+            .unwrap();
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: second }).unwrap();
+        assert_eq!(app.state.current_scene_index(), second);
+        app.set_bus_effect_param(bus_idx, 0, 0, hi).unwrap();
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 }).unwrap();
+        assert!((app.buses[bus_idx].effect_slots[0].defaults[0] - lo).abs() < 1.0e-4,
+            "scene 0 recalls its group fx value");
+        app.begin_scene_push(second, 1.0);
+        let pushed = app.effective_bus_slot_param_value(bus_idx, 0, 0).unwrap();
+        assert!((pushed - hi).abs() < 1.0e-3, "push to scene {second} reaches its group fx value: got {pushed}, base {lo}, target {hi}");
+        app.end_scene_push();
+        graph.process_block();
+    }
+
+    #[test]
+    fn scene_push_morphs_clip_rack_pad_fx_toward_the_target_scenes_clip() {
+        use crate::quantized_launch::PatternLaunchTarget;
+        let graph = TestLiveGraph::new("scene-push-rack-clip", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (rack_id, _) = app.create_drum_rack_recorded(Some("Kit".to_string())).unwrap();
+        let kick = app.graph_controller().add_blank_sampler_track().unwrap();
+        let snare = app.graph_controller().add_blank_sampler_track().unwrap();
+        app.assign_rack_pad_track_recorded(rack_id, 0, kick).unwrap();
+        app.assign_rack_pad_track_recorded(rack_id, 1, snare).unwrap();
+        app.add_builtin_effect_sync(snare, "Filter").unwrap();
+        let desc = app.graph.effect_descriptors[snare][0].params[0].clone();
+        let lo = desc.min + (desc.max - desc.min) * 0.2;
+        let hi = desc.min + (desc.max - desc.min) * 0.8;
+        crate::app::command::apply_command(&mut app, crate::app::command::AppCommand::SetEffectParam {
+            track: snare, slot_idx: 0, param_idx: 0, value: lo,
+        });
+        app.convert_rack_to_clips_recorded(rack_id).unwrap();
+        let second = app
+            .apply_recorded_scene_structure_mutation("Create scene", |app| {
+                Ok(crate::app::test_rig::new_scene(app))
+            })
+            .unwrap();
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: second }).unwrap();
+        crate::app::command::apply_command(&mut app, crate::app::command::AppCommand::SetEffectParam {
+            track: snare, slot_idx: 0, param_idx: 0, value: hi,
+        });
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 }).unwrap();
+        assert!(!app.rack_is_legacy(rack_id), "the rack plays clips");
+        assert!((app.state.pattern.effect_chains[snare][0].defaults.get(0) - lo).abs() < 1.0e-4,
+            "scene 0's clip recalls its pad fx value");
+        app.begin_scene_push(second, 1.0);
+        let pushed = app.effective_slot_param_value(snare, 0, 0).unwrap();
+        assert!((pushed - hi).abs() < 1.0e-3, "push reaches the target clip's pad value: got {pushed}, base {lo}, target {hi}");
+        app.end_scene_push();
+        graph.process_block();
+    }
+
+    #[test]
     fn recorded_group_delete_restores_backing_bus_fx_and_all_scene_routing() {
         let graph = TestLiveGraph::new("recorded-group-delete-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 0);
