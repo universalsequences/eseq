@@ -750,7 +750,8 @@ fn select_all_then_delete_empties_the_track_and_rack_lanes() {
 
 /// The view scrolls with the playhead while the song runs, holding it a
 /// third of the way in (`follow-anchor`); a hand scroll pauses
-/// that for `arrangement-follow-cooloff` seconds, and the off switch stops it.
+/// that for `arrangement-follow-cooloff` seconds or until the next Play, and
+/// the off switch stops it.
 #[test]
 fn the_view_follows_the_playhead_until_a_hand_scroll() {
     let mut h = distro();
@@ -789,6 +790,19 @@ fn the_view_follows_the_playhead_until_a_hand_scroll() {
     head(&mut h, 400.0);
     let at = start(&mut h);
     assert!((at - anchored(400.0)).abs() < 1.0, "following again: {at}");
+
+    // Play ends a pause still inside its cooloff: scroll back, stop, play
+    // again, and the view follows at once.
+    h.eval("(setopt eseq.arrangement/arrangement-follow-cooloff 60)");
+    h.eval("(eseq.arrangement/view-action (dict :type :scroll-view :view-start 0))");
+    head(&mut h, 450.0);
+    assert_eq!(start(&mut h), 0.0, "paused by the hand scroll");
+    h.app.song_capture_cancel().expect("stop");
+    h.settle();
+    h.app.song_transport_play(true).expect("play again");
+    head(&mut h, 500.0);
+    let at = start(&mut h);
+    assert!((at - anchored(500.0)).abs() < 1.0, "Play cleared the pause: {at}");
 
     // Off: the view stays put.
     h.eval("(setopt eseq.arrangement/arrangement-follow-playhead false)");

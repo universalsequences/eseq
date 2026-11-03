@@ -952,7 +952,24 @@ fn run_region_clipboard(
     let clipboard = ctx.shared.arrangement_clipboard.clone();
     match name {
         "song-region-copy" => {
-            let copied = app.song_region_copy()?;
+            // The audio clip editor's range copies a stretch of the region's
+            // source, which need not be on the timeline at all.
+            let audio_range = match payload {
+                Value::Map(map) => map_number(map, "audio-region").map(|id| {
+                    (
+                        id,
+                        map_number(map, "source-start").unwrap_or(0.0),
+                        map_number(map, "source-end").unwrap_or(0.0),
+                    )
+                }),
+                _ => None,
+            };
+            let copied = match audio_range {
+                Some((id, start, end)) => {
+                    app.audio_source_range_copy(ClipId(id as u64), start, end)?
+                }
+                None => app.song_region_copy()?,
+            };
             let spans = copied.span_count();
             let lanes = copied.lane_count();
             *clipboard.lock().unwrap() = Some(copied);

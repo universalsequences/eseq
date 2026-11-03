@@ -332,3 +332,121 @@ fn pitch_speeds_playback_and_shortens_a_set_window() {
     let slot = player_slot(app, f.track);
     assert!((app.audio_players.published(slot).unwrap().regions[0].step - 2.0).abs() < 1e-9);
 }
+
+/// The clip editor's range copies any stretch of the source, including audio
+/// the region does not play: here the region plays 0.5-1.0 s and the copy
+/// takes 2.0-3.0 s, pasting as a 2-beat region (120 bpm) from 2.0 s in.
+#[test]
+fn a_source_range_outside_the_window_copies_and_pastes() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "a.wav", 48_000 * 4, 48_000);
+    let app = f.rig.app();
+    let id = app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap()[0];
+    app.audio_region_set_window(id, 0.5, 0.5, false).unwrap();
+    let clipboard = app.audio_source_range_copy(id, 2.0, 3.0).unwrap();
+    assert_eq!(clipboard.len_beats, 2.0);
+    app.song_region_paste(&clipboard, 4.0).unwrap();
+    let spans: Vec<_> =
+        lane(app, f.track).iter().map(|r| (r.start_beat, r.end_beat, r.source_offset)).collect();
+    assert_eq!(spans, vec![(0.0, 1.0, 24_000), (4.0, 6.0, 96_000)]);
+    assert!(app.audio_source_range_copy(id, 3.0, 3.0).is_err());
+}
+
+/// A scene launch overrides the session tracks but never an audio track: its
+/// only content is the timeline, so its lane stays unlatched (undimmed). A
+/// project of only audio tracks latches nothing, so Back to Arrangement
+/// stays off.
+#[test]
+fn a_scene_launch_never_latches_an_audio_track() {
+    use crate::quantized_launch::PatternLaunchTarget;
+    let mut f = fixture();
+    let app = f.rig.app();
+    app.sync_audio_track_playback();
+    app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 }).unwrap();
+    assert_eq!(app.state.song_manual_latch_mask(), 0, "only an audio track: nothing latched");
+    assert!(!app.state.song_scene_latch(), "and no scene latch");
+
+    let session = app.graph_controller().add_empty_track().unwrap();
+    app.sync_audio_track_playback();
+    app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 }).unwrap();
+    let mask = app.state.song_manual_latch_mask();
+    assert_eq!(mask >> f.track & 1, 0, "the audio track stays on the timeline");
+    assert_eq!(mask >> session & 1, 1, "the session track latches");
+    assert!(app.state.song_scene_latch());
+}
+
+/// An audio track has ONE mixer state, not one per scene: a volume set while
+/// stopped survives Play and Stop, even when the arrangement plays a scene
+/// whose cell on the track remembers another volume.
+#[test]
+fn an_audio_track_volume_set_while_stopped_survives_play_and_stop() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "a.wav", 48_000, 48_000);
+    let app = f.rig.app();
+    app.set_arrangement_view_visible(true);
+    app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap();
+    app.sync_audio_track_playback();
+    // Scene 0 gets a cell on the audio track remembering volume 0.9.
+    app.state.pattern.track_params[f.track].set_volume(0.9);
+    assert!(app.state.save_current_pattern_snapshot(
+        app.tracks.len(),
+        &app.graph.track_buffer_ids,
+        &app.graph.track_sample_rates,
+        &app.tracks,
+        &app.graph.track_instrument_types,
+    ));
+    app.arr_scene_event_insert(0.0, 0).unwrap();
+
+    for view in [true, false] {
+        app.set_arrangement_view_visible(view);
+        crate::app::try_apply_command(app, crate::app::AppCommand::SetTrackVolume { track: f.track, value: 0.3 })
+            .unwrap();
+        app.song_transport_play(false).unwrap();
+        app.sync_track_sound_bindings();
+        assert_eq!(
+            app.state.pattern.track_params[f.track].get_volume(),
+            0.3,
+            "Play keeps it (arrangement view {view})"
+        );
+        app.song_transport_stop().unwrap();
+        app.sync_track_sound_bindings();
+        assert_eq!(
+            app.state.pattern.track_params[f.track].get_volume(),
+            0.3,
+            "Stop keeps it (arrangement view {view})"
+        );
+    }
+}
+
+/// After a scene launch (which latches session tracks), a volume set while
+/// stopped on an audio track still survives Play: the audio track never
+/// latched, so nothing re-launches a scene cell's mixer over it.
+#[test]
+fn an_audio_track_volume_survives_play_after_a_scene_launch() {
+    use crate::quantized_launch::PatternLaunchTarget;
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "a.wav", 48_000, 48_000);
+    let app = f.rig.app();
+    app.set_arrangement_view_visible(true);
+    app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap();
+    app.sync_audio_track_playback();
+    app.state.pattern.track_params[f.track].set_volume(0.9);
+    assert!(app.state.save_current_pattern_snapshot(
+        app.tracks.len(),
+        &app.graph.track_buffer_ids,
+        &app.graph.track_sample_rates,
+        &app.tracks,
+        &app.graph.track_instrument_types,
+    ));
+    app.arr_scene_event_insert(0.0, 0).unwrap();
+    app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 }).unwrap();
+    app.sync_track_sound_bindings();
+    crate::app::try_apply_command(app, crate::app::AppCommand::SetTrackVolume { track: f.track, value: 0.3 })
+        .unwrap();
+    app.song_transport_play(false).unwrap();
+    app.sync_track_sound_bindings();
+    assert_eq!(app.state.pattern.track_params[f.track].get_volume(), 0.3, "Play keeps it");
+    app.song_transport_stop().unwrap();
+    app.sync_track_sound_bindings();
+    assert_eq!(app.state.pattern.track_params[f.track].get_volume(), 0.3, "Stop keeps it");
+}

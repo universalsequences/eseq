@@ -6,6 +6,12 @@ use crate::layout::Rect;
 /// which is enough separation to scan the ruler without wasting horizontal
 /// breathing room at the normal UI scale.
 const MIN_VISIBLE_GRID_SPACING_CELLS: f64 = 6.0;
+/// Past this zoom (cells per beat) a bars/beats grid is "zoomed in": it
+/// draws (and snaps to) `ZOOMED_GRID_SUBDIVISION` times finer, down to
+/// `ZOOMED_MIN_GRID_SPACING_CELLS` apart, for micro edits.
+const ZOOMED_CELLS_PER_BEAT: f64 = 48.0;
+const ZOOMED_GRID_SUBDIVISION: f64 = 4.0;
+const ZOOMED_MIN_GRID_SPACING_CELLS: f64 = 1.5;
 
 #[derive(Clone)]
 pub struct TimeRuler {
@@ -229,7 +235,12 @@ impl TimeViewport {
                 } else {
                     16.0
                 };
-                step / self.grid_density.clamp(1.0, 8.0)
+                let zoomed = if cells_per_beat >= ZOOMED_CELLS_PER_BEAT {
+                    ZOOMED_GRID_SUBDIVISION
+                } else {
+                    1.0
+                };
+                step / self.grid_density.clamp(1.0, 8.0) / zoomed
             }
             _ => {
                 let cells_per_second = content.width as f64 / self.view_duration.max(0.0001);
@@ -266,8 +277,15 @@ impl TimeViewport {
         let content = self.content_rect();
         let cells_per_time = content.width as f64 / self.view_duration.max(0.0001);
         let mut step = self.grid_step_candidate(ruler);
+        let zoomed_bars = matches!(ruler.map(|r| &r.mode), Some(TimeRulerMode::BarsBeats { .. }))
+            && cells_per_time >= ZOOMED_CELLS_PER_BEAT;
+        let min_spacing = if zoomed_bars {
+            ZOOMED_MIN_GRID_SPACING_CELLS
+        } else {
+            MIN_VISIBLE_GRID_SPACING_CELLS
+        };
         if cells_per_time.is_finite() && cells_per_time > 0.0 {
-            while step.is_finite() && step * cells_per_time < MIN_VISIBLE_GRID_SPACING_CELLS {
+            while step.is_finite() && step * cells_per_time < min_spacing {
                 step *= 2.0;
             }
         }
@@ -412,7 +430,9 @@ mod tests {
         };
 
         assert_eq!(wide.grid_step(Some(&ruler)), 0.5);
-        assert_eq!(closer.grid_step(Some(&ruler)), 0.125);
+        // From 48 cells a beat the grid is 4x finer, for micro edits: 128
+        // cells a beat draws 128ths (0.125 / 4).
+        assert_eq!(closer.grid_step(Some(&ruler)), 0.03125);
     }
 
     #[test]

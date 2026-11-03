@@ -139,8 +139,10 @@ impl App {
     pub(crate) fn selected_bound_source(&self, track: usize) -> Option<BoundSource> {
         // Dormant while the timeline is off screen (16.6): in the Seq tab
         // nothing renders the bound clip, so a selection silently owning the
-        // device panel reads as the panel showing the wrong sound.
-        if !self.arrangement_view_visible {
+        // device panel reads as the panel showing the wrong sound. An audio
+        // track never binds a clip's sound: it has one (per-region locks
+        // are a separate layer, bead eseq-a921).
+        if !self.arrangement_view_visible || self.is_audio_track(track) {
             return None;
         }
         // Dormant on a latched lane while the song sounds (takes spec 10):
@@ -292,16 +294,27 @@ impl App {
         // keeps the origin `Scene` with no source, and every consumer falls
         // to the track sound (rule 3b) — what the lane is monitoring. Seq
         // context is the classic scene+pattern world.
-        let effective = if self.arrangement_view_visible {
+        let effective = if self.track_owns_its_sound(track) {
             None
         } else {
             self.state.effective_track_pattern_id(track)
         };
-        resolve_binding(
-            self.selected_bound_source(track),
-            self.audible_or_held_lane_source(track),
-            effective,
-        )
+        // An audio track has ONE sound (docs/audio-tracks-spec.md): no row,
+        // take or scene cell ever lends it another, so the panel, the edit
+        // target and what plays are always the track sound.
+        let audible = if self.is_audio_track(track) {
+            None
+        } else {
+            self.audible_or_held_lane_source(track)
+        };
+        resolve_binding(self.selected_bound_source(track), audible, effective)
+    }
+
+    /// Whether the TRACK owns `track`'s sound (track-sound spec §2.2.2):
+    /// every lane in arrangement context, and an audio track always — it
+    /// has no session sound for a scene cell to own.
+    pub(crate) fn track_owns_its_sound(&self, track: usize) -> bool {
+        self.arrangement_view_visible || self.is_audio_track(track)
     }
 
     /// Every pool pattern referencing the bound source's sound: one id for
@@ -347,7 +360,7 @@ impl App {
         // §2.2.2 (rev 4): the cell-refs fallback is rule 3a by another name,
         // so it obeys the same view rule — in arrangement context the
         // `track_sound_refs` fallback below supplies the owner instead.
-        let arrangement = self.arrangement_view_visible;
+        let arrangement = self.track_owns_its_sound(track);
         self.state.with_project_scenes(|scenes| {
             let from_source = match source {
                 Some(BoundSource::Take(id)) => scenes

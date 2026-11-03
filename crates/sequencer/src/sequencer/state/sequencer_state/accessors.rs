@@ -363,6 +363,7 @@ impl SequencerState {
             song_playback: SongPlaybackMailbox::default(),
             note_audition: crate::scheduler::audition::AuditionMailbox::default(),
             song_manual_latch: AtomicU64::new(0),
+            audio_track_lanes: AtomicU64::new(0),
             song_scene_latch: AtomicBool::new(false),
             song_take_lane_mask: AtomicU64::new(0),
             // Matches `App::arrangement_view_visible`'s initial value; the

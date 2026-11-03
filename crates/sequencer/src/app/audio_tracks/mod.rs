@@ -362,6 +362,44 @@ impl App {
         Ok(pasted)
     }
 
+    /// Copy `[start_seconds, end_seconds)` of region `id`'s SOURCE, as the
+    /// clip editor's range selection does, into an arrangement clipboard of
+    /// one audio region on its track. The range need not lie inside the part
+    /// the region plays: any stretch of the source copies, at the region's
+    /// gain and pitch, not looping. Paste lands it exactly at the cursor.
+    pub fn audio_source_range_copy(
+        &self,
+        id: ClipId,
+        start_seconds: f64,
+        end_seconds: f64,
+    ) -> Result<crate::app::song_region::ArrangementClipboard, String> {
+        let arrangement = self.require_arrangement()?;
+        let (track, region) = Self::locate_audio_region(&arrangement, id)?;
+        let meta = arrangement.region_source(&region)?;
+        let rate = meta.sample_rate as f64;
+        let source_seconds = meta.duration_seconds();
+        let start = start_seconds.max(0.0);
+        let end = end_seconds.min(source_seconds);
+        if !start.is_finite() || !end.is_finite() || end <= start {
+            return Err("The selected audio range has no length".to_string());
+        }
+        let len_beats = (end - start) / (self.seconds_per_beat() * region.speed());
+        let slice = AudioRegion {
+            start_beat: 0.0,
+            end_beat: len_beats,
+            source_offset: (start * rate).round() as u64,
+            loop_enabled: false,
+            loop_start: 0,
+            loop_end: 0,
+            ..region
+        };
+        Ok(crate::app::song_region::ArrangementClipboard {
+            len_beats,
+            audio: vec![(track, vec![slice])],
+            ..Default::default()
+        })
+    }
+
     /// Duplicate a region right after itself.
     pub fn audio_region_duplicate(&mut self, id: ClipId) -> Result<ClipId, String> {
         let region = self
@@ -548,6 +586,36 @@ impl App {
         })
     }
 
+    /// An audio track has ONE fx and mixer state: every scene cell it holds
+    /// shares the track sound's entities, so a row apply, a scene launch, a
+    /// Stop resync or a view switch all install the same values, and an edit
+    /// lands in the one sound wherever it is routed. A cell that drifted
+    /// (a new scene, an older project, an undo) is re-linked here and the
+    /// track sound reinstalled, so what plays is what the panel shows.
+    fn link_audio_track_sounds(&mut self, players: &[(usize, usize)]) {
+        // Runs every frame: read first, and take the write lock (which bumps
+        // the scenes revision) only when a cell actually drifted.
+        let drifted = self.state.with_project_scenes(|scenes| {
+            players.iter().any(|&(track, _)| scenes.track_pool_drifted_from_track_sound(track))
+        });
+        if !drifted {
+            return;
+        }
+        let relinked: Vec<usize> = self.state.with_scenes_mut(|scenes| {
+            players
+                .iter()
+                .map(|&(track, _)| track)
+                .filter(|&track| scenes.link_track_pool_to_track_sound(track))
+                .collect()
+        });
+        for track in relinked {
+            self.after_sound_repoint(track);
+            self.push_track_volume(track);
+            self.push_track_pan(track);
+        }
+        self.state.publish_scheduler_snapshot();
+    }
+
     /// Publish each audio track's regions to its player when what it would
     /// play changed. Cheap when nothing did: one arrangement borrow and a
     /// gate comparison (song revision, tempo, sources, players).
@@ -562,9 +630,15 @@ impl App {
             .enumerate()
             .filter_map(|(track, nodes)| nodes.audio_player.map(|player| (track, player.slot)))
             .collect();
+        // A scene launch never latches an audio track: it has no session
+        // content, so its lane keeps showing (and playing) the timeline.
+        self.state.set_audio_track_lane_mask(
+            players.iter().filter(|(track, _)| *track < 64).fold(0, |mask, (track, _)| mask | 1 << track),
+        );
         if players.is_empty() {
             return;
         }
+        self.link_audio_track_sounds(&players);
         let gate = SyncGate { view: self.audio_view_key(), host_rate: host_rate.to_bits(), players };
         if self.audio_tracks.sync_gate.as_ref() == Some(&gate) {
             return;

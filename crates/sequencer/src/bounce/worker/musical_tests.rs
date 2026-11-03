@@ -422,6 +422,11 @@ fn audio_region_export(with_scene: bool) {
     app.audio_regions_drop(track, 1.0, &[source]).unwrap();
     let project = app.capture_project("audio-region-export").unwrap();
     drop(app);
+    // The worker pool is process-global (`g_engine`): the export below starts
+    // its own engine, so this one must be stopped first, as `saved_song` does
+    // by returning. Two live pools re-init the shared session mutex under
+    // parked workers and deadlock the export's `engine_stop_workers`.
+    drop(owner);
 
     let audio = render(folder.path(), "audio", &project, None, 0.0);
     let onset = audio.chunks_exact(2).position(|frame| peak(frame) > 1e-6).expect("the region sounds");

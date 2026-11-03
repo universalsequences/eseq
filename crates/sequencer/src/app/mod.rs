@@ -2301,8 +2301,11 @@ impl App {
                     // row mirror re-applying the row's scene there would
                     // audibly recall the row's bus/group fx and re-key every
                     // scene-indexed reactive binding while the latched lanes
-                    // keep playing the performer's patterns.
-                    self.state.latch_song_scene_override();
+                    // keep playing the performer's patterns. Audio tracks
+                    // never latch, so a project of only those claims nothing.
+                    if self.state.song_manual_latch_mask() != 0 {
+                        self.state.latch_song_scene_override();
+                    }
                     // Pin each claimed lane's override to the pattern it now
                     // plays (the launched scene's cell): the masked scene
                     // save-backs treat latched lanes as stale UNLESS the

@@ -107,13 +107,16 @@
   :type :bool
   :doc "Scroll the arrangement to keep the playhead in view while the song plays.")
 
-(defcustom arrangement-follow-cooloff 10
-  :type :number :min 0 :max 120 :step 1
-  :doc "Seconds playhead follow stays paused after you scroll or zoom the arrangement yourself.")
+(defcustom arrangement-follow-cooloff 2
+  :type :number :min 0 :max 120 :step 0.5
+  :doc "Seconds playhead follow stays paused after you scroll or zoom the arrangement yourself. Starting playback ends the pause.")
 
 ;; now-ms of the last hand scroll/zoom, or nil: plain module state, not a
 ;; kind field, so pausing never repaints anything.
 (def follow-paused-ms nil)
+;; Whether the song was stopped when follow last ran: going from stopped to
+;; playing clears a hand-scroll pause, so Play always follows again.
+(def follow-was-stopped true)
 
 ;; The click selection. `scenes` are the scene lane's selected events (their
 ;; start beats) and `rect` its marquee echo while a drag is live. Track-clip
@@ -403,9 +406,13 @@
   ;; Read the position FIRST, unconditionally: the subtree reruns only on
   ;; what its last run read, so a run that bailed inside the cooloff before
   ;; reading it would never run again and follow would never come back.
-  (let ((pos song.position))
+  (let ((pos song.position)
+        (stopped (= song.mode "stopped")))
+    (when (and follow-was-stopped (not stopped))
+      (set! follow-paused-ms nil))
+    (set! follow-was-stopped stopped)
     (when (and arrangement-follow-playhead
-            (not (= song.mode "stopped"))
+            (not stopped)
             (or (= follow-paused-ms nil)
               (>= (- (now-ms) follow-paused-ms)
                 (* 1000 arrangement-follow-cooloff))))

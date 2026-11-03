@@ -7615,7 +7615,7 @@ fn ensure_effective_track_pattern(
 /// Anything that WRITES wants `rule_three_device_write_target` instead —
 /// the read fallback is not a legal write target on a bare Seq lane.
 fn rule_three_device_target(app: &App, track: usize) -> Option<crate::sequencer::PatternId> {
-    if app.arrangement_view_visible {
+    if app.track_owns_its_sound(track) {
         return app.state.track_sound_pattern_id(track);
     }
     app.state
@@ -7645,7 +7645,7 @@ fn rule_three_device_write_target(
     app: &mut App,
     track: usize,
 ) -> Option<crate::sequencer::PatternId> {
-    if app.arrangement_view_visible {
+    if app.track_owns_its_sound(track) {
         return app.state.track_sound_pattern_id(track);
     }
     ensure_effective_track_pattern(app, track)
@@ -9333,17 +9333,19 @@ fn finish_track_params_edit(
             EditError::ReplayFailed(error),
         ));
     }
-    if bound {
-        // The write landed on the bound source's entities (§17.3); its take
-        // siblings share them structurally, so there is nothing to mirror.
-        // Edit-through (16.7): a playing song's prebuilt rows cloned this
-        // pattern at preflight and would keep the pre-edit sound.
+    let scheduler_changed = scheduler_track_params_changed(&current_before, &after)
+        || current_base_before != base_after;
+    // Edit-through (16.7): a playing song's prebuilt rows cloned this pattern
+    // at preflight and would keep the pre-edit value, and an unlatched lane
+    // is scheduled from its row's snapshot — so gate or polyphony toggled
+    // during song playback would show but not sound. A bound source always
+    // invalidates (its take siblings share the entities, §17.3); the scene
+    // cell does when a value the scheduler reads changed. Cheap when no row
+    // resolves the pattern; deferred to gesture end for drags.
+    if bound || scheduler_changed {
         invalidate_song_rows_for_edit(app, track, pattern_id);
     }
-    if merge_key.is_none()
-        && (scheduler_track_params_changed(&current_before, &after)
-            || current_base_before != base_after)
-    {
+    if merge_key.is_none() && scheduler_changed {
         app.state.publish_scheduler_snapshot();
     }
 
@@ -10383,6 +10385,11 @@ fn replay_track_params_patch(
         );
         if needs_publish && publish {
             app.state.publish_scheduler_snapshot();
+        }
+        // Undo/redo of a scene-cell track param during song playback: the
+        // rows that cloned the cell must re-preflight, as the do-path does.
+        if publish_scheduler {
+            invalidate_song_rows_for_edit(app, track, patch.target.pattern);
         }
     } else {
         // A pool target (the pinned loop-bar resize, clip-edit-target spec

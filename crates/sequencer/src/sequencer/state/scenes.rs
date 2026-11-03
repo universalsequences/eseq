@@ -785,6 +785,38 @@ impl ProjectScenes {
         self.track_pools.get(track)?.refs(id)
     }
 
+    /// Point every pattern in `track`'s pool at the track sound's entities,
+    /// so the track has ONE sound whatever cell, row or view installs it
+    /// (audio tracks: docs/audio-tracks-spec.md — no scene ownership).
+    /// Returns whether any pattern moved.
+    pub fn link_track_pool_to_track_sound(&mut self, track: usize) -> bool {
+        let Some(refs) = self.track_sound_refs(track) else {
+            return false;
+        };
+        let Some(pool) = self.track_pools.get_mut(track) else {
+            return false;
+        };
+        if !pool.sounds.resolves(refs) {
+            return false;
+        }
+        let mut moved = false;
+        for stored in pool.patterns.values_mut().filter(|stored| stored.sound != refs) {
+            Arc::make_mut(stored).sound = refs;
+            moved = true;
+        }
+        moved
+    }
+
+    /// Whether [`Self::link_track_pool_to_track_sound`] would move any cell:
+    /// the read-only check that lets a per-frame caller skip the write (and
+    /// the scenes revision bump it costs every revision-keyed cache).
+    pub fn track_pool_drifted_from_track_sound(&self, track: usize) -> bool {
+        let (Some(refs), Some(pool)) = (self.track_sound_refs(track), self.track_pools.get(track)) else {
+            return false;
+        };
+        pool.sounds.resolves(refs) && pool.patterns.values().any(|stored| stored.sound != refs)
+    }
+
     /// Seed one track's sound (track-sound spec §2.6): clone (fork) the refs
     /// of the first resolving cell — scene-0-first scan — else fork the
     /// newest take's sound (the takes-only workflow this feature exists for:

@@ -67,8 +67,10 @@ impl Harness {
     }
 }
 
-/// Apply what the view queued, push the kinds and re-render.
+/// Apply what the view queued, push the kinds and re-render, with the
+/// per-frame audio-track sync the event loop runs.
 fn audio_settle(h: &mut Harness) {
+    h.app.sync_audio_track_playback();
     h.drain();
     h.sync();
     h.show_all();
@@ -310,4 +312,165 @@ fn the_clip_editor_copies_the_selected_range_and_follows_the_song() {
     let mut waveforms = Vec::new();
     widgets_with_prop(&f.h.buffer_tree("*piano-roll*").0, "playhead-map", &mut waveforms);
     assert_eq!(waveforms.len(), 1, "the clip editor maps the song position");
+}
+
+/// A range dragged across audio the region does not play (outside its start
+/// and end markers) stays selected in the clip editor, selects nothing on the
+/// timeline, and Cmd+C / Cmd+V still copy and paste that stretch of source.
+#[test]
+fn the_clip_editor_copies_a_range_outside_the_playable_window() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "hit.wav", 48_000 * 2);
+    let id = f.h.app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap()[0];
+    f.h.app.audio_region_set_window(id, 0.0, 0.25, false).unwrap();
+    audio_settle(&mut f.h);
+    f.h.eval(&format!(
+        "(eseq.arrangement/audio-lane-action {} (dict :type :double-click-item :ids (list {}) :time 0))",
+        f.track, id.0
+    ));
+    audio_settle(&mut f.h);
+    f.h.eval(&format!(
+        "(eseq.audio-clip/waveform-action (eseq.audio-clip/bound-region (track {}))
+           (dict :type :end-range :start 1.0 :end 1.5))",
+        f.track
+    ));
+    audio_settle(&mut f.h);
+    let mut waveforms = Vec::new();
+    widgets_with_prop(&f.h.buffer_tree("*piano-roll*").0, "range-start", &mut waveforms);
+    assert_eq!(waveforms.len(), 1);
+    assert_eq!(waveforms[0].get("range-start"), Some(&Value::Number(1.0)), "the range stays in the clip view");
+    assert!(f.h.app.song_region_selection.is_none(), "nothing on the timeline to select");
+    assert_eq!(f.h.eval(r#"(eseq.audio-clip/focus-key "s-c" false)"#), Value::Bool(true));
+    audio_settle(&mut f.h);
+    f.h.eval(&format!("(eseq.arrangement/set-cursor 8 {})", f.track));
+    assert_eq!(f.h.eval(r#"(eseq.audio-clip/focus-key "s-v" false)"#), Value::Bool(true));
+    audio_settle(&mut f.h);
+    let lane = f.h.app.state.with_committed_arrangement(|a| a.unwrap().audio_lane(f.track).to_vec());
+    let spans: Vec<_> = lane.iter().map(|r| (r.start_beat, r.source_offset)).collect();
+    assert_eq!(spans, vec![(0.0, 0), (8.0, 48_000)], "the out-of-window stretch pasted at the cursor");
+}
+
+/// One mixer state per audio track: a fader move while stopped survives
+/// Play and Stop, with or without a scene launched first (the distro has
+/// scenes and session tracks, as a real project does).
+#[test]
+fn an_audio_track_fader_move_while_stopped_survives_play() {
+    for launch_scene in [false, true] {
+        let mut f = fixture();
+        let wav = write_wav(f.dir.path(), "hit.wav", 48_000 * 2);
+        f.h.app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap();
+        f.h.app.set_arrangement_view_visible(true);
+        audio_settle(&mut f.h);
+        if launch_scene {
+            f.h.app
+                .apply_pattern_launch(&sequencer::quantized_launch::PatternLaunchTarget::Scene { scene: 0 })
+                .unwrap();
+            audio_settle(&mut f.h);
+        }
+        let track = f.track;
+        let volume = |h: &mut Harness| h.app.state.pattern.track_params[track].get_volume();
+        f.h.eval(&format!("(let ((t (track {track}))) (set! t.volume 0.3))"));
+        audio_settle(&mut f.h);
+        assert_eq!(volume(&mut f.h), 0.3);
+        f.h.app.song_transport_play(false).expect("play");
+        audio_settle(&mut f.h);
+        assert_eq!(volume(&mut f.h), 0.3, "Play keeps the fader (scene launched: {launch_scene})");
+        f.h.app.song_transport_stop().expect("stop");
+        audio_settle(&mut f.h);
+        assert_eq!(volume(&mut f.h), 0.3, "Stop keeps the fader (scene launched: {launch_scene})");
+    }
+}
+
+/// A fader move DURING song playback survives Stop and a fresh Play, in a
+/// project whose arrangement has a scene row (the user's repro, 2026-11-02:
+/// "volume x, play, change to y, restart, back to x").
+#[test]
+fn an_audio_track_fader_move_while_playing_survives_a_restart() {
+    for (scene_row, arrangement_view) in [(false, true), (true, true), (true, false)] {
+        let mut f = fixture();
+        let wav = write_wav(f.dir.path(), "hit.wav", 48_000 * 2);
+        f.h.app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap();
+        let track = f.track;
+        if scene_row {
+            // Scene 0 holds a cell on the audio track that remembers its own
+            // volume, as any project saved with session content does.
+            f.h.app.state.pattern.track_params[track].set_volume(0.9);
+            let app = &f.h.app;
+            assert!(app.state.save_current_pattern_snapshot(
+                app.tracks.len(),
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            ));
+            f.h.app.arr_scene_event_insert(0.0, 0).unwrap();
+        }
+        f.h.app.set_arrangement_view_visible(arrangement_view);
+        audio_settle(&mut f.h);
+        let volume = |h: &mut Harness| h.app.state.pattern.track_params[track].get_volume();
+        for (value, label) in [(0.3, "first pass"), (0.6, "second pass")] {
+            f.h.app.song_transport_play(false).expect("play");
+            audio_settle(&mut f.h);
+            f.h.eval(&format!("(let ((t (track {track}))) (set! t.volume {value}))"));
+            audio_settle(&mut f.h);
+            f.h.app.song_transport_stop().expect("stop");
+            audio_settle(&mut f.h);
+            assert_eq!(volume(&mut f.h), value, "Stop keeps it ({label}, scene row {scene_row}, arrangement view {arrangement_view})");
+            f.h.app.song_transport_play(false).expect("play again");
+            audio_settle(&mut f.h);
+            assert_eq!(volume(&mut f.h), value, "Play keeps it ({label}, scene row {scene_row}, arrangement view {arrangement_view})");
+            f.h.app.song_transport_stop().expect("stop");
+            audio_settle(&mut f.h);
+        }
+    }
+}
+
+/// The user's repro (2026-11-02): an audio track whose scene cell remembers
+/// a different mix than the track sound. Stopped showed the track sound,
+/// Play showed the cell, and an edit landed in whichever was installed —
+/// "edits flow to a dead store". One state per audio track: whatever is
+/// set, stopped or playing, in either view, is what the next pass plays.
+#[test]
+fn an_audio_track_has_one_mix_whatever_plays_it() {
+    for arrangement_view in [true, false] {
+        let mut f = fixture();
+        let wav = write_wav(f.dir.path(), "hit.wav", 48_000 * 2);
+        f.h.app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap();
+        let track = f.track;
+        // Fork the cell's sound away from the track sound with its own
+        // volume, as an older project's cell can be.
+        f.h.app.state.pattern.track_params[track].set_volume(0.9);
+        {
+            let app = &f.h.app;
+            assert!(app.state.save_current_pattern_snapshot(
+                app.tracks.len(),
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            ));
+        }
+        f.h.app.arr_scene_event_insert_placing(0.0, 0).unwrap();
+        f.h.app.set_arrangement_view_visible(arrangement_view);
+        audio_settle(&mut f.h);
+        let volume = |h: &mut Harness| h.app.state.pattern.track_params[track].get_volume();
+        let set = |h: &mut Harness, v: f64| {
+            h.eval(&format!("(let ((t (track {track}))) (set! t.volume {v}))"));
+            audio_settle(h);
+        };
+        // Stopped edit, then Play.
+        set(&mut f.h, 0.3);
+        f.h.app.song_transport_play(false).expect("play");
+        audio_settle(&mut f.h);
+        assert_eq!(volume(&mut f.h), 0.3, "Play keeps a stopped edit (arrangement view {arrangement_view})");
+        // Playing edit, then Stop and Play.
+        set(&mut f.h, 0.6);
+        f.h.app.song_transport_stop().expect("stop");
+        audio_settle(&mut f.h);
+        assert_eq!(volume(&mut f.h), 0.6, "Stop keeps a playing edit (arrangement view {arrangement_view})");
+        f.h.app.song_transport_play(false).expect("play");
+        audio_settle(&mut f.h);
+        assert_eq!(volume(&mut f.h), 0.6, "the next pass keeps it (arrangement view {arrangement_view})");
+        f.h.app.song_transport_stop().expect("stop");
+    }
 }

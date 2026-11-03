@@ -3673,6 +3673,108 @@ mod tests {
         app.song_transport_stop().expect("stop #2");
     }
 
+    // Regression (gate toggled during arrangement playback was not heard,
+    // 2026-11-02): a one-row song (Scene 1 for the whole song, looping),
+    // playing, user in the Seq view toggles the track gate. The edit must
+    // reach what the scheduler plays: the row snapshot while the song owns
+    // the lane, the live snapshot once the lane is latched.
+    #[test]
+    fn gate_toggle_during_one_scene_song_playback_reaches_the_scheduler() {
+        let mut app = test_app();
+        app.arr_replace_rows(
+            vec![SongRowSpec { start_beat: 0.0, scene: 0, overrides: Vec::new() }],
+            16.0,
+            true,
+        )
+        .expect("one-row song");
+        app.set_arrangement_view_visible(false);
+        let mut app = playing_song_app(app);
+        let row_gate = |app: &App| {
+            app.active_runtime_song.as_ref().expect("active song").rows[0]
+                .scheduler_snapshot
+                .tracks[0]
+                .params
+                .gate
+        };
+        let live_gate = |app: &App| app.state.pattern.track_params[0].is_gate_on();
+        let published_gate =
+            |app: &App| app.state.latest_scheduler_snapshot().tracks[0].params.gate;
+        let wrap = |app: &mut App| {
+            let song = app.active_runtime_song.clone().expect("active song");
+            app.mirror_song_row_applied(&AudibleSongRowApplied {
+                row_id: song.rows[0].id,
+                row_ordinal: 0,
+                effective_beat: 0.0,
+                effective_sample: 0,
+                wrapped: true,
+            })
+            .expect("wrap mirror");
+        };
+        let toggle = |app: &mut App| {
+            crate::app::edit::try_apply_command(app, crate::app::AppCommand::ToggleTrackGate { track: 0 })
+                .expect("gate toggles");
+        };
+        // Unlatched: the row snapshot is what plays (the immediate row write
+        // for every param is `track_param_edits_during_song_playback_...`);
+        // a loop wrap's row mirror must not revert the live surface.
+        let before = live_gate(&app);
+        toggle(&mut app);
+        assert_ne!(row_gate(&app), before, "unlatched: the row snapshot kept the old gate");
+        wrap(&mut app);
+        assert_ne!(live_gate(&app), before, "unlatched: the loop-wrap row mirror reverted the gate");
+
+        // Scene override (the transport's Scene 1 button): latch everything.
+        app.state.latch_song_manual_override_all(1);
+        let before = live_gate(&app);
+        toggle(&mut app);
+        assert_ne!(published_gate(&app), before, "latched: the published snapshot kept the old gate");
+        wrap(&mut app);
+        assert_ne!(published_gate(&app), before, "latched: the loop wrap reverted the gate");
+        app.song_transport_stop().unwrap();
+    }
+
+    // Regression (2026-11-02): the same staleness for
+    // every scheduler-snapshot track param edited while the song owns the
+    // lane (unlatched, Seq view, one-row song).
+    #[test]
+    fn track_param_edits_during_song_playback_reach_the_row_snapshot() {
+        use crate::app::AppCommand;
+        type Read = fn(&crate::sequencer::TrackParamsSnapshot) -> String;
+        let cases: Vec<(&str, AppCommand, Read)> = vec![
+            ("gate", AppCommand::ToggleTrackGate { track: 0 }, |p| format!("{}", p.gate)),
+            ("poly", AppCommand::ToggleTrackPolyphonic { track: 0 }, |p| format!("{}", p.polyphonic)),
+            ("attack", AppCommand::SetTrackAttack { track: 0, ms: 123.0 }, |p| format!("{}", p.attack_ms)),
+            ("release", AppCommand::SetTrackRelease { track: 0, ms: 456.0 }, |p| format!("{}", p.release_ms)),
+            ("swing", AppCommand::SetTrackSwing { track: 0, value: 0.66 }, |p| format!("{}", p.swing)),
+            ("max-poly", AppCommand::SetTrackMaxPolyphony { track: 0, value: 3 }, |p| format!("{}", p.max_polyphony)),
+            ("volume", AppCommand::SetTrackVolume { track: 0, value: 0.25 }, |p| format!("{}", p.volume)),
+        ];
+        let mut stale = Vec::new();
+        for (name, cmd, read) in cases {
+            let mut app = test_app();
+            app.arr_replace_rows(
+                vec![SongRowSpec { start_beat: 0.0, scene: 0, overrides: Vec::new() }],
+                16.0,
+                true,
+            )
+            .expect("one-row song");
+            app.set_arrangement_view_visible(false);
+            let mut app = playing_song_app(app);
+            let row = |app: &App| {
+                read(&app.active_runtime_song.as_ref().unwrap().rows[0].scheduler_snapshot.tracks[0].params)
+            };
+            let before = row(&app);
+            crate::app::edit::try_apply_command(&mut app, cmd).expect("edit applies");
+            let published = read(&app.state.latest_scheduler_snapshot().tracks[0].params);
+            let after = row(&app);
+            if after == before && published != before {
+                stale.push(name);
+            }
+            app.song_transport_stop().unwrap();
+        }
+        assert!(stale.is_empty(), "row snapshot stale after edit: {stale:?}");
+    }
+
     #[test]
     fn binding_strings_cover_every_mode() {
         assert_eq!(SongTransportMode::Stopped.binding_str(), "stopped");
