@@ -420,7 +420,7 @@ impl GraphController<'_> {
         self.app.ui.sidebar_search_focused = false;
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
-        self.app.latch_track_created_during_song_playback(idx);
+        self.app.latch_new_track_if_session_held(idx);
         self.app.state.publish_event_compatible_topology();
         Ok(())
     }

@@ -15333,7 +15333,7 @@
 
             // Mid-play add: the live state grows to 3 tracks AFTER preflight
             // froze 2-track rows; the add path latches the new lane
-            // (`latch_track_created_during_song_playback`).
+            // (`latch_new_track_if_session_held`).
             let mut live = state.with_scenes_mut(|scenes| {
                 scenes.track_pools[0]
                     .get(crate::sequencer::PatternId(1))

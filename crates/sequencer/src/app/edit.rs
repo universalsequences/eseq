@@ -9066,7 +9066,6 @@ fn apply_recorded_track_params_command(
     // take-intended tweak into the scene cell. Structural step-machine
     // fields (timebase/swing) stay live/pattern-owned — the borrow never
     // loads them from the bound source.
-    let effective_id = app.state.effective_track_pattern_id(track);
     // What the live surface is a mirror OF right now. The loan is installed
     // on the reactive tick, so the resolved binding and the mirror disagree
     // for the rest of a drain whenever something released the lane (a scene
@@ -9081,9 +9080,14 @@ fn apply_recorded_track_params_command(
         None
     } else {
         match app.bound_read_pattern(track) {
+            // Only a binding to rule 3's own target is rule 3. Where the
+            // track owns its sound, a row clip whose pattern is also the
+            // scene cell is still the bound source: writing rule 3 there
+            // lands on the track sound while the mirror plays the clip, and
+            // the next row apply (a loop wrap) restores the clip's value.
             Some(pattern)
                 if !app.track_sound_binding(track).is_scene()
-                    && Some(pattern) != effective_id
+                    && Some(pattern) != rule_three_device_target(app, track)
                     && mirror_pattern == Some(pattern) =>
             {
                 Some(pattern)

@@ -867,7 +867,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         // steps `0..num_tracks` of the chunk snapshot — without
                         // this they neither trigger nor publish a playhead
                         // until the next Play. They are latched at creation
-                        // (`latch_track_created_during_song_playback`), so
+                        // (`latch_new_track_if_session_held`), so
                         // schedule them from the live session lanes,
                         // free-running like any latched lane.
                         for track in merged.tracks.len()..live_track_count {

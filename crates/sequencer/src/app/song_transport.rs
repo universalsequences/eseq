@@ -239,8 +239,14 @@ impl App {
     /// it free-runs the live grid immediately — the lookahead merge appends
     /// lanes the row snapshot doesn't know about — and pin the override so
     /// masked save-backs persist the performer's edits (spec 5.1).
-    pub fn latch_track_created_during_song_playback(&mut self, track: usize) {
-        if !self.song_playback_authority_active() {
+    ///
+    /// While a manual SCENE launch holds the session (the lit Back to
+    /// Arrangement button), a new track joins it whether or not the
+    /// transport is running: the scene launch means "everyone play this
+    /// scene", so a track added while stopped plays its step pattern on the
+    /// next Play instead of following an arrangement it has no clips in.
+    pub fn latch_new_track_if_session_held(&mut self, track: usize) {
+        if !(self.song_playback_authority_active() || self.state.song_scene_latch()) {
             return;
         }
         self.state.latch_song_manual_override(std::iter::once(track));
@@ -1100,6 +1106,44 @@ mod tests {
         );
     }
 
+    /// A fader move in the arrangement view on a lane the arrangement plays
+    /// survives the loop wrap. The row clip's pattern is also the scene cell,
+    /// so the edit used to be routed to the track sound (rule 3 in
+    /// arrangement context) while the mirror played the clip's borrow; the
+    /// wrap's row apply then restored the clip's stored volume.
+    #[test]
+    fn a_volume_edit_on_an_arranged_lane_survives_the_loop_wrap() {
+        let mut app = app_with_song();
+        app.arrangement_view_visible = true;
+        app.state.set_arrangement_context(true);
+        app.song_transport_play(false).expect("song playback starts");
+        app.sync_track_sound_bindings();
+        assert_eq!(app.state.song_manual_latch_mask(), 0, "the arrangement plays the lane");
+        crate::app::edit::try_apply_command(
+            &mut app,
+            crate::app::AppCommand::SetTrackVolume { track: 0, value: 0.31 },
+        )
+        .expect("volume edit");
+        crate::app::edit::finish_active_gesture(&mut app);
+
+        let row_id = app.active_runtime_song.as_ref().expect("runtime song").rows[0].id;
+        app.mirror_song_row_applied(&AudibleSongRowApplied {
+            row_id,
+            row_ordinal: 0,
+            effective_beat: 0.0,
+            effective_sample: 0,
+            wrapped: true,
+        })
+        .expect("row mirror");
+
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume().to_bits(),
+            0.31f32.to_bits(),
+            "the wrap must not restore the clip's old volume"
+        );
+        app.song_transport_stop().expect("stop succeeds");
+    }
+
     /// Track-sound spec §2.3 (symptom 6/8): the stop resync must not
     /// `restore_to` a track-owned lane whose session cells survive — that is
     /// the audible snap, pushing a sound the performer never heard over the
@@ -1260,14 +1304,21 @@ mod tests {
         let mut app = app_with_song();
         app.song_transport_play(false).expect("song playback");
         assert_eq!(app.state.song_manual_latch_mask(), 0);
-        app.latch_track_created_during_song_playback(1);
+        app.latch_new_track_if_session_held(1);
         assert_eq!(app.state.song_manual_latch_mask(), 1 << 1);
         app.song_transport_stop().expect("stop succeeds");
         app.back_to_song().expect("clear the latch");
 
-        // While stopped, track creation must not latch anything.
-        app.latch_track_created_during_song_playback(1);
+        // While stopped with no scene latch, track creation latches nothing.
+        app.latch_new_track_if_session_held(1);
         assert_eq!(app.state.song_manual_latch_mask(), 0);
+
+        // ...unless a scene launch holds the session: then a new track
+        // joins it, stopped or not.
+        app.state.latch_song_manual_override(std::iter::once(0));
+        app.state.latch_song_scene_override();
+        app.latch_new_track_if_session_held(1);
+        assert_eq!(app.state.song_manual_latch_mask(), 0b11);
     }
 
     #[test]
