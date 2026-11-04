@@ -492,3 +492,152 @@ fn a_region_lock_is_published_with_its_region_and_undoes() {
     let copied = app.audio_region_place(ids[0], 8.0, None, Place::Copy).unwrap();
     assert!(app.audio_region_effect_locks(f.track, slot, 0).contains(&(copied, locked)));
 }
+
+/// One 4-second file split at beat 4 (120 bpm): two abutting regions with
+/// audio on both sides of the cut, as chopping a recording leaves them.
+fn chopped(f: &mut Fixture) -> (ClipId, ClipId) {
+    let wav = write_wav(f.dir.path(), "long.wav", 4 * 48_000, 48_000);
+    let app = f.rig.app();
+    let head = app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap()[0];
+    let tail = app.audio_region_split(head, 4.0).unwrap();
+    (head, tail)
+}
+
+#[test]
+fn fade_handles_set_length_and_shape_without_overlapping() {
+    let mut f = fixture();
+    let (head, _) = chopped(&mut f);
+    let app = f.rig.app();
+    // One beat (half a second) of fade-in, then a curve whose midpoint sits
+    // at three quarters.
+    app.audio_region_fade(head, FadeHandle::In, 1.0, true).unwrap();
+    app.audio_region_fade(head, FadeHandle::InCurve, 0.75, true).unwrap();
+    let region = lane(app, f.track)[0].clone();
+    assert_eq!(region.fade_in_seconds, 0.5);
+    let power = fade_curve_power(region.fade_in_curve);
+    assert!((crate::sequencer::fade_shape(0.5, power) - 0.75).abs() < 1e-3);
+    // A fade-out can only take what the fade-in leaves (the head is 2 s).
+    app.audio_region_fade(head, FadeHandle::Out, -10.0, true).unwrap();
+    assert_eq!(lane(app, f.track)[0].fade_out_seconds, 1.5);
+    crate::app::edit::undo(app);
+    let undone = lane(app, f.track)[0].clone();
+    assert_eq!((undone.fade_in_seconds, undone.fade_out_seconds), (0.0, 0.0), "the whole drag is one step");
+}
+
+#[test]
+fn a_fade_in_dragged_over_the_region_before_crossfades_into_it() {
+    let mut f = fixture();
+    let (head, tail) = chopped(&mut f);
+    let app = f.rig.app();
+    // Dragged a beat left of the tail's start: a half-second crossfade made
+    // of the tail's own audio from before the cut.
+    app.audio_region_fade(tail, FadeHandle::In, 3.0, false).unwrap();
+    let regions = lane(app, f.track);
+    assert_eq!((regions[1].crossfade_pre_seconds, regions[1].fade_in_seconds), (0.5, 0.0));
+    let views = app.audio_region_views();
+    let views = &views[f.track];
+    assert_eq!(views[1].crossfade, Some((1.0, 0.0)), "in beats");
+    assert_eq!(views[0].crossfade_next_pre, Some(1.0), "the head shows where it starts");
+
+    // The player hears it: the tail pre-rolls a second of host frames.
+    app.sync_audio_track_playback();
+    let published = app.audio_players.published(player_slot(app, f.track)).unwrap();
+    assert_eq!((published.regions[1].xfade_pre, published.regions[1].xfade_post), (24_000.0, 0.0));
+
+    // The crossfade's start handle (on the head) widens it, but never past
+    // the audio before the tail's start.
+    app.audio_region_fade(head, FadeHandle::CrossfadeStart, -50.0, false).unwrap();
+    assert_eq!(lane(app, f.track)[1].crossfade_pre_seconds, 2.0, "all of the head");
+
+    // Dragging the head's fade-out right past its end crossfades over the
+    // head's own audio past the cut instead.
+    app.audio_region_fade(head, FadeHandle::Out, 4.5, false).unwrap();
+    let regions = lane(app, f.track);
+    assert_eq!((regions[1].crossfade_pre_seconds, regions[1].crossfade_post_seconds), (0.0, 0.25));
+}
+
+#[test]
+fn whole_files_side_by_side_have_nothing_to_crossfade_with() {
+    let mut f = fixture();
+    let a = write_wav(f.dir.path(), "a.wav", 48_000, 48_000);
+    let b = write_wav(f.dir.path(), "b.wav", 48_001, 48_000);
+    let app = f.rig.app();
+    let ids = app.audio_regions_drop(f.track, 0.0, &[a, b]).unwrap();
+    // The second file starts at its first frame: no audio before it.
+    app.audio_region_fade(ids[1], FadeHandle::In, 1.0, false).unwrap();
+    let regions = lane(app, f.track);
+    assert_eq!((regions[1].crossfade_pre_seconds, regions[1].fade_in_seconds), (0.0, 0.0));
+    assert_eq!(app.audio_region_views()[f.track][1].crossfade, None);
+}
+
+#[test]
+fn a_split_leaves_the_fade_in_on_the_head_and_the_fade_out_on_the_tail() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "long.wav", 4 * 48_000, 48_000);
+    let app = f.rig.app();
+    let id = app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap()[0];
+    app.audio_region_fade(id, FadeHandle::In, 1.0, false).unwrap();
+    app.audio_region_fade(id, FadeHandle::Out, 7.0, false).unwrap();
+    app.audio_region_split(id, 4.0).unwrap();
+    let regions = lane(app, f.track);
+    assert_eq!((regions[0].fade_in_seconds, regions[0].fade_out_seconds), (0.5, 0.0));
+    assert_eq!((regions[1].fade_in_seconds, regions[1].fade_out_seconds), (0.0, 0.5));
+}
+
+#[test]
+fn a_fade_in_dragged_left_crossfades_even_when_its_file_starts_at_the_cut() {
+    // The left region is a trimmed file (audio past its end), the right one
+    // a whole file starting at its first frame: nothing before its start.
+    let mut f = fixture();
+    let long = write_wav(f.dir.path(), "long.wav", 4 * 48_000, 48_000);
+    let whole = write_wav(f.dir.path(), "whole.wav", 2 * 48_000, 48_000);
+    let app = f.rig.app();
+    let left = app.audio_regions_drop(f.track, 0.0, &[long]).unwrap()[0];
+    app.audio_region_resize(left, 0.0, 4.0).unwrap();
+    let right = app.audio_regions_drop(f.track, 4.0, &[whole]).unwrap()[0];
+    // A beat left of the right region's start: the half-second crossfade
+    // runs after the cut, over the left region's audio past its end.
+    app.audio_region_fade(right, FadeHandle::In, 3.0, false).unwrap();
+    let regions = lane(app, f.track);
+    assert_eq!((regions[1].crossfade_pre_seconds, regions[1].crossfade_post_seconds), (0.0, 0.5));
+    assert_eq!(app.audio_region_views()[f.track][1].crossfade, Some((0.0, 1.0)));
+}
+
+#[test]
+fn a_multi_selection_moves_together_in_one_undo_step() {
+    let mut f = fixture();
+    let a = write_wav(f.dir.path(), "a.wav", 48_000, 48_000);
+    let b = write_wav(f.dir.path(), "b.wav", 48_001, 48_000);
+    let c = write_wav(f.dir.path(), "c.wav", 48_002, 48_000);
+    let app = f.rig.app();
+    // Three 2-beat regions end to end at 0, 2 and 4.
+    let ids = app.audio_regions_drop(f.track, 0.0, &[a, b, c]).unwrap();
+    // The first two move a beat right: they keep their spacing, and only
+    // the unselected third one is truncated (its head, under the second).
+    app.audio_regions_move(&ids[..2], 1.0).unwrap();
+    // (The files differ by a frame so they store apart: round it away.)
+    let round = |beat: f64| (beat * 1000.0).round() / 1000.0;
+    let spans: Vec<_> =
+        lane(app, f.track).iter().map(|r| (r.id, round(r.start_beat), round(r.end_beat))).collect();
+    assert_eq!(spans, vec![(ids[0], 1.0, 3.0), (ids[1], 3.0, 5.0), (ids[2], 5.0, 6.0)]);
+    crate::app::edit::undo(app);
+    let spans: Vec<_> = lane(app, f.track).iter().map(|r| (round(r.start_beat), round(r.end_beat))).collect();
+    assert_eq!(spans, vec![(0.0, 2.0), (2.0, 4.0), (4.0, 6.0)], "one undo puts all three back");
+}
+
+#[test]
+fn a_fade_dragged_toward_a_neighbour_with_nothing_to_blend_keeps_its_fade() {
+    let mut f = fixture();
+    let a = write_wav(f.dir.path(), "a.wav", 48_000, 48_000);
+    let b = write_wav(f.dir.path(), "b.wav", 48_001, 48_000);
+    let app = f.rig.app();
+    let ids = app.audio_regions_drop(f.track, 0.0, &[a, b]).unwrap();
+    app.audio_region_fade(ids[0], FadeHandle::Out, 1.5, false).unwrap();
+    // Neither whole file has audio past their shared edge: dragging the
+    // second one's fade-in left over the first is no crossfade, and leaves
+    // the first one's fade-out alone.
+    app.audio_region_fade(ids[1], FadeHandle::In, 1.8, false).unwrap();
+    let regions = lane(app, f.track);
+    assert_eq!(regions[0].fade_out_seconds, 0.25);
+    assert_eq!((regions[1].crossfade_pre_seconds, regions[1].crossfade_post_seconds), (0.0, 0.0));
+}

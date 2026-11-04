@@ -1,3 +1,4 @@
+pub mod fade;
 pub mod sample;
 
 use std::path::{Path, PathBuf};

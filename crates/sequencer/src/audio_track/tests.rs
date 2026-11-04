@@ -41,8 +41,12 @@ fn region(start: f64, end: f64, offset: f64, pcm: Arc<SourcePcm>) -> PlaybackReg
         step: sample_core::playback_ratio(pcm.sample_rate, HOST_RATE),
         loop_window: None,
         gain: 1.0,
-        fade_in: DECLICK_FRAMES,
-        fade_out: DECLICK_FRAMES,
+        fade_in: 0.0,
+        fade_out: 0.0,
+        fade_in_power: 1.0,
+        fade_out_power: 1.0,
+        xfade_pre: 0.0,
+        xfade_post: 0.0,
         pcm,
         locks: Vec::new(),
     }
@@ -285,4 +289,60 @@ fn a_republished_snapshot_without_the_lock_reverts_it() {
     assert_eq!(step(&before), vec![0.6]);
     assert_eq!(step(&after), vec![0.18], "the lock was removed: back to the track value");
     assert_eq!(step(&after), Vec::<f32>::new());
+}
+
+/// One constant-1.0 source, long enough for every region below.
+fn ones() -> Arc<SourcePcm> {
+    Arc::new(SourcePcm { samples: vec![1.0; 2 * 480_000].into(), sample_rate: 48_000 })
+}
+
+fn level_at(playback: &AudioTrackPlayback, beat: f64) -> f32 {
+    let mut hint = 0;
+    playback.frame_at(beat, 1.0 / SAMPLES_PER_BEAT, &mut hint).0
+}
+
+#[test]
+fn a_curved_fade_follows_its_power() {
+    let mut fading = region(0.0, 4.0, 0.0, ones());
+    fading.fade_in = SAMPLES_PER_BEAT;
+    fading.fade_in_power = crate::sequencer::fade_curve_power(-1.0 / 3.0);
+    fading.fade_out = SAMPLES_PER_BEAT;
+    fading.fade_out_power = 0.5;
+    let playback = AudioTrackPlayback { regions: vec![fading], ..Default::default() };
+    // Halfway into the fade-in: 0.5^2 with power 2.
+    assert!((level_at(&playback, 0.5) - 0.25).abs() < 1e-4, "{}", level_at(&playback, 0.5));
+    assert!((level_at(&playback, 2.0) - 1.0).abs() < 1e-6, "full between the fades");
+    // Three quarters of the way through the fade-out: 0.25^0.5.
+    assert!((level_at(&playback, 3.75) - 0.5).abs() < 1e-4, "{}", level_at(&playback, 3.75));
+}
+
+#[test]
+fn a_crossfade_keeps_one_recording_at_full_level_across_the_cut() {
+    // A cut through one constant recording, crossfaded over a beat before
+    // and half a beat after the cut: the sum never dips or bumps.
+    let pcm = ones();
+    let head = region(0.0, 4.0, 0.0, pcm.clone());
+    let mut tail = region(4.0, 8.0, 4.0 * SAMPLES_PER_BEAT, pcm);
+    tail.xfade_pre = SAMPLES_PER_BEAT;
+    tail.xfade_post = SAMPLES_PER_BEAT / 2.0;
+    let playback = AudioTrackPlayback { regions: vec![head, tail], ..Default::default() };
+    for step in 0..=24 {
+        let beat = 2.75 + step as f64 * 0.0625;
+        let level = level_at(&playback, beat);
+        assert!((level - 1.0).abs() < 1e-4, "beat {beat}: {level}");
+    }
+}
+
+#[test]
+fn a_crossfade_hands_one_source_to_the_other() {
+    // The head plays +1, the tail -1, so the mix says how far along it is.
+    let minus = Arc::new(SourcePcm { samples: vec![-1.0; 2 * 480_000].into(), sample_rate: 48_000 });
+    let head = region(0.0, 4.0, 0.0, ones());
+    let mut tail = region(4.0, 8.0, SAMPLES_PER_BEAT, minus);
+    tail.xfade_pre = SAMPLES_PER_BEAT;
+    let playback = AudioTrackPlayback { regions: vec![head, tail], ..Default::default() };
+    assert!((level_at(&playback, 2.9) - 1.0).abs() < 1e-6, "before the window only the head plays");
+    assert!(level_at(&playback, 3.5).abs() < 1e-4, "equal gain at the middle: 1 - 1 = 0");
+    assert!((level_at(&playback, 3.999) + 1.0).abs() < 1e-3, "the tail has taken over by the cut");
+    assert!((level_at(&playback, 4.0) + 1.0).abs() < 1e-6, "no declick dip at a crossfaded start");
 }

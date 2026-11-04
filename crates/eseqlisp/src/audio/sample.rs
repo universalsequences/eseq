@@ -126,6 +126,40 @@ impl SampleBuffer {
     pub fn levels(&self) -> &[WaveformMipLevel] {
         &self.peaks
     }
+
+    /// Register one waveform per channel of interleaved `samples` beside
+    /// the sample registered under `path`, at [`channel_key`], so a view can
+    /// draw a stereo file as two waveforms (Ableton's arrangement does).
+    /// Channel peaks start at eight frames per bucket, an eighth of the
+    /// mixed waveform's memory: only the deepest arrangement zoom (a few
+    /// frames per pixel) shows the difference, as slightly blocky peaks.
+    pub fn register_channels(path: &Path, sample_rate: u32, channels: u16, samples: &[f32]) {
+        let channels = usize::from(channels.max(1));
+        let frames = samples.len() / channels;
+        for channel in 0..channels {
+            let mono: Vec<f32> = samples.iter().skip(channel).step_by(channels).copied().collect();
+            let key = channel_key(&path.display().to_string(), channel);
+            Self {
+                id: key.clone(),
+                path: PathBuf::from(&key),
+                sample_rate,
+                channels: 1,
+                frames,
+                duration_seconds: frames as f64 / sample_rate.max(1) as f64,
+                peaks: build_peak_pyramid_from(&mono, CHANNEL_FIRST_BUCKET),
+            }
+            .register();
+        }
+    }
+}
+
+/// Frames per bucket of a channel waveform's finest level.
+pub const CHANNEL_FIRST_BUCKET: usize = 8;
+
+/// Registry key of channel `channel` (0 = left) of the sample registered
+/// under `key`, when [`SampleBuffer::register_channels`] registered it.
+pub fn channel_key(key: &str, channel: usize) -> String {
+    format!("{key}#ch{channel}")
 }
 
 impl WaveformMipLevel {
@@ -327,8 +361,14 @@ fn decoded_mono_samples(decoded: &DecodedWav) -> Vec<f32> {
 }
 
 fn build_peak_pyramid(samples: &[f32]) -> Vec<WaveformMipLevel> {
+    build_peak_pyramid_from(samples, 1)
+}
+
+/// [`build_peak_pyramid`] whose finest level holds `first` frames per
+/// bucket (a power of two).
+fn build_peak_pyramid_from(samples: &[f32], first: usize) -> Vec<WaveformMipLevel> {
     let mut levels = Vec::new();
-    let mut samples_per_bucket = 1usize;
+    let mut samples_per_bucket = first.max(1);
     let max_bucket = 4096usize.min(samples.len().max(1));
     while samples_per_bucket <= max_bucket {
         let mut buckets = Vec::new();

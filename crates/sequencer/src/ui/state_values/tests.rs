@@ -25469,6 +25469,100 @@ use panel_kinds_seed::*;
         );
     }
 
+    /// Collapsing a lane re-lays out its whole row: the header beside it
+    /// takes the new height at once, never its old cached size (which hid
+    /// it after a collapse and left it short after an expand).
+    #[test]
+    fn metal_seq_arrangement_lane_collapse_resizes_the_header_with_the_lane() {
+        let mut editor = arrangement_region_editor(3, &[]);
+        let rows = |editor: &mut eseqlisp::Editor| {
+            let layout = editor.widget_layout().expect("arrangement layout");
+            let header = find_layout_node_by_stable_key_suffix(&layout, "/track-header-1")
+                .expect("track header")
+                .rect;
+            let container = find_layout_node_by_stable_key_suffix(&layout, "/track-lane-1").expect("lane");
+            let lane = find_layout_node_by_widget_type(container, "timeline").expect("timeline").rect;
+            (header.row, header.height, lane.row, lane.height)
+        };
+        let toggle = |editor: &mut eseqlisp::Editor, on: bool| {
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    "(let ((t (eseq.kinds/track 1)) (h (eseq.arrangement/arr-lane t.tid))) (set! h.collapsed {on}))"
+                ))
+                .expect("toggle collapse");
+            editor.refresh_runtime_side_effects();
+        };
+        let open = rows(&mut editor);
+        for on in [true, false, true] {
+            toggle(&mut editor, on);
+            let (header_row, header_height, lane_row, lane_height) = rows(&mut editor);
+            assert!(
+                (header_row - lane_row).abs() < 0.01 && (header_height - lane_height).abs() < 0.01,
+                "collapsed {on}: header {header_row}+{header_height} vs lane {lane_row}+{lane_height}"
+            );
+            if on {
+                assert!(lane_height < open.3 * 0.6, "the lane collapsed ({lane_height} vs {})", open.3);
+            } else {
+                assert!((lane_height - open.3).abs() < 0.01, "the lane is back to full height");
+            }
+        }
+    }
+
+    /// A pinch zooms about the pointer even past the song's last clip: the
+    /// beat under it stays under it instead of being dragged back toward the
+    /// content by the scroll extent.
+    #[test]
+    fn metal_seq_arrangement_zoom_keeps_the_pointer_beat_past_the_song_end() {
+        let mut editor = arrangement_region_editor(2, &[]);
+        let mut eval = |expr: &str| match editor.runtime_mut().eval_str(expr) {
+            Ok(Some(Value::Number(n))) => n,
+            other => panic!("{expr}: {other:?}"),
+        };
+        // Zoomed out over 1024 beats; the song ends at 64. Pointer at 512,
+        // halfway across: zoom in 8x three times.
+        eval("(let ((v eseq.arrangement/arr-view)) (set! v.start 0) (set! v.duration 1024) 0)");
+        for _ in 0..3 {
+            let start = eval("(let ((v eseq.arrangement/arr-view)) v.start)");
+            let duration = eval("(let ((v eseq.arrangement/arr-view)) v.duration)");
+            let anchor = start + duration * 0.5;
+            assert!((anchor - 512.0).abs() < 1e-6, "the pointer beat drifted to {anchor}");
+            eval(&format!(
+                "(do (eseq.arrangement/view-action (dict :type :zoom-view :anchor-time {anchor} :factor 2)) 0)"
+            ));
+        }
+        let start = eval("(let ((v eseq.arrangement/arr-view)) v.start)");
+        assert_eq!(start, 512.0 - 64.0, "a 128-beat view centred on beat 512");
+        // Scrolling back left from out there moves; it does not snap home.
+        eval("(do (eseq.arrangement/view-action (dict :type :scroll-view :delta-time -8)) 0)");
+        assert_eq!(eval("(let ((v eseq.arrangement/arr-view)) v.start)"), 440.0);
+    }
+
+    /// Rows differ in height (a tall audio lane, a collapsed one), so a
+    /// region drag's vertical travel is measured against the rows it
+    /// crosses, not one stock pitch.
+    #[test]
+    fn metal_seq_arrangement_region_rows_measure_their_own_heights() {
+        let mut editor = arrangement_region_editor(3, &[]);
+        let mut row = |expr: &str| match editor.runtime_mut().eval_str(expr) {
+            Ok(Some(Value::Number(row))) => row,
+            other => panic!("{expr}: {other:?}"),
+        };
+        // Stock 3.85, a 6.8 audio lane, stock: from row 0's middle (1.925),
+        // 5 cells down is inside the audio lane, 9 cells down past it.
+        assert_eq!(row("(eseq.arrangement/row-at-offset (list 3.85 6.8 3.85) 0 5)"), 1.0);
+        assert_eq!(row("(eseq.arrangement/row-at-offset (list 3.85 6.8 3.85) 0 9)"), 2.0);
+        // One stock pitch up from the audio lane's middle stays in row 0.
+        assert_eq!(row("(eseq.arrangement/row-at-offset (list 3.85 6.8 3.85) 1 -3.85)"), 0.0);
+        // A collapsed strip is crossed by a drag short of one stock pitch:
+        // 1.925 + 3 is inside it, 1.925 + 3.7 past it.
+        assert_eq!(row("(eseq.arrangement/row-at-offset (list 3.85 1.75 3.85) 0 3)"), 1.0);
+        assert_eq!(row("(eseq.arrangement/row-at-offset (list 3.85 1.75 3.85) 0 3.7)"), 2.0);
+        // Off either end selects out to the edge.
+        assert_eq!(row("(eseq.arrangement/row-at-offset (list 3.85 6.8 3.85) 2 100)"), 2.0);
+        assert_eq!(row("(eseq.arrangement/row-at-offset (list 3.85 6.8 3.85) 1 -100)"), 0.0);
+    }
+
     /// End-to-end body-marquee (region spec 4.2/4.3/4.4): pressing a clip's
     /// BODY and dragging down two lanes commits one region through
     /// `select-region!`, grid-quantized, spanning the swept tracks — and

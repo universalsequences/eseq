@@ -1,7 +1,9 @@
 # Audio Tracks — spec
 
-Status: rev 2.1, 2026-11-01 — phase 1 built (uncommitted); "as built" notes
-inline where the implementation settled a choice differently from rev 2.
+Status: rev 2.3, 2026-11-03 — phase 1 built; rev 2.3 adds tall stereo
+lanes, lane collapse, curved fades and crossfades (§8.1, §8.1.1). "As
+built" notes inline where the implementation settled a choice differently
+from rev 2.
 Epic: see §15 for the bead slices.
 
 Every track today is a software instrument (or a modulator) driven by
@@ -246,6 +248,41 @@ Dragging files in from Finder uses the same pipeline (later slice).
   arrangement.
 - Edge trim on the timeline changes `source_offset` / the span (left edge
   trims into the source, it does not move content).
+- *As built (rev 2.3, eseq-audio.24):* Ableton-shaped lanes. An audio lane
+  stands taller than a pattern lane (`arrangement-audio-lane-height`, 6.8
+  cells) and draws a stereo source as two waveforms, left over right,
+  once each row is at least 18 px (the source's channels are registered
+  beside its mixed waveform: `SampleBuffer::register_channels`,
+  `channel_key`). Every track header in the arrangement has a disclosure
+  that collapses its lane to a title-bar strip (`arr-lane` by track id; UI
+  state, not saved). Rows differ in height, so a region drag's vertical
+  travel is measured against the rows it crosses (`row-at-offset`).
+
+### 8.1.1 Fades and crossfades (as built, rev 2.3)
+
+- Hovering a region shows its fade handles: a square at the top of the
+  body on each fade's end (its length) and a diamond on each fade's curve
+  midpoint (its shape: drag up for a fast rise / late drop, down for the
+  opposite). The timeline widget draws the curves (area above shaded)
+  from the item's `:fades` (beats) and reports drags as `:fade-item`
+  (`timeline/fades.rs`); `audio-region-fade` (`App::audio_region_fade`)
+  applies them live, one undo step per drag. Fades never overlap.
+- Shape: a fade's level is `t^p`, `p = 2^(-3·curve)`, curve -1..1 (0 is
+  linear); the player and the widget share the formula.
+- **Crossfades.** Where one region ends exactly where the next starts,
+  dragging the later one's fade-in square left past its start, or the
+  earlier one's fade-out square right past its end, makes a crossfade:
+  a window `[edge − pre, edge + post]` stored on the later region
+  (`crossfade_pre_seconds` / `crossfade_post_seconds`). Over it the
+  earlier region keeps playing past its end and the later one pre-rolls
+  before its start, under an equal-gain S-curve (sin²/cos²), so a cut
+  through one recording stays at full level. `pre` uses the later
+  region's audio before its offset, `post` the earlier one's audio past
+  its end; both are clamped to that material and to the regions' lengths
+  (`crossfade_window`), so a cut made by splitting always has room, and two
+  whole files butted together have none (their fades stay plain). The
+  window's ends are its handles. A split leaves the fade-in on the head and
+  the fade-out on the tail.
 
 ### 8.2 Clip editor (waveform)
 
@@ -284,7 +321,8 @@ v1 contents, Ableton-shaped:
 ### 8.3 Clip editor later
 
 Warp markers and warp mode (feeding the sampler's warp engine, §6.3),
-transpose, reverse, fades drawn on the waveform, loop brace.
+transpose, reverse, fades drawn on the clip editor's waveform (the
+timeline draws them since rev 2.3), loop brace.
 
 ### 8.4 FX panel
 
@@ -318,6 +356,8 @@ AudioRegion {               // ProjectArrangement::audio_lanes[track]
     start_beat, end_beat: f64,   // the span, like a clip's
     source_offset: u64,      // source frame heard at start_beat
     gain_db, fade_in_seconds, fade_out_seconds: f32,
+    fade_in_curve, fade_out_curve: f32,        // -1..1, 0 linear (rev 2.3)
+    crossfade_pre_seconds, crossfade_post_seconds: f32, // with the region before
     muted: bool,
 }
 
@@ -358,7 +398,9 @@ draws only regions there.
   at the block's first sample, unwrapped, plus the pass start so pre-roll is
   silent) and per frame finds the region (hinted search), reads with
   `sample_core::read_stereo_at` at `playback_ratio(source_sr, host_sr)`, and
-  applies gain and edge fades (at least 64 frames, so no edge clicks).
+  applies gain, shaped edge fades (always under a 64-frame declick ramp)
+  and crossfades with the region before (§8.1.1), mixing both voices over
+  the window.
 - A transport start ramps in, a stop ramps out from where it was, and a seek
   or loop wrap restarts the ramp instead of splicing.
 - Bounce/export renders audio tracks through the same player (tested:

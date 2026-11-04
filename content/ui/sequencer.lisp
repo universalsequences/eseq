@@ -1054,9 +1054,11 @@
 ;; Names and structural edits rebuild only this header. Mute/solo styling
 ;; uses bindings throughout, including the name, so it never rebuilds a tree.
 ;; The arrangement draws its track headers with this one (`bare` true).
-(def track-header (t bare)
+;; `toggle`, when given, takes the bare header's spacer slot (the
+;; arrangement's lane collapse disclosure).
+(def track-header (t bare &key (toggle nil))
   (subtree :key (str "seqv-track-header-" t.tid)
-    (track-header-body t bare)))
+    (track-header-body t bare toggle)))
 
 ;; A fader over x's (a track's or a bus's) level meter, keyed `key`.
 (def volume-meter (key x on-click on-drag)
@@ -1117,7 +1119,7 @@
     :active-color active-color
     :on-click on-click))
 
-(def track-header-body (t bare)
+(def track-header-body (t bare &optional (toggle nil))
   (let ((i t.index)
         (c t.color))
     (box :background "seqv-track-container"
@@ -1136,7 +1138,7 @@
           :key (str "arm-" i)
           :active #'t.armed
           :on-click (track-toggle-click t (lambda () (toggle! t.armed))))
-        (if bare (box :width 1.55))
+        (if bare (if (= toggle nil) (box :width 1.55) toggle))
         (header-toggle (str (+ i 1)) (str "mute-" i) #'t.muted
           :bg :control-on-bg :active-bg :sequencer-toggle-off-bg
           :color :control-on-fg :active-color :gray

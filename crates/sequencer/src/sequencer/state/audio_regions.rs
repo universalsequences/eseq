@@ -57,6 +57,22 @@ pub struct AudioRegion {
     pub fade_in_seconds: f32,
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub fade_out_seconds: f32,
+    /// Fade shapes, -1..1: 0 is linear, positive bows the curve up (a fast
+    /// rise, a late drop), negative down ([`fade_shape`]).
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub fade_in_curve: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub fade_out_curve: f32,
+    /// The crossfade this region makes with the region ending exactly where
+    /// it starts: seconds of the window before its start (this region's
+    /// audio from before `source_offset` fades in under the other's tail)
+    /// and after it (the other region's audio past its end fades out over
+    /// this one's head). Inert while nothing abuts it; see
+    /// [`crossfade_window`].
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub crossfade_pre_seconds: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub crossfade_post_seconds: f32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub muted: bool,
     /// Semitones; speed scales by `2^(transpose/12)`.
@@ -185,6 +201,10 @@ impl AudioRegion {
             gain_db: 0.0,
             fade_in_seconds: 0.0,
             fade_out_seconds: 0.0,
+            fade_in_curve: 0.0,
+            fade_out_curve: 0.0,
+            crossfade_pre_seconds: 0.0,
+            crossfade_post_seconds: 0.0,
             muted: false,
             transpose: 0.0,
             loop_enabled: false,
@@ -223,12 +243,87 @@ impl AudioRegion {
             * source_rate as f64
             * self.speed();
         let position = self.fold_into_loop(self.source_offset as f64 + played);
+        // A cut has no fade-in or crossfade of its own: those belonged to
+        // the region's start.
         Self {
             start_beat: beat,
             source_offset: position.round() as u64,
+            fade_in_seconds: 0.0,
+            fade_in_curve: 0.0,
+            crossfade_pre_seconds: 0.0,
+            crossfade_post_seconds: 0.0,
             ..self.clone()
         }
     }
+
+    /// Timeline seconds the region spans.
+    pub fn length_seconds(&self, seconds_per_beat: f64) -> f64 {
+        (self.end_beat - self.start_beat).max(0.0) * seconds_per_beat
+    }
+
+    /// Timeline seconds of audio before the region's start that it could
+    /// play (the material a crossfade into it pre-rolls).
+    pub fn seconds_before_start(&self, source_rate: u32) -> f64 {
+        self.source_offset as f64 / source_rate.max(1) as f64 / self.speed()
+    }
+
+    /// Timeline seconds of audio past the region's end that it could keep
+    /// playing (the material a crossfade out of it runs on); a looping
+    /// region never runs out.
+    pub fn seconds_after_end(&self, meta: &AudioSourceMeta, seconds_per_beat: f64) -> f64 {
+        if self.loop_window().is_some() {
+            return f64::INFINITY;
+        }
+        let rate = meta.sample_rate.max(1) as f64;
+        let end = self.source_offset as f64 + self.length_seconds(seconds_per_beat) * rate * self.speed();
+        ((meta.frames as f64 - end) / rate / self.speed()).max(0.0)
+    }
+}
+
+// The fade shapes, shared with the timeline that draws them.
+pub use eseqlisp::audio::fade::{
+    crossfade_gains, curve_for_midpoint as fade_curve_for_midpoint, curve_power as fade_curve_power,
+    fade_level as fade_shape, FadeHandle,
+};
+
+/// Whether `next` starts exactly where `prev` ends.
+pub fn regions_abut(prev: &AudioRegion, next: &AudioRegion) -> bool {
+    (prev.end_beat - next.start_beat).abs() < 1e-6
+}
+
+/// The crossfade `next` makes with `prev`, in timeline seconds before and
+/// after their shared edge: its stored window clamped to the audio each has
+/// beyond that edge and to the regions' lengths. `None` unless they abut and
+/// some window is left.
+pub fn crossfade_window(
+    prev: &AudioRegion,
+    prev_meta: &AudioSourceMeta,
+    next: &AudioRegion,
+    next_meta: &AudioSourceMeta,
+    seconds_per_beat: f64,
+) -> Option<(f64, f64)> {
+    if !regions_abut(prev, next) {
+        return None;
+    }
+    let (pre_room, post_room) = crossfade_room(prev, prev_meta, next, next_meta, seconds_per_beat);
+    let pre = (next.crossfade_pre_seconds.max(0.0) as f64).min(pre_room);
+    let post = (next.crossfade_post_seconds.max(0.0) as f64).min(post_room);
+    (pre + post > 1e-6).then_some((pre, post))
+}
+
+/// Seconds a crossfade between abutting `prev` and `next` can reach before
+/// their shared edge (`next`'s audio before its start, within `prev`) and
+/// after it (`prev`'s audio past its end, within `next`).
+pub fn crossfade_room(
+    prev: &AudioRegion,
+    prev_meta: &AudioSourceMeta,
+    next: &AudioRegion,
+    next_meta: &AudioSourceMeta,
+    seconds_per_beat: f64,
+) -> (f64, f64) {
+    let pre = next.seconds_before_start(next_meta.sample_rate).min(prev.length_seconds(seconds_per_beat));
+    let post = prev.seconds_after_end(prev_meta, seconds_per_beat).min(next.length_seconds(seconds_per_beat));
+    (pre, post)
 }
 
 /// Beats a source of `frames` at `sample_rate` lasts at `bpm`.
@@ -403,6 +498,10 @@ impl ProjectArrangement {
                     ("transpose", region.transpose),
                     ("fade-in", region.fade_in_seconds),
                     ("fade-out", region.fade_out_seconds),
+                    ("fade-in curve", region.fade_in_curve),
+                    ("fade-out curve", region.fade_out_curve),
+                    ("crossfade", region.crossfade_pre_seconds),
+                    ("crossfade", region.crossfade_post_seconds),
                 ] {
                     if !value.is_finite() {
                         return Err(format!(

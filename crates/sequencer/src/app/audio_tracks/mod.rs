@@ -15,11 +15,12 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use crate::audio_track::{AudioTrackPlayback, LockParam, PlaybackRegion, SourcePcm, DECLICK_FRAMES};
+use crate::audio_track::{AudioTrackPlayback, LockParam, PlaybackRegion, SourcePcm};
 use crate::instruments::sample_core;
+pub use crate::sequencer::FadeHandle;
 use crate::sequencer::{
-    audio_frames_to_beats, AudioRegion, AudioSourceMeta, ClipId, InstrumentType,
-    ProjectArrangement, RegionLockTarget,
+    audio_frames_to_beats, crossfade_room, crossfade_window, fade_curve_for_midpoint, fade_curve_power,
+    regions_abut, AudioRegion, AudioSourceMeta, ClipId, InstrumentType, ProjectArrangement, RegionLockTarget,
 };
 
 use super::App;
@@ -41,6 +42,17 @@ pub struct AudioRegionView {
     pub gain_db: f32,
     pub fade_in_seconds: f32,
     pub fade_out_seconds: f32,
+    /// The fades in beats as the timeline draws them, and their shapes.
+    pub fade_in_beats: f64,
+    pub fade_out_beats: f64,
+    pub fade_in_curve: f32,
+    pub fade_out_curve: f32,
+    /// The crossfade with the region before, in beats before and after this
+    /// region's start, when one sounds.
+    pub crossfade: Option<(f64, f64)>,
+    /// Beats before this region's end where the next region's crossfade
+    /// begins, when it has one.
+    pub crossfade_next_pre: Option<f64>,
     pub muted: bool,
     /// False while the source file is offline (drawn, silent).
     pub loaded: bool,
@@ -133,6 +145,11 @@ impl AudioTrackRuntime {
 
     fn insert_pcm(&mut self, meta: &AudioSourceMeta, stereo: Vec<f32>, sample_rate: u32) {
         let path = self.store_dir().join(&meta.file);
+        // A stereo file draws as two waveforms; a mono one (folded to two
+        // equal channels for playback) as one.
+        if meta.channels >= 2 {
+            eseqlisp::audio::sample::SampleBuffer::register_channels(&path, sample_rate, 2, &stereo);
+        }
         eseqlisp::audio::sample::SampleBuffer::from_pcm(path, sample_rate, 2, stereo.clone()).register();
         self.pcm.insert(
             meta.file.clone(),
@@ -335,6 +352,41 @@ impl App {
         Ok(placed)
     }
 
+    /// Move every region in `ids` by `delta_beats` on its own track, as one
+    /// undo step: a multi-selection dragged together keeps its spacing and
+    /// truncates only what it lands on, never itself.
+    pub fn audio_regions_move(&mut self, ids: &[ClipId], delta_beats: f64) -> Result<(), String> {
+        if !delta_beats.is_finite() {
+            return Err(format!("Move distance {delta_beats} must be finite"));
+        }
+        if delta_beats == 0.0 || ids.is_empty() {
+            return Ok(());
+        }
+        let spb = self.seconds_per_beat();
+        let ids = ids.to_vec();
+        self.edit_arrangement("Move audio", move |arrangement, _scenes| {
+            let mut moving = Vec::with_capacity(ids.len());
+            for id in &ids {
+                let (track, mut region) = arrangement
+                    .take_audio_region(*id)
+                    .ok_or_else(|| format!("Audio region {} does not exist", id.0))?;
+                region.start_beat += delta_beats;
+                region.end_beat += delta_beats;
+                if region.start_beat < -1e-9 {
+                    return Err("Regions cannot move before the song start".to_string());
+                }
+                region.start_beat = region.start_beat.max(0.0);
+                moving.push((track, region));
+            }
+            for (track, region) in moving {
+                arrangement.occlude_audio_span(track, region.start_beat, region.end_beat, spb)?;
+                arrangement.end_beat = arrangement.end_beat.max(region.end_beat);
+                arrangement.insert_audio_region_sorted(track, region);
+            }
+            Ok(())
+        })
+    }
+
     /// Paste copies of `ids` so the earliest lands at `at_beat`, keeping
     /// their spacing, onto audio track `to_track` (else each one's own
     /// track). One undo step.
@@ -469,6 +521,9 @@ impl App {
             arrangement.take_audio_region(id);
             let mut head = region;
             head.end_beat = beat;
+            // The fade-out belonged to the region's end, which the tail has.
+            head.fade_out_seconds = 0.0;
+            head.fade_out_curve = 0.0;
             arrangement.insert_audio_region_sorted(track, head);
             arrangement.insert_audio_region_sorted(track, tail);
             Ok(())
@@ -590,6 +645,99 @@ impl App {
             }
             if let Some(semitones) = transpose {
                 region.transpose = semitones.clamp(-48.0, 48.0);
+            }
+            Ok(())
+        })
+    }
+
+    /// Drag a region's fade handle on the timeline (Ableton's fade
+    /// handles): a length handle to song beat `value`, a curve handle to the
+    /// 0..1 level `value` its fade passes at its midpoint. Fades never
+    /// overlap and crossfades stay within the audio each region has past the
+    /// shared edge. With `live`, a drag is one undo step.
+    pub fn audio_region_fade(&mut self, id: ClipId, handle: FadeHandle, value: f64, live: bool) -> Result<(), String> {
+        if !value.is_finite() {
+            return Err(format!("Fade position {value} must be finite"));
+        }
+        let spb = self.seconds_per_beat();
+        let merge_key = live.then(|| crate::app::history::MergeKey::new(format!("audio-fade-{}", id.0)));
+        self.edit_arrangement_keyed("Audio fade", merge_key, move |arrangement, _scenes| {
+            let (track, region) = Self::locate_audio_region(arrangement, id)?;
+            let lane = arrangement.audio_lane(track);
+            let index = lane.iter().position(|candidate| candidate.id == id).unwrap_or(0);
+            let prev = index.checked_sub(1).map(|i| lane[i].clone()).filter(|prev| regions_abut(prev, &region));
+            let next = lane.get(index + 1).cloned().filter(|next| regions_abut(&region, next));
+            let length = region.length_seconds(spb);
+            let seconds = |beats: f64| (beats * spb) as f32;
+            match handle {
+                FadeHandle::InCurve => region_mut(arrangement, id)?.fade_in_curve = fade_curve_for_midpoint(value),
+                FadeHandle::OutCurve => region_mut(arrangement, id)?.fade_out_curve = fade_curve_for_midpoint(value),
+                FadeHandle::In => {
+                    let into = value - region.start_beat;
+                    // Left past the start: crossfade with the region
+                    // before, as long as the drag, when either has audio past
+                    // the cut to blend. It sits before the cut as far as this
+                    // region has audio before its start, and runs on past the
+                    // cut over the other's audio after its end for the rest.
+                    let room = match prev.as_ref() {
+                        Some(prev) if into < 0.0 => room(arrangement, prev, &region, spb)?,
+                        _ => (0.0, 0.0),
+                    };
+                    if let (Some(prev), true) = (prev.as_ref(), room.0 + room.1 > 0.0) {
+                        let (pre_room, post_room) = room;
+                        let want = seconds(-into);
+                        let pre = want.min(pre_room);
+                        let post = (want - pre).min(post_room);
+                        set_crossfade(arrangement, prev.id, id, pre, post)?;
+                    } else {
+                        let this = region_mut(arrangement, id)?;
+                        this.fade_in_seconds = seconds(into.max(0.0)).min((length as f32 - this.fade_out_seconds).max(0.0));
+                        this.crossfade_pre_seconds = 0.0;
+                        this.crossfade_post_seconds = 0.0;
+                    }
+                }
+                FadeHandle::Out => {
+                    let past = value - region.end_beat;
+                    // Right past the end: the mirror of the fade-in's
+                    // crossfade, after the cut first, before it for the rest.
+                    let room = match next.as_ref() {
+                        Some(next) if past > 0.0 => room(arrangement, &region, next, spb)?,
+                        _ => (0.0, 0.0),
+                    };
+                    if let (Some(next), true) = (next.as_ref(), room.0 + room.1 > 0.0) {
+                        let (pre_room, post_room) = room;
+                        let want = seconds(past);
+                        let post = want.min(post_room);
+                        let pre = (want - post).min(pre_room);
+                        set_crossfade(arrangement, id, next.id, pre, post)?;
+                    } else {
+                        let this = region_mut(arrangement, id)?;
+                        this.fade_out_seconds = seconds((-past).max(0.0)).min((length as f32 - this.fade_in_seconds).max(0.0));
+                        if let Some(next) = next {
+                            let after = region_mut(arrangement, next.id)?;
+                            after.crossfade_pre_seconds = 0.0;
+                            after.crossfade_post_seconds = 0.0;
+                        }
+                    }
+                }
+                FadeHandle::CrossfadeEnd => {
+                    // On the later region: the window's end, after its start.
+                    let Some(prev) = prev else {
+                        return Err("The region has no crossfade".to_string());
+                    };
+                    let (_, post_room) = room(arrangement, &prev, &region, spb)?;
+                    region_mut(arrangement, id)?.crossfade_post_seconds =
+                        seconds((value - region.start_beat).max(0.0)).min(post_room);
+                }
+                FadeHandle::CrossfadeStart => {
+                    // On the earlier region: the window's start, before its end.
+                    let Some(next) = next else {
+                        return Err("The region has no crossfade".to_string());
+                    };
+                    let (pre_room, _) = room(arrangement, &region, &next, spb)?;
+                    region_mut(arrangement, next.id)?.crossfade_pre_seconds =
+                        seconds((region.end_beat - value).max(0.0)).min(pre_room);
+                }
             }
             Ok(())
         })
@@ -853,15 +1001,31 @@ impl App {
                 if self.audio_tracks.published.get(&slot) == Some(&key) {
                     continue;
                 }
+                let audible: Vec<(&AudioRegion, &AudioSourceMeta, &Arc<SourcePcm>)> = key
+                    .regions
+                    .iter()
+                    .filter(|region| !region.muted)
+                    .filter_map(|region| {
+                        let meta = arrangement?.audio_source(region.source)?;
+                        Some((region, meta, self.audio_tracks.pcm.get(&meta.file)?))
+                    })
+                    .collect();
+                let spb = 60.0 / bpm.max(1) as f64;
                 let playback = AudioTrackPlayback {
-                    regions: key
-                        .regions
+                    regions: audible
                         .iter()
-                        .filter(|region| !region.muted)
-                        .filter_map(|region| {
-                            let meta = arrangement?.audio_source(region.source)?;
-                            let pcm = self.audio_tracks.pcm.get(&meta.file)?;
+                        .enumerate()
+                        .map(|(index, &(region, meta, pcm))| {
                             let mut playing = playback_region(region, pcm, host_rate);
+                            // Only the region heard just before can crossfade:
+                            // a muted or offline neighbour leaves a plain edge.
+                            if let Some((pre, post)) = index
+                                .checked_sub(1)
+                                .and_then(|i| crossfade_window(audible[i].0, audible[i].1, region, meta, spb))
+                            {
+                                playing.xfade_pre = pre * host_rate as f64;
+                                playing.xfade_post = post * host_rate as f64;
+                            }
                             playing.locks = region
                                 .locks
                                 .iter()
@@ -870,7 +1034,7 @@ impl App {
                                     Some((index as u16, lock.value))
                                 })
                                 .collect();
-                            Some(playing)
+                            playing
                         })
                         .collect(),
                     lock_params: key.lock_params.clone(),
@@ -942,10 +1106,29 @@ impl App {
                 .audio_lanes
                 .iter()
                 .map(|lane| {
+                    // The crossfade each region makes with the one before.
+                    let crossfades: Vec<Option<(f64, f64)>> = (0..lane.len())
+                        .map(|index| {
+                            let prev = lane.get(index.checked_sub(1)?)?;
+                            let next = &lane[index];
+                            crossfade_window(
+                                prev,
+                                arrangement.audio_source(prev.source)?,
+                                next,
+                                arrangement.audio_source(next.source)?,
+                                spb,
+                            )
+                        })
+                        .collect();
                     lane.iter()
-                        .filter_map(|region| {
+                        .enumerate()
+                        .filter_map(|(index, region)| {
                             let meta = arrangement.audio_source(region.source)?;
                             let rate = meta.sample_rate.max(1) as f64;
+                            let beats = |seconds: f64| seconds / spb;
+                            let crossfade = crossfades[index].map(|(pre, post)| (beats(pre), beats(post)));
+                            let crossfade_next_pre =
+                                crossfades.get(index + 1).copied().flatten().map(|(pre, _)| beats(pre));
                             Some(AudioRegionView {
                                 id: region.id.0,
                                 start_beat: region.start_beat,
@@ -958,6 +1141,12 @@ impl App {
                                 gain_db: region.gain_db,
                                 fade_in_seconds: region.fade_in_seconds,
                                 fade_out_seconds: region.fade_out_seconds,
+                                fade_in_beats: beats(region.fade_in_seconds as f64),
+                                fade_out_beats: beats(region.fade_out_seconds as f64),
+                                fade_in_curve: region.fade_in_curve,
+                                fade_out_curve: region.fade_out_curve,
+                                crossfade,
+                                crossfade_next_pre,
                                 muted: region.muted,
                                 loaded: self.audio_tracks.pcm.contains_key(&meta.file),
                                 transpose: region.transpose,
@@ -1041,6 +1230,40 @@ pub(super) fn ripple_audio_lane_right(
     Ok(())
 }
 
+/// [`crossfade_room`] of two regions in `arrangement`, as timeline seconds.
+fn room(
+    arrangement: &ProjectArrangement,
+    prev: &AudioRegion,
+    next: &AudioRegion,
+    seconds_per_beat: f64,
+) -> Result<(f32, f32), String> {
+    let (pre, post) = crossfade_room(
+        prev,
+        arrangement.region_source(prev)?,
+        next,
+        arrangement.region_source(next)?,
+        seconds_per_beat,
+    );
+    Ok((pre as f32, post as f32))
+}
+
+/// Make `[edge - pre, edge + post]` the crossfade between `prev` and `next`;
+/// it replaces their plain fades at that edge.
+fn set_crossfade(
+    arrangement: &mut ProjectArrangement,
+    prev: ClipId,
+    next: ClipId,
+    pre: f32,
+    post: f32,
+) -> Result<(), String> {
+    region_mut(arrangement, prev)?.fade_out_seconds = 0.0;
+    let after = region_mut(arrangement, next)?;
+    after.fade_in_seconds = 0.0;
+    after.crossfade_pre_seconds = pre.max(0.0);
+    after.crossfade_post_seconds = post.max(0.0);
+    Ok(())
+}
+
 /// A region `id`, mutably, or an error naming it.
 fn region_mut(arrangement: &mut ProjectArrangement, id: ClipId) -> Result<&mut AudioRegion, String> {
     arrangement
@@ -1084,7 +1307,7 @@ fn place_region_in(
 }
 
 fn playback_region(region: &AudioRegion, pcm: &Arc<SourcePcm>, host_rate: f32) -> PlaybackRegion {
-    let fade = |seconds: f32| (seconds as f64 * host_rate as f64).max(DECLICK_FRAMES);
+    let fade = |seconds: f32| seconds.max(0.0) as f64 * host_rate as f64;
     PlaybackRegion {
         start_beat: region.start_beat,
         end_beat: region.end_beat,
@@ -1094,6 +1317,10 @@ fn playback_region(region: &AudioRegion, pcm: &Arc<SourcePcm>, host_rate: f32) -
         gain: 10f32.powf(region.gain_db / 20.0),
         fade_in: fade(region.fade_in_seconds),
         fade_out: fade(region.fade_out_seconds),
+        fade_in_power: fade_curve_power(region.fade_in_curve),
+        fade_out_power: fade_curve_power(region.fade_out_curve),
+        xfade_pre: 0.0,
+        xfade_post: 0.0,
         pcm: Arc::clone(pcm),
         locks: Vec::new(),
     }

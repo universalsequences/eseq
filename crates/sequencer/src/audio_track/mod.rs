@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use crate::audiograph::NodeVTable;
 use crate::instruments::sample_core;
-use crate::sequencer::{SongPositionShared, SongRenderMapping};
+use crate::sequencer::{crossfade_gains, fade_shape, SongPositionShared, SongRenderMapping};
 
 /// Shortest fade at every region edge and on transport start/stop, so no
 /// edge ever clicks (about 1.5 ms at 44.1 kHz).
@@ -59,9 +59,20 @@ pub struct PlaybackRegion {
     /// `[start, end)` source frames the region loops over, if it loops.
     pub loop_window: Option<(f64, f64)>,
     pub gain: f32,
-    /// Host frames of fade at each edge, at least [`DECLICK_FRAMES`].
+    /// Host frames of fade at each edge (0: none); every edge also gets a
+    /// [`DECLICK_FRAMES`] ramp.
     pub fade_in: f64,
     pub fade_out: f64,
+    /// Fade shapes as ramp exponents (`fade_curve_power`).
+    pub fade_in_power: f32,
+    pub fade_out_power: f32,
+    /// The crossfade with the region before this one (which ends where this
+    /// starts): host frames of the window before and after this region's
+    /// start, both 0 for none. Over the window the previous region keeps
+    /// playing past its end and this one pre-rolls before its start, their
+    /// gains following `crossfade_gains`.
+    pub xfade_pre: f64,
+    pub xfade_post: f64,
     pub pcm: Arc<SourcePcm>,
     /// `(index into AudioTrackPlayback::lock_params, value)` this region
     /// locks.
@@ -119,18 +130,70 @@ impl AudioTrackPlayback {
         let region = &self.regions[index];
         let since_start = (beat - region.start_beat) / beats_per_sample;
         let until_end = (region.end_beat - beat) / beats_per_sample;
-        let envelope = (since_start / region.fade_in)
-            .min(until_end / region.fade_out)
-            .clamp(0.0, 1.0) as f32;
-        let mut position = region.source_offset + since_start * region.step;
-        if let Some((start, end)) = region.loop_window {
+        let (mut left, mut right) = (0.0, 0.0);
+        let mut envelope = 1.0f32;
+        // The head: a crossfade with the region before, else the fade-in.
+        let crossfade_in = region.crossfade_frames() > 0.0 && index > 0;
+        if crossfade_in && since_start < region.xfade_post {
+            let (outgoing, incoming) =
+                crossfade_gains((since_start + region.xfade_pre) / region.crossfade_frames());
+            envelope *= incoming;
+            let (l, r) = self.regions[index - 1].voice_at(beat, beats_per_sample);
+            left += l * outgoing;
+            right += r * outgoing;
+        } else if !crossfade_in {
+            envelope *= edge_gain(since_start, region.fade_in, region.fade_in_power);
+        }
+        // The tail: a crossfade into the region after, else the fade-out.
+        match self.regions.get(index + 1).filter(|next| next.crossfade_frames() > 0.0) {
+            Some(next) => {
+                if until_end < next.xfade_pre {
+                    let (outgoing, incoming) =
+                        crossfade_gains((next.xfade_pre - until_end) / next.crossfade_frames());
+                    envelope *= outgoing;
+                    let (l, r) = next.voice_at(beat, beats_per_sample);
+                    left += l * incoming;
+                    right += r * incoming;
+                }
+            }
+            None => envelope *= edge_gain(until_end, region.fade_out, region.fade_out_power),
+        }
+        let (l, r) = region.voice_at(beat, beats_per_sample);
+        (left + l * envelope, right + r * envelope)
+    }
+}
+
+/// The level `distance` host frames into an edge fade of `length` frames
+/// shaped by `power`, always under a [`DECLICK_FRAMES`] ramp.
+fn edge_gain(distance: f64, length: f64, power: f32) -> f32 {
+    let declick = (distance / DECLICK_FRAMES).clamp(0.0, 1.0) as f32;
+    // Past the fade (most frames) the shape is 1: no `powf` per sample.
+    if length > distance {
+        declick * fade_shape(distance / length, power)
+    } else {
+        declick
+    }
+}
+
+impl PlaybackRegion {
+    /// Host frames of its crossfade with the region before (0: none).
+    fn crossfade_frames(&self) -> f64 {
+        self.xfade_pre + self.xfade_post
+    }
+
+    /// What the region's source plays at `beat` at its clip gain, before
+    /// any envelope. A crossfade reads it past either edge; there is
+    /// silence where the source has no audio.
+    fn voice_at(&self, beat: f64, beats_per_sample: f64) -> (f32, f32) {
+        let since_start = (beat - self.start_beat) / beats_per_sample;
+        let mut position = self.source_offset + since_start * self.step;
+        if let Some((start, end)) = self.loop_window {
             if position >= end {
                 position = start + (position - end).rem_euclid(end - start);
             }
         }
-        let (left, right) = sample_core::read_stereo_at(&region.pcm.samples, position);
-        let gain = region.gain * envelope;
-        (left * gain, right * gain)
+        let (left, right) = sample_core::read_stereo_at(&self.pcm.samples, position);
+        (left * self.gain, right * self.gain)
     }
 }
 

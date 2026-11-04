@@ -683,6 +683,15 @@ impl HostKinds {
                     ("gain", number(region.gain_db)),
                     ("fade-in", number(region.fade_in_seconds)),
                     ("fade-out", number(region.fade_out_seconds)),
+                    ("fade-in-beats", number(region.fade_in_beats)),
+                    ("fade-out-beats", number(region.fade_out_beats)),
+                    ("fade-in-curve", number(region.fade_in_curve)),
+                    ("fade-out-curve", number(region.fade_out_curve)),
+                    // The crossfade with the region before (beats before /
+                    // after this start), and where the next one's begins.
+                    ("xfade-pre", region.crossfade.map_or(Value::Nil, |(pre, _)| number(pre))),
+                    ("xfade-post", region.crossfade.map_or(Value::Nil, |(_, post)| number(post))),
+                    ("xfade-next", region.crossfade_next_pre.map_or(Value::Nil, number)),
                     ("muted", Value::Bool(region.muted)),
                     ("loaded", Value::Bool(region.loaded)),
                     ("pitch", number(region.transpose)),

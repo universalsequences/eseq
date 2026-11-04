@@ -5,7 +5,7 @@
 
 use crate::*;
 
-use sequencer::app::audio_tracks::{AudioRegionPatch, Place};
+use sequencer::app::audio_tracks::{AudioRegionPatch, FadeHandle, Place};
 use sequencer::sequencer::ClipId;
 
 use super::song::{clip_ids, payload_map, require_number, require_whole};
@@ -14,12 +14,15 @@ use crate::history_commands::map_bool;
 pub(super) const COMMANDS: &[&str] = &[
     "audio-regions-drop",
     "audio-region-move",
+    "audio-regions-move",
     "audio-region-resize",
     "audio-region-split",
     "audio-region-duplicate",
     "audio-regions-delete",
     "audio-region-set",
     "audio-region-set-window",
+    "audio-region-fade",
+    "audio-region-fade-end",
     "audio-regions-paste",
     "audio-lock-select",
 ];
@@ -90,6 +93,11 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                 Ok("Moved audio region".to_string())
             }
         }
+        "audio-regions-move" => {
+            let ids = clip_ids(map)?;
+            app.audio_regions_move(&ids, require_number(map, "delta")?)?;
+            Ok(format!("Moved {} audio region(s)", ids.len()))
+        }
         "audio-region-resize" => {
             let id = region_id(map)?;
             app.audio_region_resize(id, require_number(map, "start")?, require_number(map, "end")?)?;
@@ -143,6 +151,22 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                 map_bool(map, "live"),
             )?;
             Ok("Audio clip window set".to_string())
+        }
+        "audio-region-fade" => {
+            let id = region_id(map)?;
+            let handle = match map.get("handle").map(|cell| cell.borrow().clone()) {
+                Some(Value::Keyword(name)) | Some(Value::String(name)) => FadeHandle::parse(&name),
+                _ => None,
+            }
+            .ok_or_else(|| "audio-region-fade needs a :handle".to_string())?;
+            app.audio_region_fade(id, handle, require_number(map, "value")?, map_bool(map, "live"))?;
+            Ok("Audio fade set".to_string())
+        }
+        // A released fade handle: the next drag of the same region's fades is
+        // its own undo step.
+        "audio-region-fade-end" => {
+            sequencer::app::edit::finish_active_gesture(app);
+            Ok("Audio fade set".to_string())
         }
         "audio-lock-select" => {
             let ids = clip_ids(map)?;
