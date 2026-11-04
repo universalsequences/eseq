@@ -63,6 +63,22 @@ fn node_accepts_drag_type(node: &LayoutNode, drag_type: &str) -> bool {
             .is_some_and(|value| list_contains_string(value, drag_type))
 }
 
+/// The event `:on-drop` (and `:on-drag-over`) hears for a drag over
+/// `target` at its local `(hit_col, hit_row)`.
+fn drop_event(
+    target: &LayoutNode,
+    drag_type: &str,
+    payload: Value,
+    hit_col: f32,
+    hit_row: f32,
+) -> Value {
+    if target.widget_type == "tree" {
+        widget_render::tree::tree_drop_info(target, drag_type, payload, hit_col, hit_row)
+    } else {
+        widget_render::box_widget::box_drop_info(target, drag_type, payload, hit_col, hit_row)
+    }
+}
+
 fn deepest_drop_target(
     node: &LayoutNode,
     row: f32,
@@ -2203,18 +2219,9 @@ impl Editor {
             "widget-drop: dispatch drag_type={drag_type}; target_type={}; target_key={:?}; payload={payload:?}",
             target.widget_type, target.stable_key
         );
-        let event = if target.widget_type == "tree" {
-            crate::widget_render::tree::tree_drop_info(
-                &target, &drag_type, payload, hit_col, hit_row,
-            )
-        } else {
-            crate::widget_render::box_widget::box_drop_info(
-                &target, &drag_type, payload, hit_col, hit_row,
-            )
-        };
         Some(crate::widget_render::EventOutput {
             callback,
-            args: vec![event],
+            args: vec![drop_event(&target, &drag_type, payload, hit_col, hit_row)],
         })
     }
 
@@ -2274,7 +2281,7 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
     ) -> bool {
-        let Some((drag_type, _)) = active_widget_drag(gesture) else {
+        let Some((drag_type, payload)) = active_widget_drag(gesture) else {
             widget_render::set_drop_hover_target(None);
             self.widget_cursor = WidgetCursor::Default;
             return false;
@@ -2283,15 +2290,25 @@ impl Editor {
             let local_col = precise_col - content_col as f32 + self.widget_layout_scroll_left();
             let local_row = precise_row - content_row as f32 + self.total_scroll_top();
             deepest_drop_target(layout, local_row, local_col, &drag_type)
-                .map(|(target, _, _)| target)
         });
         let allowed = target.is_some();
-        widget_render::set_drop_hover_target(target.map(|node| node.widget_id));
+        widget_render::set_drop_hover_target(target.as_ref().map(|(node, _, _)| node.widget_id));
         self.widget_cursor = if allowed {
             WidgetCursor::DragCopy
         } else {
             WidgetCursor::DragNotAllowed
         };
+        // `:on-drag-over` hears every move over the target with the event
+        // `:on-drop` would get there, so it can preview the drop. The preview
+        // is the host's to draw only while the target is hovered.
+        if let Some((node, hit_row, hit_col)) = target
+            && let Some(callback) = node.props.get("on-drag-over").cloned()
+        {
+            self.apply_widget_output(Some(crate::widget_render::EventOutput {
+                callback,
+                args: vec![drop_event(&node, &drag_type, payload, hit_col, hit_row)],
+            }));
+        }
         self.mark_needs_redraw();
         allowed
     }

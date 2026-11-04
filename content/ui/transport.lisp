@@ -1155,6 +1155,16 @@
           :on-click |x y r| (toggle! transport.metronome)
           (v-stack :align :center
             (pill-label "MET" #'transport.metronome))))
+      ;; The arrangement's loop (Ableton's loop switch): playback wraps
+      ;; inside the ruler's loop brace while on.
+      (subtree :key "transport-loop-toggle"
+        (box :debug-name "transport-loop-toggle"
+          :width 3.6 :height 1.0
+          :v-align :center
+          :background "pattern-pill-bg"
+          :on-click |x y r| (toggle! song.loop)
+          (v-stack :align :center
+            (pill-label "LOOP" #'song.loop))))
       ;; Roll mode (docs/rolling-core-spec.md 8): toggle + live rate
       ;; display. Rate keys 1-8 switch the rate while roll mode is on.
       (subtree :key "transport-roll-toggle"

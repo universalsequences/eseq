@@ -145,12 +145,7 @@ impl AudioTrackRuntime {
 
     fn insert_pcm(&mut self, meta: &AudioSourceMeta, stereo: Vec<f32>, sample_rate: u32) {
         let path = self.store_dir().join(&meta.file);
-        // A stereo file draws as two waveforms; a mono one (folded to two
-        // equal channels for playback) as one.
-        if meta.channels >= 2 {
-            eseqlisp::audio::sample::SampleBuffer::register_channels(&path, sample_rate, 2, &stereo);
-        }
-        eseqlisp::audio::sample::SampleBuffer::from_pcm(path, sample_rate, 2, stereo.clone()).register();
+        eseqlisp::audio::sample::SampleBuffer::register_stereo(&path, sample_rate, meta.channels, stereo.clone());
         self.pcm.insert(
             meta.file.clone(),
             Arc::new(SourcePcm { samples: stereo.into_boxed_slice(), sample_rate }),

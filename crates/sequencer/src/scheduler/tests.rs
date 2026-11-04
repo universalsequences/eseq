@@ -13528,6 +13528,7 @@
             rows,
             end_beat,
             loop_enabled,
+            loop_range: None,
             next_row_id,
         }));
     }
@@ -14418,27 +14419,131 @@
             "{notices:?}"
         );
 
-        let (wrapped, notices) = exercise(true);
-        assert!(matches!(
-            wrapped,
-            crate::sequencer::SongChunkPlan::Schedule {
-                wrapped: true,
-                ..
-            }
-        ));
+        // A loop end that lands behind the playhead never wraps it (the
+        // loop brace rule: wraps happen only when the playhead reaches the
+        // end), so the shrunk song ends here too.
+        let (looped, notices) = exercise(true);
+        assert!(matches!(looped, crate::sequencer::SongChunkPlan::Ended), "{notices:?}");
         assert!(
-            notices.iter().any(|notice| matches!(
+            !notices.iter().any(|notice| matches!(
                 notice,
-                crate::sequencer::SongPlaybackNotice::RowApplied(applied)
-                    if applied.wrapped && applied.effective_beat == 0.0
+                crate::sequencer::SongPlaybackNotice::RowApplied(applied) if applied.wrapped
             )),
             "{notices:?}"
         );
+    }
+
+    #[test]
+    fn song_loop_wraps_inside_the_loop_brace() {
+        let (state, _) = song_mode_fixture();
+        state.set_committed_song(Some(crate::sequencer::ProjectSong {
+            rows: vec![
+                song_mode_row(0, 0.0, 0, Vec::new()),
+                song_mode_row(1, 4.0, 1, Vec::new()),
+            ],
+            end_beat: 12.0,
+            loop_enabled: true,
+            loop_range: Some((2.0, 6.0)),
+            next_row_id: 2,
+        }));
+        let song = state.preflight_runtime_song().expect("preflight");
+        let spq = 24_000.0;
+        let mailbox = state.song_playback();
+
+        let mut runtime =
+            crate::sequencer::SongPlaybackRuntime::new(Arc::clone(&song), 0.0, spq).expect("runtime");
+        // Chunks stop at the row boundary (4) and then at the loop end (6).
+        let mut at = 0u64;
+        let mut clock = 0.0;
+        let mut wraps = Vec::new();
+        for _ in 0..6 {
+            match runtime.next_chunk(at, clock, 48_000, mailbox) {
+                crate::sequencer::SongChunkPlan::Schedule { frames, wrapped, .. } => {
+                    if wrapped {
+                        wraps.push(at);
+                        clock = 0.0;
+                    }
+                    at += frames as u64;
+                    clock += frames as f64 / spq;
+                }
+                crate::sequencer::SongChunkPlan::Ended => panic!("a looping song never ends"),
+            }
+        }
+        assert_eq!(wraps.first(), Some(&(6 * 24_000)), "the first wrap is at the loop end");
+        let applied: Vec<(f64, bool)> = mailbox
+            .drain_notices()
+            .into_iter()
+            .filter_map(|notice| match notice {
+                crate::sequencer::SongPlaybackNotice::RowApplied(a) => Some((a.effective_beat, a.wrapped)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(&applied[..3], &[(0.0, false), (4.0, false), (2.0, true)], "{applied:?}");
+        let position = mailbox.shared().position_beats(6 * 24_000 + 12_000).expect("active");
+        assert!((position - 2.5).abs() < 1e-6, "half a beat past the wrap: {position}");
+
+        // Started past the loop end: no wrap, the song plays on.
+        let mut runtime =
+            crate::sequencer::SongPlaybackRuntime::new(Arc::clone(&song), 8.0, spq).expect("runtime");
+        runtime.set_open_ended(true);
+        for step in 0..4 {
+            match runtime.next_chunk(step * 24_000, step as f64, 24_000, mailbox) {
+                crate::sequencer::SongChunkPlan::Schedule { wrapped, .. } => assert!(!wrapped),
+                crate::sequencer::SongChunkPlan::Ended => panic!("open-ended"),
+            }
+        }
+    }
+
+    /// Editing the brace mid-pass takes effect at once and in time: the
+    /// shared position (UI playhead, audio tracks) switches to the new loop
+    /// on the next chunk, the wrap lands exactly on the new end, and an end
+    /// moved behind the playhead lets it play straight on.
+    #[test]
+    fn a_loop_brace_edit_mid_pass_wraps_at_the_new_end_at_once() {
+        let (state, _) = song_mode_fixture();
+        let commit = |range: (f64, f64)| {
+            state.set_committed_song(Some(crate::sequencer::ProjectSong {
+                rows: vec![song_mode_row(0, 0.0, 0, Vec::new())],
+                end_beat: 32.0,
+                loop_enabled: true,
+                loop_range: Some(range),
+                next_row_id: 1,
+            }));
+            state.preflight_runtime_song().expect("preflight")
+        };
+        let spq = 24_000.0;
+        let mailbox = state.song_playback();
+        let mut runtime =
+            crate::sequencer::SongPlaybackRuntime::new(commit((0.0, 16.0)), 0.0, spq).expect("runtime");
+        // Play to beat 2, then shorten the brace to end at beat 4.
+        for beat in 0..2u64 {
+            runtime.next_chunk(beat * 24_000, beat as f64, 24_000, mailbox);
+        }
+        runtime.rebuild_song(commit((1.0, 4.0)), 2.0);
+        let plan = runtime.next_chunk(2 * 24_000, 2.0, 96_000, mailbox);
         assert!(
-            !notices
-                .iter()
-                .any(|notice| matches!(notice, crate::sequencer::SongPlaybackNotice::Ended { .. }))
+            matches!(plan, crate::sequencer::SongChunkPlan::Schedule { frames: 48_000, .. }),
+            "the chunk stops at the new loop end: {plan:?}"
         );
+        let shared = mailbox.shared();
+        let after_end = shared.position_beats(4 * 24_000 + 6_000).expect("active");
+        assert!((after_end - 1.25).abs() < 1e-6, "the playhead wraps at the new end: {after_end}");
+        let plan = runtime.next_chunk(4 * 24_000, 4.0, 24_000, mailbox);
+        assert!(matches!(plan, crate::sequencer::SongChunkPlan::Schedule { wrapped: true, .. }));
+
+        // Back in the loop (song beat 2 after the wrap to 1): move the brace
+        // behind the head, which is at beat 3 by the next chunk.
+        runtime.next_chunk(5 * 24_000, 1.0, 24_000, mailbox);
+        runtime.rebuild_song(commit((0.0, 2.0)), 2.0);
+        for step in 0..4u64 {
+            let plan = runtime.next_chunk((6 + step) * 24_000, 2.0 + step as f64, 24_000, mailbox);
+            assert!(
+                matches!(plan, crate::sequencer::SongChunkPlan::Schedule { wrapped: false, .. }),
+                "a brace behind the head never wraps it: {plan:?}"
+            );
+        }
+        let on = shared.position_beats(9 * 24_000).expect("active");
+        assert!(on > 4.0, "plays straight on: {on}");
     }
 
     #[test]

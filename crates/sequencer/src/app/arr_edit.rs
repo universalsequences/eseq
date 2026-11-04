@@ -1360,6 +1360,24 @@ impl App {
             Ok(())
         })
     }
+
+    /// Move or resize the loop brace to `[start, end)` (validated by the
+    /// arrangement: finite, from beat 0 on, non-empty), turning looping on or
+    /// off with it when `enabled` says so (Loop Selection), in one undo step.
+    pub fn arr_set_loop_range(
+        &mut self,
+        start: f64,
+        end: f64,
+        enabled: Option<bool>,
+    ) -> Result<(), String> {
+        self.edit_arrangement("Set loop", move |arrangement, _scenes| {
+            arrangement.loop_range = Some((start, end));
+            if let Some(enabled) = enabled {
+                arrangement.loop_enabled = enabled;
+            }
+            Ok(())
+        })
+    }
 }
 
 impl App {
@@ -1467,9 +1485,10 @@ impl App {
                 scenes,
             )
         })?;
-        // Rows say nothing about audio or scene pushes: those lanes (and the
-        // audio sources) carry over unchanged.
+        // Rows say nothing about audio, scene pushes or the loop brace: those
+        // lanes (and the audio sources) and the brace carry over unchanged.
         if let Some(before) = &before {
+            arrangement.loop_range = before.loop_range;
             arrangement.audio_lanes = before.audio_lanes.clone();
             arrangement.push_lane = before.push_lane.clone();
             arrangement.inherit_audio_sources(before);
@@ -1645,6 +1664,7 @@ mod tests {
             rack_lanes: std::collections::BTreeMap::new(),
             end_beat: 16.0,
             loop_enabled: true,
+            loop_range: None,
             next_clip_id: 1,
         audio_lanes: Vec::new(),
         audio_sources: std::collections::BTreeMap::new(),
@@ -1755,6 +1775,7 @@ mod tests {
             }],
             end_beat: 16.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 1,
         };
         app.state.set_committed_song(Some(song.clone()));
@@ -1788,6 +1809,7 @@ mod tests {
             rack_lanes: std::collections::BTreeMap::new(),
             end_beat: 16.0,
             loop_enabled: false,
+            loop_range: None,
             next_clip_id: 1,
         audio_lanes: Vec::new(),
         audio_sources: std::collections::BTreeMap::new(),
@@ -1891,6 +1913,7 @@ mod tests {
                 .collect(),
             end_beat,
             loop_enabled,
+            loop_range: None,
             next_row_id: rows.len() as u64,
         }
     }

@@ -16,6 +16,7 @@ use crate::theme;
 use crate::vm::Value;
 
 mod fades;
+mod loop_brace;
 
 const ALIGNMENT_HELPER_BACKWARD_SNAP_PROXIMITY: f64 = 0.25;
 
@@ -259,6 +260,8 @@ struct TimelineView {
     /// candidate. Crowded candidates are promoted to a readable aligned
     /// interval; the resolved interval drives both drawing and `:grid` snaps.
     grid_density: f64,
+    /// `:fine-grid`: the zoomed-in grid density at every zoom.
+    fine_grid: bool,
     content_length: Option<f64>,
     content_length_min: f64,
     content_length_max: f64,
@@ -304,6 +307,13 @@ struct TimelineView {
     item_content_color: crate::backend::Color,
     loop_color: crate::backend::Color,
     loop_visible: bool,
+    /// `:loop-brace`: the band row draws the loop brace instead of the
+    /// content-length band (see `loop_brace`).
+    loop_brace: Option<loop_brace::LoopBrace>,
+    /// `:open-ended`: the time past `:content-length` is neither shaded nor
+    /// a limit for item drags (the arrangement, where a clip landing past
+    /// the song end extends the song).
+    open_ended: bool,
     border_top_color: crate::backend::Color,
     border_bottom_color: crate::backend::Color,
     border_width: f32,
@@ -368,6 +378,7 @@ enum SelectionRectStyle {
 enum HitRegion {
     Header,
     ContentLengthEnd,
+    LoopBrace(loop_brace::BracePart),
     Sidebar {
         lane: usize,
     },
@@ -629,16 +640,19 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
             "zoom-max-duration", "playhead-time", "cursor-time", "time-ruler", "header-height",
             "header-bottom-gutter", "sidebar-width", "sidebar-style", "tool", "snap", "snap-mode",
             "resize-snap", "resize-snap-mode", "move-snap-mode", "marquee-snap", "min-duration",
-            "create-duration", "grid-density", "content-length", "content-length-min",
+            "create-duration", "grid-density", "fine-grid", "content-length", "content-length-min",
             "content-length-max", "selection", "selection-rect", "selection-rect-style",
             "double-click-items", "band-slide", "window-marker", "window-span", "window-repeat",
             "lane-scroll", "lane-height", "scroll-viewport-height", "scroll-mode",
             "scroll-passthrough", "title-bar-height", "item-corner-radius", "item-color",
             "item-label-color", "item-label-font-size", "item-content-color", "loop-color",
-            "loop-visible", "cursor-color", "cursor-marker-visible", "cursor-line-visible",
+            "loop-visible", "loop-brace", "loop-start", "loop-end", "loop-on",
+            "open-ended", "cursor-color", "cursor-marker-visible", "cursor-line-visible",
             "cursor-marker-scale", "cursor-marker-width-scale", "cursor-marker-height-scale",
             "background-color", "border-top-color", "border-bottom-color", "border-width",
-            "placement-active", "placement-item", "lane-key", "cursor-lane", "selected-id",
+            "placement-active", "placement-item", "drop-ghost-start", "drop-ghost-end",
+            "drop-ghost-lane", "drop-ghost-color", "drop-ghost-sample",
+            "drop-ghost-seconds", "drop-ghost-generation", "on-drag-over", "lane-key", "cursor-lane", "selected-id",
             "selected-lane", "bound-id", "bound-lane", "ghost-kind", "ghost-id", "ghost-time",
             "ghost-lane-a", "ghost-lane-b", "ghost-region-a", "ghost-region-b", "region-a",
             "region-b", "region-on", "region-lane-a", "region-lane-b", "focusable", "width",
@@ -688,6 +702,18 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
             "ghost-lane-b",
             "region-lane-a",
             "region-lane-b",
+            // The loop brace (`loop_brace`), live while it is dragged.
+            "loop-start",
+            "loop-end",
+            "loop-on",
+            // A dragged sample's landing preview (`drop_ghost_item`).
+            "drop-ghost-start",
+            "drop-ghost-end",
+            "drop-ghost-lane",
+            "drop-ghost-sample",
+            "drop-ghost-seconds",
+            // Bumped as the preview decodes, so the waveform fills in.
+            "drop-ghost-generation",
         ]
     }
 
@@ -1027,8 +1053,13 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
         match view.hit_test(local_col, local_row) {
             Some(HitRegion::ItemEdgeEnd { .. })
             | Some(HitRegion::ItemEdgeStart { .. })
-            | Some(HitRegion::ContentLengthEnd) => super::WidgetCursor::EwResize,
-            Some(HitRegion::ItemTitleBar { .. }) => super::WidgetCursor::Grab,
+            | Some(HitRegion::ContentLengthEnd)
+            | Some(HitRegion::LoopBrace(loop_brace::BracePart::Start | loop_brace::BracePart::End)) => {
+                super::WidgetCursor::EwResize
+            }
+            Some(HitRegion::ItemTitleBar { .. }) | Some(HitRegion::LoopBrace(_)) => {
+                super::WidgetCursor::Grab
+            }
             _ => super::WidgetCursor::Default,
         }
     }
@@ -1149,6 +1180,62 @@ fn pixel_snapped_view_start(view: &TimelineView, cell_w: f32) -> f64 {
     (view.view_start * pixels_per_time).round() / pixels_per_time
 }
 
+/// The host's drop preview (`:drop-ghost-start`..`:drop-ghost-end` on lane
+/// `:drop-ghost-lane`, tinted `:drop-ghost-color`), drawn as a translucent
+/// item only while a drag hovers this timeline as its drop target.
+fn drop_ghost_item(node: &LayoutNode, fallback: crate::backend::Color) -> Option<TimelineItem> {
+    if !super::drop_target_hovered(node.widget_id)
+        || !lane_owns(&node.props, "drop-ghost-lane", "drop-ghost-lane")
+    {
+        return None;
+    }
+    let start = get_num(&node.props, "drop-ghost-start", f64::NAN);
+    let end = get_num(&node.props, "drop-ghost-end", f64::NAN);
+    if !(start.is_finite() && end > start) {
+        return None;
+    }
+    let mut fields = vec![
+        ("id", Value::Number(-1.0)),
+        ("lane", Value::Number(0.0)),
+        ("start", Value::Number(start)),
+        ("end", Value::Number(end)),
+    ];
+    if let Some(color) = node.props.get("drop-ghost-color") {
+        fields.push(("color", color.clone()));
+    }
+    // `:drop-ghost-sample` names a drag preview the host is decoding
+    // (`audio::sample::drag_preview_key`); its waveform spans
+    // `:drop-ghost-seconds` and draws as much as has decoded.
+    let preview = get_num(&node.props, "drop-ghost-sample", -1.0);
+    let seconds = get_num(&node.props, "drop-ghost-seconds", 0.0);
+    if preview >= 0.0 && seconds > 0.0 {
+        fields.push((
+            "content",
+            map_value(vec![
+                (
+                    "sample",
+                    Value::String(crate::audio::sample::drag_preview_key(preview as u64)),
+                ),
+                ("offset", Value::Number(0.0)),
+                ("span", Value::Number(seconds)),
+            ]),
+        ));
+    }
+    let mut preview = item_from_value(map_value(fields))?;
+    preview.color = Some(ghost_tint(preview.color.unwrap_or(fallback)));
+    Some(preview)
+}
+
+/// One item map parsed as `:items` parses each.
+fn item_from_value(item: Value) -> Option<TimelineItem> {
+    get_items(&HashMap::from([("items".to_string(), list_value(vec![item]))])).into_iter().next()
+}
+
+/// A preview item's see-through tint.
+fn ghost_tint(color: crate::backend::Color) -> crate::backend::Color {
+    crate::backend::Color { a: 0.5, ..color }
+}
+
 fn build_primitives(
     node: &LayoutNode,
     viewport: super::WidgetViewport,
@@ -1165,21 +1252,23 @@ fn build_primitives(
         let time = TIMELINE_PLACEMENT.with(|state| state.borrow()
             .filter(|(id, _)| *id == node.widget_id).map(|(_, time)| time));
         if let (Some(time), Some(item)) = (time, node.props.get("placement-item")) {
-            let props = HashMap::from([("items".to_string(), list_value(vec![item.clone()]))]);
-            if let Some(mut preview) = get_items(&props).into_iter().next() {
+            if let Some(mut preview) = item_from_value(item.clone()) {
                 let duration = preview.end - preview.start;
                 preview.start = time;
                 preview.end = time + duration;
                 let overlaps = view.items.iter().any(|item|
                     item.end > preview.start && item.start < preview.end);
-                let mut color = if overlaps {
+                preview.color = Some(ghost_tint(if overlaps {
                     crate::backend::Color::from_hex(0xee, 0x55, 0x55)
-                } else { preview.color.unwrap_or(view.item_color) };
-                color.a = 0.5;
-                preview.color = Some(color);
+                } else {
+                    preview.color.unwrap_or(view.item_color)
+                }));
                 view.items.push(preview);
             }
         }
+    }
+    if let Some(preview) = drop_ghost_item(node, view.item_color) {
+        view.items.push(preview);
     }
     view.view_start = pixel_snapped_view_start(&view, viewport.cell_w);
     let content = view.content_rect();
@@ -1187,7 +1276,14 @@ fn build_primitives(
 
     if view.header_height > 0.0 {
         let header_chrome_height = (view.header_height - view.header_bottom_gutter).max(0.0);
-        let loop_band = if header_chrome_height > 0.2 {
+        // The brace's row, kept while the brace scrolls out of view so the
+        // ruler ticks keep their height.
+        let brace_row = view
+            .loop_brace
+            .filter(|_| header_chrome_height > 0.2)
+            .and_then(|_| view.loop_band_rows())
+            .map(|(top, bottom)| (top, bottom - top));
+        let loop_band = if header_chrome_height > 0.2 && view.loop_brace.is_none() {
             view.loop_band_rect().map(|(x, width)| {
                 let y = rect.row + (header_chrome_height * 0.55).min(header_chrome_height - 0.18);
                 let bottom_inset = 0.08_f32.min(header_chrome_height * 0.12);
@@ -1232,6 +1328,7 @@ fn build_primitives(
         // than running up the whole row.
         let tick_bottom = loop_band
             .map(|(_, y, _, _)| y)
+            .or(brace_row.map(|(y, _)| y))
             .unwrap_or(rect.row + header_chrome_height);
         let label_row = if header_chrome_height >= 1.6 {
             (tick_bottom - 0.5 - cap_rows * 0.5 - 3.0 * px_rows).max(rect.row)
@@ -1399,6 +1496,9 @@ fn build_primitives(
                 height,
                 color: border_color,
             }));
+        }
+        if let (Some(brace), Some(row)) = (view.loop_brace, brace_row) {
+            loop_brace::push_loop_brace(&mut primitives, &view, brace, row, viewport);
         }
     }
 
@@ -2867,6 +2967,7 @@ impl TimelineView {
             zoom_min_duration: self.zoom_min_duration,
             zoom_max_duration: self.zoom_max_duration,
             grid_density: self.grid_density,
+            fine_grid: self.fine_grid,
         }
     }
 
@@ -2899,6 +3000,7 @@ impl TimelineView {
             zoom_min_duration: get_num(props, "zoom-min-duration", 8.0).max(0.0001),
             zoom_max_duration: get_num(props, "zoom-max-duration", 128.0).max(0.0001),
             grid_density: get_num(props, "grid-density", 1.0).clamp(1.0, 8.0),
+            fine_grid: props.get("fine-grid").and_then(as_bool).unwrap_or(false),
             content_length: props
                 .get("content-length")
                 .and_then(as_number)
@@ -2966,6 +3068,8 @@ impl TimelineView {
             ),
             loop_color: resolve_named_color(props, "loop-color", theme::BLUE()),
             loop_visible: props.get("loop-visible").and_then(as_bool).unwrap_or(true),
+            loop_brace: loop_brace::parse(props),
+            open_ended: props.get("open-ended").and_then(as_bool).unwrap_or(false),
             border_top_color: resolve_named_color(props, "border-top-color",
                 crate::backend::Color { a: 0.0, ..theme::FG() }),
             border_bottom_color: resolve_named_color(props, "border-bottom-color",
@@ -3172,7 +3276,10 @@ impl TimelineView {
             return;
         }
         let ghost_id = get_num(props, "ghost-id", f64::NAN);
-        let max_end = self.content_length.unwrap_or(f64::INFINITY);
+        let max_end = self
+            .content_length
+            .filter(|_| !self.open_ended)
+            .unwrap_or(f64::INFINITY);
         // The host's :min-duration, as the commit honours it, not a fixed
         // beat: zoomed in, an audio region trims to a fraction of one.
         let min_span = self.minimum_duration();
@@ -3185,10 +3292,28 @@ impl TimelineView {
         };
         let old_span = (item.end - item.start).max(1e-9);
         if ghost_kind < 1.5 {
-            // Move: rigid slide, content untouched.
-            let new_start = ghost_time.max(0.0);
-            let delta = new_start - item.start;
-            item.start = new_start;
+            // Move: rigid slide, content untouched. A clip of the host's
+            // multi-selection (items flagged `:selected`) carries the rest
+            // of the selection along, as the commit will.
+            let carries_selection = item.selected;
+            let mut delta = ghost_time.max(0.0) - item.start;
+            if carries_selection {
+                // The selection moves rigidly, so its earliest clip stops at
+                // beat 0, as the commit clamps it.
+                let earliest = self
+                    .items
+                    .iter()
+                    .filter(|other| other.selected)
+                    .map(|other| other.start)
+                    .fold(f64::INFINITY, f64::min);
+                delta = delta.max(-earliest);
+                for other in self.items.iter_mut().filter(|other| other.selected) {
+                    other.start += delta;
+                    other.end += delta;
+                }
+                return;
+            }
+            item.start += delta;
             item.end += delta;
         } else if ghost_kind < 2.5 {
             // Start-edge resize: phase re-anchors by the split rule.
@@ -3239,6 +3364,9 @@ impl TimelineView {
     }
 
     fn unavailable_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        if self.open_ended {
+            return None;
+        }
         let content_length = self.content_length?;
         if content_length >= self.view_start + self.view_duration {
             return None;
@@ -3274,6 +3402,7 @@ impl TimelineView {
         if !self.loop_visible {
             return None;
         }
+
         let content_length = self.content_length?;
         if content_length <= 0.0 {
             return None;
@@ -3776,7 +3905,10 @@ impl TimelineView {
             return Some(HitRegion::Sidebar { lane });
         }
         if local_row < self.rect.row + self.header_height {
-            if self.loop_visible && self.content_length.is_some() {
+            if let Some(part) = self.loop_brace_hit(local_col, local_row) {
+                return Some(HitRegion::LoopBrace(part));
+            }
+            if self.loop_visible && self.loop_brace.is_none() && self.content_length.is_some() {
                 let content = self.content_rect();
                 let content_end = self.x_for_time(self.content_length?);
                 let edge_slop = 0.75;
@@ -3978,6 +4110,9 @@ impl TimelineView {
                 HitRegion::ContentLengthEnd => {
                     Some(map_value(vec![("kind", keyword(":resize-content-length"))]))
                 }
+                HitRegion::LoopBrace(part) => {
+                    self.loop_brace_gesture(part, self.time_at_col(local_col))
+                }
                 HitRegion::Background { .. } => Some(map_value(vec![
                     ("kind", keyword(":marquee")),
                     ("time", Value::Number(current_marquee_time)),
@@ -4089,7 +4224,7 @@ impl TimelineView {
                 | HitRegion::ItemEdgeEnd { item }
                 | HitRegion::ItemTitleBar { item }
                 | HitRegion::ItemEdgeStart { item } => Some(self.select_action(item.id, ":replace", local_col)),
-                HitRegion::ContentLengthEnd => None,
+                HitRegion::ContentLengthEnd | HitRegion::LoopBrace(_) => None,
                 HitRegion::Background { time, .. } => Some(action_map(vec![
                     ("type", keyword(":clear-selection")),
                     ("time", Value::Number(self.cursor_snap_time(time))),
@@ -4336,6 +4471,9 @@ impl TimelineView {
                     ("type", keyword(":resize-content-length")),
                     ("length", Value::Number(length)),
                 ]))
+            }
+            Some(Value::Keyword(kind)) if kind == "loop-brace" => {
+                self.loop_brace_action(&gesture, raw_time, false)
             }
             Some(Value::Keyword(kind)) if kind == "slide-band" => {
                 let anchor = as_number(gesture.get("anchor-time")?)?;
@@ -4692,6 +4830,9 @@ impl TimelineView {
                     ("type", keyword(":finish-resize-content-length")),
                     ("length", Value::Number(length)),
                 ]))
+            }
+            Some(Value::Keyword(kind)) if kind == "loop-brace" => {
+                self.loop_brace_action(&gesture, self.time_at_col(local_col), true)
             }
             // Terminal for a band slide: one action with the TOTAL delta, so
             // the host lowers the whole drag to a single undoable primitive
@@ -9918,6 +10059,7 @@ mod tests {
             Some(HitRegion::Header) => "header",
             Some(HitRegion::Sidebar { .. }) => "sidebar",
             Some(HitRegion::ContentLengthEnd) => "content-length-end",
+            Some(HitRegion::LoopBrace(_)) => "loop-brace",
             None => "none",
         }
     }
@@ -10432,6 +10574,52 @@ mod tests {
     /// `:grid-density` requests a finer initial candidate. When that would
     /// crowd the view, the shared rendering/editing grid promotes it back to
     /// a readable power-of-two interval.
+    #[test]
+    fn move_ghost_of_a_selected_item_carries_the_whole_selection() {
+        let item = |id: f64, start: f64, selected: bool| {
+            map_value_raw(vec![
+                ("id", number_value(id)),
+                ("lane", number_value(0.0)),
+                ("start", number_value(start)),
+                ("end", number_value(start + 2.0)),
+                ("selected", bool_value(selected)),
+            ])
+        };
+        let view_for_ghost = |anchor_selected: bool, ghost_id: f64, ghost_time: f64| {
+            let props = HashMap::from([
+                (
+                    "items".to_string(),
+                    list_value_raw(vec![
+                        item(1.0, 0.0, anchor_selected),
+                        item(2.0, 8.0, true),
+                        item(3.0, 16.0, false),
+                    ]),
+                ),
+                ("view-start".to_string(), number_value(0.0)),
+                ("view-duration".to_string(), number_value(64.0)),
+                ("ghost-kind".to_string(), number_value(1.0)),
+                ("ghost-id".to_string(), number_value(ghost_id)),
+                ("ghost-time".to_string(), number_value(ghost_time)),
+            ]);
+            let rect = Rect { row: 0.0, col: 0.0, width: 32.0, height: 8.0 };
+            TimelineView::from_props(&props, rect)
+        };
+        let view_for = |anchor_selected: bool| view_for_ghost(anchor_selected, 1.0, 4.0);
+        let starts = |view: &TimelineView| view.items.iter().map(|i| i.start).collect::<Vec<_>>();
+
+        assert_eq!(starts(&view_for(true)), [4.0, 12.0, 16.0], "the selection moves together");
+        assert_eq!(
+            starts(&view_for(false)),
+            [4.0, 8.0, 16.0],
+            "an unselected item moves alone"
+        );
+        assert_eq!(
+            starts(&view_for_ghost(true, 2.0, 2.0)),
+            [0.0, 8.0, 16.0],
+            "the selection stops when its earliest clip reaches beat 0"
+        );
+    }
+
     #[test]
     fn grid_density_never_crowds_or_moves_bar_lines() {
         let step_for = |density: Option<f64>, view_duration: f64| {

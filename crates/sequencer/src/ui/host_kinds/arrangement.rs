@@ -787,16 +787,20 @@ impl HostKinds {
         spans: &[SceneSpan],
     ) -> Vec<usize> {
         if let Some(song) = pusher.singleton(SONG) {
-            let (exists, end, looping) = app.state.with_committed_song(|committed| {
-                (
-                    committed.is_some(),
-                    committed.map_or(0.0, |song| song.end_beat),
-                    committed.is_some_and(|song| song.loop_enabled),
-                )
-            });
+            let (exists, end, looping, (loop_start, loop_end)) =
+                app.state.with_committed_song(|committed| {
+                    (
+                        committed.is_some(),
+                        committed.map_or(0.0, |song| song.end_beat),
+                        committed.is_some_and(|song| song.loop_enabled),
+                        committed.map_or(sequencer::sequencer::DEFAULT_LOOP_RANGE, |song| song.loop_window()),
+                    )
+                });
             pusher.push(song, f::SONG_EXISTS, Value::Bool(exists));
             pusher.push(song, f::SONG_END, number(end));
             pusher.push(song, f::SONG_LOOP, Value::Bool(looping));
+            pusher.push(song, f::SONG_LOOP_START, number(loop_start));
+            pusher.push(song, f::SONG_LOOP_END, number(loop_end));
             let spans = self.sync_spans(pusher, spans);
             pusher.push(song, f::SONG_SPANS, instance_list(spans));
         }

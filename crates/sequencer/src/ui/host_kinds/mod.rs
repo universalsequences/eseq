@@ -892,6 +892,8 @@ pub(crate) mod f {
     pub(crate) const SONG_CURSOR: FieldKey = (SONG, "cursor");
     pub(crate) const SONG_END: FieldKey = (SONG, "end");
     pub(crate) const SONG_LOOP: FieldKey = (SONG, "loop");
+    pub(crate) const SONG_LOOP_START: FieldKey = (SONG, "loop-start");
+    pub(crate) const SONG_LOOP_END: FieldKey = (SONG, "loop-end");
     pub(crate) const SONG_MANUAL_LATCH: FieldKey = (SONG, "manual-latch");
     pub(crate) const SONG_SCENE_LATCHED: FieldKey = (SONG, "scene-latched");
     pub(crate) const SONG_EDIT_ERROR: FieldKey = (SONG, "edit-error");
@@ -1498,6 +1500,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SONG_CURSOR, ":number", Model),
     (f::SONG_END, ":number", Model),
     (f::SONG_LOOP, ":bool", Model),
+    (f::SONG_LOOP_START, ":number", Model),
+    (f::SONG_LOOP_END, ":number", Model),
     (f::SONG_MANUAL_LATCH, ":bool", Live),
     (f::SONG_SCENE_LATCHED, ":bool", Live),
     (f::SONG_EDIT_ERROR, ":string", Model),

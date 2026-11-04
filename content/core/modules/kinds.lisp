@@ -1230,6 +1230,8 @@
          (cursor :number :set (song-setter "cursor") :doc "The arrangement's edit cursor (the paste target), in beats")
          (end    :number :set (song-setter "end") :doc "End beat; setting it before a clip's end or the last scene change is an error")
          (loop   :bool   :set (song-setter "loop") :doc "Playback loops")
+         (loop-start :number :doc "The loop brace's start beat; playback wraps back here while loop is on")
+         (loop-end :number :doc "The loop brace's end beat (exclusive)")
          (manual-latch :bool :set (song-setter "manual-latch")
                        :doc "Some lane (or the scene) is latched away from the song; set false for Back to Song")
          (scene-latched :bool :doc "The scene is the performer's (scene latch)")

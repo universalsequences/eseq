@@ -1062,6 +1062,7 @@ impl WaveformView {
             zoom_max_duration: self.zoom_max_duration,
             // The waveform keeps the stock grid ladder.
             grid_density: 1.0,
+            fine_grid: false,
         }
     }
 

@@ -540,6 +540,12 @@ impl App {
             // that are silent or absent in the initial scene.
             song = self.state.preflight_runtime_song()
                 .map_err(|error| format!("Export routing preflight failed: {error}"))?;
+            // An export renders the song straight through, never the loop.
+            if song.loop_enabled {
+                let mut straight = (*song).clone();
+                straight.loop_enabled = false;
+                song = Arc::new(straight);
+            }
         }
         self.state
             .start_song_playback(Arc::clone(&song), start_beat, true)

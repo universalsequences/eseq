@@ -247,6 +247,68 @@ fn cmd_e_splits_the_region_under_the_cursor() {
     assert_eq!(spans, vec![(0.0, 1.0), (1.0, 4.0)]);
 }
 
+/// Ableton: with a time selection inside a region, Cmd+E cuts at both of its
+/// ends, so the selected stretch becomes its own region.
+#[test]
+fn cmd_e_cuts_a_selection_out_at_both_ends() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "hit.wav", 48_000 * 2);
+    f.h.app.audio_regions_drop(f.track, 0.0, &[wav]).unwrap();
+    audio_settle(&mut f.h);
+    let act = |h: &mut Harness, event: &str| {
+        h.eval(&format!("(eseq.arrangement/audio-lane-action {} {event})", f.track));
+        audio_settle(h);
+    };
+    act(&mut f.h, "(dict :type :finish-marquee-select :time-a 1 :time-b 3 :row-delta 0)");
+    act(&mut f.h, "(dict :type :split-items :ids (list) :time 1)");
+    let spans: Vec<(f64, f64)> = f
+        .h
+        .lane_items(f.track)
+        .iter()
+        .map(|item| (number(item.get("start")), number(item.get("end"))))
+        .collect();
+    assert_eq!(spans, vec![(0.0, 1.0), (1.0, 3.0), (3.0, 4.0)]);
+}
+
+/// A sample dragged over an audio lane previews the region it would make
+/// where it would land, from the file's header length.
+#[test]
+fn dragging_a_sample_over_a_lane_previews_where_it_lands() {
+    let mut f = fixture();
+    let wav = write_wav(f.dir.path(), "hit.wav", 48_000 * 3);
+    f.h.eval(&format!(
+        r#"(eseq.arrangement/audio-drag-over {} (dict :drag-type "sample" :payload (dict :path "{}") :sx -1))"#,
+        f.track,
+        wav.display()
+    ));
+    // Three seconds at 120 bpm: six beats from the lane's left edge.
+    assert_eq!(
+        f.h.eval("(let ((d eseq.arrangement/arr-drop)) (list d.lane d.start d.end))"),
+        f.h.eval(&format!("(list {} 0 6)", f.track))
+    );
+    // The file started decoding when the drag arrived: its preview fills in
+    // in the background until the whole three seconds are registered.
+    let preview = number(Some(&f.h.eval("(let ((d eseq.arrangement/arr-drop)) d.sample)")));
+    assert!(preview >= 0.0, "one file draws its waveform");
+    let key = eseqlisp::audio::sample::drag_preview_key(preview as u64);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let decoded = eseqlisp::audio::sample::get_registered_sample(&key)
+            .map_or(0.0, |sample| sample.duration_seconds);
+        if (decoded - 3.0).abs() < 1e-6 {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "decoded {decoded}s of 3");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // The same file dragged again reuses its waveform.
+    let again = f.h.eval(&format!(r#"(get (seq-audio-drag-preview "{}") :id)"#, wav.display()));
+    assert_eq!(number(Some(&again)), preview);
+    // The drop imports it for real and frees the preview.
+    f.h.eval("(seq-audio-drag-preview-clear)");
+    assert!(eseqlisp::audio::sample::get_registered_sample(&key).is_none(), "freed");
+}
+
 /// Ableton: a drag across the clip editor's waveform selects that stretch of
 /// audio there and the same stretch of the timeline, so it can be copied;
 /// the start/end markers stay where they were.

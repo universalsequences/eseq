@@ -98,12 +98,13 @@ impl App {
                     let Some(arrangement) = arrangement else {
                         return Vec::new();
                     };
-                    // A loop wrap inside the window: it runs to the end, then
-                    // on from zero.
+                    // A loop wrap inside the window: it runs to the loop end,
+                    // then on from the loop start.
+                    let (loop_start, loop_end) = arrangement.loop_window();
                     let (first, wrapped) = if frontier >= now {
                         ((now, frontier), None)
                     } else {
-                        ((now, arrangement.end_beat), Some((0.0, frontier)))
+                        ((now, loop_end), Some((loop_start, frontier)))
                     };
                     (arrangement.push_lane.iter())
                         .filter(|region| {

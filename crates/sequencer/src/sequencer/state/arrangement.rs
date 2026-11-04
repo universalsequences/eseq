@@ -186,6 +186,11 @@ pub struct ProjectArrangement {
     pub end_beat: f64,
     #[serde(default)]
     pub loop_enabled: bool,
+    /// The loop brace `[start, end)` playback wraps inside while
+    /// `loop_enabled` (Ableton's loop). `None` — projects saved before the
+    /// brace existed — loops the whole song, `[0, end_beat)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_range: Option<(f64, f64)>,
     /// Monotonic allocator for `ClipId`; never reused within a project.
     pub next_clip_id: u64,
     /// Audio-track lanes (docs/audio-tracks-spec.md §9), outer index = track.
@@ -214,7 +219,21 @@ fn is_zero_u64(value: &u64) -> bool {
 /// this is a starting canvas size, not a limit.
 pub const DEFAULT_ARRANGEMENT_END: f64 = 64.0;
 
+/// A new arrangement's loop brace: its first four bars.
+pub const DEFAULT_LOOP_RANGE: (f64, f64) = (0.0, 16.0);
+
+/// The loop brace a stored `loop_range` means: a project saved before the
+/// brace existed (`None`) loops its whole song, `[0, end_beat)`.
+pub fn loop_window(loop_range: Option<(f64, f64)>, end_beat: f64) -> (f64, f64) {
+    loop_range.unwrap_or((0.0, end_beat))
+}
+
 impl ProjectArrangement {
+    /// The loop brace, `[start, end)` (see `loop_range`).
+    pub fn loop_window(&self) -> (f64, f64) {
+        loop_window(self.loop_range, self.end_beat)
+    }
+
     /// An arrangement holding scene 0 from beat 0 and no clips.
     pub fn new(track_count: usize, end_beat: f64) -> Self {
         Self {
@@ -226,6 +245,7 @@ impl ProjectArrangement {
             rack_lanes: BTreeMap::new(),
             end_beat,
             loop_enabled: false,
+            loop_range: Some(DEFAULT_LOOP_RANGE),
             next_clip_id: 0,
             audio_lanes: Vec::new(),
             audio_sources: BTreeMap::new(),
@@ -244,6 +264,7 @@ impl ProjectArrangement {
             rack_lanes: BTreeMap::new(),
             end_beat: DEFAULT_ARRANGEMENT_END,
             loop_enabled: false,
+            loop_range: Some(DEFAULT_LOOP_RANGE),
             next_clip_id: 0,
             audio_lanes: Vec::new(),
             audio_sources: BTreeMap::new(),
@@ -378,6 +399,13 @@ impl ProjectArrangement {
                 self.track_lanes.len(),
                 ctx.song_track_count()
             ));
+        }
+
+        if let Some((start, end)) = self
+            .loop_range
+            .filter(|(start, end)| !(start.is_finite() && end.is_finite() && *start >= 0.0 && end > start))
+        {
+            return Err(format!("Loop brace [{start}, {end}) must be finite, from beat 0 on, and non-empty"));
         }
 
         // --- end beat (checked before clips so a nonsense end reports
@@ -1405,6 +1433,7 @@ pub fn compile_arrangement<C: ArrangementContext>(
         rows,
         end_beat: arr.end_beat,
         loop_enabled: arr.loop_enabled,
+        loop_range: arr.loop_range,
         next_row_id: 0,
     };
 
@@ -1515,6 +1544,7 @@ pub fn lower_rows_to_arrangement<C: ArrangementContext>(
         rack_lanes: BTreeMap::new(),
         end_beat,
         loop_enabled,
+        loop_range: None,
         next_clip_id,
     audio_lanes: Vec::new(),
     audio_sources: std::collections::BTreeMap::new(),
@@ -1742,6 +1772,7 @@ mod tests {
             rows,
             end_beat,
             loop_enabled: false,
+            loop_range: None,
             next_row_id,
         }
     }
@@ -1788,6 +1819,7 @@ mod tests {
             rack_lanes: BTreeMap::new(),
             end_beat,
             loop_enabled: false,
+            loop_range: None,
             next_clip_id,
             audio_lanes: Vec::new(),
             audio_sources: BTreeMap::new(),

@@ -10,7 +10,9 @@ fn mapping(beat: f64) -> SongRenderMapping {
         beats_per_sample: 1.0 / SAMPLES_PER_BEAT,
         pass_start_sample: 0,
         end_beat: 64.0,
-        loop_enabled: false,
+        anchor_beat: beat,
+        anchor_wrapped: false,
+        loop_window: None,
         open_ended: false,
     }
 }
@@ -152,7 +154,8 @@ fn a_loop_wrap_inside_a_block_lands_on_the_exact_frame() {
     let mut player = player();
     let looping = SongRenderMapping {
         end_beat: 8.0,
-        loop_enabled: true,
+        anchor_beat: 0.0,
+        loop_window: Some((0.0, 8.0)),
         ..mapping(8.0 - 2.0 / SAMPLES_PER_BEAT)
     };
     let (left, _) = render(&mut player, &playback, Some(looping), 0, 4);

@@ -42,6 +42,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "arrangement-push-clear",
     "song-set-end",
     "song-set-loop",
+    "song-set-loop-range",
     // Row path: the declarative/capture commit surface only (lane spec 9 —
     // capture still stages rows).
     "song-replace",
@@ -675,6 +676,16 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                 "Song loop {}",
                 if enabled { "enabled" } else { "disabled" }
             ))
+        }
+        "song-set-loop-range" => {
+            let map = payload_map(payload)?;
+            let start = require_number(map, "start")?;
+            let end = require_number(map, "end")?;
+            let enabled = map
+                .get("enabled")
+                .map(|value| matches!(&*value.borrow(), Value::Bool(true)));
+            app.arr_set_loop_range(start, end, enabled)?;
+            Ok(format!("Loop from beat {start} to {end}"))
         }
         // `seq-song-replace` / `seq-song-clear` keep their names (spec 5,
         // non-goal: renaming the natives) but lower to the arrangement like

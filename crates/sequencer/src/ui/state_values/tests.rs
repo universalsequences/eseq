@@ -25649,10 +25649,10 @@ use panel_kinds_seed::*;
         assert_eq!(committed.len(), 1, "one region per gesture, got {committed:?}");
         let (tracks, start, end, _) = committed[0].clone().expect("a region, not a clear");
         assert_eq!(tracks, vec![1.0, 3.0], "swept from track 1 down to track 3");
-        // Grid-quantized: the view shows 64 beats, so the ladder step divides
-        // the raw span outward rather than landing on the raw pointer beats.
-        assert!((8.0..=9.0).contains(&start), "start floors: {start}");
-        assert!((23.0..=24.0).contains(&end), "end ceils: {end}");
+        // Grid-quantized outward to the arrangement's fine grid (one beat
+        // at this 64-beat view), so both ends land on whole beats.
+        assert!((8.0..=10.0).contains(&start) && start.fract() == 0.0, "start floors: {start}");
+        assert!((22.0..=24.0).contains(&end) && end.fract() == 0.0, "end ceils: {end}");
         assert_eq!(
             read(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.region)"),
             Value::Nil,

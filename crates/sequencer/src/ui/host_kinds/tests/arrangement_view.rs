@@ -748,8 +748,9 @@ fn select_all_then_delete_empties_the_track_and_rack_lanes() {
     assert!(arrangement.track_lanes.iter().all(Vec::is_empty), "track lanes cleared");
 }
 
-/// The view scrolls with the playhead while the song runs, holding it a
-/// third of the way in (`follow-anchor`); a hand scroll pauses
+/// The view pages to the playhead only when it leaves the window, putting
+/// it a third of the way in (`follow-anchor`), and otherwise holds still;
+/// a hand scroll pauses
 /// that for `arrangement-follow-cooloff` seconds or until the next Play, and
 /// the off switch stops it.
 #[test]
@@ -769,13 +770,18 @@ fn the_view_follows_the_playhead_until_a_hand_scroll() {
     // The head at `beat` sits `follow-anchor` of the 64-beat window in.
     let anchored = |beat: f64| beat - 0.33 * 64.0;
     head(&mut h, 8.0);
-    assert_eq!(start(&mut h), 0.0, "rests at 0 until the head passes the anchor");
+    assert_eq!(start(&mut h), 0.0, "an on-screen head never moves the view");
+    head(&mut h, 60.0);
+    assert_eq!(start(&mut h), 0.0, "not even near the right edge");
     head(&mut h, 200.0);
     let at = start(&mut h);
-    assert!((at - anchored(200.0)).abs() < 1.0, "travels with the head: {at}");
-    head(&mut h, 201.0);
-    let next = start(&mut h);
-    assert!((next - at - 1.0).abs() < 0.5, "smoothly, beat by beat: {at} -> {next}");
+    assert!((at - anchored(200.0)).abs() < 1.0, "off screen: the view pages to it: {at}");
+    head(&mut h, 230.0);
+    assert_eq!(start(&mut h), at, "on screen again, so it holds still");
+    // A loop wrapping the head back before the window pages back to it.
+    head(&mut h, 150.0);
+    let back = start(&mut h);
+    assert!((back - anchored(150.0)).abs() < 1.0, "paged back to the wrap: {back}");
 
     // A hand scroll holds the view where the user put it.
     h.eval("(setopt eseq.arrangement/arrangement-follow-cooloff 0.2)");
@@ -951,4 +957,42 @@ fn push_lane_sweeps_clear_a_range_and_edges_resize() {
     assert_eq!(spans(&h), vec![(5.0, 9.0), (10.0, 12.0)]);
     let pushed = h.app.state.committed_arrangement().unwrap().push_lane[0].clone();
     assert!((pushed.value_at(5.0) - 0.125).abs() < 1.0e-4, "the curve stays in time");
+}
+
+/// The ruler's loop brace (Ableton's loop): a drag repaints it live and
+/// commits once, on release; the toggle turns looping on with the brace
+/// where it is, and the ruler draws exactly what the song holds.
+#[test]
+fn the_loop_brace_drags_live_commits_once_and_toggles() {
+    let mut h = distro();
+    h.settle();
+    let committed = |h: &Harness| {
+        h.app.state.with_committed_arrangement(|arrangement| {
+            let arrangement = arrangement.expect("an arrangement");
+            (arrangement.loop_window(), arrangement.loop_enabled)
+        })
+    };
+    let (before, looping) = committed(&h);
+    assert!(!looping, "looping starts off");
+
+    h.eval("(eseq.arrangement/scene-action (dict :type :loop-brace :start 4 :end 12))");
+    h.settle();
+    assert_eq!(h.arr_field("arr-view", "loop-start"), Value::Number(4.0));
+    assert_eq!(h.arr_field("arr-view", "loop-end"), Value::Number(12.0));
+    assert_eq!(committed(&h).0, before, "a live drag frame commits nothing");
+
+    h.eval("(eseq.arrangement/scene-action (dict :type :finish-loop-brace :start 4 :end 12))");
+    h.settle();
+    assert_eq!(committed(&h).0, (4.0, 12.0));
+    assert_eq!(h.arr_field("arr-view", "loop-dragging"), Value::Bool(false));
+
+    h.eval("(let ((s eseq.kinds/song)) (toggle! s.loop))");
+    h.settle();
+    assert_eq!(committed(&h), ((4.0, 12.0), true));
+    assert_eq!(h.arr_field("arr-view", "loop-on"), Value::Number(1.0));
+
+    // The ruler is the only lane with the brace, bound to the view state.
+    let mut braced = Vec::new();
+    widgets_with_prop(&h.buffer_tree("*arrangement*").0, "loop-brace", &mut braced);
+    assert_eq!(braced.len(), 1, "one ruler draws the brace");
 }

@@ -218,6 +218,8 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_agent_generation_watermark: u64,
     /// The agent pane conversation generation last presented.
     pub(crate) prev_agent_pane_generation: u64,
+    /// Last published `DRAG_PREVIEW` generation (`drag_preview::publish`).
+    pub(crate) prev_drag_preview_generation: u64,
     pub(crate) prev_sampler_analysis_key: Option<(usize, i32, u32, u32, usize)>,
     pub(crate) prev_sampler_analysis_generation: u64,
     /// Sound-palette reactive diff state (takes spec §17.6/§18.3).

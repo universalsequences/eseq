@@ -470,6 +470,7 @@ impl SequencerState {
             rows,
             end_beat: song.end_beat,
             loop_enabled: song.loop_enabled,
+            loop_window: song.loop_window(),
         }))
     }
 

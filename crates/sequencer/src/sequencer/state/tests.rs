@@ -7324,6 +7324,7 @@
             ],
             end_beat: 16.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 2,
         };
         remap_song_overrides_after_track_delete(&mut song, 1);
@@ -7352,6 +7353,7 @@
             ],
             end_beat: 32.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 3,
         };
         remap_song_overrides_after_track_delete(&mut song, 1);
@@ -7366,6 +7368,7 @@
             rows: vec![song_row(0, 0.0, 0, &[(0, 1), (2, 3), (3, 4)])],
             end_beat: 8.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 1,
         };
         // Move track 3 to index 1 (the undo-restore append-then-move path).
@@ -7397,6 +7400,7 @@
             rows: vec![song_row(0, 0.0, 0, &[(0, 1), (1, 1), (2, 1)])],
             end_beat: 8.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 1,
         }));
         let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
@@ -7627,6 +7631,7 @@
             ],
             end_beat: 16.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 4,
         }));
         // Adding a track materializes a pattern in EVERY scene and stamps
@@ -7788,6 +7793,7 @@
             rows: vec![song_row(0, 0.0, 0, &[]), song_row(1, 8.0, 1, &[])],
             end_beat: 16.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 2,
         };
         state.with_project_scenes(|scenes| {
@@ -7903,6 +7909,7 @@
             ],
             end_beat: 24.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 3,
         }));
         let names = vec!["a".to_string()];
@@ -7937,6 +7944,7 @@
             rows: vec![song_row(0, 0.0, 2, &[])],
             end_beat: 8.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 1,
         }));
         let err = state
@@ -7952,6 +7960,7 @@
             rows: vec![song_row(0, 0.0, 0, &[]), song_row(1, 8.0, 1, &[])],
             end_beat: 16.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 2,
         }));
         state
