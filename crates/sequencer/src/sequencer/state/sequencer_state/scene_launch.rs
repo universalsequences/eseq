@@ -926,6 +926,17 @@ impl SequencerState {
                     } else {
                         let entry = resolved.iter().find(|(t, _, _, _, _)| *t == track);
                         match entry {
+                            // A take lane plays the TAKE's sound (§17.2), so
+                            // it plays the take's sample too — handing the
+                            // voices the scene cell's would revert every
+                            // sample picked since that cell was seeded, on
+                            // every playback (the device half below already
+                            // restores the take's, bead eseq-wypz).
+                            Some((_, _, _, true, Some(take_sound)))
+                                if take_sound.sample_id.0 >= 0 =>
+                            {
+                                take_sound.sample_id.clone()
+                            }
                             Some((_, _, Some(data), _, _)) => data.sample_id.clone(),
                             // A take lane with no scene cell keeps its
                             // current binding — the lane is audibly playing

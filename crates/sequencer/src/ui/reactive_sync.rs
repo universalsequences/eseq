@@ -733,17 +733,11 @@ pub(super) fn load_or_convert_sampler_track(
         app.apply_recorded_instrument_binding_mutation(track, "Replace instrument", |app| {
             let reset_summary = match instrument_type {
                 InstrumentType::Sampler => {
-                    app.graph_controller().send_sample_to_all_voices(
+                    app.load_sample_into_sampler_track(
                         track,
                         new_buffer_id,
                         sample_rate,
-                    );
-                    app.graph.track_buffer_ids[track] = new_buffer_id;
-                    app.graph.track_sample_rates[track] = sample_rate;
-                    app.tracks[track] = new_name.clone();
-                    app.state.seed_unset_pattern_sample_ids(
-                        track,
-                        (new_buffer_id, new_name.clone(), sample_rate),
+                        new_name.clone(),
                     );
                     None
                 }

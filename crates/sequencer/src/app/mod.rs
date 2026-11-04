@@ -4195,6 +4195,27 @@ impl App {
             || self.graph.track_instrument_types[track] == InstrumentType::Sampler
     }
 
+    /// Load a decoded sample onto plain sampler `track`: the voices play it
+    /// now, and it is stored as content of the sound the lane is playing
+    /// (the track sound in the arrangement, the scene pattern in Seq, the
+    /// bound take/clip while one holds the lane) — so the next row apply,
+    /// take bind or launch keeps it instead of restoring an older pick.
+    /// Patterns that never had a sample get it as their first.
+    pub fn load_sample_into_sampler_track(
+        &mut self,
+        track: usize,
+        buffer_id: i32,
+        sample_rate: u32,
+        name: String,
+    ) {
+        let sample_id = (buffer_id, name, sample_rate);
+        self.graph_controller()
+            .put_sample_on_voices(track, &sample_id);
+        self.tracks[track] = sample_id.1.clone();
+        self.state.set_lane_sound_sample(track, sample_id.clone());
+        self.state.seed_unset_pattern_sample_ids(track, sample_id);
+    }
+
     fn selected_effect_slot(&self) -> Option<usize> {
         match self.ui.effect_tab {
             EffectTab::Slot(idx) => Some(idx),
