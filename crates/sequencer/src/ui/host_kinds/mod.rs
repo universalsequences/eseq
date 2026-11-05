@@ -273,6 +273,7 @@ pub(crate) mod f {
 
     pub(crate) const TRACK_INDEX: FieldKey = (TRACK, "index");
     pub(crate) const TRACK_TID: FieldKey = (TRACK, "tid");
+    pub(crate) const TRACK_ORDER: FieldKey = (TRACK, "order");
     pub(crate) const TRACK_NAME: FieldKey = (TRACK, "name");
     pub(crate) const TRACK_COLOR: FieldKey = (TRACK, "color");
     pub(crate) const TRACK_VOLUME: FieldKey = (TRACK, "volume");
@@ -1299,6 +1300,7 @@ pub(crate) mod f {
     pub(crate) const SELECTION_PLOCK_VARIANT: FieldKey = (SELECTION, "plock-variant");
 
     pub(crate) const PROJECT_TRACKS: FieldKey = (PROJECT, "tracks");
+    pub(crate) const PROJECT_ORDERED_TRACKS: FieldKey = (PROJECT, "ordered-tracks");
     pub(crate) const PROJECT_SCENES: FieldKey = (PROJECT, "scenes");
     pub(crate) const PROJECT_BANKS: FieldKey = (PROJECT, "banks");
     pub(crate) const PROJECT_BUSES: FieldKey = (PROJECT, "buses");
@@ -1330,6 +1332,7 @@ pub(crate) mod f {
 pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_INDEX, ":int", Model),
     (f::TRACK_TID, ":int", Model),
+    (f::TRACK_ORDER, ":int", Model),
     (f::TRACK_NAME, ":string", Model),
     (f::TRACK_COLOR, ":rgb", Model),
     (f::TRACK_VOLUME, ":number", Live),
@@ -1936,6 +1939,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SELECTION_PLOCK_ROWS, "(list-of plock-row)", Model),
     (f::SELECTION_PLOCK_VARIANT, ":string", Model),
     (f::PROJECT_TRACKS, "(list-of track)", Model),
+    (f::PROJECT_ORDERED_TRACKS, "(list-of track)", Model),
     (f::PROJECT_SCENES, "(list-of scene)", Model),
     (f::PROJECT_BANKS, "(list-of bank)", Model),
     (f::PROJECT_BUSES, "(list-of bus)", Model),

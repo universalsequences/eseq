@@ -372,7 +372,7 @@ struct SongPushed {
     capture: Option<(bool, Option<String>)>,
     /// The region, under the structure generation (its tracks are track
     /// positions).
-    region: Option<(Option<SongRegionSelection>, u64, u64)>,
+    region: Option<(Option<SongRegionSelection>, u64, u64, Vec<sequencer::sequencer::TrackId>)>,
 }
 
 /// What the rack lanes derive from: the committed song (the lanes), the
@@ -1037,18 +1037,19 @@ impl HostKinds {
         }
         // Under the groups generation too: which rack rows it covers moves
         // with rack membership.
-        let region = (
-            app.song_region_selection,
-            self.song.generation,
-            self.groups_generation,
-        );
-        if pushed.region != Some(region) {
+        // And under the display order: the rows between the ends follow it.
+        let region_key = (app.song_region_selection, self.song.generation, self.groups_generation);
+        // Compared borrowed: this runs every tick, the order rarely changes.
+        let region_stale = pushed.region.as_ref().is_none_or(|(sel, song_gen, groups_gen, order)| {
+            (*sel, *song_gen, *groups_gen) != region_key || *order != app.track_order
+        });
+        if region_stale {
+            let region = (region_key.0, region_key.1, region_key.2, app.track_order.clone());
             if let Some(id) = region_id {
                 // Cleared, the singleton reads as no tracks over 0..0.
                 let (tracks, racks, start, end, scene_lane) = match region.0 {
                     Some(region) => {
-                        let tracks = (region.track_a..=region.track_b)
-                            .filter(|track| region.contains_track(*track))
+                        let tracks = app.region_covered_tracks(&region).into_iter()
                             .filter_map(|track| self.track_ids.get(track).copied());
                         let racks = app.region_racks(&region).into_iter();
                         let racks = racks.filter_map(|gid| self.groups.get(&gid).copied());

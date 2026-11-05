@@ -441,7 +441,7 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let pattern = PatternId(map_entity_id(map, "pattern-id")?);
             let start = require_number(map, "start-beat")?;
             app.arr_pattern_place(track, pattern, start)?;
-            Ok(format!("Placed linked pattern on track {} at beat {start}", track + 1))
+            Ok(format!("Placed linked pattern on track {} at beat {start}", app.track_number(track)))
         }
         "arrangement-clip-create" => {
             let map = payload_map(payload)?;
@@ -456,14 +456,14 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                 app.arr_clip_clear_span(track, start_beat, end_beat)?;
                 return Ok(format!(
                     "Silenced track {} over beats {start_beat}-{end_beat}",
-                    track + 1
+                    app.track_number(track)
                 ));
             }
             let offset_steps = map_number(map, "offset-steps").unwrap_or(0.0);
             app.arr_clip_create(track, start_beat, end_beat, source, offset_steps)?;
             Ok(format!(
                 "Created a clip on track {} over beats {start_beat}-{end_beat}",
-                track + 1
+                app.track_number(track)
             ))
         }
         "arrangement-empty-take-create" => {
@@ -475,7 +475,7 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             Ok(format!(
                 "Created an empty take clip on track {} over beats \
                  {start_beat}-{end_beat}",
-                track + 1
+                app.track_number(track)
             ))
         }
         "arrangement-rack-member-bind" => {

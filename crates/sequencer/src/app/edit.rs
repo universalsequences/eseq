@@ -2979,6 +2979,7 @@ impl App {
         Ok(BusGroupStructureState {
             buses,
             groups,
+            track_order: self.track_order.clone(),
             scenes: self.state.capture_project_scenes(),
             grooves: self.grooves.clone(),
         })
@@ -3050,6 +3051,7 @@ impl App {
             bus.output = target_bus.output;
         }
         self.groups = groups;
+        self.track_order.clone_from(&target.track_order);
         self.grooves.clone_from(&target.grooves);
         // Chained bus outputs are replayed as part of the topology: the
         // destination bus may only have just been recreated above.
@@ -3406,8 +3408,47 @@ impl App {
             if let Some(source_id) = source_id {
                 app.dissolve_group_if_undersized(source_id)?;
             }
+            // Dropped on the group itself: it joins at the end of the block.
+            app.place_track_last_in_group(track, target_id);
             Ok(())
         })
+    }
+
+    /// Puts `track` in group `target` (by id; `None`: loose, routed to the
+    /// master mix), leaving its current group first and dissolving that one
+    /// if it falls below two units, as `move_track_to_group_recorded` does.
+    /// Unrecorded: the caller wraps it in a bus/group structure edit. A
+    /// track already in `target` is left alone.
+    pub(super) fn regroup_track_unrecorded(
+        &mut self,
+        track: usize,
+        target: Option<u64>,
+    ) -> Result<(), String> {
+        if track >= self.tracks.len() {
+            return Err("Track is out of range".to_string());
+        }
+        let source = self.groups.iter()
+            .find(|group| group.members.contains(&track))
+            .map(|group| group.id);
+        if source == target {
+            return Ok(());
+        }
+        if source.is_some() {
+            self.detach_group_member(track);
+        }
+        match target {
+            Some(group_id) => self.attach_track_to_group(track, group_id, None)?,
+            None => {
+                self.set_track_output_all_scenes_unrecorded(
+                    track,
+                    crate::sequencer::TrackOutput::Mix,
+                );
+            }
+        }
+        if let Some(source) = source {
+            self.dissolve_group_if_undersized(source)?;
+        }
+        Ok(())
     }
 
     pub fn remove_track_from_group_recorded(&mut self, track: usize) -> Result<(), String> {
@@ -4276,7 +4317,17 @@ impl App {
         Ok(())
     }
 
-    fn remap_groups_after_track_delete(&mut self, deleted: usize) {
+    /// Returns the instance-document slots the route remap changed (their
+    /// old values), which a recorded delete keeps for its undo.
+    fn remap_groups_after_track_delete(
+        &mut self,
+        deleted: usize,
+    ) -> Vec<crate::sequencer::InstanceSlotChange> {
+        // Project-owned instances route by track index.
+        let mut slot_changes = self.remap_instance_document_routes(
+            crate::project::ProjectInstanceOwner::Project,
+            deleted,
+        );
         let mut removed_members = Vec::new();
         for group in &mut self.groups {
             let position = group.members.iter().position(|member| *member == deleted);
@@ -4296,7 +4347,8 @@ impl App {
             }
         }
         for (group_id, position) in removed_members {
-            self.remap_rack_sequencer_routes_after_member_removed(group_id, position);
+            slot_changes
+                .extend(self.remap_rack_sequencer_routes_after_member_removed(group_id, position));
         }
         // A rack with no pads is still a rack (lazy pads); a plain group is
         // still a group while it holds a child rack, whose bus chains into
@@ -4309,6 +4361,7 @@ impl App {
             group.is_rack() || !group.members.is_empty() || !group.rack_members.is_empty()
         });
         self.publish_rack_choke_runtime();
+        slot_changes
     }
 
     /// Deletes several tracks as one atomic, undoable edit. Indices refer to
@@ -4391,7 +4444,7 @@ impl App {
             track,
             &self.graph.effect_descriptors,
         )?;
-        let patch = TrackDeletionPatch {
+        let mut patch = TrackDeletionPatch {
             track: track_id,
             index: track,
             instrument,
@@ -4407,10 +4460,13 @@ impl App {
             audio_lane: self.state.with_committed_arrangement(|arrangement| {
                 arrangement.map(|arrangement| arrangement.audio_lane(track).to_vec()).unwrap_or_default()
             }),
+            instance_slots: Vec::new(),
         };
-        let retained_bytes = patch.retained_bytes();
         let selected = self.graph_controller().delete_track(track)?;
-        self.remap_groups_after_track_delete(track);
+        // Instance documents' routes shift with the delete; undo puts the
+        // old values back (rows that named this track included).
+        patch.instance_slots = self.remap_groups_after_track_delete(track);
+        let retained_bytes = patch.retained_bytes();
         self.macro_engine.remap_after_track_delete(track);
         self.device_registry.clear_track(track_id);
         self.history.commit(
@@ -4457,6 +4513,11 @@ impl App {
             self.state.set_committed_arrangement(Some(arrangement))?;
         }
         self.groups = patch.groups.clone();
+        if !patch.instance_slots.is_empty() {
+            self.state
+                .with_scenes_mut(|scenes| scenes.restore_instance_document_slots(&patch.instance_slots))?;
+            self.state.publish_scheduler_snapshot();
+        }
         // The runtime choke table still holds the post-delete reindexed keys;
         // restoring the pre-delete groups has to republish it or choke fires
         // on the wrong tracks until the next group edit.

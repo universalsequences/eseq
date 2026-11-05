@@ -26,7 +26,7 @@ use eseqlisp::vm::KindField;
 pub use eseqlisp::vm::{SCRATCH_KIND_PACKAGE, kind_id, kind_name_of};
 
 pub const DEF_KIND_SIGNATURE: &str = "(def-kind name :sequencer (graph-body ...) | :generator (:resolution r :requires (m ...) :tick body :trigger track-expr) :document ((field default) | (field type :default d) ...) :state ((field default) | (field type :default d) ...) :view f :keymap mode :icon widget :on-create f) | (def-kind name :key () | (index) | (parent index) :host ((field type :set f :range (lo hi) :doc \"...\") ...) :state (...))";
-pub const DEF_KIND_DOCS: &str = "Define an instance kind. The host owns instances of it: each one publishes the :sequencer graph body (or the :generator tick body, in which `self` reads the instance's document) under its own id, carries its own :document (per pattern, saved, undoable) and :state cells, and renders (view instance) in its own buffer and step tab (whose keymap is the optional :keymap mode; the optional :icon names a defwidget the tab draws in a chip beside the label, its shader reading `selected`). A :generator's optional :trigger (e.g. self.trig-source) names a track whose played steps open the instance's gate on their own boundaries, with their length, note offset and velocity; the tick reads it with (gen-gate) (a rack-owned instance names a member of its rack; negative is none). The optional :on-create function runs once with a freshly created instance (not a duplicate, kit load or reopened project) to write document defaults the :sequencer body cannot express. Returns the kind id \"<package>:<name>\". A field's type is inferred from its default or declared as (field type :default d): :number :int :bool :rgb :point :string :any, a kind name, or (list-of type); writes of another type are errors. With :key () the kind is a singleton: def-kind creates its one instance and binds the kind's name to it. With :key (index) the host registers the instances by key and the kind's name is bound to the constructor (name i), which answers the instance under key i or nil; with :key (parent index) they are reached through the parent. Kinds with a :key take only :host fields (typed, pushed by the host; (set! x.field v) calls the field's :set function, and without one the field is read-only) and :state fields, and are never project instances.";
+pub const DEF_KIND_DOCS: &str = "Define an instance kind. The host owns instances of it: each one publishes the :sequencer graph body (or the :generator tick body, in which `self` reads the instance's document) under its own id, carries its own :document (per pattern, saved, undoable) and :state cells, and renders (view instance) in its own buffer and step tab (whose keymap is the optional :keymap mode; the optional :icon names a defwidget the tab draws in a chip beside the label, its shader reading `selected`). A :generator's optional :trigger (e.g. self.trig-source) names a track whose played steps open the instance's gate on their own boundaries, with their length, note offset and velocity; the tick reads it with (gen-gate) (a rack-owned instance names a member of its rack; negative is none). The optional :routes lists where the document stores track routes, as paths from a :document field through map keys and * (every list item), e.g. ((rows * route)): the host shifts those numbers when a track (or, rack-owned, a member) is removed, turning the removed one's to -1. The optional :on-create function runs once with a freshly created instance (not a duplicate, kit load or reopened project) to write document defaults the :sequencer body cannot express. Returns the kind id \"<package>:<name>\". A field's type is inferred from its default or declared as (field type :default d): :number :int :bool :rgb :point :string :any, a kind name, or (list-of type); writes of another type are errors. With :key () the kind is a singleton: def-kind creates its one instance and binds the kind's name to it. With :key (index) the host registers the instances by key and the kind's name is bound to the constructor (name i), which answers the instance under key i or nil; with :key (parent index) they are reached through the parent. Kinds with a :key take only :host fields (typed, pushed by the host; (set! x.field v) calls the field's :set function, and without one the field is read-only) and :state fields, and are never project instances.";
 pub const DEF_KIND_KEYWORDS: &[&str] = &[
     "key",
     "host",
@@ -38,6 +38,7 @@ pub const DEF_KIND_KEYWORDS: &[&str] = &[
     "keymap",
     "icon",
     "on-create",
+    "routes",
 ];
 
 /// One registered kind, as the host sees it. Everything here is `Send`; the
@@ -68,6 +69,13 @@ pub struct KindDefinition {
     pub has_view: bool,
     /// `:keymap`: the mode every instance's view buffer gets (spec §7).
     pub keymap: Option<String>,
+    /// `:routes`: where the document stores track routes, as paths — the
+    /// document field, then map keys and `*` (every list item); e.g.
+    /// `(rows * route)`. A route is a track index (project-owned) or a member
+    /// position (rack-owned), negative for none. The host shifts them when a
+    /// track or member is removed, as it does a graph's routes (eseq-ssd6
+    /// follow-up), and turns those that named it off (-1).
+    pub routes: Vec<Vec<String>>,
 }
 
 struct KindRegistry {
@@ -385,6 +393,7 @@ pub fn parse_def_kind(
     let mut keymap = None;
     let mut icon = None;
     let mut on_create = None;
+    let mut routes: Vec<Vec<String>> = Vec::new();
     let mut idx = 1;
     while idx < args.len() {
         let key = match &args[idx] {
@@ -464,6 +473,23 @@ pub fn parse_def_kind(
             "on-create" => {
                 on_create = (!matches!(value, EValue::Nil)).then(|| value.clone());
             }
+            "routes" => {
+                for path in def_kind_list(value).unwrap_or_default() {
+                    let steps = def_kind_list(&path)
+                        .and_then(|steps| steps.iter().map(def_kind_symbol).collect::<Option<Vec<_>>>())
+                        .filter(|steps| !steps.is_empty())
+                        .ok_or_else(|| {
+                            format!("def-kind {name}: :routes expects paths like (rows * route)")
+                        })?;
+                    if !document.iter().any(|(field, _)| *field == steps[0]) {
+                        return Err(format!(
+                            "def-kind {name}: :routes path {} does not start at a :document field (declare :document first)",
+                            steps.join(" ")
+                        ));
+                    }
+                    routes.push(steps);
+                }
+            }
             "keymap" => {
                 keymap = match value {
                     EValue::Nil => None,
@@ -505,6 +531,7 @@ pub fn parse_def_kind(
         ));
     }
     let definition = KindDefinition {
+        routes,
         id,
         name,
         package: package.map(str::to_string),
@@ -801,6 +828,7 @@ mod tests {
 
     fn defined(name: &str, module: &str) -> KindDefinition {
         KindDefinition {
+            routes: Vec::new(),
             id: kind_id(Some("alec/neural"), Some(module), name),
             name: name.to_string(),
             package: Some("alec/neural".to_string()),

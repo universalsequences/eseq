@@ -132,7 +132,21 @@ impl SongRegionSelection {
     pub fn contains_rack_row(&self, first_member: usize) -> bool {
         self.covers_row(RegionRow::rack(first_member))
     }
+
+    /// `covers_row` with rows ordered by `rank` (a track's display position,
+    /// eseq-ssd6) instead of by index: the rows between the two ends as the
+    /// arrangement draws them. Either end may be the upper one.
+    fn covers_row_ranked(&self, row: RegionRow, rank: &[usize]) -> bool {
+        let order = |row: RegionRow| (rank.get(row.track).copied().unwrap_or(usize::MAX), !row.rack);
+        let a = order(RegionRow { track: self.track_a, rack: self.rack_a });
+        let b = order(RegionRow { track: self.track_b, rack: self.rack_b });
+        let (top, bottom) = if a <= b { (a, b) } else { (b, a) };
+        let row = order(row);
+        top <= row && row <= bottom
+    }
 }
+
+/// Each track's display position (`App::display_track_order`), by index.
 
 /// A clip-bearing rack as the region ops see it: its rack row sits above
 /// its first member, and a collapsed one's row stands for its hidden members.
@@ -143,11 +157,12 @@ struct RackRow {
 }
 
 impl RackRow {
-    fn covered_by(&self, region: &SongRegionSelection) -> bool {
+    /// Its rack row sits above its first member in display order.
+    fn covered_by(&self, region: &SongRegionSelection, rank: &[usize]) -> bool {
         self.members
             .iter()
-            .min()
-            .is_some_and(|first| region.contains_rack_row(*first))
+            .min_by_key(|member| rank.get(**member).copied().unwrap_or(usize::MAX))
+            .is_some_and(|first| region.covers_row_ranked(RegionRow::rack(*first), rank))
     }
 }
 
@@ -345,16 +360,20 @@ impl App {
     /// is (docs/arrangement-rack-lanes-spec.md §5).
     fn region_tracks(&self, region: &SongRegionSelection) -> Vec<usize> {
         let racks = self.rack_rows();
+        let rank = self.region_rank();
         let hidden_rack = |track: usize| {
             racks
                 .iter()
                 .find(|rack| rack.collapsed && rack.members.contains(&track))
         };
-        let mut tracks: Vec<usize> = (region.track_a..=region.track_b)
-            .filter(|track| region.contains_track(*track) && hidden_rack(*track).is_none())
+        let mut tracks: Vec<usize> = (0..self.tracks.len())
+            .filter(|track| {
+                region.covers_row_ranked(RegionRow::track(*track), &rank)
+                    && hidden_rack(*track).is_none()
+            })
             .filter(|track| !self.track_collapsed.get(*track).copied().unwrap_or(false))
             .collect();
-        for rack in racks.iter().filter(|rack| rack.collapsed && rack.covered_by(region)) {
+        for rack in racks.iter().filter(|rack| rack.collapsed && rack.covered_by(region, &rank)) {
             tracks.extend(&rack.members);
         }
         tracks.sort_unstable();
@@ -382,11 +401,33 @@ impl App {
         })
     }
 
+    /// Each track's display position: region rows run in display order.
+    fn region_rank(&self) -> Vec<usize> {
+        super::track_order::display_rank(&self.display_track_order(), self.tracks.len())
+    }
+
+    /// Whether `region` covers track `track`'s row, the rows between its
+    /// ends taken in display order (eseq-ssd6).
+    pub fn region_contains_track(&self, region: &SongRegionSelection, track: usize) -> bool {
+        region.covers_row_ranked(RegionRow::track(track), &self.region_rank())
+    }
+
+    /// The tracks whose rows `region` covers, in display order (collapsed
+    /// ones included: the caller filters what it draws).
+    pub fn region_covered_tracks(&self, region: &SongRegionSelection) -> Vec<usize> {
+        let order = self.display_track_order();
+        let rank = super::track_order::display_rank(&order, self.tracks.len());
+        order.into_iter()
+            .filter(|track| region.covers_row_ranked(RegionRow::track(*track), &rank))
+            .collect()
+    }
+
     /// The racks whose rack row `region` covers, by group id.
     pub fn region_racks(&self, region: &SongRegionSelection) -> Vec<u64> {
+        let rank = self.region_rank();
         self.rack_rows()
             .into_iter()
-            .filter(|rack| rack.covered_by(region))
+            .filter(|rack| rack.covered_by(region, &rank))
             .map(|rack| rack.group_id)
             .collect()
     }
@@ -651,9 +692,17 @@ impl App {
         // otherwise the untouched lanes must not move.
         // A scene-lane sweep is by definition a whole-timeline gesture: it
         // carries the scene lane, so the ripple has to move it too.
-        let covers_every_track = region.scene_lane
-            || (region.contains_track(0)
-                && region.contains_track(self.tracks.len().max(1) - 1));
+        let covers_every_track = region.scene_lane || {
+            let order = self.display_track_order();
+            match (order.first(), order.last()) {
+                (Some(&first), Some(&last)) => {
+                    let rank = super::track_order::display_rank(&order, self.tracks.len());
+                    region.covers_row_ranked(RegionRow::track(first), &rank)
+                        && region.covers_row_ranked(RegionRow::track(last), &rank)
+                }
+                _ => false,
+            }
+        };
 
         let (scenes_before, cloned_takes) = self.clone_clipboard_takes(&clipboard)?;
         let scenes = self.state.capture_project_scenes();

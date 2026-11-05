@@ -36,7 +36,8 @@
 
 (export track scene bank bus group transport selection project master engine
         song region
-        tracks scenes banks buses groups routes macros
+        tracks ordered-tracks track-order track-number display-order-published? in-display-order scenes banks buses groups routes macros
+        move-track! move-group!
         launch! clone-scene! delete-scene! step-preset! copy-scene-to-new-bank!
         add-instrument-track! add-builtin-track! delete-device! bypass-device!
         timebase-options
@@ -1076,6 +1077,7 @@
   :key (index)
   :host ((index     :int    :doc "Position in the track list, from 0")
          (tid       :int    :doc "The host's stable track id")
+         (order     :int    :doc "Position in the display order (the grid, mixer and arrangement rows), from 0; index never moves")
          (name      :string)
          (color     :rgb    :doc "Display color")
          (volume    :number :range (0 1) :set set-track-volume)
@@ -1890,6 +1892,7 @@
 (def-kind project
   :key ()
   :host ((tracks (list-of track))
+         (ordered-tracks (list-of track) :doc "The tracks in display order (drag-reorderable); (tracks) stays in index order")
          (scenes (list-of scene))
          (banks  (list-of bank))
          (buses  (list-of bus))
@@ -1920,6 +1923,37 @@
 ;; The project's tracks, in order: `track` instances (t.index, t.name,
 ;; t.color, …; (describe-kind 'track) lists them all).
 (def tracks () project.tracks)
+;; The project's tracks in display order: the order the grid, the mixer and
+;; the arrangement draw them, which the user can drag to change. Indices
+;; never move with it ((track-order t) is the position here). Index order
+;; while the host has not published one.
+(def ordered-tracks ()
+  (if (display-order-published?) project.ordered-tracks project.tracks))
+
+;; Whether the host published a display order for the current track list
+;; (a hand-seeded or host-less runtime has none: index order then).
+(def display-order-published? ()
+  (let ((ordered project.ordered-tracks)
+        (count (if ordered (len ordered) 0)))
+    ;; A boolean: `and` over an empty list answers the list, not false.
+    (if (and (> count 0) (= count (len project.tracks))) true false)))
+
+;; Track t's position in (ordered-tracks): t.order, or its index while no
+;; order is published (an unpublished :int field reads 0, not nil).
+(def track-order (t)
+  (if (display-order-published?) t.order t.index))
+
+;; Tracks ts in display order (a rack's g.tracks are in pad order): for
+;; menus and rows. As given while no order is published.
+(def in-display-order (ts)
+  (if (or (empty? ts) (not (display-order-published?)))
+    ts
+    (filter (lambda (t) (not (empty? (filter (lambda (x) (= x t)) ts)))) (ordered-tracks))))
+
+;; Track t's number as the user sees it: its display position from 1 (the
+;; mute button, route menus, labels). (track n) still takes the index.
+(def track-number (t)
+  (+ (track-order t) 1))
 ;; The project's scenes, in order (`scene` instances).
 (def scenes () project.scenes)
 ;; The project's scene banks (`bank` instances).
@@ -2006,6 +2040,17 @@
 ;; Launch a scene with the transport's launch quantization.
 (def launch! (s)
   (host-command "switch-pattern" (dict :idx s.index :quantize (launch-quantize))))
+
+;; Move track t to target track's place in the display order (after it moving
+;; down, before it moving up), joining target's group — or leaving its own
+;; for the top level when target is loose. Indices do not change; one undo.
+(def move-track! (t target)
+  (host-command "move-track" (dict :track t.index :target target.index)))
+
+;; Move top-level group g's whole block to the place of the row holding track
+;; target (a loose track or another group's block). One undo.
+(def move-group! (g target)
+  (host-command "move-group" (dict :gid g.gid :target target.index)))
 
 ;; Copy scene s to a new scene at the end of its bank, which then plays.
 (def clone-scene! (s) (host-command "clone-pattern" (dict :idx s.index)))

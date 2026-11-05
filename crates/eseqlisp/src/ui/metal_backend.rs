@@ -9200,6 +9200,10 @@ fragment float4 live_spectrogram_frag(
         clip: ScissorRect,
         connected_sources: Vec<usize>,
         selected_sources: Vec<usize>,
+        /// `:cable-hang`: how far the cables at this port sag (1 = stock).
+        hang: f32,
+        /// `:cable-opacity`: the unselected cables' alpha at this in port (1 = stock).
+        opacity: f32,
     }
 
     fn collect_mod_patch_ports(
@@ -9260,6 +9264,8 @@ fragment float4 live_spectrogram_frag(
                         clip: visible_scissor,
                         connected_sources: layout_node_usize_list_prop(node, "connected-sources"),
                         selected_sources: layout_node_usize_list_prop(node, "selected-sources"),
+                        hang: crate::ui::gpu_geometry::cable_hang_prop(node),
+                        opacity: crate::ui::gpu_geometry::cable_opacity_prop(node),
                     });
                 }
             }
@@ -9388,10 +9394,12 @@ fragment float4 live_spectrogram_frag(
                         r: (base_color.r + lane_tint * lane_color.r).min(1.0),
                         g: (base_color.g + lane_tint * lane_color.g).min(1.0),
                         b: (base_color.b + lane_tint * lane_color.b).min(1.0),
-                        a: base_color.a,
+                        // `:cable-opacity`: a dense view can let what is under
+                        // its cables show through; the selected cable stays opaque.
+                        a: base_color.a * port.opacity,
                     }
                 };
-                let path = SolidCablePath::between(start, port.center_px, SOLID_CABLE_TENSION);
+                let path = SolidCablePath::hung(start, port.center_px, SOLID_CABLE_TENSION, port.hang);
                 let plug_radius_px = source_radius.max(port.radius_px);
                 let plug_levels = [source_level, port.level];
                 push_solid_mod_patch_cable(
@@ -9413,7 +9421,7 @@ fragment float4 live_spectrogram_frag(
             port.direction == ModPatchPortDirection::Out && port.active && port.pending
         }) {
             let path =
-                SolidCablePath::between(source_port.center_px, cursor_px, SOLID_CABLE_TENSION);
+                SolidCablePath::hung(source_port.center_px, cursor_px, SOLID_CABLE_TENSION, source_port.hang);
             push_solid_mod_patch_cable(
                 path,
                 radius_px,

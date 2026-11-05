@@ -58,6 +58,7 @@ pub(crate) struct ProjectCapture {
     instances: crate::project::ProjectInstances,
     grooves: Vec<crate::project::ProjectGroove>,
     track_lane_rosters: Vec<crate::process::TrackLaneRoster>,
+    track_order: Vec<crate::sequencer::TrackId>,
 }
 
 /// The sample-source registries [`App::capture_sampler_source_path`]
@@ -1309,6 +1310,7 @@ impl App {
         self.import_samples.clear();
         self.editor.pending_project_load = None;
         self.groups.clear();
+        self.track_order.clear();
         self.grooves.clear();
         self.replace_instances(crate::project::ProjectInstances::default());
         self.publish_rack_choke_runtime();
@@ -3000,6 +3002,7 @@ impl App {
                     rosters
                 }
             },
+            track_order: self.saved_track_order(),
         })
     }
 }
@@ -3336,6 +3339,7 @@ impl ProjectCapture {
             take_pools,
             track_sounds,
             track_lane_rosters: self.track_lane_rosters,
+            track_order: self.track_order,
         })
     }
 
@@ -4757,6 +4761,7 @@ impl App {
             take_pools,
             track_sounds,
             track_lane_rosters,
+            track_order,
             instances,
             grooves,
         } = pending.project;
@@ -4887,6 +4892,9 @@ impl App {
         // chain — and into the live one — in one pass. Files below v11 carry
         // no roster and install nothing.
         self.state.install_track_lane_rosters(track_lane_rosters);
+        // The display order (eseq-ssd6): ids the file no longer holds are
+        // dropped by the reader, so a hand-edited list cannot hide a track.
+        self.track_order = track_order;
         // Per-track record-arm flags (takes spec 8.1), persisted like
         // mute/solo. The UI-shared arm vector syncs FROM `graph.record_armed`
         // on the next tick via `record_arm_sync_pending`.
@@ -7035,6 +7043,7 @@ mod tests {
             take_pools: Vec::new(),
             track_sounds: Vec::new(),
             track_lane_rosters: Vec::new(),
+            track_order: Vec::new(),
         }
     }
 

@@ -228,7 +228,7 @@
   (let ((t sound-palette.track))
     (if (and (open?) t)
       (let ((inst sound-palette.instrument))
-        (str "Sound Pool - Track " (+ t.index 1)
+        (str "Sound Pool - Track " (eseq.kinds/track-number t)
           (if (= inst "") "" (str " (" inst ")"))
           " - " (target-label)))
       "Sound Pool")))

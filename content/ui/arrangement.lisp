@@ -37,7 +37,7 @@
 (import eseq.export-song)
 (import eseq.file-dialogs)
 (import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of rgb-part))
-(import eseq.kinds :refer (track tracks groups scenes banks song transport selection
+(import eseq.kinds :refer (track tracks ordered-tracks track-order groups scenes banks song transport selection
                            select-region! clear-region!))
 
 (export arr-view
@@ -2853,10 +2853,11 @@
   (let ((g (when t t.group)))
     (when (clip-rack? g) g)))
 
-;; The lowest-positioned member of clip-bearing rack g: the rack row is drawn
-;; just above it.
+;; The index of g's first member in display order (its rack row sits above it).
 (def rack-first-member (g)
-  (reduce |acc m| (min acc m.index) (let ((m (first g.tracks))) m.index) g.tracks))
+  (let ((first-shown (reduce |acc m| (if (or (= acc nil) (< (track-order m) (track-order acc))) m acc)
+                       nil g.tracks)))
+    first-shown.index))
 
 (def first-rack-member? (t g)
   (= t.index (rack-first-member g)))
@@ -2890,7 +2891,7 @@
               (cons (dict :track t.index) with-rack)
               with-rack))
         '()
-        (tracks)))))
+        (ordered-tracks)))))
 
 ;; A rack-lane clip's tint: its rack clip's color, else the rack's, lifted
 ;; like a track clip's.
@@ -3328,6 +3329,14 @@
       :height :fill :width header-width
       :background-color :buffer-bg
       :padding 0.3
+      ;; Reorder (eseq-ssd6): the rack drags as a block; tracks or groups
+      ;; dropped on it go where a drop on its grid header would.
+      :drag-type (eseq.drum-rack-v2/group-drag-type g)
+      :drag-payload (dict :gid g.gid)
+      :drop-hover-border-color :mixer-strip-selected-border
+      :drop-types eseq.drum-rack-v2/reorder-drag-types
+      :drop-meta (dict :kind "group" :gidx g.index)
+      :on-drop (lambda (event) (eseq.drum-rack-v2/drop-reorder-on-group event g))
       (h-stack :width :fill :gap 0.4 :align :center
         (box :width 0.68 :height 2.0
           :background "seqv-track-color-badge"
@@ -3363,6 +3372,12 @@
     (box
       :key (str "track-header-" i)
       :height (lane-height-for t) :width header-width
+      ;; Drop a track's name (or a group) here to reorder (eseq-ssd6); the
+      ;; name in the header is the drag source.
+      :drop-hover-border-color :mixer-strip-selected-border
+      :drop-types eseq.drum-rack-v2/reorder-drag-types
+      :drop-meta (dict :kind "track" :track i)
+      :on-drop (lambda (event) (eseq.drum-rack-v2/drop-reorder-on-track event (track i)))
       :selected #'t.in-selection
       :background-color :buffer-bg
       :selected-background-color :mixer-strip-selected-bg

@@ -199,10 +199,10 @@ pub(crate) fn clear_scene_cell_command(app: &mut app::App, payload: Value) -> Re
                 &app.graph.track_instrument_types,
                 mode,
             )
-            .ok_or_else(|| format!("Could not clear scene {} track {}", scene + 1, track + 1))
+            .ok_or_else(|| format!("Could not clear scene {} track {}", scene + 1, app.track_number(track)))
     });
     let Ok(pattern_id) = cleared else {
-        return Err(format!("Scene cell clear failed: scene {}, track {}", scene + 1, track + 1));
+        return Err(format!("Scene cell clear failed: scene {}, track {}", scene + 1, app.track_number(track)));
     };
     if queued {
         return queue_track_clip_launch(
@@ -218,7 +218,7 @@ pub(crate) fn clear_scene_cell_command(app: &mut app::App, payload: Value) -> Re
         // would otherwise restart the lane at its boundary.
         let _ = app.state.quantized_launches().cancel_owner(QuantizedLaunchOwner::TrackClip(track as u32));
     }
-    Ok(format!("Cleared scene {} track {} pattern {}", scene + 1, track + 1, pattern_id.0))
+    Ok(format!("Cleared scene {} track {} pattern {}", scene + 1, app.track_number(track), pattern_id.0))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -289,7 +289,7 @@ pub(super) fn handle(
             if track >= num_tracks {
                 editor.handle_host_event(HostEvent::Status(format!(
                     "Track pattern fork failed: track {} is out of range",
-                    track + 1
+                    app.track_number(track)
                 )));
                 return;
             }
@@ -302,18 +302,18 @@ pub(super) fn handle(
                     &app.graph.track_sample_rates,
                     &app.tracks,
                     &app.graph.track_instrument_types,
-                ).ok_or_else(|| format!("Could not fork track {} pattern", track + 1)),
+                ).ok_or_else(|| format!("Could not fork track {} pattern", app.track_number(track))),
             );
             let Ok(pattern_id) = forked else {
                 editor.handle_host_event(HostEvent::Status(format!(
                     "Track pattern fork failed for track {}",
-                    track + 1
+                    app.track_number(track)
                 )));
                 return;
             };
             editor.handle_host_event(HostEvent::Status(format!(
                 "Forked track {} pattern {}",
-                track + 1,
+                app.track_number(track),
                 pattern_id.0
             )));
         }
@@ -340,7 +340,7 @@ pub(super) fn handle(
             if track >= num_tracks {
                 editor.handle_host_event(HostEvent::Status(format!(
                     "Track pattern clone failed: track {} is out of range",
-                    track + 1
+                    app.track_number(track)
                 )));
                 return;
             }
@@ -368,14 +368,14 @@ pub(super) fn handle(
                         )
                     };
                     cloned.ok_or_else(|| format!(
-                        "Could not clone track {} pattern", track + 1
+                        "Could not clone track {} pattern", app.track_number(track)
                     ))
                 },
             );
             let Ok(pattern_id) = cloned else {
                 editor.handle_host_event(HostEvent::Status(format!(
                     "Track pattern clone failed for track {}",
-                    track + 1
+                    app.track_number(track)
                 )));
                 return;
             };
@@ -399,7 +399,7 @@ pub(super) fn handle(
             ui_epoch.fetch_add(1, Ordering::Relaxed);
             editor.handle_host_event(HostEvent::Status(format!(
                 "Cloned track {} pattern {}",
-                track + 1,
+                app.track_number(track),
                 pattern_id.0
             )));
         }
@@ -469,7 +469,7 @@ pub(super) fn handle(
             app.push_all_restored_defaults();
             editor.handle_host_event(HostEvent::Status(format!(
                 "Deleted track {} pattern {}",
-                track + 1,
+                app.track_number(track),
                 pattern_id
             )));
         }
@@ -544,7 +544,7 @@ pub(super) fn handle(
                             return Err(format!(
                                 "Could not assign scene {} track {}",
                                 scene + 1,
-                                track + 1
+                                app.track_number(track)
                             ));
                         }
                         Ok(())
@@ -554,7 +554,7 @@ pub(super) fn handle(
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Scene cell share failed: scene {}, track {}, pattern {}",
                         scene + 1,
-                        track + 1,
+                        app.track_number(track),
                         pattern_id
                     )));
                     return;
@@ -588,7 +588,7 @@ pub(super) fn handle(
                         return Err(format!(
                             "Could not assign scene {} track {}",
                             scene + 1,
-                            track + 1
+                            app.track_number(track)
                         ));
                     }
                     // The live sample arrays must match the restored
@@ -605,7 +605,7 @@ pub(super) fn handle(
                 editor.handle_host_event(HostEvent::Status(format!(
                     "Scene cell share failed: scene {}, track {}, pattern {}",
                     scene + 1,
-                    track + 1,
+                    app.track_number(track),
                     pattern_id
                 )));
                 return;
@@ -651,7 +651,7 @@ pub(super) fn handle(
             }
             editor.handle_host_event(HostEvent::Status(format!(
                 "Shared track {} pattern {} into scene {}",
-                track + 1,
+                app.track_number(track),
                 pattern_id,
                 scene + 1
             )));
@@ -695,7 +695,7 @@ pub(super) fn handle(
             if track >= num_tracks {
                 editor.handle_host_event(HostEvent::Status(format!(
                     "Track pattern launch failed: track {} is out of range",
-                    track + 1
+                    app.track_number(track)
                 )));
                 return;
             }
@@ -772,7 +772,7 @@ pub(super) fn handle(
             ui_epoch.fetch_add(1, Ordering::Relaxed);
             editor.handle_host_event(HostEvent::Status(format!(
                 "Launched track {} pattern {}",
-                track + 1,
+                app.track_number(track),
                 pattern_id
             )));
         }
@@ -1000,7 +1000,7 @@ pub(super) fn handle(
             if track >= app.tracks.len() {
                 editor.handle_host_event(HostEvent::Status(format!(
                     "Track {} is out of range",
-                    track + 1
+                    app.track_number(track)
                 )));
             } else if num_patterns <= 1 {
                 editor.handle_host_event(HostEvent::Status(
@@ -1016,18 +1016,18 @@ pub(super) fn handle(
                     &app.tracks,
                     &app.graph.track_instrument_types,
                 ).then_some(()).ok_or_else(|| format!(
-                    "Could not propagate track {}", track + 1
+                    "Could not propagate track {}", app.track_number(track)
                 )),
             ).is_ok() {
                 editor.handle_host_event(HostEvent::Status(format!(
                     "Propagated track {} to {} patterns",
-                    track + 1,
+                    app.track_number(track),
                     num_patterns
                 )));
             } else {
                 editor.handle_host_event(HostEvent::Status(format!(
                     "Failed to propagate track {}",
-                    track + 1
+                    app.track_number(track)
                 )));
             }
         }

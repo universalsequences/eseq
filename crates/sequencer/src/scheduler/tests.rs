@@ -3009,6 +3009,7 @@
                 crate::process::ProcessLiteral::from_value(&value).expect("portable")
             };
             let kind = lisp_host::KindDefinition {
+                routes: Vec::new(),
                 id: "alez/jaki:jaki".to_string(),
                 name: "jaki".to_string(),
                 package: Some("alez/jaki".to_string()),
@@ -3651,6 +3652,7 @@
                 crate::process::ProcessLiteral::from_value(&value).expect("portable")
             };
             let kind = lisp_host::KindDefinition {
+                routes: Vec::new(),
                 id: "test:gated".to_string(),
                 name: "gated".to_string(),
                 package: None,
@@ -3807,6 +3809,7 @@
                 crate::process::ProcessLiteral::from_value(&value).expect("portable")
             };
             let kind = lisp_host::KindDefinition {
+                routes: Vec::new(),
                 id: "alez/jaki:jaki".to_string(),
                 name: "jaki".to_string(),
                 package: Some("alez/jaki".to_string()),
@@ -3977,6 +3980,7 @@
             crate::process::ProcessLiteral::from_value(&value).expect("portable")
         };
         let kind = lisp_host::KindDefinition {
+            routes: Vec::new(),
             id: "alez/jaki:jaki".to_string(),
             name: "jaki".to_string(),
             package: Some("alez/jaki".to_string()),

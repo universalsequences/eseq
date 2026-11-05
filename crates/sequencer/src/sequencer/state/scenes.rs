@@ -1790,6 +1790,17 @@ impl ProjectScenes {
             if track < scene.cell_sounds.len() {
                 scene.cell_sounds.remove(track);
             }
+            // The scene's own routes address tracks by index too: drop the
+            // deleted track's and shift the rest down with their tracks, in
+            // every scene, not only the live snapshot (PatternSnapshot::
+            // remove_track) — or each later cable lands one track off, and
+            // one past the end is dropped.
+            super::track_delete_remap::remap_scene_routes_after_track_delete(
+                &mut scene.mod_connections,
+                &mut scene.neural_networks,
+                &mut scene.graph_overrides,
+                track,
+            );
         }
         if track < self.track_overrides.len() {
             self.track_overrides.remove(track);

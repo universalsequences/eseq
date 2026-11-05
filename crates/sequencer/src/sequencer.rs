@@ -35,6 +35,7 @@ pub use snapshot::{
 };
 #[allow(unused_imports)]
 pub use state::{
+    InstanceSlotChange, InstanceSlotLocation, remap_document_routes,
     arrangement_for_serialization, arrangement_scene_spans,
     compile_arrangement, insert_clip_sorted, legacy_backdrop_spans, migrate_legacy_backdrops,
     insert_rack_clip_sorted, lower_rows_to_arrangement, occlude_rack_span, occlude_span,

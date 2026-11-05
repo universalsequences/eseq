@@ -1,5 +1,22 @@
 use super::*;
 
+/// Shifts a scene's track-addressed routes (mod cables, neural routes,
+/// graph overrides) for the deletion of `deleted_track`: its own are dropped,
+/// later ones move down with their tracks.
+pub(super) fn remap_scene_routes_after_track_delete(
+    mod_connections: &mut Vec<ModConnection>,
+    neural_networks: &mut [ProjectNeuralNetwork],
+    graph_overrides: &mut [ProjectGraphOverrides],
+    deleted_track: usize,
+) {
+    *mod_connections = mod_connections
+        .iter()
+        .filter_map(|connection| remap_mod_connection_after_track_delete(*connection, deleted_track))
+        .collect();
+    crate::neural::remap_neural_network_routes_after_track_delete(neural_networks, deleted_track);
+    remap_graph_overrides_after_track_delete(graph_overrides, deleted_track);
+}
+
 pub(super) fn remove_track_lane_if_present<T>(lanes: &mut Vec<T>, track_idx: usize) {
     if track_idx < lanes.len() {
         lanes.remove(track_idx);

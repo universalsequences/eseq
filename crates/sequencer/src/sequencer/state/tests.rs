@@ -6306,6 +6306,50 @@
         );
     }
 
+    /// Mod cables live on the scene (`Scene::mod_connections`), not only in
+    /// the live snapshot: deleting a track with no cables must leave every
+    /// other cable on the same tracks, in the playing scene and in the
+    /// others.
+    #[test]
+    fn remove_track_remaps_scene_mod_connections_in_every_scene() {
+        let state = make_state_with_tracks(5);
+        let names: Vec<String> = (0..5).map(|t| format!("t{t}")).collect();
+        let buffer_ids = vec![0; 5];
+        let rates = vec![44_100; 5];
+        let types = vec![InstrumentType::Sampler; 5];
+        let effects = vec![EffectDescriptor::default_full_chain(); 5];
+        let cable = |source_track, dest| ModConnection {
+            source_output: 0,
+            source_track,
+            destination: ModDestination::Track(dest),
+            dest_input: 0,
+        };
+        // Track 1 has no cables; 0->2, 3->4 and 4->0 do.
+        let cables = vec![cable(0, 2), cable(3, 4), cable(4, 0)];
+        state
+            .edit_current_mod_connections(|current| {
+                *current = cables.clone();
+                Ok(())
+            })
+            .unwrap();
+        let other = {
+            let mut scenes = state.pattern.scenes.lock().unwrap();
+            let other = scenes.new_scene();
+            scenes.scenes[other].mod_connections = cables.clone();
+            other
+        };
+
+        assert!(state.remove_track(1, &buffer_ids, &rates, &names, &types, &effects));
+
+        let expected = vec![cable(0, 1), cable(2, 3), cable(3, 0)];
+        assert_eq!(state.current_mod_connections(), expected, "the playing scene");
+        assert_eq!(
+            state.pattern.scenes.lock().unwrap().scene_mod_connections(other),
+            Some(expected),
+            "another scene",
+        );
+    }
+
     #[test]
     fn remove_track_compacts_live_state_and_runtime_bindings() {
         let state = make_state_with_tracks(3);

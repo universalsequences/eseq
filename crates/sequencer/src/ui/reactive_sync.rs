@@ -426,7 +426,7 @@ pub(super) fn mod_route_destination_status_label(
     destination: sequencer::sequencer::ModDestination,
 ) -> String {
     match destination {
-        sequencer::sequencer::ModDestination::Track(track) => format!("track {}", track + 1),
+        sequencer::sequencer::ModDestination::Track(track) => format!("track {}", app.track_number(track)),
         sequencer::sequencer::ModDestination::Bus(bus_id) => app
             .buses
             .iter()

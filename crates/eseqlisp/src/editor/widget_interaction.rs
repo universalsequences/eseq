@@ -304,6 +304,8 @@ struct PatchPortLayout {
     pending: bool,
     center: (f32, f32),
     connected_sources: Vec<usize>,
+    /// `:cable-hang`: how far this in port's cables sag (1 = stock).
+    hang: f32,
     on_cable_click: Option<Value>,
     on_patch_drop: Option<Value>,
     on_patch_cancel: Option<Value>,
@@ -382,6 +384,7 @@ fn collect_patch_port_layouts(node: &LayoutNode, ports: &mut Vec<PatchPortLayout
                     node.rect.row + node.rect.height * 0.5,
                 ),
                 connected_sources: node_usize_list_prop(node, "connected-sources"),
+                hang: crate::ui::gpu_geometry::cable_hang_prop(node),
                 on_cable_click: node.props.get("on-cable-click").cloned(),
                 on_patch_drop: node.props.get("on-patch-drop").cloned(),
                 on_patch_cancel: node.props.get("on-patch-cancel").cloned(),
@@ -439,7 +442,7 @@ fn patch_cable_click_output(
                 continue;
             };
             let end = (port.center.0 * cell_w, port.center.1 * cell_h);
-            let distance = distance_to_patch_cable_px(start, end, point_px);
+            let distance = distance_to_patch_cable_px(start, end, point_px, port.hang);
             if distance > 7.0 {
                 continue;
             }
@@ -539,16 +542,15 @@ fn has_pending_patch_drag(layout: &LayoutNode) -> bool {
         .any(|port| port.direction == PatchPortDirection::Out && port.active && port.pending)
 }
 
-fn distance_to_patch_cable_px(start: (f32, f32), end: (f32, f32), point: (f32, f32)) -> f32 {
-    let dx = end.0 - start.0;
-    let dy = end.1 - start.1;
-    let distance = (dx * dx + dy * dy).sqrt();
-    let slack = 0.70;
-    let sag = ((28.0 + distance * 0.22) * slack).clamp(18.0, 98.0);
-    let handle_x = dx.abs().clamp(42.0, 190.0) * (0.30 + 0.14 * slack);
-    let direction = if dx >= 0.0 { 1.0 } else { -1.0 };
-    let c1 = (start.0 + handle_x * direction, start.1 + sag);
-    let c2 = (end.0 - handle_x * direction, end.1 + sag);
+fn distance_to_patch_cable_px(
+    start: (f32, f32),
+    end: (f32, f32),
+    point: (f32, f32),
+    hang: f32,
+) -> f32 {
+    // The drawn curve's (SolidCablePath at SOLID_CABLE_TENSION).
+    let slack = crate::ui::gpu_geometry::SOLID_CABLE_SLACK;
+    let (c1, c2) = crate::ui::gpu_geometry::solid_cable_controls(start, end, slack, hang);
 
     let mut best = f32::MAX;
     let mut prev = start;

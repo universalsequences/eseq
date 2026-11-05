@@ -268,7 +268,7 @@ fn create_draft(
     let status = format!(
         "{} draft track {}: {}",
         if replaced { "Its draft was deleted; created" } else { "Created" },
-        track + 1,
+        app.track_number(track),
         instrument.name
     );
     ctx.sessions.drafts.push(Draft { key, engine_id, dir, generation: 0, instrument });

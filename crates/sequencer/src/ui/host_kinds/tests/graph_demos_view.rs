@@ -366,7 +366,8 @@ fn rack_members(h: &Harness, group: u64) -> Vec<usize> {
 fn member_options(h: &Harness, members: &[usize]) -> Value {
     let labels = members
         .iter()
-        .map(|track| s(&format!("{} {}", track + 1, h.app.tracks[*track])))
+        // Numbered by display position (eseq-ssd6), as the grid shows them.
+        .map(|track| s(&format!("{} {}", h.app.track_number(*track), h.app.tracks[*track])))
         .chain([s("Off")]);
     list_value(labels)
 }

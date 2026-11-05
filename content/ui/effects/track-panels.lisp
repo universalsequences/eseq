@@ -460,7 +460,7 @@
 ;; Track t's short label: its number and the start of its name (the
 ;; mixer's collapsed strip spells it so too).
 (def track-short-label (t)
-  (str (+ t.index 1) " " (substring t.name 0 16)))
+  (str (eseq.kinds/track-number t) " " (substring t.name 0 16)))
 
 ;; The current track's chip (eseq.panel-header's chip shape). A binding
 ;; cannot be negated, so the box binds t.audible as :muted with the silenced

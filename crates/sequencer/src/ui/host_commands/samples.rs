@@ -239,7 +239,7 @@ pub(super) fn handle(
                                 || {
                                     format!(
                                         "Loaded sample on track {}: {}",
-                                        track + 1,
+                                        app.track_number(track),
                                         result.name
                                     )
                                 },

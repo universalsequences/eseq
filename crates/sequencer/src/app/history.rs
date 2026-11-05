@@ -117,6 +117,9 @@ pub struct BusStructureState {
 pub struct BusGroupStructureState {
     pub buses: Vec<BusStructureState>,
     pub groups: Vec<GroupStructureState>,
+    /// `App::track_order` (eseq-ssd6): a reorder is a structure edit, and
+    /// moving a track between groups changes both in one step.
+    pub track_order: Vec<TrackId>,
     pub scenes: crate::sequencer::ProjectScenes,
     /// The project groove pool: racks reference it, so a groove edit (pick,
     /// extract, delete-in-use) is one step over both.
@@ -883,11 +886,15 @@ pub struct TrackDeletionPatch {
     /// The track's audio regions (docs/audio-tracks-spec.md): arrangement
     /// content that the topology remap drops with the lane.
     pub audio_lane: Vec<crate::sequencer::AudioRegion>,
+    /// Instance-document slots whose track routes the delete shifted, with
+    /// their old values (a jaki's rows; kind `:routes`).
+    pub instance_slots: Vec<crate::sequencer::InstanceSlotChange>,
 }
 
 impl TrackDeletionPatch {
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
+            + self.instance_slots.iter().map(|change| change.retained_bytes()).sum::<usize>()
             + self.instrument.display_name.capacity()
             + self.patterns.pool.patterns.capacity()
                 * std::mem::size_of::<(PatternId, crate::sequencer::TrackPatternData)>()

@@ -201,11 +201,64 @@ impl App {
     /// rack clip, nodes routed to it go silent and later members shift down, in
     /// every scene. Called from the group-member funnels, inside whatever
     /// recorded edit removed the member.
+    /// Shift the track routes stored in instance documents (their kind's
+    /// `:routes`) of the instances `owner` owns, for the removal of route
+    /// `removed`: a track index for project-owned instances, a member
+    /// position for a rack's. Edits every scene and rack clip holding the
+    /// documents; returns the old values, for an undo that needs them.
+    pub(crate) fn remap_instance_document_routes(
+        &self,
+        owner: crate::project::ProjectInstanceOwner,
+        removed: usize,
+    ) -> Vec<crate::sequencer::InstanceSlotChange> {
+        let routed: std::collections::HashMap<u64, Vec<Vec<String>>> = self
+            .instances
+            .list
+            .iter()
+            .filter(|instance| instance.owner == owner)
+            .filter_map(|instance| {
+                let kind = crate::lisp_host::registered_kind(&instance.kind)?;
+                (!kind.routes.is_empty()).then(|| (instance.id, kind.routes))
+            })
+            .collect();
+        if routed.is_empty() {
+            return Vec::new();
+        }
+        let changes = self.state.with_scenes_mut(|scenes| {
+            scenes.edit_instance_document_slots(|name, value| {
+                let Some(id) = crate::lisp_host::instance_document_slot_owner(name) else {
+                    return false;
+                };
+                let Some(paths) = routed.get(&id) else {
+                    return false;
+                };
+                let field = name.rsplit_once('/').map_or("", |(_, field)| field);
+                let mut changed = false;
+                for path in paths.iter().filter(|path| path[0] == field) {
+                    changed |= crate::sequencer::remap_document_routes(value, &path[1..], removed);
+                }
+                changed
+            })
+        });
+        match changes {
+            Ok(changes) => {
+                if !changes.is_empty() {
+                    self.state.publish_scheduler_snapshot();
+                }
+                changes
+            }
+            Err(error) => {
+                eprintln!("instance route remap failed: {error}");
+                Vec::new()
+            }
+        }
+    }
+
     pub(crate) fn remap_rack_sequencer_routes_after_member_removed(
         &self,
         group_id: u64,
         position: usize,
-    ) {
+    ) -> Vec<crate::sequencer::InstanceSlotChange> {
         // Rack clips are positional over members too (rack-clips spec §3): the
         // leaving member's cell drops out of every clip, keeping
         // `clip.cells.len() == members.len()`.
@@ -223,7 +276,7 @@ impl App {
                 .iter()
                 .any(|instance| instance.owner.rack() == Some(group_id));
         if !owns_sequencers {
-            return;
+            return Vec::new();
         }
         self.state.edit_all_scene_graph_overrides(|graphs| {
             let mut changed = false;
@@ -232,6 +285,11 @@ impl App {
             }
             changed
         });
+        // Generator kinds (a jaki) keep their routes in their documents.
+        self.remap_instance_document_routes(
+            crate::project::ProjectInstanceOwner::Rack(group_id),
+            position,
+        )
     }
 
     pub(super) fn rack_member_tracks(&self, group_id: u64) -> Result<Vec<usize>, String> {

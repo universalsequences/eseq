@@ -56,10 +56,17 @@ impl HostKinds {
                 .track_variants
                 .retain(|id, _| rt.instance_is_live(*id));
         }
+        // Display order (eseq-ssd6): each track's position, and the list.
+        let display: Vec<usize> = app.display_track_order()
+            .into_iter()
+            .filter(|&track| track < tracks.len())
+            .collect();
+        let positions = crate::app::track_order::display_rank(&display, tracks.len());
         let mut params_replaced = false;
         for (track, id) in tracks.iter().enumerate() {
             let Some(id) = *id else { continue };
             pusher.push(id, f::TRACK_INDEX, number(track as f64));
+            pusher.push(id, f::TRACK_ORDER, number(positions[track] as f64));
             let tid = registry.ids()[track].0;
             pusher.push(id, f::TRACK_TID, number(tid as f64));
             pusher.push(id, f::TRACK_NAME, Value::String(app.tracks[track].clone()));
@@ -106,6 +113,9 @@ impl HostKinds {
         }
         if let Some(project) = pusher.singleton(PROJECT) {
             pusher.push(project, f::PROJECT_TRACKS, listed_instances(&tracks));
+            let ordered: Vec<Option<InstanceId>> =
+                display.iter().map(|&track| tracks[track]).collect();
+            pusher.push(project, f::PROJECT_ORDERED_TRACKS, listed_instances(&ordered));
         }
         self.sync_route_model(pusher, app, &tracks);
         self.track_ids = tracks;

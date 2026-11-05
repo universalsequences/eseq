@@ -80,6 +80,7 @@ pub mod take_edit;
 pub mod take_recording;
 pub mod song_transport;
 mod synth;
+pub mod track_order;
 
 pub use effect_params::{bus_effect_param_macro_key, effect_param_macro_key};
 pub use params::SoloAudibility;
@@ -1112,6 +1113,12 @@ pub struct App {
     pub track_collapsed: Vec<bool>,
     pub buses: Vec<BusChannelState>,
     pub groups: Vec<crate::project::ProjectTrackGroup>,
+    /// The display order of the tracks (eseq-ssd6), by stable id: the order
+    /// the step grid, the mixer and the arrangement draw rows in. Track
+    /// indices never move; this list is presentation only. Empty means the
+    /// legacy order (see `track_order::display_track_order`). Ids of deleted
+    /// tracks may linger so an undone delete returns to its old place.
+    pub track_order: Vec<crate::sequencer::TrackId>,
     /// The project groove pool (docs/rack-groove-spec.md §Three tiers): every
     /// groove a drum rack can play; racks point into it by id
     /// (`RackGrooveSettings::active`). Undo/redo carries it with the group
@@ -3070,6 +3077,7 @@ impl App {
             track_collapsed: Vec::new(),
             buses: BusChannelState::default_buses(),
             groups: Vec::new(),
+            track_order: Vec::new(),
             grooves: Vec::new(),
             instances: crate::project::ProjectInstances::default(),
             mixer_control_holds: crate::mixer_control::MixerControlHolds::default(),

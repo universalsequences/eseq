@@ -756,15 +756,12 @@ impl PatternSnapshot {
         remove_track_lane_if_present(&mut self.project_process_lane_overrides, track_idx);
         remove_track_lane_if_present(&mut self.plock_variant_registries, track_idx);
         remove_track_lane_if_present(&mut self.key_lock_variant_registries, track_idx);
-        self.mod_connections = self
-            .mod_connections
-            .iter()
-            .filter_map(|connection| {
-                remap_mod_connection_after_track_delete(*connection, track_idx)
-            })
-            .collect();
-        remap_neural_network_routes_after_track_delete(&mut self.neural_networks, track_idx);
-        remap_graph_overrides_after_track_delete(&mut self.graph_overrides, track_idx);
+        remap_scene_routes_after_track_delete(
+            &mut self.mod_connections,
+            &mut self.neural_networks,
+            &mut self.graph_overrides,
+            track_idx,
+        );
     }
 
     pub fn remove_effect_slot(&mut self, track: usize, slot_idx: usize) {

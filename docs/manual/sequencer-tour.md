@@ -53,6 +53,12 @@ Note: while the arrangement plays a track from a clip, that track is dimmed and 
 
 Shift-click a track to select the range of tracks from the current one to the clicked one. Command-click a track to add it to the selection, or remove it. While two or more tracks are selected, Command-A selects every step on each of them, and a change in the track settings applies to every selected track as a single undo step.
 
+### Reordering tracks
+
+Drag a track's name onto another track to move it there. Dragged down, it lands below that track; dragged up, it lands above. Dropping it on a track inside a group adds it to the group at that place, and dropping a grouped track on a track outside the group takes it out. Dropping a track on a group's header adds it as the group's last track. To move a whole group, drag the group's name onto a track or onto another group.
+
+The order is shared by the sequencer, the mixer and the arrangement, is saved with the project, and each move undoes with Command-Z. A track's number follows its place: the number on its mute button, in route menus and in labels is its position from the top. Scripts still address a track by its original number (`(track n)` counts from 0 in creation order), so a reorder never changes what a script plays.
+
 ## Step values
 
 The eight step values are part of the pattern. They shape each note before the instrument hears it.
