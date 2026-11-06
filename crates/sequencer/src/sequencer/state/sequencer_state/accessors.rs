@@ -289,7 +289,8 @@ impl SequencerState {
             live_instrument_params: crate::audio::live_params::LiveInstrumentParams::default(),
             publish_coalesce_depth: AtomicU64::new(0),
             pending_coalesced_publish: AtomicBool::new(false),
-            live_macro_overrides: Mutex::new(HashMap::new()),
+            live_macro_overrides: Mutex::new(Arc::new(HashMap::new())),
+            scene_push_schedule: Mutex::new(None),
             rack_macro_runtime_values: Arc::new(RackMacroRuntimeValues::new()),
             neural_visualization: Mutex::new(NeuralVisualizationSnapshot::default()),
             next_neural_network_id: AtomicU64::new(1),
@@ -325,6 +326,10 @@ impl SequencerState {
                 .collect(),
             active_note_trigger_sequence: AtomicU64::new(0),
             audio_rendered_sample: AtomicU64::new(0),
+            scheduler_lookahead_samples: AtomicU64::new(0),
+            audio_player_slots: Default::default(),
+            audio_lock_view: Default::default(),
+            audio_locks_present: AtomicBool::new(false),
             audio_clock: AudioClockStamp::default(),
             scheduler_rendered_beats_bits: AtomicU64::new(0.0_f64.to_bits()),
             scratch_source: Mutex::new(String::new()),
@@ -363,6 +368,7 @@ impl SequencerState {
             song_playback: SongPlaybackMailbox::default(),
             note_audition: crate::scheduler::audition::AuditionMailbox::default(),
             song_manual_latch: AtomicU64::new(0),
+            audio_track_lanes: AtomicU64::new(0),
             song_scene_latch: AtomicBool::new(false),
             song_take_lane_mask: AtomicU64::new(0),
             // Matches `App::arrangement_view_visible`'s initial value; the
@@ -574,8 +580,9 @@ impl SequencerState {
         read: impl FnOnce(&TrackPatternData) -> R,
     ) -> Option<R> {
         let scenes = self.pattern.scenes.lock().unwrap();
-        let scene = scenes.scenes.get(scene)?;
-        let pattern_id = scene.cells.get(track).copied().flatten()?;
+        // Composed: a clip-bearing rack's member plays its clip's cell, not
+        // the scene's own (rack-clips spec §4.1).
+        let pattern_id = scenes.composed_scene_cell(scene, track)?;
         let pattern = scenes.track_pools.get(track)?.get(pattern_id)?;
         Some(read(&pattern))
     }

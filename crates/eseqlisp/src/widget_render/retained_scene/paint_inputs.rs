@@ -87,6 +87,6 @@ fn paint_prop(key: &str) -> bool {
     // a custom paint prop must remain observable even if it looks like one.
     !is_internal_source_prop(key) && !matches!(key,
         "on-click" | "on-right-click" | "on-double-click" | "on-change"
-        | "on-press" | "on-release" | "on-drag" | "on-drop"
+        | "on-press" | "on-release" | "on-drag" | "on-drop" | "on-drag-over"
         | "on-mouse-down" | "on-mouse-up")
 }

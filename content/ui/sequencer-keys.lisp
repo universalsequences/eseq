@@ -127,7 +127,7 @@
   (let ((current selection.track)
         (steps (len selection.steps))
         (scene transport.scene))
-    (dict :about (str "current track: " (if current (str (+ current.index 1) " " current.name) "none")
+    (dict :about (str "current track: " (if current (str (eseq.kinds/track-number current) " " current.name) "none")
                       (if (> steps 0) (str ", " steps " of its steps selected") "")
                       "; scene: " (if scene (str scene.number " " scene.name " of bank " scene.bank.label) "none")
                       "; " (if transport.playing "playing" "stopped") " at " transport.bpm " bpm"))))

@@ -6,6 +6,12 @@ use crate::layout::Rect;
 /// which is enough separation to scan the ruler without wasting horizontal
 /// breathing room at the normal UI scale.
 const MIN_VISIBLE_GRID_SPACING_CELLS: f64 = 6.0;
+/// Past this zoom (cells per beat) a bars/beats grid is "zoomed in": it
+/// draws (and snaps to) `ZOOMED_GRID_SUBDIVISION` times finer, down to
+/// `ZOOMED_MIN_GRID_SPACING_CELLS` apart, for micro edits.
+const ZOOMED_CELLS_PER_BEAT: f64 = 48.0;
+const ZOOMED_GRID_SUBDIVISION: f64 = 4.0;
+const ZOOMED_MIN_GRID_SPACING_CELLS: f64 = 1.5;
 
 #[derive(Clone)]
 pub struct TimeRuler {
@@ -31,6 +37,10 @@ pub struct TimeViewport {
     /// promoted by aligned powers of two until it has enough screen space to
     /// remain readable. The resolved step drives both rendering and editing.
     pub grid_density: f64,
+    /// Bars/beats only: draw and snap to the zoomed-in subdivision at every
+    /// zoom, not just past `ZOOMED_CELLS_PER_BEAT`. Ruler labels and major
+    /// lines keep the readable grid's spacing.
+    pub fine_grid: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -40,6 +50,14 @@ pub struct TimeZoom {
 }
 
 impl TimeViewport {
+    /// This view without `fine_grid`: the grid labels are spaced by.
+    fn readable(&self) -> Self {
+        Self {
+            fine_grid: false,
+            ..*self
+        }
+    }
+
     pub fn content_rect(&self) -> Rect {
         let top = self.rect.row + self.header_height.min(self.rect.height);
         let left = self.rect.col + self.sidebar_width.min(self.rect.width);
@@ -118,7 +136,7 @@ impl TimeViewport {
         };
         let mut labels = Vec::new();
         let mut last_end = None;
-        for (mark, col, is_major) in self.visible_grid_marks(Some(ruler)) {
+        for (mark, col, is_major) in self.readable().visible_grid_marks(Some(ruler)) {
             let Some(label) = ruler.label_for_mark(mark, is_major) else {
                 continue;
             };
@@ -161,7 +179,7 @@ impl TimeViewport {
         let mut last_end = None;
         let content = self.content_rect();
         let max_x = self.rect.col + self.rect.width;
-        for (mark, _, is_major) in self.visible_grid_marks(Some(ruler)) {
+        for (mark, _, is_major) in self.readable().visible_grid_marks(Some(ruler)) {
             let Some(label) = ruler.label_for_mark(mark, is_major) else {
                 continue;
             };
@@ -229,7 +247,12 @@ impl TimeViewport {
                 } else {
                     16.0
                 };
-                step / self.grid_density.clamp(1.0, 8.0)
+                let zoomed = if self.fine_grid || cells_per_beat >= ZOOMED_CELLS_PER_BEAT {
+                    ZOOMED_GRID_SUBDIVISION
+                } else {
+                    1.0
+                };
+                step / self.grid_density.clamp(1.0, 8.0) / zoomed
             }
             _ => {
                 let cells_per_second = content.width as f64 / self.view_duration.max(0.0001);
@@ -266,8 +289,15 @@ impl TimeViewport {
         let content = self.content_rect();
         let cells_per_time = content.width as f64 / self.view_duration.max(0.0001);
         let mut step = self.grid_step_candidate(ruler);
+        let zoomed_bars = matches!(ruler.map(|r| &r.mode), Some(TimeRulerMode::BarsBeats { .. }))
+            && (self.fine_grid || cells_per_time >= ZOOMED_CELLS_PER_BEAT);
+        let min_spacing = if zoomed_bars {
+            ZOOMED_MIN_GRID_SPACING_CELLS
+        } else {
+            MIN_VISIBLE_GRID_SPACING_CELLS
+        };
         if cells_per_time.is_finite() && cells_per_time > 0.0 {
-            while step.is_finite() && step * cells_per_time < MIN_VISIBLE_GRID_SPACING_CELLS {
+            while step.is_finite() && step * cells_per_time < min_spacing {
                 step *= 2.0;
             }
         }
@@ -295,7 +325,13 @@ impl TimeViewport {
             return Vec::new();
         }
 
-        let (step, major_every) = self.grid_spec(ruler);
+        let (step, mut major_every) = self.grid_spec(ruler);
+        if self.fine_grid {
+            // The fine grid's major lines are the readable grid's, so only
+            // minor lines are added between them.
+            let (readable_step, readable_major) = self.readable().grid_spec(ruler);
+            major_every = ((readable_step * readable_major as f64) / step).round().max(1.0) as i64;
+        }
 
         // First mark at or after view_start: a mark before it would clamp to
         // the content's left edge and draw an invented grid line/label there.
@@ -372,6 +408,7 @@ mod tests {
             zoom_min_duration: 8.0,
             zoom_max_duration: 128.0,
             grid_density: 1.0,
+            fine_grid: false,
         };
         let ruler = TimeRuler {
             mode: TimeRulerMode::BarsBeats { beats_per_bar: 4 },
@@ -405,6 +442,7 @@ mod tests {
             zoom_min_duration: 0.25,
             zoom_max_duration: 128.0,
             grid_density: 1.0,
+            fine_grid: false,
         };
         let closer = TimeViewport {
             view_duration: 1.0,
@@ -412,7 +450,9 @@ mod tests {
         };
 
         assert_eq!(wide.grid_step(Some(&ruler)), 0.5);
-        assert_eq!(closer.grid_step(Some(&ruler)), 0.125);
+        // From 48 cells a beat the grid is 4x finer, for micro edits: 128
+        // cells a beat draws 128ths (0.125 / 4).
+        assert_eq!(closer.grid_step(Some(&ruler)), 0.03125);
     }
 
     #[test]
@@ -431,6 +471,7 @@ mod tests {
             zoom_min_duration: 4.0,
             zoom_max_duration: 1024.0,
             grid_density: 2.0,
+            fine_grid: false,
         };
         let ruler = TimeRuler {
             mode: TimeRulerMode::BarsBeats { beats_per_bar: 4 },
@@ -476,6 +517,7 @@ mod tests {
             zoom_min_duration: 4.0,
             zoom_max_duration: 1024.0,
             grid_density: 2.0,
+            fine_grid: false,
         };
         let ruler = TimeRuler {
             mode: TimeRulerMode::BarsBeats { beats_per_bar: 4 },
@@ -495,6 +537,49 @@ mod tests {
     }
 
     #[test]
+    fn fine_grid_keeps_the_zoomed_density_but_not_its_labels_or_bars() {
+        let coarse = TimeViewport {
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 144.0,
+                height: 8.0,
+            },
+            header_height: 1.0,
+            sidebar_width: 0.0,
+            view_start: 0.0,
+            view_duration: 64.0,
+            zoom_min_duration: 4.0,
+            zoom_max_duration: 1024.0,
+            grid_density: 2.0,
+            fine_grid: false,
+        };
+        let fine = TimeViewport {
+            fine_grid: true,
+            ..coarse
+        };
+        let ruler = TimeRuler {
+            mode: TimeRulerMode::BarsBeats { beats_per_bar: 4 },
+        };
+
+        assert_eq!(coarse.grid_step(Some(&ruler)), 4.0);
+        assert_eq!(fine.grid_step(Some(&ruler)), 1.0, "a line per beat at a bar-grid zoom");
+        assert_eq!(
+            fine.metal_time_ruler_labels(Some(&ruler)),
+            coarse.metal_time_ruler_labels(Some(&ruler)),
+            "labels keep the readable spacing"
+        );
+        let majors = |view: &TimeViewport| {
+            view.metal_grid_lines(Some(&ruler))
+                .into_iter()
+                .filter(|(_, major)| *major)
+                .map(|(x, _)| x)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(majors(&fine), majors(&coarse), "the bar lines stay where they were");
+    }
+
+    #[test]
     fn seconds_ruler_prefers_ms_when_zoomed_in() {
         let viewport = TimeViewport {
             rect: Rect {
@@ -510,6 +595,7 @@ mod tests {
             zoom_min_duration: 0.001,
             zoom_max_duration: 128.0,
             grid_density: 1.0,
+            fine_grid: false,
         };
         let ruler = TimeRuler {
             mode: TimeRulerMode::Seconds,

@@ -426,7 +426,9 @@ impl SequencerState {
     ) -> Result<Arc<RuntimeSong>, String> {
         let mut rows = Vec::with_capacity(staged.len());
         for staging in staged {
-            let mut snapshot = SequencerSnapshot::capture_from_track_pattern_data(
+            // No macro layer baked in: the scheduler folds the live one into
+            // each row as it plays (`SequencerSnapshot::with_macro_overrides`).
+            let mut snapshot = SequencerSnapshot::capture_from_track_pattern_data_with_overrides(
                 self,
                 &staging.track_data,
                 staging.mod_connections,
@@ -435,6 +437,7 @@ impl SequencerState {
                 staging.scene_slots,
                 staging.project_process_chain,
                 staging.parking,
+                &HashMap::new(),
             );
             // Row snapshots are only ever scheduled while the song transport
             // is playing; stamp them so the deterministic clock treats them
@@ -467,6 +470,7 @@ impl SequencerState {
             rows,
             end_beat: song.end_beat,
             loop_enabled: song.loop_enabled,
+            loop_window: song.loop_window(),
         }))
     }
 
@@ -575,10 +579,13 @@ impl SequencerState {
     /// (the sound binding installed a selected clip's or an audible take's
     /// devices into the mirror, so the mirror is not the track's sound).
     pub fn track_owned_lane_mask(&self) -> u64 {
+        // Audio tracks own their sound in either view (they never latch or
+        // borrow, docs/audio-tracks-spec.md).
+        let audio = self.audio_track_lanes.load(Ordering::Acquire);
         if !self.arrangement_context() {
-            return 0;
+            return audio;
         }
-        !(self.song_manual_latch_mask() | self.sound_binding_borrowed_mask())
+        !(self.song_manual_latch_mask() | self.sound_binding_borrowed_mask()) | audio
     }
 
     /// Pin `track`'s session override to the pattern the lane currently
@@ -595,6 +602,7 @@ impl SequencerState {
     }
 
     /// Latch specific tracks (a manual track launch during song playback).
+    /// Latch-exempt tracks (audio tracks) are skipped.
     pub fn latch_song_manual_override(&self, tracks: impl IntoIterator<Item = usize>) {
         let mut bits = 0u64;
         for track in tracks {
@@ -602,6 +610,7 @@ impl SequencerState {
                 bits |= 1 << track;
             }
         }
+        bits &= !self.audio_track_lanes.load(Ordering::Acquire);
         if bits != 0 {
             self.song_manual_latch.fetch_or(bits, Ordering::AcqRel);
             // A latched lane plays the performer's launch, not the row's
@@ -658,7 +667,10 @@ impl SequencerState {
         // SOUND on every unborrowed lane — a resolving cell is inert-but-
         // visible there and must not name what the live surface is showing.
         // Seq context is the classic scene+pattern world.
-        if !self.arrangement_context() {
+        // An audio track's mirror is always its track sound (one sound,
+        // docs/audio-tracks-spec.md), in either view.
+        let track_owned = self.is_audio_track_lane(track);
+        if !self.arrangement_context() && !track_owned {
             if let Some(id) = scenes.effective_pattern_id(track) {
                 return Some(id);
             }
@@ -746,10 +758,27 @@ impl SequencerState {
         self.song_take_lane_mask.store(mask, Ordering::Release);
     }
 
+    /// Whether `track` is an audio track: it never latches to a scene and
+    /// always owns its one sound (no row or clip borrows).
+    pub fn is_audio_track_lane(&self, track: usize) -> bool {
+        track < 64 && self.audio_track_lanes.load(Ordering::Acquire) >> track & 1 == 1
+    }
+
+    /// Mark the tracks that never latch (audio tracks), dropping any latch
+    /// they already hold.
+    pub fn set_audio_track_lane_mask(&self, mask: u64) {
+        if self.audio_track_lanes.swap(mask, Ordering::AcqRel) != mask {
+            self.song_manual_latch.fetch_and(!mask, Ordering::AcqRel);
+        }
+    }
+
     /// Latch every track (a manual scene launch latches globally, spec 10).
     pub fn latch_song_manual_override_all(&self, track_count: usize) {
         self.latch_song_manual_override(0..track_count.min(64));
-        self.latch_song_scene_override();
+        // Only audio tracks (all latch-exempt): nothing was overridden.
+        if self.song_manual_latch_mask() != 0 {
+            self.latch_song_scene_override();
+        }
     }
 
     /// Scene-scoped latch (spec 10): a manual SCENE launch suspends the
@@ -847,6 +876,25 @@ impl SequencerState {
     /// graph renders it.
     pub fn audio_render_clock(&self) -> (&SongPositionShared, &AtomicU64) {
         (self.song_playback.shared(), &self.audio_rendered_sample)
+    }
+
+    pub fn audio_lock_view(&self) -> std::sync::MutexGuard<'_, AudioLockView> {
+        self.audio_lock_view.lock().unwrap()
+    }
+
+    /// The lock view, only when it holds a selection or a lock on an audio
+    /// track `track`: a cheap `None` for every other knob read.
+    pub fn audio_lock_view_for(&self, track: usize) -> Option<std::sync::MutexGuard<'_, AudioLockView>> {
+        (self.audio_locks_present.load(Ordering::Acquire) && self.is_audio_track_lane(track))
+            .then(|| self.audio_lock_view())
+    }
+
+    pub fn set_audio_locks_present(&self, present: bool) {
+        self.audio_locks_present.store(present, Ordering::Release);
+    }
+
+    pub fn audio_player_slots(&self) -> &crate::audio_track::AudioSlotRegistry {
+        &self.audio_player_slots
     }
 
     /// Render-rate `song-position-beats` read (spec 10.2): derived from the

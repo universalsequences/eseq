@@ -737,7 +737,7 @@ where
     } else {
         Err(format!(
             "Track group {group_id} cannot take track {}",
-            track + 1
+            app.track_number(track)
         ))
     };
     let Err(reason) = attached else {

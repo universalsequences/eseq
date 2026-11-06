@@ -3009,6 +3009,7 @@
                 crate::process::ProcessLiteral::from_value(&value).expect("portable")
             };
             let kind = lisp_host::KindDefinition {
+                routes: Vec::new(),
                 id: "alez/jaki:jaki".to_string(),
                 name: "jaki".to_string(),
                 package: Some("alez/jaki".to_string()),
@@ -3651,6 +3652,7 @@
                 crate::process::ProcessLiteral::from_value(&value).expect("portable")
             };
             let kind = lisp_host::KindDefinition {
+                routes: Vec::new(),
                 id: "test:gated".to_string(),
                 name: "gated".to_string(),
                 package: None,
@@ -3807,6 +3809,7 @@
                 crate::process::ProcessLiteral::from_value(&value).expect("portable")
             };
             let kind = lisp_host::KindDefinition {
+                routes: Vec::new(),
                 id: "alez/jaki:jaki".to_string(),
                 name: "jaki".to_string(),
                 package: Some("alez/jaki".to_string()),
@@ -3977,6 +3980,7 @@
             crate::process::ProcessLiteral::from_value(&value).expect("portable")
         };
         let kind = lisp_host::KindDefinition {
+            routes: Vec::new(),
             id: "alez/jaki:jaki".to_string(),
             name: "jaki".to_string(),
             package: Some("alez/jaki".to_string()),
@@ -13528,6 +13532,7 @@
             rows,
             end_beat,
             loop_enabled,
+            loop_range: None,
             next_row_id,
         }));
     }
@@ -14418,27 +14423,131 @@
             "{notices:?}"
         );
 
-        let (wrapped, notices) = exercise(true);
-        assert!(matches!(
-            wrapped,
-            crate::sequencer::SongChunkPlan::Schedule {
-                wrapped: true,
-                ..
-            }
-        ));
+        // A loop end that lands behind the playhead never wraps it (the
+        // loop brace rule: wraps happen only when the playhead reaches the
+        // end), so the shrunk song ends here too.
+        let (looped, notices) = exercise(true);
+        assert!(matches!(looped, crate::sequencer::SongChunkPlan::Ended), "{notices:?}");
         assert!(
-            notices.iter().any(|notice| matches!(
+            !notices.iter().any(|notice| matches!(
                 notice,
-                crate::sequencer::SongPlaybackNotice::RowApplied(applied)
-                    if applied.wrapped && applied.effective_beat == 0.0
+                crate::sequencer::SongPlaybackNotice::RowApplied(applied) if applied.wrapped
             )),
             "{notices:?}"
         );
+    }
+
+    #[test]
+    fn song_loop_wraps_inside_the_loop_brace() {
+        let (state, _) = song_mode_fixture();
+        state.set_committed_song(Some(crate::sequencer::ProjectSong {
+            rows: vec![
+                song_mode_row(0, 0.0, 0, Vec::new()),
+                song_mode_row(1, 4.0, 1, Vec::new()),
+            ],
+            end_beat: 12.0,
+            loop_enabled: true,
+            loop_range: Some((2.0, 6.0)),
+            next_row_id: 2,
+        }));
+        let song = state.preflight_runtime_song().expect("preflight");
+        let spq = 24_000.0;
+        let mailbox = state.song_playback();
+
+        let mut runtime =
+            crate::sequencer::SongPlaybackRuntime::new(Arc::clone(&song), 0.0, spq).expect("runtime");
+        // Chunks stop at the row boundary (4) and then at the loop end (6).
+        let mut at = 0u64;
+        let mut clock = 0.0;
+        let mut wraps = Vec::new();
+        for _ in 0..6 {
+            match runtime.next_chunk(at, clock, 48_000, mailbox) {
+                crate::sequencer::SongChunkPlan::Schedule { frames, wrapped, .. } => {
+                    if wrapped {
+                        wraps.push(at);
+                        clock = 0.0;
+                    }
+                    at += frames as u64;
+                    clock += frames as f64 / spq;
+                }
+                crate::sequencer::SongChunkPlan::Ended => panic!("a looping song never ends"),
+            }
+        }
+        assert_eq!(wraps.first(), Some(&(6 * 24_000)), "the first wrap is at the loop end");
+        let applied: Vec<(f64, bool)> = mailbox
+            .drain_notices()
+            .into_iter()
+            .filter_map(|notice| match notice {
+                crate::sequencer::SongPlaybackNotice::RowApplied(a) => Some((a.effective_beat, a.wrapped)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(&applied[..3], &[(0.0, false), (4.0, false), (2.0, true)], "{applied:?}");
+        let position = mailbox.shared().position_beats(6 * 24_000 + 12_000).expect("active");
+        assert!((position - 2.5).abs() < 1e-6, "half a beat past the wrap: {position}");
+
+        // Started past the loop end: no wrap, the song plays on.
+        let mut runtime =
+            crate::sequencer::SongPlaybackRuntime::new(Arc::clone(&song), 8.0, spq).expect("runtime");
+        runtime.set_open_ended(true);
+        for step in 0..4 {
+            match runtime.next_chunk(step * 24_000, step as f64, 24_000, mailbox) {
+                crate::sequencer::SongChunkPlan::Schedule { wrapped, .. } => assert!(!wrapped),
+                crate::sequencer::SongChunkPlan::Ended => panic!("open-ended"),
+            }
+        }
+    }
+
+    /// Editing the brace mid-pass takes effect at once and in time: the
+    /// shared position (UI playhead, audio tracks) switches to the new loop
+    /// on the next chunk, the wrap lands exactly on the new end, and an end
+    /// moved behind the playhead lets it play straight on.
+    #[test]
+    fn a_loop_brace_edit_mid_pass_wraps_at_the_new_end_at_once() {
+        let (state, _) = song_mode_fixture();
+        let commit = |range: (f64, f64)| {
+            state.set_committed_song(Some(crate::sequencer::ProjectSong {
+                rows: vec![song_mode_row(0, 0.0, 0, Vec::new())],
+                end_beat: 32.0,
+                loop_enabled: true,
+                loop_range: Some(range),
+                next_row_id: 1,
+            }));
+            state.preflight_runtime_song().expect("preflight")
+        };
+        let spq = 24_000.0;
+        let mailbox = state.song_playback();
+        let mut runtime =
+            crate::sequencer::SongPlaybackRuntime::new(commit((0.0, 16.0)), 0.0, spq).expect("runtime");
+        // Play to beat 2, then shorten the brace to end at beat 4.
+        for beat in 0..2u64 {
+            runtime.next_chunk(beat * 24_000, beat as f64, 24_000, mailbox);
+        }
+        runtime.rebuild_song(commit((1.0, 4.0)), 2.0);
+        let plan = runtime.next_chunk(2 * 24_000, 2.0, 96_000, mailbox);
         assert!(
-            !notices
-                .iter()
-                .any(|notice| matches!(notice, crate::sequencer::SongPlaybackNotice::Ended { .. }))
+            matches!(plan, crate::sequencer::SongChunkPlan::Schedule { frames: 48_000, .. }),
+            "the chunk stops at the new loop end: {plan:?}"
         );
+        let shared = mailbox.shared();
+        let after_end = shared.position_beats(4 * 24_000 + 6_000).expect("active");
+        assert!((after_end - 1.25).abs() < 1e-6, "the playhead wraps at the new end: {after_end}");
+        let plan = runtime.next_chunk(4 * 24_000, 4.0, 24_000, mailbox);
+        assert!(matches!(plan, crate::sequencer::SongChunkPlan::Schedule { wrapped: true, .. }));
+
+        // Back in the loop (song beat 2 after the wrap to 1): move the brace
+        // behind the head, which is at beat 3 by the next chunk.
+        runtime.next_chunk(5 * 24_000, 1.0, 24_000, mailbox);
+        runtime.rebuild_song(commit((0.0, 2.0)), 2.0);
+        for step in 0..4u64 {
+            let plan = runtime.next_chunk((6 + step) * 24_000, 2.0 + step as f64, 24_000, mailbox);
+            assert!(
+                matches!(plan, crate::sequencer::SongChunkPlan::Schedule { wrapped: false, .. }),
+                "a brace behind the head never wraps it: {plan:?}"
+            );
+        }
+        let on = shared.position_beats(9 * 24_000).expect("active");
+        assert!(on > 4.0, "plays straight on: {on}");
     }
 
     #[test]
@@ -15228,7 +15337,7 @@
 
             // Mid-play add: the live state grows to 3 tracks AFTER preflight
             // froze 2-track rows; the add path latches the new lane
-            // (`latch_track_created_during_song_playback`).
+            // (`latch_new_track_if_session_held`).
             let mut live = state.with_scenes_mut(|scenes| {
                 scenes.track_pools[0]
                     .get(crate::sequencer::PatternId(1))
@@ -19963,6 +20072,96 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
         }
     }
 
+
+/// A prebuilt chunk (a song row, frozen at Play) plays the LIVE macro layer
+/// (eseq-vum0): a scene push published after preflight reaches the row's
+/// device defaults — what every note-on stamps — so the push holds across
+/// row boundaries and onsets instead of reverting to the row's values. The
+/// fold is cached per (row, table) and skipped with no overrides.
+#[test]
+fn prebuilt_chunks_play_the_live_macro_layer() {
+    use std::sync::Arc;
+    let state = SequencerState::new(1, vec![vec![]]);
+    let desc = crate::effects::EffectDescriptor::builtin_sampler();
+    crate::effects::EffectSlotSnapshot::new_default(&desc, 1)
+        .restore(&state.pattern.instrument_slots[0]);
+    let prebuilt = Arc::new(crate::sequencer::SequencerSnapshot::capture(&state));
+    let slot = &prebuilt.tracks[0].instrument_slot;
+    assert!(slot.num_params > 0 && !slot.defaults.is_empty(), "a sampler has params");
+    let param_id = slot.node_param_idx(0).and_then(|raw| {
+        crate::neural::ParamNodeId::from_slot_param(slot.node_id, slot.modulator_node_id, raw)
+    });
+    let key = crate::macro_engine::MacroParamKey::for_instrument(0, 0, param_id);
+    let before = slot.defaults[0];
+    let pushed = if before == 0.75 { 0.25 } else { 0.75 };
+
+    let mut cache = None;
+    let quiet = crate::sequencer::SequencerSnapshot::capture(&state);
+    let same = super::lookahead::with_live_macro_overrides(&mut cache, Arc::clone(&prebuilt), &quiet, 0.0);
+    assert!(Arc::ptr_eq(&same, &prebuilt), "no overrides: the row as built");
+
+    state.publish_macro_overrides(std::collections::HashMap::from([(key, pushed)]));
+    let base = crate::sequencer::SequencerSnapshot::capture(&state);
+    let patched = super::lookahead::with_live_macro_overrides(&mut cache, Arc::clone(&prebuilt), &base, 0.0);
+    assert_eq!(patched.tracks[0].instrument_slot.defaults[0], pushed, "the push reaches the row");
+    assert_eq!(prebuilt.tracks[0].instrument_slot.defaults[0], before, "the row itself is untouched");
+    let again = super::lookahead::with_live_macro_overrides(&mut cache, Arc::clone(&prebuilt), &base, 0.0);
+    assert!(Arc::ptr_eq(&again, &patched), "one fold per (row, table)");
+}
+
+/// A recorded push replays at the RENDERED position, but note-ons are
+/// stamped up to a lookahead earlier, when they are scheduled: the
+/// scheduler plays the push from its schedule at each chunk's beat. A chunk
+/// past the push's end plays the row's value even while the replay (behind
+/// it) still holds the push in the live table, and a chunk inside the push
+/// plays it before the replay has begun it (eseq-vum0).
+#[test]
+fn prebuilt_chunks_play_scheduled_pushes_at_their_own_beat() {
+    use std::sync::Arc;
+    let state = SequencerState::new(1, vec![vec![]]);
+    let desc = crate::effects::EffectDescriptor::builtin_sampler();
+    crate::effects::EffectSlotSnapshot::new_default(&desc, 1)
+        .restore(&state.pattern.instrument_slots[0]);
+    let prebuilt = Arc::new(crate::sequencer::SequencerSnapshot::capture(&state));
+    let slot = &prebuilt.tracks[0].instrument_slot;
+    let param_id = slot.node_param_idx(0).and_then(|raw| {
+        crate::neural::ParamNodeId::from_slot_param(slot.node_id, slot.modulator_node_id, raw)
+    });
+    let key = crate::macro_engine::MacroParamKey::for_instrument(0, 0, param_id);
+    let row_value = slot.defaults[0];
+    let (from, to) = (row_value, row_value + 1.0);
+    let region = crate::sequencer::ScenePushRegion {
+        id: crate::sequencer::ClipId(7),
+        start_beat: 4.0,
+        end_beat: 8.0,
+        target_scene: 1,
+        points: vec![crate::sequencer::ScenePushPoint { beat: 0.0, value: 1.0 }],
+    };
+    state.publish_scene_push_schedule(Some(Arc::new(crate::sequencer::ScenePushSchedule {
+        regions: vec![crate::sequencer::ScheduledScenePush {
+            region,
+            params: vec![crate::macro_engine::ScenePushParam {
+                key: key.clone(),
+                from,
+                to,
+                curve: crate::macro_engine::MacroCurve::Linear,
+            }],
+        }],
+    })));
+    let value_at = |state: &SequencerState, beat: f64| {
+        let base = crate::sequencer::SequencerSnapshot::capture(state);
+        let mut cache = None;
+        super::lookahead::with_live_macro_overrides(&mut cache, Arc::clone(&prebuilt), &base, beat)
+            .tracks[0]
+            .instrument_slot
+            .defaults[0]
+    };
+    assert_eq!(value_at(&state, 3.9), row_value, "before the push: the row");
+    assert_eq!(value_at(&state, 4.0), to, "inside: pushed, though the replay has not begun it");
+    // The replay, a lookahead behind, still holds the push...
+    state.publish_macro_overrides(std::collections::HashMap::from([(key, to)]));
+    assert_eq!(value_at(&state, 8.0), row_value, "...but past its end the row plays");
+}
 
 /// A prebuilt chunk (a quantized launch, a song row) plays the live groove
 /// table of ITS scene, so a rack clip with its own groove switches on the

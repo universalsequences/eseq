@@ -1535,13 +1535,28 @@ pub(super) fn handle(
             if track >= state.active_track_count() {
                 return;
             }
-            let command =
-                clear_plocks_command(&app, &target, track, steps, param_idx, slot_idx, rack_slot);
-            let Some(command) = command else {
-                return;
+            // An audio track's effect locks live on its regions (eseq-a921).
+            let region_slot = slot_idx.filter(|_| target == "effect" && app.is_audio_track(track));
+            let changed = if let Some(slot_idx) = region_slot {
+                match app.audio_track_clear_effect_locks(track, slot_idx, param_idx) {
+                    Ok(()) => {
+                        app.sync_audio_track_playback();
+                        true
+                    }
+                    Err(error) => {
+                        editor.handle_host_event(HostEvent::Error(error));
+                        false
+                    }
+                }
+            } else {
+                let command =
+                    clear_plocks_command(&app, &target, track, steps, param_idx, slot_idx, rack_slot);
+                let Some(command) = command else {
+                    return;
+                };
+                app::try_apply_command(&mut app, command)
+                    .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp)
             };
-            let changed = app::try_apply_command(&mut app, command)
-                .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp);
             if !changed {
                 return;
             }

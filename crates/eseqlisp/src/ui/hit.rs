@@ -48,12 +48,25 @@ pub fn to_local(
     content_col: u16,
     content_row: u16,
 ) -> Option<(f32, f32)> {
-    let local_col = precise_col - content_col as f32;
-    let local_row = precise_row - content_row as f32;
+    let (local_col, local_row) =
+        to_local_unclamped(precise_col, precise_row, content_col, content_row);
     if local_col < 0.0 || local_row < 0.0 {
         return None;
     }
     Some((local_col, local_row))
+}
+
+/// Like [`to_local`] but without the content-area clamp. A modal is centered
+/// on the whole window while it belongs to the tile that mounted it, so the
+/// panel routinely extends above and left of that tile's content origin:
+/// points there have negative local coordinates and are still on the panel.
+pub fn to_local_unclamped(
+    precise_col: f32,
+    precise_row: f32,
+    content_col: u16,
+    content_row: u16,
+) -> (f32, f32) {
+    (precise_col - content_col as f32, precise_row - content_row as f32)
 }
 
 /// Convert local float coordinates to integer grid coordinates

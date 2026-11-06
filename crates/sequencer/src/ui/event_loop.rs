@@ -416,6 +416,7 @@ pub(crate) fn run_event_loop(
         prev_active_buffer_name: editor.active_buffer().name.clone(),
         prev_agent_generation_watermark: agent_generation_watermark(&app),
         prev_agent_pane_generation: 0,
+        prev_drag_preview_generation: 0,
         prev_sampler_analysis_key: None,
         // Force one complete track/rack publication on the first frame; an
         // analysis may have completed between graph binding and loop startup.
@@ -556,6 +557,13 @@ pub(crate) fn run_event_loop(
                 }
             }
         }
+        // Recorded scene pushes replay after this frame's rows mirrored, so
+        // a push starting on a scene change morphs from the new scene. The
+        // replay drives held notes at the rendered position; the scheduler,
+        // which stamps note-ons up to its lookahead ahead of that, gets the
+        // pushes about to play as a schedule (half a lookahead more covers
+        // the frames between two passes of this loop).
+        app.drive_arrangement_scene_push_at_sample(shared.state.audio_rendered_sample());
         // Generator tick failures (eseq-85a.5): the scheduler reports the
         // first failure per generator and parks it; surface it here instead
         // of letting a broken :tick play as silence.
@@ -573,6 +581,7 @@ pub(crate) fn run_event_loop(
             )));
         }
         agent_pane::publish(&mut editor, Some(&mut *backend), &mut frame.prev_agent_pane_generation);
+        super::drag_preview::publish(&mut editor, &mut frame.prev_drag_preview_generation);
         if let Some(watcher) = lisp_hot_reload_watcher.as_mut() {
             let source_revision = editor.runtime().lisp_source_revision();
             if source_revision != lisp_hot_reload_source_revision {

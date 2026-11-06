@@ -593,6 +593,7 @@ mod settings;
 mod steps;
 mod table_editor;
 mod tracker_view;
+mod track_order_view;
 mod tracks;
 mod transport;
 mod views;

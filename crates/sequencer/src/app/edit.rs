@@ -2979,6 +2979,7 @@ impl App {
         Ok(BusGroupStructureState {
             buses,
             groups,
+            track_order: self.track_order.clone(),
             scenes: self.state.capture_project_scenes(),
             grooves: self.grooves.clone(),
         })
@@ -3050,6 +3051,7 @@ impl App {
             bus.output = target_bus.output;
         }
         self.groups = groups;
+        self.track_order.clone_from(&target.track_order);
         self.grooves.clone_from(&target.grooves);
         // Chained bus outputs are replayed as part of the topology: the
         // destination bus may only have just been recreated above.
@@ -3406,8 +3408,47 @@ impl App {
             if let Some(source_id) = source_id {
                 app.dissolve_group_if_undersized(source_id)?;
             }
+            // Dropped on the group itself: it joins at the end of the block.
+            app.place_track_last_in_group(track, target_id);
             Ok(())
         })
+    }
+
+    /// Puts `track` in group `target` (by id; `None`: loose, routed to the
+    /// master mix), leaving its current group first and dissolving that one
+    /// if it falls below two units, as `move_track_to_group_recorded` does.
+    /// Unrecorded: the caller wraps it in a bus/group structure edit. A
+    /// track already in `target` is left alone.
+    pub(super) fn regroup_track_unrecorded(
+        &mut self,
+        track: usize,
+        target: Option<u64>,
+    ) -> Result<(), String> {
+        if track >= self.tracks.len() {
+            return Err("Track is out of range".to_string());
+        }
+        let source = self.groups.iter()
+            .find(|group| group.members.contains(&track))
+            .map(|group| group.id);
+        if source == target {
+            return Ok(());
+        }
+        if source.is_some() {
+            self.detach_group_member(track);
+        }
+        match target {
+            Some(group_id) => self.attach_track_to_group(track, group_id, None)?,
+            None => {
+                self.set_track_output_all_scenes_unrecorded(
+                    track,
+                    crate::sequencer::TrackOutput::Mix,
+                );
+            }
+        }
+        if let Some(source) = source {
+            self.dissolve_group_if_undersized(source)?;
+        }
+        Ok(())
     }
 
     pub fn remove_track_from_group_recorded(&mut self, track: usize) -> Result<(), String> {
@@ -4276,7 +4317,17 @@ impl App {
         Ok(())
     }
 
-    fn remap_groups_after_track_delete(&mut self, deleted: usize) {
+    /// Returns the instance-document slots the route remap changed (their
+    /// old values), which a recorded delete keeps for its undo.
+    fn remap_groups_after_track_delete(
+        &mut self,
+        deleted: usize,
+    ) -> Vec<crate::sequencer::InstanceSlotChange> {
+        // Project-owned instances route by track index.
+        let mut slot_changes = self.remap_instance_document_routes(
+            crate::project::ProjectInstanceOwner::Project,
+            deleted,
+        );
         let mut removed_members = Vec::new();
         for group in &mut self.groups {
             let position = group.members.iter().position(|member| *member == deleted);
@@ -4296,7 +4347,8 @@ impl App {
             }
         }
         for (group_id, position) in removed_members {
-            self.remap_rack_sequencer_routes_after_member_removed(group_id, position);
+            slot_changes
+                .extend(self.remap_rack_sequencer_routes_after_member_removed(group_id, position));
         }
         // A rack with no pads is still a rack (lazy pads); a plain group is
         // still a group while it holds a child rack, whose bus chains into
@@ -4309,6 +4361,7 @@ impl App {
             group.is_rack() || !group.members.is_empty() || !group.rack_members.is_empty()
         });
         self.publish_rack_choke_runtime();
+        slot_changes
     }
 
     /// Deletes several tracks as one atomic, undoable edit. Indices refer to
@@ -4391,7 +4444,7 @@ impl App {
             track,
             &self.graph.effect_descriptors,
         )?;
-        let patch = TrackDeletionPatch {
+        let mut patch = TrackDeletionPatch {
             track: track_id,
             index: track,
             instrument,
@@ -4407,10 +4460,13 @@ impl App {
             audio_lane: self.state.with_committed_arrangement(|arrangement| {
                 arrangement.map(|arrangement| arrangement.audio_lane(track).to_vec()).unwrap_or_default()
             }),
+            instance_slots: Vec::new(),
         };
-        let retained_bytes = patch.retained_bytes();
         let selected = self.graph_controller().delete_track(track)?;
-        self.remap_groups_after_track_delete(track);
+        // Instance documents' routes shift with the delete; undo puts the
+        // old values back (rows that named this track included).
+        patch.instance_slots = self.remap_groups_after_track_delete(track);
+        let retained_bytes = patch.retained_bytes();
         self.macro_engine.remap_after_track_delete(track);
         self.device_registry.clear_track(track_id);
         self.history.commit(
@@ -4457,6 +4513,11 @@ impl App {
             self.state.set_committed_arrangement(Some(arrangement))?;
         }
         self.groups = patch.groups.clone();
+        if !patch.instance_slots.is_empty() {
+            self.state
+                .with_scenes_mut(|scenes| scenes.restore_instance_document_slots(&patch.instance_slots))?;
+            self.state.publish_scheduler_snapshot();
+        }
         // The runtime choke table still holds the post-delete reindexed keys;
         // restoring the pre-delete groups has to republish it or choke fires
         // on the wrong tracks until the next group edit.
@@ -7615,7 +7676,7 @@ fn ensure_effective_track_pattern(
 /// Anything that WRITES wants `rule_three_device_write_target` instead —
 /// the read fallback is not a legal write target on a bare Seq lane.
 fn rule_three_device_target(app: &App, track: usize) -> Option<crate::sequencer::PatternId> {
-    if app.arrangement_view_visible {
+    if app.track_owns_its_sound(track) {
         return app.state.track_sound_pattern_id(track);
     }
     app.state
@@ -7645,7 +7706,7 @@ fn rule_three_device_write_target(
     app: &mut App,
     track: usize,
 ) -> Option<crate::sequencer::PatternId> {
-    if app.arrangement_view_visible {
+    if app.track_owns_its_sound(track) {
         return app.state.track_sound_pattern_id(track);
     }
     ensure_effective_track_pattern(app, track)
@@ -9066,7 +9127,6 @@ fn apply_recorded_track_params_command(
     // take-intended tweak into the scene cell. Structural step-machine
     // fields (timebase/swing) stay live/pattern-owned — the borrow never
     // loads them from the bound source.
-    let effective_id = app.state.effective_track_pattern_id(track);
     // What the live surface is a mirror OF right now. The loan is installed
     // on the reactive tick, so the resolved binding and the mirror disagree
     // for the rest of a drain whenever something released the lane (a scene
@@ -9081,9 +9141,14 @@ fn apply_recorded_track_params_command(
         None
     } else {
         match app.bound_read_pattern(track) {
+            // Only a binding to rule 3's own target is rule 3. Where the
+            // track owns its sound, a row clip whose pattern is also the
+            // scene cell is still the bound source: writing rule 3 there
+            // lands on the track sound while the mirror plays the clip, and
+            // the next row apply (a loop wrap) restores the clip's value.
             Some(pattern)
                 if !app.track_sound_binding(track).is_scene()
-                    && Some(pattern) != effective_id
+                    && Some(pattern) != rule_three_device_target(app, track)
                     && mirror_pattern == Some(pattern) =>
             {
                 Some(pattern)
@@ -9333,17 +9398,19 @@ fn finish_track_params_edit(
             EditError::ReplayFailed(error),
         ));
     }
-    if bound {
-        // The write landed on the bound source's entities (§17.3); its take
-        // siblings share them structurally, so there is nothing to mirror.
-        // Edit-through (16.7): a playing song's prebuilt rows cloned this
-        // pattern at preflight and would keep the pre-edit sound.
+    let scheduler_changed = scheduler_track_params_changed(&current_before, &after)
+        || current_base_before != base_after;
+    // Edit-through (16.7): a playing song's prebuilt rows cloned this pattern
+    // at preflight and would keep the pre-edit value, and an unlatched lane
+    // is scheduled from its row's snapshot — so gate or polyphony toggled
+    // during song playback would show but not sound. A bound source always
+    // invalidates (its take siblings share the entities, §17.3); the scene
+    // cell does when a value the scheduler reads changed. Cheap when no row
+    // resolves the pattern; deferred to gesture end for drags.
+    if bound || scheduler_changed {
         invalidate_song_rows_for_edit(app, track, pattern_id);
     }
-    if merge_key.is_none()
-        && (scheduler_track_params_changed(&current_before, &after)
-            || current_base_before != base_after)
-    {
+    if merge_key.is_none() && scheduler_changed {
         app.state.publish_scheduler_snapshot();
     }
 
@@ -10383,6 +10450,11 @@ fn replay_track_params_patch(
         );
         if needs_publish && publish {
             app.state.publish_scheduler_snapshot();
+        }
+        // Undo/redo of a scene-cell track param during song playback: the
+        // rows that cloned the cell must re-preflight, as the do-path does.
+        if publish_scheduler {
+            invalidate_song_rows_for_edit(app, track, patch.target.pattern);
         }
     } else {
         // A pool target (the pinned loop-bar resize, clip-edit-target spec

@@ -15,6 +15,9 @@ use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32,
 use crate::theme;
 use crate::vm::Value;
 
+mod fades;
+mod loop_brace;
+
 const ALIGNMENT_HELPER_BACKWARD_SNAP_PROXIMITY: f64 = 0.25;
 
 pub struct TimelineWidget;
@@ -98,6 +101,9 @@ struct TimelineItem {
     /// it grows. A recording's host-side end then never has to follow the
     /// record head, and the lane holding it never reruns on a head tick.
     cycle_beats: Option<f64>,
+    /// `:fades` — an audio region's fade and crossfade handles
+    /// ([`fades::ItemFades`]); `None` draws and offers none.
+    fades: Option<fades::ItemFades>,
 }
 
 /// What kind of clip an item represents (docs/arrangement-timeline-ui-spec.md
@@ -135,6 +141,10 @@ enum TimelineItemContent {
     /// and simply maps onto the item's width.
     Waveform {
         sample: std::sync::Arc<crate::audio::sample::SampleBuffer>,
+        /// The left and right channels' own waveforms when the sample is
+        /// stereo (`SampleBuffer::register_channels`): a tall enough body
+        /// draws them as two rows, as Ableton does.
+        channels: Option<[std::sync::Arc<crate::audio::sample::SampleBuffer>; 2]>,
         offset: f64,
         span: f64,
         /// `[start, end)` source seconds a looping region repeats.
@@ -150,6 +160,11 @@ enum TimelineItemContent {
         cycle: f64,
         phase: f64,
     },
+    /// An automation curve over the item (a recorded scene push, epic
+    /// eseq-vum0): `(offset, value)` points, both 0..1 relative to the item
+    /// span and body height, sorted by offset. Linear between points; holds
+    /// the first value before the first point and the last after the last.
+    Curve(Vec<(f64, f64)>),
 }
 
 impl TimelineItemContent {
@@ -172,7 +187,7 @@ impl TimelineItemContent {
                 let length = end - start;
                 Some((length / span, ((offset - start) / length).rem_euclid(1.0), true))
             }
-            Self::Peaks(_) | Self::Waveform { .. } => None,
+            Self::Peaks(_) | Self::Waveform { .. } | Self::Curve(_) => None,
         }
     }
 }
@@ -245,6 +260,8 @@ struct TimelineView {
     /// candidate. Crowded candidates are promoted to a readable aligned
     /// interval; the resolved interval drives both drawing and `:grid` snaps.
     grid_density: f64,
+    /// `:fine-grid`: the zoomed-in grid density at every zoom.
+    fine_grid: bool,
     content_length: Option<f64>,
     content_length_min: f64,
     content_length_max: f64,
@@ -275,6 +292,13 @@ struct TimelineView {
     cursor_marker_width_scale: f32,
     cursor_marker_height_scale: f32,
     cursor_color: crate::backend::Color,
+    /// `:cursor-line-width` in design pixels: a lane cursor drawn as a bold
+    /// line over everything in the lane (clip bodies, waveforms, fades), as
+    /// Ableton's arrangement draws the paste position. 0 keeps the default
+    /// hairline.
+    cursor_line_px: f32,
+    /// `:magnify-sensitivity`: pinch-zoom per magnification unit (1 stock).
+    magnify_sensitivity: f64,
     item_color: crate::backend::Color,
     item_label_font_size: f32,
     item_label_color: crate::backend::Color,
@@ -283,6 +307,13 @@ struct TimelineView {
     item_content_color: crate::backend::Color,
     loop_color: crate::backend::Color,
     loop_visible: bool,
+    /// `:loop-brace`: the band row draws the loop brace instead of the
+    /// content-length band (see `loop_brace`).
+    loop_brace: Option<loop_brace::LoopBrace>,
+    /// `:open-ended`: the time past `:content-length` is neither shaded nor
+    /// a limit for item drags (the arrangement, where a clip landing past
+    /// the song end extends the song).
+    open_ended: bool,
     border_top_color: crate::backend::Color,
     border_bottom_color: crate::backend::Color,
     border_width: f32,
@@ -347,6 +378,7 @@ enum SelectionRectStyle {
 enum HitRegion {
     Header,
     ContentLengthEnd,
+    LoopBrace(loop_brace::BracePart),
     Sidebar {
         lane: usize,
     },
@@ -383,6 +415,31 @@ thread_local! {
     static TIMELINE_PLACEMENT: RefCell<Option<(u64, f64)>> = const { RefCell::new(None) };
     static TIMELINE_HOVER_EDGE: RefCell<Option<(u64, Value, HoverEdge)>> =
         const { RefCell::new(None) };
+    /// The item with fades under the pointer (its handles show) and the
+    /// handle under it, if any.
+    static TIMELINE_HOVER_FADE: RefCell<Option<(u64, Value, Option<fades::FadeHandle>)>> =
+        const { RefCell::new(None) };
+}
+
+fn set_timeline_hover_fade(widget_id: u64, hover: Option<(Value, Option<fades::FadeHandle>)>) {
+    TIMELINE_HOVER_FADE.with(|state| {
+        let mut state = state.borrow_mut();
+        let next = hover.map(|(id, handle)| (widget_id, id, handle));
+        if *state != next {
+            *state = next;
+            super::bump_widget_state_generation();
+        }
+    });
+}
+
+/// `Some(handle under the pointer)` while `item_id` of `widget_id` is
+/// hovered.
+fn timeline_hover_fade_for(widget_id: u64, item_id: &Value) -> Option<Option<fades::FadeHandle>> {
+    TIMELINE_HOVER_FADE.with(|state| {
+        state.borrow().as_ref().and_then(|(hover_widget_id, hover_item_id, handle)| {
+            (*hover_widget_id == widget_id && hover_item_id == item_id).then_some(*handle)
+        })
+    })
 }
 
 fn set_timeline_hover_edge(widget_id: u64, hover: Option<(Value, HoverEdge)>) {
@@ -550,7 +607,7 @@ the labels, :sidebar-style :piano draws keys). :items is a list of maps {:id \
 :lane (index) :start :end :label :color :selected} with optional :content \
 ({:dots ({:offset :value :width}) :cycle :phase} note previews, {:rings ...}, \
 {:sample registry-key :offset seconds :span seconds [:loop-start :loop-end]} an audio \
-waveform). The visible window is :view-start/:view-duration (default 0/16, \
+waveform, {:curve ({:offset :value})} an automation curve, both 0..1). The visible window is :view-start/:view-duration (default 0/16, \
 zoom clamped to :zoom-min-duration..:zoom-max-duration); bind them to reactive \
 fields to scroll several lanes together. :playhead-time and :cursor-time draw \
 lines; :time-ruler (dict :mode :bars-beats :beats-per-bar 4) or :seconds labels \
@@ -563,7 +620,8 @@ is the step grid (:snap-mode :floor, :resize-snap :grid, :move-snap-mode \
 :start :end), :move-items-absolute (:ids :anchor-id :start :lane) then \
 :finish-move-items, :resize-item-absolute (:id :ids :edge :time :duration) then \
 :finish-resize-items, :resize-content-length (:length), :marquee-select (:time-a \
-:time-b :lane-a :lane-b), :delete-items (:ids), :scroll-view (:view-start \
+:time-b :lane-a :lane-b), :delete-items (:ids), :delete-range (:time-a :time-b, \
+Backspace with no items selected but a :selection-rect-style :region rect), :scroll-view (:view-start \
 :delta-time :delta-lanes), :zoom-view (:anchor-time :factor), :zoom-lanes, \
 :nudge-selection (:ids :delta-time :delta-lane), :copy-items, :paste-items \
 (:time), :split-items (:ids :time, Cmd+E at the cursor), :set-tool (:tool), :clear-selection, :double-click-item (with \
@@ -582,16 +640,19 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
             "zoom-max-duration", "playhead-time", "cursor-time", "time-ruler", "header-height",
             "header-bottom-gutter", "sidebar-width", "sidebar-style", "tool", "snap", "snap-mode",
             "resize-snap", "resize-snap-mode", "move-snap-mode", "marquee-snap", "min-duration",
-            "create-duration", "grid-density", "content-length", "content-length-min",
+            "create-duration", "grid-density", "fine-grid", "content-length", "content-length-min",
             "content-length-max", "selection", "selection-rect", "selection-rect-style",
             "double-click-items", "band-slide", "window-marker", "window-span", "window-repeat",
             "lane-scroll", "lane-height", "scroll-viewport-height", "scroll-mode",
             "scroll-passthrough", "title-bar-height", "item-corner-radius", "item-color",
             "item-label-color", "item-label-font-size", "item-content-color", "loop-color",
-            "loop-visible", "cursor-color", "cursor-marker-visible", "cursor-line-visible",
+            "loop-visible", "loop-brace", "loop-start", "loop-end", "loop-on",
+            "open-ended", "cursor-color", "cursor-marker-visible", "cursor-line-visible",
             "cursor-marker-scale", "cursor-marker-width-scale", "cursor-marker-height-scale",
             "background-color", "border-top-color", "border-bottom-color", "border-width",
-            "placement-active", "placement-item", "lane-key", "cursor-lane", "selected-id",
+            "placement-active", "placement-item", "drop-ghost-start", "drop-ghost-end",
+            "drop-ghost-lane", "drop-ghost-color", "drop-ghost-sample",
+            "drop-ghost-seconds", "drop-ghost-generation", "on-drag-over", "lane-key", "cursor-lane", "selected-id",
             "selected-lane", "bound-id", "bound-lane", "ghost-kind", "ghost-id", "ghost-time",
             "ghost-lane-a", "ghost-lane-b", "ghost-region-a", "ghost-region-b", "region-a",
             "region-b", "region-on", "region-lane-a", "region-lane-b", "focusable", "width",
@@ -641,6 +702,18 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
             "ghost-lane-b",
             "region-lane-a",
             "region-lane-b",
+            // The loop brace (`loop_brace`), live while it is dragged.
+            "loop-start",
+            "loop-end",
+            "loop-on",
+            // A dragged sample's landing preview (`drop_ghost_item`).
+            "drop-ghost-start",
+            "drop-ghost-end",
+            "drop-ghost-lane",
+            "drop-ghost-sample",
+            "drop-ghost-seconds",
+            // Bumped as the preview decodes, so the waveform fills in.
+            "drop-ghost-generation",
         ]
     }
 
@@ -853,13 +926,19 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
         node: &LayoutNode,
         local_col: f32,
         local_row: f32,
-        _modifiers: KeyModifiers,
+        modifiers: KeyModifiers,
     ) -> Option<Value> {
         let view = TimelineView::from_node(node);
         if get_num(&node.props, "placement-active", 0.0) > 0.0 {
             return Some(action_map(vec![("kind", keyword(":placement"))]));
         }
-        view.begin_gesture(local_col, super::scroll::event_content_row(local_row))
+        let local_row = super::scroll::event_content_row(local_row);
+        // Shift+click on a clip adds it to (or drops it from) the selection;
+        // it moves nothing.
+        if modifiers.contains(KeyModifiers::SHIFT) && view.shift_toggle_target(local_col, local_row).is_some() {
+            return None;
+        }
+        view.begin_gesture(local_col, local_row)
     }
 
     fn mouse_event(
@@ -870,7 +949,7 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
         local_row: f32,
         _drag_start: Option<(f32, f32)>,
         gesture: Option<&Value>,
-        _modifiers: KeyModifiers,
+        modifiers: KeyModifiers,
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
@@ -903,16 +982,36 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
         }
         match mouse_kind {
             MouseEventKind::Moved => {
-                let hovered_edge = match view.hit_test(local_col, local_row) {
-                    Some(HitRegion::ItemEdgeEnd { item }) => Some((item.id, HoverEdge::End)),
-                    Some(HitRegion::ItemEdgeStart { item }) => Some((item.id, HoverEdge::Start)),
+                let fade_hit = fades::hit(&view, local_col, local_row);
+                let hit = view.hit_test(local_col, local_row);
+                let hovered_edge = match (&fade_hit, &hit) {
+                    (Some(_), _) => None,
+                    (None, Some(HitRegion::ItemEdgeEnd { item })) => Some((item.id.clone(), HoverEdge::End)),
+                    (None, Some(HitRegion::ItemEdgeStart { item })) => Some((item.id.clone(), HoverEdge::Start)),
                     _ => None,
                 };
                 set_timeline_hover_edge(node.widget_id, hovered_edge);
+                let hovered_fade = match (fade_hit, hit) {
+                    (Some((item, spot, _)), _) => Some((item.id, Some(spot.handle))),
+                    (
+                        None,
+                        Some(
+                            HitRegion::ItemBody { item }
+                            | HitRegion::ItemTitleBar { item }
+                            | HitRegion::ItemEdgeEnd { item }
+                            | HitRegion::ItemEdgeStart { item },
+                        ),
+                    ) if item.fades.is_some() => Some((item.id, None)),
+                    _ => None,
+                };
+                set_timeline_hover_fade(node.widget_id, hovered_fade);
                 MouseEventOutcome::Consume
             }
             MouseEventKind::Down(MouseButton::Left) => view
-                .handle_pointer_down(local_col, local_row)
+                .shift_toggle_target(local_col, local_row)
+                .filter(|_| modifiers.contains(KeyModifiers::SHIFT))
+                .map(|item| view.select_action(item.id, ":toggle", local_col))
+                .or_else(|| view.handle_pointer_down(local_col, local_row))
                 .map(WidgetEvent::Custom)
                 .map(MouseEventOutcome::Dispatch)
                 .unwrap_or(MouseEventOutcome::Consume),
@@ -943,11 +1042,24 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
             return super::WidgetCursor::DragCopy;
         }
         let view = TimelineView::from_node(node);
-        match view.hit_test(local_col, super::scroll::event_content_row(local_row)) {
+        let local_row = super::scroll::event_content_row(local_row);
+        if let Some((_, spot, _)) = fades::hit(&view, local_col, local_row) {
+            return if spot.handle.is_curve() {
+                super::WidgetCursor::NsResize
+            } else {
+                super::WidgetCursor::EwResize
+            };
+        }
+        match view.hit_test(local_col, local_row) {
             Some(HitRegion::ItemEdgeEnd { .. })
             | Some(HitRegion::ItemEdgeStart { .. })
-            | Some(HitRegion::ContentLengthEnd) => super::WidgetCursor::EwResize,
-            Some(HitRegion::ItemTitleBar { .. }) => super::WidgetCursor::Grab,
+            | Some(HitRegion::ContentLengthEnd)
+            | Some(HitRegion::LoopBrace(loop_brace::BracePart::Start | loop_brace::BracePart::End)) => {
+                super::WidgetCursor::EwResize
+            }
+            Some(HitRegion::ItemTitleBar { .. }) | Some(HitRegion::LoopBrace(_)) => {
+                super::WidgetCursor::Grab
+            }
             _ => super::WidgetCursor::Default,
         }
     }
@@ -1068,6 +1180,62 @@ fn pixel_snapped_view_start(view: &TimelineView, cell_w: f32) -> f64 {
     (view.view_start * pixels_per_time).round() / pixels_per_time
 }
 
+/// The host's drop preview (`:drop-ghost-start`..`:drop-ghost-end` on lane
+/// `:drop-ghost-lane`, tinted `:drop-ghost-color`), drawn as a translucent
+/// item only while a drag hovers this timeline as its drop target.
+fn drop_ghost_item(node: &LayoutNode, fallback: crate::backend::Color) -> Option<TimelineItem> {
+    if !super::drop_target_hovered(node.widget_id)
+        || !lane_owns(&node.props, "drop-ghost-lane", "drop-ghost-lane")
+    {
+        return None;
+    }
+    let start = get_num(&node.props, "drop-ghost-start", f64::NAN);
+    let end = get_num(&node.props, "drop-ghost-end", f64::NAN);
+    if !(start.is_finite() && end > start) {
+        return None;
+    }
+    let mut fields = vec![
+        ("id", Value::Number(-1.0)),
+        ("lane", Value::Number(0.0)),
+        ("start", Value::Number(start)),
+        ("end", Value::Number(end)),
+    ];
+    if let Some(color) = node.props.get("drop-ghost-color") {
+        fields.push(("color", color.clone()));
+    }
+    // `:drop-ghost-sample` names a drag preview the host is decoding
+    // (`audio::sample::drag_preview_key`); its waveform spans
+    // `:drop-ghost-seconds` and draws as much as has decoded.
+    let preview = get_num(&node.props, "drop-ghost-sample", -1.0);
+    let seconds = get_num(&node.props, "drop-ghost-seconds", 0.0);
+    if preview >= 0.0 && seconds > 0.0 {
+        fields.push((
+            "content",
+            map_value(vec![
+                (
+                    "sample",
+                    Value::String(crate::audio::sample::drag_preview_key(preview as u64)),
+                ),
+                ("offset", Value::Number(0.0)),
+                ("span", Value::Number(seconds)),
+            ]),
+        ));
+    }
+    let mut preview = item_from_value(map_value(fields))?;
+    preview.color = Some(ghost_tint(preview.color.unwrap_or(fallback)));
+    Some(preview)
+}
+
+/// One item map parsed as `:items` parses each.
+fn item_from_value(item: Value) -> Option<TimelineItem> {
+    get_items(&HashMap::from([("items".to_string(), list_value(vec![item]))])).into_iter().next()
+}
+
+/// A preview item's see-through tint.
+fn ghost_tint(color: crate::backend::Color) -> crate::backend::Color {
+    crate::backend::Color { a: 0.5, ..color }
+}
+
 fn build_primitives(
     node: &LayoutNode,
     viewport: super::WidgetViewport,
@@ -1084,21 +1252,23 @@ fn build_primitives(
         let time = TIMELINE_PLACEMENT.with(|state| state.borrow()
             .filter(|(id, _)| *id == node.widget_id).map(|(_, time)| time));
         if let (Some(time), Some(item)) = (time, node.props.get("placement-item")) {
-            let props = HashMap::from([("items".to_string(), list_value(vec![item.clone()]))]);
-            if let Some(mut preview) = get_items(&props).into_iter().next() {
+            if let Some(mut preview) = item_from_value(item.clone()) {
                 let duration = preview.end - preview.start;
                 preview.start = time;
                 preview.end = time + duration;
                 let overlaps = view.items.iter().any(|item|
                     item.end > preview.start && item.start < preview.end);
-                let mut color = if overlaps {
+                preview.color = Some(ghost_tint(if overlaps {
                     crate::backend::Color::from_hex(0xee, 0x55, 0x55)
-                } else { preview.color.unwrap_or(view.item_color) };
-                color.a = 0.5;
-                preview.color = Some(color);
+                } else {
+                    preview.color.unwrap_or(view.item_color)
+                }));
                 view.items.push(preview);
             }
         }
+    }
+    if let Some(preview) = drop_ghost_item(node, view.item_color) {
+        view.items.push(preview);
     }
     view.view_start = pixel_snapped_view_start(&view, viewport.cell_w);
     let content = view.content_rect();
@@ -1106,7 +1276,14 @@ fn build_primitives(
 
     if view.header_height > 0.0 {
         let header_chrome_height = (view.header_height - view.header_bottom_gutter).max(0.0);
-        let loop_band = if header_chrome_height > 0.2 {
+        // The brace's row, kept while the brace scrolls out of view so the
+        // ruler ticks keep their height.
+        let brace_row = view
+            .loop_brace
+            .filter(|_| header_chrome_height > 0.2)
+            .and_then(|_| view.loop_band_rows())
+            .map(|(top, bottom)| (top, bottom - top));
+        let loop_band = if header_chrome_height > 0.2 && view.loop_brace.is_none() {
             view.loop_band_rect().map(|(x, width)| {
                 let y = rect.row + (header_chrome_height * 0.55).min(header_chrome_height - 0.18);
                 let bottom_inset = 0.08_f32.min(header_chrome_height * 0.12);
@@ -1151,6 +1328,7 @@ fn build_primitives(
         // than running up the whole row.
         let tick_bottom = loop_band
             .map(|(_, y, _, _)| y)
+            .or(brace_row.map(|(y, _)| y))
             .unwrap_or(rect.row + header_chrome_height);
         let label_row = if header_chrome_height >= 1.6 {
             (tick_bottom - 0.5 - cap_rows * 0.5 - 3.0 * px_rows).max(rect.row)
@@ -1318,6 +1496,9 @@ fn build_primitives(
                 height,
                 color: border_color,
             }));
+        }
+        if let (Some(brace), Some(row)) = (view.loop_brace, brace_row) {
+            loop_brace::push_loop_brace(&mut primitives, &view, brace, row, viewport);
         }
     }
 
@@ -1823,6 +2004,17 @@ fn build_primitives(
             loops_segmented,
             viewport,
         );
+        if let Some(item_fades) = item.fades.as_ref() {
+            fades::push_fades(
+                &mut primitives,
+                &view,
+                item,
+                item_fades,
+                item_color,
+                timeline_hover_fade_for(node.widget_id, &item.id),
+                viewport,
+            );
+        }
         item_rects.push((
             x,
             y,
@@ -1939,7 +2131,28 @@ fn build_primitives(
                 0.0
             };
         let line_height = (content.row + content.height - line_y).max(0.0);
-        if view.cursor_line_visible && line_height > 0.0 {
+        if !view.cursor_line_visible || line_height <= 0.0 {
+            // No line.
+        } else if view.cursor_line_px > 0.0 {
+            // Whole device pixels, so the bold line stays crisp.
+            let width = super::ui_design_px(view.cursor_line_px).round().max(1.0) / viewport.cell_w;
+            // A one-pixel dark edge each side keeps it legible over pale
+            // (selected) bodies as well as dark lanes.
+            let edge = 1.0 / viewport.cell_w;
+            primitives.push(GpuPrimitive::ForegroundRect(super::GpuRectPrimitive {
+                rect: Rect {
+                    row: line_y,
+                    col: cursor_x - width * 0.5 - edge,
+                    width: width + edge * 2.0,
+                    height: line_height,
+                },
+                color: crate::backend::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.55 },
+            }));
+            primitives.push(GpuPrimitive::ForegroundRect(super::GpuRectPrimitive {
+                rect: Rect { row: line_y, col: cursor_x - width * 0.5, width, height: line_height },
+                color: view.cursor_color,
+            }));
+        } else {
             primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x: cursor_x - line_width * 0.5,
                 y: line_y,
@@ -2402,15 +2615,143 @@ fn push_item_content_primitives(
         Some(TimelineItemContent::Rings { rings, .. }) => {
             push_ring_glyphs(primitives, view, item, rect, rings, viewport);
         }
-        Some(TimelineItemContent::Waveform { sample, offset, span, loop_window }) => {
-            push_waveform_columns(
-                primitives, view, item, rect, title_bar, sample, *offset, *span, *loop_window, viewport,
-            );
+        Some(TimelineItemContent::Waveform { sample, channels, offset, span, loop_window }) => {
+            let Some((body_y, body_height)) = item_body(rect, title_bar, viewport) else {
+                return;
+            };
+            // Two rows once each is tall enough to read as a waveform.
+            let gap = (2.0 / viewport.cell_h).min(body_height * 0.1);
+            let row_height = (body_height - gap) * 0.5;
+            match channels {
+                Some([left, right]) if row_height * viewport.cell_h >= 18.0 => {
+                    for (channel, row_y) in [(left, body_y), (right, body_y + row_height + gap)] {
+                        push_waveform_columns(
+                            primitives, view, item, rect, (row_y, row_height), channel, *offset, *span,
+                            *loop_window, viewport,
+                        );
+                    }
+                }
+                _ => push_waveform_columns(
+                    primitives, view, item, rect, (body_y, body_height), sample, *offset, *span,
+                    *loop_window, viewport,
+                ),
+            }
+        }
+        Some(TimelineItemContent::Curve(points)) => {
+            push_curve_area(primitives, view, item, rect, title_bar, points, viewport);
         }
         // Inline peak lists are parsed but unused: audio items name their
         // sample instead (`Waveform`).
         Some(TimelineItemContent::Peaks(_)) | None => {}
     }
+}
+
+/// The value of a `Curve` content at item offset `offset` (0..1).
+fn curve_value_at(points: &[(f64, f64)], offset: f64) -> f64 {
+    let Some(&(first_offset, first_value)) = points.first() else {
+        return 0.0;
+    };
+    if offset <= first_offset {
+        return first_value;
+    }
+    let next = points.partition_point(|(point, _)| *point <= offset);
+    let Some(&(after_offset, after_value)) = points.get(next) else {
+        return points.last().map_or(0.0, |(_, value)| *value);
+    };
+    let (before_offset, before_value) = points[next - 1];
+    let span = after_offset - before_offset;
+    if span <= 0.0 {
+        return after_value;
+    }
+    before_value + (after_value - before_value) * (offset - before_offset) / span
+}
+
+/// An item's body (y, height): what its title bar leaves, or `None` when
+/// that is under 4 device pixels tall.
+fn item_body(
+    (_, y, _, height): (f32, f32, f32, f32),
+    title_bar: Option<(f32, f32)>,
+    viewport: super::WidgetViewport,
+) -> Option<(f32, f32)> {
+    let (body_y, body_height) = match title_bar {
+        Some((bar_y, bar_height)) if (bar_y - y).abs() < 1e-4 => {
+            (bar_y + bar_height, (height - bar_height).max(0.0))
+        }
+        _ => (y, height),
+    };
+    (body_height * viewport.cell_h >= 4.0).then_some((body_y, body_height))
+}
+
+/// `TimelineView::x_for_time` clamps to the view; this extends its in-view
+/// mapping linearly both ways, for content that runs past the view edges.
+struct UnclampedTimeAxis {
+    view_start: f64,
+    view_x0: f32,
+    per_time: f64,
+}
+
+impl UnclampedTimeAxis {
+    fn new(view: &TimelineView) -> Self {
+        let view_x0 = view.x_for_time(view.view_start);
+        let view_x1 = view.x_for_time(view.view_start + view.view_duration);
+        let per_time = (view_x1 - view_x0) as f64 / view.view_duration.max(0.0001);
+        Self { view_start: view.view_start, view_x0, per_time }
+    }
+
+    fn x(&self, time: f64) -> f32 {
+        self.view_x0 + ((time - self.view_start) * self.per_time) as f32
+    }
+
+    fn time(&self, x: f32) -> f64 {
+        self.view_start + (x - self.view_x0) as f64 / self.per_time.max(f64::EPSILON)
+    }
+}
+
+/// A `Curve` item's automation: a translucent fill under the curve and an
+/// anti-aliased line along it. The curve is linear between its points, so
+/// the geometry is its breakpoints inside the item's visible body plus the
+/// two visible edges, whatever the zoom.
+fn push_curve_area(
+    primitives: &mut Vec<GpuPrimitive>,
+    view: &TimelineView,
+    item: &TimelineItem,
+    rect: (f32, f32, f32, f32),
+    title_bar: Option<(f32, f32)>,
+    points: &[(f64, f64)],
+    viewport: super::WidgetViewport,
+) {
+    let span = item.end - item.start;
+    if span <= 0.0 || points.is_empty() {
+        return;
+    }
+    let Some((body_y, body_height)) = item_body(rect, title_bar, viewport) else {
+        return;
+    };
+    let (x, _, width, _) = rect;
+    // Inset so a full push does not touch the title bar and zero stays
+    // visible above the clip's bottom edge.
+    let inset = (2.0 / viewport.cell_h).min(body_height * 0.25);
+    let (top, bottom) = (body_y + inset, body_y + body_height - inset);
+    let value_y = |value: f64| bottom - (value.clamp(0.0, 1.0) as f32) * (bottom - top);
+    let axis = UnclampedTimeAxis::new(view);
+    let offset_at = |px: f32| ((axis.time(px) - item.start) / span).clamp(0.0, 1.0);
+    let (lo, hi) = (offset_at(x), offset_at(x + width));
+    if hi <= lo {
+        return;
+    }
+    let offsets = std::iter::once(lo)
+        .chain(points.iter().map(|(offset, _)| *offset).filter(|offset| *offset > lo && *offset < hi))
+        .chain(std::iter::once(hi));
+    let (mut tops, mut bottoms) = (Vec::new(), Vec::new());
+    for offset in offsets {
+        let px = axis.x(item.start + offset * span).clamp(x, x + width);
+        tops.push([px, value_y(curve_value_at(points, offset))]);
+        bottoms.push([px, bottom]);
+    }
+    let mut mesh = super::stroke::ShadedMesh::new();
+    mesh.push_band(&tops, &bottoms, view.item_content_color.with_alpha(0.22));
+    mesh.push_polyline(&tops, view.item_content_color.with_alpha(0.9), viewport, 0.75);
+    mesh.push_into(primitives);
 }
 
 /// An audio item's waveform (docs/audio-tracks-spec.md §8.1), drawn with the
@@ -2424,8 +2765,8 @@ fn push_waveform_columns(
     primitives: &mut Vec<GpuPrimitive>,
     view: &TimelineView,
     item: &TimelineItem,
-    (x, y, width, height): (f32, f32, f32, f32),
-    title_bar: Option<(f32, f32)>,
+    rect: (f32, f32, f32, f32),
+    (body_y, body_height): (f32, f32),
     sample: &crate::audio::sample::SampleBuffer,
     offset: f64,
     span: f64,
@@ -2436,22 +2777,9 @@ fn push_waveform_columns(
     if item.end <= item.start || span <= 0.0 || duration <= 0.0 || sample.peaks.is_empty() {
         return;
     }
-    // The body is what the title bar leaves.
-    let (body_y, body_height) = match title_bar {
-        Some((bar_y, bar_height)) if (bar_y - y).abs() < 1e-4 => {
-            (bar_y + bar_height, (height - bar_height).max(0.0))
-        }
-        _ => (y, height),
-    };
-    if body_height * viewport.cell_h < 4.0 {
-        return;
-    }
-    // `x_for_time` clamps to the view, so extend its in-view mapping
-    // linearly instead.
-    let view_x0 = view.x_for_time(view.view_start);
-    let view_x1 = view.x_for_time(view.view_start + view.view_duration);
-    let per_time = (view_x1 - view_x0) as f64 / view.view_duration.max(0.0001);
-    let unclamped_x = |time: f64| view_x0 + ((time - view.view_start) * per_time) as f32;
+    let axis = UnclampedTimeAxis::new(view);
+    let unclamped_x = |time: f64| axis.x(time);
+    let (x, _, width, _) = rect;
     let (item_x0, item_x1) = (unclamped_x(item.start), unclamped_x(item.end));
     if item_x1 <= item_x0 {
         return;
@@ -2639,6 +2967,7 @@ impl TimelineView {
             zoom_min_duration: self.zoom_min_duration,
             zoom_max_duration: self.zoom_max_duration,
             grid_density: self.grid_density,
+            fine_grid: self.fine_grid,
         }
     }
 
@@ -2671,6 +3000,7 @@ impl TimelineView {
             zoom_min_duration: get_num(props, "zoom-min-duration", 8.0).max(0.0001),
             zoom_max_duration: get_num(props, "zoom-max-duration", 128.0).max(0.0001),
             grid_density: get_num(props, "grid-density", 1.0).clamp(1.0, 8.0),
+            fine_grid: props.get("fine-grid").and_then(as_bool).unwrap_or(false),
             content_length: props
                 .get("content-length")
                 .and_then(as_number)
@@ -2726,6 +3056,8 @@ impl TimelineView {
             cursor_marker_height_scale: get_num(props, "cursor-marker-height-scale", 1.0)
                 .clamp(0.25, 4.0) as f32,
             cursor_color: resolve_named_color(props, "cursor-color", theme::CURSOR()),
+            cursor_line_px: get_num(props, "cursor-line-width", 0.0).max(0.0) as f32,
+            magnify_sensitivity: get_num(props, "magnify-sensitivity", 1.0),
             item_color: resolve_named_color(props, "item-color", theme::BLUE()),
             item_label_font_size: get_num(props, "item-label-font-size", 10.5).max(1.0) as f32,
             item_label_color: resolve_named_color(props, "item-label-color", theme::BLACK()),
@@ -2736,6 +3068,8 @@ impl TimelineView {
             ),
             loop_color: resolve_named_color(props, "loop-color", theme::BLUE()),
             loop_visible: props.get("loop-visible").and_then(as_bool).unwrap_or(true),
+            loop_brace: loop_brace::parse(props),
+            open_ended: props.get("open-ended").and_then(as_bool).unwrap_or(false),
             border_top_color: resolve_named_color(props, "border-top-color",
                 crate::backend::Color { a: 0.0, ..theme::FG() }),
             border_bottom_color: resolve_named_color(props, "border-bottom-color",
@@ -2942,7 +3276,10 @@ impl TimelineView {
             return;
         }
         let ghost_id = get_num(props, "ghost-id", f64::NAN);
-        let max_end = self.content_length.unwrap_or(f64::INFINITY);
+        let max_end = self
+            .content_length
+            .filter(|_| !self.open_ended)
+            .unwrap_or(f64::INFINITY);
         // The host's :min-duration, as the commit honours it, not a fixed
         // beat: zoomed in, an audio region trims to a fraction of one.
         let min_span = self.minimum_duration();
@@ -2955,10 +3292,28 @@ impl TimelineView {
         };
         let old_span = (item.end - item.start).max(1e-9);
         if ghost_kind < 1.5 {
-            // Move: rigid slide, content untouched.
-            let new_start = ghost_time.max(0.0);
-            let delta = new_start - item.start;
-            item.start = new_start;
+            // Move: rigid slide, content untouched. A clip of the host's
+            // multi-selection (items flagged `:selected`) carries the rest
+            // of the selection along, as the commit will.
+            let carries_selection = item.selected;
+            let mut delta = ghost_time.max(0.0) - item.start;
+            if carries_selection {
+                // The selection moves rigidly, so its earliest clip stops at
+                // beat 0, as the commit clamps it.
+                let earliest = self
+                    .items
+                    .iter()
+                    .filter(|other| other.selected)
+                    .map(|other| other.start)
+                    .fold(f64::INFINITY, f64::min);
+                delta = delta.max(-earliest);
+                for other in self.items.iter_mut().filter(|other| other.selected) {
+                    other.start += delta;
+                    other.end += delta;
+                }
+                return;
+            }
+            item.start += delta;
             item.end += delta;
         } else if ghost_kind < 2.5 {
             // Start-edge resize: phase re-anchors by the split rule.
@@ -3009,6 +3364,9 @@ impl TimelineView {
     }
 
     fn unavailable_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        if self.open_ended {
+            return None;
+        }
         let content_length = self.content_length?;
         if content_length >= self.view_start + self.view_duration {
             return None;
@@ -3044,6 +3402,7 @@ impl TimelineView {
         if !self.loop_visible {
             return None;
         }
+
         let content_length = self.content_length?;
         if content_length <= 0.0 {
             return None;
@@ -3546,7 +3905,10 @@ impl TimelineView {
             return Some(HitRegion::Sidebar { lane });
         }
         if local_row < self.rect.row + self.header_height {
-            if self.loop_visible && self.content_length.is_some() {
+            if let Some(part) = self.loop_brace_hit(local_col, local_row) {
+                return Some(HitRegion::LoopBrace(part));
+            }
+            if self.loop_visible && self.loop_brace.is_none() && self.content_length.is_some() {
                 let content = self.content_rect();
                 let content_end = self.x_for_time(self.content_length?);
                 let edge_slop = 0.75;
@@ -3647,6 +4009,22 @@ impl TimelineView {
     }
 
     fn begin_gesture(&self, local_col: f32, local_row: f32) -> Option<Value> {
+        if self.tool == TimelineTool::Pointer {
+            if let Some((item, spot, (body_top, body_height))) = fades::hit(self, local_col, local_row) {
+                return Some(map_value(vec![
+                    ("kind", keyword(":fade")),
+                    ("id", item.id),
+                    ("handle", fades::handle_keyword(spot.handle)),
+                    ("curve", Value::Bool(spot.handle.is_curve())),
+                    ("anchor-raw", Value::Number(self.time_at_col(local_col))),
+                    ("anchor-time", Value::Number(spot.time)),
+                    ("item-start", Value::Number(item.start)),
+                    ("item-end", Value::Number(item.end)),
+                    ("body-top", Value::Number(body_top as f64)),
+                    ("body-height", Value::Number(body_height as f64)),
+                ]));
+            }
+        }
         let hit = self.hit_test(local_col, local_row)?;
         let current_time = self.snap_time(self.time_at_col(local_col));
         let current_marquee_time = self.time_at_col(local_col);
@@ -3732,6 +4110,9 @@ impl TimelineView {
                 HitRegion::ContentLengthEnd => {
                     Some(map_value(vec![("kind", keyword(":resize-content-length"))]))
                 }
+                HitRegion::LoopBrace(part) => {
+                    self.loop_brace_gesture(part, self.time_at_col(local_col))
+                }
                 HitRegion::Background { .. } => Some(map_value(vec![
                     ("kind", keyword(":marquee")),
                     ("time", Value::Number(current_marquee_time)),
@@ -3785,7 +4166,37 @@ impl TimelineView {
         }
     }
 
+    /// A `:select` action for item `id` with `mode` (`:replace`, `:toggle`),
+    /// parking the cursor at the grid line nearest `local_col`.
+    fn select_action(&self, id: Value, mode: &str, local_col: f32) -> Value {
+        action_map(vec![
+            ("type", keyword(":select")),
+            ("ids", list_value(vec![id])),
+            ("mode", keyword(mode)),
+            ("time", Value::Number(self.cursor_snap_time(self.time_at_col(local_col)))),
+        ])
+    }
+
+    /// The clip a Shift+click toggles in the selection: one pressed on its
+    /// title bar or edges (the body stays a time-selection surface), or
+    /// anywhere on it in a host without title bars.
+    fn shift_toggle_target(&self, local_col: f32, local_row: f32) -> Option<TimelineItem> {
+        if self.tool != TimelineTool::Pointer {
+            return None;
+        }
+        match self.hit_test(local_col, local_row)? {
+            HitRegion::ItemTitleBar { item }
+            | HitRegion::ItemEdgeStart { item }
+            | HitRegion::ItemEdgeEnd { item } => Some(item),
+            HitRegion::ItemBody { item } if !self.has_title_bar() => Some(item),
+            _ => None,
+        }
+    }
+
     fn handle_pointer_down(&self, local_col: f32, local_row: f32) -> Option<Value> {
+        if self.tool == TimelineTool::Pointer && fades::hit(self, local_col, local_row).is_some() {
+            return None;
+        }
         let hit = self.hit_test(local_col, local_row)?;
         match self.tool {
             TimelineTool::Pointer => match hit {
@@ -3812,16 +4223,8 @@ impl TimelineView {
                 HitRegion::ItemBody { item }
                 | HitRegion::ItemEdgeEnd { item }
                 | HitRegion::ItemTitleBar { item }
-                | HitRegion::ItemEdgeStart { item } => Some(action_map(vec![
-                    ("type", keyword(":select")),
-                    ("ids", list_value(vec![item.id])),
-                    ("mode", keyword(":replace")),
-                    (
-                        "time",
-                        Value::Number(self.cursor_snap_time(self.time_at_col(local_col))),
-                    ),
-                ])),
-                HitRegion::ContentLengthEnd => None,
+                | HitRegion::ItemEdgeStart { item } => Some(self.select_action(item.id, ":replace", local_col)),
+                HitRegion::ContentLengthEnd | HitRegion::LoopBrace(_) => None,
                 HitRegion::Background { time, .. } => Some(action_map(vec![
                     ("type", keyword(":clear-selection")),
                     ("time", Value::Number(self.cursor_snap_time(time))),
@@ -3860,7 +4263,7 @@ impl TimelineView {
     }
 
     fn handle_double_click(&self, local_col: f32, local_row: f32) -> Option<Value> {
-        if self.tool != TimelineTool::Pointer {
+        if self.tool != TimelineTool::Pointer || fades::hit(self, local_col, local_row).is_some() {
             return None;
         }
         match self.hit_test(local_col, local_row)? {
@@ -3915,10 +4318,38 @@ impl TimelineView {
         // requires a hit, as before.
         let is_marquee =
             matches!(gesture.get("kind"), Some(Value::Keyword(kind)) if kind == "marquee");
-        if current_hit.is_none() && !is_marquee {
+        // A fade drag keeps following the pointer off the item, too.
+        let is_fade = matches!(gesture.get("kind"), Some(Value::Keyword(kind)) if kind == "fade");
+        if current_hit.is_none() && !is_marquee && !is_fade {
             return None;
         }
         match gesture.get("kind") {
+            Some(Value::Keyword(kind)) if kind == "fade" => {
+                let value = if map_bool(gesture_value, "curve") {
+                    // The level the curve should pass at its midpoint.
+                    let top = as_number(gesture.get("body-top")?)? as f32;
+                    let height = (as_number(gesture.get("body-height")?)? as f32).max(0.01);
+                    (1.0 - (local_row - top) / height).clamp(0.0, 1.0) as f64
+                } else {
+                    // The handle's song time, following the pointer from
+                    // where it was grabbed. A fade never crosses its item.
+                    let anchor_raw = as_number(gesture.get("anchor-raw")?)?;
+                    let time = as_number(gesture.get("anchor-time")?)? + raw_time - anchor_raw;
+                    let (start, end) =
+                        (as_number(gesture.get("item-start")?)?, as_number(gesture.get("item-end")?)?);
+                    let in_side = matches!(
+                        gesture.get("handle"),
+                        Some(Value::Keyword(handle)) if fades::FadeHandle::parse(handle).is_some_and(|h| h.is_in_side())
+                    );
+                    if in_side { time.min(end) } else { time.max(start) }
+                };
+                Some(action_map(vec![
+                    ("type", keyword(":fade-item")),
+                    ("id", gesture.get("id")?.clone()),
+                    ("handle", gesture.get("handle")?.clone()),
+                    ("value", Value::Number(value)),
+                ]))
+            }
             Some(Value::Keyword(kind)) if kind == "move" => {
                 let anchor_id = gesture.get("anchor-id")?.clone();
                 let anchor_start = self
@@ -4040,6 +4471,9 @@ impl TimelineView {
                     ("type", keyword(":resize-content-length")),
                     ("length", Value::Number(length)),
                 ]))
+            }
+            Some(Value::Keyword(kind)) if kind == "loop-brace" => {
+                self.loop_brace_action(&gesture, raw_time, false)
             }
             Some(Value::Keyword(kind)) if kind == "slide-band" => {
                 let anchor = as_number(gesture.get("anchor-time")?)?;
@@ -4216,7 +4650,10 @@ impl TimelineView {
         if delta.abs() < f64::EPSILON {
             return None;
         }
-        let factor = 2.0_f64.powf(delta.clamp(-1.0, 1.0));
+        // `:magnify-sensitivity` scales a pinch (the arrangement zooms much
+        // further per gesture than the piano roll, as Ableton's does).
+        let sensitivity = self.magnify_sensitivity.max(0.0);
+        let factor = 2.0_f64.powf((delta * sensitivity).clamp(-2.0, 2.0));
         if matches!(hit, HitRegion::Sidebar { .. }) {
             return Some(action_map(vec![
                 ("type", keyword(":zoom-lanes")),
@@ -4315,6 +4752,11 @@ impl TimelineView {
         let current_lane = self.lane_at_row(local_row);
         let gesture = get_map(gesture?)?;
         match gesture.get("kind") {
+            Some(Value::Keyword(kind)) if kind == "fade" => Some(action_map(vec![
+                ("type", keyword(":finish-fade-item")),
+                ("id", gesture.get("id")?.clone()),
+                ("handle", gesture.get("handle")?.clone()),
+            ])),
             Some(Value::Keyword(kind)) if kind == "draw" => {
                 let start_time = as_number(gesture.get("time")?)?;
                 let start_lane = as_number(gesture.get("lane")?)?;
@@ -4388,6 +4830,9 @@ impl TimelineView {
                     ("type", keyword(":finish-resize-content-length")),
                     ("length", Value::Number(length)),
                 ]))
+            }
+            Some(Value::Keyword(kind)) if kind == "loop-brace" => {
+                self.loop_brace_action(&gesture, self.time_at_col(local_col), true)
             }
             // Terminal for a band slide: one action with the TOTAL delta, so
             // the host lowers the whole drag to a single undoable primitive
@@ -4515,6 +4960,21 @@ impl TimelineView {
                     ("ids", list_value(selected_ids)),
                 ]))
             }
+            // No items selected but a region range is: delete what it covers
+            // (the host decides; lanes that keep no range ignore it). Only
+            // the `:region` style opts in, so a marquee-style rect (a crop,
+            // a lasso) never swallows Backspace.
+            KeyCode::Backspace | KeyCode::Delete
+                if self.selection_rect.is_some()
+                    && self.selection_rect_style == SelectionRectStyle::Region =>
+            {
+                let rect = self.selection_rect.as_ref()?;
+                Some(action_map(vec![
+                    ("type", keyword(":delete-range")),
+                    ("time-a", Value::Number(rect.time_a.min(rect.time_b))),
+                    ("time-b", Value::Number(rect.time_a.max(rect.time_b))),
+                ]))
+            }
             // Escape clears whatever is selected — items OR a region
             // (docs/arrangement-region-editing-spec.md 4.4). Gating on items
             // alone left a region highlight with no way to dismiss it, since
@@ -4559,16 +5019,16 @@ impl TimelineView {
         ]))
     }
 
+    /// Every selected id: the bound `:selected-id`/`:bound-id` selection
+    /// plus items flagged `:selected` (a host's multi-selection), else
+    /// `fallback` alone.
     fn selected_ids_for(&self, fallback: Value) -> Vec<Value> {
-        if !self.selection.is_empty() {
-            return self.selection.clone();
+        let mut selected = self.selection.clone();
+        for item in self.items.iter().filter(|item| item.selected) {
+            if !selected.contains(&item.id) {
+                selected.push(item.id.clone());
+            }
         }
-        let selected: Vec<Value> = self
-            .items
-            .iter()
-            .filter(|item| item.selected)
-            .map(|item| item.id.clone())
-            .collect();
         if selected.is_empty() {
             vec![fallback]
         } else {
@@ -4803,6 +5263,7 @@ fn get_items(props: &HashMap<String, Value>) -> Vec<TimelineItem> {
                 sound_dot: map.get("sound-dot").and_then(parse_sound_dot),
                 grow: map.get("grow").and_then(as_bool).unwrap_or(false),
                 cycle_beats: map.get("content").and_then(parse_cycle_beats),
+                fades: map.get("fades").and_then(fades::parse_fades),
             })
         })
         .map(|mut item| {
@@ -4983,12 +5444,31 @@ fn parse_item_content(value: &Value) -> Option<TimelineItemContent> {
             (Some(start), Some(end)) if end > start => Some((start, end)),
             _ => None,
         };
+        let channel = |index: usize| {
+            crate::audio::sample::get_registered_sample(&crate::audio::sample::channel_key(&key, index))
+                .filter(|channel| !channel.peaks.is_empty())
+        };
+        let channels = channel(0).zip(channel(1)).map(|(left, right)| [left, right]);
         return Some(TimelineItemContent::Waveform {
             sample,
+            channels,
             offset: number("offset").unwrap_or(0.0).max(0.0),
             span: number("span").filter(|span| *span > 0.0)?,
             loop_window,
         });
+    }
+    if let Some(Value::List(entries)) = map.get("curve") {
+        let mut points: Vec<(f64, f64)> = entries
+            .iter()
+            .filter_map(|entry| {
+                let entry = get_map(&entry.borrow())?;
+                let offset = entry.get("offset").and_then(as_number).filter(|n| n.is_finite())?;
+                let value = entry.get("value").and_then(as_number).filter(|n| n.is_finite())?;
+                Some((offset.clamp(0.0, 1.0), value.clamp(0.0, 1.0)))
+            })
+            .collect();
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        return Some(TimelineItemContent::Curve(points));
     }
     if let Some(Value::List(entries)) = map.get("peaks") {
         let peaks = entries
@@ -9579,6 +10059,7 @@ mod tests {
             Some(HitRegion::Header) => "header",
             Some(HitRegion::Sidebar { .. }) => "sidebar",
             Some(HitRegion::ContentLengthEnd) => "content-length-end",
+            Some(HitRegion::LoopBrace(_)) => "loop-brace",
             None => "none",
         }
     }
@@ -9586,6 +10067,65 @@ mod tests {
     /// With no title bar (the piano-roll default) the item is exactly what it
     /// has always been: an end handle spanning the full height and body
     /// everywhere else, with no start handle anywhere.
+    /// `:magnify-sensitivity` scales one pinch event's zoom factor.
+    #[test]
+    fn magnify_sensitivity_scales_a_pinch() {
+        let factor = |sensitivity: Option<f64>| {
+            let mut props = HashMap::from([
+                ("view-start".to_string(), number_value(0.0)),
+                ("view-duration".to_string(), number_value(16.0)),
+                ("header-height".to_string(), number_value(0.0)),
+            ]);
+            if let Some(sensitivity) = sensitivity {
+                props.insert("magnify-sensitivity".to_string(), number_value(sensitivity));
+            }
+            let view = TimelineView::from_props(&props, Rect { row: 0.0, col: 0.0, width: 16.0, height: 8.0 });
+            let action = view.handle_magnify(8.0, 4.0, 0.05).expect("a zoom");
+            get_map(&action).unwrap().get("factor").and_then(as_number).unwrap()
+        };
+        assert!((factor(None) - 2f64.powf(0.05)).abs() < 1e-9, "stock rate");
+        assert!((factor(Some(8.0)) - 2f64.powf(0.4)).abs() < 1e-9, "eight times the zoom per event");
+    }
+
+    /// A host's multi-selection (`:selected` items) joins the bound
+    /// `:selected-id`, so a title-bar drag carries every selected clip.
+    #[test]
+    fn a_title_bar_drag_carries_every_selected_item() {
+        let props = HashMap::from([
+            (
+                "items".to_string(),
+                list_value_raw(vec![
+                    map_value_raw(vec![
+                        ("id", number_value(1.0)),
+                        ("start", number_value(0.0)),
+                        ("end", number_value(4.0)),
+                        ("selected", bool_value(true)),
+                    ]),
+                    map_value_raw(vec![
+                        ("id", number_value(2.0)),
+                        ("start", number_value(8.0)),
+                        ("end", number_value(12.0)),
+                        ("selected", bool_value(true)),
+                    ]),
+                ]),
+            ),
+            ("selected-id".to_string(), number_value(2.0)),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(0.0)),
+            ("title-bar-height".to_string(), number_value(2.0)),
+        ]);
+        let view = TimelineView::from_props(&props, Rect { row: 0.0, col: 0.0, width: 16.0, height: 8.0 });
+        let gesture = view.begin_gesture(10.0, 1.0).expect("a move");
+        let ids = get_map(&gesture).unwrap().get("ids").cloned().unwrap();
+        let Value::List(ids) = ids else { panic!("ids list") };
+        let mut ids: Vec<f64> = ids.iter().filter_map(|id| as_number(&id.borrow())).collect();
+        ids.sort_by(f64::total_cmp);
+        assert_eq!(ids, vec![1.0, 2.0]);
+        assert!(view.shift_toggle_target(10.0, 1.0).is_some(), "a title bar toggles");
+        assert!(view.shift_toggle_target(10.0, 5.0).is_none(), "a body does not");
+    }
+
     #[test]
     fn hit_test_without_a_title_bar_is_unchanged() {
         let view = title_bar_view(None);
@@ -9988,9 +10528,98 @@ mod tests {
         assert_eq!(action_type(&action), "clear-selection");
     }
 
+    /// Backspace over a range with no items selected deletes the range
+    /// (`:delete-range`, ordered); with items selected it deletes those.
+    #[test]
+    fn backspace_deletes_a_range_when_no_item_is_selected() {
+        let backspace = |view: &TimelineView| {
+            view.handle_key(WidgetKeyEvent {
+                code: KeyCode::Backspace,
+                modifiers: KeyModifiers::empty(),
+            })
+        };
+        let field = |value: &Value, key: &str| {
+            let Value::Map(map) = value else {
+                panic!("expected action map, got {value:?}");
+            };
+            map.get(key).map(|cell| cell.borrow().clone())
+        };
+        let mut props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(0.0)),
+        ]);
+        let rect = Rect { row: 0.0, col: 0.0, width: 16.0, height: 4.0 };
+        assert!(backspace(&TimelineView::from_props(&props, rect)).is_none());
+        props.insert(
+            "selection-rect".to_string(),
+            map_value_raw(vec![
+                ("time-a", number_value(8.0)),
+                ("time-b", number_value(2.0)),
+                ("lane-a", number_value(0.0)),
+                ("lane-b", number_value(0.0)),
+            ]),
+        );
+        assert!(
+            backspace(&TimelineView::from_props(&props, rect)).is_none(),
+            "a marquee-style rect (a crop) lets Backspace fall through"
+        );
+        props.insert("selection-rect-style".to_string(), Value::Keyword("region".to_string()));
+        let action = backspace(&TimelineView::from_props(&props, rect)).expect("range delete");
+        assert_eq!(field(&action, "type"), Some(Value::Keyword("delete-range".to_string())));
+        assert_eq!(field(&action, "time-a"), Some(Value::Number(2.0)));
+        assert_eq!(field(&action, "time-b"), Some(Value::Number(8.0)));
+    }
+
     /// `:grid-density` requests a finer initial candidate. When that would
     /// crowd the view, the shared rendering/editing grid promotes it back to
     /// a readable power-of-two interval.
+    #[test]
+    fn move_ghost_of_a_selected_item_carries_the_whole_selection() {
+        let item = |id: f64, start: f64, selected: bool| {
+            map_value_raw(vec![
+                ("id", number_value(id)),
+                ("lane", number_value(0.0)),
+                ("start", number_value(start)),
+                ("end", number_value(start + 2.0)),
+                ("selected", bool_value(selected)),
+            ])
+        };
+        let view_for_ghost = |anchor_selected: bool, ghost_id: f64, ghost_time: f64| {
+            let props = HashMap::from([
+                (
+                    "items".to_string(),
+                    list_value_raw(vec![
+                        item(1.0, 0.0, anchor_selected),
+                        item(2.0, 8.0, true),
+                        item(3.0, 16.0, false),
+                    ]),
+                ),
+                ("view-start".to_string(), number_value(0.0)),
+                ("view-duration".to_string(), number_value(64.0)),
+                ("ghost-kind".to_string(), number_value(1.0)),
+                ("ghost-id".to_string(), number_value(ghost_id)),
+                ("ghost-time".to_string(), number_value(ghost_time)),
+            ]);
+            let rect = Rect { row: 0.0, col: 0.0, width: 32.0, height: 8.0 };
+            TimelineView::from_props(&props, rect)
+        };
+        let view_for = |anchor_selected: bool| view_for_ghost(anchor_selected, 1.0, 4.0);
+        let starts = |view: &TimelineView| view.items.iter().map(|i| i.start).collect::<Vec<_>>();
+
+        assert_eq!(starts(&view_for(true)), [4.0, 12.0, 16.0], "the selection moves together");
+        assert_eq!(
+            starts(&view_for(false)),
+            [4.0, 8.0, 16.0],
+            "an unselected item moves alone"
+        );
+        assert_eq!(
+            starts(&view_for_ghost(true, 2.0, 2.0)),
+            [0.0, 8.0, 16.0],
+            "the selection stops when its earliest clip reaches beat 0"
+        );
+    }
+
     #[test]
     fn grid_density_never_crowds_or_moves_bar_lines() {
         let step_for = |density: Option<f64>, view_duration: f64| {
@@ -10154,12 +10783,13 @@ mod tests {
         ));
         let looping = TimelineItemContent::Waveform {
             sample: std::sync::Arc::clone(&sample),
+            channels: None,
             offset: 0.25,
             span: 4.0,
             loop_window: Some((0.25, 0.75)),
         };
         assert_eq!(looping.cycle(), Some((0.125, 0.0, true)), "eight half-second repeats");
-        let one_shot = TimelineItemContent::Waveform { sample, offset: 0.0, span: 1.0, loop_window: None };
+        let one_shot = TimelineItemContent::Waveform { sample, channels: None, offset: 0.0, span: 1.0, loop_window: None };
         assert_eq!(one_shot.cycle(), None);
     }
 

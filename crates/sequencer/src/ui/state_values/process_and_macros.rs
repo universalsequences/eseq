@@ -157,7 +157,7 @@ pub(crate) fn macro_mapping_display_metadata(
 ) -> (String, String, f32, f32, f32, f32, f32, u8, String) {
     let Some((device, param)) = macro_mapping_param_descriptor(app, mapping) else {
         let scope_label = match mapping.scope {
-            sequencer::macro_engine::ParamScope::Track(track) => format!("Track {}", track + 1),
+            sequencer::macro_engine::ParamScope::Track(track) => format!("Track {}", app.track_number(track)),
             sequencer::macro_engine::ParamScope::Bus(bus_id) => app
                 .buses
                 .iter()
@@ -188,7 +188,7 @@ pub(crate) fn macro_mapping_display_metadata(
         }
     };
     let scope_label = match mapping.scope {
-        sequencer::macro_engine::ParamScope::Track(track) => format!("T{}", track + 1),
+        sequencer::macro_engine::ParamScope::Track(track) => format!("T{}", app.track_number(track)),
         sequencer::macro_engine::ParamScope::Bus(bus_id) => app
             .buses
             .iter()

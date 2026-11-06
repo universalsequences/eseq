@@ -450,6 +450,11 @@ pub struct ProjectFile {
     /// an empty roster.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub track_lane_rosters: Vec<crate::process::TrackLaneRoster>,
+    /// The display order of the tracks by stable id (eseq-ssd6): the order
+    /// the grid, mixer and arrangement draw them in. Empty (every file
+    /// before it, and a project never reordered) is the legacy order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub track_order: Vec<TrackId>,
     /// Per scene, the rack clip pointers of `ProjectScene::rack_clips`
     /// (rack-clips spec 3): `(group id, clip id)`. Outer index = scene; a rack
     /// with no entry is silent in that scene. Absent in files below v13, whose
@@ -673,6 +678,8 @@ struct ProjectFileWire {
     #[serde(default)]
     track_lane_rosters: Vec<crate::process::TrackLaneRoster>,
     #[serde(default)]
+    track_order: Vec<TrackId>,
+    #[serde(default)]
     scene_rack_clips: Vec<Vec<(u64, RackClipId)>>,
     #[serde(default)]
     scene_slot_enable: Vec<Vec<(usize, Vec<u64>)>>,
@@ -755,6 +762,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             take_pools: wire.take_pools,
             track_sounds: wire.track_sounds,
             track_lane_rosters: wire.track_lane_rosters,
+            track_order: wire.track_order,
             scene_rack_clips: wire.scene_rack_clips,
             scene_slot_enable: wire.scene_slot_enable,
             scene_parked_kits: wire.scene_parked_kits,
@@ -5432,6 +5440,7 @@ mod tests {
             take_pools: Vec::new(),
             track_sounds: Vec::new(),
             track_lane_rosters: Vec::new(),
+            track_order: Vec::new(),
         }
     }
 
@@ -5566,10 +5575,12 @@ mod tests {
             rack_lanes: std::collections::BTreeMap::new(),
             end_beat: 33.25,
             loop_enabled: true,
+            loop_range: None,
             next_clip_id: 1,
             audio_lanes: Vec::new(),
             audio_sources: std::collections::BTreeMap::new(),
             next_audio_source_id: 0,
+            push_lane: Vec::new(),
         }
     }
 
@@ -5751,6 +5762,24 @@ mod tests {
         assert!(!empty.contains("track_lane_rosters"), "{empty}");
     }
 
+    #[test]
+    fn track_order_round_trips_and_older_files_load_empty() {
+        let mut project = sample_project();
+        project.track_order = vec![TrackId(2), TrackId(1)];
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("parse project");
+        assert_eq!(restored.track_order, vec![TrackId(2), TrackId(1)]);
+
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        value.as_object_mut().expect("object").remove("track_order");
+        let legacy: ProjectFile = serde_json::from_value(value).expect("legacy parses");
+        assert!(legacy.track_order.is_empty());
+
+        // A never-reordered project writes no key.
+        let empty = serde_json::to_string(&sample_project()).expect("serialize project");
+        assert!(!empty.contains("track_order"), "{empty}");
+    }
+
     /// Spec 10, v5 -> v6: a version-5 arrangement may carry explicit-empty
     /// clips, which this version's validation rejects. The file must still
     /// LOAD — the load-time migration drops them, and a project the user
@@ -5828,10 +5857,12 @@ mod tests {
             rack_lanes: std::collections::BTreeMap::new(),
             end_beat: 16.0,
             loop_enabled: false,
+            loop_range: None,
             next_clip_id: 1,
         audio_lanes: Vec::new(),
         audio_sources: std::collections::BTreeMap::new(),
         next_audio_source_id: 0,
+        push_lane: Vec::new(),
         };
 
         let migrated = migrate_legacy_backdrops(&v5, &scenes).expect("migrates");

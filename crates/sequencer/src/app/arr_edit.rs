@@ -1310,6 +1310,7 @@ impl App {
                 for group_id in racks {
                     occlude_rack_span(arrangement, group_id, end_beat, old_end)?;
                 }
+                arrangement.occlude_scene_push_span(end_beat, old_end)?;
             }
             Self::set_end_in(arrangement, end_beat)?;
             restamp_changed_scene_spans(arrangement, scenes, &before)
@@ -1329,6 +1330,7 @@ impl App {
             .flatten()
             .map(|clip| clip.end_beat)
             .chain(arrangement.rack_lanes.values().flatten().map(|clip| clip.end_beat))
+            .chain(arrangement.push_lane.iter().map(|push| push.end_beat))
             .fold(0.0f64, f64::max);
         if end_beat < last_clip_end {
             return Err(format!(
@@ -1355,6 +1357,24 @@ impl App {
     pub fn arr_set_loop(&mut self, enabled: bool) -> Result<(), String> {
         self.edit_arrangement("Set song loop", move |arrangement, _scenes| {
             arrangement.loop_enabled = enabled;
+            Ok(())
+        })
+    }
+
+    /// Move or resize the loop brace to `[start, end)` (validated by the
+    /// arrangement: finite, from beat 0 on, non-empty), turning looping on or
+    /// off with it when `enabled` says so (Loop Selection), in one undo step.
+    pub fn arr_set_loop_range(
+        &mut self,
+        start: f64,
+        end: f64,
+        enabled: Option<bool>,
+    ) -> Result<(), String> {
+        self.edit_arrangement("Set loop", move |arrangement, _scenes| {
+            arrangement.loop_range = Some((start, end));
+            if let Some(enabled) = enabled {
+                arrangement.loop_enabled = enabled;
+            }
             Ok(())
         })
     }
@@ -1465,10 +1485,12 @@ impl App {
                 scenes,
             )
         })?;
-        // Rows say nothing about audio: the audio lanes and their sources
-        // carry over unchanged.
+        // Rows say nothing about audio, scene pushes or the loop brace: those
+        // lanes (and the audio sources) and the brace carry over unchanged.
         if let Some(before) = &before {
+            arrangement.loop_range = before.loop_range;
             arrangement.audio_lanes = before.audio_lanes.clone();
+            arrangement.push_lane = before.push_lane.clone();
             arrangement.inherit_audio_sources(before);
         }
         self.commit_arrangement_edit("Replace arrangement", before, Some(arrangement))
@@ -1642,10 +1664,12 @@ mod tests {
             rack_lanes: std::collections::BTreeMap::new(),
             end_beat: 16.0,
             loop_enabled: true,
+            loop_range: None,
             next_clip_id: 1,
         audio_lanes: Vec::new(),
         audio_sources: std::collections::BTreeMap::new(),
         next_audio_source_id: 0,
+        push_lane: Vec::new(),
         };
         let revision = app.state.committed_song_revision();
         app.state
@@ -1751,6 +1775,7 @@ mod tests {
             }],
             end_beat: 16.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 1,
         };
         app.state.set_committed_song(Some(song.clone()));
@@ -1784,10 +1809,12 @@ mod tests {
             rack_lanes: std::collections::BTreeMap::new(),
             end_beat: 16.0,
             loop_enabled: false,
+            loop_range: None,
             next_clip_id: 1,
         audio_lanes: Vec::new(),
         audio_sources: std::collections::BTreeMap::new(),
         next_audio_source_id: 0,
+        push_lane: Vec::new(),
         };
         let depth = app.history.undo_len();
         app.arr_replace(arrangement.clone()).expect("arr_replace");
@@ -1886,6 +1913,7 @@ mod tests {
                 .collect(),
             end_beat,
             loop_enabled,
+            loop_range: None,
             next_row_id: rows.len() as u64,
         }
     }

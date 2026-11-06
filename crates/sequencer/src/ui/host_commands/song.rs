@@ -35,8 +35,14 @@ pub(super) const COMMANDS: &[&str] = &[
     "arrangement-clip-move",
     "arrangement-clip-resize",
     "arrangement-clip-split",
+    // Recorded scene pushes (eseq-vum0): `:ids` / `:clip-id :start-beat`.
+    "arrangement-push-delete",
+    "arrangement-push-move",
+    "arrangement-push-resize",
+    "arrangement-push-clear",
     "song-set-end",
     "song-set-loop",
+    "song-set-loop-range",
     // Row path: the declarative/capture commit surface only (lane spec 9 —
     // capture still stages rows).
     "song-replace",
@@ -307,12 +313,27 @@ fn resolve_clip(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<ClipId, Str
 }
 
 /// A non-negative integer field (an id).
-fn require_whole(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Result<u64, String> {
+pub(super) fn require_whole(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Result<u64, String> {
     let value = require_number(map, key)?;
     if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
         return Err(format!("{key} must be a non-negative integer"));
     }
     Ok(value as u64)
+}
+
+/// `:ids` as a list of arrangement clip ids (regions, pushes).
+pub(super) fn clip_ids(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<Vec<ClipId>, String> {
+    let Some(Value::List(ids)) = map.get("ids").map(|cell| cell.borrow().clone()) else {
+        return Err("missing :ids list".to_string());
+    };
+    ids.iter()
+        .map(|id| match &*id.borrow() {
+            Value::Number(n) if n.is_finite() && *n >= 0.0 && n.fract() == 0.0 => {
+                Ok(ClipId(*n as u64))
+            }
+            other => Err(format!("clip id must be a non-negative integer, got {other:?}")),
+        })
+        .collect()
 }
 
 fn parse_overrides(
@@ -420,7 +441,7 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let pattern = PatternId(map_entity_id(map, "pattern-id")?);
             let start = require_number(map, "start-beat")?;
             app.arr_pattern_place(track, pattern, start)?;
-            Ok(format!("Placed linked pattern on track {} at beat {start}", track + 1))
+            Ok(format!("Placed linked pattern on track {} at beat {start}", app.track_number(track)))
         }
         "arrangement-clip-create" => {
             let map = payload_map(payload)?;
@@ -435,14 +456,14 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                 app.arr_clip_clear_span(track, start_beat, end_beat)?;
                 return Ok(format!(
                     "Silenced track {} over beats {start_beat}-{end_beat}",
-                    track + 1
+                    app.track_number(track)
                 ));
             }
             let offset_steps = map_number(map, "offset-steps").unwrap_or(0.0);
             app.arr_clip_create(track, start_beat, end_beat, source, offset_steps)?;
             Ok(format!(
                 "Created a clip on track {} over beats {start_beat}-{end_beat}",
-                track + 1
+                app.track_number(track)
             ))
         }
         "arrangement-empty-take-create" => {
@@ -454,7 +475,7 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             Ok(format!(
                 "Created an empty take clip on track {} over beats \
                  {start_beat}-{end_beat}",
-                track + 1
+                app.track_number(track)
             ))
         }
         "arrangement-rack-member-bind" => {
@@ -521,6 +542,34 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let clip_id = resolve_clip(map)?;
             let copy = app.arr_rack_clip_duplicate(clip_id)?;
             Ok(format!("Duplicated rack clip {} as {}", clip_id.0, copy.0))
+        }
+        "arrangement-push-delete" => {
+            let ids = clip_ids(payload_map(payload)?)?;
+            app.scene_pushes_delete(&ids)?;
+            Ok(match ids.len() {
+                1 => "Deleted scene push".to_string(),
+                n => format!("Deleted {n} scene pushes"),
+            })
+        }
+        "arrangement-push-move" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map)?;
+            let start_beat = require_number(map, "start-beat")?;
+            app.scene_push_move(clip_id, start_beat)?;
+            Ok(format!("Moved scene push to beat {start_beat}"))
+        }
+        "arrangement-push-resize" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map)?;
+            let (start, end) = (require_number(map, "start")?, require_number(map, "end")?);
+            app.scene_push_resize(clip_id, start, end)?;
+            Ok(format!("Resized scene push to beats {start}-{end}"))
+        }
+        "arrangement-push-clear" => {
+            let map = payload_map(payload)?;
+            let (start, end) = (require_number(map, "start")?, require_number(map, "end")?);
+            app.scene_pushes_clear_span(start, end)?;
+            Ok(format!("Cleared scene pushes from beat {start} to {end}"))
         }
         "arrangement-clip-delete" => {
             let map = payload_map(payload)?;
@@ -627,6 +676,16 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                 "Song loop {}",
                 if enabled { "enabled" } else { "disabled" }
             ))
+        }
+        "song-set-loop-range" => {
+            let map = payload_map(payload)?;
+            let start = require_number(map, "start")?;
+            let end = require_number(map, "end")?;
+            let enabled = map
+                .get("enabled")
+                .map(|value| matches!(&*value.borrow(), Value::Bool(true)));
+            app.arr_set_loop_range(start, end, enabled)?;
+            Ok(format!("Loop from beat {start} to {end}"))
         }
         // `seq-song-replace` / `seq-song-clear` keep their names (spec 5,
         // non-goal: renaming the natives) but lower to the arrangement like
@@ -952,7 +1011,24 @@ fn run_region_clipboard(
     let clipboard = ctx.shared.arrangement_clipboard.clone();
     match name {
         "song-region-copy" => {
-            let copied = app.song_region_copy()?;
+            // The audio clip editor's range copies a stretch of the region's
+            // source, which need not be on the timeline at all.
+            let audio_range = match payload {
+                Value::Map(map) => map_number(map, "audio-region").map(|id| {
+                    (
+                        id,
+                        map_number(map, "source-start").unwrap_or(0.0),
+                        map_number(map, "source-end").unwrap_or(0.0),
+                    )
+                }),
+                _ => None,
+            };
+            let copied = match audio_range {
+                Some((id, start, end)) => {
+                    app.audio_source_range_copy(ClipId(id as u64), start, end)?
+                }
+                None => app.song_region_copy()?,
+            };
             let spans = copied.span_count();
             let lanes = copied.lane_count();
             *clipboard.lock().unwrap() = Some(copied);

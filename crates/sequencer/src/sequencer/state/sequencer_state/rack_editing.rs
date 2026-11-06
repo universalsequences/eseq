@@ -187,6 +187,34 @@ impl SequencerState {
         Ok(())
     }
 
+    /// Write `sample_id` into the Patch the lane is playing right now: the
+    /// pool pattern the live mirror names (`mirror_device_pattern_id` — the
+    /// bound take/clip while a sound binding holds the lane, the track sound
+    /// in arrangement context, the effective scene pattern in Seq). A sample
+    /// loaded onto a plain sampler track is content of THAT sound, exactly
+    /// like a device-knob edit. Without it the pick lived only in the voices:
+    /// once every Patch had been seeded, a later row apply, take bind or
+    /// scene launch pushed the stored (first-picked) sample back. Returns
+    /// whether a Patch was written.
+    pub fn set_lane_sound_sample(&self, track: usize, sample_id: (i32, String, u32)) -> bool {
+        if sample_id.0 < 0 {
+            return false;
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(pattern) = self.mirror_device_pattern_id(track, &scenes) else {
+            return false;
+        };
+        let Some(patch) = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.patch_mut(pattern))
+        else {
+            return false;
+        };
+        patch.sample_id = sample_id;
+        true
+    }
+
     /// Seed `sample_id` onto every stored pattern of `track` that has never had
     /// a real sample chosen (negative buffer id). Patterns with an explicit
     /// sample keep it. Returns the number of patterns seeded.

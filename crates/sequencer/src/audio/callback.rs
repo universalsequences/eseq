@@ -794,6 +794,14 @@ pub(super) fn render_audio_block(
         AudioOutputPurpose::Export { source_end_sample } => Some(source_end_sample),
     };
     dispatch_block_events_until(data, block_start_sample, source_end);
+    // After the scheduled params, so a region lock wins over a stamp.
+    unsafe {
+        crate::audio_track::apply_region_locks(
+            data.lg.0,
+            data.state.audio_player_slots(),
+            block_start_sample,
+        );
+    }
     #[cfg(feature = "audio-experiments")]
     { data.event_profile.dispatch_us = super::experiment::phase_elapsed(&mut event_clock); }
 

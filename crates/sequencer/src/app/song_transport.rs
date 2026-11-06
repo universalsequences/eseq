@@ -164,11 +164,7 @@ impl App {
         }
         // Same authority as the stop boundary: the latency-compensated
         // record clock every capture event was stamped against.
-        let end_raw_beats = self
-            .state
-            .record_beats_at_instant(std::time::Instant::now())
-            .unwrap_or_else(|| self.state.scheduler_rendered_beats())
-            .max(0.0);
+        let end_raw_beats = self.state.record_beats_now();
         // Unlock the song editing primitives before committing: the commit
         // itself goes through `song_replace`.
         self.set_song_transport_mode(SongTransportMode::SongPlayback);
@@ -243,8 +239,14 @@ impl App {
     /// it free-runs the live grid immediately — the lookahead merge appends
     /// lanes the row snapshot doesn't know about — and pin the override so
     /// masked save-backs persist the performer's edits (spec 5.1).
-    pub fn latch_track_created_during_song_playback(&mut self, track: usize) {
-        if !self.song_playback_authority_active() {
+    ///
+    /// While a manual SCENE launch holds the session (the lit Back to
+    /// Arrangement button), a new track joins it whether or not the
+    /// transport is running: the scene launch means "everyone play this
+    /// scene", so a track added while stopped plays its step pattern on the
+    /// next Play instead of following an arrangement it has no clips in.
+    pub fn latch_new_track_if_session_held(&mut self, track: usize) {
+        if !(self.song_playback_authority_active() || self.state.song_scene_latch()) {
             return;
         }
         self.state.latch_song_manual_override(std::iter::once(track));
@@ -544,6 +546,12 @@ impl App {
             // that are silent or absent in the initial scene.
             song = self.state.preflight_runtime_song()
                 .map_err(|error| format!("Export routing preflight failed: {error}"))?;
+            // An export renders the song straight through, never the loop.
+            if song.loop_enabled {
+                let mut straight = (*song).clone();
+                straight.loop_enabled = false;
+                song = Arc::new(straight);
+            }
         }
         self.state
             .start_song_playback(Arc::clone(&song), start_beat, true)
@@ -644,11 +652,7 @@ impl App {
         // would place Q one output-latency ahead of the events it
         // bounds; it stays only as the fallback for the case where the
         // audio callback never published a record-clock anchor.
-        let end_raw_beats = self
-            .state
-            .record_beats_at_instant(std::time::Instant::now())
-            .unwrap_or_else(|| self.state.scheduler_rendered_beats())
-            .max(0.0);
+        let end_raw_beats = self.state.record_beats_now();
         // Capture-on-playback teardown (takes spec 9.3): the song
         // was playing underneath; the latch auto-clears at
         // punch-out (spec 10) — the committed song now CONTAINS the
@@ -1102,6 +1106,44 @@ mod tests {
         );
     }
 
+    /// A fader move in the arrangement view on a lane the arrangement plays
+    /// survives the loop wrap. The row clip's pattern is also the scene cell,
+    /// so the edit used to be routed to the track sound (rule 3 in
+    /// arrangement context) while the mirror played the clip's borrow; the
+    /// wrap's row apply then restored the clip's stored volume.
+    #[test]
+    fn a_volume_edit_on_an_arranged_lane_survives_the_loop_wrap() {
+        let mut app = app_with_song();
+        app.arrangement_view_visible = true;
+        app.state.set_arrangement_context(true);
+        app.song_transport_play(false).expect("song playback starts");
+        app.sync_track_sound_bindings();
+        assert_eq!(app.state.song_manual_latch_mask(), 0, "the arrangement plays the lane");
+        crate::app::edit::try_apply_command(
+            &mut app,
+            crate::app::AppCommand::SetTrackVolume { track: 0, value: 0.31 },
+        )
+        .expect("volume edit");
+        crate::app::edit::finish_active_gesture(&mut app);
+
+        let row_id = app.active_runtime_song.as_ref().expect("runtime song").rows[0].id;
+        app.mirror_song_row_applied(&AudibleSongRowApplied {
+            row_id,
+            row_ordinal: 0,
+            effective_beat: 0.0,
+            effective_sample: 0,
+            wrapped: true,
+        })
+        .expect("row mirror");
+
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume().to_bits(),
+            0.31f32.to_bits(),
+            "the wrap must not restore the clip's old volume"
+        );
+        app.song_transport_stop().expect("stop succeeds");
+    }
+
     /// Track-sound spec §2.3 (symptom 6/8): the stop resync must not
     /// `restore_to` a track-owned lane whose session cells survive — that is
     /// the audible snap, pushing a sound the performer never heard over the
@@ -1262,14 +1304,21 @@ mod tests {
         let mut app = app_with_song();
         app.song_transport_play(false).expect("song playback");
         assert_eq!(app.state.song_manual_latch_mask(), 0);
-        app.latch_track_created_during_song_playback(1);
+        app.latch_new_track_if_session_held(1);
         assert_eq!(app.state.song_manual_latch_mask(), 1 << 1);
         app.song_transport_stop().expect("stop succeeds");
         app.back_to_song().expect("clear the latch");
 
-        // While stopped, track creation must not latch anything.
-        app.latch_track_created_during_song_playback(1);
+        // While stopped with no scene latch, track creation latches nothing.
+        app.latch_new_track_if_session_held(1);
         assert_eq!(app.state.song_manual_latch_mask(), 0);
+
+        // ...unless a scene launch holds the session: then a new track
+        // joins it, stopped or not.
+        app.state.latch_song_manual_override(std::iter::once(0));
+        app.state.latch_song_scene_override();
+        app.latch_new_track_if_session_held(1);
+        assert_eq!(app.state.song_manual_latch_mask(), 0b11);
     }
 
     #[test]
@@ -3671,6 +3720,108 @@ mod tests {
             "play clobbered the freshly added effect slot from a stale pool snapshot"
         );
         app.song_transport_stop().expect("stop #2");
+    }
+
+    // Regression (gate toggled during arrangement playback was not heard,
+    // 2026-11-02): a one-row song (Scene 1 for the whole song, looping),
+    // playing, user in the Seq view toggles the track gate. The edit must
+    // reach what the scheduler plays: the row snapshot while the song owns
+    // the lane, the live snapshot once the lane is latched.
+    #[test]
+    fn gate_toggle_during_one_scene_song_playback_reaches_the_scheduler() {
+        let mut app = test_app();
+        app.arr_replace_rows(
+            vec![SongRowSpec { start_beat: 0.0, scene: 0, overrides: Vec::new() }],
+            16.0,
+            true,
+        )
+        .expect("one-row song");
+        app.set_arrangement_view_visible(false);
+        let mut app = playing_song_app(app);
+        let row_gate = |app: &App| {
+            app.active_runtime_song.as_ref().expect("active song").rows[0]
+                .scheduler_snapshot
+                .tracks[0]
+                .params
+                .gate
+        };
+        let live_gate = |app: &App| app.state.pattern.track_params[0].is_gate_on();
+        let published_gate =
+            |app: &App| app.state.latest_scheduler_snapshot().tracks[0].params.gate;
+        let wrap = |app: &mut App| {
+            let song = app.active_runtime_song.clone().expect("active song");
+            app.mirror_song_row_applied(&AudibleSongRowApplied {
+                row_id: song.rows[0].id,
+                row_ordinal: 0,
+                effective_beat: 0.0,
+                effective_sample: 0,
+                wrapped: true,
+            })
+            .expect("wrap mirror");
+        };
+        let toggle = |app: &mut App| {
+            crate::app::edit::try_apply_command(app, crate::app::AppCommand::ToggleTrackGate { track: 0 })
+                .expect("gate toggles");
+        };
+        // Unlatched: the row snapshot is what plays (the immediate row write
+        // for every param is `track_param_edits_during_song_playback_...`);
+        // a loop wrap's row mirror must not revert the live surface.
+        let before = live_gate(&app);
+        toggle(&mut app);
+        assert_ne!(row_gate(&app), before, "unlatched: the row snapshot kept the old gate");
+        wrap(&mut app);
+        assert_ne!(live_gate(&app), before, "unlatched: the loop-wrap row mirror reverted the gate");
+
+        // Scene override (the transport's Scene 1 button): latch everything.
+        app.state.latch_song_manual_override_all(1);
+        let before = live_gate(&app);
+        toggle(&mut app);
+        assert_ne!(published_gate(&app), before, "latched: the published snapshot kept the old gate");
+        wrap(&mut app);
+        assert_ne!(published_gate(&app), before, "latched: the loop wrap reverted the gate");
+        app.song_transport_stop().unwrap();
+    }
+
+    // Regression (2026-11-02): the same staleness for
+    // every scheduler-snapshot track param edited while the song owns the
+    // lane (unlatched, Seq view, one-row song).
+    #[test]
+    fn track_param_edits_during_song_playback_reach_the_row_snapshot() {
+        use crate::app::AppCommand;
+        type Read = fn(&crate::sequencer::TrackParamsSnapshot) -> String;
+        let cases: Vec<(&str, AppCommand, Read)> = vec![
+            ("gate", AppCommand::ToggleTrackGate { track: 0 }, |p| format!("{}", p.gate)),
+            ("poly", AppCommand::ToggleTrackPolyphonic { track: 0 }, |p| format!("{}", p.polyphonic)),
+            ("attack", AppCommand::SetTrackAttack { track: 0, ms: 123.0 }, |p| format!("{}", p.attack_ms)),
+            ("release", AppCommand::SetTrackRelease { track: 0, ms: 456.0 }, |p| format!("{}", p.release_ms)),
+            ("swing", AppCommand::SetTrackSwing { track: 0, value: 0.66 }, |p| format!("{}", p.swing)),
+            ("max-poly", AppCommand::SetTrackMaxPolyphony { track: 0, value: 3 }, |p| format!("{}", p.max_polyphony)),
+            ("volume", AppCommand::SetTrackVolume { track: 0, value: 0.25 }, |p| format!("{}", p.volume)),
+        ];
+        let mut stale = Vec::new();
+        for (name, cmd, read) in cases {
+            let mut app = test_app();
+            app.arr_replace_rows(
+                vec![SongRowSpec { start_beat: 0.0, scene: 0, overrides: Vec::new() }],
+                16.0,
+                true,
+            )
+            .expect("one-row song");
+            app.set_arrangement_view_visible(false);
+            let mut app = playing_song_app(app);
+            let row = |app: &App| {
+                read(&app.active_runtime_song.as_ref().unwrap().rows[0].scheduler_snapshot.tracks[0].params)
+            };
+            let before = row(&app);
+            crate::app::edit::try_apply_command(&mut app, cmd).expect("edit applies");
+            let published = read(&app.state.latest_scheduler_snapshot().tracks[0].params);
+            let after = row(&app);
+            if after == before && published != before {
+                stale.push(name);
+            }
+            app.song_transport_stop().unwrap();
+        }
+        assert!(stale.is_empty(), "row snapshot stale after edit: {stale:?}");
     }
 
     #[test]

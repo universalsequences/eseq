@@ -6951,6 +6951,242 @@ mod tests {
         graph.process_block();
     }
 
+    // ── Track display order (eseq-ssd6) ──────────────────────────────────
+
+    /// An app with `count` blank sampler tracks on a live graph.
+    fn reorder_app(graph: &TestLiveGraph, count: usize) -> App {
+        let mut app = test_app_for_live_graph(graph, 0);
+        for _ in 0..count {
+            app.graph_controller().add_blank_sampler_track().expect("track");
+        }
+        app
+    }
+
+    fn group_id_of(app: &App, bus: crate::sequencer::BusId) -> u64 {
+        app.groups.iter().find(|group| group.bus_id == bus.0).expect("group").id
+    }
+
+    #[test]
+    fn moving_a_track_reorders_display_only_and_undoes() {
+        let graph = TestLiveGraph::new("track-order-move-test", 64, 44_100, 2);
+        let mut app = reorder_app(&graph, 4);
+        let names = app.tracks.clone();
+        assert_eq!(app.display_track_order(), vec![0, 1, 2, 3]);
+        assert!(app.saved_track_order().is_empty(), "never reordered: nothing to save");
+
+        // Down: lands after the target. Up: lands before it.
+        app.move_track_recorded(0, 2).expect("move down");
+        assert_eq!(app.display_track_order(), vec![1, 2, 0, 3]);
+        app.move_track_recorded(3, 1).expect("move up");
+        assert_eq!(app.display_track_order(), vec![3, 1, 2, 0]);
+        assert_eq!(app.tracks, names, "indices never move");
+        assert_eq!(app.saved_track_order().len(), 4);
+
+        let _ = crate::app::edit::undo(&mut app);
+        assert_eq!(app.display_track_order(), vec![1, 2, 0, 3]);
+        let _ = crate::app::edit::undo(&mut app);
+        assert_eq!(app.display_track_order(), vec![0, 1, 2, 3]);
+        let _ = crate::app::edit::redo(&mut app);
+        assert_eq!(app.display_track_order(), vec![1, 2, 0, 3]);
+
+        // Dropping a track on itself records nothing.
+        let depth = app.history.undo_len();
+        app.move_track_recorded(2, 2).expect("no-op");
+        assert_eq!(app.history.undo_len(), depth);
+    }
+
+    #[test]
+    fn dropping_on_a_grouped_track_joins_its_group_and_on_a_loose_one_leaves() {
+        let graph = TestLiveGraph::new("track-order-group-test", 64, 44_100, 2);
+        let mut app = reorder_app(&graph, 5);
+        let bus = app.group_tracks_recorded(vec![1, 2, 3]).expect("group");
+        let group = group_id_of(&app, bus);
+        assert_eq!(app.display_track_order(), vec![0, 1, 2, 3, 4]);
+
+        // Track 4 dropped on member 1 (moving up): joins, lands before it.
+        app.move_track_recorded(4, 1).expect("join");
+        let members = &app.groups.iter().find(|g| g.id == group).unwrap().members;
+        assert!(members.contains(&4));
+        assert_eq!(app.display_track_order(), vec![0, 4, 1, 2, 3]);
+        assert_eq!(
+            app.state.with_scene_track_pattern(0, 4, |p| p.track_params.output.clone()),
+            Some(crate::sequencer::TrackOutput::Bus(bus)),
+            "a joining track routes to the group bus",
+        );
+
+        // Reorder within the group.
+        app.move_track_recorded(4, 3).expect("within");
+        assert_eq!(app.display_track_order(), vec![0, 1, 2, 3, 4]);
+
+        // Member 2 dropped on loose track 0 (moving up): leaves, lands first.
+        app.move_track_recorded(2, 0).expect("leave");
+        assert!(!app.groups.iter().any(|g| g.members.contains(&2)));
+        assert_eq!(app.display_track_order(), vec![2, 0, 1, 3, 4]);
+        assert_eq!(
+            app.state.with_scene_track_pattern(0, 2, |p| p.track_params.output.clone()),
+            Some(crate::sequencer::TrackOutput::Mix),
+        );
+
+        // One undo restores both membership and order.
+        let _ = crate::app::edit::undo(&mut app);
+        assert!(app.groups.iter().find(|g| g.id == group).unwrap().members.contains(&2));
+        assert_eq!(app.display_track_order(), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_group_moves_as_a_block_and_stays_contiguous() {
+        let graph = TestLiveGraph::new("track-order-block-test", 64, 44_100, 2);
+        let mut app = reorder_app(&graph, 5);
+        let bus = app.group_tracks_recorded(vec![0, 1]).expect("group");
+        let group = group_id_of(&app, bus);
+
+        app.move_group_recorded(group, 3).expect("down");
+        assert_eq!(app.display_track_order(), vec![2, 3, 0, 1, 4]);
+        app.move_group_recorded(group, 2).expect("up");
+        assert_eq!(app.display_track_order(), vec![0, 1, 2, 3, 4]);
+        // Onto one of its own tracks: nothing.
+        let depth = app.history.undo_len();
+        app.move_group_recorded(group, 1).expect("no-op");
+        assert_eq!(app.history.undo_len(), depth);
+
+        // A loose track moved between the group's members' indices still
+        // draws outside the block: the group stays one contiguous run.
+        app.move_track_recorded(4, 0).expect("loose to top");
+        assert_eq!(app.display_track_order(), vec![4, 0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn dropping_on_a_group_header_puts_the_track_last_in_the_group() {
+        let graph = TestLiveGraph::new("track-order-header-test", 64, 44_100, 2);
+        let mut app = reorder_app(&graph, 4);
+        let bus = app.group_tracks_recorded(vec![1, 2]).expect("group");
+        let group = group_id_of(&app, bus);
+        let gidx = app.groups.iter().position(|g| g.id == group).unwrap();
+        app.move_track_to_group_recorded(0, gidx).expect("join via header");
+        assert_eq!(app.display_track_order(), vec![1, 2, 0, 3]);
+    }
+
+    #[test]
+    fn new_and_restored_tracks_take_sensible_places_in_a_reordered_project() {
+        let graph = TestLiveGraph::new("track-order-heal-test", 64, 44_100, 2);
+        let mut app = reorder_app(&graph, 3);
+        app.move_track_recorded(2, 0).expect("reorder");
+        assert_eq!(app.display_track_order(), vec![2, 0, 1]);
+
+        // An appended track goes last.
+        let added = app.graph_controller().add_blank_sampler_track().expect("track");
+        assert_eq!(app.display_track_order(), vec![2, 0, 1, added]);
+
+        // A deleted track leaves; undoing the delete brings it back in place.
+        app.delete_track_recorded(0).expect("delete");
+        assert_eq!(app.display_track_order(), vec![1, 0, 2]);
+        let _ = crate::app::edit::undo(&mut app);
+        assert_eq!(app.display_track_order(), vec![2, 0, 1, 3]);
+    }
+
+    // ── Instance document routes (a jaki's rows) follow a delete ───────────
+
+    const ROUTED_KIND: &str = "test/routed:routed";
+
+    fn register_routed_kind() {
+        crate::lisp_host::register_kind(crate::lisp_host::KindDefinition {
+            routes: vec![vec!["rows".to_string(), "*".to_string(), "route".to_string()]],
+            id: ROUTED_KIND.to_string(),
+            name: "routed".to_string(),
+            package: Some("test/routed".to_string()),
+            module: None,
+            sequencer: None,
+            generator: None,
+            document: Vec::new(),
+            state_fields: Vec::new(),
+            has_view: false,
+            keymap: None,
+        });
+    }
+
+    fn rows_literal(routes: &[f64]) -> crate::process::ProcessLiteral {
+        use crate::process::ProcessLiteral;
+        ProcessLiteral::List(
+            routes
+                .iter()
+                .map(|route| {
+                    let mut row = std::collections::BTreeMap::new();
+                    row.insert("route".to_string(), ProcessLiteral::Number(*route));
+                    ProcessLiteral::Map(row)
+                })
+                .collect(),
+        )
+    }
+
+    fn add_routed_instance(
+        app: &mut App,
+        id: u64,
+        owner: crate::project::ProjectInstanceOwner,
+        routes: &[f64],
+    ) {
+        app.instances.list.push(crate::project::ProjectInstance {
+            id,
+            kind: ROUTED_KIND.to_string(),
+            owner,
+            label: format!("routed {id}"),
+        });
+        let name = crate::lisp_host::instance_document_slot(id, "rows");
+        let rows = rows_literal(routes);
+        app.state.with_scenes_mut(|scenes| {
+            for scene in &mut scenes.scenes {
+                scene.scene_slots.write_literal(name.clone(), rows.clone()).unwrap();
+            }
+        });
+    }
+
+    fn routed_rows(app: &App, id: u64, scene: usize) -> crate::process::ProcessLiteral {
+        let name = crate::lisp_host::instance_document_slot(id, "rows");
+        app.state.with_scenes_mut(|scenes| {
+            scenes.scenes[scene].scene_slots.get(&name).cloned().expect("rows slot")
+        })
+    }
+
+    #[test]
+    fn deleting_tracks_shifts_instance_document_routes_and_undo_restores_them() {
+        let graph = TestLiveGraph::new("instance-routes-delete-test", 64, 44_100, 2);
+        let mut app = reorder_app(&graph, 5);
+        register_routed_kind();
+        // A rack over tracks 3 and 4 (member positions 0 and 1).
+        let (rack, _) = app.create_drum_rack_recorded(Some("Kit".to_string())).expect("rack");
+        app.assign_rack_pad_track_recorded(rack, 36, 3).expect("pad 0");
+        app.assign_rack_pad_track_recorded(rack, 38, 4).expect("pad 1");
+        app.state.with_scenes_mut(|scenes| { scenes.new_scene(); });
+        add_routed_instance(&mut app, 901, crate::project::ProjectInstanceOwner::Project,
+            &[0.0, 1.0, 2.0, 4.0, -1.0, -2.0]);
+        add_routed_instance(&mut app, 902, crate::project::ProjectInstanceOwner::Rack(rack),
+            &[0.0, 1.0, 1.0]);
+
+        // Track 1: project rows past it move down, its own turn Off; the
+        // rack's member positions do not move.
+        app.delete_track_recorded(1).expect("delete track 1");
+        for scene in 0..2 {
+            assert_eq!(routed_rows(&app, 901, scene), rows_literal(&[0.0, -1.0, 1.0, 3.0, -1.0, -2.0]),
+                "project-owned, scene {scene}");
+            assert_eq!(routed_rows(&app, 902, scene), rows_literal(&[0.0, 1.0, 1.0]),
+                "rack-owned, scene {scene}");
+        }
+
+        // Track 2 is now the rack's first member (was 3): its rows turn Off
+        // and the second member's move to position 0.
+        app.delete_track_recorded(2).expect("delete rack member");
+        assert_eq!(routed_rows(&app, 902, 1), rows_literal(&[-1.0, 0.0, 0.0]));
+        assert_eq!(routed_rows(&app, 901, 1), rows_literal(&[0.0, -1.0, 1.0, 2.0, -1.0, -2.0]));
+
+        let _ = crate::app::edit::undo(&mut app);
+        let _ = crate::app::edit::undo(&mut app);
+        for scene in 0..2 {
+            assert_eq!(routed_rows(&app, 901, scene), rows_literal(&[0.0, 1.0, 2.0, 4.0, -1.0, -2.0]));
+            assert_eq!(routed_rows(&app, 902, scene), rows_literal(&[0.0, 1.0, 1.0]));
+        }
+        let _ = crate::app::edit::redo(&mut app);
+        assert_eq!(routed_rows(&app, 901, 0), rows_literal(&[0.0, -1.0, 1.0, 3.0, -1.0, -2.0]));
+    }
+
     #[test]
     fn remove_track_from_nested_rack_keeps_it_in_the_enclosing_group() {
         let graph = TestLiveGraph::new("remove-nested-rack-pad-test", 64, 44_100, 2);
@@ -7624,11 +7860,114 @@ mod tests {
         graph.process_block();
     }
 
-    /// Per-clip grooves (eseq-d12o): a clip with its own groove plays it
-    /// while the current scene points at that clip, every other clip plays
-    /// the rack's; the per-scene tables the scheduler switches on launch
-    /// agree with the current one; "Apply to All Clips" makes the clip's
-    /// groove the rack's for every clip; and each step undoes.
+    /// eseq-vum0: a scene push performed during an arrangement take lands on
+    /// the push lane as one region (target scene + curve); a later take's
+    /// push replaces only the span it covers, trimming what straddles it.
+    #[test]
+    fn capture_records_scene_pushes_onto_the_push_lane() {
+        use crate::app::song_capture::ScenePushStep::{Begin, End, Value};
+        let graph = TestLiveGraph::new("scene-push-capture", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let second = app
+            .apply_recorded_scene_structure_mutation("Create scene", |app| {
+                Ok(crate::app::test_rig::new_scene(app))
+            })
+            .unwrap();
+
+        app.begin_song_capture_take(0.0);
+        app.record_scene_push_at(Begin { target_scene: second, value: 0.0 }, 4.0);
+        app.record_scene_push_at(Value(0.5), 5.0);
+        app.record_scene_push_at(Value(1.0), 6.0);
+        app.record_scene_push_at(End, 8.0);
+        app.finish_song_capture_take(16.0).expect("commit");
+
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        assert_eq!(arrangement.push_lane.len(), 1);
+        let push = &arrangement.push_lane[0];
+        assert_eq!((push.start_beat, push.end_beat, push.target_scene), (4.0, 8.0, second));
+        assert!((push.value_at(5.0) - 0.5).abs() < 1.0e-6);
+        assert_eq!(push.value_at(7.5), 1.0);
+
+        // Overdub inside the first push: it splits around the new one, and
+        // the tail keeps its curve.
+        app.begin_song_capture_take(0.0);
+        app.record_scene_push_at(Begin { target_scene: 0, value: 1.0 }, 5.0);
+        app.record_scene_push_at(End, 6.0);
+        app.finish_song_capture_take(10.0).expect("commit 2");
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        let lane: Vec<(f64, f64, usize)> = (arrangement.push_lane.iter())
+            .map(|push| (push.start_beat, push.end_beat, push.target_scene))
+            .collect();
+        assert_eq!(lane, vec![(4.0, 5.0, second), (5.0, 6.0, 0), (6.0, 8.0, second)]);
+        assert_eq!(arrangement.push_lane[2].value_at(7.0), 1.0, "the tail keeps its curve");
+
+        // A push held through Stop ends at Stop.
+        app.begin_song_capture_take(0.0);
+        app.record_scene_push_at(Begin { target_scene: 0, value: 0.5 }, 12.0);
+        app.finish_song_capture_take(14.0).expect("commit 3");
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        let last = arrangement.push_lane.last().expect("the held push");
+        assert_eq!((last.start_beat, last.end_beat), (12.0, 14.0));
+        graph.process_block();
+    }
+
+    /// eseq-vum0: a recorded push replays through the live push path — the
+    /// effect morphs toward the target scene by the curve, lets go after the
+    /// region, and a held live gesture wins over the recording.
+    #[test]
+    fn arrangement_replays_recorded_scene_pushes() {
+        use crate::app::song_capture::ScenePushStep::{Begin, End, Value};
+        use crate::quantized_launch::PatternLaunchTarget;
+        let graph = TestLiveGraph::new("scene-push-replay", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let track = app.graph_controller().add_blank_sampler_track().unwrap();
+        app.add_builtin_effect_sync(track, "Filter").unwrap();
+        let desc = app.graph.effect_descriptors[track][0].params[0].clone();
+        let lo = desc.min + (desc.max - desc.min) * 0.2;
+        let hi = desc.min + (desc.max - desc.min) * 0.8;
+        let set = |app: &mut App, value: f32| {
+            crate::app::command::apply_command(app, crate::app::command::AppCommand::SetEffectParam {
+                track, slot_idx: 0, param_idx: 0, value,
+            });
+        };
+        set(&mut app, lo);
+        let second = app
+            .apply_recorded_scene_structure_mutation("Create scene", |app| {
+                Ok(crate::app::test_rig::new_scene(app))
+            })
+            .unwrap();
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: second }).unwrap();
+        set(&mut app, hi);
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 }).unwrap();
+
+        app.begin_song_capture_take(0.0);
+        app.record_scene_push_at(Begin { target_scene: second, value: 0.0 }, 4.0);
+        app.record_scene_push_at(Value(1.0), 6.0);
+        app.record_scene_push_at(End, 8.0);
+        app.finish_song_capture_take(16.0).expect("commit");
+
+        let value = |app: &App| app.effective_slot_param_value(track, 0, 0).unwrap();
+        app.drive_arrangement_scene_push(Some(2.0));
+        assert!((value(&app) - lo).abs() < 1.0e-4, "before the push");
+        app.drive_arrangement_scene_push(Some(5.0));
+        let mid = value(&app);
+        assert!(mid > lo + 1.0e-3 && mid < hi - 1.0e-3, "half way: {mid}");
+        app.drive_arrangement_scene_push(Some(7.0));
+        assert!((value(&app) - hi).abs() < 1.0e-3, "fully pushed");
+        app.drive_arrangement_scene_push(Some(9.0));
+        assert!((value(&app) - lo).abs() < 1.0e-4, "released after the region");
+
+        app.drive_arrangement_scene_push(Some(7.0));
+        app.begin_scene_push(second, 0.0);
+        app.drive_arrangement_scene_push(Some(7.5));
+        assert!((value(&app) - lo).abs() < 1.0e-4, "the live gesture wins");
+        app.end_scene_push();
+        app.drive_arrangement_scene_push(None);
+        assert!((value(&app) - lo).abs() < 1.0e-4, "stopped: nothing pushed");
+        graph.process_block();
+    }
+
     /// docs/arrangement-rack-lanes-spec.md §4: recording scene launches on a
     /// clip-bearing rack writes its rack lane with the rack clip each launch
     /// actually played, resolved at launch time, not at Stop. A rack clip
@@ -7685,6 +8024,11 @@ mod tests {
         app.state.preflight_runtime_song().expect("the recording plays");
     }
 
+    /// Per-clip grooves (eseq-d12o): a clip with its own groove plays it
+    /// while the current scene points at that clip, every other clip plays
+    /// the rack's; the per-scene tables the scheduler switches on launch
+    /// agree with the current one; "Apply to All Clips" makes the clip's
+    /// groove the rack's for every clip; and each step undoes.
     #[test]
     fn rack_clips_play_their_own_groove_or_the_racks() {
         use crate::groove::mpc_swing_groove;
@@ -10266,6 +10610,76 @@ mod tests {
         app.state.switch_pattern(second_scene, app.tracks.len(), &app.graph.track_buffer_ids,
             &app.graph.track_sample_rates, &app.tracks, &app.graph.track_instrument_types).unwrap();
         assert_eq!(app.buses.iter().find(|bus| bus.id == b).unwrap().output, BusOutput::Bus(a.0));
+    }
+
+    #[test]
+    fn scene_push_morphs_group_fx_edited_per_scene_through_real_launches() {
+        use crate::quantized_launch::PatternLaunchTarget;
+        let graph = TestLiveGraph::new("scene-push-group-fx", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let bus_id = app.group_tracks_recorded(vec![0, 1]).unwrap();
+        let bus_idx = app.buses.iter().position(|bus| bus.id == bus_id).unwrap();
+        app.add_builtin_bus_effect_sync(bus_idx, "OTT").unwrap();
+        let desc = app.buses[bus_idx].effect_descriptors[0].params[0].clone();
+        let lo = desc.min + (desc.max - desc.min) * 0.2;
+        let hi = desc.min + (desc.max - desc.min) * 0.8;
+        app.set_bus_effect_param(bus_idx, 0, 0, lo).unwrap();
+        let second = app
+            .apply_recorded_scene_structure_mutation("Create scene", |app| {
+                Ok(crate::app::test_rig::new_scene(app))
+            })
+            .unwrap();
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: second }).unwrap();
+        assert_eq!(app.state.current_scene_index(), second);
+        app.set_bus_effect_param(bus_idx, 0, 0, hi).unwrap();
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 }).unwrap();
+        assert!((app.buses[bus_idx].effect_slots[0].defaults[0] - lo).abs() < 1.0e-4,
+            "scene 0 recalls its group fx value");
+        app.begin_scene_push(second, 1.0);
+        let pushed = app.effective_bus_slot_param_value(bus_idx, 0, 0).unwrap();
+        assert!((pushed - hi).abs() < 1.0e-3, "push to scene {second} reaches its group fx value: got {pushed}, base {lo}, target {hi}");
+        app.end_scene_push();
+        graph.process_block();
+    }
+
+    #[test]
+    fn scene_push_morphs_clip_rack_pad_fx_toward_the_target_scenes_clip() {
+        use crate::quantized_launch::PatternLaunchTarget;
+        let graph = TestLiveGraph::new("scene-push-rack-clip", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (rack_id, _) = app.create_drum_rack_recorded(Some("Kit".to_string())).unwrap();
+        let kick = app.graph_controller().add_blank_sampler_track().unwrap();
+        let snare = app.graph_controller().add_blank_sampler_track().unwrap();
+        app.assign_rack_pad_track_recorded(rack_id, 0, kick).unwrap();
+        app.assign_rack_pad_track_recorded(rack_id, 1, snare).unwrap();
+        app.add_builtin_effect_sync(snare, "Filter").unwrap();
+        let desc = app.graph.effect_descriptors[snare][0].params[0].clone();
+        let lo = desc.min + (desc.max - desc.min) * 0.2;
+        let hi = desc.min + (desc.max - desc.min) * 0.8;
+        crate::app::command::apply_command(&mut app, crate::app::command::AppCommand::SetEffectParam {
+            track: snare, slot_idx: 0, param_idx: 0, value: lo,
+        });
+        app.convert_rack_to_clips_recorded(rack_id).unwrap();
+        let second = app
+            .apply_recorded_scene_structure_mutation("Create scene", |app| {
+                Ok(crate::app::test_rig::new_scene(app))
+            })
+            .unwrap();
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: second }).unwrap();
+        crate::app::command::apply_command(&mut app, crate::app::command::AppCommand::SetEffectParam {
+            track: snare, slot_idx: 0, param_idx: 0, value: hi,
+        });
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 }).unwrap();
+        assert!(!app.rack_is_legacy(rack_id), "the rack plays clips");
+        assert!((app.state.pattern.effect_chains[snare][0].defaults.get(0) - lo).abs() < 1.0e-4,
+            "scene 0's clip recalls its pad fx value");
+        app.begin_scene_push(second, 1.0);
+        let pushed = app.effective_slot_param_value(snare, 0, 0).unwrap();
+        assert!((pushed - hi).abs() < 1.0e-3, "push reaches the target clip's pad value: got {pushed}, base {lo}, target {hi}");
+        app.end_scene_push();
+        graph.process_block();
     }
 
     #[test]

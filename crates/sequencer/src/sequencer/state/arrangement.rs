@@ -129,7 +129,7 @@ pub struct RackArrClip {
 /// What track lanes and rack lanes share: each is a sorted list of
 /// non-overlapping half-open spans with ids from one allocator, so the span
 /// mechanics (insertion, occlusion, validation) are written once.
-pub trait LaneSpan: Copy {
+pub trait LaneSpan: Clone {
     fn id(&self) -> ClipId;
     fn set_id(&mut self, id: ClipId);
     fn start_beat(&self) -> f64;
@@ -186,6 +186,11 @@ pub struct ProjectArrangement {
     pub end_beat: f64,
     #[serde(default)]
     pub loop_enabled: bool,
+    /// The loop brace `[start, end)` playback wraps inside while
+    /// `loop_enabled` (Ableton's loop). `None` — projects saved before the
+    /// brace existed — loops the whole song, `[0, end_beat)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_range: Option<(f64, f64)>,
     /// Monotonic allocator for `ClipId`; never reused within a project.
     pub next_clip_id: u64,
     /// Audio-track lanes (docs/audio-tracks-spec.md §9), outer index = track.
@@ -199,6 +204,10 @@ pub struct ProjectArrangement {
     /// Monotonic allocator for `AudioSourceId`.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub next_audio_source_id: u64,
+    /// Recorded scene pushes (`scene_push_lane`), sorted and
+    /// non-overlapping; empty in projects that never recorded one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub push_lane: Vec<ScenePushRegion>,
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -210,7 +219,21 @@ fn is_zero_u64(value: &u64) -> bool {
 /// this is a starting canvas size, not a limit.
 pub const DEFAULT_ARRANGEMENT_END: f64 = 64.0;
 
+/// A new arrangement's loop brace: its first four bars.
+pub const DEFAULT_LOOP_RANGE: (f64, f64) = (0.0, 16.0);
+
+/// The loop brace a stored `loop_range` means: a project saved before the
+/// brace existed (`None`) loops its whole song, `[0, end_beat)`.
+pub fn loop_window(loop_range: Option<(f64, f64)>, end_beat: f64) -> (f64, f64) {
+    loop_range.unwrap_or((0.0, end_beat))
+}
+
 impl ProjectArrangement {
+    /// The loop brace, `[start, end)` (see `loop_range`).
+    pub fn loop_window(&self) -> (f64, f64) {
+        loop_window(self.loop_range, self.end_beat)
+    }
+
     /// An arrangement holding scene 0 from beat 0 and no clips.
     pub fn new(track_count: usize, end_beat: f64) -> Self {
         Self {
@@ -222,10 +245,12 @@ impl ProjectArrangement {
             rack_lanes: BTreeMap::new(),
             end_beat,
             loop_enabled: false,
+            loop_range: Some(DEFAULT_LOOP_RANGE),
             next_clip_id: 0,
             audio_lanes: Vec::new(),
             audio_sources: BTreeMap::new(),
             next_audio_source_id: 0,
+            push_lane: Vec::new(),
         }
     }
 
@@ -239,10 +264,12 @@ impl ProjectArrangement {
             rack_lanes: BTreeMap::new(),
             end_beat: DEFAULT_ARRANGEMENT_END,
             loop_enabled: false,
+            loop_range: Some(DEFAULT_LOOP_RANGE),
             next_clip_id: 0,
             audio_lanes: Vec::new(),
             audio_sources: BTreeMap::new(),
             next_audio_source_id: 0,
+            push_lane: Vec::new(),
         }
     }
 
@@ -253,6 +280,7 @@ impl ProjectArrangement {
             && self.track_lanes.iter().all(|lane| lane.is_empty())
             && self.rack_lanes.values().all(|lane| lane.is_empty())
             && self.audio_lanes.iter().all(|lane| lane.is_empty())
+            && self.push_lane.is_empty()
     }
 
     /// Allocate a fresh `ClipId`. Ids are monotonic and never reused within a
@@ -373,6 +401,13 @@ impl ProjectArrangement {
             ));
         }
 
+        if let Some((start, end)) = self
+            .loop_range
+            .filter(|(start, end)| !(start.is_finite() && end.is_finite() && *start >= 0.0 && end > start))
+        {
+            return Err(format!("Loop brace [{start}, {end}) must be finite, from beat 0 on, and non-empty"));
+        }
+
         // --- end beat (checked before clips so a nonsense end reports
         // itself rather than blaming the first clip that overruns it) -----
         if !self.end_beat.is_finite() || self.end_beat <= 0.0 {
@@ -462,6 +497,7 @@ impl ProjectArrangement {
         }
 
         self.validate_audio_lanes(ctx.song_track_count(), &mut seen_ids)?;
+        self.validate_push_lane(ctx.song_scene_count(), &mut seen_ids)?;
 
         // --- rack lanes (docs/arrangement-rack-lanes-spec.md §2) ----------
         // A rack clip that no longer exists is NOT an error: deleting a rack
@@ -854,7 +890,7 @@ pub(super) fn occlude_lane<C: LaneSpan>(
             // 2. Fully covered: removed.
         } else if clip_start < start && clip_end > end {
             // 4. The incoming span lands strictly inside.
-            let mut left = clip;
+            let mut left = clip.clone();
             left.set_end_beat(start);
             kept.push(left);
             split_tails.extend(tail_at(&clip, end));
@@ -1397,6 +1433,7 @@ pub fn compile_arrangement<C: ArrangementContext>(
         rows,
         end_beat: arr.end_beat,
         loop_enabled: arr.loop_enabled,
+        loop_range: arr.loop_range,
         next_row_id: 0,
     };
 
@@ -1507,10 +1544,12 @@ pub fn lower_rows_to_arrangement<C: ArrangementContext>(
         rack_lanes: BTreeMap::new(),
         end_beat,
         loop_enabled,
+        loop_range: None,
         next_clip_id,
     audio_lanes: Vec::new(),
     audio_sources: std::collections::BTreeMap::new(),
     next_audio_source_id: 0,
+    push_lane: Vec::new(),
     };
 
     // Scene lane: one event per *change*. An unscened row (`scene: None`)
@@ -1733,6 +1772,7 @@ mod tests {
             rows,
             end_beat,
             loop_enabled: false,
+            loop_range: None,
             next_row_id,
         }
     }
@@ -1779,10 +1819,12 @@ mod tests {
             rack_lanes: BTreeMap::new(),
             end_beat,
             loop_enabled: false,
+            loop_range: None,
             next_clip_id,
             audio_lanes: Vec::new(),
             audio_sources: BTreeMap::new(),
             next_audio_source_id: 0,
+            push_lane: Vec::new(),
         }
     }
 

@@ -44,7 +44,40 @@
 
 use super::*;
 use sequencer::app::song_region::SongRegionSelection;
-use sequencer::sequencer::{arrangement_scene_spans, ArrClip, ClipId, SceneSpan};
+use sequencer::sequencer::{
+    arrangement_scene_spans, ArrClip, ClipId, SceneSpan, ScenePushPoint,
+};
+
+/// How closely the in-flight push curve follows the gesture; the
+/// stop-commit thins the whole gesture again with its own tolerance.
+const PENDING_PUSH_THIN_TOLERANCE: f32 = 0.002;
+
+/// One push region as the arrangement draws it: `points` are beat offsets
+/// from `start`, published as fractions of the region (`:offset`). A
+/// provisional push has no `cid`.
+fn push_region_value(
+    cid: Option<ClipId>,
+    start: f64,
+    end: f64,
+    target_scene: usize,
+    points: &[ScenePushPoint],
+) -> Value {
+    let length = (end - start).max(f64::EPSILON);
+    let points = crate::values::list_value(points.iter().map(|point| {
+        crate::values::map_value([
+            ("offset", number((point.beat / length).clamp(0.0, 1.0))),
+            ("value", number(point.value as f64)),
+        ])
+    }));
+    let cid = cid.map_or(Value::Nil, |cid| number(cid.0 as f64));
+    crate::values::map_value([
+        ("cid", cid),
+        ("start", number(start)),
+        ("end", number(end)),
+        ("target", number(target_scene as f64)),
+        ("points", points),
+    ])
+}
 
 /// What the arrangement half of the sync keeps across ticks.
 #[derive(Default)]
@@ -87,6 +120,15 @@ pub(super) struct SongState {
     /// What the tracks' `audio-regions` were last pushed under:
     /// `App::audio_view_key` and the track instances.
     audio_key: Option<((u64, u32, usize), Vec<Option<InstanceId>>)>,
+    /// The committed song revision `song.pushes` was last pushed under.
+    pushes_key: Option<u64>,
+    /// What `song.pending-pushes` was last pushed under: the capture take's
+    /// push revision and, while a push is held, the record head it grows
+    /// to (`Some(None)`: pushed empty, no capture take).
+    pending_pushes_key: Option<Option<(u64, Option<u64>)>>,
+    /// The take's released pushes as last built: they never change again,
+    /// so only the held one is rebuilt while a gesture runs.
+    pending_released: Vec<Value>,
 }
 
 impl SongState {
@@ -118,6 +160,9 @@ impl SongState {
         self.pushed = SongPushed::default();
         self.governed = None;
         self.rack_lanes_key = None;
+        self.pushes_key = None;
+        self.pending_pushes_key = None;
+        self.pending_released.clear();
         self.pending.invalidate();
     }
 }
@@ -327,7 +372,7 @@ struct SongPushed {
     capture: Option<(bool, Option<String>)>,
     /// The region, under the structure generation (its tracks are track
     /// positions).
-    region: Option<(Option<SongRegionSelection>, u64, u64)>,
+    region: Option<(Option<SongRegionSelection>, u64, u64, Vec<sequencer::sequencer::TrackId>)>,
 }
 
 /// What the rack lanes derive from: the committed song (the lanes), the
@@ -638,6 +683,15 @@ impl HostKinds {
                     ("gain", number(region.gain_db)),
                     ("fade-in", number(region.fade_in_seconds)),
                     ("fade-out", number(region.fade_out_seconds)),
+                    ("fade-in-beats", number(region.fade_in_beats)),
+                    ("fade-out-beats", number(region.fade_out_beats)),
+                    ("fade-in-curve", number(region.fade_in_curve)),
+                    ("fade-out-curve", number(region.fade_out_curve)),
+                    // The crossfade with the region before (beats before /
+                    // after this start), and where the next one's begins.
+                    ("xfade-pre", region.crossfade.map_or(Value::Nil, |(pre, _)| number(pre))),
+                    ("xfade-post", region.crossfade.map_or(Value::Nil, |(_, post)| number(post))),
+                    ("xfade-next", region.crossfade_next_pre.map_or(Value::Nil, number)),
                     ("muted", Value::Bool(region.muted)),
                     ("loaded", Value::Bool(region.loaded)),
                     ("pitch", number(region.transpose)),
@@ -651,6 +705,77 @@ impl HostKinds {
         self.song.audio_key = Some(key);
     }
 
+    /// `song.pushes` (eseq-vum0): the push lane's regions as maps the
+    /// arrangement draws as curve items, when an arrangement install moved
+    /// the committed song revision. Then `song.pending-pushes`: the pushes
+    /// the capture take has recorded so far, in the same shape without a
+    /// `:cid`, so the lane fills in while the take records.
+    pub(super) fn sync_push_lane(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
+        let Some(song) = pusher.singleton(SONG) else {
+            return;
+        };
+        let revision = app.state.committed_song_revision();
+        if self.song.pushes_key != Some(revision) {
+            let list = app.state.with_committed_arrangement(|arrangement| {
+                let lane = arrangement.map_or(&[][..], |arrangement| arrangement.push_lane.as_slice());
+                crate::values::list_value(lane.iter().map(|region| {
+                    push_region_value(
+                        Some(region.id),
+                        region.start_beat,
+                        region.end_beat,
+                        region.target_scene,
+                        &region.points,
+                    )
+                }))
+            });
+            pusher.push(song, f::SONG_PUSHES, list);
+            self.song.pushes_key = Some(revision);
+        }
+        self.sync_pending_pushes(pusher, app, song);
+    }
+
+    /// `song.pending-pushes` (eseq-vum0.5). Rebuilt when the take records a
+    /// push step, and while a push is held, when the record head (floored
+    /// to a 16th) moves, since the held push grows to it.
+    fn sync_pending_pushes(&mut self, pusher: &mut Pusher<'_>, app: &app::App, song: InstanceId) {
+        let Some((revision, pushes)) = app.pending_scene_pushes() else {
+            self.song.pending_released.clear();
+            if self.song.pending_pushes_key != Some(None) {
+                pusher.push(song, f::SONG_PENDING_PUSHES, crate::values::list_value(std::iter::empty()));
+                self.song.pending_pushes_key = Some(None);
+            }
+            return;
+        };
+        let held = pushes.last().is_some_and(|push| push.end_beat.is_none());
+        let head = held.then(|| quantized_pending_head(app).unwrap_or(0.0));
+        let key = Some((revision, head.map(f64::to_bits)));
+        if self.song.pending_pushes_key == Some(key) {
+            return;
+        }
+        let pending_value = |push: &app::song_capture::CapturedPush| {
+            let first = push.points.first()?;
+            let last = push.points.last()?;
+            let end = push.end_beat.unwrap_or_else(|| last.beat.max(head.unwrap_or(0.0)));
+            let points = push.region_curve(first.beat, end - first.beat, PENDING_PUSH_THIN_TOLERANCE);
+            Some(push_region_value(None, first.beat, end, push.target_scene, &points))
+        };
+        // Released pushes are immutable: build each once per take (a new
+        // take starts with fewer pushes than were cached).
+        let released = &pushes[..pushes.len() - usize::from(held)];
+        let cache = &mut self.song.pending_released;
+        if cache.len() > released.len() {
+            cache.clear();
+        }
+        let built = cache.len();
+        cache.extend(released[built..].iter().map(|push| pending_value(push).unwrap_or(Value::Nil)));
+        let open = held.then(|| pushes.last().and_then(pending_value)).flatten();
+        let list = crate::values::list_value(
+            cache.iter().filter(|value| !matches!(value, Value::Nil)).cloned().chain(open),
+        );
+        pusher.push(song, f::SONG_PENDING_PUSHES, list);
+        self.song.pending_pushes_key = Some(key);
+    }
+
     /// The song's `exists`, `end`, `loop` and `spans`, and every track's
     /// clips with their structural fields. Returns the rows whose (track,
     /// source) is new: a new instance, or a moved or re-sourced clip.
@@ -662,16 +787,20 @@ impl HostKinds {
         spans: &[SceneSpan],
     ) -> Vec<usize> {
         if let Some(song) = pusher.singleton(SONG) {
-            let (exists, end, looping) = app.state.with_committed_song(|committed| {
-                (
-                    committed.is_some(),
-                    committed.map_or(0.0, |song| song.end_beat),
-                    committed.is_some_and(|song| song.loop_enabled),
-                )
-            });
+            let (exists, end, looping, (loop_start, loop_end)) =
+                app.state.with_committed_song(|committed| {
+                    (
+                        committed.is_some(),
+                        committed.map_or(0.0, |song| song.end_beat),
+                        committed.is_some_and(|song| song.loop_enabled),
+                        committed.map_or(sequencer::sequencer::DEFAULT_LOOP_RANGE, |song| song.loop_window()),
+                    )
+                });
             pusher.push(song, f::SONG_EXISTS, Value::Bool(exists));
             pusher.push(song, f::SONG_END, number(end));
             pusher.push(song, f::SONG_LOOP, Value::Bool(looping));
+            pusher.push(song, f::SONG_LOOP_START, number(loop_start));
+            pusher.push(song, f::SONG_LOOP_END, number(loop_end));
             let spans = self.sync_spans(pusher, spans);
             pusher.push(song, f::SONG_SPANS, instance_list(spans));
         }
@@ -908,18 +1037,19 @@ impl HostKinds {
         }
         // Under the groups generation too: which rack rows it covers moves
         // with rack membership.
-        let region = (
-            app.song_region_selection,
-            self.song.generation,
-            self.groups_generation,
-        );
-        if pushed.region != Some(region) {
+        // And under the display order: the rows between the ends follow it.
+        let region_key = (app.song_region_selection, self.song.generation, self.groups_generation);
+        // Compared borrowed: this runs every tick, the order rarely changes.
+        let region_stale = pushed.region.as_ref().is_none_or(|(sel, song_gen, groups_gen, order)| {
+            (*sel, *song_gen, *groups_gen) != region_key || *order != app.track_order
+        });
+        if region_stale {
+            let region = (region_key.0, region_key.1, region_key.2, app.track_order.clone());
             if let Some(id) = region_id {
                 // Cleared, the singleton reads as no tracks over 0..0.
                 let (tracks, racks, start, end, scene_lane) = match region.0 {
                     Some(region) => {
-                        let tracks = (region.track_a..=region.track_b)
-                            .filter(|track| region.contains_track(*track))
+                        let tracks = app.region_covered_tracks(&region).into_iter()
                             .filter_map(|track| self.track_ids.get(track).copied());
                         let racks = app.region_racks(&region).into_iter();
                         let racks = racks.filter_map(|gid| self.groups.get(&gid).copied());

@@ -201,7 +201,7 @@
 ;; `routes`: (jk-route-tracks self)
 (def jk-route-options (routes)
   (append
-    (cons "Off" (map (lambda (t) (str (+ t.index 1) " " t.name)) routes))
+    (cons "Off" (map (lambda (t) (str (eseq.kinds/track-number t) " " t.name)) routes))
     (list jk-chords-label)))
 
 (def jk-chords-row? (row) (= (get row :route) alez.jaki.doc/chords-route))
@@ -222,7 +222,9 @@
 ;; tracks keep their indices.
 (def jk-menu-routes (self routes row viewed)
   (if (number? self.owner)
-    routes
+    ;; Display order, as the grid draws the rack; picks still map back by
+    ;; label over `routes` (pad order).
+    (eseq.kinds/in-display-order routes)
     (let ((current (jk-row-track routes row)))
       (bank-tracks viewed (if current (list current) (list))))))
 
@@ -704,6 +706,9 @@
              (row-count 8)
              (mode :loop)
              (patterns (list)))
+  ;; Where rows store their track (a member position on a rack): the host
+  ;; shifts these when a track or member is removed (Off when it was theirs).
+  :routes '((rows * route) (patterns * rows * route))
   ;; view only: the row whose rules box is open ("k:index")
   :state ((rules-open ""))
   :view jk-panel)

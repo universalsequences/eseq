@@ -408,6 +408,7 @@ mod tests {
             rows: vec![row(7, 0.0, 0), row(3, 16.0, 1), row(9, 32.0, 2)],
             end_beat: 48.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 10,
         }
     }
@@ -425,10 +426,12 @@ mod tests {
             rack_lanes: Default::default(),
             end_beat: 48.0,
             loop_enabled: false,
+            loop_range: None,
             next_clip_id: 6,
             audio_lanes: Vec::new(),
             audio_sources: Default::default(),
             next_audio_source_id: 0,
+            push_lane: Vec::new(),
         }
     }
 

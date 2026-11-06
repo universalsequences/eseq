@@ -211,3 +211,53 @@ fn an_expanded_track_keeps_its_editor_through_a_delete_and_its_undo() {
         Value::Number(4.0)
     );
 }
+
+// Regression (2026-11-02, gate toggled during arrangement playback was not heard):
+// an arrangement that is one scene (Scene 1) for the whole song, looping and
+// playing; the user in the Seq view clicks the sampler panel's gate button
+// (`sampler-gate-button`'s on-click, evaluated verbatim). The button toggles
+// but the song row snapshot the scheduler plays keeps the old gate.
+#[test]
+fn gate_button_during_one_scene_song_playback_is_heard() {
+    fn settle(h: &mut Harness) {
+        h.drain();
+        h.sync();
+        h.show_all();
+        h.tick();
+        h.drain();
+        h.sync();
+        h.show_all();
+    }
+    let mut h = distro();
+    // Scene 1 placed with its patterns as clips, so every lane plays its
+    // Pattern 1 (an unplaced scene event leaves the lanes silent).
+    h.app.arr_scene_event_insert_placing(0.0, 0).unwrap();
+    h.app.set_arrangement_view_visible(false);
+    settle(&mut h);
+    h.app.song_transport_play(false).expect("play");
+    settle(&mut h);
+    let click = "(let ((t selection.track) (gate (if t t.gate false))) \
+                 (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :gate (if gate 0 1)))";
+    let ui_gate = |h: &mut Harness| h.eval("(let ((t selection.track)) (if t t.gate nil))");
+    let track = match h.eval("(let ((t selection.track)) t.index)") {
+        Value::Number(n) => n as usize,
+        other => panic!("selection.track.index: {other:?}"),
+    };
+    let live_gate = |h: &Harness| h.app.state.pattern.track_params[track].is_gate_on();
+    let row_gate = |h: &Harness| {
+        h.app.active_runtime_song.as_ref().map(|song| {
+            song.rows.iter().map(|row| row.scheduler_snapshot.tracks[track].params.gate).collect::<Vec<_>>()
+        })
+    };
+    let ui_before = ui_gate(&mut h);
+    let live_before = live_gate(&h);
+    h.eval(click);
+    settle(&mut h);
+    assert_ne!(ui_gate(&mut h), ui_before, "the button toggles");
+    let rows = row_gate(&h).expect("the song is playing");
+    assert!(
+        rows.iter().all(|gate| *gate != live_before),
+        "the song row snapshot (what plays) kept the old gate: {rows:?}"
+    );
+    h.app.song_transport_stop().unwrap();
+}

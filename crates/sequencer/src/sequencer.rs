@@ -35,13 +35,15 @@ pub use snapshot::{
 };
 #[allow(unused_imports)]
 pub use state::{
+    InstanceSlotChange, InstanceSlotLocation, remap_document_routes,
     arrangement_for_serialization, arrangement_scene_spans,
     compile_arrangement, insert_clip_sorted, legacy_backdrop_spans, migrate_legacy_backdrops,
     insert_rack_clip_sorted, lower_rows_to_arrangement, occlude_rack_span, occlude_span,
     pattern_play_step, restamp_changed_scene_spans, restamped_clip, stamp_scene_clips, LaneSpan, RackArrClip,
     stamped_clip_override, ArrClip, LegacyBackdropSpan, SceneSpan,
     ArrangementContext, ClipId, ProjectArrangement, SceneEvent, SongCompileContext,
-    DEFAULT_ARRANGEMENT_END,
+    ScenePushPoint, ScenePushRegion, ScenePushSchedule, ScheduledScenePush, thin_scene_push_points,
+    DEFAULT_ARRANGEMENT_END, DEFAULT_LOOP_RANGE,
     default_empty_effect_chain, default_rack_macros, format_song_row_positions, project_lanes,
     VoiceCountTable,
     remap_scene_index_after_move, remap_song_after_scene_delete, remap_song_after_scene_move,
@@ -52,8 +54,9 @@ pub use state::{
     TrackTake, TrackTakePool,
     ActiveNoteActivity, AudibleSongRowApplied, RuntimeSong, RuntimeSongRow, SongChunkPlan,
     SongPlaybackCommand, SongPlaybackMailbox, SongPlaybackNotice, SongPlaybackRuntime,
-    SongPositionShared, SongRenderMapping, AudioRegion, AudioSourceId, AudioSourceMeta,
-    audio_frames_to_beats,
+    SongPositionShared, SongRenderMapping, AudioRegion, AudioSourceId, AudioSourceMeta, AudioLockView, RegionLock, RegionLockTarget,
+    audio_frames_to_beats, crossfade_gains, crossfade_room, crossfade_window, fade_curve_for_midpoint,
+    fade_curve_power, fade_shape, regions_abut, FadeHandle,
     DeviceParamPrintOverride, DeviceParamPrintTarget, DeviceParamPrintValues, RackMacroPrintOverride,
     EffectInstanceId, InstrumentDeviceValuesSnapshot, InstrumentSlotResetSummary,
     GeneratorTickErrorNotice, MidiFxInstanceId, PatternId, PatternSnapshot, ProjectScenes, RackClip, RackClipBank, RackClipId, rack_clip_label, PublishedSequencer, RackMacro, RackMacroCurve,

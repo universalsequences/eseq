@@ -31,7 +31,7 @@ impl Harness {
     }
 
     /// Apply what the view queued, push the kinds and re-render.
-    fn settle(&mut self) {
+    pub(super) fn settle(&mut self) {
         self.drain();
         self.sync();
         self.show_all();
@@ -748,9 +748,11 @@ fn select_all_then_delete_empties_the_track_and_rack_lanes() {
     assert!(arrangement.track_lanes.iter().all(Vec::is_empty), "track lanes cleared");
 }
 
-/// The view scrolls with the playhead while the song runs, holding it a
-/// third of the way in (`follow-anchor`); a hand scroll pauses
-/// that for `arrangement-follow-cooloff` seconds, and the off switch stops it.
+/// The view pages to the playhead only when it leaves the window, putting
+/// it a third of the way in (`follow-anchor`), and otherwise holds still;
+/// a hand scroll pauses
+/// that for `arrangement-follow-cooloff` seconds or until the next Play, and
+/// the off switch stops it.
 #[test]
 fn the_view_follows_the_playhead_until_a_hand_scroll() {
     let mut h = distro();
@@ -768,13 +770,18 @@ fn the_view_follows_the_playhead_until_a_hand_scroll() {
     // The head at `beat` sits `follow-anchor` of the 64-beat window in.
     let anchored = |beat: f64| beat - 0.33 * 64.0;
     head(&mut h, 8.0);
-    assert_eq!(start(&mut h), 0.0, "rests at 0 until the head passes the anchor");
+    assert_eq!(start(&mut h), 0.0, "an on-screen head never moves the view");
+    head(&mut h, 60.0);
+    assert_eq!(start(&mut h), 0.0, "not even near the right edge");
     head(&mut h, 200.0);
     let at = start(&mut h);
-    assert!((at - anchored(200.0)).abs() < 1.0, "travels with the head: {at}");
-    head(&mut h, 201.0);
-    let next = start(&mut h);
-    assert!((next - at - 1.0).abs() < 0.5, "smoothly, beat by beat: {at} -> {next}");
+    assert!((at - anchored(200.0)).abs() < 1.0, "off screen: the view pages to it: {at}");
+    head(&mut h, 230.0);
+    assert_eq!(start(&mut h), at, "on screen again, so it holds still");
+    // A loop wrapping the head back before the window pages back to it.
+    head(&mut h, 150.0);
+    let back = start(&mut h);
+    assert!((back - anchored(150.0)).abs() < 1.0, "paged back to the wrap: {back}");
 
     // A hand scroll holds the view where the user put it.
     h.eval("(setopt eseq.arrangement/arrangement-follow-cooloff 0.2)");
@@ -790,10 +797,202 @@ fn the_view_follows_the_playhead_until_a_hand_scroll() {
     let at = start(&mut h);
     assert!((at - anchored(400.0)).abs() < 1.0, "following again: {at}");
 
+    // Play ends a pause still inside its cooloff: scroll back, stop, play
+    // again, and the view follows at once.
+    h.eval("(setopt eseq.arrangement/arrangement-follow-cooloff 60)");
+    h.eval("(eseq.arrangement/view-action (dict :type :scroll-view :view-start 0))");
+    head(&mut h, 450.0);
+    assert_eq!(start(&mut h), 0.0, "paused by the hand scroll");
+    h.app.song_capture_cancel().expect("stop");
+    h.settle();
+    h.app.song_transport_play(true).expect("play again");
+    head(&mut h, 500.0);
+    let at = start(&mut h);
+    assert!((at - anchored(500.0)).abs() < 1.0, "Play cleared the pause: {at}");
+
     // Off: the view stays put.
     h.eval("(setopt eseq.arrangement/arrangement-follow-playhead false)");
     h.eval("(eseq.arrangement/view-action (dict :type :scroll-view :view-start 0))");
     head(&mut h, 600.0);
     assert_eq!(start(&mut h), 0.0, "follow is off");
     h.app.song_capture_cancel().expect("cancel");
+}
+
+/// eseq-vum0: a recorded scene push draws on the push lane under the scene
+/// lane — labeled with its target scene, its curve as item content — and
+/// the lane's delete gesture removes it as one arrangement edit.
+#[test]
+fn recorded_scene_pushes_draw_and_delete_on_the_push_lane() {
+    use sequencer::sequencer::{ScenePushPoint, ScenePushRegion};
+    let mut h = distro();
+    h.app.set_arrangement_view_visible(true);
+    h.command("clone-pattern", Value::Nil);
+    h.settle();
+    assert_eq!(h.eval("(len (eseq.arrangement/push-items))"), Value::Number(0.0));
+    let mut arrangement = h.app.state.committed_arrangement().expect("arrangement");
+    let id = arrangement.allocate_clip_id().expect("id");
+    arrangement.end_beat = arrangement.end_beat.max(16.0);
+    arrangement.push_lane.push(ScenePushRegion {
+        id,
+        start_beat: 4.0,
+        end_beat: 8.0,
+        target_scene: 1,
+        points: vec![
+            ScenePushPoint { beat: 0.0, value: 0.0 },
+            ScenePushPoint { beat: 2.0, value: 1.0 },
+        ],
+    });
+    h.app.state.set_committed_arrangement(Some(arrangement)).expect("commit");
+    h.settle();
+
+    let pushes = items(&h.eval("(eseq.arrangement/push-items)"));
+    assert_eq!(pushes.len(), 1);
+    let item = &pushes[0];
+    assert_eq!(get(item, "id"), Value::Number(id.0 as f64));
+    assert_eq!(get(item, "start"), Value::Number(4.0));
+    assert_eq!(get(item, "end"), Value::Number(8.0));
+    let Value::String(label) = get(item, "label") else { panic!("a label") };
+    assert!(label.starts_with("→ "), "names the target scene: {label}");
+    assert_eq!(
+        h.eval("(let ((p (first (eseq.arrangement/push-items)))) (len (get (get p :content) :curve)))"),
+        Value::Number(2.0),
+        "the curve rides as item content"
+    );
+
+    h.eval(&format!("(eseq.arrangement/push-lane-action (dict :type :delete-items :ids (list {})))", id.0));
+    h.settle();
+    assert!(h.app.state.committed_arrangement().expect("arrangement").push_lane.is_empty());
+    assert_eq!(h.eval("(len (eseq.arrangement/push-items))"), Value::Number(0.0));
+
+    // Cmd+A selects the pushes with everything else (they light up), and
+    // the region delete Backspace sends takes them too.
+    sequencer::app::edit::undo(&mut h.app);
+    h.settle();
+    assert_eq!(h.eval("(len (eseq.arrangement/push-items))"), Value::Number(1.0));
+    assert_eq!(h.eval("(eseq.arrangement/select-all-clips)"), Value::Bool(true));
+    h.settle();
+    assert_eq!(
+        h.eval("(let ((r (eseq.arrangement/push-selection-rect))) (and (<= (get r :time-a) 4) (>= (get r :time-b) 8)))"),
+        Value::Bool(true),
+        "Cmd+A lights the push lane over the push"
+    );
+    h.command("song-region-delete", Value::Nil);
+    h.settle();
+    assert!(
+        h.app.state.committed_arrangement().expect("arrangement").push_lane.is_empty(),
+        "Cmd+A, Backspace deletes the push"
+    );
+}
+
+/// eseq-vum0: a sweep on the push lane selects a time range of it alone;
+/// Backspace clears just that range (cutting the push it straddles). An
+/// edge drag resizes a push: in trims the curve, out holds its value.
+#[test]
+fn push_lane_sweeps_clear_a_range_and_edges_resize() {
+    use sequencer::sequencer::{ScenePushPoint, ScenePushRegion};
+    let mut h = distro();
+    h.app.set_arrangement_view_visible(true);
+    h.command("clone-pattern", Value::Nil);
+    h.settle();
+    let mut arrangement = h.app.state.committed_arrangement().expect("arrangement");
+    let id = arrangement.allocate_clip_id().expect("id");
+    arrangement.end_beat = arrangement.end_beat.max(32.0);
+    arrangement.push_lane.push(ScenePushRegion {
+        id,
+        start_beat: 4.0,
+        end_beat: 12.0,
+        target_scene: 1,
+        points: vec![
+            ScenePushPoint { beat: 0.0, value: 0.0 },
+            ScenePushPoint { beat: 8.0, value: 1.0 },
+        ],
+    });
+    h.app.state.set_committed_arrangement(Some(arrangement)).expect("commit");
+    h.settle();
+    let spans = |h: &Harness| -> Vec<(f64, f64)> {
+        let arrangement = h.app.state.committed_arrangement().expect("arrangement");
+        arrangement.push_lane.iter().map(|push| (push.start_beat, push.end_beat)).collect()
+    };
+
+    h.eval("(eseq.arrangement/push-lane-action (dict :type :marquee-select :time-a 10 :time-b 6))");
+    h.eval("(eseq.arrangement/push-lane-action (dict :type :finish-marquee-select :time-a 10 :time-b 6))");
+    h.settle();
+    assert_eq!(
+        h.eval("(get (first (eseq.arrangement/push-items)) :selected)"),
+        Value::Bool(false),
+        "a range lights its span, not the whole push"
+    );
+    assert_eq!(
+        h.eval("(let ((r (eseq.arrangement/push-selection-rect))) (list (get r :time-a) (get r :time-b)))"),
+        h.eval("(list 6 10)"),
+        "the swept range, ordered"
+    );
+    h.eval("(eseq.arrangement/push-lane-action (dict :type :delete-range :time-a 6 :time-b 10))");
+    h.settle();
+    assert_eq!(spans(&h), vec![(4.0, 6.0), (10.0, 12.0)], "only the range goes");
+
+    let first = h.app.state.committed_arrangement().unwrap().push_lane[0].id;
+    h.eval(&format!(
+        "(eseq.arrangement/push-lane-action (dict :type :resize-item-absolute :id {} :edge :end :time 9))",
+        first.0
+    ));
+    h.settle();
+    assert_eq!(
+        h.eval("(get (first (eseq.arrangement/push-items)) :end)"),
+        Value::Number(9.0),
+        "the edge ghosts while dragged"
+    );
+    h.eval("(eseq.arrangement/push-lane-action (dict :type :finish-resize-items))");
+    h.settle();
+    assert_eq!(spans(&h), vec![(4.0, 9.0), (10.0, 12.0)]);
+    let pushed = h.app.state.committed_arrangement().unwrap().push_lane[0].clone();
+    assert!((pushed.value_at(8.5) - 0.25).abs() < 1.0e-4, "pulled out, it holds where it was cut");
+
+    h.eval(&format!(
+        "(eseq.arrangement/push-lane-action (dict :type :resize-item-absolute :id {} :edge :start :time 5))",
+        first.0
+    ));
+    h.eval("(eseq.arrangement/push-lane-action (dict :type :finish-resize-items))");
+    h.settle();
+    assert_eq!(spans(&h), vec![(5.0, 9.0), (10.0, 12.0)]);
+    let pushed = h.app.state.committed_arrangement().unwrap().push_lane[0].clone();
+    assert!((pushed.value_at(5.0) - 0.125).abs() < 1.0e-4, "the curve stays in time");
+}
+
+/// The ruler's loop brace (Ableton's loop): a drag repaints it live and
+/// commits once, on release; the toggle turns looping on with the brace
+/// where it is, and the ruler draws exactly what the song holds.
+#[test]
+fn the_loop_brace_drags_live_commits_once_and_toggles() {
+    let mut h = distro();
+    h.settle();
+    let committed = |h: &Harness| {
+        h.app.state.with_committed_arrangement(|arrangement| {
+            let arrangement = arrangement.expect("an arrangement");
+            (arrangement.loop_window(), arrangement.loop_enabled)
+        })
+    };
+    let (before, looping) = committed(&h);
+    assert!(!looping, "looping starts off");
+
+    h.eval("(eseq.arrangement/scene-action (dict :type :loop-brace :start 4 :end 12))");
+    h.settle();
+    assert_eq!(h.arr_field("arr-view", "loop-start"), Value::Number(4.0));
+    assert_eq!(h.arr_field("arr-view", "loop-end"), Value::Number(12.0));
+    assert_eq!(committed(&h).0, before, "a live drag frame commits nothing");
+
+    h.eval("(eseq.arrangement/scene-action (dict :type :finish-loop-brace :start 4 :end 12))");
+    h.settle();
+    assert_eq!(committed(&h).0, (4.0, 12.0));
+    assert_eq!(h.arr_field("arr-view", "loop-dragging"), Value::Bool(false));
+
+    h.eval("(let ((s eseq.kinds/song)) (toggle! s.loop))");
+    h.settle();
+    assert_eq!(committed(&h), ((4.0, 12.0), true));
+    assert_eq!(h.arr_field("arr-view", "loop-on"), Value::Number(1.0));
+
+    // The ruler is the only lane with the brace, bound to the view state.
+    let mut braced = Vec::new();
+    widgets_with_prop(&h.buffer_tree("*arrangement*").0, "loop-brace", &mut braced);
+    assert_eq!(braced.len(), 1, "one ruler draws the brace");
 }

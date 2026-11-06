@@ -71,6 +71,7 @@ mod bus_outputs;
 pub mod pending_capture;
 pub mod retrospective;
 pub mod song_capture;
+pub mod scene_push_lane;
 pub mod song_edit;
 pub mod song_region;
 pub mod sound_binding;
@@ -79,8 +80,9 @@ pub mod take_edit;
 pub mod take_recording;
 pub mod song_transport;
 mod synth;
+pub mod track_order;
 
-pub use effect_params::effect_param_macro_key;
+pub use effect_params::{bus_effect_param_macro_key, effect_param_macro_key};
 pub use params::SoloAudibility;
 pub use synth::{instrument_param_macro_key, rack_macro_shown_value};
 #[allow(unused_imports)]
@@ -1111,6 +1113,12 @@ pub struct App {
     pub track_collapsed: Vec<bool>,
     pub buses: Vec<BusChannelState>,
     pub groups: Vec<crate::project::ProjectTrackGroup>,
+    /// The display order of the tracks (eseq-ssd6), by stable id: the order
+    /// the step grid, the mixer and the arrangement draw rows in. Track
+    /// indices never move; this list is presentation only. Empty means the
+    /// legacy order (see `track_order::display_track_order`). Ids of deleted
+    /// tracks may linger so an undone delete returns to its old place.
+    pub track_order: Vec<crate::sequencer::TrackId>,
     /// The project groove pool (docs/rack-groove-spec.md §Three tiers): every
     /// groove a drum rack can play; racks point into it by id
     /// (`RackGrooveSettings::active`). Undo/redo carries it with the group
@@ -1182,6 +1190,12 @@ pub struct App {
     /// `apply_pattern_launch` appends one lightweight event per audible
     /// launch.
     pub(crate) song_capture_take: Option<song_capture::SongCaptureTake>,
+    /// The scene push gesture state shared by the live transport gesture
+    /// and arrangement replay (epic eseq-vum0, `scene_push_lane`).
+    pub(crate) scene_push_owner: scene_push_lane::ScenePushOwner,
+    /// What `schedule_arrangement_scene_pushes` last handed the scheduler:
+    /// (committed song revision, push region ids).
+    pub(crate) scheduled_scene_pushes: scene_push_lane::ScheduledScenePushesKey,
     /// True when the most recent arrangement capture failed to commit
     /// (overflow, normalization, validation). Cleared when the next capture
     /// starts. Read as `song.capture-failed` (the host kinds).
@@ -2301,8 +2315,11 @@ impl App {
                     // row mirror re-applying the row's scene there would
                     // audibly recall the row's bus/group fx and re-key every
                     // scene-indexed reactive binding while the latched lanes
-                    // keep playing the performer's patterns.
-                    self.state.latch_song_scene_override();
+                    // keep playing the performer's patterns. Audio tracks
+                    // never latch, so a project of only those claims nothing.
+                    if self.state.song_manual_latch_mask() != 0 {
+                        self.state.latch_song_scene_override();
+                    }
                     // Pin each claimed lane's override to the pattern it now
                     // plays (the launched scene's cell): the masked scene
                     // save-backs treat latched lanes as stale UNLESS the
@@ -2342,10 +2359,7 @@ impl App {
         // 120 BPM). Quantized launches keep their scheduler-stamped grid
         // deadline via `audible_beats`.
         let beat = audible_beats.unwrap_or_else(|| {
-            self.state
-                .record_beats_at_instant(std::time::Instant::now())
-                .unwrap_or_else(|| self.state.scheduler_rendered_beats())
-                .max(0.0)
+            self.state.record_beats_now()
         });
         self.record_song_capture_launch(target, beat);
         Ok(PatternLaunchOutcome {
@@ -2363,6 +2377,10 @@ impl App {
         self.scene_macro_runtime.clear();
         let mut touched = self.macro_engine.release_all_scene_macros();
         touched.extend(self.macro_engine.end_scene_push());
+        if self.scene_push_owner.is_live() {
+            self.observe_scene_push(song_capture::ScenePushStep::End);
+        }
+        self.scene_push_owner = scene_push_lane::ScenePushOwner::Idle;
         touched
     }
 
@@ -2985,17 +3003,11 @@ impl App {
                 for (slot_idx, slot) in effect_slots.iter_mut().enumerate() {
                     let count = (slot.num_params as usize).min(slot.defaults.len());
                     for param_idx in 0..count {
-                        let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+                        let Some(key) =
+                            bus_effect_param_macro_key(bus.id, slot_idx, slot, param_idx)
+                        else {
                             continue;
                         };
-                        let param_id = crate::neural::ParamNodeId::from_slot_param(
-                            slot.node_id,
-                            slot.modulator_node_id,
-                            raw_idx,
-                        );
-                        let key = crate::macro_engine::MacroParamKey::for_bus_effect(
-                            bus.id, slot_idx, param_idx, param_id,
-                        );
                         slot.defaults[param_idx] = self
                             .macro_engine
                             .effective_value(&key, slot.defaults[param_idx]);
@@ -3065,6 +3077,7 @@ impl App {
             track_collapsed: Vec::new(),
             buses: BusChannelState::default_buses(),
             groups: Vec::new(),
+            track_order: Vec::new(),
             grooves: Vec::new(),
             instances: crate::project::ProjectInstances::default(),
             mixer_control_holds: crate::mixer_control::MixerControlHolds::default(),
@@ -3194,6 +3207,8 @@ impl App {
             song_row_mirror_epoch: 0,
             bus_pattern_restore_epoch: 0,
             song_capture_take: None,
+            scene_push_owner: Default::default(),
+            scheduled_scene_pushes: Default::default(),
             song_capture_failed: false,
             song_capture_error: None,
             song_edit_error: None,
@@ -4186,6 +4201,27 @@ impl App {
     pub fn is_sampler_track(&self, track: usize) -> bool {
         track >= self.graph.track_instrument_types.len()
             || self.graph.track_instrument_types[track] == InstrumentType::Sampler
+    }
+
+    /// Load a decoded sample onto plain sampler `track`: the voices play it
+    /// now, and it is stored as content of the sound the lane is playing
+    /// (the track sound in the arrangement, the scene pattern in Seq, the
+    /// bound take/clip while one holds the lane) — so the next row apply,
+    /// take bind or launch keeps it instead of restoring an older pick.
+    /// Patterns that never had a sample get it as their first.
+    pub fn load_sample_into_sampler_track(
+        &mut self,
+        track: usize,
+        buffer_id: i32,
+        sample_rate: u32,
+        name: String,
+    ) {
+        let sample_id = (buffer_id, name, sample_rate);
+        self.graph_controller()
+            .put_sample_on_voices(track, &sample_id);
+        self.tracks[track] = sample_id.1.clone();
+        self.state.set_lane_sound_sample(track, sample_id.clone());
+        self.state.seed_unset_pattern_sample_ids(track, sample_id);
     }
 
     fn selected_effect_slot(&self) -> Option<usize> {

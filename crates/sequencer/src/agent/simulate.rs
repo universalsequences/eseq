@@ -286,6 +286,7 @@ mod tests {
         };
         let id = format!("test/sim:{name}");
         lisp_host::register_kind(lisp_host::KindDefinition {
+            routes: Vec::new(),
             id: id.clone(),
             name: name.to_string(),
             package: Some("test/sim".to_string()),

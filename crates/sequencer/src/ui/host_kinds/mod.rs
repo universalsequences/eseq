@@ -273,6 +273,7 @@ pub(crate) mod f {
 
     pub(crate) const TRACK_INDEX: FieldKey = (TRACK, "index");
     pub(crate) const TRACK_TID: FieldKey = (TRACK, "tid");
+    pub(crate) const TRACK_ORDER: FieldKey = (TRACK, "order");
     pub(crate) const TRACK_NAME: FieldKey = (TRACK, "name");
     pub(crate) const TRACK_COLOR: FieldKey = (TRACK, "color");
     pub(crate) const TRACK_VOLUME: FieldKey = (TRACK, "volume");
@@ -892,6 +893,8 @@ pub(crate) mod f {
     pub(crate) const SONG_CURSOR: FieldKey = (SONG, "cursor");
     pub(crate) const SONG_END: FieldKey = (SONG, "end");
     pub(crate) const SONG_LOOP: FieldKey = (SONG, "loop");
+    pub(crate) const SONG_LOOP_START: FieldKey = (SONG, "loop-start");
+    pub(crate) const SONG_LOOP_END: FieldKey = (SONG, "loop-end");
     pub(crate) const SONG_MANUAL_LATCH: FieldKey = (SONG, "manual-latch");
     pub(crate) const SONG_SCENE_LATCHED: FieldKey = (SONG, "scene-latched");
     pub(crate) const SONG_EDIT_ERROR: FieldKey = (SONG, "edit-error");
@@ -901,6 +904,8 @@ pub(crate) mod f {
     pub(crate) const SONG_BOUND_CLIP: FieldKey = (SONG, "bound-clip");
     pub(crate) const SONG_BOUND_RACK_ITEM: FieldKey = (SONG, "bound-rack-item");
     pub(crate) const SONG_SPANS: FieldKey = (SONG, "spans");
+    pub(crate) const SONG_PUSHES: FieldKey = (SONG, "pushes");
+    pub(crate) const SONG_PENDING_PUSHES: FieldKey = (SONG, "pending-pushes");
     pub(crate) const SONG_PENDING: FieldKey = (SONG, "pending");
     pub(crate) const SONG_PENDING_ORIGIN: FieldKey = (SONG, "pending-origin");
     pub(crate) const SONG_PENDING_HEAD: FieldKey = (SONG, "pending-head");
@@ -1295,6 +1300,7 @@ pub(crate) mod f {
     pub(crate) const SELECTION_PLOCK_VARIANT: FieldKey = (SELECTION, "plock-variant");
 
     pub(crate) const PROJECT_TRACKS: FieldKey = (PROJECT, "tracks");
+    pub(crate) const PROJECT_ORDERED_TRACKS: FieldKey = (PROJECT, "ordered-tracks");
     pub(crate) const PROJECT_SCENES: FieldKey = (PROJECT, "scenes");
     pub(crate) const PROJECT_BANKS: FieldKey = (PROJECT, "banks");
     pub(crate) const PROJECT_BUSES: FieldKey = (PROJECT, "buses");
@@ -1326,6 +1332,7 @@ pub(crate) mod f {
 pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_INDEX, ":int", Model),
     (f::TRACK_TID, ":int", Model),
+    (f::TRACK_ORDER, ":int", Model),
     (f::TRACK_NAME, ":string", Model),
     (f::TRACK_COLOR, ":rgb", Model),
     (f::TRACK_VOLUME, ":number", Live),
@@ -1496,6 +1503,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SONG_CURSOR, ":number", Model),
     (f::SONG_END, ":number", Model),
     (f::SONG_LOOP, ":bool", Model),
+    (f::SONG_LOOP_START, ":number", Model),
+    (f::SONG_LOOP_END, ":number", Model),
     (f::SONG_MANUAL_LATCH, ":bool", Live),
     (f::SONG_SCENE_LATCHED, ":bool", Live),
     (f::SONG_EDIT_ERROR, ":string", Model),
@@ -1505,6 +1514,10 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SONG_BOUND_CLIP, "clip", Model),
     (f::SONG_BOUND_RACK_ITEM, ":string", Model),
     (f::SONG_SPANS, "(list-of scene-span)", Model),
+    // Recorded scene pushes (eseq-vum0): {:cid :start :end :target
+    // :points ({:offset :value})}, offsets 0..1 of the region.
+    (f::SONG_PUSHES, "(list-of :any)", Model),
+    (f::SONG_PENDING_PUSHES, "(list-of :any)", Model),
     // The provisional capture surface (`pending`): rebuilt with the pending
     // content key, the lanes' ends with the quantized record head.
     (f::SONG_PENDING, ":bool", Model),
@@ -1926,6 +1939,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SELECTION_PLOCK_ROWS, "(list-of plock-row)", Model),
     (f::SELECTION_PLOCK_VARIANT, ":string", Model),
     (f::PROJECT_TRACKS, "(list-of track)", Model),
+    (f::PROJECT_ORDERED_TRACKS, "(list-of track)", Model),
     (f::PROJECT_SCENES, "(list-of scene)", Model),
     (f::PROJECT_BANKS, "(list-of bank)", Model),
     (f::PROJECT_BUSES, "(list-of bus)", Model),
@@ -3061,6 +3075,7 @@ impl HostKinds {
         sync_phase("sync-groove-library", || self.sync_groove_library(&mut pusher, app));
         sync_phase("sync-song-model", || self.sync_song_model(&mut pusher, app));
         sync_phase("sync-audio-regions", || self.sync_audio_regions(&mut pusher, app));
+        sync_phase("sync-push-lane", || self.sync_push_lane(&mut pusher, app));
         sync_phase("sync-rack-lanes", || self.sync_rack_lanes(&mut pusher, app));
         sync_phase("sync-song-pushed", || self.sync_song_pushed(&mut pusher, app));
         sync_phase("sync-song-pending", || self.sync_song_pending(&mut pusher, app));

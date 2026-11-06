@@ -184,8 +184,10 @@
 (def used-in-viewed-bank? (t)
   (track-used-in-bank? t (scene-viewed-bank)))
 
-;; The tracks bank `viewed` shows, in track order, plus those of `keep` (a
-;; list) wherever they sit: the route menus keep the tracks their controls
-;; name now, so the menu can show them.
+;; The tracks bank `viewed` shows, in display order (eseq.kinds
+;; ordered-tracks), plus those of `keep` (a list) wherever they sit: the
+;; route menus keep the tracks their controls name now, so the menu can show
+;; them.
 (def bank-tracks (viewed keep)
-  (filter (lambda (t) (or (kit/listed? t keep) (track-used-in-bank? t viewed))) (tracks)))
+  (filter (lambda (t) (or (kit/listed? t keep) (track-used-in-bank? t viewed)))
+    (eseq.kinds/ordered-tracks)))

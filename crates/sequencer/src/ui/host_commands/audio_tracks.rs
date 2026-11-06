@@ -5,33 +5,29 @@
 
 use crate::*;
 
-use sequencer::app::audio_tracks::{AudioRegionPatch, Place};
+use sequencer::app::audio_tracks::{AudioRegionPatch, FadeHandle, Place};
 use sequencer::sequencer::ClipId;
 
-use super::song::{payload_map, require_number};
+use super::song::{clip_ids, payload_map, require_number, require_whole};
 use crate::history_commands::map_bool;
 
 pub(super) const COMMANDS: &[&str] = &[
     "audio-regions-drop",
     "audio-region-move",
+    "audio-regions-move",
     "audio-region-resize",
     "audio-region-split",
     "audio-region-duplicate",
     "audio-regions-delete",
     "audio-region-set",
     "audio-region-set-window",
+    "audio-region-fade",
+    "audio-region-fade-end",
     "audio-regions-paste",
+    "audio-lock-select",
 ];
 
 type PayloadMap = HashMap<String, Rc<RefCell<Value>>>;
-
-fn require_whole(map: &PayloadMap, key: &str) -> Result<u64, String> {
-    let value = require_number(map, key)?;
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
-        return Err(format!("{key} must be a non-negative integer"));
-    }
-    Ok(value as u64)
-}
 
 fn optional_track(map: &PayloadMap) -> Result<Option<usize>, String> {
     match map.get("track").map(|cell| cell.borrow().clone()) {
@@ -42,21 +38,6 @@ fn optional_track(map: &PayloadMap) -> Result<Option<usize>, String> {
 
 fn region_id(map: &PayloadMap) -> Result<ClipId, String> {
     require_whole(map, "id").map(ClipId)
-}
-
-/// `:ids` as a list of region ids.
-fn region_ids(map: &PayloadMap) -> Result<Vec<ClipId>, String> {
-    let Some(Value::List(ids)) = map.get("ids").map(|cell| cell.borrow().clone()) else {
-        return Err("missing :ids list".to_string());
-    };
-    ids.iter()
-        .map(|id| match &*id.borrow() {
-            Value::Number(n) if n.is_finite() && *n >= 0.0 && n.fract() == 0.0 => {
-                Ok(ClipId(*n as u64))
-            }
-            other => Err(format!("region id must be a non-negative integer, got {other:?}")),
-        })
-        .collect()
 }
 
 /// `:paths` (a list) or `:path` (one), as file paths.
@@ -112,6 +93,11 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                 Ok("Moved audio region".to_string())
             }
         }
+        "audio-regions-move" => {
+            let ids = clip_ids(map)?;
+            app.audio_regions_move(&ids, require_number(map, "delta")?)?;
+            Ok(format!("Moved {} audio region(s)", ids.len()))
+        }
         "audio-region-resize" => {
             let id = region_id(map)?;
             app.audio_region_resize(id, require_number(map, "start")?, require_number(map, "end")?)?;
@@ -127,7 +113,7 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             Ok("Duplicated audio region".to_string())
         }
         "audio-regions-delete" => {
-            let ids = region_ids(map)?;
+            let ids = clip_ids(map)?;
             app.audio_regions_delete(&ids)?;
             Ok(match ids.len() {
                 1 => "Deleted audio region".to_string(),
@@ -152,7 +138,7 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             Ok("Audio region updated".to_string())
         }
         "audio-regions-paste" => {
-            let ids = region_ids(map)?;
+            let ids = clip_ids(map)?;
             let pasted = app.audio_regions_paste(&ids, require_number(map, "beat")?, optional_track(map)?)?;
             Ok(format!("Pasted {} audio region(s)", pasted.len()))
         }
@@ -165,6 +151,27 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                 map_bool(map, "live"),
             )?;
             Ok("Audio clip window set".to_string())
+        }
+        "audio-region-fade" => {
+            let id = region_id(map)?;
+            let handle = match map.get("handle").map(|cell| cell.borrow().clone()) {
+                Some(Value::Keyword(name)) | Some(Value::String(name)) => FadeHandle::parse(&name),
+                _ => None,
+            }
+            .ok_or_else(|| "audio-region-fade needs a :handle".to_string())?;
+            app.audio_region_fade(id, handle, require_number(map, "value")?, map_bool(map, "live"))?;
+            Ok("Audio fade set".to_string())
+        }
+        // A released fade handle: the next drag of the same region's fades is
+        // its own undo step.
+        "audio-region-fade-end" => {
+            sequencer::app::edit::finish_active_gesture(app);
+            Ok("Audio fade set".to_string())
+        }
+        "audio-lock-select" => {
+            let ids = clip_ids(map)?;
+            app.set_audio_lock_selection(optional_track(map)?.map(|track| (track, ids)));
+            Ok("Selected regions for locking".to_string())
         }
         _ => Err(format!("unknown audio command {name}")),
     }
@@ -192,7 +199,19 @@ pub(super) fn handle(
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) {
-    let result = run(name, &payload, app).map(Some);
+    let result = run(name, &payload, app);
+    if name == "audio-lock-select" {
+        // Mirrors the arrangement's clip selection: no status line, no song
+        // edit; the knobs re-read the locks they show.
+        match result {
+            Ok(_) => {
+                ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(error) => editor.handle_host_event(HostEvent::Error(format!("{name} failed: {error}"))),
+        }
+        return;
+    }
+    let result = result.map(Some);
     // Publish at once rather than on the next frame, so playback started
     // right after an edit already hears it.
     app.sync_audio_track_playback();

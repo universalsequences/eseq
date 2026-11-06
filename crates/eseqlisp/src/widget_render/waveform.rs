@@ -30,11 +30,14 @@ const WAVEFORM_BODY_TOP_INSET: f32 = 0.45;
 /// Height of the start/end bar strip `:marker-style :bar` draws between the
 /// ruler and the waveform, in cells.
 const MARKER_BAR_STRIP_HEIGHT: f32 = 0.7;
-/// Width of a bar's end handle, in cells: the grab zone for one marker.
-const MARKER_BAR_HANDLE_WIDTH: f32 = 0.6;
+/// Width of a bar's end handle, in cells: how far its triangle points into
+/// the bar, and the grab zone for one marker.
+const MARKER_BAR_HANDLE_WIDTH: f32 = 0.9;
 /// A marker line's width in cells: constant at any widget size.
 const MARKER_LINE_WIDTH: f32 = 0.125;
 const WAVEFORM_BODY_BOTTOM_INSET: f32 = 0.25;
+/// Pinch zoom: doublings of zoom per unit of trackpad magnification.
+const WAVEFORM_PINCH_ZOOM_RATE: f64 = 3.0;
 const MARKER_FLAG_HEIGHT_NORM: f32 = 0.1575;
 const MARKER_LINE_SLOP_PX: f32 = 2.0;
 /// A slice flag is the grab handle for a slice division, so it is drawn as a
@@ -477,6 +480,17 @@ Example: (waveform :buffer buf :view-start v.start :view-duration v.dur \
         view.begin_gesture(local_col, local_row, modifiers)
     }
 
+    fn cursor(&self, node: &LayoutNode, local_col: f32, local_row: f32) -> super::WidgetCursor {
+        let local_row = super::scroll::event_content_row(local_row);
+        let view = WaveformView::from_props(&node.props, node.rect);
+        match view.hit_test(local_col, local_row) {
+            Some(HitRegion::StartMarker | HitRegion::EndMarker | HitRegion::SliceMarker { .. }) => {
+                super::WidgetCursor::EwResize
+            }
+            _ => super::WidgetCursor::Default,
+        }
+    }
+
     fn mouse_event(
         &self,
         node: &LayoutNode,
@@ -623,9 +637,11 @@ fn push_marker_bar(
         height: strip.height - inset * 2.0,
         color: bar_color,
     }));
+    // Ableton's handles: a triangle at each end of the bar, pointing in.
+    let (top, bottom) = (strip.row + inset, strip.row + strip.height - inset);
     let handle = MARKER_BAR_HANDLE_WIDTH.min(((end_x - start_x) / 2.0).max(0.2));
-    for (time, x, marker, handle_x) in [
-        (start, start_x, "start", start_x),
+    for (time, x, marker, tip_x) in [
+        (start, start_x, "start", start_x + handle),
         (end, end_x, "end", end_x - handle),
     ] {
         if !view.time_visible(time) {
@@ -635,16 +651,13 @@ fn push_marker_bar(
             active
         } else {
             let mut darker = bar_color;
-            darker.r *= 0.6;
-            darker.g *= 0.6;
-            darker.b *= 0.6;
+            darker.r *= 0.35;
+            darker.g *= 0.35;
+            darker.b *= 0.35;
             darker
         };
-        primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
-            x: handle_x,
-            y: strip.row + inset,
-            width: handle,
-            height: strip.height - inset * 2.0,
+        primitives.push(GpuPrimitive::Triangle(GpuTrianglePrimitive {
+            points: [[x, top], [x, bottom], [tip_x, (top + bottom) / 2.0]],
             color,
         }));
         primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
@@ -1049,6 +1062,7 @@ impl WaveformView {
             zoom_max_duration: self.zoom_max_duration,
             // The waveform keeps the stock grid ladder.
             grid_density: 1.0,
+            fine_grid: false,
         }
     }
 
@@ -1656,9 +1670,11 @@ impl WaveformView {
         if delta.abs() < f64::EPSILON {
             return None;
         }
+        // 3x the timeline's pinch rate: a short gesture reaches sample-level
+        // detail, as Ableton's clip view does.
         self.zoom_action(
             self.time_at_col(local_col),
-            2.0_f64.powf(delta.clamp(-1.0, 1.0)),
+            2.0_f64.powf((delta * WAVEFORM_PINCH_ZOOM_RATE).clamp(-3.0, 3.0)),
         )
     }
 

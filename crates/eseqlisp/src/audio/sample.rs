@@ -126,6 +126,68 @@ impl SampleBuffer {
     pub fn levels(&self) -> &[WaveformMipLevel] {
         &self.peaks
     }
+
+    /// Register stereo-folded `stereo` (interleaved L/R) under `path`, plus
+    /// its two channel waveforms when the source had two or more channels
+    /// (a mono source folded to two equal channels draws as one).
+    pub fn register_stereo(path: &Path, sample_rate: u32, source_channels: u16, stereo: Vec<f32>) {
+        if source_channels >= 2 {
+            Self::register_channels(path, sample_rate, 2, &stereo);
+        }
+        Self::from_pcm(path.to_path_buf(), sample_rate, 2, stereo).register();
+    }
+
+    /// Drop the sample registered under `key` and its channel waveforms.
+    pub fn unregister(key: &str) {
+        let registry = SAMPLE_REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+        if let Ok(mut registry) = registry.lock() {
+            registry.remove(key);
+            for channel in 0..2 {
+                registry.remove(&channel_key(key, channel));
+            }
+        }
+    }
+
+    /// Register one waveform per channel of interleaved `samples` beside
+    /// the sample registered under `path`, at [`channel_key`], so a view can
+    /// draw a stereo file as two waveforms (Ableton's arrangement does).
+    /// Channel peaks start at eight frames per bucket, an eighth of the
+    /// mixed waveform's memory: only the deepest arrangement zoom (a few
+    /// frames per pixel) shows the difference, as slightly blocky peaks.
+    pub fn register_channels(path: &Path, sample_rate: u32, channels: u16, samples: &[f32]) {
+        let channels = usize::from(channels.max(1));
+        let frames = samples.len() / channels;
+        for channel in 0..channels {
+            let mono: Vec<f32> = samples.iter().skip(channel).step_by(channels).copied().collect();
+            let key = channel_key(&path.display().to_string(), channel);
+            Self {
+                id: key.clone(),
+                path: PathBuf::from(&key),
+                sample_rate,
+                channels: 1,
+                frames,
+                duration_seconds: frames as f64 / sample_rate.max(1) as f64,
+                peaks: build_peak_pyramid_from(&mono, CHANNEL_FIRST_BUCKET),
+            }
+            .register();
+        }
+    }
+}
+
+/// Registry key of drag preview `id`: a sample's waveform registered while
+/// it is dragged over a timeline, before it is dropped (the host decodes it;
+/// the timeline's `:drop-ghost-sample` names the id).
+pub fn drag_preview_key(id: u64) -> String {
+    format!("drag-preview#{id}")
+}
+
+/// Frames per bucket of a channel waveform's finest level.
+pub const CHANNEL_FIRST_BUCKET: usize = 8;
+
+/// Registry key of channel `channel` (0 = left) of the sample registered
+/// under `key`, when [`SampleBuffer::register_channels`] registered it.
+pub fn channel_key(key: &str, channel: usize) -> String {
+    format!("{key}#ch{channel}")
 }
 
 impl WaveformMipLevel {
@@ -168,6 +230,101 @@ pub fn decode_wav_bytes(bytes: &[u8]) -> Result<DecodedWav, String> {
         samples,
         warnings,
     })
+}
+
+/// A WAV file's shape, read from its headers alone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WavInfo {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub frames: usize,
+}
+
+impl WavInfo {
+    pub fn seconds(&self) -> f64 {
+        self.frames as f64 / self.sample_rate.max(1) as f64
+    }
+}
+
+/// [`WavInfo`] for the file at `path`, reading only its chunk headers and
+/// format (never the audio), under the same rules [`decode_wav_bytes`]
+/// decodes by: a data chunk running past the end counts what is there.
+pub fn wav_info(path: &Path) -> Result<WavInfo, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
+    let file_len = file.metadata().map_err(|err| err.to_string())?.len();
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header).map_err(|_| "not a RIFF/WAVE file".to_string())?;
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return Err("not a RIFF/WAVE file".to_string());
+    }
+    let (mut format, mut data_len) = (None, None);
+    let mut offset = 12u64;
+    let mut chunk = [0u8; 8];
+    while offset + 8 <= file_len && (format.is_none() || data_len.is_none()) {
+        file.seek(SeekFrom::Start(offset)).map_err(|err| err.to_string())?;
+        file.read_exact(&mut chunk).map_err(|err| err.to_string())?;
+        let size = read_u32_le(&chunk[4..8]) as u64;
+        match &chunk[0..4] {
+            b"fmt " => {
+                if size < 16 {
+                    return Err("wav fmt chunk is too small".to_string());
+                }
+                let mut fmt = vec![0u8; size.min(64) as usize];
+                file.read_exact(&mut fmt).map_err(|err| err.to_string())?;
+                format = Some(parse_wav_format(&fmt)?);
+            }
+            b"data" => data_len = Some(size.min(file_len - offset - 8)),
+            _ => {}
+        }
+        offset += 8 + size + (size % 2);
+    }
+    let format = format.ok_or_else(|| "wav file is missing fmt chunk".to_string())?;
+    let data_len = data_len.ok_or_else(|| "wav file is missing data chunk".to_string())?;
+    if format.channels == 0 || format.block_align == 0 {
+        return Err("wav format has invalid channel layout".to_string());
+    }
+    Ok(WavInfo {
+        sample_rate: format.sample_rate,
+        channels: format.channels,
+        frames: data_len as usize / format.block_align as usize,
+    })
+}
+
+/// Decode the WAV at `path` piece by piece (the same decoder as
+/// [`decode_wav_bytes`]), handing `progress` the interleaved samples
+/// decoded so far, with the file's [`WavInfo`], each time they have grown by
+/// half (and once at the end), so a long file is shown a handful of times.
+/// `keep_going` is asked between pieces of about 64k frames; `Ok(true)`
+/// when the whole file was decoded, `Ok(false)` when it was cancelled.
+pub fn decode_wav_progressively(
+    path: &Path,
+    keep_going: impl Fn() -> bool,
+    mut progress: impl FnMut(&[f32], WavInfo),
+) -> Result<bool, String> {
+    const PIECE_FRAMES: usize = 1 << 16;
+    let bytes = fs::read(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let (format, data, _warnings) = parse_wav_bytes(&bytes)?;
+    let stride = format.block_align as usize;
+    let frames = data.len() / stride;
+    let info = WavInfo { sample_rate: format.sample_rate, channels: format.channels, frames };
+    let channels = usize::from(format.channels);
+    let mut samples = Vec::with_capacity(frames * channels);
+    // The first look comes after a quarter second of audio.
+    let mut next_show = format.sample_rate as usize / 4;
+    for piece in data[..frames * stride].chunks(PIECE_FRAMES * stride) {
+        if !keep_going() {
+            return Ok(false);
+        }
+        samples.extend(decode_interleaved_samples(piece, format)?);
+        let decoded = samples.len() / channels;
+        if decoded >= next_show && decoded < frames {
+            progress(&samples, info);
+            next_show = decoded + decoded.max(format.sample_rate as usize) / 2;
+        }
+    }
+    progress(&samples, info);
+    Ok(true)
 }
 
 fn parse_wav_bytes(bytes: &[u8]) -> Result<(WavFormat, &[u8], Vec<String>), String> {
@@ -327,8 +484,14 @@ fn decoded_mono_samples(decoded: &DecodedWav) -> Vec<f32> {
 }
 
 fn build_peak_pyramid(samples: &[f32]) -> Vec<WaveformMipLevel> {
+    build_peak_pyramid_from(samples, 1)
+}
+
+/// [`build_peak_pyramid`] whose finest level holds `first` frames per
+/// bucket (a power of two).
+fn build_peak_pyramid_from(samples: &[f32], first: usize) -> Vec<WaveformMipLevel> {
     let mut levels = Vec::new();
-    let mut samples_per_bucket = 1usize;
+    let mut samples_per_bucket = first.max(1);
     let max_bucket = 4096usize.min(samples.len().max(1));
     while samples_per_bucket <= max_bucket {
         let mut buckets = Vec::new();

@@ -6,7 +6,7 @@ The mixer sits below the sequencer. The mixer button at the left of the transpor
 
 From left to right, the mixer shows:
 
-- the track strips, in track order, with each group drawn as a coloured container around its members;
+- the track strips, in the order the sequencer shows them, with each group drawn as a coloured container around its members;
 - the **Drop sounds here** zone, which creates new tracks;
 - the bus strips, with Main last.
 
@@ -154,6 +154,7 @@ A knob that changes on its own after a launch is following the pattern or the sc
 - Click a track's name badge, a group's badge, a pattern cell or a modulation cable, then press Backspace or Delete, to delete that track, group (with its members), pattern or cable. A deleted group and its tracks come back with Command-Z.
 - With a pattern cell selected, Command-D duplicates the pattern.
 - Right-click a strip and choose **Rename** to rename the track.
+- Drag a track's name badge onto another strip to move the track there, into or out of that strip's group; drag a group's badge onto a strip to move the whole group. See "Reordering tracks" in [Step sequencer](sequencer-tour).
 
 The mixer also accepts drops. Drop a sample, instrument or sound on a track strip to load it on that track, where the track's type allows it (see [Instruments](instruments)), and an audio or MIDI effect to append it to the track's chain. Drop a sample, instrument or sound on **Drop sounds here** to create a new track.
 

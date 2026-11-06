@@ -719,8 +719,12 @@ pub struct SequencerState {
     pub(super) publish_coalesce_depth: AtomicU64,
     pub(super) pending_coalesced_publish: AtomicBool,
     /// Command-thread macro values waiting to be folded into the next
-    /// immutable scheduler snapshot. The scheduler never reads this lock.
-    pub(super) live_macro_overrides: Mutex<HashMap<crate::macro_engine::MacroParamKey, f32>>,
+    /// immutable scheduler snapshot. The scheduler never reads this lock:
+    /// the live snapshot carries the same table (`macro_overrides`).
+    pub(super) live_macro_overrides: Mutex<Arc<HashMap<crate::macro_engine::MacroParamKey, f32>>>,
+    /// The recorded scene pushes about to play, for the scheduler
+    /// (`SequencerSnapshot::scene_push_schedule`).
+    pub(super) scene_push_schedule: Mutex<Option<Arc<crate::sequencer::ScenePushSchedule>>>,
     pub(super) rack_macro_runtime_values: Arc<RackMacroRuntimeValues>,
     pub(super) neural_visualization: Mutex<NeuralVisualizationSnapshot>,
     /// The next native neural network id to mint (`mint_neural_network_id`):
@@ -774,6 +778,17 @@ pub struct SequencerState {
     pub(super) active_note_trigger_ids: Vec<[AtomicU64; 128]>,
     pub(super) active_note_trigger_sequence: AtomicU64,
     pub(super) audio_rendered_sample: AtomicU64,
+    /// How far past `audio_rendered_sample` the scheduler thread schedules
+    /// (its lookahead, in samples; 0 until it starts).
+    pub(super) scheduler_lookahead_samples: AtomicU64,
+    /// The audio regions selected for locking and what the effect knobs
+    /// show for them (eseq-a921), published by `App`.
+    pub(super) audio_lock_view: Mutex<AudioLockView>,
+    /// Whether `audio_lock_view` holds any selection or lock, so every
+    /// other knob read skips its mutex.
+    pub(super) audio_locks_present: AtomicBool,
+    /// Every audio-track player slot, for the callback's region-lock pass.
+    pub(super) audio_player_slots: crate::audio_track::AudioSlotRegistry,
     /// When the block ending at `audio_rendered_sample` started, so the
     /// playhead can move between blocks (audio_clock.rs).
     pub(super) audio_clock: AudioClockStamp,
@@ -874,6 +889,11 @@ pub struct SequencerState {
     /// row mirror leaves the lane alone. Transient transport state; never
     /// serialized. Bit `t` = track `t` (`MAX_TRACKS <= 64`).
     pub(super) song_manual_latch: AtomicU64,
+    /// The audio tracks. They never latch: their only content is their
+    /// arrangement regions, so a scene launch has nothing to override there
+    /// (docs/audio-tracks-spec.md). Bit `t` = track `t`; kept current by
+    /// `App::sync_audio_track_playback`.
+    pub(super) audio_track_lanes: AtomicU64,
     /// Scene-scoped manual-override latch (takes spec 10): set by a manual
     /// SCENE launch during song playback/capture. While set, the song's
     /// SCENE-LEVEL authority is suspended too — the control-side row mirror

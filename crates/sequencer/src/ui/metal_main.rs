@@ -5,6 +5,7 @@ mod browser;
 mod capture;
 mod constants;
 mod custom_ui;
+mod drag_preview;
 mod editor_setup;
 mod host_commands;
 mod host_kinds;
