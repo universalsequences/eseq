@@ -766,6 +766,7 @@ use panel_kinds_seed::*;
             ("ui/themes/mac-osx-midnight-50.lisp", "Midnight 50"),
             ("ui/themes/phosphor.lisp", "Phosphor"),
             ("ui/themes/phosphor-blue.lisp", "Phosphor Blue"),
+            ("ui/themes/cathode-amber.lisp", "Cathode Amber"),
             ("ui/themes/aura.lisp", "Aura"),
         ] {
             let src = read_factory_source(path)
@@ -14858,6 +14859,14 @@ use panel_kinds_seed::*;
             "surface select-all must relinquish the mixer delete target");
         let entries = format!("{:?}", log(&mut editor));
         assert_eq!(entries.matches("clips").count(), 2, "{entries}");
+        // The selection's surface takes focus, so Backspace (whose region
+        // delete runs only in the active *arrangement*) acts on it next.
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor.runtime_mut().eval_str("(current-buffer-name)").unwrap(),
+            Some(Value::String("*arrangement*".into())),
+            "Cmd+A over a visible arrangement focuses it"
+        );
 
         // Active piano roll.
         editor
