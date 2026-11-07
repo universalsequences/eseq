@@ -30,7 +30,7 @@
 (module alez.jaki.surface)
 
 (import alez.jaki.core)
-(export jak register)
+(export jak register register-at)
 
 ;; `jak` expands on the authoring VM while its quoted body executes on the
 ;; scheduler VM. Channel widgets therefore have to become plain `(chan ...)`
@@ -114,6 +114,10 @@
 ;; builder can publish once and let the shipped read resolve the active
 ;; pattern's value at each scheduler boundary.
 (defmacro register (name res body)
+  `(alez.jaki.surface/register-at ,name ,res 0 ,body))
+
+;; `register` with an instance clock offset in units (eseq-jrrq)
+(defmacro register-at (name res offset body)
   `(def-sequencer ,name
      :resolution ,res
      ;; The shipped tick calls package functions; the scheduler VM imports
@@ -121,7 +125,7 @@
      :requires (alez.jaki.core)
      :tick (do
        (alez.jaki.core/init ,res)
-       (alez.jaki.core/run ,body))))
+       (alez.jaki.core/run-at ,offset ,body))))
 
 ;; A body of exactly one bare non-event symbol is never pattern data — it is
 ;; an expression body (typically a defscene slot): (jak "yo" :16 pat)
@@ -135,9 +139,13 @@
 
 ;; Quasiquote unquotes only resolve inside defmacro bodies here, so both
 ;; expansions stay in the macro; only the shape test is a helper.
-(defmacro jak (name res &rest body)
+(defmacro jak (name res &rest all)
+  ;; `:offset n` before the pattern: the instance clock offset in units
+  ;; (alez.jaki.core/step-clock-at, eseq-jrrq)
+  (let ((offset (if (= (nth all 0) :offset) (nth all 1) 0))
+        (body (if (= (nth all 0) :offset) (rest (rest all)) all)))
   (if (alez.jaki.surface/expression-body? body)
-      `(alez.jaki.surface/register ,name ,res ,(nth body 0))
+      `(alez.jaki.surface/register-at ,name ,res ,offset ,(nth body 0))
       (let ((walked (channel-walk-list body name 0)))
         (let ((decls (list 'quote (get walked :decls)))
               (bindings (list 'quote (get walked :bindings)))
@@ -153,6 +161,6 @@
                      :requires (alez.jaki.core)
                      :tick (do
                        (alez.jaki.core/init ,res)
-                       (alez.jaki.core/run ,forms)))
+                       (alez.jaki.core/run-at ,offset ,forms)))
                    false)
-               false)))))
+               false))))))

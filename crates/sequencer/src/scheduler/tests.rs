@@ -3019,8 +3019,8 @@
                     id: 0,
                     name: "jaki".to_string(),
                     resolution: crate::sequencer::Timebase::Sixteenth as u8,
-                    tick_source: "(alez.jaki.doc/tick-patterns self.figures self.rows \
-                                  self.row-count self.mode self.patterns)"
+                    tick_source: "(alez.jaki.doc/tick-patterns-at self.figures self.rows \
+                                  self.row-count self.mode self.offset self.patterns)"
                         .to_string(),
                     requires: vec!["alez.jaki.doc".to_string()],
                     graph: None,
@@ -3033,6 +3033,7 @@
                     ("rows".to_string(), literal("(list)")),
                     ("row-count".to_string(), literal("8")),
                     ("mode".to_string(), literal(":loop")),
+                    ("offset".to_string(), literal("0")),
                     ("patterns".to_string(), literal("(list)")),
                 ],
                 state_fields: Vec::new(),
@@ -3567,6 +3568,133 @@
         };
         assert_eq!(times(0), vec![0, 12_000, 24_000, 36_000, 48_000, 60_000, 72_000, 84_000]);
         assert_eq!(times(1), vec![0, 6_000, 24_000, 30_000, 48_000, 54_000, 72_000, 78_000]);
+    }
+
+    /// [`jaki_instance_observed`] with the instance clock offset (eseq-jrrq)
+    /// in sixteenths, as (track, sample time, transpose, velocity) tuples.
+    fn jaki_offset_triggers(
+        rows: &'static str,
+        figures: &'static str,
+        offset: i64,
+        horizon: u64,
+    ) -> Vec<(usize, u64, f32, f32)> {
+        jaki_instance_observed(None, rows, figures, horizon, move |state| {
+            let mut values = Runtime::new();
+            let value = values
+                .eval_str(&offset.to_string())
+                .expect("literal")
+                .expect("a value");
+            state
+                .write_current_scene_slot(
+                    lisp_host::instance_document_slot(5, "offset"),
+                    crate::process::ProcessLiteral::from_value(&value).expect("portable"),
+                )
+                .expect("offset");
+        })
+        .into_iter()
+        .map(|t| (t.track, t.sample_time, t.transpose, t.velocity))
+        .collect()
+    }
+
+    #[test]
+    fn a_jaki_clock_offset_translates_the_whole_stream_in_time() {
+        // eseq-jrrq: an offset plays the identical stream earlier, not a
+        // rotation inside the cycle. Per-cycle variation — (slow 2) on one
+        // hand, (every 3 (fast 2)), a cycled transpose — must line up hit for
+        // hit: offset -2 at time T is offset 0 at T + 2 sixteenths.
+        const ROWS: &str = r#"(list (dict :route 0 :mods (list "right" (list "slow" 2)))
+                                    (dict :route 1 :mods (list (list "every" 3 (list "fast" 2))))
+                                    (dict :route 2 :mods (list (list "note" (list 0 7 12)))))"#;
+        const FIGURES: &str = "(list (list :dot :dash :dot) (list :dot :dash :dot))";
+        const SIXTEENTH: u64 = 6_000;
+        const HORIZON: u64 = 192_000;
+        let plain = jaki_offset_triggers(ROWS, FIGURES, 0, HORIZON);
+        let early = jaki_offset_triggers(ROWS, FIGURES, -2, HORIZON);
+        let shift = 2 * SIXTEENTH;
+        let expected: Vec<_> = plain
+            .iter()
+            .filter(|(_, time, _, _)| *time >= shift)
+            .map(|(track, time, note, vel)| (*track, time - shift, *note, *vel))
+            .collect();
+        let compared: Vec<_> = early
+            .iter()
+            .filter(|(_, time, _, _)| *time < HORIZON - shift)
+            .copied()
+            .collect();
+        assert!(expected.len() > 20, "{plain:?}");
+        assert_eq!(compared, expected);
+        // A positive offset delays it; its pre-roll is silent.
+        let late = jaki_offset_triggers(ROWS, FIGURES, 2, HORIZON);
+        assert!(late.iter().all(|(_, time, _, _)| *time >= shift), "{late:?}");
+        let delayed: Vec<_> = plain
+            .iter()
+            .filter(|(_, time, _, _)| *time < HORIZON - shift)
+            .map(|(track, time, note, vel)| (*track, time + shift, *note, *vel))
+            .collect();
+        assert_eq!(late, delayed);
+    }
+
+    #[test]
+    fn a_jaki_clock_offset_keeps_seq_counters_on_their_hits() {
+        // eseq-jrrq, the reported case: (seq :hit …) notes and (seq :fig …)
+        // velocities are stateful counters. Offset -6 starts the stream six
+        // sixteenths in, so without the muted pre-roll each counter began on
+        // the wrong hit and the notes played rotated against the rhythm.
+        const ROWS: &str = r#"(list
+            (dict :route 0 :mods (list "left"
+                (list "note" (list "seq" ":hit" -9 -9 (list -12 -14) -10 -13))
+                (list "every" 2 "accent") (list "on" "dot" "stac") (list "slow" 2)))
+            (dict :route 1 :mods (list "right"
+                (list "note" (list "seq" ":hit" -6 -8 3 -1)) (list "shift" 2)
+                (list "vel*" (list "seq" ":fig" 0.5 0.15)) (list "slow" 4)))
+            (dict :route 2 :mods (list "right" (list "every-fig" 3 (list "vel*" 0.55))
+                (list "on" "dot" (list "note+" 4)) (list "slow" (list 1 2)))))"#;
+        const FIGURES: &str = "(list (list :dot :dash :dot) (list :dot :dash :dot))";
+        const HORIZON: u64 = 288_000;
+        let shift = 6 * 6_000;
+        let plain = jaki_offset_triggers(ROWS, FIGURES, 0, HORIZON);
+        let early = jaki_offset_triggers(ROWS, FIGURES, -6, HORIZON);
+        let expected: Vec<_> = plain
+            .iter()
+            .filter(|(_, time, _, _)| *time >= shift)
+            .map(|(track, time, note, vel)| (*track, time - shift, *note, *vel))
+            .collect();
+        let compared: Vec<_> = early
+            .iter()
+            .filter(|(_, time, _, _)| *time < HORIZON - shift)
+            .copied()
+            .collect();
+        assert!(expected.len() > 20, "{plain:?}");
+        assert_eq!(compared, expected);
+    }
+
+    #[test]
+    fn a_jaki_quant_snaps_on_the_transport_grid_under_an_offset() {
+        // eseq-jrrq: (quant :8) under offset -1 still lands on transport
+        // eighths, not on eighths of the shifted pattern.
+        let triggers = jaki_offset_triggers(
+            r#"(list (dict :route 0 :mods (list (list "quant" ":8"))))"#,
+            "(list (list :dot :dot :dot :dot))",
+            -1,
+            96_000,
+        );
+        assert!(!triggers.is_empty());
+        assert!(triggers.iter().all(|(_, time, _, _)| time % 12_000 == 0), "{triggers:?}");
+    }
+
+    #[test]
+    fn a_jaki_quant_snaps_on_the_transport_grid_across_odd_cycles() {
+        // `. -` is a 3-unit cycle: cycle starts drift off the quarter grid
+        // (0, 3, 6, 9 …). (quant :4) lands every hit on a transport quarter.
+        let triggers = jaki_offset_triggers(
+            r#"(list (dict :route 0 :mods (list (list "quant" ":4"))))"#,
+            "(list (list :dot :dash))",
+            0,
+            96_000,
+        );
+        let times: Vec<u64> = triggers.iter().map(|(_, time, _, _)| *time).collect();
+        assert!(!times.is_empty());
+        assert!(times.iter().all(|time| time % 24_000 == 0), "{times:?}");
     }
 
     #[test]

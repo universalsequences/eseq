@@ -51,7 +51,8 @@
         figure-options figure-option-labels zero-mods
         num-mods mod-arg-spec every-words split-targets
         figures-body modes mode-labels mode-of
-        pattern-list pattern-sounds? patterns-body new-pattern tick-patterns
+        pattern-list pattern-sounds? patterns-body new-pattern tick-patterns tick-patterns-at
+        offset-of
         chords-route chord-qualities chords-row-schema
         row-procs proc-word new-chain chain-trigger-items chain-with-trigger
         proc-trigger-schema proc-body-schema)
@@ -100,7 +101,7 @@
 (def zero-mods (list "left" "right" "accent" "rev" "stac" "ghost" "swap" "half"))
 ;; Words that take one number. Every one is resolved per cycle by jaki core,
 ;; so a list of numbers cycles: (fast (1 2)).
-(def num-mods (list "trunc" "rot" "shift" "fast" "slow" "gate" "vel" "note"
+(def num-mods (list "trunc" "rot" "shift" "fast" "slow" "fit" "gate" "vel" "note"
                     "vel*" "vel+" "note+"
                     "basevel" "dotdecay" "dashdecay" "minvel" "maxvel"))
 (def every-words zero-mods)
@@ -114,6 +115,10 @@
     "shift" (list -32 32 1 0 1)
     "fast"  (list 1 8 1 0 2)
     "slow"  (list 1 8 1 0 2)
+    ;; (fit n): squash or stretch each figure to exactly n units — `(. -)%4`
+    "fit"   (list 1 32 1 0 4)
+    ;; (align n :pad): pad up to a multiple of n units — `@16`
+    "align" (list 1 64 1 0 16)
     "gate"  (list 0 4 0.05 2 0.5)
     "vel"   (list 0 2 0.05 2 0.7)
     "note"  (list -48 48 1 0 12)
@@ -221,7 +226,17 @@
 ;; destination track (the slot's :dyn-context); V takes seqs like note's.
 (def plock-form (list "form" "plock" (list "fixed" (list "dyn" "param")) (value-schema "plock")))
 
-(def gated-word (append (list "or" (cons "word" every-words)) num-forms (list quant-form)))
+;; (align n :pad) — `@n`: round the cycle (on the row, its last figure; in
+;; (on (fig k) …) that figure) up to a multiple of n units; :pad fills with
+;; dots that thread hands and velocity, :rest with silence. Options follow:
+;; :fill PAT repeats PAT into the gap, :end PAT finishes it — (align 8 :end -),
+;; (align 8 :fill (. . -)), (align 8 :fill (. -) :end -). PAT is `.`, `-` or
+;; a list of them, which a non-fixed word slot already takes.
+(def align-form
+  (list "form" "align" (num-schema "align")
+        (list "rest" (list "word" ":pad" ":rest" ":fill" ":end" "-" "."))))
+
+(def gated-word (append (list "or" (cons "word" every-words)) num-forms (list quant-form align-form)))
 
 ;; (on SEL word) — the word applies only where the selector holds
 ;; (crates/sequencer/docs/jaki-sequencer-spec.md §7.1). A selector is a tag
@@ -249,6 +264,7 @@
                 (cons "word" (append zero-mods (list "rest"))))
           (filter (lambda (f) (not (= (nth f 1) "vel+"))) num-forms)
           (list quant-form
+                align-form
                 plock-form
                 (list "form" "every" (num-schema "every") gated-word))))
 
@@ -285,7 +301,7 @@
   (append
     (list "forms" (cons "word" zero-mods))
     num-forms
-    (list quant-form plock-form scale-form harmony-form)
+    (list quant-form align-form plock-form scale-form harmony-form)
     ;; declared harmony (docs/harmony-declaration-spec.md): (chord Q) plays
     ;; or (on a Chords row) declares quality Q; :declared plays the declared
     ;; chord; voice takes the nearest free chord tone
@@ -579,14 +595,23 @@
 ;; the host's "stopped".
 ;; `mode` is :loop, :retrig, :continue or :gate (docs/jaki-trig-modes-spec.md);
 ;; the mark follows the clock's position, and is 0 while the gate is shut.
+;; documents saved before the offset have none: 0
+(def offset-of (o) (if (number? o) (round o) 0))
+
 (def tick-patterns (figures rows row-count mode patterns)
+  (tick-patterns-at figures rows row-count mode 0 patterns))
+
+;; `offset`: the instance's clock offset in sixteenths (eseq-jrrq) — the whole
+;; stream plays that many units late, early when negative, with quant still
+;; on the bar grid (alez.jaki.core/step-clock-at)
+(def tick-patterns-at (figures rows row-count mode offset patterns)
   (do
     (alez.jaki.core/init :16)
-    (let ((playing (alez.jaki.core/step-clock (mode-of mode))))
+    (let ((playing (alez.jaki.core/step-clock-at (mode-of mode) (offset-of offset))))
       (do
         (gen-mark (if playing (+ (alez.jaki.core/play-pos) 1) 0))
         (let ((b (memo-body figures rows row-count patterns)))
-          (if (and b playing) (alez.jaki.core/play-routes b) 0))))))
+          (if (and b playing) (alez.jaki.core/play-offset-routes b) 0))))))
 
 ;; one pattern: the tick before patterns
 (def tick (figures rows row-count mode)
