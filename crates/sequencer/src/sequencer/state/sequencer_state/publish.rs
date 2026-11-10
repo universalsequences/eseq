@@ -134,7 +134,7 @@ impl SequencerState {
         let mut hits = self.roll_recorded_hits.lock().unwrap();
         // Backstop for a control thread that never drains (headless
         // schedulers): recording cannot be on there, so dropping is safe.
-        if hits.len() < 4096 {
+        if hits.len() < super::super::SCHEDULER_MAILBOX_CAP {
             hits.push(hit);
         }
     }

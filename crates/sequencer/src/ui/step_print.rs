@@ -2,14 +2,18 @@
 Live parameter printing (beads eseq-jc9 and eseq-prm).
 
 While transport and recording are active, touching an eligible parameter
-latches a [`PrintTarget`] and writes its value onto every triggered step the
-playhead passes. The hold ends on control release; transport/recording-off or
-a focused-track change also disarms it. Multiple held targets print together.
+latches a [`PrintTarget`]. Step targets print onto the triggered steps the
+scheduler plays while latched; device targets p-lock every step boundary the
+playhead passes, triggered or not. The hold ends on control release;
+transport/recording-off or a focused-track change also disarms it. Multiple
+held targets print together.
 
-Step targets write live `step_data`, use the engine-side override so the
-write is audible before snapshot republish, and push targeted step
-invalidations. Device targets write live p-lock storage, but the scheduler
-resolves every device p-lock family from its published snapshot (deep-copied
+Step targets use the engine-side override so the value is audible as it is
+played, and the scheduler logs every step it substitutes
+([`StepPrintHeard`](sequencer::sequencer::StepPrintHeard)). Those logged
+values — not the latch's position when the UI frame runs — are what land in
+live `step_data`, so the recorded pass reproduces exactly what was heard.
+Device targets write live p-lock storage, but the scheduler resolves every device p-lock family from its published snapshot (deep-copied
 at publish time), so instrument, effect, MIDI-FX, and rack targets are all
 coalesced into one copy-on-write scheduler-track publish per tick, and bus
 targets into one bus-runtime publish. Base values remain untouched
@@ -19,7 +23,7 @@ device-edit gesture history.
 */
 
 use super::*;
-use sequencer::sequencer::{DeviceParamPrintTarget, RollHitRecorded};
+use sequencer::sequencer::DeviceParamPrintTarget;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PrintTarget {
@@ -70,12 +74,12 @@ pub(crate) struct StepPrintState {
     track: usize,
     /// Latched (target, value) pairs — only touched params print.
     values: Vec<(PrintTarget, f32)>,
-    /// Playhead step printed last tick, so each boundary prints once and a
-    /// frame that skipped steps can catch up across the gap (wrap-aware).
+    /// Device targets only: playhead step reported last tick, so each
+    /// boundary prints once and a frame that skipped steps can catch up
+    /// across the gap (wrap-aware). Step targets print from the heard log.
     last_step: Option<usize>,
-    /// A latch/value change since the last tick: the step under the playhead
-    /// reprints even without a boundary crossing, so the touch itself lands
-    /// on the current step.
+    /// Device targets only: a latch/value change since the last tick
+    /// re-reports the step under the playhead without a boundary crossing.
     touch_dirty: bool,
     /// Tracks (bitmask) whose printed values are in live pattern state but
     /// not yet in the scheduler snapshot. Per-track so the flush can use
@@ -85,18 +89,22 @@ pub(crate) struct StepPrintState {
     dirty_unpublished_tracks: u64,
 }
 
-/// One frame's print result: which steps on which track took which params.
-/// `steps` holds every step boundary the playhead passed; `triggered` is the
-/// parallel active-trigger flag — step-param prints land only on triggered
-/// steps, device p-lock prints land on every passed step (an off-step device
+/// One frame's print result.
+///
+/// `heard` lists the step params written from the scheduler's heard log as
+/// (track, step, param): each is the value that step actually played with.
+///
+/// `steps`/`targets` are the device-param prints: every step boundary the
+/// playhead passed on `track`, and the held device targets to p-lock onto
+/// them. Device p-lock prints land on every passed step (an off-step device
 /// p-lock is track-level automation: it applies to all voices at that
 /// boundary and holds until the next p-lock or ON trigger).
 #[derive(Default)]
 pub(crate) struct PrintedSteps {
     pub(crate) track: usize,
     pub(crate) steps: Vec<usize>,
-    pub(crate) triggered: Vec<bool>,
     pub(crate) targets: Vec<(PrintTarget, f32)>,
+    pub(crate) heard: Vec<(usize, usize, StepParam)>,
 }
 
 /// The step params the *step* panel pickers can print, by their Lisp keyword.
@@ -117,6 +125,12 @@ pub(crate) fn print_step_param_from_keyword(name: &str) -> Option<StepParam> {
 }
 
 impl StepPrintState {
+    /// `track`'s printed values are in live pattern state but not yet in the
+    /// scheduler snapshot.
+    fn mark_dirty(&mut self, track: usize) {
+        self.dirty_unpublished_tracks |= 1u64 << track.min(sequencer::sequencer::MAX_TRACKS - 1);
+    }
+
     pub(crate) fn armed(&self) -> bool {
         !self.values.is_empty()
     }
@@ -261,22 +275,6 @@ impl StepPrintState {
                 .set(self.track, &rack_macro_entries);
         }
     }
-
-    /// Rolled hits recorded while print mode is armed take the latched
-    /// values at record time — only for touched params on the armed track.
-    pub(crate) fn override_roll_hit(&self, hit: &mut RollHitRecorded) {
-        if !self.armed() || hit.track != self.track {
-            return;
-        }
-        for (target, value) in &self.values {
-            match target {
-                PrintTarget::Step(StepParam::Transpose) => hit.transpose = *value,
-                PrintTarget::Step(StepParam::Velocity) => hit.velocity = *value,
-                PrintTarget::Step(StepParam::Duration) => hit.duration_steps = *value,
-                _ => {}
-            }
-        }
-    }
 }
 
 /// Divert already-resolved, already-clamped base-value edits into the live
@@ -309,19 +307,26 @@ pub(crate) fn try_latch_param_print(
     true
 }
 
-/// One frame of print mode: disarm when the (recording && playing && same
-/// focused track) gate fails, otherwise write the latched params onto every
-/// trigger step the playhead has passed since the previous frame (walking
-/// the wrap, so a loop boundary keeps printing). Pure state + pattern
-/// mutation; invalidations/publishing live in `tick_step_print`.
+/// One frame of print mode. First, write every step the scheduler logged as
+/// played with latched step params, with exactly the values it played (this
+/// also drains steps scheduled just before a release). Then disarm when the
+/// (recording && playing && same focused track) gate fails, otherwise report
+/// every step boundary the playhead has passed since the previous frame
+/// (walking the wrap, so a loop boundary keeps printing) for the held device
+/// targets. Pure state + pattern mutation; invalidations/publishing live in
+/// `tick_step_print`.
 pub(crate) fn print_pass(
     state: &SequencerState,
     print: &mut StepPrintState,
     focused_track: usize,
     recording: bool,
 ) -> PrintedSteps {
+    let mut printed = PrintedSteps {
+        heard: print_heard_steps(state, print, recording),
+        ..PrintedSteps::default()
+    };
     if !print.armed() {
-        return PrintedSteps::default();
+        return printed;
     }
     if !recording
         || !state.is_playing()
@@ -335,7 +340,7 @@ pub(crate) fn print_pass(
         state.step_print_override.clear();
         state.device_print_override.clear();
         state.rack_macro_print_override.clear();
-        return PrintedSteps::default();
+        return printed;
     }
     let track = print.track;
     let num_steps = state.pattern.track_params[track]
@@ -367,37 +372,56 @@ pub(crate) fn print_pass(
     }
     print.last_step = Some(playhead);
     print.touch_dirty = false;
-    let mut printed = Vec::new();
-    let mut triggered = Vec::new();
-    let mut wrote_step_params = false;
-    for step in boundary_steps {
-        // Printing never creates triggers. Step params write onto triggered
-        // steps only; device p-locks land on every passed step (off-step
-        // p-locks are track-level automation — see `PrintedSteps`).
-        let active = state.pattern.patterns[track].is_active(step);
-        if active {
-            for (target, value) in &print.values {
-                if let PrintTarget::Step(param) = target {
-                    state.set_step_param_no_publish(track, step, *param, *value);
-                    wrote_step_params = true;
-                }
-            }
+    // Step params never print from the boundary walk: the heard log above
+    // carries them with the values the scheduler actually played.
+    if boundary_steps.is_empty() {
+        return printed;
+    }
+    let device_targets = print
+        .values
+        .iter()
+        .filter(|(target, _)| !matches!(target, PrintTarget::Step(_)))
+        .copied()
+        .collect::<Vec<_>>();
+    if device_targets.is_empty() {
+        return printed;
+    }
+    printed.track = track;
+    printed.steps = boundary_steps;
+    printed.targets = device_targets;
+    printed
+}
+
+/// Write the scheduler's heard log into live pattern state: each entry is a
+/// step that played with latched step params, carrying the exact values the
+/// scheduler substituted. Printing never creates triggers, so a step whose
+/// trigger was removed meanwhile is skipped. Outside play+record the entries
+/// are dropped: the record take that would own them has already closed (and
+/// before this log existed, a closing gate never wrote either).
+fn print_heard_steps(
+    state: &SequencerState,
+    print: &mut StepPrintState,
+    recording: bool,
+) -> Vec<(usize, usize, StepParam)> {
+    let heard = state.step_print_override.drain_heard();
+    if heard.is_empty() || !recording || !state.is_playing() {
+        return Vec::new();
+    }
+    let mut writes = Vec::new();
+    for entry in heard {
+        if entry.track >= state.pattern.patterns.len()
+            || entry.step >= sequencer::sequencer::MAX_STEPS
+            || !state.pattern.patterns[entry.track].is_active(entry.step)
+        {
+            continue;
         }
-        printed.push(step);
-        triggered.push(active);
+        for (param, value) in entry.values.iter() {
+            state.set_step_param_no_publish(entry.track, entry.step, param, value);
+            writes.push((entry.track, entry.step, param));
+        }
+        print.mark_dirty(entry.track);
     }
-    if printed.is_empty() {
-        return PrintedSteps::default();
-    }
-    if wrote_step_params {
-        print.dirty_unpublished_tracks |= 1u64 << track.min(sequencer::sequencer::MAX_TRACKS - 1);
-    }
-    PrintedSteps {
-        track,
-        steps: printed,
-        triggered,
-        targets: print.values.clone(),
-    }
+    writes
 }
 
 /// What one `tick_step_print` frame did, for the reactive tick to act on.
@@ -410,12 +434,17 @@ pub(crate) struct StepPrintTick {
 /// Per-frame drive, mirroring `tick_roll_record`: run the print pass, push
 /// targeted step invalidations for what landed (no `ui_epoch` bump — see the
 /// `set-step-param-history` contract), and republish the scheduler snapshot
-/// so the printed values are audible on the same pass's later steps. The
-/// publish defers while a roll hold has unpublished pattern writes; the
-/// roll's own release publish carries the printed values along.
+/// so the written values persist once the latch (and its engine override)
+/// ends. Runs while disarmed too when the heard log has entries, so steps
+/// scheduled just before a release still print. The publish defers while a
+/// roll hold has unpublished pattern writes; the roll's own release publish
+/// carries the printed values along.
 pub(crate) fn tick_step_print(app: &mut app::App, shared: &SharedHandles) -> StepPrintTick {
     let mut print = shared.step_print.lock().unwrap();
-    if !print.armed() && print.dirty_unpublished_tracks == 0 {
+    if !print.armed()
+        && print.dirty_unpublished_tracks == 0
+        && !shared.state.step_print_override.has_heard()
+    {
         return StepPrintTick::default();
     }
     let recording = shared.recording.load(Ordering::Relaxed);
@@ -438,34 +467,29 @@ pub(crate) fn tick_step_print(app: &mut app::App, shared: &SharedHandles) -> Ste
         remaining &= remaining - 1;
         shared.state.publish_scheduler_track(track);
     }
-    let mut wrote = false;
+    let mut wrote = !printed.heard.is_empty();
+    for &(track, step, param) in &printed.heard {
+        shared.ui_invalidations.push(UiInvalidation::Step {
+            track,
+            step,
+            change: StepInvalidation::Param(param.into()),
+        });
+        if param == StepParam::Duration {
+            shared.ui_invalidations.push(UiInvalidation::Step {
+                track,
+                step,
+                change: StepInvalidation::DurationSpan,
+            });
+        }
+    }
     let mut track_snapshot_dirty = false;
     let mut bus_runtime_dirty = false;
     let mut plock_presence_steps = Vec::new();
-    for (step, step_triggered) in printed.steps.iter().zip(printed.triggered.iter()) {
+    for step in &printed.steps {
         let mut wrote_plock = false;
         for (target, value) in &printed.targets {
             match target {
-                PrintTarget::Step(param) => {
-                    // Step params only land on triggered steps (print_pass
-                    // skipped the write on off steps).
-                    if !*step_triggered {
-                        continue;
-                    }
-                    wrote = true;
-                    shared.ui_invalidations.push(UiInvalidation::Step {
-                        track: printed.track,
-                        step: *step,
-                        change: StepInvalidation::Param((*param).into()),
-                    });
-                    if *param == StepParam::Duration {
-                        shared.ui_invalidations.push(UiInvalidation::Step {
-                            track: printed.track,
-                            step: *step,
-                            change: StepInvalidation::DurationSpan,
-                        });
-                    }
-                }
+                PrintTarget::Step(_) => unreachable!("print_pass filters step targets out"),
                 PrintTarget::Instrument { param_idx } => {
                     let target_wrote =
                         app.print_instrument_plock(printed.track, *step, *param_idx, *value);
@@ -580,8 +604,7 @@ pub(crate) fn tick_step_print(app: &mut app::App, shared: &SharedHandles) -> Ste
             // publishing here would make its written steps audible early. Mark
             // the track dirty and let a later tick (or the roll's own release
             // publish) carry the printed p-locks along.
-            shared.step_print.lock().unwrap().dirty_unpublished_tracks |=
-                1u64 << printed.track.min(sequencer::sequencer::MAX_TRACKS - 1);
+            shared.step_print.lock().unwrap().mark_dirty(printed.track);
         } else {
             shared.state.publish_scheduler_track(printed.track);
         }
@@ -609,9 +632,7 @@ pub(crate) fn tick_step_print(app: &mut app::App, shared: &SharedHandles) -> Ste
 #[cfg(test)]
 mod step_print_tests {
     use super::{print_pass, PrintTarget, StepPrintState};
-    use sequencer::sequencer::{
-        default_empty_effect_chain, RollHitRecorded, SequencerState, StepParam,
-    };
+    use sequencer::sequencer::{default_empty_effect_chain, SequencerState, StepParam};
     use std::sync::atomic::Ordering;
 
     fn playing_state() -> SequencerState {
@@ -624,14 +645,28 @@ mod step_print_tests {
         state.transport.track_playheads[0].store(step as u32, Ordering::Relaxed);
     }
 
+    /// Stand-in for the scheduler resolving `step` on `track`: it plays the
+    /// engine override as it stands now and logs exactly that.
+    fn schedule(state: &SequencerState, track: usize, step: usize) {
+        let played = state.step_print_override.values_for_track(track);
+        state.step_print_override.record_heard(track, step, played);
+    }
+
+    /// Latch + mirror into the engine override, as the touch path does.
+    fn touch(state: &SequencerState, print: &mut StepPrintState, param: StepParam, value: f32) {
+        print.latch(0, param, value);
+        print.publish_engine_override(state);
+    }
+
     #[test]
     fn playback_and_record_alone_change_nothing_until_a_param_is_touched() {
         let state = playing_state();
         state.pattern.patterns[0].toggle_step(0);
         let before = state.pattern.step_data[0].get(0, StepParam::Velocity);
         let mut print = StepPrintState::default();
+        schedule(&state, 0, 0);
         let printed = print_pass(&state, &mut print, 0, true);
-        assert!(printed.steps.is_empty());
+        assert!(printed.heard.is_empty() && printed.steps.is_empty());
         assert_eq!(
             state.pattern.step_data[0].get(0, StepParam::Velocity),
             before
@@ -639,21 +674,57 @@ mod step_print_tests {
     }
 
     #[test]
-    fn touch_prints_the_step_under_the_playhead_and_only_the_touched_param() {
+    fn a_heard_step_prints_only_the_touched_param() {
         let state = playing_state();
         state.pattern.patterns[0].toggle_step(4);
         set_playhead(&state, 4);
         let duration_before = state.pattern.step_data[0].get(4, StepParam::Duration);
         let mut print = StepPrintState::default();
-        print.latch(0, StepParam::Velocity, 0.25);
+        touch(&state, &mut print, StepParam::Velocity, 0.25);
+        // Touching alone writes nothing: the step under the playhead was
+        // already scheduled (and heard) with its stored value.
+        assert!(print_pass(&state, &mut print, 0, true).heard.is_empty());
+        schedule(&state, 0, 4);
         let printed = print_pass(&state, &mut print, 0, true);
-        assert_eq!(printed.steps, vec![4]);
+        assert_eq!(printed.heard, vec![(0, 4, StepParam::Velocity)]);
+        assert_eq!(printed.steps, Vec::<usize>::new(), "no device targets held");
         assert_eq!(state.pattern.step_data[0].get(4, StepParam::Velocity), 0.25);
-        // Untouched params on the printed step are left alone.
         assert_eq!(
             state.pattern.step_data[0].get(4, StepParam::Duration),
             duration_before
         );
+    }
+
+    /// The reported bug: the picker keeps moving after a step was scheduled.
+    /// The recording must keep the value the step PLAYED with, not wherever
+    /// the picker sat when the UI frame stamped it.
+    #[test]
+    fn a_step_records_the_value_it_played_with_not_the_pickers_later_position() {
+        let state = playing_state();
+        state.pattern.patterns[0].toggle_step(2);
+        state.pattern.patterns[0].toggle_step(3);
+        set_playhead(&state, 2);
+        let mut print = StepPrintState::default();
+        touch(&state, &mut print, StepParam::Transpose, -20.0);
+        schedule(&state, 0, 2);
+        // Drag continues within step 2 before the UI frame runs.
+        touch(&state, &mut print, StepParam::Transpose, -26.0);
+        print_pass(&state, &mut print, 0, true);
+        assert_eq!(
+            state.pattern.step_data[0].get(2, StepParam::Transpose),
+            -20.0,
+            "step 2 played at -20 and must record -20"
+        );
+        // Still on step 2 with a newer value: nothing rewrites it.
+        touch(&state, &mut print, StepParam::Transpose, -30.0);
+        assert!(print_pass(&state, &mut print, 0, true).heard.is_empty());
+        assert_eq!(state.pattern.step_data[0].get(2, StepParam::Transpose), -20.0);
+        // The next step plays (and records) the value current at ITS
+        // schedule time.
+        schedule(&state, 0, 3);
+        set_playhead(&state, 3);
+        print_pass(&state, &mut print, 0, true);
+        assert_eq!(state.pattern.step_data[0].get(3, StepParam::Transpose), -30.0);
     }
 
     #[test]
@@ -667,67 +738,57 @@ mod step_print_tests {
         set_playhead(&state, step);
 
         let mut print = StepPrintState::default();
-        print.latch(0, StepParam::Transpose, 12.0);
-        print.latch(0, StepParam::Duration, 3.5);
-        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![step]);
+        touch(&state, &mut print, StepParam::Transpose, 12.0);
+        touch(&state, &mut print, StepParam::Duration, 3.5);
+        schedule(&state, 0, step);
+        assert_eq!(print_pass(&state, &mut print, 0, true).heard.len(), 2);
 
         assert_eq!(state.pattern.chord_data[0].get(step, 0), 12.0);
         assert_eq!(state.pattern.chord_data[0].get_duration(step, 0), 3.5);
     }
 
     #[test]
-    fn latch_keeps_printing_across_the_loop_wrap_and_skips_trigger_less_steps() {
+    fn heard_entries_never_create_triggers() {
         let state = playing_state();
-        // Triggers on 14 and 1; 15 and 0 stay empty across the wrap.
-        state.pattern.patterns[0].toggle_step(14);
-        state.pattern.patterns[0].toggle_step(1);
-        set_playhead(&state, 13);
+        set_playhead(&state, 5);
         let mut print = StepPrintState::default();
-        print.latch(0, StepParam::Duration, 3.0);
-        let printed = print_pass(&state, &mut print, 0, true);
-        // Every passed step is reported (device p-lock prints land on off
-        // steps too), but step 13 is not triggered, so step params skip it.
-        assert_eq!(printed.steps, vec![13]);
-        assert_eq!(printed.triggered, vec![false]);
-        let default_duration = StepParam::Duration.default_value();
+        touch(&state, &mut print, StepParam::Duration, 3.0);
+        // The trigger was removed between scheduling and the UI frame.
+        schedule(&state, 0, 5);
+        assert!(print_pass(&state, &mut print, 0, true).heard.is_empty());
+        assert!(!state.pattern.patterns[0].is_active(5));
         assert_eq!(
-            state.pattern.step_data[0].get(13, StepParam::Duration),
-            default_duration,
-            "step 13 has no trigger, so the step param stays default",
-        );
-        // Frame gap: playhead moved 13 -> 1 across the wrap; the latch (not
-        // a fresh touch) prints every passed trigger step.
-        set_playhead(&state, 1);
-        let printed = print_pass(&state, &mut print, 0, true);
-        assert_eq!(printed.steps, vec![14, 15, 0, 1]);
-        assert_eq!(printed.triggered, vec![true, false, false, true]);
-        assert_eq!(state.pattern.step_data[0].get(14, StepParam::Duration), 3.0);
-        assert_eq!(state.pattern.step_data[0].get(1, StepParam::Duration), 3.0);
-        // Trigger-less steps stay at their defaults.
-        assert_eq!(
-            state.pattern.step_data[0].get(15, StepParam::Duration),
-            default_duration
-        );
-        assert_eq!(
-            state.pattern.step_data[0].get(0, StepParam::Duration),
-            default_duration
+            state.pattern.step_data[0].get(5, StepParam::Duration),
+            StepParam::Duration.default_value()
         );
     }
 
     #[test]
-    fn value_moves_within_one_step_reprint_it_but_a_still_latch_does_not_rewrite() {
+    fn device_targets_walk_every_passed_boundary_across_the_wrap() {
         let state = playing_state();
-        state.pattern.patterns[0].toggle_step(2);
-        set_playhead(&state, 2);
+        state.pattern.patterns[0].toggle_step(14);
+        state.pattern.patterns[0].toggle_step(1);
+        set_playhead(&state, 13);
         let mut print = StepPrintState::default();
-        print.latch(0, StepParam::Velocity, 0.5);
-        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![2]);
-        // Playhead still on 2, no new touch: nothing to write.
+        let target = PrintTarget::Instrument { param_idx: 2 };
+        print.latch(0, target, 0.5);
+        print.latch(0, StepParam::Duration, 3.0);
+        let printed = print_pass(&state, &mut print, 0, true);
+        assert_eq!(printed.steps, vec![13]);
+        assert_eq!(
+            printed.targets,
+            vec![(target, 0.5)],
+            "step targets never ride the boundary walk"
+        );
+        // Frame gap across the wrap: every passed step, triggered or not
+        // (off-step device p-locks are track-level automation).
+        set_playhead(&state, 1);
+        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![14, 15, 0, 1]);
+        // A still latch on the same step does not re-report it; a moved
+        // value reprints the current step.
         assert!(print_pass(&state, &mut print, 0, true).steps.is_empty());
-        // The picker moved: the same step takes the new value.
-        print.latch(0, StepParam::Velocity, 0.75);
-        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![2]);
-        assert_eq!(state.pattern.step_data[0].get(2, StepParam::Velocity), 0.75);
+        print.latch(0, target, 0.75);
+        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![1]);
     }
 
     #[test]
@@ -743,7 +804,7 @@ mod step_print_tests {
             let mut print = StepPrintState::default();
             print.latch(0, StepParam::Velocity, 0.1);
             let printed = print_pass(&state, &mut print, focused_track, recording);
-            assert!(printed.steps.is_empty());
+            assert!(printed.steps.is_empty() && printed.heard.is_empty());
             assert!(
                 !print.armed(),
                 "gate ({playing}, {recording}, track {focused_track}) must disarm"
@@ -752,37 +813,23 @@ mod step_print_tests {
                 state.pattern.step_data[0].get(0, StepParam::Velocity),
                 before
             );
-            // Disarmed: the next pass with the gate restored stays silent
-            // until the next touch (re-arm on touch, not on transport).
             state.transport.playing.store(true, Ordering::Relaxed);
             assert!(print_pass(&state, &mut print, 0, true).steps.is_empty());
         }
     }
 
     #[test]
-    fn rolled_hits_take_the_latched_values_for_touched_params_only() {
+    fn heard_steps_outside_play_and_record_are_dropped() {
+        let state = playing_state();
+        state.pattern.patterns[0].toggle_step(0);
+        let before = state.pattern.step_data[0].get(0, StepParam::Velocity);
         let mut print = StepPrintState::default();
-        print.latch(0, StepParam::Duration, 2.5);
-        print.latch(0, StepParam::Velocity, 0.6);
-        let mut hit = RollHitRecorded {
-            track: 0,
-            step: 3,
-            delay: 0.0,
-            transpose: 7.0,
-            velocity: 1.0,
-            duration_steps: 0.25,
-            beat: 1.5,
-        };
-        print.override_roll_hit(&mut hit);
-        assert_eq!(hit.duration_steps, 2.5);
-        assert_eq!(hit.velocity, 0.6);
-        // Transpose untouched: the rolled key's pitch survives.
-        assert_eq!(hit.transpose, 7.0);
-        // Hits on other tracks are never overridden.
-        let mut other = RollHitRecorded { track: 1, ..hit };
-        let velocity_before = other.velocity;
-        print.override_roll_hit(&mut other);
-        assert_eq!(other.velocity, velocity_before);
+        touch(&state, &mut print, StepParam::Velocity, 0.1);
+        schedule(&state, 0, 0);
+        // Record went off: the take that would own the write has closed.
+        assert!(print_pass(&state, &mut print, 0, false).heard.is_empty());
+        assert!(!state.step_print_override.has_heard(), "the log is drained");
+        assert_eq!(state.pattern.step_data[0].get(0, StepParam::Velocity), before);
     }
 
     #[test]
@@ -862,18 +909,17 @@ mod step_print_tests {
     }
 
     /// Retrig / Rate are the roll knobs: a drag while play+record must both
-    /// stamp the passing steps AND reach the engine override, or the roll is
-    /// inaudible until the loop wraps (docs/step-retrig-spec.md).
+    /// reach the engine override (heard now) and print what was heard
+    /// (docs/step-retrig-spec.md).
     #[test]
-    fn retrig_and_rate_print_onto_passing_steps_and_pre_echo_through_the_engine() {
+    fn retrig_and_rate_print_what_the_engine_played() {
         let state = playing_state();
         state.pattern.patterns[0].toggle_step(0);
         state.pattern.patterns[0].toggle_step(1);
         set_playhead(&state, 0);
         let mut print = StepPrintState::default();
-        print.latch(0, StepParam::Retrig, 3.0);
-        print.latch(0, StepParam::RetrigRate, 12.0);
-        print.publish_engine_override(&state);
+        touch(&state, &mut print, StepParam::Retrig, 3.0);
+        touch(&state, &mut print, StepParam::RetrigRate, 12.0);
 
         let overrides = state.step_print_override.values_for_track(0);
         assert_eq!(
@@ -885,26 +931,18 @@ mod step_print_tests {
             "the held roll knobs must pre-echo through the scheduler override"
         );
 
-        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![0]);
+        schedule(&state, 0, 0);
+        print_pass(&state, &mut print, 0, true);
         assert_eq!(state.pattern.step_data[0].get(0, StepParam::Retrig), 3.0);
-        assert_eq!(
-            state.pattern.step_data[0].get(0, StepParam::RetrigRate),
-            12.0
-        );
+        assert_eq!(state.pattern.step_data[0].get(0, StepParam::RetrigRate), 12.0);
 
         // Rate's mouse-up leaves the retrig count printing on its own.
-        assert!(
-            !print.unlatch(StepParam::RetrigRate),
-            "retrig is still held"
-        );
+        assert!(!print.unlatch(StepParam::RetrigRate), "retrig is still held");
         print.publish_engine_override(&state);
-        let overrides = state.step_print_override.values_for_track(0);
-        assert_eq!(overrides.get(StepParam::Retrig), Some(3.0));
-        assert_eq!(overrides.get(StepParam::RetrigRate), None);
-
         let rate_before = state.pattern.step_data[0].get(1, StepParam::RetrigRate);
+        schedule(&state, 0, 1);
         set_playhead(&state, 1);
-        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![1]);
+        print_pass(&state, &mut print, 0, true);
         assert_eq!(state.pattern.step_data[0].get(1, StepParam::Retrig), 3.0);
         assert_eq!(
             state.pattern.step_data[0].get(1, StepParam::RetrigRate),
@@ -914,15 +952,14 @@ mod step_print_tests {
     }
 
     #[test]
-    fn release_unlatches_only_that_param_and_the_last_release_disarms() {
+    fn release_unlatches_one_param_and_already_heard_steps_still_print() {
         let state = playing_state();
         state.pattern.patterns[0].toggle_step(0);
         state.pattern.patterns[0].toggle_step(1);
         set_playhead(&state, 0);
         let mut print = StepPrintState::default();
-        print.latch(0, StepParam::Velocity, 0.25);
-        print.latch(0, StepParam::Duration, 3.0);
-        print.publish_engine_override(&state);
+        touch(&state, &mut print, StepParam::Velocity, 0.25);
+        touch(&state, &mut print, StepParam::Duration, 3.0);
         let overrides = state.step_print_override.values_for_track(0);
         assert_eq!(
             (
@@ -933,26 +970,13 @@ mod step_print_tests {
             (Some(0.25), Some(3.0), None),
             "both held params reach the engine override"
         );
-        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![0]);
 
-        // Velocity's mouse-up: only duration keeps printing (and only
-        // duration stays in the engine override).
-        assert!(
-            !print.unlatch(StepParam::Velocity),
-            "duration is still held"
-        );
+        // Velocity's mouse-up: only duration stays in the engine override.
+        assert!(!print.unlatch(StepParam::Velocity), "duration is still held");
         print.publish_engine_override(&state);
-        let overrides = state.step_print_override.values_for_track(0);
-        assert_eq!(
-            (
-                overrides.get(StepParam::Velocity),
-                overrides.get(StepParam::Duration),
-            ),
-            (None, Some(3.0))
-        );
         let velocity_before = state.pattern.step_data[0].get(1, StepParam::Velocity);
-        set_playhead(&state, 1);
-        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![1]);
+        schedule(&state, 0, 1);
+        print_pass(&state, &mut print, 0, true);
         assert_eq!(state.pattern.step_data[0].get(1, StepParam::Duration), 3.0);
         assert_eq!(
             state.pattern.step_data[0].get(1, StepParam::Velocity),
@@ -960,31 +984,30 @@ mod step_print_tests {
             "a released param must stop printing immediately"
         );
 
-        // The last held param's release ends print mode entirely.
+        // A step scheduled inside the lookahead just before the last release
+        // was heard with the latch, so it still prints after disarm.
+        state.pattern.step_data[0].set(0, StepParam::Duration, 1.0);
+        schedule(&state, 0, 0);
         assert!(print.unlatch(StepParam::Duration));
         assert!(!print.armed());
         print.publish_engine_override(&state);
         assert!(state.step_print_override.values_for_track(0).is_empty());
+        print_pass(&state, &mut print, 0, true);
+        assert_eq!(state.pattern.step_data[0].get(0, StepParam::Duration), 3.0);
     }
 
     #[test]
     fn touching_a_param_on_another_track_restarts_the_latch_there() {
+        let state = SequencerState::new(2, vec![default_empty_effect_chain(), default_empty_effect_chain()]);
         let mut print = StepPrintState::default();
         print.latch(0, StepParam::Velocity, 0.5);
         print.latch(1, StepParam::Duration, 2.0);
-        let mut hit = RollHitRecorded {
-            track: 1,
-            step: 0,
-            delay: 0.0,
-            transpose: 0.0,
-            velocity: 1.0,
-            duration_steps: 0.25,
-            beat: 0.0,
-        };
-        print.override_roll_hit(&mut hit);
-        assert_eq!(hit.duration_steps, 2.0);
+        print.publish_engine_override(&state);
+        assert!(state.step_print_override.values_for_track(0).is_empty());
+        let overrides = state.step_print_override.values_for_track(1);
+        assert_eq!(overrides.get(StepParam::Duration), Some(2.0));
         // The old track's velocity latch did not carry over.
-        assert_eq!(hit.velocity, 1.0);
+        assert_eq!(overrides.get(StepParam::Velocity), None);
     }
 
     /// Every picker in the *step* panel must be printable through both the

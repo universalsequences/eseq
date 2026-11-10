@@ -527,23 +527,21 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
     // pattern. The latch is in PATTERN-step units while this event's
     // samples_per_step is the roll grid, so the duration converts by
     // step_dur/grid. Transpose deliberately stays default here — the rolled
-    // key's pitch is the pass-through invariant above; the recorded
-    // transpose override is applied on the control thread instead.
-    {
-        let overrides = state.step_print_override.values_for_track(track);
-        if let Some(value) = overrides.get(StepParam::Velocity) {
-            resolved.velocity = value;
-        }
-        if let Some(value) = overrides.get(StepParam::Retrig) {
-            resolved.retrig = value;
-        }
-        if let Some(value) = overrides.get(StepParam::RetrigRate) {
-            resolved.retrig_rate = value;
-        }
-        if let Some(value) = overrides.get(StepParam::Duration) {
-            if grid_beats > 0.0 {
-                resolved.duration = value * (step_dur_beats / grid_beats) as f32;
-            }
+    // key's pitch is the pass-through invariant above; a latched transpose
+    // is only written into the record feedback below (recorded, not played).
+    let overrides = state.step_print_override.values_for_track(track);
+    if let Some(value) = overrides.get(StepParam::Velocity) {
+        resolved.velocity = value;
+    }
+    if let Some(value) = overrides.get(StepParam::Retrig) {
+        resolved.retrig = value;
+    }
+    if let Some(value) = overrides.get(StepParam::RetrigRate) {
+        resolved.retrig_rate = value;
+    }
+    if let Some(value) = overrides.get(StepParam::Duration) {
+        if grid_beats > 0.0 {
+            resolved.duration = value * (step_dur_beats / grid_beats) as f32;
         }
     }
     let chord = chord_data_from_parts(notes, &[], &[], resolved.duration, resolved.transpose);
@@ -585,13 +583,20 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
     ) {
         return false;
     }
-    let duration_steps = (grid_beats / step_dur_beats) as f32;
+    // The record feedback carries the latch as it stood when this hit was
+    // scheduled (what was heard), not wherever the picker is by the time the
+    // control thread drains it. Transpose is recorded from the latch but not
+    // played (pass-through invariant above), matching the stamped step.
+    let duration_steps = overrides
+        .get(StepParam::Duration)
+        .unwrap_or((grid_beats / step_dur_beats) as f32);
+    let latched_transpose = overrides.get(StepParam::Transpose);
     for transpose in notes {
         state.push_roll_recorded_hit(crate::sequencer::RollHitRecorded {
             track,
             step,
             delay,
-            transpose: *transpose,
+            transpose: latched_transpose.unwrap_or(*transpose),
             velocity: recorded_velocity,
             duration_steps,
             beat: boundary_beats,

@@ -422,8 +422,8 @@ pub(super) fn handle(
         "print-step-param" => {
             // Live step-param printing (bead eseq-jc9): while playing with
             // record on, a *step*-buffer param touch latches into print mode;
-            // the reactive tick writes the latched value onto passing trigger
-            // steps. No cool-off / auto-follow override here — the performer
+            // the reactive tick prints it onto the steps the scheduler plays
+            // while latched (heard log). No cool-off / auto-follow override here — the performer
             // is watching the playhead, so follow must stay alive.
             if !state.is_playing() || !ctx.shared.recording.load(Ordering::Relaxed) {
                 // The lisp-side gate raced off between the touch and this

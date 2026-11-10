@@ -307,7 +307,7 @@ pub(crate) struct SharedHandles {
     pub(crate) roll_record: Arc<Mutex<RollRecordBuffer>>,
     /// Live step-param printing latch (bead eseq-jc9): *step* buffer param
     /// touches while playing+recording arm it; the reactive tick prints the
-    /// latched values onto passing trigger steps.
+    /// values the scheduler played on each latched step (heard log).
     pub(crate) step_print: Arc<Mutex<StepPrintState>>,
     pub(crate) keyboard_octave: Arc<std::sync::atomic::AtomicI32>,
     pub(crate) sample_browser: Rc<RefCell<DebouncedSampleBrowser>>,

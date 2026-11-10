@@ -2297,6 +2297,20 @@
         assert!((resolved.duration - 3.0).abs() < 1e-6, "latched duration plays");
         assert_eq!(resolved.transpose, 5.0, "untouched transpose keeps the step value");
 
+        // The scheduler logs exactly what it played, for the control thread
+        // to print — not whatever the latch holds by the time it drains.
+        state
+            .step_print_override
+            .set(0, &[(StepParam::Velocity, 0.9), (StepParam::Duration, 1.0)]);
+        let heard = state.step_print_override.drain_heard();
+        assert_eq!(heard.len(), 1, "one scheduled step, one heard entry");
+        assert_eq!((heard[0].track, heard[0].step), (0, 0));
+        assert_eq!(
+            heard[0].values.iter().collect::<Vec<_>>(),
+            vec![(StepParam::Duration, 3.0), (StepParam::Velocity, 0.25)],
+            "the heard log carries the values substituted at schedule time"
+        );
+
         // Disarmed (or armed for another track): the step plays as stored.
         state.step_print_override.clear();
         let queue = ScheduledEventQueue::<16>::new();
@@ -2323,6 +2337,10 @@
             panic!("expected resolved trigger");
         };
         assert!((resolved.velocity - 0.7).abs() < 1e-6, "disarm restores stored values");
+        assert!(
+            state.step_print_override.drain_heard().is_empty(),
+            "a disarmed latch logs nothing to print"
+        );
     }
 
     /// Chord-backed steps own their sounding durations per note, which beat

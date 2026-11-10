@@ -79,16 +79,10 @@ pub(crate) fn write_rolled_hit_to_pattern(state: &SequencerState, hit: &RollHitR
 /// refresh the timeline preview.
 pub(crate) fn tick_roll_record(app: &mut app::App, shared: &SharedHandles) -> (bool, bool) {
     let state = &shared.state;
-    let mut drained = state.drain_roll_recorded_hits();
-    // Rolled hits recorded while step-param printing is armed take the
-    // latched values at record time (bead eseq-jc9): the roll records the
-    // trigger, the live print gives it velocity/duration/pitch.
-    if !drained.is_empty() {
-        let print = shared.step_print.lock().unwrap();
-        for hit in &mut drained {
-            print.override_roll_hit(hit);
-        }
-    }
+    // Rolled hits recorded while step-param printing is armed already carry
+    // the latched velocity/duration/pitch the scheduler played them with
+    // (bead eseq-jc9; see `emit_roll_hit`).
+    let drained = state.drain_roll_recorded_hits();
     let mut buffer = shared.roll_record.lock().unwrap();
     let roll_active = state.transport.roll_mode.load(Ordering::Relaxed) && state.is_playing();
     let recording = shared.recording.load(Ordering::Relaxed);

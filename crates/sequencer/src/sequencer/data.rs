@@ -2105,9 +2105,12 @@ pub struct RollHitRecorded {
     /// Sub-step delay in step units (0..1): roll grids finer than the track
     /// timebase, and triplet offsets, land here instead of being rounded.
     pub delay: f32,
+    /// The rolled key's pass-through pitch, or the latched print transpose
+    /// while step-param printing is armed (recorded, not played).
     pub transpose: f32,
     pub velocity: f32,
-    /// Note length in track-step units (one roll-grid note, converted).
+    /// Note length in track-step units (one roll-grid note, converted), or
+    /// the latched print Duration while step-param printing is armed.
     pub duration_steps: f32,
     /// Absolute transport beat of the hit — the take-recording path positions
     /// clip-relative notes from this directly.

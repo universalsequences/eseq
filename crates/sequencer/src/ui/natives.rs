@@ -3804,8 +3804,8 @@ pub(crate) fn init_runtime(
 
     // seq-print-step-param — live step-param printing (bead eseq-jc9): same
     // signature as seq-set-step-param, but while playing+recording the value
-    // latches into print mode and lands on the playhead's passing trigger
-    // steps instead of the cursor step. The step argument is the cursor
+    // latches into print mode and lands on the steps the scheduler plays
+    // while latched instead of the cursor step. The step argument is the cursor
     // fallback if the play/record gate raced off before dispatch. Never
     // clears the selection — printing targets the playhead, not the cursor.
     let ct = current_track.clone();

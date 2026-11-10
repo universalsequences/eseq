@@ -97,9 +97,10 @@ pub(crate) fn sync_reactive_tick(
         editor.mark_needs_redraw();
     }
 
-    // Live param printing: while playing+recording, an armed target writes
-    // onto each trigger step the playhead passes. Step targets push targeted
-    // invalidations; instrument targets update atomic p-lock storage directly.
+    // Live param printing: while playing+recording, step targets print the
+    // values the scheduler logged as played (draining after release too) and
+    // push targeted invalidations; device targets p-lock every passed
+    // boundary through atomic p-lock storage.
     // Both ride the open "Record take" transaction like live note recording.
     // The held controls show the latch through the host kinds.
     if tick_step_print(&mut app, ctx.shared).printed {

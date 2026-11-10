@@ -1441,6 +1441,12 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 let overrides = state
                     .step_print_override
                     .values_for_track(trigger.track);
+                // Log exactly what this step plays with: the control thread
+                // prints these values (not the picker's later position), so
+                // the recorded pass reproduces what was heard.
+                state
+                    .step_print_override
+                    .record_heard(trigger.track, trigger.step, overrides);
                 if let Some(value) = overrides.get(StepParam::Velocity) {
                     resolved.velocity = value;
                 }

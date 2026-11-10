@@ -436,10 +436,19 @@ pub struct GeneratorTickErrorNotice {
 /// printed value would only be heard one loop later. `mask` carries one bit
 /// per [`StepParam`] index; 0 = disarmed. Values are f32 bits. Written by the
 /// control thread on latch/disarm, read per scheduled step by the scheduler.
+///
+/// The scheduler also logs every substitution it makes ([`StepPrintHeard`]):
+/// the control thread prints exactly those values into the pattern, so the
+/// recording reproduces what was heard rather than wherever the picker had
+/// moved by the time the UI frame stamped the step.
 pub struct StepPrintOverride {
     track: std::sync::atomic::AtomicUsize,
     mask: AtomicU32,
     values: [AtomicU32; NUM_PARAMS],
+    heard: Mutex<Vec<StepPrintHeard>>,
+    /// Lock-free "the heard log is non-empty", so the idle UI frame never
+    /// takes the mutex.
+    has_heard: AtomicBool,
 }
 
 impl Default for StepPrintOverride {
@@ -448,8 +457,24 @@ impl Default for StepPrintOverride {
             track: std::sync::atomic::AtomicUsize::new(0),
             mask: AtomicU32::new(0),
             values: std::array::from_fn(|_| AtomicU32::new(0)),
+            heard: Mutex::new(Vec::new()),
+            has_heard: AtomicBool::new(false),
         }
     }
+}
+
+/// Cap for the scheduler→control mailboxes (heard print steps, recorded roll
+/// hits): only reached when the control thread never drains.
+pub(crate) const SCHEDULER_MAILBOX_CAP: usize = 4096;
+
+/// One scheduled pattern step that played with latched print values: the
+/// exact values the scheduler substituted, which the control thread then
+/// writes onto that step.
+#[derive(Clone, Copy)]
+pub struct StepPrintHeard {
+    pub track: usize,
+    pub step: usize,
+    pub values: StepPrintOverrideValues,
 }
 
 /// A snapshot of the latched overrides for one track, taken in a single
@@ -469,6 +494,14 @@ impl StepPrintOverrideValues {
     pub fn is_empty(&self) -> bool {
         self.mask == 0
     }
+
+    /// The latched (param, value) pairs, in `StepParam` index order.
+    pub fn iter(&self) -> impl Iterator<Item = (StepParam, f32)> + '_ {
+        StepParam::ALL
+            .iter()
+            .copied()
+            .filter_map(|param| self.get(param).map(|value| (param, value)))
+    }
 }
 
 impl StepPrintOverride {
@@ -485,8 +518,50 @@ impl StepPrintOverride {
         self.mask.store(mask, Ordering::Release);
     }
 
+    /// Disarm the substitution. Deliberately keeps the heard log: steps
+    /// already scheduled with the latch still owe their print.
     pub fn clear(&self) {
         self.mask.store(0, Ordering::Relaxed);
+    }
+
+    /// Scheduler side: `step` on `track` was scheduled with `values`
+    /// substituted. A re-schedule of the same step replaces its entry.
+    pub fn record_heard(&self, track: usize, step: usize, values: StepPrintOverrideValues) {
+        if values.is_empty() {
+            return;
+        }
+        let mut heard = self.heard.lock().unwrap();
+        if let Some(entry) = heard
+            .iter_mut()
+            .find(|entry| entry.track == track && entry.step == step)
+        {
+            entry.values = values;
+            return;
+        }
+        // Backstop for a control thread that never drains (headless
+        // schedulers): printing cannot be armed there, so dropping is safe.
+        if heard.len() < SCHEDULER_MAILBOX_CAP {
+            heard.push(StepPrintHeard {
+                track,
+                step,
+                values,
+            });
+            self.has_heard.store(true, Ordering::Release);
+        }
+    }
+
+    /// Whether heard steps are waiting to be printed.
+    pub fn has_heard(&self) -> bool {
+        self.has_heard.load(Ordering::Acquire)
+    }
+
+    /// Control side: take every heard step logged since the last drain.
+    /// Drains in place so the shared Vec keeps its capacity: the scheduler
+    /// never reallocates under the lock while a print is running.
+    pub fn drain_heard(&self) -> Vec<StepPrintHeard> {
+        let mut heard = self.heard.lock().unwrap();
+        self.has_heard.store(false, Ordering::Release);
+        heard.drain(..).collect()
     }
 
     /// The latched overrides for `track`; empty when disarmed or armed for a
