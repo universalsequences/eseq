@@ -467,6 +467,12 @@
 (def drop-step-selection ()
   (if (seq-has-selection?) (seq-clear-selection) nil))
 
+;; Cmd+A typed with another panel active selects the visible surface;
+;; focus it too, so the next key (Backspace, Cmd+C) acts on what was just
+;; selected instead of the panel the selection is not in.
+(def focus-selected-surface (name)
+  (unless (= (current-buffer-name) name) (select-window-for name)))
+
 ;; Gated like seq-global-toggle-record: a UI-only or read-only buffer wants
 ;; the surface select-all; an editable text buffer keeps the editor's own.
 (def seq-global-select-all ()
@@ -480,9 +486,12 @@
         ;; DAW root's: a `-noui` session (whose own view may be named
         ;; *sequencer*) has none of them and gets the plain step select-all.
         (if (and (= context :arrangement) (module-loaded? "eseq.arrangement"))
-          (do (drop-step-selection) (eseq.arrangement/select-all-clips))
+          (do (drop-step-selection)
+            (when (eseq.arrangement/select-all-clips) (focus-selected-surface "*arrangement*")))
           (if (and (= context :piano-roll) (module-loaded? "eseq.piano-roll"))
-            (do (drop-step-selection) (eseq.piano-roll/piano-roll-select-all))
+            (do (drop-step-selection)
+              (eseq.piano-roll/piano-roll-select-all)
+              (focus-selected-surface "*piano-roll*"))
             (if (and (= (current-buffer-name) "*sequencer*") (module-loaded? "eseq.sequencer"))
               (eseq.sequencer/select-all-current-track-steps)
               (select-all-steps))))

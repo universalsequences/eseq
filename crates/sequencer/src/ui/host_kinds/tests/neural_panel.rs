@@ -926,8 +926,10 @@ fn a_rack_owned_neural_routes_to_its_members() {
     assert_eq!(
         route["options"],
         list_value([
-            s(&format!("3 {}", names[2])),
-            s(&format!("1 {}", names[0])),
+            // Numbered by display position (eseq-ssd6): the rack's block
+            // (pad order 2, 0) is drawn first.
+            s(&format!("{} {}", h.app.track_number(2), names[2])),
+            s(&format!("{} {}", h.app.track_number(0), names[0])),
             s("Off")
         ])
     );

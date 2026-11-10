@@ -28,7 +28,7 @@
 ;;
 ;; The three panel-visibility reads (`samples-sidebar-visible`,
 ;; `mixer-panel-visible`, `lower-panel-visible`) are qualified reads of
-;; `defstate`s owned by `eseq.seq-core-state`, which main.lisp loads first.
+;; `defstates owned by `eseq.seq-core-state`, which main.lisp loads first.
 (module eseq.transport)
 ;; Compile-time edge (spec §4): the shared defstate keyspace + compat
 ;; aliases must exist before this unit's readers compile.
@@ -109,6 +109,8 @@
 ;; The `:shader`/`:material` bodies expand OUTSIDE this module (hazard g/h), so
 ;; every `sdf/*`, `material`, `shadow`, `lighting` reference in them stays FLAT.
 
+
+
 (defwidget transport-btn-bg
   :width 1 :height 1
   :paint-margin 0.3
@@ -171,7 +173,7 @@
       (red-end lvl))
     (sdf/layer
       (sdf/fill track
-        (material :color (rgba 0.06 0.07 0.08 1)))
+        (material :color (rgba 0.06 0.07 0.08 0.2)))
       (if (> green-end 0.005)
         (sdf/fill
           (let ((__start 0.0)
@@ -221,16 +223,9 @@
   :width 1 :height 1
   :shader
   (sdf/layer
-    (sdf/fill (sdf/rounded-rect width height 0.54)
-      (material
-        :lighting (lighting :edge-min -0.215 :edge-max 0.843
-          :light (vec3 0.51 4.5 4.5) :shininess 91.0)
-        :color
-        (eseq.materials/color-cell :transport-led-bg :mixer-strip-bg )
-          
-        ))
-    (sdf/fill (sdf/rounded-rect (* 0.999 width) (* 0.98 height) 0.54)
-      (* (* (smoothstep 0.8 -0.3 d) 0.99) :transport-led-bg)
+    (sdf/fill 
+      (sdf/rounded-rect (* 0.98 width) (* 0.98 height) 0.54)
+      (material :color :transport-led-bg)
       )
     ))
 
@@ -241,7 +236,7 @@
   :shader
   (let ((push-amount (if (= scene push-target) push 0.0)))
     (sdf/layer
-      (sdf/fill (sdf/rounded-rect width height 0.54)
+      (sdf/fill (sdf/rounded-rect width height 0.74)
         (material
           :lighting (lighting :edge-min -0.115 :edge-max 1.2413
             :light (vec3 -0.51 -1.851 2.5) :shininess 91.0)
@@ -251,9 +246,9 @@
             (rgba 0 0 0 0)
             )
         ))
-      (sdf/fill (sdf/rounded-rect (* 0.94 width) (* 0.94 height) 0.54)
+      (sdf/fill (sdf/rounded-rect (* 0.94 width) (* 0.94 height) 0.70)
         (material
-          :lighting (lighting :edge-min -0.115 :edge-max 1.2413
+          :lighting (lighting :edge-min -0.015 :edge-max 1.2413
             :light (vec3 -0.51 -1.851 1.5) :shininess 91.0)
           :color
           ;; The inner face of an active pill keeps the active tint: every
@@ -261,7 +256,7 @@
           ;; is translucent grey in most themes and would bury the cue for
           ;; which scene is playing.
           (if (> active 0)
-            (eseq.materials/color-cell :scene-active-base :scene-active-base)
+            (mix :scene-active-base (eseq.materials/color-cell :scene-active-base :scene-active-base) (smoothstep -0.1 0 d))
             (if hit/hover
               (let ((base :scene-hover-base)
                   (lit (+ 0.06 (* 0.03 diffuse)))
@@ -389,17 +384,19 @@
         (material :color fg-col)))))
 
 (defwidget samples-sidebar-icon
-  :width 3.5 :height 1.6
+  :width 3.5 :height 1.5
   :paint-margin 0.5
   :state (active)
   :shader
   ;; The macOS "sidebar.left" glyph: a rounded window outline split by a
   ;; divider, with three short rows in the left pane.
-  (let ((panel-col (if (= active 1) :fg :gray)))
+  (let ((panel-col (if (= active 1) :fg :fg)))
     (sdf/layer
+      
       (sdf/fill
-        (sdf/rounded-rect width height 0.5)
-        (if active :buffer-bg :transparent))
+        (sdf/rounded-rect (* 0.9 width) (* 0.9 height) (* 0.75 width))
+        (material :color (if (= active 1) :gray :transparent))
+        )      
       (sdf/fill
         (- (abs (sdf/rounded-rect 0.56 0.42 0.14)) 0.045)
         (material :color panel-col))
@@ -421,24 +418,25 @@
         (material :color panel-col)))))
 
 (defwidget mix-panel-icon
-  :width 3.5 :height 1.6
+  :width 3.5 :height 1.5
   :paint-margin 0.5
   :state (active)
   :shader
   ;; Three vertical faders: thin tracks, caps at different heights.
-  (let ((panel-col (if (= active 1) :fg :gray)))
+  (let ((panel-col (if (= active 1) :fg :fg)))
     (sdf/layer
       (sdf/fill
-        (sdf/rounded-rect width height 0.5)
-        (if active :buffer-bg :transparent))
+        (sdf/rounded-rect (* 0.9 width) (* 0.9 height) (* 0.75 width))
+        (material :color (if (= active 1) :gray :transparent))
+        )
       (sdf/fill
-        (sdf/translate -0.36 0.0 (sdf/rounded-rect 0.03 0.44 0.03))
+        (sdf/translate -0.36 0.0 (sdf/rounded-rect 0.05 0.44 0.03))
         (material :color panel-col))
       (sdf/fill
-        (sdf/translate 0.0 0.0 (sdf/rounded-rect 0.03 0.44 0.03))
+        (sdf/translate 0.0 0.0 (sdf/rounded-rect 0.05 0.44 0.03))
         (material :color panel-col))
       (sdf/fill
-        (sdf/translate 0.36 0.0 (sdf/rounded-rect 0.03 0.44 0.03))
+        (sdf/translate 0.36 0.0 (sdf/rounded-rect 0.05 0.44 0.03))
         (material :color panel-col))
       (sdf/fill
         (sdf/translate -0.36 0.16 (sdf/rounded-rect 0.12 0.07 0.04))
@@ -456,26 +454,29 @@
   :state (active)
   :shader
   ;; Two knobs: outlined dials with pointers at different settings.
-  (let ((panel-col (if (= active 1) :fg :gray)))
+  (let ((panel-col (if (= active 1) :fg :fg)))
     (sdf/layer
+      
       (sdf/fill
-        (sdf/rounded-rect width height 0.5)
-        (if active :buffer-bg :transparent))
+        (sdf/rounded-rect (* 0.9 width) (* 0.9 height) (* 0.75 width))
+        (material :color (if (= active 1) :gray :transparent))
+        )
+      
       (sdf/fill
         (sdf/translate -0.3 0.02
-          (- (abs (sdf/circle 0.25)) 0.045))
+          (- (abs (sdf/circle 0.25)) 0.055))
         (material :color panel-col))
       (sdf/fill
         (sdf/translate -0.3 0.02
-          (- (sdf/line 0.0 0.0 -0.13 -0.14) 0.045))
+          (- (sdf/line 0.0 0.0 -0.13 -0.14) 0.055))
         (material :color panel-col))
       (sdf/fill
         (sdf/translate 0.3 0.02
-          (- (abs (sdf/circle 0.25)) 0.045))
+          (- (abs (sdf/circle 0.25)) 0.055))
         (material :color panel-col))
       (sdf/fill
         (sdf/translate 0.3 0.02
-          (- (sdf/line 0.0 0.0 0.16 -0.1) 0.045))
+          (- (sdf/line 0.0 0.0 0.16 -0.1) 0.055))
         (material :color panel-col)))))
 
 (defwidget session-view-icon
@@ -488,10 +489,7 @@
       (bg-col :transparent)
       (line-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
-      (sdf/fill 
-        (sdf/rounded-rect width height 0.5)
-        (if active :buffer-bg :transparent)
-        )
+     
       (sdf/fill
         (sdf/rounded-rect width height 0.4)
         (material :color bg-col))
@@ -518,10 +516,7 @@
       (bg-col :transparent)
       (line-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
-      (sdf/fill 
-        (sdf/rounded-rect width height 0.5)
-        (if active :buffer-bg :transparent)
-        )
+    
       (sdf/fill
         (sdf/rounded-rect width height 0.4)
         (material :color bg-col))
@@ -576,7 +571,7 @@
   (let ((fg-col (if (= active 1) :icon-active-fg :icon-fg)))
     (sdf/layer
       (if (= active 1)
-        (sdf/fill (sdf/rounded-rect (* 0.72 height) (* 0.72 height) 0.4)
+        (sdf/fill (sdf/rounded-rect (* 0.65 height) (* 0.65 height) 0.5)
           (material
             :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
               :light (vec3 -0.31 -0.851 1.3) :shininess 51.0)
@@ -605,14 +600,14 @@
   (if (= active 1)
     (sdf/layer
       
-      (sdf/fill (sdf/rounded-rect (* 0.75 height) (* 0.75 height) 0.4)
+      (sdf/fill (sdf/rounded-rect (* 0.75 height) (* 0.75 height) 0.8)
         (material
           :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
             :light (vec3 -0.31 -0.851 1.3) :shininess 51.0)
           :color
-          (eseq.materials/color-cell :arrangement-return-base :white)
+          (eseq.materials/color-cell :arrangement-return-base :black)
           ))      
-      (sdf/fill (sdf/rounded-rect (* 0.72 height) (* 0.72 height) 0.4)
+      (sdf/fill (sdf/rounded-rect (* 0.72 height) (* 0.72 height) 0.8)
         (material
           :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
             :light (vec3 -0.31 -0.851 1.3) :shininess 51.0)
@@ -642,7 +637,7 @@
   (let ((fg-col (if (= active 1) :icon-active-fg :record-idle-fg)))
     (sdf/layer
       (if (= active 1)
-        (sdf/fill (sdf/rounded-rect (* 0.75 height) (* 0.75 height) 0.4)
+        (sdf/fill (sdf/rounded-rect (* 0.65 height) (* 0.65 height) 0.9)
           (material
             :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
               :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
@@ -795,6 +790,7 @@
         :options (append (scene-bank-labels) (list "New bank"))
         :on-change   select-scene-bank
         :bg-color :transport-led-bg
+        :border-color :transparent
         :badge-color :transport-led-bg
         :chevron-color :clock-fg
         :text-color :clock-fg
@@ -1043,7 +1039,7 @@
 ;; Transport buttons in a shared rounded-rect container, about three quarters
 ;; the LED's height.
 (def transport-playback ()
-  (box :key "transport-playback-controls" :background-color :transport-controls-bg :corner-radius 72 :padding 0.0015 :height 1.9
+  (box :key "transport-playback-controls" :background "liquid-glass" :corner-radius 72 :padding 0.0015 :height 1.9
     (h-stack :gap 0.2 :align :center
       (box :width 0.3)
       (subtree :key "transport-stop-button"
@@ -1084,7 +1080,7 @@
           :style transport-icon-style
           :on-click |x y r| (when song.manual-latch (set! song.manual-latch false))
           (back-to-arrangement-icon :width 3.0 :height 2.0 :active #'song.manual-latch)))
-      (box :width 0.3))))
+      (box :width 0.5))))
 
 ;; The clock group on the LED's left half, two rows like a hardware LCD:
 ;; clock, BPM and scene transpose on top; launch/record quantize, MET and
@@ -1128,6 +1124,7 @@
           :text-color :clock-fg
           :badge-color :transport-led-bg
           :chevron-color :clock-fg
+          :border-color :transparent
           :key "transport-scene-launch-quantize-dropdown"
           :debug-name "transport-scene-launch-quantize"
           :value (launch-quantize)
@@ -1141,6 +1138,7 @@
           :key "transport-record-quantize-dropdown"
           :debug-name "transport-record-quantize"
           :badge-color :transport-led-bg
+          :border-color :transparent
           :chevron-color :clock-fg
           :value (label-or transport.record-quantize "1/16")
           :options record-quantize-options
@@ -1155,6 +1153,16 @@
           :on-click |x y r| (toggle! transport.metronome)
           (v-stack :align :center
             (pill-label "MET" #'transport.metronome))))
+      ;; The arrangement's loop (Ableton's loop switch): playback wraps
+      ;; inside the ruler's loop brace while on.
+      (subtree :key "transport-loop-toggle"
+        (box :debug-name "transport-loop-toggle"
+          :width 3.6 :height 1.0
+          :v-align :center
+          :background "pattern-pill-bg"
+          :on-click |x y r| (toggle! song.loop)
+          (v-stack :align :center
+            (pill-label "LOOP" #'song.loop))))
       ;; Roll mode (docs/rolling-core-spec.md 8): toggle + live rate
       ;; display. Rate keys 1-8 switch the rate while roll mode is on.
       (subtree :key "transport-roll-toggle"
@@ -1177,9 +1185,10 @@
 ;; left half and the scene launcher, wrapped onto two rows, on its right.
 (def transport-led ()
   (box :key "transport-led" 
-    :background-color :transport-led-bg 
+    ;:background-color :transport-led-bg 
     :background "transport-led-container"
-    :corner-radius 64 :height 2.8
+    ;:corner-radius 94 
+    :height 2.8
     (h-stack :align :center :gap 0.8
       (box :width 0.4)
       (transport-clock-panel)
@@ -1190,10 +1199,10 @@
 ;; The master meters, CPU and output latency on their own LED panel, hugging
 ;; the right end of the *transport* row.
 (def transport-meter-panel ()
-  (box :key "transport-meter-panel" :background-color :transport-controls-bg :corner-radius 64 :height 1.9
+  (box :key "transport-meter-panel" :background "liquid-glass" :corner-radius 64 :height 1.9
     :width 27
     (h-stack :align :center :gap 0.3
-      (box :width 0.6)
+      (box :width 1.2)
       (v-stack :gap 0.08 :padding 0.05
         (label "L"
           :font-size 5 :width 0.9
@@ -1281,7 +1290,7 @@
 
 ;; A "+" / "-" button of the strip; `enabled` lights it and lets it click.
 (def scene-strip-button (key text enabled action)
-  (box :key key :background "pattern-pill-btn-bg"
+  (box :key key :background "liquid-glass"
     :width 2.5 :height 1.1 :active true
     :style (if enabled pattern-control-style nil)
     :on-click |x y r| (action)
@@ -1349,10 +1358,13 @@
   ;; stay centred whatever the menus and the meters measure.
   (h-stack :key "transport-bar" :width :fill :height :fill :gap 0.5
     :padding-left 0.5 :padding-right 0.5 :align :center
-    (box :key "transport-leading-controls" :background-color :transport-controls-bg :corner-radius 72 :padding 0.015 :height 1.9
+    (box :key "transport-leading-controls" :background "liquid-glass" :corner-radius 72 :padding 0.25 :height 1.9
       (h-stack :key "transport-left" :width 0 :flex 1 :height :fill :gap 0.2 :align :center
+        (box :width 0.3)
         (titlebar-leading)
-        (transport-leading))
+        (transport-leading)
+        (box :width 0.3)
+        )
       )
     (box :width 3)
     (box :flex 1 :height 0 :width 0)
@@ -1397,8 +1409,9 @@
 ;; Session and arrangement are app views, not tabs in the main buffer: the
 ;; pair sits at the titlebar's right end.
 (def titlebar-trailing ()
-  (box :key "transport-trailing-controls" :background-color :transport-controls-bg :corner-radius 72 :padding 0.015 :height 1.9
+  (box :key "transport-trailing-controls" :background "liquid-glass" :corner-radius 72 :padding 0.015 :height 1.9
     (h-stack :gap 0.1  :align :center
+      (box :width 0.5)
       (list
         (subtree :key "transport-session-view-button"
           (session-view-icon
@@ -1409,7 +1422,10 @@
           (arrangement-view-icon
             :on-click |x y r| (eseq.seq-panels/seq-open-arrangement)
             :style transport-icon-style
-            :active (if (tabs/seq-arrangement-view?) 1 0)))))
+            :active (if (tabs/seq-arrangement-view?) 1 0))))
+      
+      (box :width 0.5)
+      )
     ))
 
 ;; The project's name centred like a document title, followed by a green

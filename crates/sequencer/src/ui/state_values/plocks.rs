@@ -779,6 +779,8 @@ pub(super) fn build_selected_neural_plocks_value(
     let current_pattern = state.current_scene_index();
     let networks = state.current_neural_networks();
     let mut items = Vec::new();
+    let track_numbers = app.track_numbers();
+    let track_number = |track: usize| track_numbers.get(track).copied().unwrap_or(track + 1);
 
     for selected in selection
         .iter()
@@ -818,7 +820,7 @@ pub(super) fn build_selected_neural_plocks_value(
                 &label,
                 selected.neuron_idx,
                 "neural-instrument",
-                &format!("T{} inst", target_track + 1),
+                &format!("T{} inst", track_number(target_track)),
                 &param.name,
                 param.stored_to_user(override_param.value),
                 param.stored_to_user(param.default),
@@ -866,7 +868,7 @@ pub(super) fn build_selected_neural_plocks_value(
                 &label,
                 selected.neuron_idx,
                 "neural-effect",
-                &format!("T{} {}", target_track + 1, desc.name),
+                &format!("T{} {}", track_number(target_track), desc.name),
                 &param.name,
                 override_param.value,
                 param.default,

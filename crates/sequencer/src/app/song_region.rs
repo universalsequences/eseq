@@ -132,7 +132,21 @@ impl SongRegionSelection {
     pub fn contains_rack_row(&self, first_member: usize) -> bool {
         self.covers_row(RegionRow::rack(first_member))
     }
+
+    /// `covers_row` with rows ordered by `rank` (a track's display position,
+    /// eseq-ssd6) instead of by index: the rows between the two ends as the
+    /// arrangement draws them. Either end may be the upper one.
+    fn covers_row_ranked(&self, row: RegionRow, rank: &[usize]) -> bool {
+        let order = |row: RegionRow| (rank.get(row.track).copied().unwrap_or(usize::MAX), !row.rack);
+        let a = order(RegionRow { track: self.track_a, rack: self.rack_a });
+        let b = order(RegionRow { track: self.track_b, rack: self.rack_b });
+        let (top, bottom) = if a <= b { (a, b) } else { (b, a) };
+        let row = order(row);
+        top <= row && row <= bottom
+    }
 }
+
+/// Each track's display position (`App::display_track_order`), by index.
 
 /// A clip-bearing rack as the region ops see it: its rack row sits above
 /// its first member, and a collapsed one's row stands for its hidden members.
@@ -143,11 +157,12 @@ struct RackRow {
 }
 
 impl RackRow {
-    fn covered_by(&self, region: &SongRegionSelection) -> bool {
+    /// Its rack row sits above its first member in display order.
+    fn covered_by(&self, region: &SongRegionSelection, rank: &[usize]) -> bool {
         self.members
             .iter()
-            .min()
-            .is_some_and(|first| region.contains_rack_row(*first))
+            .min_by_key(|member| rank.get(**member).copied().unwrap_or(usize::MAX))
+            .is_some_and(|first| region.covers_row_ranked(RegionRow::rack(*first), rank))
     }
 }
 
@@ -204,6 +219,9 @@ pub struct ArrangementClipboard {
     /// what the scene lane sounded like, not just its change points.
     pub scene_lane: bool,
     pub scene_events: Vec<(f64, usize)>,
+    /// The scene pushes inside the span, for a scene-lane region
+    /// (eseq-vum0): cut at its edges, beats relative to its start.
+    pub scene_pushes: Vec<crate::sequencer::ScenePushRegion>,
     /// Rack group id → its rack-lane spans, for every rack row the region
     /// covered. A rack lane silent throughout still appears, so paste
     /// silences it.
@@ -342,16 +360,20 @@ impl App {
     /// is (docs/arrangement-rack-lanes-spec.md §5).
     fn region_tracks(&self, region: &SongRegionSelection) -> Vec<usize> {
         let racks = self.rack_rows();
+        let rank = self.region_rank();
         let hidden_rack = |track: usize| {
             racks
                 .iter()
                 .find(|rack| rack.collapsed && rack.members.contains(&track))
         };
-        let mut tracks: Vec<usize> = (region.track_a..=region.track_b)
-            .filter(|track| region.contains_track(*track) && hidden_rack(*track).is_none())
+        let mut tracks: Vec<usize> = (0..self.tracks.len())
+            .filter(|track| {
+                region.covers_row_ranked(RegionRow::track(*track), &rank)
+                    && hidden_rack(*track).is_none()
+            })
             .filter(|track| !self.track_collapsed.get(*track).copied().unwrap_or(false))
             .collect();
-        for rack in racks.iter().filter(|rack| rack.collapsed && rack.covered_by(region)) {
+        for rack in racks.iter().filter(|rack| rack.collapsed && rack.covered_by(region, &rank)) {
             tracks.extend(&rack.members);
         }
         tracks.sort_unstable();
@@ -379,11 +401,33 @@ impl App {
         })
     }
 
+    /// Each track's display position: region rows run in display order.
+    fn region_rank(&self) -> Vec<usize> {
+        super::track_order::display_rank(&self.display_track_order(), self.tracks.len())
+    }
+
+    /// Whether `region` covers track `track`'s row, the rows between its
+    /// ends taken in display order (eseq-ssd6).
+    pub fn region_contains_track(&self, region: &SongRegionSelection, track: usize) -> bool {
+        region.covers_row_ranked(RegionRow::track(track), &self.region_rank())
+    }
+
+    /// The tracks whose rows `region` covers, in display order (collapsed
+    /// ones included: the caller filters what it draws).
+    pub fn region_covered_tracks(&self, region: &SongRegionSelection) -> Vec<usize> {
+        let order = self.display_track_order();
+        let rank = super::track_order::display_rank(&order, self.tracks.len());
+        order.into_iter()
+            .filter(|track| region.covers_row_ranked(RegionRow::track(*track), &rank))
+            .collect()
+    }
+
     /// The racks whose rack row `region` covers, by group id.
     pub fn region_racks(&self, region: &SongRegionSelection) -> Vec<u64> {
+        let rank = self.region_rank();
         self.rack_rows()
             .into_iter()
-            .filter(|rack| rack.covered_by(region))
+            .filter(|rack| rack.covered_by(region, &rank))
             .map(|rack| rack.group_id)
             .collect()
     }
@@ -536,12 +580,18 @@ impl App {
         } else {
             Vec::new()
         };
+        let scene_pushes = if region.scene_lane {
+            arrangement.scene_pushes_in(start_beat, end_beat)
+        } else {
+            Vec::new()
+        };
         Ok(ArrangementClipboard {
             len_beats,
             snap_beats: region_snap_beats(start_beat, len_beats),
             tracks,
             scene_lane: region.scene_lane,
             scene_events,
+            scene_pushes,
             racks,
             audio,
         })
@@ -642,9 +692,17 @@ impl App {
         // otherwise the untouched lanes must not move.
         // A scene-lane sweep is by definition a whole-timeline gesture: it
         // carries the scene lane, so the ripple has to move it too.
-        let covers_every_track = region.scene_lane
-            || (region.contains_track(0)
-                && region.contains_track(self.tracks.len().max(1) - 1));
+        let covers_every_track = region.scene_lane || {
+            let order = self.display_track_order();
+            match (order.first(), order.last()) {
+                (Some(&first), Some(&last)) => {
+                    let rank = super::track_order::display_rank(&order, self.tracks.len());
+                    region.covers_row_ranked(RegionRow::track(first), &rank)
+                        && region.covers_row_ranked(RegionRow::track(last), &rank)
+                }
+                _ => false,
+            }
+        };
 
         let (scenes_before, cloned_takes) = self.clone_clipboard_takes(&clipboard)?;
         let scenes = self.state.capture_project_scenes();
@@ -677,6 +735,10 @@ impl App {
                         event.start_beat += len_beats;
                     }
                 }
+                // Pushes ride the timeline like scene changes do. Without
+                // the scene lane the copy pastes no pushes, so one cut by
+                // the insert holds across the opening instead.
+                arrangement.ripple_scene_pushes_right(insert_beat, len_beats, !clipboard.scene_lane)?;
             }
             // Both paths leave exactly [insert, insert + len) vacated on the
             // rippled lanes; the duplicate fills it.
@@ -792,6 +854,7 @@ impl App {
                 let tail_scene =
                     Self::clear_scene_lane_span(&mut arrangement, source_start, source_end);
                 Self::restore_scene_tail(&mut arrangement, source_end, tail_scene);
+                arrangement.occlude_scene_push_span(source_start, source_end)?;
             }
             // Destination second — it clears its own rectangle and stamps the
             // lifted clips (and, for a scene-lane region, the scene events).
@@ -970,7 +1033,7 @@ impl App {
                 if arrangement.audio_source(region.source).is_none() {
                     continue;
                 }
-                let mut pasted = *region;
+                let mut pasted = region.clone();
                 pasted.id = arrangement.allocate_clip_id()?;
                 pasted.start_beat += dest_beat;
                 pasted.end_beat += dest_beat;
@@ -979,6 +1042,7 @@ impl App {
         }
         if clipboard.scene_lane {
             Self::paste_scene_events(arrangement, &clipboard.scene_events, dest_beat, dest_end);
+            arrangement.paste_scene_pushes(&clipboard.scene_pushes, dest_beat, clipboard.len_beats)?;
         }
         Ok(())
     }
@@ -1205,6 +1269,7 @@ impl App {
         if region.scene_lane {
             let tail_scene = Self::clear_scene_lane_span(&mut arrangement, start_beat, end_beat);
             Self::restore_scene_tail(&mut arrangement, end_beat, tail_scene);
+            arrangement.occlude_scene_push_span(start_beat, end_beat)?;
         }
         if arrangement == existing {
             return Ok("The region is already empty".to_string());
@@ -2302,6 +2367,72 @@ mod tests {
 
         undo(&mut app);
         assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 1)]);
+    }
+
+    /// Seed a push toward scene 1 over `[start, end)`, ramping 0 → 1.
+    fn add_push(app: &mut App, start: f64, end: f64) {
+        let mut arrangement = app.state.committed_arrangement().expect("arrangement");
+        let id = arrangement.allocate_clip_id().expect("id");
+        arrangement.push_lane.push(crate::sequencer::ScenePushRegion {
+            id,
+            start_beat: start,
+            end_beat: end,
+            target_scene: 1,
+            points: vec![
+                crate::sequencer::ScenePushPoint { beat: 0.0, value: 0.0 },
+                crate::sequencer::ScenePushPoint { beat: end - start, value: 1.0 },
+            ],
+        });
+        app.state.set_committed_arrangement(Some(arrangement)).expect("commit");
+    }
+
+    fn pushes(app: &App) -> Vec<(f64, f64)> {
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        arrangement.push_lane.iter().map(|push| (push.start_beat, push.end_beat)).collect()
+    }
+
+    /// eseq-vum0: a scene-lane region (Cmd+A) carries the scene pushes it
+    /// covers. Delete clears them (cutting one it straddles), duplicate
+    /// ripples and repeats them, move lifts them; a track-lane region leaves
+    /// them alone. Each is one undo step.
+    #[test]
+    fn scene_lane_regions_carry_scene_pushes() {
+        let mut app = app_with_scene_change();
+        add_push(&mut app, 2.0, 6.0);
+        add_push(&mut app, 10.0, 14.0);
+
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 4.0, 12.0, false));
+        app.song_region_delete().expect("track-lane delete");
+        assert_eq!(pushes(&app), vec![(2.0, 6.0), (10.0, 14.0)], "a track lane region");
+        undo(&mut app);
+
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 4.0, 12.0, true));
+        let depth = app.history.undo_len();
+        app.song_region_delete().expect("delete");
+        assert_eq!(app.history.undo_len(), depth + 1);
+        assert_eq!(pushes(&app), vec![(2.0, 4.0), (12.0, 14.0)], "cut at the region edges");
+        undo(&mut app);
+        assert_eq!(pushes(&app), vec![(2.0, 6.0), (10.0, 14.0)]);
+
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 0.0, 8.0, true));
+        app.song_region_duplicate().expect("duplicate");
+        assert_eq!(
+            pushes(&app),
+            vec![(2.0, 6.0), (10.0, 14.0), (18.0, 22.0)],
+            "the copy lands after the region, later pushes ripple right"
+        );
+        undo(&mut app);
+
+        // Every track but not the scene lane: the timeline still opens, the
+        // straddling push holds across the opening.
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 0.0, 4.0, false));
+        app.song_region_duplicate().expect("track-only duplicate");
+        assert_eq!(pushes(&app), vec![(2.0, 10.0), (14.0, 18.0)], "no hole in the cut push");
+        undo(&mut app);
+
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 0.0, 8.0, true));
+        app.song_region_move(16.0).expect("move");
+        assert_eq!(pushes(&app), vec![(10.0, 14.0), (18.0, 22.0)], "lifted and set down");
     }
 
     /// The same rectangle swept in a TRACK lane never touches the scene lane.

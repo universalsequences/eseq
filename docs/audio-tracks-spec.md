@@ -1,7 +1,10 @@
 # Audio Tracks — spec
 
-Status: rev 2.1, 2026-11-01 — phase 1 built (uncommitted); "as built" notes
-inline where the implementation settled a choice differently from rev 2.
+Status: rev 3, 2026-11-09 — phases 1 and 2 built. Rev 3 is recording
+(§12.8 "As built" is the authority where it differs from §12.1–§13, which
+keep the rev 1 design for its reasoning); rev 2.3 added tall stereo lanes,
+lane collapse, curved fades and crossfades (§8.1, §8.1.1). "As built" notes
+inline where the implementation settled a choice differently.
 Epic: see §15 for the bead slices.
 
 Every track today is a software instrument (or a modulator) driven by
@@ -106,8 +109,8 @@ Engine / model:
 - RT hazard: the scheduler-snapshot seam has dropped large `Arc`s on the
   audio thread before (eseq-sj01). Region lists and source buffers must never
   be freed on the audio thread.
-- **There is no audio input stream anywhere** in the crate; `recorder.rs`
-  captures the master output only (relevant to phase 2).
+- (Rev 2 fact, no longer true: there was no audio input stream anywhere in
+  the crate. `src/audio_input/` is it now, §12.8.)
 
 ## 3. Terminology
 
@@ -246,6 +249,41 @@ Dragging files in from Finder uses the same pipeline (later slice).
   arrangement.
 - Edge trim on the timeline changes `source_offset` / the span (left edge
   trims into the source, it does not move content).
+- *As built (rev 2.3, eseq-audio.24):* Ableton-shaped lanes. An audio lane
+  stands taller than a pattern lane (`arrangement-audio-lane-height`, 6.8
+  cells) and draws a stereo source as two waveforms, left over right,
+  once each row is at least 18 px (the source's channels are registered
+  beside its mixed waveform: `SampleBuffer::register_channels`,
+  `channel_key`). Every track header in the arrangement has a disclosure
+  that collapses its lane to a title-bar strip (`arr-lane` by track id; UI
+  state, not saved). Rows differ in height, so a region drag's vertical
+  travel is measured against the rows it crosses (`row-at-offset`).
+
+### 8.1.1 Fades and crossfades (as built, rev 2.3)
+
+- Hovering a region shows its fade handles: a square at the top of the
+  body on each fade's end (its length) and a diamond on each fade's curve
+  midpoint (its shape: drag up for a fast rise / late drop, down for the
+  opposite). The timeline widget draws the curves (area above shaded)
+  from the item's `:fades` (beats) and reports drags as `:fade-item`
+  (`timeline/fades.rs`); `audio-region-fade` (`App::audio_region_fade`)
+  applies them live, one undo step per drag. Fades never overlap.
+- Shape: a fade's level is `t^p`, `p = 2^(-3·curve)`, curve -1..1 (0 is
+  linear); the player and the widget share the formula.
+- **Crossfades.** Where one region ends exactly where the next starts,
+  dragging the later one's fade-in square left past its start, or the
+  earlier one's fade-out square right past its end, makes a crossfade:
+  a window `[edge − pre, edge + post]` stored on the later region
+  (`crossfade_pre_seconds` / `crossfade_post_seconds`). Over it the
+  earlier region keeps playing past its end and the later one pre-rolls
+  before its start, under an equal-gain S-curve (sin²/cos²), so a cut
+  through one recording stays at full level. `pre` uses the later
+  region's audio before its offset, `post` the earlier one's audio past
+  its end; both are clamped to that material and to the regions' lengths
+  (`crossfade_window`), so a cut made by splitting always has room, and two
+  whole files butted together have none (their fades stay plain). The
+  window's ends are its handles. A split leaves the fade-in on the head and
+  the fade-out on the tail.
 
 ### 8.2 Clip editor (waveform)
 
@@ -284,7 +322,8 @@ v1 contents, Ableton-shaped:
 ### 8.3 Clip editor later
 
 Warp markers and warp mode (feeding the sampler's warp engine, §6.3),
-transpose, reverse, fades drawn on the waveform, loop brace.
+transpose, reverse, fades drawn on the clip editor's waveform (the
+timeline draws them since rev 2.3), loop brace.
 
 ### 8.4 FX panel
 
@@ -318,6 +357,8 @@ AudioRegion {               // ProjectArrangement::audio_lanes[track]
     start_beat, end_beat: f64,   // the span, like a clip's
     source_offset: u64,      // source frame heard at start_beat
     gain_db, fade_in_seconds, fade_out_seconds: f32,
+    fade_in_curve, fade_out_curve: f32,        // -1..1, 0 linear (rev 2.3)
+    crossfade_pre_seconds, crossfade_post_seconds: f32, // with the region before
     muted: bool,
 }
 
@@ -358,7 +399,9 @@ draws only regions there.
   at the block's first sample, unwrapped, plus the pass start so pre-roll is
   silent) and per frame finds the region (hinted search), reads with
   `sample_core::read_stereo_at` at `playback_ratio(source_sr, host_sr)`, and
-  applies gain and edge fades (at least 64 frames, so no edge clicks).
+  applies gain, shaped edge fades (always under a 64-frame declick ramp)
+  and crossfades with the region before (§8.1.1), mixing both voices over
+  the window.
 - A transport start ramps in, a stop ramps out from where it was, and a seek
   or loop wrap restarts the ramp instead of splicing.
 - Bounce/export renders audio tracks through the same player (tested:
@@ -540,7 +583,81 @@ Microphone rather than recording silence silently.
   (non-destructive). Phase 3 turns this into a take stack.
 - Undo of a recording removes the region; the source file is kept until GC.
 
+### 12.8 As built (rev 3, eseq-audio.1 / .4)
+
+How to record: add an audio track, pick its input under its header in the
+arrangement, arm it (the header dot), and press Record + Play in the
+arrangement view (or Record while it plays, to punch in). Stop, or Record
+again, ends the take; the region appears on the lane a moment later.
+
+What differs from §12.1–§12.7:
+
+- **No input node, no writer ring, no audio-thread part in recording.**
+  Each open device fills an `InputRing` (`audio_input/ring.rs`) from its
+  cpal input callback: four seconds of every channel, one writer, any
+  number of readers each with its own cursor. A take is written by a
+  thread that follows the ring (`audio_input/take.rs`), so the audio
+  thread cannot drop recorded audio, and a take reaches back to its first
+  sample even though the control thread starts the writer a frame or two
+  late. The take is held in memory (it is the PCM the region will play)
+  and its float WAV is written to the audio store when it stops, trimmed
+  to the exact stop frame; a crash mid-take loses the take. A writer that
+  stalls a whole ring writes the gap as silence and the take says so.
+- **The lane shows the take's waveform as it records.** The writer keeps
+  each channel's high and low of every 100 frames; the control thread
+  registers that as a small sample (`recording-take#<id>`, a fiftieth of
+  the audio) a dozen times a second, and the lane draws a red "Recording"
+  item from the take's start to the playhead with it as content
+  (`t.audio-recording`). The item stays until the region lands. Capture
+  fixture: `ui/capture-fixtures/arrangement-audio-recording.lisp`
+  (`:recording BEATS` on an audio track).
+- **Monitoring lives in the track's region player.** The player node adds
+  the ring's chosen channels to its output, trailing the device by one
+  device buffer + 32 frames (`InputRing::monitor_margin`); a short ring is
+  a silent block and a ramped rejoin, never stale audio. No graph edit, so
+  arming is instant. Monitor modes are `off | auto | in`: auto is "while
+  armed" (not rev 1's "and no region playing there").
+- **Placement is by device clock, not by which block read the input**
+  (§13 as built).
+- **Takes ride the arrangement capture pass** (`begin_song_capture_take` …
+  `finish_song_capture_take`): the same Record that captures launches and
+  notes. Each armed audio track with an open input records from the pass's
+  first sample (or the punch-in sample) to its stop. The regions land as
+  their own undo step ("Record audio") when the writers finish, separate
+  from the pass's commit.
+- **Inputs are per track, by stable track id**, in the project file's
+  `audio_inputs` (`AudioTrackInput`: device name, left channel, optional
+  right, monitor mode). A device opens when a track that uses it is armed
+  or set to monitor `in`, and closes when none is.
+- **Rate**: the device must run at the graph rate; cpal moves a CoreAudio
+  device there when it can, otherwise the open fails with the reason on
+  the status line. **Clock domain is not checked** (eseq-audio.2 stays
+  open): a mic and an interface on separate clocks record, and a long take
+  drifts by their difference.
+- **Permission**: a take whose every sample is exactly zero is not
+  committed; the status line points at the Microphone privacy setting. The
+  app bundle carries `NSMicrophoneUsageDescription` and the
+  `com.apple.security.device.audio-input` entitlement (`dist/macos/`).
+- **Not built**: loop recording (a take that crosses a loop wrap keeps
+  running linearly from where it started), take stacks, a post-fx tap.
+
 ## 13. Recording: latency (phase 2)
+
+*As built (rev 3):* no margin term and no dependence on callback timing.
+The input and output callbacks each stamp the buffer they are handed on
+the device clock (CoreAudio's host time for the buffer's first frame;
+elsewhere cpal's capture / playback time). `StreamEpoch` turns each
+stream's stamps into "when frame 0 crossed the converter", smoothed over
+callbacks, and the difference of the two epochs is a constant `K`: input
+frame `f` was captured while output sample `f + K` was playing
+(`InputRing::output_offset`). A take starting on output sample `S` starts
+on input frame `S − K`. What the clocks cannot see is the converters' own
+latency (device latency + safety offset, both directions); that is the
+`arrangement-audio-record-offset-ms` customize knob, default 0, until the
+loopback calibration (eseq-audio.5) measures it. Verified on real devices
+here: frames arrive at the nominal rate and the epoch holds still (0 ns
+drift over a second at 48 kHz). Not verified: absolute placement against
+a loopback cable.
 
 | Term | What | Owner |
 |---|---|---|
@@ -594,9 +711,9 @@ Epic `eseq-audio`. Phase 1 slices are P2; phase 2 (recording) and phase 3 are P3
 | eseq-audio.16 | clip editor: double-click waveform editor, start/end, gain | 1 | .3 |
 | eseq-audio.17 | FX panel for audio tracks, no device slot | 1 | .3 |
 | eseq-audio.8 | bounce/export renders audio tracks | 1 | .3 |
-| eseq-audio.1 | input stream, device/channel, `InputSource`, input node, meter | 2 | .3 |
-| eseq-audio.2 | arm-time rate/clock/permission checks | 2 | .1 |
-| eseq-audio.4 | arm/monitor, record tap, writer, stamped region creation | 2 | .1 |
+| eseq-audio.1 | input stream, device/channel, input ring, monitor, meter — **built** | 2 | .3 |
+| eseq-audio.2 | arm-time rate/clock/permission checks — rate + permission built, clock domain open | 2 | .1 |
+| eseq-audio.4 | arm/monitor, take writer, clock-placed region creation — **built** | 2 | .1 |
 | eseq-audio.5 | loopback calibration + manual offset | 2 | .4 |
 | eseq-audio.18 | audio track device: sampler params + ext1..4 modulation | 3 | .14, .17 |
 | eseq-audio.9 | cross-clock input (adaptive resampler) | 3 | .1 |

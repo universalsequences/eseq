@@ -272,6 +272,23 @@ pub enum MacroParamKey {
     },
 }
 
+/// One param a scene push moves: `key` goes from `from` to `to` along
+/// `curve` as the push amount goes 0 → 1.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScenePushParam {
+    pub key: MacroParamKey,
+    pub from: f32,
+    pub to: f32,
+    pub curve: MacroCurve,
+}
+
+impl ScenePushParam {
+    /// The value at push amount `amount` (the engine's own mapping).
+    pub fn at(&self, amount: f32) -> f32 {
+        lerp_curved(self.from, self.to, amount, self.curve)
+    }
+}
+
 impl MacroParamKey {
     pub fn for_instrument(track: usize, param_idx: usize, param_id: Option<ParamNodeId>) -> Self {
         param_id.map_or(
@@ -1264,12 +1281,7 @@ impl MacroEngine {
         let mut touched = self.end_scene_push();
         let accepted = mappings
             .into_iter()
-            .filter(|mapping| {
-                mapping
-                    .resolved_key
-                    .as_ref()
-                    .is_none_or(|key| self.mapping_owner(key).is_none())
-            })
+            .filter(|mapping| self.accepts_scene_push(mapping))
             .collect::<Vec<_>>();
         touched.extend(accepted.iter().filter_map(mapping_touch));
         let write_order = self.allocate_write_order();
@@ -1301,6 +1313,33 @@ impl MacroEngine {
             .collect();
         self.rebuild_ownership();
         touched
+    }
+
+    /// Whether a scene push may take `mapping`: no persistent macro owns
+    /// its param.
+    fn accepts_scene_push(&self, mapping: &MacroMapping) -> bool {
+        mapping
+            .resolved_key
+            .as_ref()
+            .is_none_or(|key| self.mapping_owner(key).is_none())
+    }
+
+    /// The params [`Self::begin_scene_push`] would move for `mappings` (the
+    /// resolved, live ones it takes), for a scheduler that has to stamp a
+    /// push before the engine plays it.
+    pub fn scene_push_params(&self, mappings: &[MacroMapping]) -> Vec<ScenePushParam> {
+        mappings
+            .iter()
+            .filter(|mapping| !mapping.suspended && self.accepts_scene_push(mapping))
+            .filter_map(|mapping| {
+                Some(ScenePushParam {
+                    key: mapping.resolved_key.clone()?,
+                    from: mapping.range_min,
+                    to: mapping.range_max,
+                    curve: mapping.curve,
+                })
+            })
+            .collect()
     }
 
     pub fn end_scene_push(&mut self) -> Vec<ScopedParamTarget> {

@@ -3009,6 +3009,7 @@
                 crate::process::ProcessLiteral::from_value(&value).expect("portable")
             };
             let kind = lisp_host::KindDefinition {
+                routes: Vec::new(),
                 id: "alez/jaki:jaki".to_string(),
                 name: "jaki".to_string(),
                 package: Some("alez/jaki".to_string()),
@@ -3018,8 +3019,8 @@
                     id: 0,
                     name: "jaki".to_string(),
                     resolution: crate::sequencer::Timebase::Sixteenth as u8,
-                    tick_source: "(alez.jaki.doc/tick-patterns self.figures self.rows \
-                                  self.row-count self.mode self.patterns)"
+                    tick_source: "(alez.jaki.doc/tick-patterns-at self.figures self.rows \
+                                  self.row-count self.mode self.offset self.patterns)"
                         .to_string(),
                     requires: vec!["alez.jaki.doc".to_string()],
                     graph: None,
@@ -3032,6 +3033,7 @@
                     ("rows".to_string(), literal("(list)")),
                     ("row-count".to_string(), literal("8")),
                     ("mode".to_string(), literal(":loop")),
+                    ("offset".to_string(), literal("0")),
                     ("patterns".to_string(), literal("(list)")),
                 ],
                 state_fields: Vec::new(),
@@ -3568,6 +3570,133 @@
         assert_eq!(times(1), vec![0, 6_000, 24_000, 30_000, 48_000, 54_000, 72_000, 78_000]);
     }
 
+    /// [`jaki_instance_observed`] with the instance clock offset (eseq-jrrq)
+    /// in sixteenths, as (track, sample time, transpose, velocity) tuples.
+    fn jaki_offset_triggers(
+        rows: &'static str,
+        figures: &'static str,
+        offset: i64,
+        horizon: u64,
+    ) -> Vec<(usize, u64, f32, f32)> {
+        jaki_instance_observed(None, rows, figures, horizon, move |state| {
+            let mut values = Runtime::new();
+            let value = values
+                .eval_str(&offset.to_string())
+                .expect("literal")
+                .expect("a value");
+            state
+                .write_current_scene_slot(
+                    lisp_host::instance_document_slot(5, "offset"),
+                    crate::process::ProcessLiteral::from_value(&value).expect("portable"),
+                )
+                .expect("offset");
+        })
+        .into_iter()
+        .map(|t| (t.track, t.sample_time, t.transpose, t.velocity))
+        .collect()
+    }
+
+    #[test]
+    fn a_jaki_clock_offset_translates_the_whole_stream_in_time() {
+        // eseq-jrrq: an offset plays the identical stream earlier, not a
+        // rotation inside the cycle. Per-cycle variation — (slow 2) on one
+        // hand, (every 3 (fast 2)), a cycled transpose — must line up hit for
+        // hit: offset -2 at time T is offset 0 at T + 2 sixteenths.
+        const ROWS: &str = r#"(list (dict :route 0 :mods (list "right" (list "slow" 2)))
+                                    (dict :route 1 :mods (list (list "every" 3 (list "fast" 2))))
+                                    (dict :route 2 :mods (list (list "note" (list 0 7 12)))))"#;
+        const FIGURES: &str = "(list (list :dot :dash :dot) (list :dot :dash :dot))";
+        const SIXTEENTH: u64 = 6_000;
+        const HORIZON: u64 = 192_000;
+        let plain = jaki_offset_triggers(ROWS, FIGURES, 0, HORIZON);
+        let early = jaki_offset_triggers(ROWS, FIGURES, -2, HORIZON);
+        let shift = 2 * SIXTEENTH;
+        let expected: Vec<_> = plain
+            .iter()
+            .filter(|(_, time, _, _)| *time >= shift)
+            .map(|(track, time, note, vel)| (*track, time - shift, *note, *vel))
+            .collect();
+        let compared: Vec<_> = early
+            .iter()
+            .filter(|(_, time, _, _)| *time < HORIZON - shift)
+            .copied()
+            .collect();
+        assert!(expected.len() > 20, "{plain:?}");
+        assert_eq!(compared, expected);
+        // A positive offset delays it; its pre-roll is silent.
+        let late = jaki_offset_triggers(ROWS, FIGURES, 2, HORIZON);
+        assert!(late.iter().all(|(_, time, _, _)| *time >= shift), "{late:?}");
+        let delayed: Vec<_> = plain
+            .iter()
+            .filter(|(_, time, _, _)| *time < HORIZON - shift)
+            .map(|(track, time, note, vel)| (*track, time + shift, *note, *vel))
+            .collect();
+        assert_eq!(late, delayed);
+    }
+
+    #[test]
+    fn a_jaki_clock_offset_keeps_seq_counters_on_their_hits() {
+        // eseq-jrrq, the reported case: (seq :hit …) notes and (seq :fig …)
+        // velocities are stateful counters. Offset -6 starts the stream six
+        // sixteenths in, so without the muted pre-roll each counter began on
+        // the wrong hit and the notes played rotated against the rhythm.
+        const ROWS: &str = r#"(list
+            (dict :route 0 :mods (list "left"
+                (list "note" (list "seq" ":hit" -9 -9 (list -12 -14) -10 -13))
+                (list "every" 2 "accent") (list "on" "dot" "stac") (list "slow" 2)))
+            (dict :route 1 :mods (list "right"
+                (list "note" (list "seq" ":hit" -6 -8 3 -1)) (list "shift" 2)
+                (list "vel*" (list "seq" ":fig" 0.5 0.15)) (list "slow" 4)))
+            (dict :route 2 :mods (list "right" (list "every-fig" 3 (list "vel*" 0.55))
+                (list "on" "dot" (list "note+" 4)) (list "slow" (list 1 2)))))"#;
+        const FIGURES: &str = "(list (list :dot :dash :dot) (list :dot :dash :dot))";
+        const HORIZON: u64 = 288_000;
+        let shift = 6 * 6_000;
+        let plain = jaki_offset_triggers(ROWS, FIGURES, 0, HORIZON);
+        let early = jaki_offset_triggers(ROWS, FIGURES, -6, HORIZON);
+        let expected: Vec<_> = plain
+            .iter()
+            .filter(|(_, time, _, _)| *time >= shift)
+            .map(|(track, time, note, vel)| (*track, time - shift, *note, *vel))
+            .collect();
+        let compared: Vec<_> = early
+            .iter()
+            .filter(|(_, time, _, _)| *time < HORIZON - shift)
+            .copied()
+            .collect();
+        assert!(expected.len() > 20, "{plain:?}");
+        assert_eq!(compared, expected);
+    }
+
+    #[test]
+    fn a_jaki_quant_snaps_on_the_transport_grid_under_an_offset() {
+        // eseq-jrrq: (quant :8) under offset -1 still lands on transport
+        // eighths, not on eighths of the shifted pattern.
+        let triggers = jaki_offset_triggers(
+            r#"(list (dict :route 0 :mods (list (list "quant" ":8"))))"#,
+            "(list (list :dot :dot :dot :dot))",
+            -1,
+            96_000,
+        );
+        assert!(!triggers.is_empty());
+        assert!(triggers.iter().all(|(_, time, _, _)| time % 12_000 == 0), "{triggers:?}");
+    }
+
+    #[test]
+    fn a_jaki_quant_snaps_on_the_transport_grid_across_odd_cycles() {
+        // `. -` is a 3-unit cycle: cycle starts drift off the quarter grid
+        // (0, 3, 6, 9 …). (quant :4) lands every hit on a transport quarter.
+        let triggers = jaki_offset_triggers(
+            r#"(list (dict :route 0 :mods (list (list "quant" ":4"))))"#,
+            "(list (list :dot :dash))",
+            0,
+            96_000,
+        );
+        let times: Vec<u64> = triggers.iter().map(|(_, time, _, _)| *time).collect();
+        assert!(!times.is_empty());
+        assert!(times.iter().all(|time| time % 24_000 == 0), "{times:?}");
+    }
+
     #[test]
     fn a_jaki_every_fig_note_transposes_only_the_picked_figures() {
         // `. .` ×2 = one 4-unit cycle; (note 5) then (every-fig 2 (note (12
@@ -3651,6 +3780,7 @@
                 crate::process::ProcessLiteral::from_value(&value).expect("portable")
             };
             let kind = lisp_host::KindDefinition {
+                routes: Vec::new(),
                 id: "test:gated".to_string(),
                 name: "gated".to_string(),
                 package: None,
@@ -3807,6 +3937,7 @@
                 crate::process::ProcessLiteral::from_value(&value).expect("portable")
             };
             let kind = lisp_host::KindDefinition {
+                routes: Vec::new(),
                 id: "alez/jaki:jaki".to_string(),
                 name: "jaki".to_string(),
                 package: Some("alez/jaki".to_string()),
@@ -3977,6 +4108,7 @@
             crate::process::ProcessLiteral::from_value(&value).expect("portable")
         };
         let kind = lisp_host::KindDefinition {
+            routes: Vec::new(),
             id: "alez/jaki:jaki".to_string(),
             name: "jaki".to_string(),
             package: Some("alez/jaki".to_string()),
@@ -13528,6 +13660,7 @@
             rows,
             end_beat,
             loop_enabled,
+            loop_range: None,
             next_row_id,
         }));
     }
@@ -14418,27 +14551,172 @@
             "{notices:?}"
         );
 
-        let (wrapped, notices) = exercise(true);
-        assert!(matches!(
-            wrapped,
-            crate::sequencer::SongChunkPlan::Schedule {
-                wrapped: true,
-                ..
-            }
-        ));
+        // A loop end that lands behind the playhead never wraps it (the
+        // loop brace rule: wraps happen only when the playhead reaches the
+        // end), so the shrunk song ends here too.
+        let (looped, notices) = exercise(true);
+        assert!(matches!(looped, crate::sequencer::SongChunkPlan::Ended), "{notices:?}");
         assert!(
-            notices.iter().any(|notice| matches!(
+            !notices.iter().any(|notice| matches!(
                 notice,
-                crate::sequencer::SongPlaybackNotice::RowApplied(applied)
-                    if applied.wrapped && applied.effective_beat == 0.0
+                crate::sequencer::SongPlaybackNotice::RowApplied(applied) if applied.wrapped
             )),
             "{notices:?}"
         );
+    }
+
+    /// Push regions are stored in song beats, and the scheduler folds them
+    /// in at `song_beat_at(clock)`: the clock reads zero at a mid-song Play
+    /// and again after every loop wrap, so a push at beat 3 must still be
+    /// found at beat 3 then (eseq-vum0).
+    #[test]
+    fn song_beat_at_maps_the_clock_through_a_mid_song_start_and_a_wrap() {
+        let (state, _) = song_mode_fixture();
+        state.set_committed_song(Some(crate::sequencer::ProjectSong {
+            rows: vec![song_mode_row(0, 0.0, 0, Vec::new())],
+            end_beat: 12.0,
+            loop_enabled: true,
+            loop_range: Some((2.0, 6.0)),
+            next_row_id: 1,
+        }));
+        let song = state.preflight_runtime_song().expect("preflight");
+        let spq = 24_000.0;
+        let mailbox = state.song_playback();
+        let mut runtime =
+            crate::sequencer::SongPlaybackRuntime::new(Arc::clone(&song), 3.0, spq).expect("runtime");
+        assert_eq!(runtime.song_beat_at(0.0), 3.0, "Play at beat 3: clock zero is song beat 3");
+        assert_eq!(runtime.song_beat_at(1.5), 4.5);
+
+        let (mut at, mut clock, mut wrapped_once) = (0u64, 0.0, false);
+        for _ in 0..8 {
+            match runtime.next_chunk(at, clock, 24_000, mailbox) {
+                crate::sequencer::SongChunkPlan::Schedule { frames, wrapped, .. } => {
+                    if wrapped {
+                        clock = 0.0;
+                        wrapped_once = true;
+                        assert_eq!(runtime.song_beat_at(clock), 2.0, "the wrap lands on the loop start");
+                    }
+                    at += frames as u64;
+                    clock += frames as f64 / spq;
+                }
+                crate::sequencer::SongChunkPlan::Ended => panic!("a looping song never ends"),
+            }
+        }
+        assert!(wrapped_once, "the run crossed the loop end");
+        assert!((runtime.song_beat_at(clock) - (2.0 + clock)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn song_loop_wraps_inside_the_loop_brace() {
+        let (state, _) = song_mode_fixture();
+        state.set_committed_song(Some(crate::sequencer::ProjectSong {
+            rows: vec![
+                song_mode_row(0, 0.0, 0, Vec::new()),
+                song_mode_row(1, 4.0, 1, Vec::new()),
+            ],
+            end_beat: 12.0,
+            loop_enabled: true,
+            loop_range: Some((2.0, 6.0)),
+            next_row_id: 2,
+        }));
+        let song = state.preflight_runtime_song().expect("preflight");
+        let spq = 24_000.0;
+        let mailbox = state.song_playback();
+
+        let mut runtime =
+            crate::sequencer::SongPlaybackRuntime::new(Arc::clone(&song), 0.0, spq).expect("runtime");
+        // Chunks stop at the row boundary (4) and then at the loop end (6).
+        let mut at = 0u64;
+        let mut clock = 0.0;
+        let mut wraps = Vec::new();
+        for _ in 0..6 {
+            match runtime.next_chunk(at, clock, 48_000, mailbox) {
+                crate::sequencer::SongChunkPlan::Schedule { frames, wrapped, .. } => {
+                    if wrapped {
+                        wraps.push(at);
+                        clock = 0.0;
+                    }
+                    at += frames as u64;
+                    clock += frames as f64 / spq;
+                }
+                crate::sequencer::SongChunkPlan::Ended => panic!("a looping song never ends"),
+            }
+        }
+        assert_eq!(wraps.first(), Some(&(6 * 24_000)), "the first wrap is at the loop end");
+        let applied: Vec<(f64, bool)> = mailbox
+            .drain_notices()
+            .into_iter()
+            .filter_map(|notice| match notice {
+                crate::sequencer::SongPlaybackNotice::RowApplied(a) => Some((a.effective_beat, a.wrapped)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(&applied[..3], &[(0.0, false), (4.0, false), (2.0, true)], "{applied:?}");
+        let position = mailbox.shared().position_beats(6 * 24_000 + 12_000).expect("active");
+        assert!((position - 2.5).abs() < 1e-6, "half a beat past the wrap: {position}");
+
+        // Started past the loop end: no wrap, the song plays on.
+        let mut runtime =
+            crate::sequencer::SongPlaybackRuntime::new(Arc::clone(&song), 8.0, spq).expect("runtime");
+        runtime.set_open_ended(true);
+        for step in 0..4 {
+            match runtime.next_chunk(step * 24_000, step as f64, 24_000, mailbox) {
+                crate::sequencer::SongChunkPlan::Schedule { wrapped, .. } => assert!(!wrapped),
+                crate::sequencer::SongChunkPlan::Ended => panic!("open-ended"),
+            }
+        }
+    }
+
+    /// Editing the brace mid-pass takes effect at once and in time: the
+    /// shared position (UI playhead, audio tracks) switches to the new loop
+    /// on the next chunk, the wrap lands exactly on the new end, and an end
+    /// moved behind the playhead lets it play straight on.
+    #[test]
+    fn a_loop_brace_edit_mid_pass_wraps_at_the_new_end_at_once() {
+        let (state, _) = song_mode_fixture();
+        let commit = |range: (f64, f64)| {
+            state.set_committed_song(Some(crate::sequencer::ProjectSong {
+                rows: vec![song_mode_row(0, 0.0, 0, Vec::new())],
+                end_beat: 32.0,
+                loop_enabled: true,
+                loop_range: Some(range),
+                next_row_id: 1,
+            }));
+            state.preflight_runtime_song().expect("preflight")
+        };
+        let spq = 24_000.0;
+        let mailbox = state.song_playback();
+        let mut runtime =
+            crate::sequencer::SongPlaybackRuntime::new(commit((0.0, 16.0)), 0.0, spq).expect("runtime");
+        // Play to beat 2, then shorten the brace to end at beat 4.
+        for beat in 0..2u64 {
+            runtime.next_chunk(beat * 24_000, beat as f64, 24_000, mailbox);
+        }
+        runtime.rebuild_song(commit((1.0, 4.0)), 2.0);
+        let plan = runtime.next_chunk(2 * 24_000, 2.0, 96_000, mailbox);
         assert!(
-            !notices
-                .iter()
-                .any(|notice| matches!(notice, crate::sequencer::SongPlaybackNotice::Ended { .. }))
+            matches!(plan, crate::sequencer::SongChunkPlan::Schedule { frames: 48_000, .. }),
+            "the chunk stops at the new loop end: {plan:?}"
         );
+        let shared = mailbox.shared();
+        let after_end = shared.position_beats(4 * 24_000 + 6_000).expect("active");
+        assert!((after_end - 1.25).abs() < 1e-6, "the playhead wraps at the new end: {after_end}");
+        let plan = runtime.next_chunk(4 * 24_000, 4.0, 24_000, mailbox);
+        assert!(matches!(plan, crate::sequencer::SongChunkPlan::Schedule { wrapped: true, .. }));
+
+        // Back in the loop (song beat 2 after the wrap to 1): move the brace
+        // behind the head, which is at beat 3 by the next chunk.
+        runtime.next_chunk(5 * 24_000, 1.0, 24_000, mailbox);
+        runtime.rebuild_song(commit((0.0, 2.0)), 2.0);
+        for step in 0..4u64 {
+            let plan = runtime.next_chunk((6 + step) * 24_000, 2.0 + step as f64, 24_000, mailbox);
+            assert!(
+                matches!(plan, crate::sequencer::SongChunkPlan::Schedule { wrapped: false, .. }),
+                "a brace behind the head never wraps it: {plan:?}"
+            );
+        }
+        let on = shared.position_beats(9 * 24_000).expect("active");
+        assert!(on > 4.0, "plays straight on: {on}");
     }
 
     #[test]
@@ -15228,7 +15506,7 @@
 
             // Mid-play add: the live state grows to 3 tracks AFTER preflight
             // froze 2-track rows; the add path latches the new lane
-            // (`latch_track_created_during_song_playback`).
+            // (`latch_new_track_if_session_held`).
             let mut live = state.with_scenes_mut(|scenes| {
                 scenes.track_pools[0]
                     .get(crate::sequencer::PatternId(1))
@@ -19963,6 +20241,96 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
         }
     }
 
+
+/// A prebuilt chunk (a song row, frozen at Play) plays the LIVE macro layer
+/// (eseq-vum0): a scene push published after preflight reaches the row's
+/// device defaults — what every note-on stamps — so the push holds across
+/// row boundaries and onsets instead of reverting to the row's values. The
+/// fold is cached per (row, table) and skipped with no overrides.
+#[test]
+fn prebuilt_chunks_play_the_live_macro_layer() {
+    use std::sync::Arc;
+    let state = SequencerState::new(1, vec![vec![]]);
+    let desc = crate::effects::EffectDescriptor::builtin_sampler();
+    crate::effects::EffectSlotSnapshot::new_default(&desc, 1)
+        .restore(&state.pattern.instrument_slots[0]);
+    let prebuilt = Arc::new(crate::sequencer::SequencerSnapshot::capture(&state));
+    let slot = &prebuilt.tracks[0].instrument_slot;
+    assert!(slot.num_params > 0 && !slot.defaults.is_empty(), "a sampler has params");
+    let param_id = slot.node_param_idx(0).and_then(|raw| {
+        crate::neural::ParamNodeId::from_slot_param(slot.node_id, slot.modulator_node_id, raw)
+    });
+    let key = crate::macro_engine::MacroParamKey::for_instrument(0, 0, param_id);
+    let before = slot.defaults[0];
+    let pushed = if before == 0.75 { 0.25 } else { 0.75 };
+
+    let mut cache = None;
+    let quiet = crate::sequencer::SequencerSnapshot::capture(&state);
+    let same = super::lookahead::with_live_macro_overrides(&mut cache, Arc::clone(&prebuilt), &quiet, 0.0);
+    assert!(Arc::ptr_eq(&same, &prebuilt), "no overrides: the row as built");
+
+    state.publish_macro_overrides(std::collections::HashMap::from([(key, pushed)]));
+    let base = crate::sequencer::SequencerSnapshot::capture(&state);
+    let patched = super::lookahead::with_live_macro_overrides(&mut cache, Arc::clone(&prebuilt), &base, 0.0);
+    assert_eq!(patched.tracks[0].instrument_slot.defaults[0], pushed, "the push reaches the row");
+    assert_eq!(prebuilt.tracks[0].instrument_slot.defaults[0], before, "the row itself is untouched");
+    let again = super::lookahead::with_live_macro_overrides(&mut cache, Arc::clone(&prebuilt), &base, 0.0);
+    assert!(Arc::ptr_eq(&again, &patched), "one fold per (row, table)");
+}
+
+/// A recorded push replays at the RENDERED position, but note-ons are
+/// stamped up to a lookahead earlier, when they are scheduled: the
+/// scheduler plays the push from its schedule at each chunk's beat. A chunk
+/// past the push's end plays the row's value even while the replay (behind
+/// it) still holds the push in the live table, and a chunk inside the push
+/// plays it before the replay has begun it (eseq-vum0).
+#[test]
+fn prebuilt_chunks_play_scheduled_pushes_at_their_own_beat() {
+    use std::sync::Arc;
+    let state = SequencerState::new(1, vec![vec![]]);
+    let desc = crate::effects::EffectDescriptor::builtin_sampler();
+    crate::effects::EffectSlotSnapshot::new_default(&desc, 1)
+        .restore(&state.pattern.instrument_slots[0]);
+    let prebuilt = Arc::new(crate::sequencer::SequencerSnapshot::capture(&state));
+    let slot = &prebuilt.tracks[0].instrument_slot;
+    let param_id = slot.node_param_idx(0).and_then(|raw| {
+        crate::neural::ParamNodeId::from_slot_param(slot.node_id, slot.modulator_node_id, raw)
+    });
+    let key = crate::macro_engine::MacroParamKey::for_instrument(0, 0, param_id);
+    let row_value = slot.defaults[0];
+    let (from, to) = (row_value, row_value + 1.0);
+    let region = crate::sequencer::ScenePushRegion {
+        id: crate::sequencer::ClipId(7),
+        start_beat: 4.0,
+        end_beat: 8.0,
+        target_scene: 1,
+        points: vec![crate::sequencer::ScenePushPoint { beat: 0.0, value: 1.0 }],
+    };
+    state.publish_scene_push_schedule(Some(Arc::new(crate::sequencer::ScenePushSchedule {
+        regions: vec![crate::sequencer::ScheduledScenePush {
+            region,
+            params: vec![crate::macro_engine::ScenePushParam {
+                key: key.clone(),
+                from,
+                to,
+                curve: crate::macro_engine::MacroCurve::Linear,
+            }],
+        }],
+    })));
+    let value_at = |state: &SequencerState, beat: f64| {
+        let base = crate::sequencer::SequencerSnapshot::capture(state);
+        let mut cache = None;
+        super::lookahead::with_live_macro_overrides(&mut cache, Arc::clone(&prebuilt), &base, beat)
+            .tracks[0]
+            .instrument_slot
+            .defaults[0]
+    };
+    assert_eq!(value_at(&state, 3.9), row_value, "before the push: the row");
+    assert_eq!(value_at(&state, 4.0), to, "inside: pushed, though the replay has not begun it");
+    // The replay, a lookahead behind, still holds the push...
+    state.publish_macro_overrides(std::collections::HashMap::from([(key, to)]));
+    assert_eq!(value_at(&state, 8.0), row_value, "...but past its end the row plays");
+}
 
 /// A prebuilt chunk (a quantized launch, a song row) plays the live groove
 /// table of ITS scene, so a rack clip with its own groove switches on the

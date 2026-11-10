@@ -1,5 +1,22 @@
 use super::*;
 
+/// Shifts a scene's track-addressed routes (mod cables, neural routes,
+/// graph overrides) for the deletion of `deleted_track`: its own are dropped,
+/// later ones move down with their tracks.
+pub(super) fn remap_scene_routes_after_track_delete(
+    mod_connections: &mut Vec<ModConnection>,
+    neural_networks: &mut [ProjectNeuralNetwork],
+    graph_overrides: &mut [ProjectGraphOverrides],
+    deleted_track: usize,
+) {
+    *mod_connections = mod_connections
+        .iter()
+        .filter_map(|connection| remap_mod_connection_after_track_delete(*connection, deleted_track))
+        .collect();
+    crate::neural::remap_neural_network_routes_after_track_delete(neural_networks, deleted_track);
+    remap_graph_overrides_after_track_delete(graph_overrides, deleted_track);
+}
+
 pub(super) fn remove_track_lane_if_present<T>(lanes: &mut Vec<T>, track_idx: usize) {
     if track_idx < lanes.len() {
         lanes.remove(track_idx);
@@ -190,6 +207,7 @@ pub(super) fn remap_arrangement_after_scene_move(
     for event in &mut arrangement.scene_lane {
         event.scene = remap_scene_index_after_move(event.scene, source, target);
     }
+    remap_push_lane_after_scene_move(arrangement, source, target);
 }
 
 /// Arrangement sibling of `remap_song_after_scene_delete`: decrement scene
@@ -206,6 +224,7 @@ pub(super) fn remap_arrangement_after_scene_delete(
             event.scene -= 1;
         }
     }
+    remap_push_lane_after_scene_delete(arrangement, deleted_scene);
 }
 
 pub(super) fn mod_destination_valid_for_track_count(

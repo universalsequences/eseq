@@ -681,3 +681,50 @@ fn a_rack_slot_samplers_selection_reads_like_the_rack_panel() {
     h.sync();
     assert_eq!(h.eval_x("rs.start-time"), Value::Number(0.5));
 }
+
+// ── the p-lock strip with steps selected ───────────────────────────────
+
+#[test]
+fn plock_chips_light_every_variant_the_selection_plays_and_clear_unlocks_it() {
+    let mut h = Harness::with_root(UiRoot::Distro);
+    let slot = h.add_effect(0, "Filter");
+    h.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+    h.sync();
+    // Steps 2 and 4 play A, step 6 B; step 3 none.
+    for (step, value) in [(2, 500.0), (4, 500.0), (6, 800.0)] {
+        h.lock_effect(slot, step, 2, value);
+    }
+    app::edit::finish_active_gesture(&mut h.app);
+    h.sync();
+    h.eval_x("(def t0 (track 0)) (def a (first t0.variants)) (def b (nth t0.variants 1))");
+    let lit = |h: &mut Harness| {
+        h.eval_x(
+            "(list (eseq.effects.track-panels/plock-chip-current? \"def\") \
+                   (eseq.effects.track-panels/plock-chip-current? a.label) \
+                   (eseq.effects.track-panels/plock-chip-current? b.label))",
+        )
+    };
+    // A mixed selection lights each chip it plays, not just its first step's.
+    h.shared.selected_steps.lock().unwrap().extend([3, 6]);
+    h.sync();
+    assert_eq!(lit(&mut h), h.eval_x("(list true false true)"));
+    h.shared.selected_steps.lock().unwrap().insert(2);
+    h.sync();
+    assert_eq!(lit(&mut h), h.eval_x("(list true true true)"));
+    // Clear removes the selection's variant locks as one undo entry.
+    let undo = h.app.history.undo_len();
+    h.eval_x("(eseq.effects.track-panels/plock-clear-selection)");
+    h.drain_and_sync();
+    assert_eq!(h.app.history.undo_len(), undo + 1);
+    assert_eq!(
+        h.eval_x("(let ((s2 (nth t0.steps 2)) (s3 (nth t0.steps 3)) (s6 (nth t0.steps 6))) \
+                 (list s2.variant s3.variant s6.variant))"),
+        h.eval_x("(list nil nil nil)")
+    );
+    assert_eq!(lit(&mut h), h.eval_x("(list true false false)"));
+    // Step 4, unselected, still plays A.
+    assert_eq!(
+        h.eval_x("(let ((s4 (nth t0.steps 4))) (if s4.variant s4.variant.label nil))"),
+        h.eval_x("a.label")
+    );
+}

@@ -40,7 +40,7 @@ impl AudioSourceMeta {
 /// `loop_start` whenever it reaches `loop_end`, so extending it repeats the
 /// loop; otherwise a span longer than the audio left plays silence past the
 /// end, as a tempo change can produce.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AudioRegion {
     /// Drawn from the same allocator as `ArrClip::id`.
     pub id: ClipId,
@@ -57,6 +57,22 @@ pub struct AudioRegion {
     pub fade_in_seconds: f32,
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub fade_out_seconds: f32,
+    /// Fade shapes, -1..1: 0 is linear, positive bows the curve up (a fast
+    /// rise, a late drop), negative down ([`fade_shape`]).
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub fade_in_curve: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub fade_out_curve: f32,
+    /// The crossfade this region makes with the region ending exactly where
+    /// it starts: seconds of the window before its start (this region's
+    /// audio from before `source_offset` fades in under the other's tail)
+    /// and after it (the other region's audio past its end fades out over
+    /// this one's head). Inert while nothing abuts it; see
+    /// [`crossfade_window`].
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub crossfade_pre_seconds: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub crossfade_post_seconds: f32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub muted: bool,
     /// Semitones; speed scales by `2^(transpose/12)`.
@@ -70,6 +86,82 @@ pub struct AudioRegion {
     pub loop_start: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub loop_end: u64,
+    /// Parameter values this region locks while it plays, like step p-locks
+    /// (eseq-a921): the track's one fx/mixer state otherwise. At most one
+    /// lock per target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locks: Vec<RegionLock>,
+}
+
+/// What a region lock sets.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RegionLockTarget {
+    /// A parameter of the track's effect at `slot`. `effect` is that slot's
+    /// effect id when the lock was made: a slot now holding another effect
+    /// leaves the lock inert rather than writing into the wrong device.
+    Effect { slot: u16, effect: String, param: u16 },
+}
+
+/// What the effect knobs show for region locks (eseq-a921): the regions
+/// selected for locking, the locks of the first of them, and every effect
+/// parameter some region of each audio track locks. Entries are validated
+/// against the effect each slot holds now.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AudioLockView {
+    /// `(track, regions)`: an effect edit on `track` locks these regions.
+    pub selection: Option<(usize, Vec<ClipId>)>,
+    /// `(slot, param) -> value` of the first selected region's locks.
+    pub shown: Vec<((usize, usize), f32)>,
+    /// `(track, slot, param)` some region locks.
+    pub locked: Vec<(usize, usize, usize)>,
+}
+
+impl AudioLockView {
+    /// The regions an effect edit on `track` locks, if any are selected.
+    pub fn regions_for(&self, track: usize) -> Option<&[ClipId]> {
+        self.selection
+            .as_ref()
+            .filter(|(owner, regions)| *owner == track && !regions.is_empty())
+            .map(|(_, regions)| regions.as_slice())
+    }
+
+    /// What a knob for `track`'s effect `slot`:`param` shows while regions
+    /// are selected: `Some(Some(value))` locked, `Some(None)` unlocked (the
+    /// track value), `None` when no region is selected there.
+    pub fn shown(&self, track: usize, slot: usize, param: usize) -> Option<Option<f32>> {
+        self.regions_for(track)?;
+        Some(self.shown.iter().find(|(key, _)| *key == (slot, param)).map(|(_, value)| *value))
+    }
+
+    pub fn has_lock(&self, track: usize, slot: usize, param: usize) -> bool {
+        self.locked.contains(&(track, slot, param))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RegionLock {
+    pub target: RegionLockTarget,
+    pub value: f32,
+}
+
+impl AudioRegion {
+    pub fn lock(&self, target: &RegionLockTarget) -> Option<f32> {
+        self.locks.iter().find(|lock| &lock.target == target).map(|lock| lock.value)
+    }
+
+    /// Set (`Some`) or clear (`None`) the lock on `target`.
+    pub fn set_lock(&mut self, target: RegionLockTarget, value: Option<f32>) {
+        let existing = self.locks.iter().position(|lock| lock.target == target);
+        match (existing, value) {
+            (Some(index), Some(value)) => self.locks[index].value = value,
+            (Some(index), None) => {
+                self.locks.remove(index);
+            }
+            (None, Some(value)) => self.locks.push(RegionLock { target, value }),
+            (None, None) => {}
+        }
+    }
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -109,11 +201,16 @@ impl AudioRegion {
             gain_db: 0.0,
             fade_in_seconds: 0.0,
             fade_out_seconds: 0.0,
+            fade_in_curve: 0.0,
+            fade_out_curve: 0.0,
+            crossfade_pre_seconds: 0.0,
+            crossfade_post_seconds: 0.0,
             muted: false,
             transpose: 0.0,
             loop_enabled: false,
             loop_start: 0,
             loop_end: 0,
+            locks: Vec::new(),
         }
     }
 
@@ -146,12 +243,96 @@ impl AudioRegion {
             * source_rate as f64
             * self.speed();
         let position = self.fold_into_loop(self.source_offset as f64 + played);
+        // A cut has no fade-in or crossfade of its own: those belonged to
+        // the region's start.
         Self {
             start_beat: beat,
             source_offset: position.round() as u64,
-            ..*self
+            fade_in_seconds: 0.0,
+            fade_in_curve: 0.0,
+            crossfade_pre_seconds: 0.0,
+            crossfade_post_seconds: 0.0,
+            ..self.clone()
         }
     }
+
+    /// Keep the fades inside the region (in + out never longer than it),
+    /// after a cut shortened it: a fade outlasting its region would start
+    /// before it and darken the whole of it.
+    pub fn clamp_fades(&mut self, seconds_per_beat: f64) {
+        let length = self.length_seconds(seconds_per_beat) as f32;
+        self.fade_in_seconds = self.fade_in_seconds.min(length).max(0.0);
+        self.fade_out_seconds = self.fade_out_seconds.min(length - self.fade_in_seconds).max(0.0);
+    }
+
+    /// Timeline seconds the region spans.
+    pub fn length_seconds(&self, seconds_per_beat: f64) -> f64 {
+        (self.end_beat - self.start_beat).max(0.0) * seconds_per_beat
+    }
+
+    /// Timeline seconds of audio before the region's start that it could
+    /// play (the material a crossfade into it pre-rolls).
+    pub fn seconds_before_start(&self, source_rate: u32) -> f64 {
+        self.source_offset as f64 / source_rate.max(1) as f64 / self.speed()
+    }
+
+    /// Timeline seconds of audio past the region's end that it could keep
+    /// playing (the material a crossfade out of it runs on); a looping
+    /// region never runs out.
+    pub fn seconds_after_end(&self, meta: &AudioSourceMeta, seconds_per_beat: f64) -> f64 {
+        if self.loop_window().is_some() {
+            return f64::INFINITY;
+        }
+        let rate = meta.sample_rate.max(1) as f64;
+        let end = self.source_offset as f64 + self.length_seconds(seconds_per_beat) * rate * self.speed();
+        ((meta.frames as f64 - end) / rate / self.speed()).max(0.0)
+    }
+}
+
+// The fade shapes, shared with the timeline that draws them.
+pub use eseqlisp::audio::fade::{
+    crossfade_gains, curve_for_midpoint as fade_curve_for_midpoint, curve_power as fade_curve_power,
+    fade_level as fade_shape, FadeHandle,
+};
+
+/// Whether `next` starts exactly where `prev` ends.
+pub fn regions_abut(prev: &AudioRegion, next: &AudioRegion) -> bool {
+    (prev.end_beat - next.start_beat).abs() < 1e-6
+}
+
+/// The crossfade `next` makes with `prev`, in timeline seconds before and
+/// after their shared edge: its stored window clamped to the audio each has
+/// beyond that edge and to the regions' lengths. `None` unless they abut and
+/// some window is left.
+pub fn crossfade_window(
+    prev: &AudioRegion,
+    prev_meta: &AudioSourceMeta,
+    next: &AudioRegion,
+    next_meta: &AudioSourceMeta,
+    seconds_per_beat: f64,
+) -> Option<(f64, f64)> {
+    if !regions_abut(prev, next) {
+        return None;
+    }
+    let (pre_room, post_room) = crossfade_room(prev, prev_meta, next, next_meta, seconds_per_beat);
+    let pre = (next.crossfade_pre_seconds.max(0.0) as f64).min(pre_room);
+    let post = (next.crossfade_post_seconds.max(0.0) as f64).min(post_room);
+    (pre + post > 1e-6).then_some((pre, post))
+}
+
+/// Seconds a crossfade between abutting `prev` and `next` can reach before
+/// their shared edge (`next`'s audio before its start, within `prev`) and
+/// after it (`prev`'s audio past its end, within `next`).
+pub fn crossfade_room(
+    prev: &AudioRegion,
+    prev_meta: &AudioSourceMeta,
+    next: &AudioRegion,
+    next_meta: &AudioSourceMeta,
+    seconds_per_beat: f64,
+) -> (f64, f64) {
+    let pre = next.seconds_before_start(next_meta.sample_rate).min(prev.length_seconds(seconds_per_beat));
+    let post = prev.seconds_after_end(prev_meta, seconds_per_beat).min(next.length_seconds(seconds_per_beat));
+    (pre, post)
 }
 
 /// Beats a source of `frames` at `sample_rate` lasts at `bpm`.
@@ -234,6 +415,13 @@ impl ProjectArrangement {
         seconds_per_beat: f64,
     ) -> Result<(), String> {
         let lane = std::mem::take(self.audio_lane_mut(track));
+        // A region the span cuts in two: its fade-out belonged to its end,
+        // which the tail keeps (as `audio_region_split` does).
+        let straddling: Vec<ClipId> = lane
+            .iter()
+            .filter(|region| region.start_beat < start && region.end_beat > end)
+            .map(|region| region.id)
+            .collect();
         let sources = &self.audio_sources;
         let mut next_clip_id = self.next_clip_id;
         let kept = occlude_lane(
@@ -253,7 +441,15 @@ impl ProjectArrangement {
             },
         );
         self.next_clip_id = next_clip_id;
-        self.audio_lanes[track] = kept?;
+        let mut kept = kept?;
+        for region in &mut kept {
+            if straddling.contains(&region.id) {
+                region.fade_out_seconds = 0.0;
+                region.fade_out_curve = 0.0;
+            }
+            region.clamp_fades(seconds_per_beat);
+        }
+        self.audio_lanes[track] = kept;
         Ok(())
     }
 
@@ -326,6 +522,10 @@ impl ProjectArrangement {
                     ("transpose", region.transpose),
                     ("fade-in", region.fade_in_seconds),
                     ("fade-out", region.fade_out_seconds),
+                    ("fade-in curve", region.fade_in_curve),
+                    ("fade-out curve", region.fade_out_curve),
+                    ("crossfade", region.crossfade_pre_seconds),
+                    ("crossfade", region.crossfade_post_seconds),
                 ] {
                     if !value.is_finite() {
                         return Err(format!(

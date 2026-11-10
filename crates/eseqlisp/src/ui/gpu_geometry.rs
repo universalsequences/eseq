@@ -112,16 +112,16 @@ pub(crate) struct SolidCablePath {
 
 impl SolidCablePath {
     pub fn between(start: (f32, f32), end: (f32, f32), tension: f32) -> Self {
-        let dx = end.0 - start.0;
-        let dy = end.1 - start.1;
-        let distance = (dx * dx + dy * dy).sqrt();
-        let horizontal = dx.abs();
+        Self::hung(start, end, tension, 1.0)
+    }
+
+    /// `between` with the sag scaled by `hang` (a port's `:cable-hang`; 1 is
+    /// the stock hang): a dense view lets its cables drop below what they
+    /// would cover. The click hit-test follows the same curve
+    /// ([`solid_cable_controls`]).
+    pub fn hung(start: (f32, f32), end: (f32, f32), tension: f32, hang: f32) -> Self {
         let slack = (1.0 - tension).clamp(0.0, 1.0);
-        let sag = ((28.0 + distance * 0.22) * slack).clamp(18.0, 98.0);
-        let handle_x = horizontal.clamp(42.0, 190.0) * (0.30 + 0.14 * slack);
-        let direction = if dx >= 0.0 { 1.0 } else { -1.0 };
-        let control1 = (start.0 + handle_x * direction, start.1 + sag);
-        let control2 = (end.0 - handle_x * direction, end.1 + sag);
+        let (control1, control2) = solid_cable_controls(start, end, slack, hang);
         Self {
             start,
             control1,
@@ -131,10 +131,50 @@ impl SolidCablePath {
     }
 }
 
+/// The solid cable's two Bezier control points between `start` and `end`:
+/// horizontal handles and a sag that grows with the span, scaled by `hang`
+/// (clamped to 1..6; 1 is the stock hang).
+pub(crate) fn solid_cable_controls(
+    start: (f32, f32),
+    end: (f32, f32),
+    slack: f32,
+    hang: f32,
+) -> ((f32, f32), (f32, f32)) {
+    let dx = end.0 - start.0;
+    let dy = end.1 - start.1;
+    let distance = (dx * dx + dy * dy).sqrt();
+    let hang = if hang.is_finite() { hang.clamp(1.0, 6.0) } else { 1.0 };
+    let sag = ((28.0 + distance * 0.22) * slack * hang).clamp(18.0 * hang, 98.0 * hang);
+    let handle_x = dx.abs().clamp(42.0, 190.0) * (0.30 + 0.14 * slack);
+    let direction = if dx >= 0.0 { 1.0 } else { -1.0 };
+    (
+        (start.0 + handle_x * direction, start.1 + sag),
+        (end.0 - handle_x * direction, end.1 + sag),
+    )
+}
+
+/// A port's `:cable-hang` (a number), else 1: the stock hang.
+pub(crate) fn cable_hang_prop(node: &crate::layout::LayoutNode) -> f32 {
+    match node.props.get("cable-hang") {
+        Some(crate::vm::Value::Number(hang)) => *hang as f32,
+        _ => 1.0,
+    }
+}
+
+/// A port's `:cable-opacity` (a number, clamped to 0.1..1), else 1.
+pub(crate) fn cable_opacity_prop(node: &crate::layout::LayoutNode) -> f32 {
+    match node.props.get("cable-opacity") {
+        Some(crate::vm::Value::Number(alpha)) => (*alpha as f32).clamp(0.1, 1.0),
+        _ => 1.0,
+    }
+}
+
 /// Design-pixel half-width of the app-wide solid cable body.
 pub(crate) const SOLID_CABLE_RADIUS_DESIGN_PX: f32 = 3.0;
 /// Hang of the solid cable between its ports: 0 sags fully, 1 pulls taut.
 pub(crate) const SOLID_CABLE_TENSION: f32 = 0.30;
+/// The solid cable's slack (`1 - SOLID_CABLE_TENSION`), for the hit-test.
+pub(crate) const SOLID_CABLE_SLACK: f32 = 1.0 - SOLID_CABLE_TENSION;
 
 /// One solid-style cable instance, or `None` when it lies entirely offscreen.
 /// `plug_radius_px` is the plug disc drawn over each end.

@@ -2,25 +2,11 @@ use super::*;
 
 impl GraphController<'_> {
     pub fn apply_sample_ids(&mut self, sample_ids: &[(i32, String, u32)]) {
-        for (track, (buffer_id, name, sample_rate)) in sample_ids.iter().enumerate() {
-            if *buffer_id < 0 {
-                continue;
-            }
+        for (track, sample_id) in sample_ids.iter().enumerate() {
             if track >= self.app.tracks.len() {
                 break;
             }
-            if !self.app.is_sampler_track(track) {
-                continue;
-            }
-            self.send_sample_to_all_voices(track, *buffer_id, *sample_rate);
-            self.app.graph.track_buffer_ids[track] = *buffer_id;
-            if let Some(track_sample_rate) = self.app.graph.track_sample_rates.get_mut(track) {
-                *track_sample_rate = *sample_rate;
-            }
-            self.app.set_automatic_track_name(track, name.clone());
-            self.app
-                .sync_sampler_path_from_sample(track, *buffer_id, name);
-            self.app.publish_sampler_analysis_runtime(track);
+            self.apply_track_sample_id(track, sample_id);
         }
         if let Err(error) = self.sync_live_rack_tracks_from_pattern_state() {
             self.app.editor.status_message = Some((
@@ -28,6 +14,38 @@ impl GraphController<'_> {
                 std::time::Instant::now(),
             ));
         }
+    }
+
+    /// Put one plain sampler track's voices on `sample_id` (a stored Patch
+    /// sample). Unset ids and non-sampler tracks are left alone.
+    pub fn apply_track_sample_id(&mut self, track: usize, sample_id: &(i32, String, u32)) {
+        if !self.put_sample_on_voices(track, sample_id) {
+            return;
+        }
+        let (buffer_id, name, _) = sample_id;
+        self.app.set_automatic_track_name(track, name.clone());
+        self.app
+            .sync_sampler_path_from_sample(track, *buffer_id, name);
+        self.app.publish_sampler_analysis_runtime(track);
+    }
+
+    /// Only the audio half of `apply_track_sample_id`: the voices play
+    /// `sample_id` and the live buffer/rate arrays name it. No track rename
+    /// and no slice-marker reconciliation. Returns false (and does nothing)
+    /// for an unset id or a track that is not a plain sampler.
+    pub fn put_sample_on_voices(&mut self, track: usize, sample_id: &(i32, String, u32)) -> bool {
+        let (buffer_id, _, sample_rate) = sample_id;
+        if *buffer_id < 0 || track >= self.app.tracks.len() || !self.app.is_sampler_track(track) {
+            return false;
+        }
+        self.send_sample_to_all_voices(track, *buffer_id, *sample_rate);
+        if let Some(track_buffer_id) = self.app.graph.track_buffer_ids.get_mut(track) {
+            *track_buffer_id = *buffer_id;
+        }
+        if let Some(track_sample_rate) = self.app.graph.track_sample_rates.get_mut(track) {
+            *track_sample_rate = *sample_rate;
+        }
+        true
     }
 
     pub fn sync_live_rack_tracks_from_pattern_state(&mut self) -> Result<(), String> {

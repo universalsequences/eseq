@@ -77,7 +77,7 @@
     (v-stack :width :fill :height :fill :gap 0
       (subtree :key "instance-power"
         (instance-power-strip id))
-      (box :width :fill :flex 1 :padding 0
+      (box :width :fill :flex 1 :padding 0 :v-align :start
         (view self)))))
 
 (set-instance-view-frame! instance-view-frame)

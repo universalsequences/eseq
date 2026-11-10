@@ -12,5 +12,11 @@
        is required. -->
   <key>com.apple.security.cs.disable-library-validation</key>
   <true/>
+  <!-- Audio tracks record from an input device (audio-tracks spec §12.6).
+       Under the hardened runtime the system delivers silence from every
+       input, without asking the user, unless the app carries this. The
+       Info.plist's NSMicrophoneUsageDescription is the prompt's text. -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
 </dict>
 </plist>

@@ -636,6 +636,7 @@ mod tests {
     fn instance_commands_round_trip_through_dispatch() {
         sequencer::lisp_host::clear_kind_registry();
         sequencer::lisp_host::register_kind(sequencer::lisp_host::KindDefinition {
+            routes: Vec::new(),
             id: "scratch:tst".to_string(),
             name: "tst".to_string(),
             package: None,

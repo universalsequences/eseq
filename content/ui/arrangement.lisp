@@ -37,19 +37,22 @@
 (import eseq.export-song)
 (import eseq.file-dialogs)
 (import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of rgb-part))
-(import eseq.kinds :refer (track tracks groups scenes banks song transport selection
+(import eseq.kinds :refer (track tracks ordered-tracks track-order groups scenes banks song transport selection project
                            select-region! clear-region!))
 
 (export arr-view
         arr-select
         arr-lanes
         arr-drag
+        arr-drop
+        arr-lane
         arr-placement
         arr-scene-menu
         arr-pattern-menu
         track-row-pitch
         scroll-extent
         set-view-start
+        view-action
         set-cursor
         lane-cursor-time
         scene-name
@@ -64,6 +67,7 @@
         lane-selection
         region-other-track
         region-other-row
+        row-at-offset
         track-row-key
         rack-row-key
         rack-lane-region
@@ -77,7 +81,11 @@
         clip-span-all-tracks
         everything-span
         begin-placement
-        cancel-placement)
+        cancel-placement
+        push-items
+        pending-push-items
+        push-selection-rect
+        push-lane-action)
 
 ;; ── View state (`:key ()` singletons) ──────────────────────────────────────
 ;; Every fast-changing surface a lane draws is a field bound with #': scroll
@@ -98,22 +106,33 @@
           (duration 64)
           (content-length 64)
           (cursor-time 0)
-          (cursor-track -1)))
+          (cursor-track -1)
+          ;; The loop brace the ruler draws: the song's, or the live drag
+          ;; while `loop-dragging`. `loop-on` is 1 while looping (bound as
+          ;; a number).
+          (loop-start 0)
+          (loop-end 16)
+          (loop-on 0)
+          (loop-dragging false)))
 
-;; Playhead follow: while the song plays, the view scrolls smoothly with the
-;; playhead. A hand scroll or zoom pauses it for a cooloff,
+;; Playhead follow: while the song plays, the view pages to the playhead
+;; whenever it leaves the window, and otherwise holds still (a loop inside
+;; the window never scrolls it). A hand scroll or zoom pauses it for a cooloff,
 ;; so you can look elsewhere without being dragged back mid-glance.
 (defcustom arrangement-follow-playhead true
   :type :bool
   :doc "Scroll the arrangement to keep the playhead in view while the song plays.")
 
-(defcustom arrangement-follow-cooloff 10
-  :type :number :min 0 :max 120 :step 1
-  :doc "Seconds playhead follow stays paused after you scroll or zoom the arrangement yourself.")
+(defcustom arrangement-follow-cooloff 2
+  :type :number :min 0 :max 120 :step 0.5
+  :doc "Seconds playhead follow stays paused after you scroll or zoom the arrangement yourself. Starting playback ends the pause.")
 
 ;; now-ms of the last hand scroll/zoom, or nil: plain module state, not a
 ;; kind field, so pausing never repaints anything.
 (def follow-paused-ms nil)
+;; Whether the song was stopped when follow last ran: going from stopped to
+;; playing clears a hand-scroll pause, so Play always follows again.
+(def follow-was-stopped true)
 
 ;; The click selection. `scenes` are the scene lane's selected events (their
 ;; start beats) and `rect` its marquee echo while a drag is live. Track-clip
@@ -130,7 +149,10 @@
           ;; The selected rack member item's string id (rack-member-select,
           ;; then song.bound-rack-item), or nil: the widget's :selected-id is
           ;; numeric, so these light through the item's own :selected.
-          (rack-item :any :default nil)))
+          (rack-item :any :default nil)
+          ;; The audio regions effect edits lock (eseq-a921), as last sent
+          ;; to the host: the selected regions of one audio lane.
+          (lock-ids '())))
 
 ;; The host's song selection as the lanes draw it (the lane sync below): the
 ;; bound clip (takes spec 16.6) and the committed region (region spec 4.4),
@@ -167,6 +189,21 @@
           (region-b 0)
           (lane-a -1)
           (lane-b -1)))
+
+;; Where a sample dragged over an audio lane would land: lane `lane`
+;; (-1: none) from `start` to `end` in beats. The lane draws it only while
+;; the drag hovers it, so a drag that leaves or ends needs no clearing.
+;; One dragged file also draws its waveform as it decodes: `sample` is its
+;; drag preview id (-1: none), `seconds` its length, and `generation` bumps
+;; as more of it decodes.
+(def-kind arr-drop
+  :key ()
+  :state ((lane -1)
+          (start 0)
+          (end 0)
+          (sample -1)
+          (seconds 0)
+          (generation 0)))
 
 ;; The rack rows' own gesture state (docs/arrangement-rack-lanes-spec.md
 ;; §5): the selected rack-lane clip, the lane that owns it and the live drag.
@@ -220,6 +257,8 @@
 (def-kind arr-scene-menu
   :key ()
   :state ((open false)
+          ;; Opened on the ruler: the loop menu, not the scene one.
+          (ruler false)
           (at :point :default nil)
           (time 0)
           (span scene-span :default nil)
@@ -257,7 +296,7 @@
 ;; flush (the track rows) must draw only ONE of the two edges, otherwise two
 ;; adjacent 1 px borders read as a 2 px seam — see `track-lane`.
 (def lane-border-top-color :bg)
-(def lane-border-bottom-color :bg)
+(def lane-border-bottom-color :transparent)
 (def lane-border-width 3)
 ;; Vertical distance in CELLS between one track row's top and the next.
 ;; Track rows stack in a :gap 0 v-stack (see the buffer composition below), so
@@ -267,6 +306,39 @@
 ;; the v-stack gap; metal_seq_arrangement_region_row_pitch_matches_layout
 ;; measures the rendered rows and fails if they ever drift apart.
 (def track-row-pitch track-lane-height)
+
+;; Audio lanes stand taller so a waveform (two, for a stereo file) reads at
+;; a glance, as Ableton's audio tracks do; any lane collapses to a strip
+;; holding just its clips' title bars.
+(defcustom arrangement-audio-lane-height 6.8
+  :type :number :min 3 :max 16 :step 0.1
+  :doc "Height (cells) of an audio track's lane in the arrangement.")
+(def collapsed-lane-height 1.75)
+
+;; Per-track lane state, by track id: collapsed to a strip.
+(def-kind arr-lane
+  :key (tid)
+  :state ((collapsed false)))
+
+;; Track t's lane height: collapsed, audio or the stock pattern lane.
+(def lane-height-for (t)
+  (cond
+    ((= t nil) track-lane-height)
+    ((let ((h (arr-lane t.tid))) h.collapsed) collapsed-lane-height)
+    ((audio-track? t) arrangement-audio-lane-height)
+    (else track-lane-height)))
+
+;; The disclosure that collapses track t's lane, in its header.
+(def lane-collapse-toggle (t)
+  (let ((h (arr-lane t.tid)))
+    (box :background "disclosure-button"
+      :key (str "arr-lane-collapse-" t.tid)
+      :width 1.55 :height 1.25
+      :collapsed #'h.collapsed
+      :col 0.9
+      :surface-alpha 1.0
+      :stroke-width 0.12
+      :on-click (lambda (event) (toggle! h.collapsed)))))
 ;; Clip title-bar height in cells (region spec 3.1): the move/resize strip
 ;; above each clip's body. Fixed rather than proportional so clips read the
 ;; same at any lane height; tune by eye against the Ableton reference.
@@ -277,6 +349,15 @@
 (def scene-color () THEME.scene_clip_bg)
 (def timeline-background-color :buffer-bg)
 (def cursor-color :arrangement-cursor)
+;; A track lane's edit cursor (where Cmd+V pastes): a bold line in the
+;; theme's ink across the whole lane, clips and waveforms included, as
+;; Ableton draws it.
+(def track-cursor-color :fg)
+(def track-cursor-width 2)
+
+(defcustom arrangement-pinch-zoom 4
+  :type :number :min 1 :max 32 :step 0.5
+  :doc "How far one trackpad pinch zooms the arrangement (1 is the piano roll's rate).")
 ;; Clip corner radius in CELLS (GarageBand-style rounded clips), so it scales
 ;; with the UI zoom like the lane heights above. 0 gives the square clips
 ;; every other timeline host draws.
@@ -303,8 +384,20 @@
   (set! arr-select.lane i)
   (set! arr-select.clip clip-id))
 
+;; Regions `ids` of audio lane i are what effect edits lock (i -1: none):
+;; with them selected, turning an effect knob p-locks the regions instead
+;; of moving the track's one value (eseq-a921). Only "none again" is
+;; skipped: the host drops a deleted or undone region from its copy on its
+;; own, so re-selecting the same ids must still be sent.
+(def set-lock-regions! (i ids)
+  (unless (and (empty? ids) (empty? arr-select.lock-ids))
+    (set! arr-select.lock-ids ids)
+    (host-command "audio-lock-select"
+      (if (< i 0) (dict :ids '()) (dict :track i :ids ids)))))
+
 ;; No clip is clicked on any lane.
 (def deselect-clips! ()
+  (set-lock-regions! -1 '())
   (set! arr-select.clips '())
   (set! arr-select.rack-item nil)
   (set! arr-rack.selected -1)
@@ -389,23 +482,29 @@
   (set! arr-view.start
     (max 0 (min (max-view-start duration) start))))
 
-;; Where in the window the followed playhead sits (0 left edge, 1 right):
-;; a third in, so more of what is coming is on screen than what has passed.
+;; Where in the window a page puts the playhead (0 left edge, 1 right): a
+;; third in, so more of what is coming is on screen than what has passed.
 (def follow-anchor 0.33)
 
-;; Scroll the view continuously so the playhead holds its anchor point,
-;; unless follow is off or a hand scroll is still inside its cooloff. Near
-;; the song start the view rests at 0 until the playhead reaches the anchor.
-;; It bypasses set-view-start's extent clamp on purpose: that clamp ends the
-;; view a padding past the playhead, which would pin the playhead to the
-;; right edge instead of letting the view travel with it.
+;; Page the view to the playhead only when it leaves the window (runs off
+;; the right edge, or a loop wraps it back before the left one), unless
+;; follow is off or a hand scroll is still inside its cooloff. While the
+;; playhead is on screen the view never moves. It bypasses set-view-start's
+;; extent clamp on purpose: that clamp ends the view a padding past the
+;; playhead, which would pin the playhead to the right edge.
 (def follow-playhead ()
   ;; Read the position FIRST, unconditionally: the subtree reruns only on
   ;; what its last run read, so a run that bailed inside the cooloff before
   ;; reading it would never run again and follow would never come back.
-  (let ((pos song.position))
+  (let ((pos song.position)
+        (stopped (= song.mode "stopped")))
+    (when (and follow-was-stopped (not stopped))
+      (set! follow-paused-ms nil))
+    (set! follow-was-stopped stopped)
     (when (and arrangement-follow-playhead
-            (not (= song.mode "stopped"))
+            (not stopped)
+            (or (< pos arr-view.start)
+              (>= pos (+ arr-view.start arr-view.duration)))
             (or (= follow-paused-ms nil)
               (>= (- (now-ms) follow-paused-ms)
                 (* 1000 arrangement-follow-cooloff))))
@@ -425,7 +524,10 @@
                         0.5
                         (max 0 (min 1 (/ (- anchor start) duration))))))
     (set! arr-view.duration next-duration)
-    (set-view-start (- anchor (* anchor-ratio next-duration)) next-duration)))
+    ;; The time under the pointer stays under it (Ableton): no clamp to
+    ;; the song's extent, which would drag a zoom aimed past the last clip
+    ;; back toward it on every step.
+    (set! arr-view.start (max 0 (- anchor (* anchor-ratio next-duration))))))
 
 (def set-cursor (time track)
   (unless (= time nil)
@@ -449,10 +551,12 @@
   (match event.type
     :scroll-view
     ;; An absolute start (0 included) wins over a delta.
-    (let ((start (get event :view-start)))
-      (set-view-start
-        (if (= start nil) (+ arr-view.start (or (get event :delta-time) 0)) start)
-        arr-view.duration))
+    ;; A view a zoom left past the song's extent scrolls back from there
+    ;; rather than snapping: only scrolling further right is held back.
+    (let ((start (get event :view-start))
+          (next (if (= start nil) (+ arr-view.start (or (get event :delta-time) 0)) start))
+          (limit (max (max-view-start arr-view.duration) arr-view.start)))
+      (set! arr-view.start (max 0 (min limit next))))
     :zoom-view
     (set-zoom event)))
 
@@ -960,12 +1064,38 @@
 ;; absent from that order, so a region drag always spans visible rows, and
 ;; one that runs off the top or bottom selects out to the edge.
 (def region-other-row (key row-delta)
-  (let ((rows (arr-row-keys))
+  (let ((items (arr-row-items))
+        (rows (arr-row-keys))
         (ordinal (index-of rows key)))
     (if (< ordinal 0)
       key
-      (let ((steps (round (/ (or row-delta 0) track-row-pitch))))
-        (nth rows (max 0 (min (- (len rows) 1) (+ ordinal steps))))))))
+      (nth rows (row-at-offset (map row-item-height items) ordinal (or row-delta 0))))))
+
+;; A visible row's height in cells (rack rows keep the stock lane height).
+(def row-item-height (item)
+  (if (= (get item :rack) nil)
+    (lane-height-for (track (get item :track)))
+    track-lane-height))
+
+;; The row a drag lands on that started at the middle of row `ordinal` and
+;; travelled `delta` cells, given every row's height: rows differ (audio
+;; lanes stand taller, collapsed ones shrink), so travel is measured against
+;; the rows it actually crosses. One that runs off either end selects out to
+;; the edge.
+(def row-at-offset (heights ordinal delta)
+  (let ((top (reduce |acc k| (+ acc (nth heights k)) 0 (range ordinal)))
+        (y (+ top (* 0.5 (nth heights ordinal)) delta))
+        ;; Walk the rows down to the first whose bottom is below y.
+        (walk (reduce |acc h|
+                  (if (get acc :done)
+                    acc
+                    (let ((bottom (+ (get acc :edge) h)))
+                      (if (< y bottom)
+                        (dict :done true :row (get acc :row) :edge bottom)
+                        (dict :done false :row (+ (get acc :row) 1) :edge bottom))))
+                (dict :done false :row 0 :edge 0)
+                heights)))
+    (if (< y 0) 0 (min (get walk :row) (- (len heights) 1)))))
 
 ;; region-other-row from track i's row, as the track it lands on (a rack
 ;; row answers its first member).
@@ -1019,6 +1149,7 @@
 ;; which a track-lane marquee covering the same rectangle never does.
 (def region-commit (region)
   (clear-region-ghost!)
+  (drop-push-selection!)
   (let ((row-a (when region (get region :row-a)))
         (row-b (when region (get region :row-b)))
         (a (when region (track (row-key-track row-a))))
@@ -1038,6 +1169,7 @@
 ;; (negative id, lane spec 12): a gap is not a clip, so there is nothing to
 ;; bind or select.
 (def select-clip (c)
+  (drop-push-selection!)
   (set! song.bound-clip c)
   (when (= c nil) (clear-region!)))
 
@@ -1056,21 +1188,30 @@
                             (fold-clips |acc c| (min acc c.start) hi)))
         :end hi))))
 
-;; The clip span widened to every scene event; nil when the song holds
-;; neither clips nor scene events.
+;; The clip span widened to every scene event and recorded scene push; nil
+;; when the song holds none of them.
 (def everything-span ()
   (let ((clips (clip-span-all-tracks))
-        (spans song.spans))
-    (if (empty? spans)
-      clips
-      ;; Spans are ordered and contiguous (as content-length-min reads them).
-      (let ((first-span (first spans))
-            (last-span (nth spans (- (len spans) 1)))
-            (lo first-span.start)
-            (hi last-span.end))
-        (if (= clips nil)
-          (dict :start lo :end hi)
-          (dict :start (min lo (get clips :start)) :end (max hi (get clips :end))))))))
+        (spans song.spans)
+        (pushes (or song.pushes '()))
+        ;; Both lanes are in time order (scene spans contiguous, pushes never
+        ;; overlapping), so their first and last entries bound them.
+        (scene-span
+          (unless (empty? spans)
+            (let ((a (first spans)) (b (nth spans (- (len spans) 1))))
+              (dict :start a.start :end b.end))))
+        (push-span
+          (unless (empty? pushes)
+            (let ((a (first pushes)) (b (nth pushes (- (len pushes) 1))))
+              (dict :start a.start :end b.end)))))
+    (reduce |acc span|
+      (cond
+        ((= span nil) acc)
+        ((= acc nil) span)
+        (else (dict :start (min (get acc :start) (get span :start))
+                :end (max (get acc :end) (get span :end)))))
+      nil
+      (list clips scene-span push-span))))
 
 (def select-all-clips ()
   (let ((span (everything-span))
@@ -1089,13 +1230,20 @@
 ;; this is really about the in-flight ghost and the scene-row path.
 (def drop-region! ()
   (clear-region-ghost!)
-  (clear-region!))
+  (clear-region!)
+  (drop-push-selection!))
 
 ;; What a gesture that names no single clip does: drop the region and release
 ;; the sound binding (takes spec 16.6 cause 2).
 (def release-selection! ()
   (drop-region!)
   (set! song.bound-clip nil))
+
+;; The push lane's own selection (picked pushes, a swept range) yields to
+;; any other selection gesture, as the lanes' selections yield to it.
+(def drop-push-selection! ()
+  (set! arr-push.selected '())
+  (set! arr-push.range nil))
 
 ;; The scene lane draws its own marquee echo while a drag is live, then keeps
 ;; the committed rect lit for a SCENE-LANE region (region spec 4.4) — the
@@ -1175,6 +1323,10 @@
       (scene-clear-selection event)
       :set-cursor
       (set-cursor (get event :time) -1)
+      :loop-brace
+      (loop-brace-drag event)
+      :finish-loop-brace
+      (loop-brace-finish event)
       ;; A scene-lane marquee selects the time span across ALL visible tracks
       ;; (region spec 4.2): the lane has no per-track geometry to sweep. The
       ;; scene lane keeps its own dashed marquee echo while the drag is live.
@@ -1257,7 +1409,8 @@
   (edit-finish (merge payload :track i :clip-id c.cid)))
 
 (def track-resize-end-finish (i c time)
-  (let ((new-end (max 0 (min song.end time))))
+  ;; A resize past the song end extends the song (arr_clip_resize).
+  (let ((new-end (max 0 time)))
     (unless (= new-end c.end)
       (if (<= new-end c.start)
         ;; Dragged past its own start: the clip is gone.
@@ -1404,21 +1557,35 @@
         (unless (or (= c nil) (= (get drag :start) c.start))
           (clip-edit i c (dict :type :clip-move :start (get drag :start))))))))
 
-;; Cmd+E: split the items (clips or audio regions) under the cursor at
-;; `time` -- the selected ones when the selection holds one there, else
-;; whichever the cursor is inside. `split` sends one item's split.
-(def split-under (items time noun split)
-  (unless (= time nil)
-    (let ((under (filter |c| (and (> time c.start) (< time c.end)) items))
-          (selected (filter |c| (listed? c.cid arr-select.clips) under))
-          (targets (if (empty? selected) under selected)))
-      (if (empty? targets)
-        (status (str "Place the cursor inside a " noun " to split it"))
-        (each targets |c| (split c))))))
+;; Cmd+E: split the items (clips or audio regions) of lane i. A time
+;; selection on the lane cuts at both of its ends (Ableton), so the selected
+;; span becomes its own item; otherwise the cut is at the cursor `time`, on
+;; the selected items there when the selection holds one, else whichever
+;; the cursor is inside. `split` sends one item's split at a beat.
+(def items-under (items time)
+  (filter |c| (and (> time c.start) (< time c.end)) items))
+
+(def split-under (i items time noun split)
+  (let ((r song.region)
+        ;; End first: a split keeps the left half's id, so the start cut
+        ;; still finds its item in `items` afterwards.
+        (cuts (if (and (not (= r nil)) (> r.end r.start)
+                       (lane-in? i (region-lane-a r) (region-lane-b r)))
+                (filter |t| (not (empty? (items-under items t))) (list r.end r.start))
+                '())))
+    (if (empty? cuts)
+      (unless (= time nil)
+        (let ((under (items-under items time))
+              (selected (filter |c| (listed? c.cid arr-select.clips) under))
+              (targets (if (empty? selected) under selected)))
+          (if (empty? targets)
+            (status (str "Place the cursor inside a " noun " to split it"))
+            (each targets |c| (split c time)))))
+      (each cuts |t| (each (items-under items t) |c| (split c t))))))
 
 (def track-split (i time)
-  (split-under (track-clips i) time "clip"
-    |c| (host-command "arrangement-clip-split" (dict :clip-id c.cid :beat time))))
+  (split-under i (track-clips i) time "clip"
+    |c beat| (host-command "arrangement-clip-split" (dict :clip-id c.cid :beat beat))))
 
 (def track-delete (i ids)
   (let ((member (selected-rack-member i)))
@@ -1451,6 +1618,7 @@
     ;; A clip and a region are mutually exclusive (region spec 4.1); the
     ;; host drops the region too, this clears the in-flight ghost.
     (clear-region-ghost!)
+    (set-lock-regions! -1 '())
     (set! arr-select.clips ids)
     (set! arr-select.rack-item nil)
     (set! arr-rack.selected -1)
@@ -1693,6 +1861,7 @@
 (def open-scene-menu (event)
   (cancel-placement)
   (set! arr-pattern-menu.open false)
+  (set! arr-scene-menu.ruler (< (get event :y) header-height))
   (let ((at (pointer-time event))
         (span (first (filter |span| (and (<= span.start at) (> span.end at)) song.spans))))
     (set! arr-scene-menu.time (drop-time event))
@@ -1724,11 +1893,67 @@
           :checked (and current (= current.bank b))
           (scene-menu-scene-items b.scenes beat current prefix))))))
 
+;; ── Loop brace (Ableton's loop) ─────────────────────────────────────────────
+;; The ruler's brace is the loop playback wraps inside while song.loop is on.
+;; Off by default; the ruler's right-click menu and the transport's loop
+;; button toggle it, and dragging it moves or resizes it.
+
+;; The ruler draws the song's brace, except while a drag owns it: from the
+;; first drag frame until the song holds what the release committed, so the
+;; brace never flicks back to the old span for a frame in between.
+(def sync-loop-brace ()
+  (when (and arr-view.loop-dragging
+             (= song.loop-start arr-view.loop-start)
+             (= song.loop-end arr-view.loop-end))
+    (set! arr-view.loop-dragging false))
+  (unless arr-view.loop-dragging
+    (set! arr-view.loop-start song.loop-start)
+    (set! arr-view.loop-end song.loop-end))
+  (set! arr-view.loop-on (if song.loop 1 0)))
+
+;; Loop `start`..`end` and turn looping on (Ableton's Loop Selection): one
+;; undo step.
+(def loop-span! (start end)
+  (when (> end start)
+    (host-command "song-set-loop-range" (dict :start start :end end :enabled true))))
+
+;; A brace drag frame: the ruler shows it, nothing commits.
+(def loop-brace-drag (event)
+  (set! arr-view.loop-dragging true)
+  (set! arr-view.loop-start (get event :start))
+  (set! arr-view.loop-end (get event :end)))
+
+;; The release: one commit; `sync-loop-brace` hands the ruler back to the
+;; song once it holds the new span.
+(def loop-brace-finish (event)
+  (loop-brace-drag event)
+  (if (and (= arr-view.loop-start song.loop-start) (= arr-view.loop-end song.loop-end))
+    (set! arr-view.loop-dragging false)
+    (host-command "song-set-loop-range"
+      (dict :start arr-view.loop-start :end arr-view.loop-end))))
+
+(def loop-context-menu ()
+  (let ((r song.region))
+    (menu-of arr-scene-menu
+      (menu-item "Loop" :key "arr-loop-toggle"
+        :checked song.loop
+        :on-select |event| (do (set! arr-scene-menu.open false) (toggle! song.loop)))
+      (menu-item "Loop Selection" :key "arr-loop-selection"
+        :disabled (= r nil)
+        :on-select |event|
+          (do (set! arr-scene-menu.open false)
+              (loop-span! r.start r.end))))))
+
 (def close-scene-menu-with (command payload)
   (set! arr-scene-menu.open false)
   (host-command command payload))
 
 (def scene-context-menu ()
+  (if arr-scene-menu.ruler
+    (loop-context-menu)
+    (scene-lane-context-menu)))
+
+(def scene-lane-context-menu ()
   (let ((span (scene-menu-span))
         (beat arr-scene-menu.span-start))
     (apply menu-of arr-scene-menu
@@ -1893,13 +2118,17 @@
     :header-bottom-gutter cursor-gutter-height
     :time-ruler (dict :mode :bars-beats :beats-per-bar beats-per-bar)
     :grid-density grid-density
+    :fine-grid true
     :background-color timeline-background-color
     :title-bar-height clip-title-bar-height
     :item-label-font-size clip-label-font-size
     :item-label-color :scene-clip-fg
     :item-corner-radius clip-corner-radius
     :item-color :scene-clip-bg
-    :loop-color :arrangement-loop
+    :loop-brace true
+    :loop-start #'arr-view.loop-start
+    :loop-end #'arr-view.loop-end
+    :loop-on #'arr-view.loop-on
     :playhead-time #'song.position
     ;; The ruler always owns the transport-start triangle, while the
     ;; track-specific cursor line remains in the lane the user clicked.
@@ -1920,7 +2149,12 @@
     :view-duration #'arr-view.duration
     :zoom-min-duration min-view-duration
     :zoom-max-duration max-view-duration
+    :magnify-sensitivity arrangement-pinch-zoom
     :content-length #'arr-view.content-length
+    ;; Open-ended: no song-end shade or drag limit. The arrangement runs on
+    ;; past it (the loop brace bounds playback, and a clip landing past
+    ;; the end extends the song).
+    :open-ended true
     :content-length-min (content-length-min)
     :content-length-max 8192
     :lane-scroll 0
@@ -1937,6 +2171,267 @@
     :scroll-mode :smooth
     :on-action |event| (scene-action event)))
 
+;; ── Push lane (eseq-vum0) ────────────────────────────────────────────────
+;; Scene pushes (Shift/Cmd-drag on a transport scene) recorded during an
+;; arrangement take: one region per gesture, labeled with the scene it
+;; pushed toward, its push amount drawn as a curve. Regions are clicked to
+;; select, dragged by their title bar to move, and deleted with Backspace;
+;; playback replays them through the live push path.
+(def push-lane-height 3.2)
+;; The shortest a push resizes to, in beats (the ghost clamps to it).
+(def push-min-length 0.25)
+
+(def-kind arr-push
+  :key ()
+  :state ((selected '())
+          ;; The live drag ghost while a gesture runs: {:id :start} for a
+          ;; title-bar move, {:id :edge :time} for an edge resize.
+          (drag :any :default nil)
+          ;; A time range swept on the lane: {:start :end}. Backspace clears
+          ;; just that range of the push lane, cutting what straddles it.
+          (range :any :default nil)))
+
+;; "→ <scene>" for a push toward scene index `target` of `all`.
+(def push-target-label (all push)
+  (str "→ "
+    (if (< push.target (len all)) (scene-name (nth all push.target)) "?")))
+
+;; Where push `push` draws while a drag of it runs: (start end).
+(def push-ghost-span (push)
+  (let ((drag arr-push.drag)
+        (mine (and drag (= (get drag :id) push.cid)))
+        (length (- push.end push.start)))
+    (cond
+      ((not mine) (list push.start push.end))
+      ((= (get drag :edge) :start)
+       (list (min (max 0 (get drag :time)) (- push.end push-min-length)) push.end))
+      ((= (get drag :edge) :end)
+       (list push.start (max (get drag :time) (+ push.start push-min-length))))
+      (else (list (get drag :start) (+ (get drag :start) length))))))
+
+;; The push amount at fraction `at` of a curve published as region
+;; fractions: linear between points, held past either end.
+(def push-curve-at (points at)
+  (let ((before (filter |p| (<= p.offset at) points))
+        (after (filter |p| (> p.offset at) points)))
+    (cond
+      ((= (len before) 0) (if (= (len after) 0) 0 (get (first after) :value)))
+      ((= (len after) 0) (get (nth before (- (len before) 1)) :value))
+      (else
+       (let ((p (nth before (- (len before) 1)))
+             (q (first after))
+             (frac (/ (- at p.offset) (- q.offset p.offset))))
+         (+ p.value (* frac (- q.value p.value))))))))
+
+;; Push `push`'s curve redrawn over `span` (start end) while an edge of it
+;; is dragged: every point keeps its beat, so an edge cut in trims the
+;; curve there and one pulled out holds its value, as the committed resize
+;; will. Without this the fractions stretch across the ghost until release.
+;; A move or no drag keeps the curve as published.
+(def push-ghost-curve (push span)
+  (let ((drag arr-push.drag)
+        (resizing (and drag (= (get drag :id) push.cid) (get drag :edge))))
+    (if (not resizing)
+      push.points
+      (let ((length (- push.end push.start))
+            (points push.points)
+            (a (/ (- (first span) push.start) length))
+            (b (/ (- (nth span 1) push.start) length))
+            (cut-a (> a 0))
+            (cut-b (< b 1)))
+        (map |p| (dict :offset (/ (- p.offset a) (- b a)) :value p.value)
+          (append
+            (if cut-a (list (dict :offset a :value (push-curve-at points a))) '())
+            (filter |p| (and (or (not cut-a) (> p.offset a))
+                             (or (not cut-b) (< p.offset b)))
+              points)
+            (if cut-b (list (dict :offset b :value (push-curve-at points b))) '())))))))
+
+(def push-items ()
+  (let ((all (scenes)))
+    (map |push|
+      (let ((span (push-ghost-span push)))
+        (dict
+          :id push.cid
+          :lane 0
+          :start (first span)
+          :end (nth span 1)
+          :label (push-target-label all push)
+          :content (dict :curve (push-ghost-curve push span))
+          :selected (listed? push.cid arr-push.selected)
+          :color (scene-color)))
+      (or song.pushes '()))))
+
+;; The pushes the running capture has recorded so far, drawn over the
+;; committed ones they will replace. Like the other provisional items they
+;; carry no :id, so no gesture can select or move them; a held push ends
+;; at the record head and grows with it.
+(def pending-push-items ()
+  (let ((all (scenes)))
+    (map |push|
+      (dict
+        :lane 0
+        :start push.start
+        :end push.end
+        :label (push-target-label all push)
+        :content (dict :curve push.points)
+        :color (scene-color))
+      (or song.pending-pushes '()))))
+
+(def find-push (id)
+  (first (filter |push| (= push.cid id) (or song.pushes '()))))
+
+;; The swept range ordered, from a marquee event.
+(def push-range (event)
+  (let ((a (get event :time-a)) (b (get event :time-b)))
+    (dict :start (max 0 (min a b)) :end (max a b))))
+
+;; The lane's highlight: its own swept range, else a scene-lane region
+;; (Cmd+A, a scene-lane sweep), whose copy/move/duplicate/delete carry the
+;; pushes it covers. Drawn in the :region style, so it lights exactly the
+;; span inside each push, as the track lanes do.
+(def push-selection-rect ()
+  (let ((range arr-push.range))
+    (if range
+      (dict :time-a (get range :start) :time-b (get range :end) :lane-a 0 :lane-b 0)
+      (scene-region-rect))))
+
+;; A push-lane selection replaces every other one: the region, the bound
+;; clip, scene and clip picks, and its own previous range or picks.
+(def drop-other-selections! ()
+  (release-selection!)
+  (set! arr-select.scenes '())
+  (set! arr-select.rect nil)
+  (deselect-clips!))
+
+(def push-lane-action (event)
+  (if (view-action? event)
+    (view-action event)
+    (match event.type
+      ;; Picking pushes is a selection of its own: it drops the region, as a
+      ;; scene-lane click does.
+      :select
+      (do
+        (drop-other-selections!)
+        (set! arr-push.selected (or (get event :ids) '())))
+      :clear-selection
+      (do
+        (set! arr-push.range nil)
+        (set! arr-push.selected '()))
+      ;; A sweep on the lane selects a time range of the push lane alone.
+      :marquee-select
+      (do
+        (drop-other-selections!)
+        (set! arr-push.range (push-range event)))
+      :finish-marquee-select
+      (let ((range (push-range event)))
+        (set! arr-push.range
+          (when (> (get range :end) (get range :start)) range)))
+      :move-items-absolute
+      (let ((push (find-push (get event :anchor-id))))
+        (set! arr-push.drag
+          (when push (dict :id push.cid :start (max 0 (get event :start))))))
+      :resize-item-absolute
+      (let ((push (find-push (get event :id))))
+        (set! arr-push.drag
+          (when push
+            (dict :id push.cid
+              :edge (if (= (get event :edge) :start) :start :end)
+              :time (get event :time)))))
+      :finish-move-items
+      (let ((drag arr-push.drag)
+            (push (when drag (find-push (get drag :id)))))
+        (set! arr-push.drag nil)
+        (unless (or (= push nil) (= (get drag :start) push.start))
+          (host-command "arrangement-push-move"
+            (dict :clip-id push.cid :start-beat (get drag :start)))))
+      :finish-resize-items
+      (let ((drag arr-push.drag)
+            (push (when drag (find-push (get drag :id))))
+            (span (when push (push-ghost-span push))))
+        (set! arr-push.drag nil)
+        (unless (or (= push nil)
+                  (and (= (first span) push.start) (= (nth span 1) push.end)))
+          (host-command "arrangement-push-resize"
+            (dict :clip-id push.cid :start (first span) :end (nth span 1)))))
+      ;; Backspace with nothing picked: the lane's own swept range clears
+      ;; just that span of the push lane; a song region (Cmd+A, a sweep
+      ;; elsewhere) deletes as a region, clips and all.
+      :delete-range
+      (let ((range arr-push.range))
+        (cond
+          (range
+           (do
+             (set! arr-push.range nil)
+             (host-command "arrangement-push-clear"
+               (dict :start (get range :start) :end (get range :end)))))
+          ((not (= song.region nil))
+           (seq-song-region-delete))
+          (else nil)))
+      :delete-items
+      (let ((ids (or (get event :ids) '())))
+        (set! arr-push.selected '())
+        (set! arr-push.range nil)
+        (unless (empty? ids)
+          (host-command "arrangement-push-delete" (dict :ids ids))))
+      _ nil)))
+
+(def push-lane ()
+  (timeline
+    :key "push-lane"
+    :border-top-color :transparent
+    :border-bottom-color lane-border-bottom-color
+    :border-width lane-border-width
+    :width 0 :flex 1
+    :height push-lane-height
+    :focusable true
+    :sidebar-width 0
+    :header-height 0
+    :time-ruler (dict :mode :bars-beats :beats-per-bar beats-per-bar)
+    :grid-density grid-density
+    :fine-grid true
+    :background-color timeline-background-color
+    :title-bar-height clip-title-bar-height
+    :item-label-font-size clip-label-font-size
+    :item-label-color :scene-clip-fg
+    :item-content-color :scene-clip-fg
+    :item-corner-radius clip-corner-radius
+    :item-color :scene-clip-bg
+    :loop-visible false
+    :playhead-time #'song.position
+    :items (append (push-items) (pending-push-items))
+    :selection-rect (push-selection-rect)
+    ;; Light the swept span inside the pushes, as the track lanes do.
+    :selection-rect-style :region
+    :view-start #'arr-view.start
+    :view-duration #'arr-view.duration
+    :zoom-min-duration min-view-duration
+    :zoom-max-duration max-view-duration
+    :magnify-sensitivity arrangement-pinch-zoom
+    :content-length #'arr-view.content-length
+    ;; Open-ended: no song-end shade or drag limit. The arrangement runs on
+    ;; past it (the loop brace bounds playback, and a clip landing past
+    ;; the end extends the song).
+    :open-ended true
+    :snap snap
+    :move-snap-mode :alignment-helper
+    :resize-snap :grid
+    :resize-snap-mode :alignment-helper
+    :marquee-snap :grid
+    :snap-mode :floor
+    :scroll-mode :smooth
+    :on-action |event| (push-lane-action event)))
+
+;; The row: a labeled header and the lane. Always shown, so the layout
+;; does not jump the moment a take records its first push.
+(def push-row ()
+  (h-stack :width :fill :align :start :gap 0
+    (box :key "push-header" :width header-width :height push-lane-height
+      :padding 0.4
+      (label "Scene pushes" :font-size 9.5 :color :gray :bg :transparent))
+    (h-stack :width 0 :flex 1 :align :start :gap 0
+      (push-lane))))
+
 ;; The footer and the unused track area share the same time transform as
 ;; real lanes, but cannot create scene clips or acquire track selection.
 (def continuation-lane (key height ruler-height)
@@ -1948,14 +2443,20 @@
     :sidebar-width 0 :header-height ruler-height
     :time-ruler (dict :mode :bars-beats :beats-per-bar beats-per-bar)
     :grid-density grid-density
+    :fine-grid true
     :background-color timeline-background-color
     :items '()
     :playhead-time #'song.position
     :view-start #'arr-view.start
     :view-duration #'arr-view.duration
     :content-length #'arr-view.content-length
+    ;; Open-ended: no song-end shade or drag limit. The arrangement runs on
+    ;; past it (the loop brace bounds playback, and a clip landing past
+    ;; the end extends the song).
+    :open-ended true
     :zoom-min-duration min-view-duration
     :zoom-max-duration max-view-duration
+    :magnify-sensitivity arrangement-pinch-zoom
     :scroll-passthrough :vertical
     :scroll-mode :smooth
     :on-action |event| (when (view-action? event) (view-action event))))
@@ -1975,12 +2476,60 @@
 
 (def audio-select (i event)
   (let ((ids (real-region-ids i (get event :ids)))
-        (r (if (empty? ids) nil (find-audio-region i (first ids)))))
+        (pressed (if (empty? ids) nil (first ids))))
+    (cond
+      ((= (get event :mode) :toggle) (audio-toggle-select i pressed))
+      ;; Pressing a clip of a multi-selection keeps the selection, so the
+      ;; drag that follows moves them all.
+      ((and (= arr-select.lane i) (> (len arr-select.clips) 1) (listed? pressed arr-select.clips))
+       (do
+         (eseq.audio-clip/bind! i pressed)
+         (set-cursor (get event :time) i)
+         (find-audio-region i pressed)))
+      (else (audio-select-one i ids event)))))
+
+;; Shift+click: add region `cid` of lane i to the selection, or drop it.
+;; A selection on another lane starts over. As in Ableton, the selection is
+;; also the time span from the first selected region's start to the last
+;; one's end, gaps and all, so the region verbs (copy, paste, duplicate,
+;; delete) act on it like any other span.
+(def audio-toggle-select (i cid)
+  (let ((current (if (= arr-select.lane i) arr-select.clips '()))
+        (next (if (listed? cid current)
+                (filter |c| (not (= c cid)) current)
+                (append current (list cid)))))
+    (eseq.sequencer/select-track-for-edit (track i))
+    (release-selection!)
+    (set! arr-select.clips next)
+    (set-lock-regions! (if (empty? next) -1 i) next)
+    (if (empty? next)
+      (do
+        (select-lane-clip! -1 -1)
+        (eseq.audio-clip/clear!))
+      (let ((newest (nth next (- (len next) 1)))
+            (span (audio-span i next)))
+        (select-lane-clip! i newest)
+        (eseq.audio-clip/bind! i newest)
+        (select-region! (track i) (track i) (get span :start) (get span :end))))
+    nil))
+
+;; The span regions `ids` of lane i cover, `(dict :start :end)` from the
+;; first start to the last end, or nil when none of them exist.
+(def audio-span (i ids)
+  (let ((rs (map |id| (find-audio-region i id) (real-region-ids i ids))))
+    (unless (empty? rs)
+      (let ((f (first rs)))
+        (dict :start (reduce |acc r| (min acc r.start) f.start rs)
+              :end (reduce |acc r| (max acc r.end) f.end rs))))))
+
+(def audio-select-one (i ids event)
+  (let ((r (if (empty? ids) nil (find-audio-region i (first ids)))))
     (eseq.sequencer/select-track-for-edit (track i))
     (set! arr-select.scenes '())
     (set! arr-select.rect nil)
     (release-selection!)
     (set! arr-select.clips ids)
+    (set-lock-regions! (if (empty? ids) -1 i) ids)
     (set! arr-select.rack-item nil)
     (set! arr-rack.selected -1)
     (select-lane-clip! i (if (= r nil) -1 r.cid))
@@ -2005,8 +2554,8 @@
       (eseq.audio-clip/bind! i (first ids)))))
 
 (def audio-split (i time)
-  (split-under (audio-regions i) time "region"
-    |r| (host-command "audio-region-split" (dict :id r.cid :beat time))))
+  (split-under i (audio-regions i) time "region"
+    |r beat| (host-command "audio-region-split" (dict :id r.cid :beat beat))))
 
 (def audio-open-editor (i event)
   (when (audio-select i event)
@@ -2018,7 +2567,8 @@
     (if (= r nil)
       (set! arr-drag.track nil)
       (do
-        (set! arr-drag.track (dict :kind :audio-move :track i :id r.cid :start start))
+        (set! arr-drag.track
+          (dict :kind :audio-move :track i :id r.cid :ids (real-region-ids i (get event :ids)) :start start))
         (ghost-clip! i 1 r.cid start)))))
 
 (def audio-move-finish (i)
@@ -2028,7 +2578,19 @@
     (set! arr-drag.track nil)
     (clear-region-ghost!)
     (unless (or (= r nil) (= (get drag :start) r.start))
-      (host-command "audio-region-move" (dict :id r.cid :start (get drag :start))))))
+      (let ((ids (get drag :ids))
+            (delta (- (get drag :start) r.start)))
+        (if (> (len ids) 1)
+          ;; A multi-selection moves together; it stays selected, and its
+          ;; span moves with it.
+          (let ((span (audio-span i ids)))
+            (host-command "audio-regions-move" (dict :ids ids :delta delta))
+            (select-region! (track i) (track i)
+              (+ delta (get span :start)) (+ delta (get span :end))))
+          (do
+            (host-command "audio-region-move" (dict :id r.cid :start (get drag :start)))
+            ;; The selected span follows the region to where it landed.
+            (select-region! (track i) (track i) (get drag :start) (+ (get drag :start) (- r.end r.start)))))))))
 
 (def audio-resize-ghost (i event)
   (let ((edge (if (= (get event :edge) :start) :start :end))
@@ -2063,19 +2625,82 @@
 
 ;; A sample dropped on the lane: a region at the drop beat (the beat grid,
 ;; finer than the bar snap scene drops use).
-(def audio-drop (i event)
-  (let ((payload (get event :payload))
-        (paths (get payload :paths))
+;; The beat a sample dropped at the pointer lands on.
+(def audio-drop-beat (event)
+  (max 0 (floor (pointer-time event))))
+
+;; The sample files a drop or drag `payload` carries (`:paths`, else its
+;; one `:path`), or '() for a folder.
+(def dropped-files (payload)
+  (let ((paths (get payload :paths))
         (path (get payload :path)))
-    (if (and (= paths nil) (or (= path nil) (= path "")))
+    (cond
+      ((not (= paths nil)) paths)
+      ((or (= path nil) (= path "")) '())
+      (else (list path)))))
+
+;; While a sample is dragged over lane i: preview the regions it would make,
+;; laid end to end as the drop lays them (a file the drop cannot read adds
+;; nothing). Any other drag clears it, so a cancelled sample drag's ghost
+;; never shows under the next one.
+(def audio-drag-over (i event)
+  (let ((files (if (= (get event :drag-type) "sample")
+                 (dropped-files (get event :payload))
+                 '())))
+    (if (empty? files)
+      (set! arr-drop.lane -1)
+      (do
+        (audio-drag-preview files)
+        (let ((beats-per-second (/ transport.bpm 60))
+              (beats (reduce |acc f|
+                       (let ((secs (seq-audio-file-seconds f)))
+                         (+ acc (if (= secs nil) 0 (* secs beats-per-second))))
+                       0 files))
+              (start (audio-drop-beat event)))
+          (set! arr-drop.lane i)
+          (set! arr-drop.start start)
+          (set! arr-drop.end (+ start beats)))))))
+
+;; One dragged file draws its waveform in the preview: its decode starts the
+;; moment the drag reaches a lane. Several draw as a plain ghost.
+(def audio-drag-preview (files)
+  (let ((preview (if (= (len files) 1) (seq-audio-drag-preview (first files)) nil)))
+    (set! arr-drop.sample (if (= preview nil) -1 (get preview :id)))
+    (set! arr-drop.seconds (if (= preview nil) 0 (get preview :seconds)))))
+
+(def audio-drop (i event)
+  (set! arr-drop.lane -1)
+  ;; The drop imports the file for real; its preview waveform is done.
+  (seq-audio-drag-preview-clear)
+  (let ((files (dropped-files (get event :payload))))
+    (if (empty? files)
       (status "Drop a sample file, not a folder")
-      (let ((beat (max 0 (floor (pointer-time event)))))
-        (host-command "audio-regions-drop"
-          (if (= paths nil)
-            (dict :track i :beat beat :path path)
-            (dict :track i :beat beat :paths paths)))))))
+      (host-command "audio-regions-drop"
+        (dict :track i :beat (audio-drop-beat event) :paths files)))))
+
+;; The take lane i is recording, as an item that grows with the playhead.
+(def recording-items (i)
+  (let ((t (track i)))
+    (if (or (= t nil) (= t.audio-recording nil))
+      '()
+      (list (dict
+        :id -1
+        :lane 0
+        :start (get t.audio-recording :start)
+        :end (get t.audio-recording :end)
+        :kind :audio
+        :label "Recording"
+        ;; The waveform so far, registered by the host as the take grows;
+        ;; :span is the item's whole length, so it fills in from the left.
+        :content (dict :sample (get t.audio-recording :sample) :offset 0
+                   :span (get t.audio-recording :span)
+                   :loop-start 0 :loop-end 0)
+        :color '(0.78 0.16 0.14))))))
 
 (def audio-items (i)
+  (append (audio-region-items i) (recording-items i)))
+
+(def audio-region-items (i)
   (let ((color (lane-clip-color i)))
     (map |r|
       (dict
@@ -2084,12 +2709,19 @@
         :start r.start
         :end r.end
         :kind :audio
+        ;; Shift+click selections light every selected region.
+        :selected (and (= arr-select.lane i) (listed? r.cid arr-select.clips))
         :label (eseq.audio-clip/region-label r)
         ;; An offline source draws an empty body: there is nothing to show.
         ;; loop-start/-end are 0 (no loop) unless the region loops.
         :content (when r.loaded
                    (dict :sample r.sample :offset r.offset :span r.span
                      :loop-start r.loop-start :loop-end r.loop-end))
+        ;; Fade and crossfade handles (beats), dragged as :fade-item.
+        :fades (dict :in r.fade-in-beats :out r.fade-out-beats
+                 :in-curve r.fade-in-curve :out-curve r.fade-out-curve
+                 :xfade-pre r.xfade-pre :xfade-post r.xfade-post
+                 :xfade-next r.xfade-next)
         :color (if r.muted (override-dim color) color))
       (audio-regions i))))
 
@@ -2124,6 +2756,16 @@
       (seq-song-region-paste (get event :time))
       :split-items
       (audio-split i (get event :time))
+      ;; A fade handle drag: its length or curve, live, one undo step. A
+      ;; fade-in dragged left over the region before (or a fade-out right
+      ;; over the one after) becomes a crossfade.
+      :fade-item
+      (host-command "audio-region-fade"
+        (dict :id (get event :id) :handle (get event :handle)
+          :value (get event :value) :live true))
+      ;; The released handle ends the drag's undo step.
+      :finish-fade-item
+      (host-command "audio-region-fade-end" (dict :id (get event :id)))
       ;; A region sweep still selects time across lanes (region spec 4.2).
       :marquee-select
       (ghost-region! (region-from-event i event) 4 0)
@@ -2143,7 +2785,7 @@
     :border-bottom-color lane-border-bottom-color
     :border-width lane-border-width
     :width 0 :flex 1
-    :height track-lane-height
+    :height (lane-height-for t)
     ;; Vertical scrolling belongs to the enclosing track scroll container;
     ;; horizontal deltas still pan the shared time axis.
     :scroll-passthrough :vertical
@@ -2169,6 +2811,7 @@
     ;; region drag snaps to those same wrong positions.
     :time-ruler (dict :mode :bars-beats :beats-per-bar beats-per-bar)
     :grid-density grid-density
+    :fine-grid true
     :focusable true
     :playhead-time #'song.position
     ;; Every fast-changing surface below is bound: the cursor, the live drag
@@ -2182,13 +2825,22 @@
     :cursor-lane #'arr-view.cursor-track
     :cursor-marker-visible false
     :cursor-line-visible true
-    :cursor-color cursor-color
+    :cursor-color track-cursor-color
+    :cursor-line-width track-cursor-width
     :placement-active (if (= (placement-target-source i) nil) 0 1)
     :placement-item (placement-item i)
     :on-right-click |event| (unless (audio-track? t) (open-placement-menu i event))
     :drop-types (if (audio-track? t)
                   (list "sample" "transport-scene")
                   (list "transport-scene" (str "track-pattern-" t.tid)))
+    :on-drag-over |event| (audio-drag-over i event)
+    :drop-ghost-lane #'arr-drop.lane
+    :drop-ghost-start #'arr-drop.start
+    :drop-ghost-end #'arr-drop.end
+    :drop-ghost-sample #'arr-drop.sample
+    :drop-ghost-seconds #'arr-drop.seconds
+    :drop-ghost-generation #'arr-drop.generation
+    :drop-ghost-color (lane-clip-color i)
     :on-drop |event|
       (if (= (get event :drag-type) "sample")
         (audio-drop i event)
@@ -2220,7 +2872,12 @@
     :view-duration #'arr-view.duration
     :zoom-min-duration min-view-duration
     :zoom-max-duration max-view-duration
+    :magnify-sensitivity arrangement-pinch-zoom
     :content-length #'arr-view.content-length
+    ;; Open-ended: no song-end shade or drag limit. The arrangement runs on
+    ;; past it (the loop brace bounds playback, and a clip landing past
+    ;; the end extends the song).
+    :open-ended true
     :lane-scroll 0
     :snap snap
     ;; Audio regions trim to a 64th of a beat (micro edits at deep zoom);
@@ -2256,10 +2913,11 @@
   (let ((g (when t t.group)))
     (when (clip-rack? g) g)))
 
-;; The lowest-positioned member of clip-bearing rack g: the rack row is drawn
-;; just above it.
+;; The index of g's first member in display order (its rack row sits above it).
 (def rack-first-member (g)
-  (reduce |acc m| (min acc m.index) (let ((m (first g.tracks))) m.index) g.tracks))
+  (let ((first-shown (reduce |acc m| (if (or (= acc nil) (< (track-order m) (track-order acc))) m acc)
+                       nil g.tracks)))
+    first-shown.index))
 
 (def first-rack-member? (t g)
   (= t.index (rack-first-member g)))
@@ -2293,7 +2951,7 @@
               (cons (dict :track t.index) with-rack)
               with-rack))
         '()
-        (tracks)))))
+        (ordered-tracks)))))
 
 ;; A rack-lane clip's tint: its rack clip's color, else the rack's, lifted
 ;; like a track clip's.
@@ -2679,6 +3337,7 @@
       :header-height 0
       :time-ruler (dict :mode :bars-beats :beats-per-bar beats-per-bar)
       :grid-density grid-density
+      :fine-grid true
       :focusable true
       :playhead-time #'song.position
       :lane-key (rack-lane-key g)
@@ -2705,7 +3364,12 @@
       :view-duration #'arr-view.duration
       :zoom-min-duration min-view-duration
       :zoom-max-duration max-view-duration
+      :magnify-sensitivity arrangement-pinch-zoom
       :content-length #'arr-view.content-length
+      ;; Open-ended: no song-end shade or drag limit. The arrangement runs on
+      ;; past it (the loop brace bounds playback, and a clip landing past
+      ;; the end extends the song).
+      :open-ended true
       :lane-scroll 0
       ;; Snapping as on the track lanes.
       :snap snap
@@ -2725,6 +3389,14 @@
       :height :fill :width header-width
       :background-color :buffer-bg
       :padding 0.3
+      ;; Reorder (eseq-ssd6): the rack drags as a block; tracks or groups
+      ;; dropped on it go where a drop on its grid header would.
+      :drag-type (eseq.drum-rack-v2/group-drag-type g)
+      :drag-payload (dict :gid g.gid)
+      :drop-hover-border-color :mixer-strip-selected-border
+      :drop-types eseq.drum-rack-v2/reorder-drag-types
+      :drop-meta (dict :kind "group" :gidx g.index)
+      :on-drop (lambda (event) (eseq.drum-rack-v2/drop-reorder-on-group event g))
       (h-stack :width :fill :gap 0.4 :align :center
         (box :width 0.68 :height 2.0
           :background "seqv-track-color-badge"
@@ -2752,15 +3424,96 @@
 
 ;; ── Buffer composition (spec 4.1) ──────────────────────────────────────────
 
+;; ── Audio input (docs/audio-tracks-spec.md §12) ────────────────────────────
+;; Under an audio track's header: what it records from, whether the input
+;; is heard through the track, and the level arriving. Arming the track
+;; (the dot in the header) opens the input; transport Record in this view
+;; then records it onto the lane.
+
+(defcustom arrangement-audio-record-offset-ms 0
+  :type :number :min -50 :max 50 :step 0.1
+  :doc "Milliseconds a recorded audio take is moved earlier. Takes are placed by the audio device's clock; raise this if your recordings still land late (the converters' own latency), by the amount a loopback recording of a click lands late.")
+
+;; The host places takes, so it has to hear the knob: sent when an input
+;; row draws with a value the host has not been told.
+(def record-offset-sent nil)
+(def sync-record-offset ()
+  (unless (= record-offset-sent arrangement-audio-record-offset-ms)
+    (set! record-offset-sent arrangement-audio-record-offset-ms)
+    (host-command "audio-record-offset" (dict :ms arrangement-audio-record-offset-ms))))
+
+(def no-input-label "No Input")
+
+(def input-options () (or project.audio-input-options '()))
+
+(def set-input! (i label)
+  (let ((o (first (filter |o| (= (get o :label) label) (input-options)))))
+    (if (= o nil)
+      (host-command "audio-track-set-input" (dict :track i))
+      (host-command "audio-track-set-input"
+        (dict :track i :device (get o :device) :left (get o :left) :right (get o :right))))))
+
+;; Monitor modes cycle on click: heard while armed, always, never.
+(def next-monitor (mode)
+  (cond ((= mode "auto") "in") ((= mode "in") "off") (else "auto")))
+
+(def monitor-label (mode)
+  (cond ((= mode "in") "In") ((= mode "off") "Off") (else "Auto")))
+
+(def input-row (i t)
+  (let ((in t.audio-input)
+        (label (if (= t.audio-input nil) nil (get t.audio-input :label)))
+        (mode (if (= t.audio-input nil) nil (get t.audio-input :monitor))))
+    (sync-record-offset)
+    (h-stack :gap 0.4 :align :center :padding 0.3
+      (box :width 2.4)
+      (dropdown :key (str "arr-audio-input-" t.tid) :width 14.5 :height 1.15 :font-size 9
+        :bg-color :mixer-strip-bg :border-color :mixer-strip-selected-bg
+        :badge-color :transparent
+        :value (or label no-input-label)
+        :options (cons no-input-label (map |o| (get o :label) (input-options)))
+        :on-change |picked| (set-input! i picked))
+      (button (monitor-label mode)
+        :key (str "arr-audio-monitor-" t.tid)
+        :width 3.4 :height 1.15 :padding 0 :font-size 9
+        :border-color :transparent
+        :active (and (not (= in nil)) (get in :monitoring))
+        :background-color :sequencer-toggle-off-bg
+        :active-background-color :sequencer-solo-on-bg
+        :color :gray
+        :active-color :sequencer-solo-on-fg
+        :on-click |event|
+          (unless (= label nil)
+            (host-command "audio-track-set-monitor" (dict :track i :mode (next-monitor mode)))))
+      (box
+        :key (str "arr-audio-input-meter-" t.tid)
+        :width 6.5 :height 0.7
+        :background "seqv-track-volume-meter"
+        :level #'t.input-peak
+        :volume 1.0))))
+
 (def track-header (i)
   (let ((t (track i)))
+    ;; The header's height is the lane's, read here rather than filled:
+    ;; collapsing a lane must re-lay out the whole row, or the header keeps
+    ;; its old cached size beside the resized lane.
     (box
       :key (str "track-header-" i)
-      :height :fill :width header-width
+      :height (lane-height-for t) :width header-width
+      ;; Drop a track's name (or a group) here to reorder (eseq-ssd6); the
+      ;; name in the header is the drag source.
+      :drop-hover-border-color :mixer-strip-selected-border
+      :drop-types eseq.drum-rack-v2/reorder-drag-types
+      :drop-meta (dict :kind "track" :track i)
+      :on-drop (lambda (event) (eseq.drum-rack-v2/drop-reorder-on-track event (track i)))
       :selected #'t.in-selection
       :background-color :buffer-bg
       :selected-background-color :mixer-strip-selected-bg
-      (eseq.sequencer/track-header t true))))
+      (if (and (audio-track? t) (not (let ((h (arr-lane t.tid))) h.collapsed)))
+        (v-stack :gap 0
+          (eseq.sequencer/track-header t true :toggle (lane-collapse-toggle t))
+          (input-row i t))
+        (eseq.sequencer/track-header t true :toggle (lane-collapse-toggle t))))))
 
 ;; Rows wrap their h-stack in a :width :fill box (the sequencer.lisp track-row
 ;; idiom): the box stretches to the pane, which gives the inner h-stack a
@@ -2890,6 +3643,12 @@
       (do (sync-lanes) (nothing)))
     (subtree :key "arr-content-length"
       (do (set! arr-view.content-length (content-length)) (nothing)))
+    (subtree :key "arr-loop-sync"
+      (do (sync-loop-brace) (nothing)))
+    ;; A dragged sample's waveform decoding (eseq-c3jf): one field write
+    ;; per decode step, so the drop preview repaints as it fills in.
+    (subtree :key "arr-drag-preview-sync"
+      (do (set! arr-drop.generation (seq-audio-drag-preview-generation)) (nothing)))
     ;; Reads song.position, so it reruns per playhead push like the
     ;; content-length sync above (one field write; the lanes bind
     ;; arr-view.start with #', so they repaint without rerunning).
@@ -2945,6 +3704,9 @@
         (subtree :key "arr-scene-row-lane"
           (h-stack :width 0 :flex 1 :align :start :gap 0
             (scene-lane)))))
+    ;; Recorded scene pushes, pinned under the scene lane (eseq-vum0).
+    (subtree :key "arr-push-row"
+      (push-row))
     (scroll :key "track-scroll" :width :fill :flex 1
       (v-stack :width :fill :height :fill :gap 0.0
         (track-rows)

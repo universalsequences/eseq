@@ -8,6 +8,9 @@
 ;; rows and the pad grid in ui/sequencer.lisp, the group strip in
 ;; ui/mixer.lisp, the groove in ui/rack-groove-buffer.lisp.
 ;;
+;; The track-reorder drop handlers at the end are shared by the grid, mixer
+;; and arrangement; they reach the host only when a drop fires.
+;;
 ;; Pure lookups: no state of its own, no buffers, no host calls at import,
 ;; so the effects manifest (ui/effects/buffers.lisp) can import it on its
 ;; own (`selected-bus-rack` reads eseq.seq-core-state's selected bus, spelled
@@ -15,7 +18,7 @@
 
 (module eseq.drum-rack-v2)
 
-(import eseq.kinds :refer (tracks groups project set-kit-parked!))
+(import eseq.kinds :refer (track tracks ordered-tracks track-order display-order-published? groups project set-kit-parked!))
 (import eseq.bank-power :refer (kit-bank-state bank-power-hint))
 (import eseq.view-kit :refer (index-of listed?))
 (import eseq.scene-banks :refer (scene-viewed-bank scene-viewed-bank-label
@@ -25,6 +28,9 @@
         selected-bus-rack
         rack-of-track
         render-items
+        in-display-order
+        reorder-drag-types with-reorder-drop-types reorder-drop? group-display-tracks
+        drop-reorder-on-track drop-reorder-on-group group-drag-type
         shown-members
         bank-members
         bank-racks
@@ -75,15 +81,22 @@
     (when (and g g.rack) g)))
 
 ;; ── Render order ────────────────────────────────────────────────────────
-;; Loose tracks stay in track order. Every top-level group collapses its member
-;; run into one item anchored at its lowest member, so regular groups and drum
-;; racks use the same nested block model. Unanchored groups (an empty, lazy
-;; drum rack) follow the tracks. A group drawn inside another's block (a rack
-;; in a plain group, `g.parent`) is its parent's to draw.
+;; Rows follow the display order (`(ordered-tracks)`, t.order), which the user
+;; reorders by dragging (eseq-ssd6); track indices never move with it. Every
+;; top-level group collapses its member run into one item anchored at its
+;; first member in that order, so regular groups and drum racks use the same
+;; nested block model. Unanchored groups (an empty, lazy drum rack) follow the
+;; tracks. A group drawn inside another's block (a rack in a plain group,
+;; `g.parent`) is its parent's to draw. The host keeps the order structural
+;; (a group's tracks contiguous), so this reads the same as it draws.
 
-;; The lowest position among tracks, or -1 for none.
+;; Tracks ts in display order; as given while the host has published no
+;; order (a rack's g.tracks are then in pad order, the legacy draw order).
+(def in-display-order (ts) (eseq.kinds/in-display-order ts))
+
+;; The first display position among tracks, or -1 for none.
 (def lowest-index (ts)
-  (reduce |acc t| (if (or (< acc 0) (< t.index acc)) t.index acc) -1 ts))
+  (reduce |acc t| (let ((o (track-order t))) (if (or (< acc 0) (< o acc)) o acc)) -1 ts))
 
 ;; Where a group sits in track order: its lowest member, or that of a rack
 ;; drawn inside it; -1 before it claims a track.
@@ -115,7 +128,7 @@
         (group-item (lambda (ga) (dict :kind "group" :group (get ga :group) :viewed viewed))))
     (append
       (reduce |acc t|
-        (let ((hit (first (filter (lambda (ga) (= (get ga :anchor) t.index)) anchored))))
+        (let ((hit (first (filter (lambda (ga) (= (get ga :anchor) (track-order t))) anchored))))
           (if hit
             (append acc (list (group-item hit)))
             (if (or t.group (and t.collapsed (not collapsed-tracks))
@@ -123,15 +136,16 @@
               acc
               (append acc (list (dict :kind "track" :track t :viewed viewed))))))
         (list)
-        (tracks))
+        (ordered-tracks))
       (map group-item (filter (lambda (ga) (< (get ga :anchor) 0)) anchored)))))
 
 ;; Group g's member tracks bank `viewed` uses (a kit's pads all or none:
 ;; they follow the kit), and the child racks it shows.
+;; In display order (a rack's g.tracks are in pad order).
 (def bank-members (g viewed)
   (if g.rack
-    (if (= (kit-bank-view g viewed) :shown) g.tracks (list))
-    (filter (lambda (m) (track-used-in-bank? m viewed)) g.tracks)))
+    (if (= (kit-bank-view g viewed) :shown) (in-display-order g.tracks) (list))
+    (filter (lambda (m) (track-used-in-bank? m viewed)) (in-display-order g.tracks))))
 
 (def bank-racks (g viewed)
   (filter (lambda (r) (group-used-in-bank? r viewed)) g.racks))
@@ -435,3 +449,60 @@
 ;; The power toggle: on or mixed turns the whole bank off; off turns it on.
 (def toggle-kit-in-viewed-bank! (g)
   (set-kit-in-viewed-bank! g (= (kit-viewed-state g) :off)))
+
+;; ── Track reorder (eseq-ssd6) ────────────────────────────────────────────
+;; A track's name (the grid and arrangement header) and its mixer label drag
+;; as "track-badge"; a top-level group's header drags as "track-group".
+;; Dropped on a track row, a track takes that row's place in the display
+;; order (after it moving down, before it moving up) and joins its group, or
+;; leaves its own when the row is loose; a group block moves to the place of
+;; the row's top-level block. Dropped on a group header, a track joins the
+;; group last (or goes first when it is already in it) and a group block
+;; moves to that group's place. Track indices never change: only the order
+;; the grid, mixer and arrangement draw, and group membership.
+(def reorder-drag-types (list "track-badge" "track-group"))
+
+(def reorder-drop? (event)
+  (listed? (get event :drag-type) reorder-drag-types))
+
+;; Track t's drop types plus the reorder ones.
+(def with-reorder-drop-types (types)
+  (append types reorder-drag-types))
+
+;; Group g's tracks, its child racks' included, in display order.
+(def group-display-tracks (g)
+  (in-display-order
+    (reduce |acc r| (append acc r.tracks) g.tracks g.racks)))
+
+(def drop-reorder-on-track (event t)
+  (let ((payload (get event :payload)))
+    (match (get event :drag-type)
+      "track-badge"
+      (let ((source (get payload :track)))
+        (unless (or (= source nil) (= source t.index))
+          (host-command "move-track" (dict :track source :target t.index))))
+      "track-group"
+      (host-command "move-group" (dict :gid (get payload :gid) :target t.index))
+      _ nil)))
+
+(def drop-reorder-on-group (event g)
+  (let ((payload (get event :payload)))
+    (match (get event :drag-type)
+      "track-badge"
+      (let ((source (track (get payload :track))))
+        (when source
+          (if (listed? source g.tracks)
+            (let ((lead (first (group-display-tracks g))))
+              (unless (or (= lead nil) (= lead source))
+                (host-command "move-track" (dict :track source.index :target lead.index))))
+            (host-command "move-track-to-group" (dict :track source.index :gidx g.index)))))
+      "track-group"
+      (let ((lead (first (group-display-tracks g))))
+        (unless (or (= lead nil) (= (get payload :gid) g.gid))
+          (host-command "move-group" (dict :gid (get payload :gid) :target lead.index))))
+      _ nil)))
+
+;; A group header's drag type: "track-group" for a top-level group, nil
+;; (no drag source) for a nested rack, which moves with the group around it.
+(def group-drag-type (g)
+  (if g.parent nil "track-group"))

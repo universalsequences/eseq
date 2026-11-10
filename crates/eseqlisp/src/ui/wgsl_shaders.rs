@@ -1222,13 +1222,15 @@ fn waveform_frag(input: WaveformVaryings) -> @location(0) vec4<f32> {
         y_max = center + min_thickness * 0.5;
     }
 
-    let edge_aa = max(length(vec2<f32>(d_uv_x, d_uv_y)) * 1.5, 0.002);
+    // Antialias over one vertical pixel only (see the Metal shader).
+    let px_y = max(d_uv_y, 1e-5);
+    let edge_aa = px_y * 0.5;
     let above_min = smoothstep(y_min - edge_aa, y_min + edge_aa, content_uv.y);
     let below_max = smoothstep(y_max + edge_aa, y_max - edge_aa, content_uv.y);
     let fill_alpha = above_min * below_max;
 
-    let upper_edge = 1.0 - smoothstep(0.0, edge_aa * 1.5, abs(content_uv.y - y_max));
-    let lower_edge = 1.0 - smoothstep(0.0, edge_aa * 1.5, abs(content_uv.y - y_min));
+    let upper_edge = 1.0 - smoothstep(0.0, px_y, abs(content_uv.y - y_max));
+    let lower_edge = 1.0 - smoothstep(0.0, px_y, abs(content_uv.y - y_min));
     let edge_alpha = max(upper_edge, lower_edge);
 
     let in_selection = has_selection &&

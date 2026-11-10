@@ -316,7 +316,7 @@
       (h-stack :gap 0.1 :align :center
         (toggle :value (listed? t m.tracks)
           :on-change (lambda (on) (set! m.tracks (tracks-with m t on))))
-        (dim-label (str (+ t.index 1)) 1.2 8)))))
+        (dim-label (str (eseq.kinds/track-number t)) 1.2 8)))))
 
 ;; Reusable scene-macro surface addressed by its stable numeric MacroId.
 (def scene-macro-controls (_macro id)

@@ -27,6 +27,8 @@ pub(super) const COMMANDS: &[&str] = &[
     "group-selected-tracks",
     "move-track-to-group",
     "remove-track-from-group",
+    "move-track",
+    "move-group",
 ];
 
 /// The browser's saved-instrument row `name` spins (`""` stops it).
@@ -132,6 +134,17 @@ fn sync_after_track_topology_delete(
     refresh_visible_track_topology_layouts(editor);
     ctx.frame.prev_track_playheads = track_playheads_snapshot(&state, app);
     ctx.frame.prev_track_button_states = track_button_state_snapshot(&state);
+    ctx.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Publishes a bus/group structure edit (regroup, reorder) to the shared
+/// mirrors and redraws.
+fn sync_after_group_structure_edit(app: &app::App, editor: &mut Editor, ctx: &LoopCtx<'_>) {
+    *ctx.shared.bus_state.lock().unwrap() = app.buses.clone();
+    *ctx.shared.bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+    *ctx.shared.track_groups.lock().unwrap() = app.groups.clone();
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
     ctx.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -1019,7 +1032,7 @@ pub(super) fn handle(
                     sync_after_track_topology_delete(&mut app, &mut editor, ctx, new_idx);
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Deleted track {}",
-                        track + 1
+                        app.track_number(track)
                     )));
                 }
                 Err(e) => {
@@ -1322,13 +1335,7 @@ pub(super) fn handle(
             let gidx = extract_usize_from_payload(&payload, "gidx");
             if let (Some(rack), Some(gidx)) = (rack, gidx) {
                 if app.move_rack_to_group_recorded(rack, gidx).is_ok() {
-                    *bus_state.lock().unwrap() = app.buses.clone();
-                    *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
-                    *track_groups.lock().unwrap() = app.groups.clone();
-                    let rt = editor.runtime_mut();
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    sync_after_group_structure_edit(app, editor, ctx);
                 }
             }
         }
@@ -1338,13 +1345,7 @@ pub(super) fn handle(
             let rack = extract_usize_from_payload(&payload, "rack").map(|id| id as u64);
             if let Some(rack) = rack {
                 if app.remove_rack_from_group_recorded(rack).is_ok() {
-                    *bus_state.lock().unwrap() = app.buses.clone();
-                    *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
-                    *track_groups.lock().unwrap() = app.groups.clone();
-                    let rt = editor.runtime_mut();
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    sync_after_group_structure_edit(app, editor, ctx);
                 }
             }
         }
@@ -1356,13 +1357,36 @@ pub(super) fn handle(
             let gidx = extract_usize_from_payload(&payload, "gidx");
             if let (Some(track), Some(gidx)) = (track, gidx) {
                 if app.move_track_to_group_recorded(track, gidx).is_ok() {
-                        *bus_state.lock().unwrap() = app.buses.clone();
-                        *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
-                        *track_groups.lock().unwrap() = app.groups.clone();
-                        let rt = editor.runtime_mut();
-                        rt.run_reactive_cycle();
-                        editor.refresh_runtime_side_effects();
-                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    sync_after_group_structure_edit(app, editor, ctx);
+                }
+            }
+        }
+        "move-track" | "move-group" => {
+            // Drag-reorder (eseq-ssd6): `track` (or group `gid`) takes the
+            // display place of `target`, joining target's group for a track.
+            // Indices never move; only the display order and membership do.
+            let target = extract_usize_from_payload(&payload, "target");
+            let result = match (name, target) {
+                ("move-track", Some(target)) => {
+                    match extract_usize_from_payload(&payload, "track") {
+                        Some(track) => app.move_track_recorded(track, target),
+                        None => Err("move-track needs :track".to_string()),
+                    }
+                }
+                ("move-group", Some(target)) => {
+                    match extract_usize_from_payload(&payload, "gid") {
+                        Some(gid) => app.move_group_recorded(gid as u64, target),
+                        None => Err("move-group needs :gid".to_string()),
+                    }
+                }
+                _ => Err(format!("{name} needs :target")),
+            };
+            match result {
+                Ok(()) => {
+                    sync_after_group_structure_edit(app, editor, ctx);
+                }
+                Err(error) => {
+                    editor.handle_host_event(HostEvent::Status(format!("Could not move: {error}")));
                 }
             }
         }
@@ -1372,13 +1396,7 @@ pub(super) fn handle(
             // group if it would fall below 2 members.
             if let Some(track) = extract_usize_from_payload(&payload, "track") {
                 if app.remove_track_from_group_recorded(track).is_ok() {
-                    *bus_state.lock().unwrap() = app.buses.clone();
-                    *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
-                    *track_groups.lock().unwrap() = app.groups.clone();
-                    let rt = editor.runtime_mut();
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    sync_after_group_structure_edit(app, editor, ctx);
                 }
             }
         }

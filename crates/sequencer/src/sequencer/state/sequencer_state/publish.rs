@@ -293,6 +293,17 @@ impl SequencerState {
         self.audio_rendered_sample.load(Ordering::Acquire)
     }
 
+    /// The scheduler thread's lookahead past the rendered sample: events up
+    /// to `audio_rendered_sample() + this` may already be scheduled, their
+    /// device params stamped from the snapshot of that moment.
+    pub fn scheduler_lookahead_samples(&self) -> u64 {
+        self.scheduler_lookahead_samples.load(Ordering::Relaxed)
+    }
+
+    pub fn set_scheduler_lookahead_samples(&self, samples: u64) {
+        self.scheduler_lookahead_samples.store(samples, Ordering::Relaxed);
+    }
+
     /// Publish the scheduler's rendered-beat clock (the `rendered_beats`
     /// domain quantized-launch deadlines live in). Called once per scheduler
     /// loop from scheduler/worker.rs; song capture reads it back for
@@ -565,12 +576,30 @@ impl SequencerState {
         &self,
         overrides: HashMap<crate::macro_engine::MacroParamKey, f32>,
     ) -> Arc<SequencerSnapshot> {
-        *self.live_macro_overrides.lock().unwrap() = overrides;
+        *self.live_macro_overrides.lock().unwrap() = Arc::new(overrides);
         self.publish_scheduler_snapshot()
     }
 
-    pub(in crate::sequencer) fn live_macro_overrides(&self) -> HashMap<crate::macro_engine::MacroParamKey, f32> {
-        self.live_macro_overrides.lock().unwrap().clone()
+    /// Hand the scheduler the recorded pushes about to play (`None`: none,
+    /// or a live gesture owns the push).
+    pub fn publish_scene_push_schedule(
+        &self,
+        schedule: Option<Arc<crate::sequencer::ScenePushSchedule>>,
+    ) -> Arc<SequencerSnapshot> {
+        *self.scene_push_schedule.lock().unwrap() = schedule;
+        self.publish_scheduler_snapshot()
+    }
+
+    pub(in crate::sequencer) fn scene_push_schedule(
+        &self,
+    ) -> Option<Arc<crate::sequencer::ScenePushSchedule>> {
+        self.scene_push_schedule.lock().unwrap().clone()
+    }
+
+    pub(in crate::sequencer) fn live_macro_overrides(
+        &self,
+    ) -> Arc<HashMap<crate::macro_engine::MacroParamKey, f32>> {
+        Arc::clone(&self.live_macro_overrides.lock().unwrap())
     }
 
     fn publish_scheduler_snapshot_arc(

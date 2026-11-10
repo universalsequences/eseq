@@ -176,6 +176,14 @@
   (let ((i (jk-index-of alez.jaki.doc/mode-labels label)))
     (if (>= i 0) (set! self.mode (nth alez.jaki.doc/modes i)) nil)))
 
+;; The instance's clock offset (eseq-jrrq): sixteenths the whole stream plays
+;; late (early when negative) — a translation in time, not a rotation, with
+;; quant still on the bar grid.
+(def jk-max-offset 64)
+
+(def jk-set-offset (self v)
+  (set! self.offset (max (- 0 jk-max-offset) (min jk-max-offset (round v)))))
+
 (def jk-mode-index (self)
   (max 0 (jk-index-of alez.jaki.doc/modes (alez.jaki.doc/mode-of self.mode))))
 
@@ -201,7 +209,7 @@
 ;; `routes`: (jk-route-tracks self)
 (def jk-route-options (routes)
   (append
-    (cons "Off" (map (lambda (t) (str (+ t.index 1) " " t.name)) routes))
+    (cons "Off" (map (lambda (t) (str (eseq.kinds/track-number t) " " t.name)) routes))
     (list jk-chords-label)))
 
 (def jk-chords-row? (row) (= (get row :route) alez.jaki.doc/chords-route))
@@ -222,7 +230,9 @@
 ;; tracks keep their indices.
 (def jk-menu-routes (self routes row viewed)
   (if (number? self.owner)
-    routes
+    ;; Display order, as the grid draws the rack; picks still map back by
+    ;; label over `routes` (pad order).
+    (eseq.kinds/in-display-order routes)
     (let ((current (jk-row-track routes row)))
       (bank-tracks viewed (if current (list current) (list))))))
 
@@ -612,15 +622,17 @@
 ;; The pattern as the jak form it plays; several patterns are one voice line
 ;; each, a line apiece.
 (def jk-code-lines (self pats)
-  (let ((b (alez.jaki.doc/patterns-body pats)))
-    (if (= b nil)
-      (list "route a row to hear it")
-      (if (> (len (filter alez.jaki.doc/pattern-sounds? pats)) 1)
-        (let ((n (len b)))
-          (cons (str "(jak " (source self.label) " :16")
-                (map (lambda (i) (str "  " (source (nth b i)) (if (= i (- n 1)) ")" "")))
-                     (range 0 n))))
-        (list (source (append (list 'jak self.label :16) b)))))))
+  (let ((b (alez.jaki.doc/patterns-body pats))
+        (off (alez.jaki.doc/offset-of self.offset)))
+    (let ((head (if (= off 0) (list 'jak self.label :16) (list 'jak self.label :16 :offset off))))
+      (if (= b nil)
+        (list "route a row to hear it")
+        (if (> (len (filter alez.jaki.doc/pattern-sounds? pats)) 1)
+          (let ((n (len b)))
+            (cons (str "(jak " (source self.label) " :16" (if (= off 0) "" (str " :offset " off)))
+                  (map (lambda (i) (str "  " (source (nth b i)) (if (= i (- n 1)) ")" "")))
+                       (range 0 n))))
+          (list (source (append head b))))))))
 
 (def jk-pattern-header (self k pat count)
   (h-stack :gap 0.6 :align :center
@@ -676,7 +688,17 @@
               :bg-color :mixer-strip-bg
               ;:border-color :mixer-strip-selected-bg
               :width 7 :height jk-row-height :font-size 9
-              :on-change (lambda (label) (jk-set-mode self label))))
+              :on-change (lambda (label) (jk-set-mode self label)))
+            (label "offset" :v-align :center :width 3.5 :height jk-row-height :font-size 9 :h-align :right
+              :color :dim :bg :transparent)
+            (number-picker
+              :key "jaki-offset"
+              :value (alez.jaki.doc/offset-of self.offset)
+              :min (- 0 jk-max-offset) :max jk-max-offset :step 1 :decimals 0
+              :width 4 :height jk-row-height :font-size 9
+              :on-change (lambda (v) (jk-set-offset self v)))
+            (label "16ths" :v-align :center :width 2.5 :height jk-row-height :font-size 9
+              :color :dim :bg :transparent))
           (v-stack :gap 1.2
             (each (range 0 (len pats)) |k|
               (box :key (str "jaki-pattern-" k) :padding 0 :background-color :transparent
@@ -697,13 +719,17 @@
 (def-kind jaki
   :generator (:resolution :16
               :requires (alez.jaki.doc)
-              :tick (alez.jaki.doc/tick-patterns self.figures self.rows self.row-count
-                                                 self.mode self.patterns))
+              :tick (alez.jaki.doc/tick-patterns-at self.figures self.rows self.row-count
+                                                    self.mode self.offset self.patterns))
   :document ((figures (list (list :dot :dot :dash)))
              (rows (list (dict :route 0 :mods (list))))
              (row-count 8)
              (mode :loop)
+             (offset 0)
              (patterns (list)))
+  ;; Where rows store their track (a member position on a rack): the host
+  ;; shifts these when a track or member is removed (Off when it was theirs).
+  :routes '((rows * route) (patterns * rows * route))
   ;; view only: the row whose rules box is open ("k:index")
   :state ((rules-open ""))
   :view jk-panel)

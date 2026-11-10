@@ -29,7 +29,8 @@ use std::collections::BTreeSet;
 use crate::sequencer::{
     insert_clip_sorted, insert_rack_clip_sorted, occlude_rack_span, occlude_span,
     stamped_clip_override, ArrClip, ClipId, PatternId, ProjectArrangement, ProjectScenes,
-    ProjectSongTrackOverride, RackArrClip, RackClipId, SceneEvent,
+    ProjectSongTrackOverride, RackArrClip, RackClipId, SceneEvent, ScenePushPoint,
+    ScenePushRegion, thin_scene_push_points,
 };
 
 use super::edit::finish_active_gesture;
@@ -108,7 +109,49 @@ pub struct SongCaptureTake {
     /// clips.
     whole_song: bool,
     events: Vec<CaptureLaunchEvent>,
+    /// Scene push gestures performed during the take (epic eseq-vum0), in
+    /// order; the last one is still open while the gesture is held.
+    pushes: Vec<CapturedPush>,
+    /// Moves whenever `pushes` changes, so the provisional push lane is
+    /// republished only then.
+    pushes_revision: u64,
 }
+
+/// One scene push gesture as performed: absolute arrangement beats, the
+/// value the gesture sent at each update, and its end once released.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CapturedPush {
+    pub target_scene: usize,
+    pub points: Vec<ScenePushPoint>,
+    pub end_beat: Option<f64>,
+}
+
+impl CapturedPush {
+    /// The gesture's curve as a region over `[start, start + length)`:
+    /// beats rebased to `start` and clamped inside, thinned to `tolerance`.
+    /// Shared by the stop-commit and the live push lane, so what is shown
+    /// while recording is what gets committed.
+    pub fn region_curve(&self, start: f64, length: f64, tolerance: f32) -> Vec<ScenePushPoint> {
+        let points: Vec<ScenePushPoint> = (self.points.iter())
+            .map(|point| ScenePushPoint {
+                beat: (point.beat - start).clamp(0.0, length),
+                value: point.value,
+            })
+            .collect();
+        thin_scene_push_points(&points, tolerance)
+    }
+}
+
+/// One step of a performed scene push gesture, as the capture records it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ScenePushStep {
+    Begin { target_scene: usize, value: f32 },
+    Value(f32),
+    End,
+}
+
+/// Curve thinning tolerance for recorded pushes, in push amount (0..1).
+const PUSH_THIN_TOLERANCE: f32 = 0.002;
 
 impl SongCaptureTake {
     pub(crate) fn event_count(&self) -> usize {
@@ -285,6 +328,11 @@ impl App {
                 touched_racks,
             },
             events: Vec::new(),
+            pushes: Vec::new(),
+            // Seeded apart per take (`pending_revision` moves when one
+            // begins), so a take started inside one UI tick of the last
+            // never matches its published revision.
+            pushes_revision: self.pending_revision << 32,
         });
         // Take recording rides the same capture pass (takes spec 8.2): one
         // transport gesture, two streams, one commit. Same timeline offset.
@@ -292,6 +340,9 @@ impl App {
             timeline_start_beat,
             self.tracks.len(),
         ));
+        // Armed audio tracks record their inputs over the same pass
+        // (audio-tracks spec §12.7).
+        self.begin_audio_takes();
         // A new take is new provisional content: a capture started in the
         // same tick another ended must not show the old one's.
         self.pending_revision = self.pending_revision.wrapping_add(1);
@@ -305,6 +356,7 @@ impl App {
         // Pending take content lives in detached buffers (takes spec 8.5
         // Cancel): dropping it touches neither the pattern pool nor the song.
         self.take_recording = None;
+        self.discard_audio_takes();
         self.pending_revision = self.pending_revision.wrapping_add(1);
     }
 
@@ -359,6 +411,71 @@ impl App {
         self.pending_revision = self.pending_revision.wrapping_add(1);
     }
 
+    /// Observe a scene push gesture step (epic eseq-vum0) at the record
+    /// clock's "now". No-op unless a capture take is active.
+    pub(crate) fn observe_scene_push(&mut self, step: ScenePushStep) {
+        let Some(take) = self.song_capture_take.as_ref() else {
+            return;
+        };
+        // A repeated value adds nothing to the curve: skip it before reading
+        // the clock.
+        if let ScenePushStep::Value(value) = step {
+            let last = take.pushes.last().filter(|push| push.end_beat.is_none());
+            let last_value = last.and_then(|push| push.points.last()).map(|point| point.value);
+            if last_value == Some(value.clamp(0.0, 1.0)) {
+                return;
+            }
+        }
+        let raw = self.state.record_beats_now();
+        self.record_scene_push_at(step, raw);
+    }
+
+    /// The take's scene pushes so far with their revision (`None` with no
+    /// capture take): what the push lane shows while the take records.
+    pub fn pending_scene_pushes(&self) -> Option<(u64, &[CapturedPush])> {
+        let take = self.song_capture_take.as_ref()?;
+        Some((take.pushes_revision, &take.pushes))
+    }
+
+    /// Record `step` at record-clock beat `raw_beats`. A begin closes an
+    /// unreleased earlier gesture; a value or end without an open gesture
+    /// (one begun before the take) is ignored.
+    pub(crate) fn record_scene_push_at(&mut self, step: ScenePushStep, raw_beats: f64) {
+        let Some(take) = self.song_capture_take.as_mut() else {
+            return;
+        };
+        let beat = (take.timeline_start_beat + raw_beats.max(0.0)).max(0.0);
+        let open = take.pushes.last_mut().filter(|push| push.end_beat.is_none());
+        // Only a step that changes `pushes` moves the revision: a value or
+        // end for a gesture begun before the take is ignored outright.
+        if open.is_none() && !matches!(step, ScenePushStep::Begin { .. }) {
+            return;
+        }
+        take.pushes_revision = take.pushes_revision.wrapping_add(1);
+        match step {
+            ScenePushStep::Begin { target_scene, value } => {
+                if let Some(open) = open {
+                    open.end_beat = Some(beat);
+                }
+                take.pushes.push(CapturedPush {
+                    target_scene,
+                    points: vec![ScenePushPoint { beat, value: value.clamp(0.0, 1.0) }],
+                    end_beat: None,
+                });
+            }
+            ScenePushStep::Value(value) => {
+                if let Some(open) = open {
+                    open.points.push(ScenePushPoint { beat, value: value.clamp(0.0, 1.0) });
+                }
+            }
+            ScenePushStep::End => {
+                if let Some(open) = open {
+                    open.end_beat = Some(beat);
+                }
+            }
+        }
+    }
+
     /// Observe a manual CLIP launch (the mixer clip grid's per-track
     /// pattern launch, which does not route through `apply_pattern_launch`):
     /// latch the lane (takes spec 10) and record the capture event. A clip
@@ -371,11 +488,7 @@ impl App {
         let Some(take) = self.song_capture_take.as_mut() else {
             return;
         };
-        let beat = self
-            .state
-            .record_beats_at_instant(std::time::Instant::now())
-            .unwrap_or_else(|| self.state.scheduler_rendered_beats())
-            .max(0.0);
+        let beat = self.state.record_beats_now();
         take.events.push(CaptureLaunchEvent {
             beat: (take.timeline_start_beat + beat).max(0.0),
             kind: CaptureLaunchKind::Tracks {
@@ -403,6 +516,9 @@ impl App {
         &mut self,
         end_raw_beats: f64,
     ) -> Result<String, String> {
+        // Audio takes stop with the pass whatever becomes of its launches
+        // and notes; their regions land as their own edit once written.
+        self.finish_audio_takes();
         let result = self.try_finish_song_capture_take(end_raw_beats);
         self.state.take_rack_macro_override.clear();
         self.song_capture_take = None;
@@ -450,10 +566,13 @@ impl App {
         // empty project keeps the whole-song commit (spec 9.3: "record from an
         // empty song"), which is the same splice over `[0, Q)` onto an empty
         // arrangement.
+        // A scene push is performance too: a take of nothing but pushes
+        // punches in at the first one.
         let punch_in = take
             .events
             .iter()
             .map(|event| event.beat)
+            .chain(take.pushes.iter().filter_map(|push| push.points.first().map(|point| point.beat)))
             .min_by(|a, b| a.partial_cmp(b).expect("capture beats are finite"));
 
         // The beats the performer changed SCENE at. Consolidated states carry
@@ -497,7 +616,7 @@ impl App {
             Some(punch_in) => {
                 let mut base = base;
                 base.end_beat = base.end_beat.max(end_beat);
-                self.spliced_arrangement(
+                let mut arrangement = self.spliced_arrangement(
                     &base,
                     &scenes,
                     &captured,
@@ -505,7 +624,9 @@ impl App {
                     punch_in,
                     end_beat,
                     take.timeline_start_beat,
-                )?
+                )?;
+                splice_captured_pushes(&mut arrangement, &take.pushes, punch_in, end_beat)?;
+                arrangement
             }
         };
 
@@ -952,6 +1073,44 @@ impl App {
             arrangement.end_beat
         ))
     }
+}
+
+/// Write the take's scene pushes onto the push lane (epic eseq-vum0): each
+/// captured gesture becomes one region, its curve thinned to its shape, and
+/// replaces only what it covers. Recorded pushes keep replaying during the
+/// take wherever the performer is not pushing, so leaving the rest of the
+/// lane alone commits exactly what was heard. A gesture still held at Stop
+/// ends there.
+fn splice_captured_pushes(
+    arrangement: &mut ProjectArrangement,
+    pushes: &[CapturedPush],
+    punch_in: f64,
+    stop: f64,
+) -> Result<(), String> {
+    if pushes.is_empty() || stop <= punch_in {
+        return Ok(());
+    }
+    for push in pushes {
+        let Some(first) = push.points.first() else {
+            continue;
+        };
+        let start_beat = first.beat.max(punch_in);
+        let end_beat = push.end_beat.unwrap_or(stop).min(stop);
+        if end_beat <= start_beat {
+            continue;
+        }
+        let points = push.region_curve(start_beat, end_beat - start_beat, PUSH_THIN_TOLERANCE);
+        arrangement.occlude_scene_push_span(start_beat, end_beat)?;
+        let region = ScenePushRegion {
+            id: arrangement.allocate_clip_id()?,
+            start_beat,
+            end_beat,
+            target_scene: push.target_scene,
+            points,
+        };
+        arrangement.insert_scene_push_sorted(region);
+    }
+    Ok(())
 }
 
 /// Every clip-bearing rack's pointer in scene `scene`, by group id.

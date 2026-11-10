@@ -599,15 +599,7 @@ impl App {
         let bus = self.buses.get(bus_idx)?;
         let slot = bus.effect_slots.get(slot_idx)?;
         let base = *slot.defaults.get(param_idx)?;
-        let raw_idx = slot.node_param_idx(param_idx)?;
-        let param_id = crate::neural::ParamNodeId::from_slot_param(
-            slot.node_id,
-            slot.modulator_node_id,
-            raw_idx,
-        );
-        let key = crate::macro_engine::MacroParamKey::for_bus_effect(
-            bus.id, slot_idx, param_idx, param_id,
-        );
+        let key = bus_effect_param_macro_key(bus.id, slot_idx, slot, param_idx)?;
         Some(self.macro_engine.effective_value(&key, base))
     }
 
@@ -675,29 +667,71 @@ impl App {
 
     /// Begins the transport's ephemeral Shift gesture. This deliberately
     /// morphs parameter snapshots only: pattern switching is discrete and
-    /// therefore has no meaningful value between 0 and 1.
+    /// therefore has no meaningful value between 0 and 1. The live gesture
+    /// takes the push over from arrangement replay and is recorded by an
+    /// active capture take.
     pub fn begin_scene_push(&mut self, target_scene: usize, value: f32) {
         if target_scene >= self.state.scene_count() {
             return;
         }
-        let config = crate::macro_engine::SceneMacroConfig {
+        self.scene_push_owner = super::scene_push_lane::ScenePushOwner::Live;
+        self.apply_scene_push_begin(target_scene, value);
+        self.observe_scene_push(super::song_capture::ScenePushStep::Begin { target_scene, value });
+    }
+
+    pub fn set_scene_push_value(&mut self, value: f32) {
+        if !self.scene_push_owner.is_live() {
+            return;
+        }
+        self.apply_scene_push_value(value);
+        if value.is_finite() {
+            self.observe_scene_push(super::song_capture::ScenePushStep::Value(value));
+        }
+    }
+
+    pub fn end_scene_push(&mut self) {
+        if !self.scene_push_owner.is_live() {
+            return;
+        }
+        self.scene_push_owner = super::scene_push_lane::ScenePushOwner::Idle;
+        self.apply_scene_push_end();
+        self.observe_scene_push(super::song_capture::ScenePushStep::End);
+    }
+
+    /// The push itself, shared by the live gesture and arrangement replay.
+    pub(super) fn apply_scene_push_begin(&mut self, target_scene: usize, value: f32) {
+        let Some(mappings) = self.scene_push_mappings(target_scene) else {
+            return;
+        };
+        let touched = self.macro_engine.begin_scene_push(mappings, value);
+        self.send_macro_targets(touched);
+    }
+
+    /// What a push toward `target_scene` morphs: every param it holds
+    /// differently from the playing scene (`None`: no such scene). Shared by
+    /// the push itself and the scheduler's push schedule.
+    pub(super) fn scene_push_mappings(
+        &self,
+        target_scene: usize,
+    ) -> Option<Vec<crate::macro_engine::MacroMapping>> {
+        if target_scene >= self.state.scene_count() {
+            return None;
+        }
+        Some(self.scene_macro_mappings(&crate::macro_engine::SceneMacroConfig {
             target_scene,
             morph_params: true,
             steal_patterns: false,
             quantize: crate::macro_engine::StealQuantize::Off,
             track_mask: None,
-        };
-        let mappings = self.scene_macro_mappings(&config);
-        let touched = self.macro_engine.begin_scene_push(mappings, value);
-        self.send_macro_targets(touched);
+        }))
     }
 
-    pub fn set_scene_push_value(&mut self, value: f32) {
+    pub(super) fn apply_scene_push_value(&mut self, value: f32) {
         let touched = self.macro_engine.set_scene_push_value(value);
         self.send_macro_targets(touched);
     }
 
-    pub fn end_scene_push(&mut self) {
+    pub(super) fn apply_scene_push_end(&mut self) {
         let touched = self.macro_engine.end_scene_push();
         self.send_macro_targets(touched);
     }
@@ -1378,5 +1412,26 @@ pub fn effect_param_macro_key(
     );
     Some(crate::macro_engine::MacroParamKey::for_effect(
         track, slot_idx, param_idx, param_id,
+    ))
+}
+
+/// The macro engine's key for param `param_idx` of bus `bus_id`'s effect slot
+/// `slot_idx`; `None` when the param has no live node param. Shared by
+/// [`App::effective_bus_slot_param_value`], the bus runtime publish and the
+/// host kinds, so all three resolve the same key.
+pub fn bus_effect_param_macro_key(
+    bus_id: crate::sequencer::BusId,
+    slot_idx: usize,
+    slot: &crate::effects::EffectSlotSnapshot,
+    param_idx: usize,
+) -> Option<crate::macro_engine::MacroParamKey> {
+    let raw_idx = slot.node_param_idx(param_idx)?;
+    let param_id = crate::neural::ParamNodeId::from_slot_param(
+        slot.node_id,
+        slot.modulator_node_id,
+        raw_idx,
+    );
+    Some(crate::macro_engine::MacroParamKey::for_bus_effect(
+        bus_id, slot_idx, param_idx, param_id,
     ))
 }

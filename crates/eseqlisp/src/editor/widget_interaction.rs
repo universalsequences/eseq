@@ -63,6 +63,22 @@ fn node_accepts_drag_type(node: &LayoutNode, drag_type: &str) -> bool {
             .is_some_and(|value| list_contains_string(value, drag_type))
 }
 
+/// The event `:on-drop` (and `:on-drag-over`) hears for a drag over
+/// `target` at its local `(hit_col, hit_row)`.
+fn drop_event(
+    target: &LayoutNode,
+    drag_type: &str,
+    payload: Value,
+    hit_col: f32,
+    hit_row: f32,
+) -> Value {
+    if target.widget_type == "tree" {
+        widget_render::tree::tree_drop_info(target, drag_type, payload, hit_col, hit_row)
+    } else {
+        widget_render::box_widget::box_drop_info(target, drag_type, payload, hit_col, hit_row)
+    }
+}
+
 fn deepest_drop_target(
     node: &LayoutNode,
     row: f32,
@@ -288,6 +304,8 @@ struct PatchPortLayout {
     pending: bool,
     center: (f32, f32),
     connected_sources: Vec<usize>,
+    /// `:cable-hang`: how far this in port's cables sag (1 = stock).
+    hang: f32,
     on_cable_click: Option<Value>,
     on_patch_drop: Option<Value>,
     on_patch_cancel: Option<Value>,
@@ -366,6 +384,7 @@ fn collect_patch_port_layouts(node: &LayoutNode, ports: &mut Vec<PatchPortLayout
                     node.rect.row + node.rect.height * 0.5,
                 ),
                 connected_sources: node_usize_list_prop(node, "connected-sources"),
+                hang: crate::ui::gpu_geometry::cable_hang_prop(node),
                 on_cable_click: node.props.get("on-cable-click").cloned(),
                 on_patch_drop: node.props.get("on-patch-drop").cloned(),
                 on_patch_cancel: node.props.get("on-patch-cancel").cloned(),
@@ -423,7 +442,7 @@ fn patch_cable_click_output(
                 continue;
             };
             let end = (port.center.0 * cell_w, port.center.1 * cell_h);
-            let distance = distance_to_patch_cable_px(start, end, point_px);
+            let distance = distance_to_patch_cable_px(start, end, point_px, port.hang);
             if distance > 7.0 {
                 continue;
             }
@@ -523,16 +542,15 @@ fn has_pending_patch_drag(layout: &LayoutNode) -> bool {
         .any(|port| port.direction == PatchPortDirection::Out && port.active && port.pending)
 }
 
-fn distance_to_patch_cable_px(start: (f32, f32), end: (f32, f32), point: (f32, f32)) -> f32 {
-    let dx = end.0 - start.0;
-    let dy = end.1 - start.1;
-    let distance = (dx * dx + dy * dy).sqrt();
-    let slack = 0.70;
-    let sag = ((28.0 + distance * 0.22) * slack).clamp(18.0, 98.0);
-    let handle_x = dx.abs().clamp(42.0, 190.0) * (0.30 + 0.14 * slack);
-    let direction = if dx >= 0.0 { 1.0 } else { -1.0 };
-    let c1 = (start.0 + handle_x * direction, start.1 + sag);
-    let c2 = (end.0 - handle_x * direction, end.1 + sag);
+fn distance_to_patch_cable_px(
+    start: (f32, f32),
+    end: (f32, f32),
+    point: (f32, f32),
+    hang: f32,
+) -> f32 {
+    // The drawn curve's (SolidCablePath at SOLID_CABLE_TENSION).
+    let slack = crate::ui::gpu_geometry::SOLID_CABLE_SLACK;
+    let (c1, c2) = crate::ui::gpu_geometry::solid_cable_controls(start, end, slack, hang);
 
     let mut best = f32::MAX;
     let mut prev = start;
@@ -2203,18 +2221,9 @@ impl Editor {
             "widget-drop: dispatch drag_type={drag_type}; target_type={}; target_key={:?}; payload={payload:?}",
             target.widget_type, target.stable_key
         );
-        let event = if target.widget_type == "tree" {
-            crate::widget_render::tree::tree_drop_info(
-                &target, &drag_type, payload, hit_col, hit_row,
-            )
-        } else {
-            crate::widget_render::box_widget::box_drop_info(
-                &target, &drag_type, payload, hit_col, hit_row,
-            )
-        };
         Some(crate::widget_render::EventOutput {
             callback,
-            args: vec![event],
+            args: vec![drop_event(&target, &drag_type, payload, hit_col, hit_row)],
         })
     }
 
@@ -2274,7 +2283,7 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
     ) -> bool {
-        let Some((drag_type, _)) = active_widget_drag(gesture) else {
+        let Some((drag_type, payload)) = active_widget_drag(gesture) else {
             widget_render::set_drop_hover_target(None);
             self.widget_cursor = WidgetCursor::Default;
             return false;
@@ -2283,15 +2292,25 @@ impl Editor {
             let local_col = precise_col - content_col as f32 + self.widget_layout_scroll_left();
             let local_row = precise_row - content_row as f32 + self.total_scroll_top();
             deepest_drop_target(layout, local_row, local_col, &drag_type)
-                .map(|(target, _, _)| target)
         });
         let allowed = target.is_some();
-        widget_render::set_drop_hover_target(target.map(|node| node.widget_id));
+        widget_render::set_drop_hover_target(target.as_ref().map(|(node, _, _)| node.widget_id));
         self.widget_cursor = if allowed {
             WidgetCursor::DragCopy
         } else {
             WidgetCursor::DragNotAllowed
         };
+        // `:on-drag-over` hears every move over the target with the event
+        // `:on-drop` would get there, so it can preview the drop. The preview
+        // is the host's to draw only while the target is hovered.
+        if let Some((node, hit_row, hit_col)) = target
+            && let Some(callback) = node.props.get("on-drag-over").cloned()
+        {
+            self.apply_widget_output(Some(crate::widget_render::EventOutput {
+                callback,
+                args: vec![drop_event(&node, &drag_type, payload, hit_col, hit_row)],
+            }));
+        }
         self.mark_needs_redraw();
         allowed
     }
@@ -2304,8 +2323,13 @@ impl Editor {
         precise_row: f32,
         delta: f64,
     ) {
-        let Some((local_col, local_row)) =
-            hit::to_local(precise_col, precise_row, content_col, content_row)
+        let modal_entry = widget_render::topmost_overlay()
+            .filter(|entry| entry.kind == widget_render::OverlayKind::Modal);
+        // The window-centered panel can extend above/left of its owner
+        // tile's content origin: negative local coordinates are still on it.
+        let Some((local_col, local_row)) = modal_entry
+            .map(|_| hit::to_local_unclamped(precise_col, precise_row, content_col, content_row))
+            .or_else(|| hit::to_local(precise_col, precise_row, content_col, content_row))
         else {
             return;
         };
@@ -2314,8 +2338,8 @@ impl Editor {
         // Like scroll: a topmost modal traps the pinch and hit-tests only its
         // own subtree. A whole-layout hit test lets underlay widgets later in
         // tree order win wherever they sit behind the panel.
-        let node = match widget_render::topmost_overlay() {
-            Some(entry) if entry.kind == widget_render::OverlayKind::Modal => {
+        let node = match modal_entry {
+            Some(entry) => {
                 if !widget_render::overlay_contains(local_col, local_row) {
                     return;
                 }
@@ -2364,6 +2388,10 @@ impl Editor {
         // Topmost dropdown menus scroll their own list; a topmost modal
         // routes normal scroll, hit-tested within the modal subtree only
         // (scroll outside the panel is consumed, never reaching the tile).
+        // Unclamped: the window-centered panel can extend above/left of its
+        // owner tile's content origin, so negative local points are on it.
+        let unclamped =
+            hit::to_local_unclamped(precise_col, precise_row, content_col, content_row);
         let mut modal_root: Option<LayoutNode> = None;
         if let Some(entry) = widget_render::topmost_overlay() {
             match entry.kind {
@@ -2374,11 +2402,8 @@ impl Editor {
                     }
                 }
                 widget_render::OverlayKind::Modal => {
-                    let inside = hit::to_local(precise_col, precise_row, content_col, content_row)
-                        .is_some_and(|(local_col, local_row)| {
-                            widget_render::overlay_contains(local_col, local_row)
-                        });
-                    if !inside {
+                    let (local_col, local_row) = unclamped;
+                    if !widget_render::overlay_contains(local_col, local_row) {
                         return true;
                     }
                     modal_root = self.runtime.current_layout.as_deref().and_then(|layout| {
@@ -2392,8 +2417,10 @@ impl Editor {
             }
         }
 
-        let Some((local_col, local_row)) =
-            hit::to_local(precise_col, precise_row, content_col, content_row)
+        let Some((local_col, local_row)) = modal_root
+            .is_some()
+            .then_some(unclamped)
+            .or_else(|| hit::to_local(precise_col, precise_row, content_col, content_row))
         else {
             return false;
         };

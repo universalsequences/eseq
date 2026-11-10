@@ -141,6 +141,9 @@ pub struct ProjectSong {
     pub end_beat: f64,
     #[serde(default)]
     pub loop_enabled: bool,
+    /// See `ProjectArrangement::loop_range`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_range: Option<(f64, f64)>,
     /// Monotonic allocator for `SongRowId`; never reused within a project.
     pub next_row_id: u64,
 }
@@ -240,6 +243,11 @@ impl SongProjectContext for SerializedSongContext {
 }
 
 impl ProjectSong {
+    /// See `ProjectArrangement::loop_window`.
+    pub fn loop_window(&self) -> (f64, f64) {
+        super::arrangement::loop_window(self.loop_range, self.end_beat)
+    }
+
     /// Check every rule of spec 5.3 against `ctx`. Errors are actionable and
     /// never clamp, reorder, or drop invalid data.
     pub fn validate(&self, ctx: &dyn SongProjectContext) -> Result<(), String> {
@@ -657,6 +665,7 @@ mod tests {
             ],
             end_beat: 64.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 3,
         }
     }
@@ -759,6 +768,7 @@ mod tests {
             rows: Vec::new(),
             end_beat: 16.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 0,
         };
         let err = song.validate(&ctx()).unwrap_err();
@@ -891,6 +901,7 @@ mod tests {
             ],
             end_beat: 32.0,
             loop_enabled: false,
+            loop_range: None,
             next_row_id: 4,
         };
         song.normalize();

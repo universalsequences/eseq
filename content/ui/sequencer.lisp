@@ -577,9 +577,11 @@
       (status "Drop a sample file, not a folder"))))
 
 (def drop-on-track (event)
-  (if (listed? (get event :drag-type) (list "sound" "instrument" "instrument-preset"))
-    (eseq.browser/drop-sound-on-track event)
-    (drop-sample-on-track event)))
+  (if (eseq.drum-rack-v2/reorder-drop? event)
+    (eseq.drum-rack-v2/drop-reorder-on-track event (track-at (get (get event :target) :track)))
+    (if (listed? (get event :drag-type) (list "sound" "instrument" "instrument-preset"))
+      (eseq.browser/drop-sound-on-track event)
+      (drop-sample-on-track event))))
 
 (def drop-new-track (event)
   (let ((payload (get event :payload))
@@ -1054,9 +1056,11 @@
 ;; Names and structural edits rebuild only this header. Mute/solo styling
 ;; uses bindings throughout, including the name, so it never rebuilds a tree.
 ;; The arrangement draws its track headers with this one (`bare` true).
-(def track-header (t bare)
+;; `toggle`, when given, takes the bare header's spacer slot (the
+;; arrangement's lane collapse disclosure).
+(def track-header (t bare &key (toggle nil))
   (subtree :key (str "seqv-track-header-" t.tid)
-    (track-header-body t bare)))
+    (track-header-body t bare toggle)))
 
 ;; A fader over x's (a track's or a bus's) level meter, keyed `key`.
 (def volume-meter (key x on-click on-drag)
@@ -1117,7 +1121,7 @@
     :active-color active-color
     :on-click on-click))
 
-(def track-header-body (t bare)
+(def track-header-body (t bare &optional (toggle nil))
   (let ((i t.index)
         (c t.color))
     (box :background "seqv-track-container"
@@ -1136,8 +1140,8 @@
           :key (str "arm-" i)
           :active #'t.armed
           :on-click (track-toggle-click t (lambda () (toggle! t.armed))))
-        (if bare (box :width 1.55))
-        (header-toggle (str (+ i 1)) (str "mute-" i) #'t.muted
+        (if bare (if (= toggle nil) (box :width 1.55) toggle))
+        (header-toggle (str (eseq.kinds/track-number t)) (str "mute-" i) #'t.muted
           :bg :control-on-bg :active-bg :sequencer-toggle-off-bg
           :color :control-on-fg :active-color :gray
           :on-click (track-toggle-click t (lambda () (toggle! t.muted))))
@@ -1146,6 +1150,9 @@
         (box :width 8.6 :height 1
           :key (str "select-" i) :part "sequencer/track-name" :track t
           :background-color :transparent
+          ;; Drag the name onto another row to reorder (eseq-ssd6).
+          :drag-type "track-badge"
+          :drag-payload (dict :track i)
           :on-click (lambda (event) (track-click event t))
           :on-double-click (lambda (evt) (open-piano-roll-for-track t))
           ;; Lit (the plain look) while the track is heard: a binding
@@ -1913,7 +1920,7 @@
 ;; every track, so hidden tracks keep their indices.
 (def lane-track-option (index)
   (let ((t (track-at index)))
-    (str (+ index 1) " " (if t t.name ""))))
+    (str (if t (eseq.kinds/track-number t) (+ index 1)) " " (if t t.name ""))))
 
 (def lane-track-options ()
   (map (lambda (t) (lane-track-option t.index)) (tracks)))
@@ -3350,7 +3357,7 @@
         :selected-border-color :mixer-strip-selected-border
         :muted-border-color :mixer-strip-border
         :drop-hover-border-color :mixer-strip-selected-border
-        :drop-types (sound-drop-types t)
+        :drop-types (eseq.drum-rack-v2/with-reorder-drop-types (sound-drop-types t))
         :drop-meta (dict :kind "track" :track i)
         :on-drop (lambda (event) (drop-on-track event))
         :padding 0.0145
@@ -3398,9 +3405,9 @@
   (let ((px (/ (+  x) design-px))
       (py (/ (- x y) design-px))
       (mottle (+ (* 9.2 (eseq.materials/surface-noise (/ px 110.0) (/ py 110.0)))
-          (* 3.8 (eseq.materials/surface-noise (/ px 7.0) (/ py 37.0)))))
+          (* 0.8 (eseq.materials/surface-noise (/ px 7.0) (/ py 37.0)))))
       (grain (- (eseq.materials/surface-hash (floor px) (floor py)) 0.5))
-      (sheen (* 0.5 (- 1.0 (/ y height))))
+      (sheen (* 0.8 (- 1.0 (/ y height))))
       (base (vec3 fill-r fill-g fill-b))
       (tint (vec3 (* 0.3 tint-r) (* 0.3 tint-g) (* 0.3 tint-b))))
     (sdf/layer
@@ -3416,7 +3423,7 @@
               (eseq.materials/color-cell 
                 (rgba (+ base
                     (* 2.2 tint (+ (* 0.035 (- mottle 0.45)) (* 0.045 rim)))
-                    (* 0.8 (vec3 lift lift lift)))
+                    (* 0.5 (vec3 lift lift lift)))
                   1.0)
                 (rgba (+ base
                     (* tint (+ (* 0.035 (- mottle 0.45)) (* 0.045 rim)))
@@ -3465,6 +3472,12 @@
     (box :background "seqv-track-container"
       :padding 0.1
       :on-click on-select
+      ;; Tracks and group blocks dropped on the header (eseq-ssd6).
+      :key (group-element-key g "header-drop")
+      :drop-hover-border-color :mixer-strip-selected-border
+      :drop-types eseq.drum-rack-v2/reorder-drag-types
+      :drop-meta (dict :kind "group" :gidx g.index)
+      :on-drop (lambda (event) (eseq.drum-rack-v2/drop-reorder-on-group event g))
       ;; A fill row: the clip grid at the end flexes into whatever width the
       ;; panel has left and wraps there, so a wide window shows more cells
       ;; per row and a long bank grows the header instead of running off it.
@@ -3515,6 +3528,10 @@
         (box :width 8.6 :height 1
           :key (group-element-key g "select")
           :background-color :transparent
+          ;; Drag a top-level group's name to move its block (eseq-ssd6); a
+          ;; nil drag type (a nested rack) makes no drag source.
+          :drag-type (eseq.drum-rack-v2/group-drag-type g)
+          :drag-payload (dict :gid g.gid)
           :on-click on-select
           :on-double-click (lambda (event) (show-fx-for-group g))
           (badge (track-name-display g.name)

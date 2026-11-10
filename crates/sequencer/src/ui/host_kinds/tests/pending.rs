@@ -403,3 +403,73 @@ fn kind_reads_move_no_generation() {
     assert_eq!(h.pending_syncs(), syncs, "no pending rebuild");
     assert_eq!(h.eval_7d2("(lane-at 0)"), lane, "the same instance");
 }
+
+/// eseq-vum0.5: a scene push performed while a take records shows on the
+/// push lane right away (no :id, so nothing can grab it), grows with the
+/// record head while held, keeps its end once released, and gives way to
+/// the committed region at Stop. The push row is there from the start.
+#[test]
+fn a_recording_push_draws_on_the_push_lane_as_it_happens() {
+    let mut h = super::views::distro();
+    h.settle();
+    assert_eq!(
+        h.eval("(len (eseq.arrangement/pending-push-items))"),
+        Value::Number(0.0)
+    );
+    h.start_capture();
+    h.set_record_head(4.0);
+    h.app.begin_scene_push(0, 0.25);
+    h.set_record_head(5.0);
+    h.app.set_scene_push_value(0.75);
+    h.set_record_head(6.0);
+    h.settle();
+    let pending = |h: &mut Harness, field: &str| {
+        h.eval(&format!(
+            "(let ((p (first (eseq.arrangement/pending-push-items)))) (get p :{field}))"
+        ))
+    };
+    assert_eq!(
+        h.eval("(len (eseq.arrangement/pending-push-items))"),
+        Value::Number(1.0)
+    );
+    assert_eq!(pending(&mut h, "id"), Value::Nil, "provisional: no id");
+    let number = |value: Value| match value {
+        Value::Number(n) => n,
+        other => panic!("a number, got {other:?}"),
+    };
+    let start = number(pending(&mut h, "start"));
+    assert!((start - 4.0).abs() < 0.05, "starts where the push began: {start}");
+    let held_end = number(pending(&mut h, "end"));
+    assert!(held_end >= 5.9, "a held push runs to the record head: {held_end}");
+    assert_eq!(
+        h.eval("(let ((p (first (eseq.arrangement/pending-push-items)))) (len (get (get p :content) :curve)))"),
+        Value::Number(2.0),
+        "the curve so far"
+    );
+
+    h.set_record_head(8.0);
+    h.settle();
+    let grown = number(pending(&mut h, "end"));
+    assert!(grown >= 7.9, "it grows with the head: {grown}");
+
+    h.app.end_scene_push();
+    h.set_record_head(12.0);
+    h.settle();
+    let released = number(pending(&mut h, "end"));
+    assert!(
+        (released - 8.0).abs() < 0.05,
+        "released: it keeps the end it was let go at: {released}"
+    );
+
+    h.app.song_transport_stop().expect("stop");
+    h.settle();
+    assert_eq!(
+        h.eval("(len (eseq.arrangement/pending-push-items))"),
+        Value::Number(0.0)
+    );
+    assert_eq!(
+        h.eval("(len (eseq.arrangement/push-items))"),
+        Value::Number(1.0),
+        "committed at Stop"
+    );
+}

@@ -139,8 +139,10 @@ impl App {
     pub(crate) fn selected_bound_source(&self, track: usize) -> Option<BoundSource> {
         // Dormant while the timeline is off screen (16.6): in the Seq tab
         // nothing renders the bound clip, so a selection silently owning the
-        // device panel reads as the panel showing the wrong sound.
-        if !self.arrangement_view_visible {
+        // device panel reads as the panel showing the wrong sound. An audio
+        // track never binds a clip's sound: it has one (per-region locks
+        // are a separate layer, bead eseq-a921).
+        if !self.arrangement_view_visible || self.is_audio_track(track) {
             return None;
         }
         // Dormant on a latched lane while the song sounds (takes spec 10):
@@ -292,16 +294,27 @@ impl App {
         // keeps the origin `Scene` with no source, and every consumer falls
         // to the track sound (rule 3b) — what the lane is monitoring. Seq
         // context is the classic scene+pattern world.
-        let effective = if self.arrangement_view_visible {
+        let effective = if self.track_owns_its_sound(track) {
             None
         } else {
             self.state.effective_track_pattern_id(track)
         };
-        resolve_binding(
-            self.selected_bound_source(track),
-            self.audible_or_held_lane_source(track),
-            effective,
-        )
+        // An audio track has ONE sound (docs/audio-tracks-spec.md): no row,
+        // take or scene cell ever lends it another, so the panel, the edit
+        // target and what plays are always the track sound.
+        let audible = if self.is_audio_track(track) {
+            None
+        } else {
+            self.audible_or_held_lane_source(track)
+        };
+        resolve_binding(self.selected_bound_source(track), audible, effective)
+    }
+
+    /// Whether the TRACK owns `track`'s sound (track-sound spec §2.2.2):
+    /// every lane in arrangement context, and an audio track always — it
+    /// has no session sound for a scene cell to own.
+    pub(crate) fn track_owns_its_sound(&self, track: usize) -> bool {
+        self.arrangement_view_visible || self.is_audio_track(track)
     }
 
     /// Every pool pattern referencing the bound source's sound: one id for
@@ -347,7 +360,7 @@ impl App {
         // §2.2.2 (rev 4): the cell-refs fallback is rule 3a by another name,
         // so it obeys the same view rule — in arrangement context the
         // `track_sound_refs` fallback below supplies the owner instead.
-        let arrangement = self.arrangement_view_visible;
+        let arrangement = self.track_owns_its_sound(track);
         self.state.with_project_scenes(|scenes| {
             let from_source = match source {
                 Some(BoundSource::Take(id)) => scenes
@@ -1041,6 +1054,44 @@ impl App {
         {
             self.push_instrument_defaults_for_track(track);
         }
+        // The sample is part of the sound too: binding a take (or falling
+        // back to the track sound) must move the voices onto THAT sound's
+        // sample, or they keep whatever the last row/launch handed them.
+        // Audio half only: a clip selection must not rename the track, and
+        // must never reach the sampler-path sync, whose marker wipe bypasses
+        // undo — selecting a take is not a sample load.
+        let Some(sample_id) = self.bound_sound_sample_id(track) else {
+            return;
+        };
+        let live = (
+            self.graph.track_buffer_ids.get(track).copied(),
+            self.graph.track_sample_rates.get(track).copied(),
+        );
+        if live != (Some(sample_id.0), Some(sample_id.2))
+            && self.graph_controller().put_sample_on_voices(track, &sample_id)
+        {
+            let path = self.sample_path_for_buffer(sample_id.0, &sample_id.1);
+            if let Some(slot) = self.sampler_paths.get_mut(track) {
+                *slot = path;
+            }
+            self.publish_sampler_analysis_runtime(track);
+        }
+    }
+
+    /// The stored sample of the sound `track` is bound to (§17.2); a negative
+    /// buffer id means the Patch never had one.
+    fn bound_sound_sample_id(&self, track: usize) -> Option<(i32, String, u32)> {
+        let refs = self.bound_sound_refs(track)?;
+        self.state
+            .with_project_scenes(|scenes| {
+                scenes
+                    .track_pools
+                    .get(track)?
+                    .sounds
+                    .patches
+                    .get(&refs.patch)
+                    .map(|patch| patch.sample_id.clone())
+            })
     }
 }
 
@@ -2504,5 +2555,114 @@ pub(crate) mod tests {
             "the take's device state is not replaced by the scene pattern's"
         );
         app.song_transport_stop().expect("stop succeeds");
+    }
+
+    // ---- Sampler samples follow the lane's sound (sampler-revert bug) ----
+
+    /// `app_with_take` as a plain sampler track whose voices hold no sample.
+    fn sampler_app_with_take() -> (App, TakeId, PatternId, Vec<PatternId>) {
+        let (mut app, take, scene_pattern, chunks) = app_with_take();
+        app.graph.track_instrument_types = vec![crate::sequencer::InstrumentType::Sampler];
+        app.graph.track_buffer_ids = vec![-1];
+        app.graph.track_sample_rates = vec![44_100];
+        (app, take, scene_pattern, chunks)
+    }
+
+    fn pattern_sample(app: &App, pattern: PatternId) -> i32 {
+        app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0].patch(pattern).expect("pattern in pool").sample_id.0
+        })
+    }
+
+    fn set_patch_sample(app: &App, patch: crate::sequencer::PatchId, buffer_id: i32) {
+        app.state.with_scenes_mut(|scenes| {
+            Arc::make_mut(scenes.track_pools[0].sounds.patches.get_mut(&patch).unwrap())
+                .sample_id = (buffer_id, format!("sample-{buffer_id}"), 44_100);
+        });
+    }
+
+    fn set_take_sample(app: &App, take: TakeId, buffer_id: i32) {
+        let patch = app.state.with_project_scenes(|scenes| {
+            scenes.take_pools[0].get(take).expect("take").sound.patch
+        });
+        set_patch_sample(app, patch, buffer_id);
+    }
+
+    /// The user repro: audition several samples on an arrangement sampler
+    /// track. The first pick seeds every Patch; every later pick must still
+    /// land in the track sound, or the next playback restores the first one.
+    #[test]
+    fn auditioning_samples_in_the_arrangement_updates_the_track_sound_every_time() {
+        let (mut app, _take, _scene, _chunks) = sampler_app_with_take();
+        let carrier = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_sounds[0])
+            .expect("the carrier exists");
+        app.load_sample_into_sampler_track(0, 11, 44_100, "first".to_string());
+        assert_eq!(pattern_sample(&app, carrier), 11);
+        app.load_sample_into_sampler_track(0, 22, 44_100, "second".to_string());
+        app.load_sample_into_sampler_track(0, 33, 44_100, "third".to_string());
+        assert_eq!(
+            pattern_sample(&app, carrier),
+            33,
+            "the last audition is the track sound's sample, not the first"
+        );
+        assert_eq!(app.graph.track_buffer_ids[0], 33);
+    }
+
+    /// Session flavor: in Seq view the lane's sound is the effective scene
+    /// pattern, so later picks land there.
+    #[test]
+    fn auditioning_samples_in_seq_view_updates_the_playing_pattern_every_time() {
+        let (mut app, _take, scene_pattern, _chunks) = sampler_app_with_take();
+        app.arrangement_view_visible = false;
+        app.state.set_arrangement_context(false);
+        app.load_sample_into_sampler_track(0, 11, 44_100, "first".to_string());
+        app.load_sample_into_sampler_track(0, 22, 44_100, "second".to_string());
+        assert_eq!(pattern_sample(&app, scene_pattern), 22);
+    }
+
+    /// A row playing a take hands the voices the TAKE's sample, never the
+    /// scene cell's (which kept the first-ever pick and reverted the lane
+    /// on every playback).
+    #[test]
+    fn a_rows_take_lane_plays_the_takes_sample_not_the_scene_cells() {
+        let (app, take, scene_pattern, chunks) = sampler_app_with_take();
+        let cell_patch = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0].refs(scene_pattern).expect("cell").patch
+        });
+        set_patch_sample(&app, cell_patch, 5);
+        set_take_sample(&app, take, 9);
+        let sample_ids = app
+            .state
+            .apply_song_row_latched(
+                0,
+                &[(0, Some(chunks[0]))],
+                1,
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+                false,
+                0,
+                false,
+                0,
+            )
+            .expect("the row applies");
+        assert_eq!(sample_ids[0], (9, "sample-9".to_string(), 44_100));
+    }
+
+    /// Binding a take moves the voices onto its sample along with its knobs;
+    /// releasing it moves them back to the track sound's.
+    #[test]
+    fn binding_a_take_moves_the_voices_onto_its_sample_and_back() {
+        let (mut app, take, _scene, _chunks) = sampler_app_with_take();
+        app.load_sample_into_sampler_track(0, 11, 44_100, "track".to_string());
+        set_take_sample(&app, take, 9);
+        app.select_song_clip(0, ClipId(0)).expect("clip selects");
+        assert_eq!(app.graph.track_buffer_ids[0], 9, "the take's sample sounds");
+        assert_eq!(app.tracks[0], "track", "selecting a clip is not a sample load");
+        app.set_song_clip_selection(None);
+        assert_eq!(app.graph.track_buffer_ids[0], 11, "back on the track sound's");
     }
 }

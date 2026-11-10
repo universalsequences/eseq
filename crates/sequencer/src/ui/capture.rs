@@ -250,6 +250,9 @@ struct CaptureTrackSpec {
     step_params: Vec<(usize, StepParam, f32)>,
     instrument_locks: Vec<(usize, String, f32)>,
     samples: Vec<String>,
+    /// `:recording BEATS` on an audio track: show it mid-take, that many
+    /// beats in, after its samples.
+    recording: Option<usize>,
     instruments: Vec<String>,
     midi_fx: Vec<String>,
     audio_fx: Vec<String>,
@@ -522,6 +525,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
     let mut step_params = Vec::new();
     let mut instrument_locks = Vec::new();
     let mut samples = Vec::new();
+    let mut recording = None;
     let mut instruments = Vec::new();
     let mut midi_fx = Vec::new();
     let mut audio_fx = Vec::new();
@@ -572,6 +576,10 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
             }
             "instrument-locks" => instrument_locks = parse_capture_param_values(value, ":instrument-locks")?,
             "samples" => samples = expression_string_list(value, ":samples")?,
+            "recording" => {
+                recording =
+                    Some(expression_usize(value).ok_or_else(|| ":recording expects a number of beats".to_string())?);
+            }
             "instruments" => instruments = expression_string_list(value, ":instruments")?,
             "midi-fx" => midi_fx = expression_string_list(value, ":midi-fx")?,
             "audio-fx" => audio_fx = expression_string_list(value, ":audio-fx")?,
@@ -626,6 +634,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
         step_params,
         instrument_locks,
         samples,
+        recording,
         instruments,
         midi_fx,
         audio_fx,
@@ -773,6 +782,15 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
             app.audio_regions_drop(track, 0.0, &paths)
                 .map_err(|error| format!("failed to drop samples on audio track {}: {error}", track + 1))?;
             app.sync_audio_track_playback();
+        }
+        if let (CaptureTrackKind::Audio, Some(beats)) = (&spec.kind, spec.recording) {
+            let start = app.state.with_committed_arrangement(|arrangement| {
+                arrangement
+                    .and_then(|arrangement| arrangement.audio_lane(track).last().map(|region| region.end_beat.ceil()))
+                    .unwrap_or(0.0)
+            });
+            app.stage_audio_take(track, start, beats as f64)
+                .map_err(|error| format!("failed to stage a take on audio track {}: {error}", track + 1))?;
         }
 
         if let Some(name) = &spec.display_name {
@@ -2112,6 +2130,7 @@ mod tests {
                 step_params: vec![],
                 instrument_locks: vec![],
                 samples: vec![],
+                recording: None,
                 instruments: vec![],
                 midi_fx: vec!["arp".to_string()],
                 audio_fx: vec!["filter".to_string()],

@@ -79,8 +79,10 @@
                 :commit (= (get event :type) :commit-band)))))
     nil))
 
-(def sync-button (fx p)
-  (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p "s8-sync")
+;; `tag` keeps widget keys unique: a linked right column renders the left
+;; ear's params a second time, so it must not reuse the left column's keys.
+(def sync-button (fx p tag)
+  (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p (str tag "-sync"))
     (button "Sync"
       :corner-radius 1
       :width 4.95 :height 0.88 :padding 0 :font-size 8.5
@@ -92,6 +94,38 @@
       :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
       :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
       :on-click |x y r| (eseq.effects.param-controls/fx-toggle-effect-value fx p))))
+
+;; Link: the right ear runs on the left ear's settings (DSP side), and the
+;; right column shows the left ear's controls, so editing or modulating
+;; either column moves both. Drawn as two chain links between the columns:
+;; joined and lit when on, pulled apart and dim when off, in the p-lock color
+;; while locked. The toggle goes through `toggle-effect-param`, which p-locks
+;; when steps are selected (as Sync does).
+(defwidget s8-link-icon
+  :width 1.1 :height 1.1
+  :paint-margin 0.1
+  :state (active plock pr pg pb)
+  :shader
+  (let ((off (+ 0.5 (* 0.22 (- 1 active))))
+        (c (if (> plock 0.5)
+             (rgba pr pg pb 1)
+             (if (> active 0.5) :effect-mode-on-bg :dim))))
+    (sdf/rotate -0.7853982
+      (sdf/layer
+        (sdf/stroke (sdf/translate (- 0 off) 0 (sdf/rounded-rect 0.78 0.4 0.4)) 0.13 c)
+        (sdf/stroke (sdf/translate off 0 (sdf/rounded-rect 0.78 0.4 0.4)) 0.13 c)))))
+
+(def link-toggle (fx p)
+  (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p "s8-link")
+    (box :width 1.1 :height 9.45 :v-align :center :h-align :center :padding 0
+      (s8-link-icon
+        :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p "s8-link-icon")
+        :active (if (eseq.effects.param-controls/fx-param-on-for? fx p) 1 0)
+        :plock (eseq.effects.param-controls/param-plock-active-prop fx p)
+        :pr (eseq.effects.param-controls/param-plock-color-r)
+        :pg (eseq.effects.param-controls/param-plock-color-g)
+        :pb (eseq.effects.param-controls/param-plock-color-b)
+        :on-click |x y r| (eseq.effects.param-controls/fx-toggle-effect-value fx p)))))
 
 ;; `current` comes from fx-param-text-value-for: the param's live text
 ;; (or the division at its value), so a p-locked division shows.
@@ -107,8 +141,8 @@
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
     :on-click |x y r| (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx p label-text)))
 
-(def div-grid (fx p)
-  (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p "s8-div")
+(def div-grid (fx p tag)
+  (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p (str tag "-div"))
     (let ((current (eseq.effects.param-controls/fx-param-text-value-for fx p)))
       (v-stack :gap 0.11
         (h-stack :gap 0.12
@@ -130,16 +164,49 @@
           (div-button fx p current "1")
           (box :width 2.72 :height 0.82))))))
 
-(def side (fx title sync-p div-p offset-p time-p)
+;; Tagged twins of filter-core's mini-number / mini-percent (same widgets,
+;; keys carry `tag`).
+(def mini-number (fx label-text p tag)
+  (eseq.effects.param-controls/param-mod-wrapper fx p (str tag "-mini-param-" (get p :idx) "-mod-wrapper")
+    (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p (str tag "-mini-num"))
+      (h-stack :gap 0.18 :align :baseline
+        (label label-text :font-size 8.5 :width 3.0 :color :dim :bg :transparent)
+        (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
+          :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals 2
+          :noui true :font-size 9.5 :text-color :dim
+          :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
+          :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+          :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+          :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+          :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))
+          :width 4.6 :height 0.8)))))
+
+(def mini-percent (fx label-text p tag)
+  (eseq.effects.param-controls/param-mod-wrapper fx p (str tag "-mini-param-" (get p :idx) "-mod-wrapper")
+    (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p (str tag "-mini-pct"))
+      (h-stack :gap 0.18 :align :center
+        (label label-text :font-size 8.5 :width 3.00 :color :dim :bg :transparent)
+        (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
+          :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
+          :noui false :font-size 9.5 :text-color :dim
+          :mode :slider
+          :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
+          :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+          :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+          :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+          :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))
+          :width 4.6 :height 0.8)))))
+
+(def side (fx tag sync-p div-p offset-p time-p)
   (box :width 8.5 :height 9.45 :padding 0.18
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.14 :align :center
-      (sync-button fx sync-p)
+      (sync-button fx sync-p tag)
       (if (eseq.effects.param-controls/fx-param-on-for? fx sync-p)
         (v-stack :gap 0.12 :align :center
-          (div-grid fx div-p)
-          (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "offset" offset-p))
-        (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "ms" time-p)))))
+          (div-grid fx div-p tag)
+          (mini-percent fx "offset" offset-p tag))
+        (mini-number fx "ms" time-p tag)))))
 
 (def parameter-knob (fx label-text p decimals)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "str8-delay-param-" (get p :idx) "-mod-wrapper")
@@ -209,11 +276,16 @@
         (filter-q-p (eseq.effects.builtin.filter-core/builtin-fx-param params "filter width"))
         (mod-rate-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mod rate"))
         (mod-amount-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mod amount"))
-        (mod-phase-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mod phase")))
+        (mod-phase-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mod phase"))
+        (link-p (eseq.effects.builtin.filter-core/builtin-fx-param params "link")))
       (h-stack :gap 0.85 :align :start
         :padding 0.5
-        (side fx "Left" left-sync-p left-div-p left-offset-p left-time-p)
-        (side fx "Right" right-sync-p right-div-p right-offset-p right-time-p)
+        (h-stack :gap 0 :align :start
+          (side fx "s8l" left-sync-p left-div-p left-offset-p left-time-p)
+          (if link-p (link-toggle fx link-p) (box :width 0.85 :height 0.1))
+          (if (and link-p (eseq.effects.param-controls/fx-param-on-for? fx link-p))
+            (side fx "s8r-linked" left-sync-p left-div-p left-offset-p left-time-p)
+            (side fx "s8r" right-sync-p right-div-p right-offset-p right-time-p)))
         (v-stack :gap 0.18
           (box :width 20.4 :height 7.5
             ;; See filter-panel.lisp: keep the curve in its own subtree.

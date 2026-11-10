@@ -136,11 +136,34 @@ fn start_cpal_output_stream(
     // them so every node — spectral DGenLisp effects above all — sees the block
     // size it was compiled for (eseq-linux.73).
     let mut blocks = FixedOutputBlocks::new(block_size, channels);
+    let rendered_samples = Arc::clone(&cb_data.rendered_samples);
+    let stream_rate = config.sample_rate.0;
+    // A new stream is a new clock relation.
+    crate::audio_input::output_epoch().clear();
     let stream = device
         .build_output_stream(
             config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
                 let callback_start = Instant::now();
+                // Where this buffer's first frame sits on the device clock
+                // and which rendered sample it is: what places recorded
+                // input on the timeline (audio_input). Frames a previous
+                // block rendered ahead are still to be served.
+                {
+                    let timestamp = info.timestamp();
+                    #[cfg(target_os = "macos")]
+                    let instant = timestamp.callback;
+                    #[cfg(not(target_os = "macos"))]
+                    let instant = timestamp.playback;
+                    let first = rendered_samples
+                        .load(Ordering::Relaxed)
+                        .saturating_sub(blocks.pending_frames(channels) as u64);
+                    crate::audio_input::output_epoch().observe(
+                        crate::audio_input::stream_nanos(instant),
+                        first,
+                        stream_rate,
+                    );
+                }
                 #[cfg(feature = "audio-heap-audit")]
                 let _heap = crate::heap_audit::AudioScope::enter();
                 // Cover the complete application callback, including first-call

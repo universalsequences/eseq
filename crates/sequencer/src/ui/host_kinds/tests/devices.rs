@@ -230,6 +230,31 @@ fn bus_effect_params_follow_each_scenes_values() {
     assert_eq!(h.eval_all("bc.base"), Value::Number(1500.0));
 }
 
+/// A scene push morphs a group/bus effect toward the target scene's value:
+/// the knob's `value` shows the pushed value while `base` stays the scene's.
+#[test]
+fn bus_effect_param_value_shows_the_scene_push() {
+    let mut h = Harness::new();
+    let (bus, slot) = h.bus_with_filter();
+    let target = h.app.buses[bus].effect_slots[slot].defaults[CUTOFF];
+    h.command("clone-pattern", Value::Nil);
+    h.eval_all("(host-command \"switch-pattern\" (dict :idx 0 :quantize \"off\"))");
+    h.drain_and_sync();
+    h.eval_all(&format!(
+        r#"(def b (nth (buses) {bus})) (def bd (first b.devices)) (def bc (device-param bd "cutoff"))"#
+    ));
+    h.eval_all("(set! bc.base 1500)");
+    h.drain_and_sync();
+    h.app.begin_scene_push(1, 1.0);
+    h.sync();
+    assert_eq!(h.eval_all("bc.base"), Value::Number(1500.0));
+    let Value::Number(pushed) = h.eval_all("bc.value") else { panic!("a number") };
+    assert!((pushed - target as f64).abs() < 1.0e-2, "pushed {pushed}, target {target}");
+    h.app.end_scene_push();
+    h.sync();
+    assert_eq!(h.eval_all("bc.value"), Value::Number(1500.0));
+}
+
 #[test]
 fn bus_devices_read_after_sync_and_set_through_history() {
     let mut h = Harness::new();

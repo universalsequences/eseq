@@ -113,6 +113,7 @@ impl GraphController<'_> {
                 &track_name,
                 song,
                 rendered,
+                state.audio_player_slots(),
                 shell.voice_sum_id,
                 shell.voice_sum_r_id,
             )?

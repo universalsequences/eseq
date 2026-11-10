@@ -61,6 +61,7 @@ pub(super) fn register_factory_path_native(runtime: &mut Runtime) {
             ))
         },
     );
+    super::drag_preview::register_natives(runtime);
     runtime.register_native("seq-factory-path", |args, _ctx| {
         let Some(Value::String(relative)) = args.first() else {
             return Err("seq-factory-path expects one relative path string".to_string());

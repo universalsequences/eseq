@@ -89,9 +89,9 @@
       :filterbank-control-on                '(0.98 0.78 0.14 1.0)
       :filterbank-readout                   '(0.93 0.88 0.72 1.0)
       ;; Semantic control roles preserve the original UI independently of accent.
-      :scene-active-base              '(0.204 0.298 0.845 1.0)
-      :scene-hover-base               '(0.095 0.034 1.0 0.72)
-      :scene-push-base                '(0.18 0.325 0.789 1.0)
+      :scene-active-base              '(0.311 0.315 0.353 1.0)
+      :scene-hover-base               '(0.372 0.353 0.641 0.72)
+      :scene-push-base                '(0.484 0.521 0.639 1.0)
       :scene-queued-base              '(0.01 0.03 0.38 1.0)
       :scene-queued-pulse             '(0.04 0.10 0.30 0.0)
       :scene-bank-indicator           '(0.20 0.52 1.0 1.0)
@@ -110,7 +110,7 @@
       :record-idle-fg                 '(0.65 0.18 0.18 1.0)
       :clock-fg                       '(0.85 0.85 0.85 1.0)
       :transport-led-bg               '(0.074 0.074 0.081 1.0)  ; LED panel: well below the playback container
-      :transport-controls-bg          '(0.095 0.095 0.105 1.0)  ; playback buttons: a shade darker than :bg
+      :transport-controls-bg          '(0.167 0.167 0.192 1.0)  ; playback buttons: a shade darker than :bg
       :preset-save-bg                 '(0.08 0.08 0.01 1.0)
       :preset-save-active-bg          '(0.00 0.35 0.82 1.0)
       :device-enabled                 '(1.0 0.8 0.12 1.0)
@@ -118,7 +118,7 @@
       :sequencer-toggle-off-bg        '(0.08 0.09 0.10 1.0)
       :sequencer-solo-on-bg           '(0.72 0.10 0.10 1.0)
       :sequencer-solo-on-fg            '(0.92 0.92 0.94)
-      :sampler-toggle-off-bg          '(0.1 0.1 0.1 0.5)
+      :sampler-toggle-off-bg          '(0.221 0.221 0.221 0.5)
       :poly-off-bg                    '(0.1 0.1 0.1 1.0)
       :poly-off-fg                    '(0.92 0.92 0.94)
       :sampler-dropdown-bg            '(0.1 0.1 0.1 0.3)
@@ -135,7 +135,7 @@
       :piano-black-key                '(0.020 0.020 0.022 1.0)
       :piano-white-lane               '(0.133 0.133 0.146 1.0)
       :piano-black-lane               '(0.110 0.110 0.115 1.0)
-      :timeline-grid-minor            '(0.202 0.202 0.222 1.0)
+      :timeline-grid-minor            '(0.153 0.153 0.169 1.0)
       :timeline-playhead              '(1.00 0.80 0.00)
       :search-icon                    '(0.45 0.47 0.50 1.0)
       :text-input-bg                  '(0.19 0.2 0.22999999999999998 1.0)
@@ -152,7 +152,7 @@
       :dimmer         '(0.48 0.48 0.50)     ; Between :gray and :dim
       :black          '(0.07 0.07 0.07)     ;
       :white          '(0.92 0.92 0.94)     ;
-      :bright-black   '(0.30 0.30 0.32)     ; Subtle separators
+      :bright-black   '(0.363 0.363 0.425 1.0)     ; Subtle separators
       
       ;; Accent colors
       :blue           '(0.00 0.48 1.00)     ; #007AFF — System blue
@@ -184,7 +184,7 @@
       :fg-match-paren '(1.00 1.00 1.00)     ;
       
       ;; Buffer/panel surfaces
-      :buffer-bg        '(0.12 0.13 0.14)  ; Main rounded buffer surface
+      :buffer-bg        '(0.12 0.12 0.145 1.0)  ; Main rounded buffer surface
       :buffer-tab-bar-bg '(0.14 0.14 0.15)
       :buffer-tab-selected-bg '(0.154 0.154 0.165)
       :buffer-tab-selected-border '(0.43 0.43 0.46)
@@ -210,39 +210,39 @@
       :status-accent     '(0.58 0.58 0.60)   ; Gray accent, not blue
       
       ;; Tile borders
-      :border-active   '(0.196 0.196 0.202 1.0)     ; Lighter gray for active tile
-      :border-inactive '(0.15 0.15 .155)    ; Match buffer background
+      :border-active   '(0.229 0.227 0.269 1.0)     ; Lighter gray for active tile
+      :border-inactive '(0.141 0.137 0.167 1.0)    ; Match buffer background
       
       :list-selected-fg '(0.9 0.9 0.9)
       ;; Browser tree icons (solid colored silhouettes; the rail keeps white strokes)
       :list-icon-detail     '(0.12 0.13 0.14)   ; cutouts match the row bg
       :list-icon-folder     '(0.45 0.75 0.98)   ; Finder's light sky-blue folder
-      :list-icon-instrument '(0.96 0.57 0.10)
+      :list-icon-instrument '(0.642 0.703 0.75 1.0)
       :list-icon-sample     '(0.11 0.86 0.31)
-      :list-icon-kit        '(0.96 0.14 0.10)
+      :list-icon-kit        '(0.112 0.802 0.896 1.0)
       :list-icon-audio-fx   '(0.17 0.71 0.96)
       :list-icon-midi-fx    '(0.67 0.17 0.91)
       :list-icon-preset     '(0.96 0.79 0.10)
       :list-icon-lfo        '(0.89 0.15 0.53)
       :list-icon-misc       '(0.56 0.56 0.58)
-      :tree-row-alt-bg '(0.14 0.15 0.16)   ; Subtle tree zebra stripe
+      :tree-row-alt-bg '(0.13 0.135 0.139 1.0)   ; Subtle tree zebra stripe
       
       ;; Sequencer panels
-      :fx-panel-bg       '(0.17 0.17 0.18)
-      :fx-inner-panel-bg '(0.15 0.15 0.155)
+      :fx-panel-bg       '(0.118 0.118 0.125 1.0)
+      :fx-inner-panel-bg '(0.165 0.165 0.18 1.0)
       :fx-panel-selected-bg '(0.17 0.17 0.17)
-      :fx-panel-header-bg '(0.21 0.21 0.22)
+      :fx-panel-header-bg '(0.156 0.156 0.164 1.0)
       :fx-panel-header-selected-bg '(0.32 0.32 0.63)
       :fx-panel-border   '(0.26 0.26 0.27)
-      :instrument-panel-bg '(0.21 0.21 0.22)
+      :instrument-panel-bg '(0.118 0.118 0.127 1.0)
       :instrument-control-bg '(0.04 0.04 0.045)
-      :instrument-group-bg '(0.14 0.14 0.15)
+      :instrument-group-bg '(0.165 0.165 0.18 1.0)
       :instrument-group-selected-bg '(0.11 0.115 0.11)
       :mixer-strip-bg    '(0.16 0.16 0.17)
       :mixer-strip-selected-bg '(0.24 0.24 0.25)
       :mixer-strip-muted-bg '(0.095 0.095 0.10)
       :mixer-strip-border '(0.21 0.21 0.22)
-      :mixer-strip-selected-border '(0.92 0.92 0.94)
+      :mixer-strip-selected-border '(0.436 0.436 0.469 1.0)
       :mixer-control-bg  '(0.07 0.075 0.08)
       :mixer-label-bg    '(0.13 0.13 0.14)
       :mixer-label-muted-bg '(0.09 0.09 0.09)
@@ -358,6 +358,7 @@
       :patcher-back-button-text '(0.62 0.63 0.66)
       :patcher-back-button-hover-text '(0.88 0.93 1.00)
       :sampler-grid                   '(0.187 0.187 0.189 1.0)
+      :timeline-ruler-bg              '(0.098 0.098 0.107 1.0)
       )))
 
 (mac-osx-theme)

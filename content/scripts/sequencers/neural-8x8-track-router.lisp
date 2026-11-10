@@ -74,7 +74,7 @@
 
 ;; ── routes: "Track 1" … and Off ───────────────────────────────────────────
 
-(def router-track-label (t) (str "Track " (+ t.index 1)))
+(def router-track-label (t) (str "Track " (eseq.kinds/track-number t)))
 
 (def router-route-options ()
   (append (map router-track-label (tracks)) (list "Off")))

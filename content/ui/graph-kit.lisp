@@ -8,7 +8,7 @@
 
 (module eseq.graph-kit)
 
-(import eseq.kinds :refer (tracks groups graph-param-named graph-edge-to graph-quantize-options
+(import eseq.kinds :refer (tracks track-number in-display-order groups graph-param-named graph-edge-to graph-quantize-options
                            set-graph-params!))
 (import eseq.view-kit :refer (index-of))
 (import eseq.scene-banks :refer (scene-viewed-bank bank-tracks))
@@ -20,13 +20,14 @@
 ;; ── routes ────────────────────────────────────────────────────────────────
 ;; A node routes to a track of its graph's owner: a rack-owned graph's
 ;; members ("3 hat": the track's number and name), else the project's tracks
-;; ("Track 3"). "Off" (nil) is always last.
+;; ("Track 3"). Numbers are display positions (track-number), as the grid and
+;; mixer show them. "Off" (nil) is always last.
 
 (def route-tracks (g)
   (let ((rack g.owner)) (if rack rack.tracks (tracks))))
 
 (def route-label (g t)
-  (if g.owner (str (+ t.index 1) " " t.name) (str "Track " (+ t.index 1))))
+  (if g.owner (str (track-number t) " " t.name) (str "Track " (track-number t))))
 
 ;; The tracks a route menu lists: a rack-owned graph's members all (they
 ;; follow their kit's on/off together), else the tracks the viewed bank uses
@@ -36,7 +37,9 @@
 ;; keeps its index.
 (def route-menu-tracks (g &key (keep (list)))
   (if g.owner
-    (route-tracks g)
+    ;; A rack's members in display order (route-tracks keeps pad order,
+    ;; which the stored routes count by).
+    (in-display-order (route-tracks g))
     (bank-tracks (scene-viewed-bank)
       (append keep (filter (lambda (t) t) (map (lambda (n) n.route) g.nodes))))))
 

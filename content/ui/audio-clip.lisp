@@ -62,21 +62,6 @@
   (let ((beats-per-second (if (> r.span 0) (/ (- r.end r.start) r.span) 0)))
     (max r.start (min r.end (+ r.start (* (- sec r.offset) beats-per-second))))))
 
-;; A body drag selected [start, end) source seconds: select the same stretch
-;; of the timeline as an arrangement region, so Cmd+C / Cmd+D / Backspace act
-;; on it (Ableton selects in the clip view and the arrangement together).
-(def select-range! (r start end)
-  (let ((beat-a (beat-at-second r start))
-        (beat-b (beat-at-second r end))
-        (t (track audio-clip.track)))
-    (if (and t (> beat-b beat-a))
-      (do
-        (set! audio-clip.range (dict :start start :end end))
-        (select-region! t t beat-a beat-b))
-      (do
-        (set! audio-clip.range nil)
-        (clear-region!)))))
-
 ;; The marker window — the part of the source the region plays, or its loop
 ;; while it loops: the drag preview while one is live, else the region's.
 (def region-window-start (r)
@@ -84,6 +69,23 @@
 
 (def region-window-end (r)
   (if r.loop r.loop-end (+ r.offset r.span)))
+
+;; A body drag selected [start, end) source seconds. The range stays in the
+;; clip view either way; when it lies inside the part the region plays, the
+;; same stretch of the timeline is selected too, so Cmd+D / Backspace act on
+;; it there (Ableton selects in the clip view and the arrangement together).
+;; A range outside it is audio not on the timeline: nothing there to select,
+;; but Cmd+C still copies it (see `range-copy`).
+(def select-range! (r start end)
+  (let ((beat-a (beat-at-second r start))
+        (beat-b (beat-at-second r end))
+        (t (track audio-clip.track)))
+    (set! audio-clip.range (dict :start start :end end))
+    (if (and t (> beat-b beat-a)
+             (>= start (region-window-start r))
+             (<= end (region-window-end r)))
+      (select-region! t t beat-a beat-b)
+      (clear-region!))))
 
 (def window-start (r)
   (let ((p audio-clip.pending))
@@ -103,8 +105,14 @@
   (set! audio-clip.pending nil)
   (set-window! r start end false))
 
+;; The visible duration: 0 in the state means the whole source.
+(def visible-duration (duration)
+  (if (= audio-clip.view-duration 0) duration audio-clip.view-duration))
+
+;; Keep the view inside the source, so a scroll never pushes either marker
+;; out of reach (unzoomed, the view is the whole source and cannot move).
 (def clamp-view-start (start duration)
-  (max 0 (min start (max 0 (- duration audio-clip.view-duration)))))
+  (max 0 (min start (max 0 (- duration (visible-duration duration))))))
 
 ;; Bar and marker drags preview locally and commit once on release, so a
 ;; drag is one undo step; a selection made without one commits at once.
@@ -138,19 +146,13 @@
       (set! audio-clip.view-start
         (clamp-view-start (+ audio-clip.view-start event.delta-time) duration))
       :zoom-view
-      (let ((current (if (= audio-clip.view-duration 0) duration audio-clip.view-duration))
+      (let ((current (visible-duration duration))
             (anchor-ratio (/ (- event.anchor-time audio-clip.view-start) current))
-            (next (max 0.01 (min duration (/ current event.factor)))))
+            (next (max 0.001 (min duration (/ current event.factor)))))
         (set! audio-clip.view-duration next)
         (set! audio-clip.view-start
           (clamp-view-start (- event.anchor-time (* anchor-ratio next)) duration)))
       _ nil)))
-
-(def gain-label (db)
-  (str (if (> db 0) "+" "") (/ (round (* db 10)) 10) " dB"))
-
-(def pitch-label (st)
-  (str (if (> st 0) "+" "") (round st) " st"))
 
 ;; ── The clip panel (Ableton's Clip / Audio boxes) ──────────────────────────
 
@@ -190,19 +192,21 @@
 (def audio-section (r)
   (v-stack :key "audio-clip-audio" :width :fill :gap 0.15
     (section-label "audio-clip-audio-label" "Audio")
-    (h-stack :width :fill :gap 0.4 :align :center
-      (section-label "audio-clip-gain-label" "Gain")
-      (hslider :key "audio-clip-gain" :width 6 :min -36 :max 12
-        :value r.gain
+    ;; The standard device knobs: focus one and type a value, as on any
+    ;; instrument or effect panel.
+    (h-stack :width :fill :gap 0.4
+      (knob-number :key "audio-clip-gain" :label "Gain" :unit "dB" :decimals 1
+        :min -36 :max 12 :origin 0 :value r.gain
+        :font-size 9.5 :label-font-size 9.0 :text-color :dim :label-color :dim
+        :width 5.35 :height 3.55 :knob-size 2.85
         :on-change (lambda (v)
           (host-command "audio-region-set" (dict :id r.cid :gain v :live true))))
-      (label (gain-label r.gain) :key "audio-clip-gain-value" :font-size 10 :bg :transparent))
-    (h-stack :width :fill :gap 0.4 :align :center
-      (section-label "audio-clip-pitch-label" "Pitch")
-      (knob :key "audio-clip-pitch" :size 3.5 :min -24 :max 24 :value r.pitch
+      (knob-number :key "audio-clip-pitch" :label "Pitch" :unit "st" :decimals 0
+        :min -24 :max 24 :step 1 :origin 0 :value r.pitch
+        :font-size 9.5 :label-font-size 9.0 :text-color :dim :label-color :dim
+        :width 5.35 :height 3.55 :knob-size 2.85
         :on-change (lambda (v)
-          (host-command "audio-region-set" (dict :id r.cid :pitch (round v) :live true))))
-      (label (pitch-label r.pitch) :key "audio-clip-pitch-value" :font-size 10 :bg :transparent))
+          (host-command "audio-region-set" (dict :id r.cid :pitch (round v) :live true)))))
     ;; Warp and reverse arrive with the sampler-shaped device
     ;; (docs/audio-tracks-spec.md §6.3, §8.3).
     (h-stack :width :fill :gap 0.4
@@ -241,8 +245,8 @@
         :waveform-color :fg
         :inactive-waveform-color '(rgba 0.32 0.32 0.32 1)
         :buffer (dict :registry-key r.sample)
-        :view-start audio-clip.view-start
-        :view-duration (if (= audio-clip.view-duration 0) r.duration audio-clip.view-duration)
+        :view-start (clamp-view-start audio-clip.view-start r.duration)
+        :view-duration (visible-duration r.duration)
         :cursor-time audio-clip.cursor
         ;; The playhead follows the song: the widget maps the bound song
         ;; position through the region (and its loop) onto source seconds,
@@ -273,6 +277,19 @@
 (def song-region-copy ()
   (if (= song.region nil) false (do (seq-song-region-copy) true)))
 
+;; Cmd+C in the clip editor: the range dragged across the waveform copies
+;; that stretch of the source, whether or not the timeline plays it; with no
+;; range it is the timeline region's copy.
+(def range-copy ()
+  (let ((range audio-clip.range))
+    (if (and range (>= audio-clip.region 0))
+      (do
+        (host-command "song-region-copy"
+          (dict :audio-region audio-clip.region
+                :source-start (get range :start) :source-end (get range :end)))
+        true)
+      (song-region-copy))))
+
 (def song-region-paste ()
   (seq-song-region-paste)
   true)
@@ -299,10 +316,14 @@
 ;; duplicates with Cmd+C / Cmd+V / Cmd+D. Otherwise each returns false and
 ;; the key falls through to the piano roll as before.
 (def editing-audio? () (audio-track? piano-roll.track))
-(def region-copy-key () (if (editing-audio?) (song-region-copy) false))
+(def region-copy-key () (if (editing-audio?) (range-copy) false))
 (def region-paste-key () (if (editing-audio?) (song-region-paste) false))
 (def region-duplicate-key () (if (editing-audio?) (song-region-duplicate) false))
-(def focus-key (key text) (if (editing-audio?) (song-region-key key) false))
+(def focus-key (key text)
+  (cond
+    ((not (editing-audio?)) false)
+    ((or (= key "s-c") (= key "C-c")) (range-copy))
+    (else (song-region-key key))))
 
 (define-mode "audio-clip-mode" :read-only true :live-keys true
   :inherit "eseq.sequencer-keys/sequencer-keys")

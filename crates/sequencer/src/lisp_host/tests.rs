@@ -8888,7 +8888,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert!(
             published[0]
                 .tick_source
-                .contains("(alez.jaki.core/run (__defscene-resolve \"jb-figures\"))"),
+                .contains("(alez.jaki.core/run-at 0 (__defscene-resolve \"jb-figures\"))"),
             "the tick must late-resolve body data by scene: {}",
             published[0].tick_source,
         );
@@ -9505,6 +9505,165 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(jaki_offsets(&mut rt, expr, 0).len(), 4);
         assert_eq!(jaki_offsets(&mut rt, expr, 1).len(), 2);
         assert_eq!(jaki_offsets(&mut rt, expr, 2).len(), 4);
+    }
+
+    /// Route 0 of a jak body, evaluated for `cycle`: its hit offsets in
+    /// units, then the cycle length last.
+    fn jaki_route_offsets(rt: &mut ScratchControlRuntime, body: &str, cycle: u32) -> Vec<f64> {
+        jaki_eval_nums(
+            rt,
+            &format!(
+                r#"(let ((r (jaki/eval-at (get (first (jaki/prepare '({body}))) :p)
+                                          {cycle} :left jaki/default-state)))
+                     (append (map (lambda (e) (/ (nth (get e :off) 0) (nth (get e :off) 1)))
+                                  (get r :events))
+                             (list (/ (nth (get r :len) 0) (nth (get r :len) 1)))))"#
+            ),
+        )
+    }
+
+    #[test]
+    fn jaki_fit_and_align_row_words_retime_and_pad() {
+        let mut rt = jaki_runtime();
+        let third = 1.0 / 3.0;
+        // (fit 4): `. -` (3 hits in 3 units) spread across 4 — `(. -)%4`.
+        assert_close(
+            &jaki_route_offsets(&mut rt, ". - -> 0 (fit 4)", 0),
+            &[0.0, 4.0 * third, 8.0 * third, 4.0],
+        );
+        // (align 16 :pad) after it — `(. -)%4 @16`: dots fill units 4..15.
+        let padded = jaki_route_offsets(&mut rt, ". - -> 0 (fit 4) (align 16 :pad)", 0);
+        let mut expected = vec![0.0, 4.0 * third, 8.0 * third];
+        expected.extend((4..16).map(f64::from));
+        expected.push(16.0);
+        assert_close(&padded, &expected);
+        // :rest pads with silence; the cycle is still a bar.
+        assert_close(
+            &jaki_route_offsets(&mut rt, ". - -> 0 (fit 4) (align 16 :rest)", 0),
+            &[0.0, 4.0 * third, 8.0 * third, 16.0],
+        );
+        // The row word aligns the whole cycle (its last figure): 3 + 3 = 6
+        // units round up to 8, not each figure to 8.
+        assert_close(
+            &jaki_route_offsets(&mut rt, "(fig (. -)) (fig (. -)) -> 0 (align 8 :rest)", 0),
+            &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 8.0],
+        );
+        // (on (fig 2) (fit 4)) fits only figure 2: `(. -) (. -)%4`.
+        assert_close(
+            &jaki_route_offsets(&mut rt, "(fig (. -)) (fig (. -)) -> 0 (on (fig 2) (fit 4))", 0),
+            &[0.0, 1.0, 2.0, 3.0, 3.0 + 4.0 * third, 3.0 + 8.0 * third, 7.0],
+        );
+        // (on (fig 1) (align 4 :rest)) pads figure 1 alone.
+        assert_close(
+            &jaki_route_offsets(&mut rt, "(fig (. -)) (fig (. -)) -> 0 (on (fig 1) (align 4 :rest))", 0),
+            &[0.0, 1.0, 2.0, 4.0, 5.0, 6.0, 7.0],
+        );
+        // (every 2 (align 8 :rest)): one cycle of 3 units, one padded to 8.
+        let a = jaki_route_offsets(&mut rt, ". - -> 0 (every 2 (align 8 :rest))", 0);
+        let b = jaki_route_offsets(&mut rt, ". - -> 0 (every 2 (align 8 :rest))", 1);
+        let mut lens = vec![*a.last().unwrap(), *b.last().unwrap()];
+        lens.sort_by(f64::total_cmp);
+        assert_eq!(lens, vec![3.0, 8.0]);
+    }
+
+    /// Each hit of a route's cycle as 0 (dot), 1 (a dash's first hit) or 2
+    /// (its second), then the cycle length.
+    fn jaki_route_syms(rt: &mut ScratchControlRuntime, body: &str) -> Vec<f64> {
+        jaki_eval_nums(
+            rt,
+            &format!(
+                r#"(let ((r (jaki/eval-at (get (first (jaki/prepare '({body}))) :p)
+                                          0 :left jaki/default-state)))
+                     (append (map (lambda (e) (if (= (get e :sym) :dot) 0 (get e :hit)))
+                                  (get r :events))
+                             (list (/ (nth (get r :len) 0) (nth (get r :len) 1)))))"#
+            ),
+        )
+    }
+
+    #[test]
+    fn jaki_align_fills_with_a_pattern_and_ends_on_a_symbol() {
+        let mut rt = jaki_runtime();
+        // `. -` is 3 units; each variant pads it to 8.
+        // (align 8 :pad): (. -) . . . . .
+        assert_close(
+            &jaki_route_syms(&mut rt, ". - -> 0 (align 8 :pad)"),
+            &[0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 8.0],
+        );
+        // :end -: (. -) . . . -
+        assert_close(
+            &jaki_route_syms(&mut rt, ". - -> 0 (align 8 :end -)"),
+            &[0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 1.0, 2.0, 8.0],
+        );
+        // :fill (. . -): (. -) . . - .
+        assert_close(
+            &jaki_route_syms(&mut rt, ". - -> 0 (align 8 :fill (. . -))"),
+            &[0.0, 1.0, 2.0, 0.0, 0.0, 1.0, 2.0, 0.0, 8.0],
+        );
+        // :fill (. -) :end -: (. -) . - -
+        assert_close(
+            &jaki_route_syms(&mut rt, ". - -> 0 (align 8 :fill (. -) :end -)"),
+            &[0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 1.0, 2.0, 8.0],
+        );
+        // Bare symbols after :fill read like a group: :fill . - = :fill (. -).
+        assert_close(
+            &jaki_route_syms(&mut rt, ". - -> 0 (align 8 :fill . - :end -)"),
+            &[0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 1.0, 2.0, 8.0],
+        );
+        assert_close(
+            &jaki_route_syms(&mut rt, ". - -> 0 (align 16 :fill . -)"),
+            &[0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 16.0],
+        );
+        // A dash that would cross the boundary becomes a dot: - - .
+        assert_close(
+            &jaki_route_syms(&mut rt, ". - -> 0 (align 8 :fill -)"),
+            &[0.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 0.0, 8.0],
+        );
+        // :rest :end -: silence, then the dash on units 6-7.
+        assert_close(
+            &jaki_route_offsets(&mut rt, ". - -> 0 (align 8 :rest :end -)", 0),
+            &[0.0, 1.0, 2.0, 6.0, 7.0, 8.0],
+        );
+        // Already aligned: nothing is added, not even the end.
+        assert_close(
+            &jaki_route_syms(&mut rt, ". - . . . . . -> 0 (align 8 :end -)"),
+            &[0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 8.0],
+        );
+        // A figure's own align takes the same options.
+        assert_close(
+            &jaki_route_syms(&mut rt, "(fig (. -) (align 8 :end -)) -> 0"),
+            &[0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 1.0, 2.0, 8.0],
+        );
+        // Under (on (fig k) …) too.
+        assert_close(
+            &jaki_route_syms(&mut rt, "(fig (. -)) -> 0 (on (fig 1) (align 8 :fill (. -) :end -))"),
+            &[0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 1.0, 2.0, 8.0],
+        );
+    }
+
+    #[test]
+    fn jaki_row_schema_offers_fit_and_align_everywhere_fast_goes() {
+        use eseqlisp::sexp_slot::{read_value, schema::Schema};
+        let mut rt = jaki_runtime();
+        let value = rt
+            .eval("(import alez.jaki.doc)\nalez.jaki.doc/row-schema")
+            .expect("row schema")
+            .expect("a value");
+        let schema = Schema::parse(&value).expect("row schema parses");
+        schema
+            .check(&read_value(
+                "((fit 4) (fit (4 6)) (align 16 :pad) (align 8 :rest) \
+                  (on (fig 2) (fit 4)) (on (fig 1) (align 4 :pad)) \
+                  (every 2 (fit 6)) (every-fig 2 (align 8 :rest)) (on (fig 2) (every 2 (fit 3))) \
+                  (align 8 :end -) (align 8 :fill (. . -)) (align 8 :fill (. -) :end -) \
+                  (align 8 :rest :end -) (on (fig 1) (align 8 :pad :fill (- .))))",
+            ).unwrap())
+            .expect("fit and align on rows, under on, every and every-fig");
+        assert!(schema.check(&read_value("((align 16 :nope))").unwrap()).is_err());
+        let fresh = schema.form_default("align").expect("align is a form");
+        assert_eq!(eseqlisp::vm::format_lisp_source(&fresh), r#"("align" 16 ":pad")"#);
+        let fresh = schema.form_default("fit").expect("fit is a form");
+        assert_eq!(eseqlisp::vm::format_lisp_source(&fresh), r#"("fit" 4)"#);
     }
 
     #[test]

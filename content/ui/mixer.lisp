@@ -119,6 +119,20 @@
   :type :number :min 9 :max 20 :step 0.1
   :doc "Width (cells) of a bus strip in the mixer.")
 
+;; How far the mixer's modulation cables sag, as a multiple of the stock
+;; hang (1) the lane patchbay keeps: dense projects let them drop below the
+;; name labels so those stay readable and clickable. The standalone patch
+;; editor has its own cables and ignores it.
+(defcustom mixer-cable-hang 2.5
+  :type :number :min 1 :max 6 :step 0.1
+  :doc "How low the mixer's modulation cables hang (1 = stock; higher clears the track names).")
+
+;; The mixer's unselected modulation cables' opacity (1 = solid): dense
+;; projects let the strips show through. A selected cable stays solid.
+(defcustom mixer-cable-opacity 0.7
+  :type :number :min 0.1 :max 1 :step 0.05
+  :doc "Opacity of the mixer's modulation cables (1 = solid); the selected cable stays solid.")
+
 (def strip-height ()
   (+ 9.8 (clip-area-height) (clip-stop-row-height)))
 
@@ -420,13 +434,12 @@
           (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
           (status "Drop a sample file, not a folder"))))))
 
-;; Drag a track badge onto a group container -> add it to that group.
+;; Drag a track badge onto a group container -> add it to that group (first
+;; when it is already a member); a group dropped there moves its block to
+;; that group's place (eseq-ssd6).
 (def drop-track-into-group (event g)
-  (let ((trk event.payload.track))
-    (clear-delete-target)
-    (if (>= trk 0)
-      (host-command "move-track-to-group" (dict :track trk :gidx g.index))
-      false)))
+  (clear-delete-target)
+  (eseq.drum-rack-v2/drop-reorder-on-group event g))
 
 ;; Drag a track badge onto the "Drop samples here" zone -> remove it from its group.
 (def drop-track-out-of-group (event)
@@ -449,6 +462,13 @@
       _ (status "Drop an audio or MIDI effect"))))
 
 (def drop-on-track (event)
+  (if (eseq.drum-rack-v2/reorder-drop? event)
+    (do
+      (clear-delete-target)
+      (eseq.drum-rack-v2/drop-reorder-on-track event (track event.target.track)))
+    (drop-resource-on-track event)))
+
+(def drop-resource-on-track (event)
   (match event.drag-type
     "sound" (eseq.browser/drop-sound-on-track event)
     "instrument" (eseq.browser/drop-sound-on-track event)
@@ -549,7 +569,7 @@
     (do
       (set! mod-patch.source t)
       (set! mod-patch.output output)
-      (status (str "Mod " (mod-out-label t output) ": track " (+ t.index 1))))
+      (status (str "Mod " (mod-out-label t output) ": track " (eseq.kinds/track-number t))))
     (status "This track has no mod output")))
 
 (def cancel-mod-draw ()
@@ -876,6 +896,8 @@
       (append props
         (list :patch-port true
               :direction :in
+              :cable-hang mixer-cable-hang
+              :cable-opacity mixer-cable-opacity
               :input input
               :connected-sources (route-sources dest input false)
               :selected-sources selected
@@ -907,6 +929,7 @@
           :key (if (= output 0) (str "mod-out-" t.index) (str "mod-out-" t.index "-" output))
           :patch-port true
           :direction :out
+          :cable-hang mixer-cable-hang
           :track t.index
           :source (source-key t.index output)
           :active (track-mod-output? t)
@@ -1170,8 +1193,10 @@
 
 ;; A mixer strip's drop target and pointer gestures (full or collapsed).
 (def track-strip-props (t)
-  (list :drop-hover-border-color :mixer-strip-selected-border
-        :drop-types (track-drop-types t)
+  (list :key (str "mixer-strip-drop-" t.index)
+        :drop-hover-border-color :mixer-strip-selected-border
+        ;; Plus the reorder drags (eseq-ssd6): a label or group dropped here.
+        :drop-types (eseq.drum-rack-v2/with-reorder-drop-types (track-drop-types t))
         :drop-meta (dict :kind "track" :track t.index)
         :on-drop (lambda (event) (drop-on-track event))
         :on-click (lambda (event) (track-click event t select-track))
@@ -1242,7 +1267,7 @@
 ;; while the track is heard.
 (def strip-buttons (t)
   (h-stack :gap 0.35
-    (strip-button (str (+ t.index 1)) #'t.audible
+    (strip-button (str (eseq.kinds/track-number t)) #'t.audible
       :on-click (lambda (event) (activate-track-control) (toggle! t.muted)))
     (strip-button "S" #'t.soloed
       :on-click (lambda (event) (activate-track-control) (toggle! t.soloed)))
@@ -1293,6 +1318,7 @@
     :key (if (= output 0) (str "mod-out-" t.index) (str "mod-out-" t.index "-" output))
     :patch-port true
     :direction :out
+    :cable-hang mixer-cable-hang
     :track t.index
     :source (source-key t.index output)
     :active true
@@ -1331,7 +1357,7 @@
 ;; useful on it; record arm still plays notes into its pattern.
 (def module-strip-buttons (t)
   (h-stack :gap 0.35
-    (strip-button (str (+ t.index 1)) true)
+    (strip-button (str (eseq.kinds/track-number t)) true)
     (strip-button "R" #'t.armed :color :black :active-bg arm-color
       :on-click (lambda (event) (activate-track-control) (toggle! t.armed)))))
 
@@ -1537,7 +1563,7 @@
 
 ;; A collapsed strip's label: the track's number and the start of its name.
 (def collapsed-label (t)
-  (str (+ t.index 1) " " (substring t.name 0 3)))
+  (str (eseq.kinds/track-number t) " " (substring t.name 0 3)))
 
 (def track-collapsed-strip (t)
   (track-frame t 4.7 (collapsed-strip-height) 2 10 (track-strip-props t)
@@ -1549,6 +1575,8 @@
       (strip-button "M" #'t.muted :key (str "track-collapsed-mute-" t.index) :width 3.65
         :on-click (lambda (event) (activate-track-control) (toggle! t.muted)))
       (track-label-box t (str "track-collapsed-label-" t.index) 3.65
+        :drag-type "track-badge"
+        :drag-payload (dict :track t.index)
         (if (= strip-rename.track t)
           (track-rename-input t "track-collapsed-rename-input-" 3.65 9)
           (track-badge t (collapsed-label t)
@@ -1826,6 +1854,9 @@
         (box :width 0 :height 0.2)
         (box :corner-radius (eseq.seq-core-state/radius 34) :background-color g.color :width 9.5 :padding 0.1
           :key (str "group-badge-" g.gid)
+          ;; Drag a top-level group's badge to move its block (eseq-ssd6).
+          :drag-type (eseq.drum-rack-v2/group-drag-type g)
+          :drag-payload (dict :gid g.gid)
           :selected #'g.delete-target
           :selected-background-color :fx-panel-header-selected-bg
           :on-click (lambda (event) (select-group-delete-target g))
@@ -1941,7 +1972,7 @@
       :border-color :mixer-strip-border
       :selected-border-color :mixer-strip-selected-border
       :drop-hover-border-color :mixer-strip-selected-border
-      :drop-types (list "track-badge")
+      :drop-types eseq.drum-rack-v2/reorder-drag-types
       :drop-meta (dict :kind "group" :gidx g.index)
       :on-drop (lambda (event) (drop-track-into-group event g))
       :on-click (lambda (event) (select-group g))

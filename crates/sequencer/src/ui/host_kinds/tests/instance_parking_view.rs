@@ -163,3 +163,39 @@ fn a_project_sequencers_view_has_a_bank_power_toggle_and_the_packages_menu_switc
     assert!(h.app.instances.get(id).is_none(), "purged");
     assert_eq!(parked(&h, id), vec![false; 4], "its parking went with it");
 }
+
+/// A view taller than its tile keeps its natural layout: the frame's flex box
+/// is viewport-tall, and a stretched child would hand every v-stack below it
+/// that height as a cap, so whatever crossed the viewport edge was squeezed and
+/// the siblings after it drew on top of it once scrolled into view.
+#[test]
+fn an_instance_view_taller_than_its_tile_lays_out_at_natural_height() {
+    let mut h = distro();
+    h.eval("(import alez.jaki.kind)");
+    let before = crate::host_commands::instances::instance_ids(&h.app);
+    h.command("instance-create", map_value(vec![("kind", s(JAKI))]));
+    let id = *crate::host_commands::instances::instance_ids(&h.app)
+        .difference(&before)
+        .next()
+        .expect("an instance");
+    settle(&mut h);
+    let (tree, _) = h.buffer_tree(&view_buffer(&h, id));
+    fn keyed<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        key: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if node.stable_key.as_deref().is_some_and(|k| k.ends_with(key)) {
+            return Some(node);
+        }
+        node.children.iter().find_map(|child| keyed(child, key))
+    }
+    let add_pattern_row = |rows: u16| {
+        let layout = eseqlisp::layout::LayoutEngine::new(160, rows, 0.5)
+            .layout(&tree)
+            .expect("layout");
+        keyed(&layout, "jaki-pattern-add").expect("the add-pattern button").rect.row
+    };
+    let tall = add_pattern_row(200);
+    assert!(tall > 20.0, "the fixture must overflow a 20-row tile: {tall}");
+    assert_eq!(add_pattern_row(20), tall, "a short tile must not move it up");
+}

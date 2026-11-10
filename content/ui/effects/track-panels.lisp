@@ -194,11 +194,48 @@
       (stamp-variant! selection.track selection.steps v)
       (host-command "preview-plock-variant" (dict :label (if v v.label "def"))))))
 
+;; The chip label a step plays: its variant's, "def" with none.
+(def plock-step-chip-label (s)
+  (if s.variant s.variant.label "def"))
+
+;; Whether any selected step plays the chip `chip-label`.
+(def plock-selection-plays? (chip-label)
+  (> (len (filter |s| (= (plock-step-chip-label s) chip-label) selection.steps)) 0))
+
+;; Whether chip `chip-label` lights: with steps selected, every chip a
+;; selected step plays (a mixed selection lights several); else the chip
+;; the table shows (the selected or previewed variant).
+(def plock-chip-current? (chip-label)
+  (if (> (len selection.steps) 0)
+    (plock-selection-plays? chip-label)
+    (= selection.plock-variant chip-label)))
+
+;; Remove every variant lock from the selected steps (one undo entry).
+(def plock-clear-selection ()
+  (do
+    (eseq.seq-core-state/cool-off-follow)
+    (set! plock-table.row -1)
+    (stamp-variant! selection.track selection.steps nil)))
+
+;; With steps selected: how many, and a clear button for their locks. The
+;; chips below light the variants they play.
+(def plock-selection-bar ()
+  (let ((n (len selection.steps))
+        (locked (> (len (filter |s| s.variant selection.steps)) 0)))
+    (h-stack :debug-name "track-plock-selection-bar" :width :fill :gap 0.3 :align :center
+      (label (str n (if (= n 1) " step selected" " steps selected"))
+        :flex 1 :font-size 8.5 :color :dim :bg :transparent)
+      (button "clear" :debug-name "track-plock-clear"
+        :variant :danger
+        :disabled (not locked)
+        :width 4.0 :height 1.0 :font-size 8.5
+        :on-click (lambda (event) (plock-clear-selection))))))
+
 ;; A variant chip (v, one of the track's variants), or the def chip (nil).
 (def plock-chip (v)
   (let ((chip-label (if v v.label "def"))
       (color (if v v.color (plock-base-color)))
-      (current (= selection.plock-variant chip-label))
+      (current (plock-chip-current? chip-label))
       (c (color-rgba color 1.0)))
     (box :debug-name (str "track-plock-chip-" (if v "variant" "def") "-" chip-label)
       :height 1.0
@@ -320,9 +357,12 @@
     (box :debug-name "track-plocks-panel" :padding 0.72
       (v-stack :gap 0.30
         (if t
-          (label "p-locks" :height 1 :bg :transparent :color :dim :font-size 8)
+          (label "parameter locks" :height 1 :bg :transparent :color :dim :font-size 8)
           )
-        
+        (if (and t (> (len selection.steps) 0))
+          (plock-selection-bar)
+          (box :height 0))
+
         ;; Variants mint and relabel live while a drag prints locks, so the
         ;; strip is a subtree (the variant list re-renders it, not the lock
         ;; table) and each chip one of its own, keyed by its variant (a
@@ -460,7 +500,7 @@
 ;; Track t's short label: its number and the start of its name (the
 ;; mixer's collapsed strip spells it so too).
 (def track-short-label (t)
-  (str (+ t.index 1) " " (substring t.name 0 16)))
+  (str (eseq.kinds/track-number t) " " (substring t.name 0 16)))
 
 ;; The current track's chip (eseq.panel-header's chip shape). A binding
 ;; cannot be negated, so the box binds t.audible as :muted with the silenced
@@ -472,7 +512,7 @@
         :key "step-track-badge"
         :width 11.55 :height 1.0
         :padding 0
-        :corner-radius 8
+        :corner-radius 38
         :v-align :center
         :muted #'t.audible
         :background-color (track-rgba t true)

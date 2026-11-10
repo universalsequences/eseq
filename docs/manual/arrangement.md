@@ -65,7 +65,7 @@ The view has these parts, from top to bottom:
 - **Place**, the pattern selector beside it, and the starting-scene menu. These are described in the sections below.
 - The ruler, numbered in bars. The shaded band shows the arrangement's length; drag its right end to change the end. The end cannot be moved before the last clip or onto the last scene marker.
 - The scene lane.
-- One row per track. The header on the left is the same as in the session view: the record-arm circle, the numbered mute button, **S** for solo, the track name and a volume control. Collapsed tracks are hidden here too.
+- One row per track, in the same order as the sequencer. The header on the left is the same as in the session view: the record-arm circle, the numbered mute button, **S** for solo, the track name and a volume control. Collapsed tracks are hidden here too. Drag a track's name onto another track's header to move it; see "Reordering tracks" in [Step sequencer](sequencer-tour).
 - **Drop sounds here to add a track**, a drop target for a sample, an instrument or a Sound.
 - A second ruler at the bottom.
 

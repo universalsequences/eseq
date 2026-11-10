@@ -766,6 +766,7 @@ use panel_kinds_seed::*;
             ("ui/themes/mac-osx-midnight-50.lisp", "Midnight 50"),
             ("ui/themes/phosphor.lisp", "Phosphor"),
             ("ui/themes/phosphor-blue.lisp", "Phosphor Blue"),
+            ("ui/themes/cathode-amber.lisp", "Cathode Amber"),
             ("ui/themes/aura.lisp", "Aura"),
         ] {
             let src = read_factory_source(path)
@@ -14858,6 +14859,14 @@ use panel_kinds_seed::*;
             "surface select-all must relinquish the mixer delete target");
         let entries = format!("{:?}", log(&mut editor));
         assert_eq!(entries.matches("clips").count(), 2, "{entries}");
+        // The selection's surface takes focus, so Backspace (whose region
+        // delete runs only in the active *arrangement*) acts on it next.
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor.runtime_mut().eval_str("(current-buffer-name)").unwrap(),
+            Some(Value::String("*arrangement*".into())),
+            "Cmd+A over a visible arrangement focuses it"
+        );
 
         // Active piano roll.
         editor
@@ -21571,6 +21580,112 @@ use panel_kinds_seed::*;
         );
     }
 
+    /// Regression: the palette modal is centered on the window but belongs to
+    /// the tile that mounted it (here *step*, at the window's lower right).
+    /// Scroll above/left of that tile's content origin had negative local
+    /// coordinates, failed the clamped `to_local`, and was consumed as
+    /// "outside the panel" -- so the sound list never scrolled.
+    #[test]
+    fn metal_seq_touchpad_scroll_scrolls_open_sound_palette() {
+        fn find_modal<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.widget_type == "modal" && !node.children.is_empty() {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_modal)
+        }
+        fn find_type<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            ty: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.widget_type == ty {
+                return Some(node);
+            }
+            node.children.iter().find_map(|c| find_type(c, ty))
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        assert!(editor.switch_active_tile_to_buffer_named("*step*"));
+        {
+            let rt = editor.runtime_mut();
+            let track = kind_track(rt, 0);
+            let mut sounds = Vec::new();
+            for patch in 0u64..24 {
+                let id = rt.register_keyed_instance("eseq.kinds:sound", &[track, patch]).unwrap();
+                for (field, value) in [
+                    ("track", Value::Instance(track)),
+                    ("patch-id", Value::Number(patch as f64)),
+                    ("mix-id", Value::Number(0.0)),
+                    ("name", Value::String(format!("Patch {patch}"))),
+                    ("referents", Value::String("S1".into())),
+                    ("base", Value::Bool(false)),
+                    ("current", Value::Bool(false)),
+                    ("track-sound", Value::Bool(false)),
+                    ("colored", Value::Bool(false)),
+                    ("color", test_rgb([0.62, 0.62, 0.66])),
+                    ("preset", Value::String("".into())),
+                    ("diff-up", Value::Number(1.0)),
+                    ("diff-down", Value::Number(1.0)),
+                    ("glyph-key", Value::String(format!("sound-glyph:track:0:patch:{patch}"))),
+                ] {
+                    set_field(rt, id, field, value);
+                }
+                sounds.push(id);
+            }
+            let palette = kind_singleton_rt(rt, "sound-palette");
+            for (field, value) in [
+                ("open", Value::Bool(true)),
+                ("track", Value::Instance(track)),
+                ("target", Value::String("take".into())),
+                ("target-id", Value::Number(1.0)),
+                ("instrument", Value::String("ultrakick".into())),
+                ("sounds", instance_list(sounds)),
+            ] {
+                set_field(rt, palette, field, value);
+            }
+            rt.run_reactive_cycle();
+        }
+        editor.refresh_runtime_side_effects();
+        let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 140, 36);
+        let layout = editor.widget_layout().expect("step layout");
+        let _ = eseqlisp::widget_render::collect_gpu_primitives(
+            &layout,
+            eseqlisp::widget_render::WidgetViewport {
+                cell_w: 10.0,
+                cell_h: 20.0,
+                vp_w: 1400.0,
+                vp_h: 720.0,
+                time_seconds: 0.0,
+                focused_widget_id: None,
+                focused_branch: false,
+                overlay_viewport_bottom: 36.0,
+                scroll_top: 0.0,
+                scroll_left: 0.0,
+                inherited_hover: false,
+            },
+            0.0,
+            36,
+        );
+        let entry = eseqlisp::widget_render::topmost_overlay().expect("modal overlay");
+        let modal = find_modal(&layout).expect("open modal").clone();
+        let scroll = find_type(&modal, "scroll").expect("palette scroll").clone();
+        let key = eseqlisp::widget_render::scroll::scroll_state_key(&scroll);
+        let tile = editor.tile_body_rect(editor.active_tile).expect("step tile rect");
+        // Window center: on the panel, but above-left of the step tile.
+        let (col, row) = (70.0, 22.0);
+        assert!(
+            col < tile.col && row > tile.row,
+            "the point must sit left of the modal's owner tile: {tile:?}"
+        );
+        assert!(entry.rect.width > 0.0);
+        let consumed = editor.handle_tiled_touchpad_scroll(col, row, 0, 0.0, -60.0);
+        let offset = eseqlisp::widget_render::scroll::get_scroll_state(key).offset_y;
+        eseqlisp::widget_render::clear_overlay();
+        assert!(consumed, "scroll over the panel is trapped by the modal");
+        assert!(offset > 0.0, "the palette's sound list must scroll");
+    }
+
     /// The overlay's Apply rows dispatch the palette's apply command with
     /// the sound's track id and patch id (takes spec 17.6).
     #[test]
@@ -24548,28 +24663,40 @@ use panel_kinds_seed::*;
             scene_lane.rect.width,
             layout.rect.width
         );
+        // The scene push lane (eseq-vum0) is always shown between the scene
+        // lane and the track rows, so the layout does not jump when a take
+        // records its first push. A thin deliberate separator strip (and row
+        // border chrome) may sit between lanes; anything larger is a layout
+        // regression that would let the pointer fall between them.
+        let push_lane = find_layout_node_by_stable_key_suffix(&layout, "/push-lane")
+            .expect("the push lane, even with no pushes");
+        assert_finite_nonzero_rect(push_lane, "push lane");
         let scene_bottom = scene_lane.rect.row + scene_lane.rect.height;
-        // A thin deliberate separator strip (and row border chrome) may sit
-        // between the scene lane and the track rows; anything larger is a
-        // layout regression that would let the pointer fall between lanes.
-        let track_gap = track_lane.rect.row - scene_bottom;
+        let push_gap = push_lane.rect.row - scene_bottom;
+        assert!(
+            (-0.01..0.5).contains(&push_gap),
+            "push lane must sit just under the scene lane (scene bottom {scene_bottom}, push top {})",
+            push_lane.rect.row
+        );
+        let push_bottom = push_lane.rect.row + push_lane.rect.height;
+        let track_gap = track_lane.rect.row - push_bottom;
         assert!(
             (-0.01..0.5).contains(&track_gap),
-            "track lane must sit just under the scene lane (scene bottom {scene_bottom}, track top {})",
+            "track lane must sit just under the push lane (push bottom {push_bottom}, track top {})",
             track_lane.rect.row
         );
 
         // Sticky ruler: the track rows live inside a scroll container that
-        // starts flush under the pinned scene lane and absorbs the rest of
-        // the pane, so vertical track scrolling never moves the ruler.
+        // starts flush under the pinned scene and push lanes and absorbs the
+        // rest of the pane, so vertical track scrolling never moves the ruler.
         let track_scroll = find_layout_node_by_stable_key_suffix(&layout, "/track-scroll")
             .expect("track scroll container");
         assert_eq!(track_scroll.widget_type, "scroll");
         assert_finite_nonzero_rect(track_scroll, "arrangement-track-scroll");
-        let scroll_gap = track_scroll.rect.row - scene_bottom;
+        let scroll_gap = track_scroll.rect.row - push_bottom;
         assert!(
             (-0.01..0.5).contains(&scroll_gap),
-            "scroll container starts just under the scene lane (gap {scroll_gap})"
+            "scroll container starts just under the push lane (gap {scroll_gap})"
         );
         assert!(
             find_layout_node_by_stable_key(track_scroll, "arr-track-0").is_some(),
@@ -25351,6 +25478,100 @@ use panel_kinds_seed::*;
         );
     }
 
+    /// Collapsing a lane re-lays out its whole row: the header beside it
+    /// takes the new height at once, never its old cached size (which hid
+    /// it after a collapse and left it short after an expand).
+    #[test]
+    fn metal_seq_arrangement_lane_collapse_resizes_the_header_with_the_lane() {
+        let mut editor = arrangement_region_editor(3, &[]);
+        let rows = |editor: &mut eseqlisp::Editor| {
+            let layout = editor.widget_layout().expect("arrangement layout");
+            let header = find_layout_node_by_stable_key_suffix(&layout, "/track-header-1")
+                .expect("track header")
+                .rect;
+            let container = find_layout_node_by_stable_key_suffix(&layout, "/track-lane-1").expect("lane");
+            let lane = find_layout_node_by_widget_type(container, "timeline").expect("timeline").rect;
+            (header.row, header.height, lane.row, lane.height)
+        };
+        let toggle = |editor: &mut eseqlisp::Editor, on: bool| {
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    "(let ((t (eseq.kinds/track 1)) (h (eseq.arrangement/arr-lane t.tid))) (set! h.collapsed {on}))"
+                ))
+                .expect("toggle collapse");
+            editor.refresh_runtime_side_effects();
+        };
+        let open = rows(&mut editor);
+        for on in [true, false, true] {
+            toggle(&mut editor, on);
+            let (header_row, header_height, lane_row, lane_height) = rows(&mut editor);
+            assert!(
+                (header_row - lane_row).abs() < 0.01 && (header_height - lane_height).abs() < 0.01,
+                "collapsed {on}: header {header_row}+{header_height} vs lane {lane_row}+{lane_height}"
+            );
+            if on {
+                assert!(lane_height < open.3 * 0.6, "the lane collapsed ({lane_height} vs {})", open.3);
+            } else {
+                assert!((lane_height - open.3).abs() < 0.01, "the lane is back to full height");
+            }
+        }
+    }
+
+    /// A pinch zooms about the pointer even past the song's last clip: the
+    /// beat under it stays under it instead of being dragged back toward the
+    /// content by the scroll extent.
+    #[test]
+    fn metal_seq_arrangement_zoom_keeps_the_pointer_beat_past_the_song_end() {
+        let mut editor = arrangement_region_editor(2, &[]);
+        let mut eval = |expr: &str| match editor.runtime_mut().eval_str(expr) {
+            Ok(Some(Value::Number(n))) => n,
+            other => panic!("{expr}: {other:?}"),
+        };
+        // Zoomed out over 1024 beats; the song ends at 64. Pointer at 512,
+        // halfway across: zoom in 8x three times.
+        eval("(let ((v eseq.arrangement/arr-view)) (set! v.start 0) (set! v.duration 1024) 0)");
+        for _ in 0..3 {
+            let start = eval("(let ((v eseq.arrangement/arr-view)) v.start)");
+            let duration = eval("(let ((v eseq.arrangement/arr-view)) v.duration)");
+            let anchor = start + duration * 0.5;
+            assert!((anchor - 512.0).abs() < 1e-6, "the pointer beat drifted to {anchor}");
+            eval(&format!(
+                "(do (eseq.arrangement/view-action (dict :type :zoom-view :anchor-time {anchor} :factor 2)) 0)"
+            ));
+        }
+        let start = eval("(let ((v eseq.arrangement/arr-view)) v.start)");
+        assert_eq!(start, 512.0 - 64.0, "a 128-beat view centred on beat 512");
+        // Scrolling back left from out there moves; it does not snap home.
+        eval("(do (eseq.arrangement/view-action (dict :type :scroll-view :delta-time -8)) 0)");
+        assert_eq!(eval("(let ((v eseq.arrangement/arr-view)) v.start)"), 440.0);
+    }
+
+    /// Rows differ in height (a tall audio lane, a collapsed one), so a
+    /// region drag's vertical travel is measured against the rows it
+    /// crosses, not one stock pitch.
+    #[test]
+    fn metal_seq_arrangement_region_rows_measure_their_own_heights() {
+        let mut editor = arrangement_region_editor(3, &[]);
+        let mut row = |expr: &str| match editor.runtime_mut().eval_str(expr) {
+            Ok(Some(Value::Number(row))) => row,
+            other => panic!("{expr}: {other:?}"),
+        };
+        // Stock 3.85, a 6.8 audio lane, stock: from row 0's middle (1.925),
+        // 5 cells down is inside the audio lane, 9 cells down past it.
+        assert_eq!(row("(eseq.arrangement/row-at-offset (list 3.85 6.8 3.85) 0 5)"), 1.0);
+        assert_eq!(row("(eseq.arrangement/row-at-offset (list 3.85 6.8 3.85) 0 9)"), 2.0);
+        // One stock pitch up from the audio lane's middle stays in row 0.
+        assert_eq!(row("(eseq.arrangement/row-at-offset (list 3.85 6.8 3.85) 1 -3.85)"), 0.0);
+        // A collapsed strip is crossed by a drag short of one stock pitch:
+        // 1.925 + 3 is inside it, 1.925 + 3.7 past it.
+        assert_eq!(row("(eseq.arrangement/row-at-offset (list 3.85 1.75 3.85) 0 3)"), 1.0);
+        assert_eq!(row("(eseq.arrangement/row-at-offset (list 3.85 1.75 3.85) 0 3.7)"), 2.0);
+        // Off either end selects out to the edge.
+        assert_eq!(row("(eseq.arrangement/row-at-offset (list 3.85 6.8 3.85) 2 100)"), 2.0);
+        assert_eq!(row("(eseq.arrangement/row-at-offset (list 3.85 6.8 3.85) 1 -100)"), 0.0);
+    }
+
     /// End-to-end body-marquee (region spec 4.2/4.3/4.4): pressing a clip's
     /// BODY and dragging down two lanes commits one region through
     /// `select-region!`, grid-quantized, spanning the swept tracks — and
@@ -25437,10 +25658,10 @@ use panel_kinds_seed::*;
         assert_eq!(committed.len(), 1, "one region per gesture, got {committed:?}");
         let (tracks, start, end, _) = committed[0].clone().expect("a region, not a clear");
         assert_eq!(tracks, vec![1.0, 3.0], "swept from track 1 down to track 3");
-        // Grid-quantized: the view shows 64 beats, so the ladder step divides
-        // the raw span outward rather than landing on the raw pointer beats.
-        assert!((8.0..=9.0).contains(&start), "start floors: {start}");
-        assert!((23.0..=24.0).contains(&end), "end ceils: {end}");
+        // Grid-quantized outward to the arrangement's fine grid (one beat
+        // at this 64-beat view), so both ends land on whole beats.
+        assert!((8.0..=10.0).contains(&start) && start.fract() == 0.0, "start floors: {start}");
+        assert!((22.0..=24.0).contains(&end) && end.fract() == 0.0, "end ceils: {end}");
         assert_eq!(
             read(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.region)"),
             Value::Nil,

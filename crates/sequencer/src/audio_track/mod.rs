@@ -14,15 +14,26 @@
 //! Playback is arrangement-only: the node maps each rendered sample to a
 //! song beat through `SongPositionShared::render_mapping`, so session play
 //! and a stopped transport are silence.
+//!
+//! Region locks (eseq-a921) are applied by the audio CALLBACK, not the node:
+//! the param ring has one producer, and nodes run on parallel workers. Once
+//! per block [`apply_region_locks`] finds the region each locked track is in
+//! and pushes its locked values (the track values when it leaves one).
+//!
+//! The same node is the track's input monitor (spec §12.5): while the slot
+//! names an [`InputRing`], the node follows it a safe margin behind the
+//! device and adds the chosen channels to its output, so a monitored input
+//! runs through the track's fx chain and mixer like its regions do.
 
 use std::ffi::CString;
 use std::os::raw::{c_int, c_void};
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use crate::audio_input::InputRing;
 use crate::audiograph::NodeVTable;
 use crate::instruments::sample_core;
-use crate::sequencer::{SongPositionShared, SongRenderMapping};
+use crate::sequencer::{crossfade_gains, fade_shape, SongPositionShared, SongRenderMapping};
 
 /// Shortest fade at every region edge and on transport start/stop, so no
 /// edge ever clicks (about 1.5 ms at 44.1 kHz).
@@ -54,10 +65,33 @@ pub struct PlaybackRegion {
     /// `[start, end)` source frames the region loops over, if it loops.
     pub loop_window: Option<(f64, f64)>,
     pub gain: f32,
-    /// Host frames of fade at each edge, at least [`DECLICK_FRAMES`].
+    /// Host frames of fade at each edge (0: none); every edge also gets a
+    /// [`DECLICK_FRAMES`] ramp.
     pub fade_in: f64,
     pub fade_out: f64,
+    /// Fade shapes as ramp exponents (`fade_curve_power`).
+    pub fade_in_power: f32,
+    pub fade_out_power: f32,
+    /// The crossfade with the region before this one (which ends where this
+    /// starts): host frames of the window before and after this region's
+    /// start, both 0 for none. Over the window the previous region keeps
+    /// playing past its end and this one pre-rolls before its start, their
+    /// gains following `crossfade_gains`.
+    pub xfade_pre: f64,
+    pub xfade_post: f64,
     pub pcm: Arc<SourcePcm>,
+    /// `(index into AudioTrackPlayback::lock_params, value)` this region
+    /// locks.
+    pub locks: Vec<(u16, f32)>,
+}
+
+/// A parameter some region of the track locks: where it is written and the
+/// track's own value it reverts to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LockParam {
+    pub logical_id: u64,
+    pub idx: u64,
+    pub base: f32,
 }
 
 /// Everything one region player plays: its track's regions, sorted and
@@ -65,6 +99,12 @@ pub struct PlaybackRegion {
 #[derive(Clone, Default)]
 pub struct AudioTrackPlayback {
     pub regions: Vec<PlaybackRegion>,
+    /// Every parameter a region locks, plus any a previous snapshot locked
+    /// (so a removed lock still reverts).
+    pub lock_params: Vec<LockParam>,
+    /// Set by [`AudioTrackPlayers::publish`], never reused: how the lock pass
+    /// tells snapshots apart (a freed snapshot's address can come back).
+    pub generation: u64,
 }
 
 impl AudioTrackPlayback {
@@ -96,18 +136,70 @@ impl AudioTrackPlayback {
         let region = &self.regions[index];
         let since_start = (beat - region.start_beat) / beats_per_sample;
         let until_end = (region.end_beat - beat) / beats_per_sample;
-        let envelope = (since_start / region.fade_in)
-            .min(until_end / region.fade_out)
-            .clamp(0.0, 1.0) as f32;
-        let mut position = region.source_offset + since_start * region.step;
-        if let Some((start, end)) = region.loop_window {
+        let (mut left, mut right) = (0.0, 0.0);
+        let mut envelope = 1.0f32;
+        // The head: a crossfade with the region before, else the fade-in.
+        let crossfade_in = region.crossfade_frames() > 0.0 && index > 0;
+        if crossfade_in && since_start < region.xfade_post {
+            let (outgoing, incoming) =
+                crossfade_gains((since_start + region.xfade_pre) / region.crossfade_frames());
+            envelope *= incoming;
+            let (l, r) = self.regions[index - 1].voice_at(beat, beats_per_sample);
+            left += l * outgoing;
+            right += r * outgoing;
+        } else if !crossfade_in {
+            envelope *= edge_gain(since_start, region.fade_in, region.fade_in_power);
+        }
+        // The tail: a crossfade into the region after, else the fade-out.
+        match self.regions.get(index + 1).filter(|next| next.crossfade_frames() > 0.0) {
+            Some(next) => {
+                if until_end < next.xfade_pre {
+                    let (outgoing, incoming) =
+                        crossfade_gains((next.xfade_pre - until_end) / next.crossfade_frames());
+                    envelope *= outgoing;
+                    let (l, r) = next.voice_at(beat, beats_per_sample);
+                    left += l * incoming;
+                    right += r * incoming;
+                }
+            }
+            None => envelope *= edge_gain(until_end, region.fade_out, region.fade_out_power),
+        }
+        let (l, r) = region.voice_at(beat, beats_per_sample);
+        (left + l * envelope, right + r * envelope)
+    }
+}
+
+/// The level `distance` host frames into an edge fade of `length` frames
+/// shaped by `power`, always under a [`DECLICK_FRAMES`] ramp.
+fn edge_gain(distance: f64, length: f64, power: f32) -> f32 {
+    let declick = (distance / DECLICK_FRAMES).clamp(0.0, 1.0) as f32;
+    // Past the fade (most frames) the shape is 1: no `powf` per sample.
+    if length > distance {
+        declick * fade_shape(distance / length, power)
+    } else {
+        declick
+    }
+}
+
+impl PlaybackRegion {
+    /// Host frames of its crossfade with the region before (0: none).
+    fn crossfade_frames(&self) -> f64 {
+        self.xfade_pre + self.xfade_post
+    }
+
+    /// What the region's source plays at `beat` at its clip gain, before
+    /// any envelope. A crossfade reads it past either edge; there is
+    /// silence where the source has no audio.
+    fn voice_at(&self, beat: f64, beats_per_sample: f64) -> (f32, f32) {
+        let since_start = (beat - self.start_beat) / beats_per_sample;
+        let mut position = self.source_offset + since_start * self.step;
+        if let Some((start, end)) = self.loop_window {
             if position >= end {
                 position = start + (position - end).rem_euclid(end - start);
             }
         }
-        let (left, right) = sample_core::read_stereo_at(&region.pcm.samples, position);
-        let gain = region.gain * envelope;
-        (left * gain, right * gain)
+        let (left, right) = sample_core::read_stereo_at(&self.pcm.samples, position);
+        (left * self.gain, right * self.gain)
     }
 }
 
@@ -116,6 +208,15 @@ impl AudioTrackPlayback {
 /// points at them.
 pub struct AudioTrackSlot {
     playback: AtomicPtr<AudioTrackPlayback>,
+    /// What [`apply_region_locks`] last applied (callback thread only): the
+    /// snapshot's generation and the region index in it, `-1` for none.
+    applied_playback: AtomicU64,
+    applied_region: AtomicI64,
+    /// The input the track monitors, null for none. Rings are kept alive by
+    /// [`AudioTrackPlayers`] for as long as the graph can run.
+    monitor_ring: AtomicPtr<InputRing>,
+    /// The monitored channels: left in the low 16 bits, right above.
+    monitor_channels: AtomicU32,
     song: *const SongPositionShared,
     /// `SequencerState::audio_rendered_sample`: while the graph renders a
     /// block it still holds that block's first sample.
@@ -140,6 +241,13 @@ struct RegionPlayerState {
     last_beat: f64,
     last_beats_per_sample: f64,
     region_hint: u64,
+    /// The ring the monitor cursor belongs to (a change resyncs it).
+    monitor_seen: *const InputRing,
+    /// The next ring frame the monitor plays.
+    monitor_cursor: u64,
+    /// 0..1 ramp in after a resync, so joining the input never clicks;
+    /// negative after a block the ring could not cover.
+    monitor_ramp: f32,
 }
 
 const STATE_SIZE: usize = std::mem::size_of::<RegionPlayerState>();
@@ -163,6 +271,9 @@ unsafe extern "C" fn region_player_init(
             last_beat: 0.0,
             last_beats_per_sample: 0.0,
             region_hint: 0,
+            monitor_seen: std::ptr::null(),
+            monitor_cursor: 0,
+            monitor_ramp: 0.0,
         },
     );
 }
@@ -190,7 +301,65 @@ unsafe extern "C" fn region_player_process(
     let block_start = (*slot.rendered).load(Ordering::Acquire);
     let mapping = (*slot.song).render_mapping(block_start);
     render_block(&mut player, playback, mapping, block_start, left, right);
+    let ring = slot.monitor_ring.load(Ordering::Acquire) as *const InputRing;
+    let channels = slot.monitor_channels.load(Ordering::Relaxed);
+    mix_monitor(&mut player, ring, channels, left, right);
     std::ptr::write_unaligned(state as *mut RegionPlayerState, player);
+}
+
+/// Add the monitored input to the block. The cursor trails the device by
+/// the ring's margin. When the ring cannot cover the block (the input
+/// stalled) the block is left as it is and the next one rejoins the device,
+/// ramping in; a cursor that has fallen far behind (the two callbacks
+/// drifted apart) rejoins at once.
+fn mix_monitor(
+    player: &mut RegionPlayerState,
+    ring: *const InputRing,
+    channels: u32,
+    left: &mut [f32],
+    right: &mut [f32],
+) {
+    let Some(input) = (unsafe { ring.as_ref() }) else {
+        player.monitor_seen = std::ptr::null();
+        return;
+    };
+    let frames = left.len() as u64;
+    let written = input.written();
+    let margin = input.monitor_margin();
+    let rejoin = written.saturating_sub(margin + frames);
+    if player.monitor_seen != ring {
+        player.monitor_seen = ring;
+        player.monitor_cursor = rejoin;
+        player.monitor_ramp = 0.0;
+    } else if player.monitor_ramp < 0.0 {
+        // After a short block: rejoin the device, never replaying audio
+        // the cursor already passed.
+        player.monitor_cursor = player.monitor_cursor.max(rejoin);
+        player.monitor_ramp = 0.0;
+    }
+    if player.monitor_cursor + frames > written {
+        // Nothing has arrived yet on a ring that only just opened.
+        if written >= margin + frames {
+            input.count_underrun();
+        }
+        player.monitor_ramp = -1.0;
+        return;
+    }
+    if written - player.monitor_cursor > 4 * (margin + frames) {
+        // The callbacks drifted apart: the monitor is late, not short.
+        input.count_underrun();
+        player.monitor_cursor = rejoin;
+        player.monitor_ramp = 0.0;
+    }
+    let (left_channel, right_channel) = ((channels & 0xffff) as usize, (channels >> 16) as usize);
+    let ramp_step = (1.0 / DECLICK_FRAMES) as f32;
+    for (offset, (left, right)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+        let frame = player.monitor_cursor + offset as u64;
+        player.monitor_ramp = (player.monitor_ramp + ramp_step).min(1.0);
+        *left += input.sample(frame, left_channel) * player.monitor_ramp;
+        *right += input.sample(frame, right_channel) * player.monitor_ramp;
+    }
+    player.monitor_cursor += frames;
 }
 
 /// The node's block body, separate from the FFI shell so tests drive it.
@@ -273,6 +442,11 @@ pub struct AudioTrackPlayers {
     /// Swapped-out snapshots with the rendered sample seen at the swap.
     retired: Vec<(*mut AudioTrackPlayback, u64)>,
     rendered: Option<*const AtomicU64>,
+    /// The last [`AudioTrackPlayback::generation`] handed out.
+    generation: u64,
+    /// Every ring a slot has monitored, kept for good: a node may still be
+    /// reading one in the block after its slot lets go.
+    monitor_rings: Vec<Arc<InputRing>>,
 }
 
 // SAFETY: see `AudioTrackSlot`; retired pointers are owned boxes.
@@ -291,11 +465,16 @@ impl AudioTrackPlayers {
         name: &str,
         song: &SongPositionShared,
         rendered: &AtomicU64,
+        registry: &AudioSlotRegistry,
         voice_sum_l: i32,
         voice_sum_r: i32,
     ) -> Result<AudioPlayerNode, String> {
         let slot = Box::new(AudioTrackSlot {
             playback: AtomicPtr::new(std::ptr::null_mut()),
+            applied_playback: AtomicU64::new(0),
+            applied_region: AtomicI64::new(-1),
+            monitor_ring: AtomicPtr::new(std::ptr::null_mut()),
+            monitor_channels: AtomicU32::new(0),
             song: song as *const SongPositionShared,
             rendered: rendered as *const AtomicU64,
         });
@@ -318,15 +497,18 @@ impl AudioTrackPlayers {
         }
         crate::audiograph::graph_connect(lg, node_id, 0, voice_sum_l, 0);
         crate::audiograph::graph_connect(lg, node_id, 1, voice_sum_r, 0);
+        registry.register(slot_ptr);
         self.slots.push(slot);
         Ok(AudioPlayerNode { node_id, slot: self.slots.len() - 1 })
     }
 
     /// Publish `playback` to `slot`, retiring what it replaces.
-    pub fn publish(&mut self, slot: usize, playback: AudioTrackPlayback) {
+    pub fn publish(&mut self, slot: usize, mut playback: AudioTrackPlayback) {
         let Some(slot) = self.slots.get(slot) else {
             return;
         };
+        self.generation += 1;
+        playback.generation = self.generation;
         let fresh = Box::into_raw(Box::new(playback));
         let old = slot.playback.swap(fresh, Ordering::AcqRel);
         if !old.is_null() {
@@ -336,12 +518,30 @@ impl AudioTrackPlayers {
         self.reclaim();
     }
 
+    /// What `slot`'s track monitors: `ring`'s channels `left` and `right`
+    /// (the same channel twice for a mono input), or nothing.
+    pub fn set_monitor(&mut self, slot: usize, monitor: Option<(&Arc<InputRing>, u16, u16)>) {
+        let Some(slot) = self.slots.get(slot) else {
+            return;
+        };
+        let Some((ring, left, right)) = monitor else {
+            slot.monitor_ring.store(std::ptr::null_mut(), Ordering::Release);
+            return;
+        };
+        if !self.monitor_rings.iter().any(|kept| Arc::ptr_eq(kept, ring)) {
+            self.monitor_rings.push(Arc::clone(ring));
+        }
+        slot.monitor_channels.store(u32::from(left) | u32::from(right) << 16, Ordering::Relaxed);
+        slot.monitor_ring.store(Arc::as_ptr(ring) as *mut InputRing, Ordering::Release);
+    }
+
     /// Detach a deleted track's slot. The node may still run until its
     /// deletion applies, so the snapshot is retired, not freed.
     pub fn clear(&mut self, slot: usize) {
         let Some(slot) = self.slots.get(slot) else {
             return;
         };
+        slot.monitor_ring.store(std::ptr::null_mut(), Ordering::Release);
         let old = slot.playback.swap(std::ptr::null_mut(), Ordering::AcqRel);
         if !old.is_null() {
             let stamp = self.rendered_now();
@@ -382,6 +582,107 @@ impl AudioTrackPlayers {
     }
 }
 
+/// Every slot, for the audio callback's lock pass. Slots are never freed
+/// (see `Drop for AudioTrackPlayers`), so a registered pointer stays valid.
+pub struct AudioSlotRegistry {
+    slots: [AtomicPtr<AudioTrackSlot>; MAX_AUDIO_SLOTS],
+    len: AtomicUsize,
+}
+
+/// More than `MAX_TRACKS`: a deleted track's slot is not reused.
+const MAX_AUDIO_SLOTS: usize = 256;
+
+impl Default for AudioSlotRegistry {
+    fn default() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
+            len: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl AudioSlotRegistry {
+    fn register(&self, slot: *const AudioTrackSlot) {
+        let index = self.len.load(Ordering::Acquire);
+        if index < MAX_AUDIO_SLOTS {
+            self.slots[index].store(slot as *mut AudioTrackSlot, Ordering::Release);
+            self.len.store(index + 1, Ordering::Release);
+        }
+    }
+}
+
+/// Apply region locks for the block starting at `block_start`: for each
+/// track whose snapshot locks anything, push every lock parameter's value
+/// (the region's lock, else the track value) when the region it is in or
+/// its snapshot changed, and re-assert the region's locks every block
+/// otherwise, so a track-value write (a knob, a Play/Stop resync) cannot
+/// undo a lock while its region plays.
+///
+/// # Safety
+/// Audio callback thread only (the param ring's producer); `lg` is the live
+/// graph the slots' nodes belong to.
+pub unsafe fn apply_region_locks(
+    lg: *mut crate::audiograph::LiveGraph,
+    registry: &AudioSlotRegistry,
+    block_start: u64,
+) {
+    region_lock_pass(registry, block_start, |param, value| unsafe {
+        crate::audiograph::params_push_wrapper(
+            lg,
+            crate::audiograph::ParamMsg { idx: param.idx, logical_id: param.logical_id, fvalue: value },
+        );
+    });
+}
+
+/// [`apply_region_locks`]' body, with the param write abstracted (tests).
+fn region_lock_pass(registry: &AudioSlotRegistry, block_start: u64, mut push: impl FnMut(&LockParam, f32)) {
+    for slot in &registry.slots[..registry.len.load(Ordering::Acquire).min(MAX_AUDIO_SLOTS)] {
+        let Some(slot) = (unsafe { slot.load(Ordering::Acquire).as_ref() }) else {
+            continue;
+        };
+        let pointer = slot.playback.load(Ordering::Acquire);
+        let Some(playback) = (unsafe { pointer.as_ref() }) else {
+            continue;
+        };
+        if playback.lock_params.is_empty() {
+            continue;
+        }
+        let beat = unsafe { (*slot.song).render_mapping(block_start) }
+            .and_then(|mapping| mapping.song_beat(block_start, 0));
+        apply_slot_locks(slot, playback, beat, &mut push);
+    }
+}
+
+/// One slot's step of [`region_lock_pass`] at song `beat` (`None`: the
+/// transport is stopped or outside the song).
+fn apply_slot_locks(
+    slot: &AudioTrackSlot,
+    playback: &AudioTrackPlayback,
+    beat: Option<f64>,
+    push: &mut impl FnMut(&LockParam, f32),
+) {
+    let generation = playback.generation;
+    let previous = slot.applied_region.load(Ordering::Relaxed);
+    let region = beat
+        .and_then(|beat| playback.region_at(beat, previous.max(0) as usize))
+        .map_or(-1, |index| index as i64);
+    let locks = usize::try_from(region).ok().map(|index| playback.regions[index].locks.as_slice());
+    if slot.applied_playback.load(Ordering::Relaxed) != generation || previous != region {
+        for (index, param) in playback.lock_params.iter().enumerate() {
+            let locked = locks.and_then(|locks| locks.iter().find(|(i, _)| *i as usize == index));
+            push(param, locked.map_or(param.base, |&(_, value)| value));
+        }
+        slot.applied_playback.store(generation, Ordering::Relaxed);
+        slot.applied_region.store(region, Ordering::Relaxed);
+    } else if let Some(locks) = locks {
+        for &(index, value) in locks {
+            if let Some(param) = playback.lock_params.get(index as usize) {
+                push(param, value);
+            }
+        }
+    }
+}
+
 impl Drop for AudioTrackPlayers {
     fn drop(&mut self) {
         // The graph is torn down after the App and may still be rendering:
@@ -391,6 +692,9 @@ impl Drop for AudioTrackPlayers {
         self.retired.clear();
         for slot in self.slots.drain(..) {
             std::mem::forget(slot);
+        }
+        for ring in self.monitor_rings.drain(..) {
+            std::mem::forget(ring);
         }
     }
 }

@@ -62,6 +62,27 @@ pub struct RuntimeSong {
     pub rows: Vec<RuntimeSongRow>,
     pub end_beat: f64,
     pub loop_enabled: bool,
+    /// The loop brace `[start, end)` playback wraps inside while
+    /// `loop_enabled` (`ProjectArrangement::loop_window`).
+    pub loop_window: (f64, f64),
+}
+
+/// The song beat heard at unwrapped `beat`, anchored at `anchor` (the beat
+/// last published), under loop brace `[start, end)`. Ableton's rule: a
+/// playhead that reaches the loop end wraps to the start; one anchored at or
+/// past the end plays straight on. When the anchor is a wrap (`wrapped`), a
+/// beat short of `start` is the render lagging that wrap, so it maps back to
+/// the brace's tail; otherwise it is genuinely before the brace.
+pub fn loop_song_beat(beat: f64, anchor: f64, wrapped: bool, (start, end): (f64, f64)) -> f64 {
+    let len = end - start;
+    if !(len > 0.0) || anchor >= end {
+        return beat;
+    }
+    if beat >= end || (wrapped && beat < start) {
+        start + (beat - start).rem_euclid(len)
+    } else {
+        beat
+    }
 }
 
 impl RuntimeSong {
@@ -74,26 +95,22 @@ impl RuntimeSong {
             .rposition(|row| row.start_beat <= beat)
     }
 
-    /// Validate and normalize a requested transport start on the song
-    /// timeline. Looping songs wrap starts beyond the loop end; non-looping
-    /// songs require a position strictly before the end.
+    /// Validate a requested transport start on the song timeline. Any
+    /// beat from 0 on is legal: a start at or past the end is open-ended
+    /// jam room (unified-transport spec 4.2) where the transport
+    /// auto-latches the selected scene, and a start past the loop brace
+    /// plays straight on, as in Ableton.
     pub fn normalize_start_beat(&self, start_beat: f64) -> Result<f64, String> {
         if !start_beat.is_finite() || start_beat < 0.0 {
             return Err(format!("invalid song start beat {start_beat}"));
         }
-        if self.loop_enabled {
-            if self.end_beat > 0.0 {
-                Ok(start_beat.rem_euclid(self.end_beat))
-            } else {
-                Err("song end beat must be positive".to_string())
-            }
-        } else {
-            // A start at or past the end is legal (unified-transport spec
-            // 4.2): playback is open-ended, so the space after the
-            // arrangement is playable jam room — the transport auto-latches
-            // the selected scene there (silent start).
-            Ok(start_beat)
-        }
+        Ok(start_beat)
+    }
+
+    /// The loop brace, while looping is on and the brace is non-empty.
+    pub fn active_loop(&self) -> Option<(f64, f64)> {
+        let (start, end) = self.loop_window;
+        (self.loop_enabled && end > start).then_some((start, end))
     }
 }
 
@@ -109,7 +126,8 @@ pub struct AudibleSongRowApplied {
     pub effective_beat: f64,
     /// Sample position on the scheduler/audio timeline.
     pub effective_sample: u64,
-    /// True when this application came from a loop wrap back to beat zero.
+    /// True when this application came from a loop wrap back to the loop
+    /// start.
     pub wrapped: bool,
 }
 
@@ -171,6 +189,10 @@ pub struct SongPositionShared {
     anchor_beat_bits: AtomicU64,
     samples_per_quarter_bits: AtomicU64,
     end_beat_bits: AtomicU64,
+    loop_start_bits: AtomicU64,
+    loop_end_bits: AtomicU64,
+    /// The anchor was published at a loop wrap (see [`loop_song_beat`]).
+    anchor_wrapped: AtomicBool,
     current_row: AtomicU64,
     current_row_id: AtomicU64,
 }
@@ -187,6 +209,9 @@ impl Default for SongPositionShared {
             anchor_beat_bits: AtomicU64::new(0.0_f64.to_bits()),
             samples_per_quarter_bits: AtomicU64::new(0.0_f64.to_bits()),
             end_beat_bits: AtomicU64::new(0.0_f64.to_bits()),
+            loop_start_bits: AtomicU64::new(0.0_f64.to_bits()),
+            loop_end_bits: AtomicU64::new(0.0_f64.to_bits()),
+            anchor_wrapped: AtomicBool::new(false),
             current_row: AtomicU64::new(0),
             current_row_id: AtomicU64::new(0),
         }
@@ -204,6 +229,16 @@ impl SongPositionShared {
 
     pub fn current_row_id(&self) -> SongRowId {
         SongRowId(self.current_row_id.load(Ordering::Relaxed))
+    }
+
+    /// The published loop brace, while looping is on.
+    fn active_loop(&self) -> Option<(f64, f64)> {
+        self.loop_enabled.load(Ordering::Relaxed).then(|| {
+            (
+                f64::from_bits(self.loop_start_bits.load(Ordering::Relaxed)),
+                f64::from_bits(self.loop_end_bits.load(Ordering::Relaxed)),
+            )
+        })
     }
 
     /// Derive the song position in beats from a rendered sample position.
@@ -227,8 +262,9 @@ impl SongPositionShared {
         // lookahead window ahead of rendering, so rendered may briefly trail.
         let delta = rendered_sample as f64 - anchor_sample as f64;
         let beats = anchor_beat + delta / samples_per_quarter;
-        if self.loop_enabled.load(Ordering::Relaxed) && end_beat > 0.0 {
-            Some(beats.rem_euclid(end_beat))
+        if let Some(window) = self.active_loop() {
+            let wrapped = self.anchor_wrapped.load(Ordering::Relaxed);
+            Some(loop_song_beat(beats, anchor_beat, wrapped, window))
         } else if self.open_ended.load(Ordering::Relaxed) {
             Some(beats.max(0.0))
         } else {
@@ -262,9 +298,16 @@ impl SongPositionShared {
             beats_per_sample: 1.0 / samples_per_quarter,
             pass_start_sample: self.pass_start_sample.load(Ordering::Relaxed),
             end_beat,
-            loop_enabled: self.loop_enabled.load(Ordering::Relaxed) && end_beat > 0.0,
+            anchor_beat,
+            anchor_wrapped: self.anchor_wrapped.load(Ordering::Relaxed),
+            loop_window: self.active_loop(),
             open_ended: self.open_ended.load(Ordering::Relaxed),
         })
+    }
+
+    /// The sample the current (or last) pass started on.
+    pub fn pass_start_sample(&self) -> u64 {
+        self.pass_start_sample.load(Ordering::Relaxed)
     }
 
     fn mark_pass_start(&self, sample: u64) {
@@ -277,11 +320,13 @@ impl SongPositionShared {
         anchor_beat: f64,
         samples_per_quarter: f64,
         end_beat: f64,
-        loop_enabled: bool,
+        loop_window: Option<(f64, f64)>,
+        anchor_wrapped: bool,
         open_ended: bool,
         row_ordinal: usize,
         row_id: SongRowId,
     ) {
+        self.anchor_wrapped.store(anchor_wrapped, Ordering::Relaxed);
         self.anchor_sample.store(anchor_sample, Ordering::Relaxed);
         self.anchor_beat_bits
             .store(anchor_beat.to_bits(), Ordering::Relaxed);
@@ -289,12 +334,32 @@ impl SongPositionShared {
             .store(samples_per_quarter.to_bits(), Ordering::Relaxed);
         self.end_beat_bits
             .store(end_beat.to_bits(), Ordering::Relaxed);
-        self.loop_enabled.store(loop_enabled, Ordering::Relaxed);
+        self.store_loop(loop_window);
         self.open_ended.store(open_ended, Ordering::Relaxed);
         self.current_row.store(row_ordinal as u64, Ordering::Relaxed);
         self.current_row_id.store(row_id.0, Ordering::Relaxed);
         self.ended.store(false, Ordering::Relaxed);
         self.active.store(true, Ordering::Release);
+    }
+
+    fn store_loop(&self, loop_window: Option<(f64, f64)>) {
+        let (loop_start, loop_end) = loop_window.unwrap_or((0.0, 0.0));
+        self.loop_start_bits.store(loop_start.to_bits(), Ordering::Relaxed);
+        self.loop_end_bits.store(loop_end.to_bits(), Ordering::Relaxed);
+        self.loop_enabled.store(loop_window.is_some(), Ordering::Relaxed);
+    }
+
+    /// A new song's loop brace and end, keeping the published anchor: the
+    /// frames rendering now still map from it, only the wrap moves. An
+    /// anchor that was a wrap to a start the brace has left is no longer a
+    /// wrap of this brace, so beats before it are genuinely before it.
+    fn republish_loop(&self, end_beat: f64, loop_window: Option<(f64, f64)>) {
+        self.end_beat_bits.store(end_beat.to_bits(), Ordering::Relaxed);
+        let anchor = f64::from_bits(self.anchor_beat_bits.load(Ordering::Relaxed));
+        if loop_window.is_none_or(|(start, _)| start != anchor) {
+            self.anchor_wrapped.store(false, Ordering::Relaxed);
+        }
+        self.store_loop(loop_window);
     }
 
     fn mark_ended(&self) {
@@ -315,7 +380,12 @@ pub struct SongRenderMapping {
     pub beats_per_sample: f64,
     pub pass_start_sample: u64,
     pub end_beat: f64,
-    pub loop_enabled: bool,
+    /// The beat last published (a row start, a wrap, the pass start).
+    pub anchor_beat: f64,
+    /// `anchor_beat` is a loop wrap (see [`loop_song_beat`]).
+    pub anchor_wrapped: bool,
+    /// The loop brace while the current pass loops (see [`loop_song_beat`]).
+    pub loop_window: Option<(f64, f64)>,
     pub open_ended: bool,
 }
 
@@ -327,8 +397,8 @@ impl SongRenderMapping {
             return None;
         }
         let beat = self.beat + offset as f64 * self.beats_per_sample;
-        if self.loop_enabled {
-            Some(beat.rem_euclid(self.end_beat))
+        if let Some(window) = self.loop_window {
+            Some(loop_song_beat(beat, self.anchor_beat, self.anchor_wrapped, window))
         } else if beat < 0.0 || (beat >= self.end_beat && !self.open_ended) {
             None
         } else {
@@ -475,6 +545,10 @@ pub struct SongPlaybackRuntime {
     ended: bool,
     /// See `SongPlaybackCommand::Start::open_ended`.
     open_ended: bool,
+    /// A new song (a loop brace edit, say) was installed: the next chunk
+    /// republishes the position so the UI and the audio tracks wrap with it
+    /// at once, instead of at the next row change.
+    republish: bool,
 }
 
 impl SongPlaybackRuntime {
@@ -518,6 +592,7 @@ impl SongPlaybackRuntime {
             started: false,
             ended: false,
             open_ended: false,
+            republish: false,
         })
     }
 
@@ -552,6 +627,7 @@ impl SongPlaybackRuntime {
             return false;
         }
         self.song = song;
+        self.republish = true;
         true
     }
 
@@ -599,14 +675,47 @@ impl SongPlaybackRuntime {
             .row_index_at_beat(self.start_beat)
             .unwrap_or(0);
         self.pending_rebuild = None;
+        self.republish = true;
     }
 
     pub fn current_row(&self) -> usize {
         self.row
     }
 
+    /// The song beat at scheduler clock beat `clock_beats`. The clock starts
+    /// at zero on Play and rewinds at every loop wrap, so anything stored in
+    /// song beats (push regions) must be read through this.
+    pub fn song_beat_at(&self, clock_beats: f64) -> f64 {
+        self.clock_beat_offset + clock_beats
+    }
+
     pub fn is_ended(&self) -> bool {
         self.ended
+    }
+
+    /// The first sample at or after song beat `beat` in this pass: each
+    /// authored beat maps independently from the pass's origin, so boundary
+    /// decisions never accumulate rounding.
+    fn sample_at_beat(&self, beat: f64) -> u64 {
+        let origin = self.sample_origin.unwrap_or(0);
+        let start_frame = (self.clock_beat_offset * self.samples_per_quarter).ceil() as u64;
+        let frame = (beat * self.samples_per_quarter).ceil() as u64;
+        origin.saturating_add(frame.saturating_sub(start_frame))
+    }
+
+    /// The loop brace playback wraps inside from `at_sample` on: looping is
+    /// on and the playhead has not yet passed the loop end. Wraps happen only
+    /// when the playhead reaches the end, exactly on its sample, so an edit
+    /// that moves the brace takes effect at once and stays in time; a
+    /// playhead already past the end (a brace moved behind it, or Play
+    /// pressed after it) plays straight on, as in Ableton. A sub-sample brace
+    /// never loops, so a wrap always makes progress.
+    fn active_loop_window(&self, at_sample: u64) -> Option<(f64, f64)> {
+        let (start, end) = self.song.active_loop()?;
+        (end > self.clock_beat_offset
+            && self.sample_at_beat(end) >= at_sample
+            && ((end - start) * self.samples_per_quarter).ceil() >= 1.0)
+            .then_some((start, end))
     }
 
     /// Rewind to the initial start position (transport stopped and will
@@ -655,14 +764,21 @@ impl SongPlaybackRuntime {
         (previous, &self.song.rows[current_row])
     }
 
-    fn publish_position(&self, mailbox: &SongPlaybackMailbox, anchor_sample: u64, anchor_beat: f64) {
+    fn publish_position(
+        &self,
+        mailbox: &SongPlaybackMailbox,
+        anchor_sample: u64,
+        anchor_beat: f64,
+        wrapped: bool,
+    ) {
         let row = &self.song.rows[self.row];
         mailbox.shared().publish(
             anchor_sample,
             anchor_beat,
             self.samples_per_quarter,
             self.song.end_beat,
-            self.song.loop_enabled,
+            self.active_loop_window(anchor_sample),
+            wrapped,
             self.open_ended,
             self.row,
             row.id,
@@ -703,23 +819,32 @@ impl SongPlaybackRuntime {
                 wrapped: false,
             }));
             mailbox.shared().mark_pass_start(at_sample);
-            self.publish_position(mailbox, at_sample, song_beat);
+            self.publish_position(mailbox, at_sample, song_beat, false);
+            self.republish = false;
+        }
+        if std::mem::take(&mut self.republish) {
+            mailbox
+                .shared()
+                .republish_loop(self.song.end_beat, self.active_loop_window(at_sample));
         }
 
         let mut row_changed = false;
         let mut wrapped = false;
         loop {
+            let sample_at = |beat: f64| self.sample_at_beat(beat);
             let (boundary_beat, boundary_is_end) = match self.song.rows.get(self.row + 1) {
                 Some(next) => (next.start_beat, false),
                 None => (self.song.end_beat, true),
             };
-            let origin = self.sample_origin.expect("sample origin initialized above");
-            let boundary_frame = (boundary_beat * self.samples_per_quarter).ceil() as u64;
-            let start_frame = (self.clock_beat_offset * self.samples_per_quarter).ceil() as u64;
-            let boundary_sample = origin.saturating_add(boundary_frame.saturating_sub(start_frame));
-            let remaining_samples = boundary_sample.saturating_sub(at_sample);
-            if remaining_samples > 0 {
-                let frames = (block as u64).min(remaining_samples) as usize;
+            let remaining_samples = sample_at(boundary_beat).saturating_sub(at_sample);
+            let loop_window = self.active_loop_window(at_sample);
+            let loop_remaining =
+                loop_window.map(|(_, end)| sample_at(end).saturating_sub(at_sample));
+            let at_loop_end = loop_remaining == Some(0);
+            if remaining_samples > 0 && !at_loop_end {
+                let frames = (block as u64)
+                    .min(remaining_samples)
+                    .min(loop_remaining.unwrap_or(u64::MAX)) as usize;
                 return SongChunkPlan::Schedule {
                     frames,
                     row: self.row,
@@ -732,7 +857,9 @@ impl SongPlaybackRuntime {
                 let past_end = song_beat >= song.end_beat;
                 self.install_rebuild(song, next_row, true);
                 row_changed = true;
-                if !past_end || self.open_ended {
+                // At the loop end the wrap below re-enters a row and
+                // publishes on this same sample: one notice, not two.
+                if !at_loop_end && (!past_end || self.open_ended) {
                     let row = &self.song.rows[self.row];
                     mailbox.push_notice(SongPlaybackNotice::RowApplied(
                         AudibleSongRowApplied {
@@ -743,47 +870,45 @@ impl SongPlaybackRuntime {
                             wrapped: false,
                         },
                     ));
-                    self.publish_position(mailbox, at_sample, song_beat);
+                    self.publish_position(mailbox, at_sample, song_beat, false);
                 }
                 // Re-evaluate against the rebuilt layout. If the new end is
                 // already behind the cursor, the ordinary end/loop branch
                 // below now owns the outcome.
                 continue;
             }
+            if let Some((loop_start, _)) = loop_window.filter(|_| at_loop_end) {
+                // Wrap to the loop start: the caller rewinds its clock to
+                // beat zero for the chunk starting at this sample, which is
+                // song beat `loop_start` from here on.
+                self.clock_beat_offset = loop_start;
+                self.sample_origin = Some(at_sample);
+                song_beat = loop_start;
+                self.row = self.song.row_index_at_beat(loop_start).unwrap_or(0);
+                self.row_anchor_beat = self.song.rows[self.row].start_beat;
+                row_changed = true;
+                wrapped = true;
+                let row = &self.song.rows[self.row];
+                mailbox.push_notice(SongPlaybackNotice::RowApplied(AudibleSongRowApplied {
+                    row_id: row.id,
+                    row_ordinal: self.row,
+                    effective_beat: loop_start,
+                    effective_sample: at_sample,
+                    wrapped: true,
+                }));
+                self.publish_position(mailbox, at_sample, loop_start, true);
+                continue;
+            }
             if boundary_is_end {
-                // Guard against a degenerate sub-sample song hanging the
-                // wrap loop: a wrap must make forward progress.
-                if self.song.loop_enabled
-                    && (self.song.end_beat * self.samples_per_quarter).ceil() >= 1.0
-                {
-                    // Wrap to song beat zero: the caller rewinds its clock to
-                    // beat zero for the chunk starting at this sample.
-                    self.clock_beat_offset = 0.0;
-                    self.sample_origin = Some(at_sample);
-                    song_beat = 0.0;
-                    self.row = self.song.row_index_at_beat(0.0).unwrap_or(0);
-                    self.row_anchor_beat = self.song.rows[self.row].start_beat;
-                    row_changed = true;
-                    wrapped = true;
-                    let row = &self.song.rows[self.row];
-                    mailbox.push_notice(SongPlaybackNotice::RowApplied(AudibleSongRowApplied {
-                        row_id: row.id,
-                        row_ordinal: self.row,
-                        effective_beat: 0.0,
-                        effective_sample: at_sample,
-                        wrapped: true,
-                    }));
-                    self.publish_position(mailbox, at_sample, 0.0);
-                    continue;
-                }
-                if self.open_ended {
-                    // Recording past the old song end (spec 7.4): the last
-                    // row simply keeps playing. `song_beat` runs past
+                if self.open_ended || loop_window.is_some() {
+                    // Past the song end the last row simply keeps playing:
+                    // recording past the old end (spec 7.4), or a loop brace
+                    // that reaches beyond it. `song_beat` runs past
                     // `end_beat` from here, so this branch is re-entered
-                    // every chunk and must schedule a full block rather than
-                    // loop.
+                    // every chunk and schedules up to the loop end, if any.
+                    let frames = (block as u64).min(loop_remaining.unwrap_or(u64::MAX)) as usize;
                     return SongChunkPlan::Schedule {
-                        frames: block,
+                        frames,
                         row: self.row,
                         row_changed,
                         wrapped,
@@ -808,7 +933,7 @@ impl SongPlaybackRuntime {
                 effective_sample: at_sample,
                 wrapped: false,
             }));
-            self.publish_position(mailbox, at_sample, row.start_beat);
+            self.publish_position(mailbox, at_sample, row.start_beat, false);
         }
     }
 }

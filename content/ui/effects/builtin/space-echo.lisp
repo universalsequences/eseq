@@ -285,7 +285,7 @@
           (wf-p (eseq.effects.builtin.filter-core/builtin-fx-param params "wow/flutter"))
           (age-p (eseq.effects.builtin.filter-core/builtin-fx-param params "tape age")))
       (if (and mode-p rate-p sync-p intensity-p echo-p reverb-p)
-        (h-stack :gap 0.35 :align :start
+        (h-stack :gap 0.05 :align :start
           (rate-box fx sync-p div-p offset-p rate-p)
           (mode-box fx mode-p  wf-p age-p drive-p dry-p)
           (echo-box fx intensity-p echo-p bass-p treble-p width-p)

@@ -28,11 +28,11 @@
 (import alez.jaki.chords)
 
 (export pat from-list xform rev rot trunc every every-fig stac ghost swap
-        shift filter for-hand fast slow on preview
+        shift filter for-hand fast slow fit on preview
         eval-at eval-cycle cycle-length locate cycle-index
         default-state mk-state
         init emit emit* reset
-        run run-in step-clock play-routes play-pos
+        run run-in run-at step-clock step-clock-at play-routes play-offset-routes play-pos
         prepare hash-u preview-procs)
 
 ;; ── exact rationals: normalized (num den) 2-lists, den > 0 ──────────────────
@@ -194,8 +194,9 @@
           :merge (list :merge (norm-target (nth args 0)))
           _ (if (= h nil) nil (cons h args))))))
 
-(def event-sym? (x) (or (= x '.) (= x '-)))
-(def event-kw (x) (if (= x '-) :dash :dot))
+;; the doc's slots store `.` / `-` as strings
+(def event-sym? (x) (or (= x '.) (= x '-) (= x ".") (= x "-")))
+(def event-kw (x) (if (or (= x '-) (= x "-")) :dash :dot))
 
 (def add-fig-events (acc evs)
   (merge acc :events (append (get acc :events) evs)))
@@ -213,7 +214,7 @@
                     (merge acc :tm (list (match h '* :fast '/ :slow _ :fit)
                                          (nth (raw-args it) 0)))
                     (if (= h 'align)
-                        (merge acc :align (list (nth it 1) (= (nth it 2) :pad)))
+                        (merge acc :align (align-spec (raw-args it)))
                     (if (= h 'rep)
                         (merge acc :rep (max 1 (round-int (nth it 1))))
                         (let ((x (norm-xf it)))
@@ -281,10 +282,10 @@
     :on (sel-ok? (nth tm 2) (nth tm 3) cycle)
     _ (fig-index-active? (nth tm 2) (nth tm 3) cycle)))
 
-(def tm-at (tm cycle)
-  (if (and (not (= tm nil)) (= (first tm) :when))
-      (if (when-active? tm cycle) (nth tm 4) (tm-at (nth tm 5) cycle))
-      tm))
+(def when-at (x cycle)
+  (if (and (not (= x nil)) (= (first x) :when))
+      (if (when-active? x cycle) (nth x 4) (when-at (nth x 5) cycle))
+      x))
 
 (def when-retime (p kind n mode m)
   (let ((figs (get p :figs)) (tag (str "|when:" (source (list kind n mode m)))))
@@ -428,9 +429,84 @@
   (on-figs p tag
     (lambda (f ctx) (merge f :xf (append (get f :xf) (list (list :on sel x ctx)))))))
 
-(def on-retime (p sel mode m tag)
+(def on-when (p sel key val tag)
   (on-figs p tag
-    (lambda (f ctx) (merge f :tm (list :when :on sel ctx (list mode m) (get f :tm))))))
+    (lambda (f ctx) (merge f key (list :when :on sel ctx val (get f key))))))
+(def on-retime (p sel mode m tag) (on-when p sel :tm (list mode m) tag))
+
+;; ── alignment as a row word: (align n) / (align n :pad) ──
+;; A figure's :align is nil, (n pad?), or conditional like :tm — (:when kind
+;; n index-or-sel ctx (n pad?) else) — written by (every k (align n)),
+;; (every-fig k (align n)) and (on SEL (align n)). The row word itself
+;; aligns the LAST figure: alignment rounds the figure's end, counted from
+;; the cycle start, up to a multiple of n, so on the last figure it pads the
+;; whole cycle — `@16` keeps the pattern a whole number of bars.
+;; (align n [:pad|:rest] [:fill PAT] [:end PAT]) args → the figure's
+;; (n pad? fill end). A bare (align n) pads silently, like a figure's own
+;; (align n). :fill repeats PAT (`-`, `.` or a group like (. . -)) into the
+;; gap instead of dots; :end finishes the gap on PAT. Either one implies :pad
+;; unless :rest is given — (align 8 :rest :end -) is silence, then a dash.
+(def pad-syms-of (x)
+  (if (event-sym? x)
+      (list (event-kw x))
+      (if (list? x) (map event-kw (keep event-sym? x)) nil)))
+;; the index after the run of `.` / `-` / (…) items from i — :fill . - and
+;; :fill (. -) read the same
+(def pat-run-end (args i)
+  (if (and (< i (len args))
+           (let ((a (nth args i))) (or (event-sym? a) (list? a))))
+      (pat-run-end args (+ i 1))
+      i))
+(def pat-run (args i j)
+  (if (>= i j) (list) (append (pad-syms-of (nth args i)) (pat-run args (+ i 1) j))))
+(def align-opts (args i acc)
+  (if (>= i (len args))
+      acc
+      (let ((a (nth args i)))
+        (match a
+          :pad (align-opts args (+ i 1) (merge acc :pad true))
+          :rest (align-opts args (+ i 1) (merge acc :pad false))
+          _ (if (or (= a :fill) (= a :end))
+                (let ((j (pat-run-end args (+ i 1))))
+                  (let ((pat (pat-run args (+ i 1) j)))
+                    (align-opts args j (if (empty? pat) acc (merge acc a pat)))))
+                (align-opts args (+ i 1) acc))))))
+(def align-spec (args)
+  (let ((o (align-opts args 1 (dict :pad nil :fill nil :end nil))))
+    (let ((fill (get o :fill)) (end (get o :end)))
+      (list (nth args 0)
+            (if (= (get o :pad) nil) (not (and (= fill nil) (= end nil))) (get o :pad))
+            fill end))))
+
+(def with-figs-tag (p figs tag)
+  (merge p :figs figs :id (str (get p :id) tag) :len-id (str (get p :len-id) tag)))
+
+(def align-last (p spec tag)
+  (let ((figs (get p :figs)) (k (- (len (get p :figs)) 1)))
+    (if (< k 0)
+        p
+        (with-figs-tag p
+          (map (lambda (i) (if (= i k) (merge (nth figs i) :align spec) (nth figs i)))
+               (range 0 (len figs)))
+          tag))))
+
+;; (every k (align n)): the last figure, on the cycles `every` picks;
+;; (every-fig k (align n)): each figure every-fig picks
+(def when-align (p kind n spec)
+  (let ((figs (get p :figs)) (k (- (len (get p :figs)) 1))
+        (tag (str "|when-align:" (source (list kind n spec)))))
+    (with-figs-tag p
+      (map (lambda (i)
+             (let ((f (nth figs i)))
+               (if (or (not (= kind :every)) (= i k))
+                   (merge f :align (list :when kind n i spec (get f :align)))
+                   f)))
+           (range 0 (len figs)))
+      tag)))
+
+(def on-align (p sel spec tag) (on-when p sel :align spec tag))
+
+(def fit (p n) (retime p :fit n))
 
 (def rev (p) (xform p 'rev))
 (def rot (p n) (xform p (list 'rot n)))
@@ -1482,23 +1558,40 @@
                             e2)))
                 (post-fold-walk evs (+ i 1) (append acc (list e3)))))))))
 
-;; alignment padding: dots on the straight unit grid, hand and velocity state
-;; threading through (Swift generateAlignmentPadding)
-(def gen-padding (count start hand st params figidx)
-  (if (<= count 0)
-      (dict :evs (list) :hand hand :st st)
-      (let ((r (next-vel st false false params)))
-        (let ((sub (gen-padding (- count 1) (+ start 1) (other-hand hand)
-                                (get r :st) params figidx)))
-          (dict :evs (cons (dict :off (r-int start) :sym :dot :hit 1 :hand hand
-                                 :vel (get r :vel) :accent (get r :accent)
-                                 :fig figidx :gate (rat 4 5))
-                           (get sub :evs))
-                :hand (get sub :hand)
-                :st (get sub :st))))))
+;; `k` units of the :fill pattern, cycled; a symbol too long for what is
+;; left (a dash in the last unit) becomes a dot
+(def fill-walk (k fill i)
+  (if (<= k 0)
+      (list)
+      (let ((s (nth fill (imod i (len fill)))))
+        (if (<= (sym-units s) k)
+            (cons s (fill-walk (- k (sym-units s)) fill (+ i 1)))
+            (cons :dot (fill-walk (- k 1) fill (+ i 1)))))))
+
+;; the gap's symbols: :fill (dots by default) then :end when it fits; with
+;; :rest only the end sounds, as a (silence-offset syms) pair
+(def align-gap (gap pad? fill end)
+  (let ((f (if (= fill nil) (list :dot) fill))
+        (el (if (= end nil) 0 (units end))))
+    (let ((end? (and (> el 0) (<= el gap))))
+      (if pad?
+          (list 0 (if end? (append (fill-walk (- gap el) f 0) end) (fill-walk gap f 0)))
+          (if end? (list (- gap el) end) (list gap (list)))))))
+
+;; the gap's symbols folded like a figure's on the straight unit grid (no
+;; row processes), hand and velocity state threading through
+(def fold-padding (syms start hand st params figidx)
+  (let ((r (fold-events syms (derive-hands syms hand)
+                        (dict :scale (r-int 1) :gate (rat 4 5) :ghost false
+                              :params params :fig figidx :pc nil)
+                        st (r-int start) 0 (list))))
+    (dict :evs (post-fold-walk (get r :evs) 0 (list))
+          :hand (if (= 0 (imod (len syms) 2)) hand (other-hand hand))
+          :st (get r :st))))
 
 ;; alignment (spec §4.5): snap the accumulated duration up to a multiple of n;
-;; :pad fills the gap with dot events that thread hand and velocity state
+;; :pad fills the gap with dots (or the :fill pattern, ending on :end) that
+;; thread hand and velocity state
 (def apply-align (body al cycle off params figidx)
   (if (= al nil)
       body
@@ -1508,16 +1601,17 @@
         (let ((d0 (r-ceil total)))
           (let ((dprime (* n (iceil-div d0 n)))
                 (dur (lambda (dp) (r- (r-int dp) off))))
-            (if (and pad? (> (- dprime d0) 0))
-                (let ((pr (gen-padding (- dprime d0) d0 (get body :hand)
-                                       (get body :st) params figidx)))
-                  (dict :evs (append (get body :evs) (get pr :evs))
-                        :dur (dur dprime)
-                        :hand (get pr :hand)
-                        ;; padding runs no row processes: chain state passes
-                        ;; through unchanged
-                        :st (keep-procs (get pr :st) (get body :st))))
-                (merge body :dur (dur dprime))))))))
+            (let ((gap (align-gap (- dprime d0) pad? (nth al 2) (nth al 3))))
+              (if (empty? (nth gap 1))
+                  (merge body :dur (dur dprime))
+                  (let ((pr (fold-padding (nth gap 1) (+ d0 (nth gap 0)) (get body :hand)
+                                          (get body :st) params figidx)))
+                    (dict :evs (append (get body :evs) (get pr :evs))
+                          :dur (dur dprime)
+                          :hand (get pr :hand)
+                          ;; padding runs no row processes: chain state passes
+                          ;; through unchanged
+                          :st (keep-procs (get pr :st) (get body :st)))))))))))
 
 ;; evaluate one figure → (dict :evs :dur :hand :st). `pc` is the route's row
 ;; process config (nil: none): pending (next …) words apply to this figure
@@ -1540,7 +1634,7 @@
 (def eval-fig* (fig cycle off hand st figidx pc)
   (let ((xfs (get fig :xf))
         (evs1 (cut-tail (apply-xf-events (get fig :events) (get fig :xf) cycle) fig))
-        (tm (tm-at (get fig :tm) cycle)))
+        (tm (when-at (get fig :tm) cycle)))
     (let ((kind0 (if (= tm nil) nil (nth tm 0)))
           (m0 (if (= tm nil) 1 (max 1 (round-int (resolve-arg (nth tm 1) cycle)))))
           (nf (or-default (get fig :nfast) 1)))
@@ -1588,7 +1682,7 @@
                                               hand
                                               (other-hand hand))
                                     :st (get folded :st))))
-                    (apply-align body (get fig :align) cycle off params figidx))))))))))))
+                    (apply-align body (when-at (get fig :align) cycle) cycle off params figidx))))))))))))
 
 ;; ── whole-pattern evaluation ────────────────────────────────────────────────
 
@@ -1681,21 +1775,45 @@
   (merge res :events
     (map (lambda (e) (fh-one e hand xf cycle)) (get res :events))))
 
-;; quantize as a post op: snap every event offset to the nearest multiple of
-;; q (a rational, in units), wrapping into the cycle like `shift`. Route-word
-;; `(quant tb)` resolves tb to units at route time so the memoized evaluator
-;; stays resolution-independent.
+;; quantize as a post op: snap every event onto the nearest multiple of q (a
+;; rational, in units) on the TRANSPORT grid, wrapping into the cycle like
+;; `shift`. `:base` (eval-at*) is the transport unit the cycle starts on —
+;; its start position plus the instance's clock offset — so a hit snaps where
+;; it sounds: on the bar grid even when cycle lengths are not multiples of q
+;; or the instance plays offset (eseq-jrrq). Without a base (a preview) the
+;; grid starts at the cycle. Route-word `(quant tb)` resolves tb to units at
+;; route time so the memoized evaluator stays resolution-independent.
 (def apply-quant (res q)
-  (let ((total (get res :len)))
+  (let ((total (get res :len))
+        (base (or-default (get res :base) (r-int 0))))
     (if (r<= q (r-int 0))
         res
         (merge res :events
           (sort-evs
-            (map (lambda (e)
-                   (let ((snapped (r* (r-int (round-int (r->f (r-div (get e :off) q)))) q)))
-                     (merge e :off
-                       (if (r<= total (r-int 0)) snapped (r-mod snapped total)))))
-                 (get res :events)))))))
+            (keep (lambda (e) (not (= (get e :off) nil)))
+              (map (lambda (e)
+                     (let ((at (r+ base (get e :off))))
+                       (merge e :off
+                         (quant-wrap (r- (r* (r-int (round-int (r->f (r-div at q)))) q) base)
+                                     base q total))))
+                   (get res :events))))))))
+
+;; A snap past either end of the cycle wraps by the cycle length, as before —
+;; but when the cycle is not a whole number of grid steps that lands off the
+;; grid, so it takes the cycle's first grid point instead (its last, wrapping
+;; backward). A cycle shorter than the grid can hold no grid point: its hits
+;; that snap outside it drop (nil), since nowhere inside would be on grid.
+(def quant-wrap (s base q total)
+  (if (or (r<= total (r-int 0)) (and (r<= (r-int 0) s) (r< s total)))
+      s
+      (let ((w (r-mod s total)))
+        (if (= (r-num (r-mod (r+ base w) q)) 0)
+            w
+            (let ((first-g (r- (r* (r-int (r-ceil (r-div base q))) q) base))
+                  (last-g (r- (r* (r-int (- (r-ceil (r-div (r+ base total) q)) 1)) q) base)))
+              (if (r< first-g total)
+                  (if (r< s (r-int 0)) last-g first-g)
+                  nil))))))
 
 ;; staccato as a post op: cap every gate at 1/4 unit. Route-word `stac` lands
 ;; here (not as the xf flag) so it applies in authored word order relative to
@@ -1787,12 +1905,30 @@
       _ res)))
 
 ;; evaluate a pattern for one cycle with explicit threading state
-(def eval-at (p cycle hand st)
+(def eval-at (p cycle hand st) (eval-at* p cycle hand st nil))
+
+;; `base`: the transport unit this cycle starts on, as a rational (quant's
+;; grid origin, apply-quant), or nil to snap from the cycle's own start
+(def eval-at* (p cycle hand st base)
   (let ((r (eval-figs (cut-figs p cycle) cycle (r-int 0) hand st 0 (list) (proc-config p cycle))))
     (reduce (lambda (acc op) (apply-post-one acc op cycle))
             (dict :events (sort-evs (get r :evs)) :len (get r :off)
-                  :end-hand (get r :hand) :end-st (get r :st))
+                  :end-hand (get r :hand) :end-st (get r :st) :base base)
             (get p :post))))
+
+;; the quant grids a pattern's post ops snap to, nested ones included: only
+;; these patterns depend on where their cycle sits on the transport
+(def post-quants (op)
+  (match (first op)
+    :quant (list (nth op 1))
+    :every (post-quants (nth op 2))
+    :fig-every (post-quants (nth op 2))
+    :on (post-quants (nth op 2))
+    :alt (reduce (lambda (a x) (append a (post-quants x))) (list) (rest op))
+    _ (list)))
+
+(def pat-quants (p)
+  (reduce (lambda (a op) (append a (post-quants op))) (list) (or-default (get p :post) (list))))
 
 ;; ── per-cycle memo (assoc list in scheduler-VM globals, spec §8.2) ──────────
 
@@ -1888,22 +2024,25 @@
         :merge 1
         _ (reduce (lambda (a x) (lcm0 a (raw-period x))) 1 (rest f)))))
 
-(def tm-period* (tm)
-  (if (= tm nil)
+(def when-period* (x leaf)
+  (if (= x nil)
       1
-      (if (= (first tm) :when)
-          (lcm0 (match (nth tm 1)
-                  :every (every-period (nth tm 2))
-                  :on (sel-period* (nth tm 2))
-                  _ (raw-period (nth tm 2)))
-                (lcm0 (tm-period* (nth tm 4)) (tm-period* (nth tm 5))))
-          (raw-period (nth tm 1)))))
+      (if (= (first x) :when)
+          (lcm0 (match (nth x 1)
+                  :every (every-period (nth x 2))
+                  :on (sel-period* (nth x 2))
+                  _ (raw-period (nth x 2)))
+                (lcm0 (when-period* (nth x 4) leaf) (when-period* (nth x 5) leaf)))
+          (raw-period (nth x leaf)))))
+;; a time-mod's number is its 2nd item, an alignment's its 1st
+(def tm-period* (tm) (when-period* tm 1))
+(def align-period* (al) (when-period* al 0))
 
 (def fig-period* (fig)
   (let ((tm (get fig :tm)) (al (get fig :align)))
     (reduce (lambda (a f) (lcm0 a (xf-period* f)))
             (lcm0 (tm-period* tm)
-                  (if (= al nil) 1 (raw-period (nth al 0))))
+                  (align-period* al))
             (get fig :xf))))
 
 (def post-period* (op)
@@ -1954,9 +2093,30 @@
                     (get p :post))))
     (if (or (> pd 256) (has-procs? p)) 0 pd)))
 
-;; `prepare` stamps :period on each route's pattern; patterns built by hand
-;; (emit, emit*) carry none and keep the exact cycle key.
-(def with-period (p) (merge p :period (eval-period p)))
+;; `prepare` stamps :period (and :quants, pat-quants) on each route's
+;; pattern; patterns built by hand (emit, emit*) carry none and keep the
+;; exact cycle key.
+(def with-period (p) (merge p :period (eval-period p) :quants (pat-quants p)))
+
+;; the instance's clock offset in units (step-clock-at): the pattern plays
+;; `offset` units late (negative: early)
+(def clock-offset () (state-get "jaki-offset" 0))
+
+;; transport unit cycle c starts on, as a rational; nil when no quant reads
+;; it. Hand-built patterns (no :quants stamp) are scanned here.
+(def quants-of (p) (or-default (get p :quants) (pat-quants p)))
+
+(def quant-base (p cycle)
+  (if (empty? (quants-of p))
+      nil
+      (r-int (+ (cycle-start p cycle) (clock-offset)))))
+
+;; the base's phase on each grid: two cycles that agree on it snap alike, so
+;; periodic memo keys stay periodic
+(def quant-phase (p base)
+  (if (= base nil)
+      nil
+      (map (lambda (q) (r-mod base q)) (quants-of p))))
 
 (def periodic? (p) (let ((pd (get p :period))) (and (number? pd) (> pd 0))))
 
@@ -1975,18 +2135,21 @@
   ;; one instance's row processes evict another's periodic steady-state
   ;; entries, so every ~20 cycles each route re-evaluated at once on the
   ;; same bar-start tick (eseq-8cim). They get their own small store.
+  ;; A quant snaps on the transport grid, so where the cycle starts (on
+  ;; that grid) joins the key — as its phase, nil without a quant.
+  (let ((base (quant-base p cycle)))
   (let ((key (list (get p :id) (memo-cycle p cycle) hand
                    (get st :cur) (get st :pwd) (get st :streak)
-                   (chan-epoch) (get st :procs))))
+                   (chan-epoch) (get st :procs) (quant-phase p base))))
     (let ((hit (memo-find (if (periodic? p) memo-store exact-memo) key)))
       (if (= hit nil)
-          (let ((r (eval-at p cycle hand st)))
+          (let ((r (eval-at* p cycle hand st base)))
             (let ((entry (list r (unit-buckets r))))
               (do (if (periodic? p)
                       (set! memo-store (cons (list key entry) (take* 63 memo-store)))
                       (set! exact-memo (cons (list key entry) (take* 31 exact-memo))))
                   entry)))
-          hit))))
+          hit)))))
 
 ;; A cycle's events grouped by the unit they start in, (floor :off): bucket
 ;; u holds, in order, exactly the events `emit-window` can emit for unit u,
@@ -2020,7 +2183,7 @@
 ;; pre-expansion unit count.
 (def fig-len (fig cycle off)
   (let ((evs1 (cut-tail (apply-xf-events (get fig :events) (get fig :xf) cycle) fig))
-        (tm (tm-at (get fig :tm) cycle)))
+        (tm (when-at (get fig :tm) cycle)))
     (let ((kind (if (= tm nil) nil (nth tm 0)))
           (m (if (= tm nil) 1 (max 1 (round-int (resolve-arg (nth tm 1) cycle))))))
       (let ((raw (units evs1)))
@@ -2029,7 +2192,7 @@
                      :fast (r-int raw)
                      :slow (r-int (* raw m))
                      _ (r-int raw))))
-          (let ((al (get fig :align)))
+          (let ((al (when-at (get fig :align) cycle)))
             (if (= al nil)
                 eff
                 (let ((n (max 1 (round-int (resolve-arg (nth al 0) cycle))))
@@ -2080,21 +2243,23 @@
 
 (def sel-period (s) (let ((pd (sel-period* s))) (if (> pd 0) (min 64 pd) 1)))
 
-(def tm-period (tm)
-  (if (= tm nil)
+(def when-period (x leaf)
+  (if (= x nil)
       1
-      (if (= (first tm) :when)
-          (lcm* (match (nth tm 1)
-                  :every (max 1 (every-period (nth tm 2)))
-                  :on (sel-period (nth tm 2))
-                  _ (arg-period (nth tm 2)))
-                (lcm* (tm-period (nth tm 4)) (tm-period (nth tm 5))))
-          (arg-period (nth tm 1)))))
+      (if (= (first x) :when)
+          (lcm* (match (nth x 1)
+                  :every (max 1 (every-period (nth x 2)))
+                  :on (sel-period (nth x 2))
+                  _ (arg-period (nth x 2)))
+                (lcm* (when-period (nth x 4) leaf) (when-period (nth x 5) leaf)))
+          (arg-period (nth x leaf)))))
+(def tm-period (tm) (when-period tm 1))
+(def align-period (al) (when-period al 0))
 
 (def fig-period (f)
   (lcm* (tm-period (get f :tm))
         (lcm* (reduce (lambda (a x) (lcm* a (xf-period x))) 1 (get f :xf))
-              (arg-period (if (= (get f :align) nil) nil (nth (get f :align) 0))))))
+              (align-period (get f :align)))))
 
 (def gtrunc-period (e)
   (if (= (first e) :all)
@@ -2131,6 +2296,15 @@
                         (cons (list (get p :len-id) entry) (take* 23 lens-memo)))
                   entry))))
         hit)))
+
+;; cycle index → its start unit (locate's inverse)
+(def cycle-start (p c)
+  (let ((entry (pat-lens p)))
+    (let ((lens (nth entry 0)) (total (nth entry 1)) (pd (nth entry 2)))
+      (if (<= total 0)
+          0
+          (let ((full (idiv c pd)))
+            (round-int (+ (* full total) (prefix-sum lens (- c (* full pd))))))))))
 
 ;; position (integer units) → (cycle-index cycle-start-unit)
 (def locate (p pos)
@@ -2239,7 +2413,35 @@
 
 ;; Set this tick's position and the gate's note/vel pass-through (:loop takes
 ;; none); true when the tick plays.
-(def step-clock (mode)
+(def step-clock (mode) (step-clock-at mode 0))
+
+;; An instance clock offset (eseq-jrrq): the position is the clock's less
+;; `offset` units, in every mode, so the whole stream — cycles, (every …),
+;; (cyc …), threading, row processes — plays translated in time rather than
+;; rotated inside its cycle like (shift n). -2 plays two units early: tick
+;; t plays position t+2. Positions before 0 (a positive offset's pre-roll)
+;; are silent. Quant still snaps on the transport grid (apply-quant).
+;;
+;; A clock jump — transport start or relocation, a restart, a :retrig rewind:
+;; the raw position is 0 or the tick is not the next one — is flagged for
+;; play-offset-routes, which replays what an early offset skipped.
+;; the kind panel's rail; a surface (jak … :offset n) is held to it too, so
+;; a jump never replays more than this many units of pre-roll in one tick
+(def max-offset 64)
+(def step-clock-at (mode offset)
+  (let ((off (max (- 0 max-offset) (min max-offset (round-int (or-default offset 0)))))
+        (tick (gen-tick))
+        (last (state-get "jaki-clock-tick" -2)))
+    (do (state-set! "jaki-offset" off)
+        (state-set! "jaki-clock-tick" tick)
+        (if (step-clock* mode)
+            (let ((raw (state-get "jaki-pos" 0)))
+              (do (state-set! "jaki-pos" (- raw off))
+                  (state-set! "jaki-jump" (if (or (= raw 0) (not (= tick (+ last 1)))) 1 0))
+                  (>= (- raw off) 0)))
+            false))))
+
+(def step-clock* (mode)
   (let ((g (gen-gate)) (tick (gen-tick)))
     (let ((fired (> (get g :epoch) (state-get "jaki-gate-seen" 0)))
           (restart (> (get g :restart) (state-get "jaki-restart-seen" 0)))
@@ -2447,12 +2649,12 @@
       (do
         ;; the row items applied to this hit, lit for its length (§7.3)
         (if (get opts :lights)
-            (do (gen-mark (lit-mask (or-default (get e :lits) (list))) (get opts :rindex) at)
-                (gen-mark 0 (get opts :rindex) (+ at dur)))
+            (do (out-mark (lit-mask (or-default (get e :lits) (list))) (get opts :rindex) at)
+                (out-mark 0 (get opts :rindex) (+ at dur)))
             nil)
         ;; the list members this hit played, one mark per item (§7.4)
         (map (lambda (path)
-               (gen-mark (path-code (rest path)) (str (get opts :rindex) "." (first path)) at))
+               (out-mark (path-code (rest path)) (str (get opts :rindex) "." (first path)) at))
              lit-picks)
       (let ((base (let ((ns (get a :nset))) (if (= ns nil) opt-note ns))))
         ;; a gating fire's payload rides on top of everything the row
@@ -2496,6 +2698,15 @@
 ;; declares (and with :play sounds) the chord rooted on the hit's note; a
 ;; (chord Q) row plays chord Q on it, a bare (chord) the declared chord
 ;; transposed by it; any other row plays the one note.
+;; Output while a pre-roll replays skipped positions (play-offset-routes):
+;; muted, every counter and threading cell still advances but nothing sounds
+;; or lights.
+(def muted false)
+(def out-note (track at vel note dur params)
+  (if muted nil (seq-emit :track track :at at :vel vel :note note :dur dur :params params)))
+(def out-mark (v name at)
+  (if muted nil (gen-mark v name at)))
+
 (def emit-notes (q c opts track at dur vel note params)
   (let ((inv (resolve-arg (or-default (get opts :chord-inv) 0) c)))
     (do
@@ -2507,13 +2718,13 @@
           (if (string? (get opts :declare))
               (let ((qd (if (or (= qual nil) (= qual :field)) :maj qual)))
                 (do (alez.jaki.chords/field-set! (get opts :declare) root qd)
-                    (gen-mark (alez.jaki.chords/field-code root qd) "chord" at)
+                    (out-mark (alez.jaki.chords/field-code root qd) "chord" at)
                     (if (= (get opts :play) nil)
                         nil
                         (emit-bundle (round-int (resolve-arg (get opts :play) c)) at vel dur params
                                      (alez.jaki.chords/chord-notes root qd inv)))))
               (if (= qual nil)
-                  (seq-emit :track track :at at :vel vel :note note :dur dur :params params)
+                  (out-note track at vel note dur params)
                   (emit-bundle track at vel dur params
                     (if (= qual :field)
                         (let ((f (alez.jaki.chords/field-get "chords")))
@@ -2523,8 +2734,7 @@
                         (alez.jaki.chords/chord-notes root qual inv))))))))))
 
 (def emit-bundle (track at vel dur params notes)
-  (map (lambda (n) (seq-emit :track track :at at :vel vel :note n :dur dur :params params))
-       notes))
+  (map (lambda (n) (out-note track at vel n dur params)) notes))
 
 ;; ── note ops at emit (docs/jaki-row-processes-spec.md §13) ──
 ;; A hit tagged by (harmony :track n :amount a), (scale :minor :root C) or
@@ -2751,6 +2961,8 @@
     (match h
       'fast (merge acc :p (when-retime p kind n :fast (nth (raw-args w) 0)))
       'slow (merge acc :p (when-retime p kind n :slow (nth (raw-args w) 0)))
+      'fit  (merge acc :p (when-retime p kind n :fit (nth (raw-args w) 0)))
+      'align (merge acc :p (when-align p kind n (align-spec (raw-args w))))
       ;; (every k (trunc n)) cuts the whole cycle; every-fig cuts its figures
       'trunc (merge acc :p (if (= kind :every)
                                (add-gtrunc p (list :every n (nth (raw-args w) 0)))
@@ -2782,6 +2994,9 @@
       'shift  (merge acc :p (shift (get acc :p) (nth args 0)))
       'fast   (merge acc :p (fast (get acc :p) (nth args 0)))
       'slow   (merge acc :p (slow (get acc :p) (nth args 0)))
+      'fit    (merge acc :p (fit (get acc :p) (nth args 0)))
+      'align  (merge acc :p (align-last (get acc :p) (align-spec args)
+                                        (str "|align:" (source args))))
       'gate   (merge acc :p (add-post (get acc :p) (route-post-op-at w (get acc :wpath))
                                       (str "gate:" (source (nth args 0)))))
       'dur    (merge acc :p (add-post (get acc :p) (route-post-op-at w (get acc :wpath))
@@ -2881,6 +3096,8 @@
                      acc)
           'fast (if figure? (add-tag (merge acc :p (on-retime p sel :fast (nth args 0) (on-tag sel w))) sel) acc)
           'slow (if figure? (add-tag (merge acc :p (on-retime p sel :slow (nth args 0) (on-tag sel w))) sel) acc)
+          'fit (if figure? (add-tag (merge acc :p (on-retime p sel :fit (nth args 0) (on-tag sel w))) sel) acc)
+          'align (if figure? (add-tag (merge acc :p (on-align p sel (align-spec args) (on-tag sel w))) sel) acc)
           'vel  (on-post acc sel (defer-or :vmul :vmul v) w)
           'note (on-post acc sel (defer-or :nset :nset v) w)
           _ (let ((post (route-post-op-at w wp)))
@@ -3014,6 +3231,9 @@
 (def invert-windows (wins total) (invert-walk wins (r-int 0) total (list)))
 
 (def emit-control-one (w u unit spec)
+  (if muted nil (emit-control-one* w u unit spec)))
+
+(def emit-control-one* (w u unit spec)
   (let ((at (* (r->f (r- (first w) (r-int u))) unit))
         (dur (* (r->f (r- (nth w 1) (first w))) unit)))
     (if (= (get spec :kind) :group)
@@ -3142,3 +3362,37 @@
   (if (step-clock mode) (play-routes body) 0))
 
 (def run (body) (run-in :loop body))
+
+;; :loop with an instance clock offset (step-clock-at)
+(def run-at (offset body)
+  (if (step-clock-at :loop offset) (play-offset-routes body) 0))
+
+;; play-routes under an instance clock offset. An early offset starts the
+;; stream `-offset` units in: without the units before, every stateful value
+;; — (seq :hit …) counters, hand/velocity threading, row processes, voice
+;; leading — would begin there instead of where the unshifted stream begins,
+;; and play rotated against the rhythm. So on a clock jump the skipped units
+;; replay first, muted: the state lands exactly where the unshifted stream's
+;; would be, and only then does this tick sound.
+(def play-offset-routes (body)
+  (let ((pos (play-pos)) (off (clock-offset)))
+    ;; unmute first: a pre-roll that threw must not silence later ticks
+    (do (set! muted false)
+        (if (and (< off 0) (= (state-get "jaki-jump" 0) 1))
+            (preroll body (max 0 (+ pos off)) pos)
+            nil)
+        (play-routes body))))
+
+(def preroll (body from to)
+  (do (set! muted true)
+      (preroll-walk body from to)
+      (set! muted false)
+      (state-set! "jaki-pos" to)
+      nil))
+
+(def preroll-walk (body q to)
+  (if (>= q to)
+      nil
+      (do (state-set! "jaki-pos" q)
+          (play-routes body)
+          (preroll-walk body (+ q 1) to))))

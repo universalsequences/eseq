@@ -205,6 +205,11 @@ impl FixedOutputBlocks {
         }
     }
 
+    /// Frames rendered but not yet served to the device.
+    pub(super) fn pending_frames(&self, channels: usize) -> usize {
+        (self.scratch.len() - self.position) / channels.max(1)
+    }
+
     /// Fill `output` (interleaved) by repeatedly rendering exact blocks.
     /// `render` is always called with a slice of exactly `block_frames *
     /// channels` samples. Allocation-free, so it is safe on the audio thread.

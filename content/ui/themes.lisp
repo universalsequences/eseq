@@ -37,6 +37,7 @@
     (dict :name "tahoe-terminal" :curated true :label "Tahoe Terminal" :command "seq-theme-tahoe-terminal" :file "@/ui/themes/tahoe-terminal.lisp")
     (dict :name "phosphor" :curated true :label "Phosphor" :command "seq-theme-phosphor" :file "@/ui/themes/phosphor.lisp")
     (dict :name "phosphor-blue" :curated true :label "Phosphor Blue" :command "seq-theme-phosphor-blue" :file "@/ui/themes/phosphor-blue.lisp")
+    (dict :name "cathode-amber" :curated true :label "Cathode Amber" :command "seq-theme-cathode-amber" :file "@/ui/themes/cathode-amber.lisp")
     (dict :name "aura" :label "Aura" :command "seq-theme-aura" :file "@/ui/themes/aura.lisp")))
 
 ;; The palette's "Change Theme" choices: the curated themes by label. The
@@ -118,6 +119,9 @@ Lists the curated themes, with the current one checked."
 
 (def seq-theme-phosphor-blue ()
   (seq-apply-theme-file "phosphor-blue" "@/ui/themes/phosphor-blue.lisp"))
+
+(def seq-theme-cathode-amber ()
+  (seq-apply-theme-file "cathode-amber" "@/ui/themes/cathode-amber.lisp"))
 
 (def seq-theme-aura ()
   (seq-apply-theme-file "aura" "@/ui/themes/aura.lisp"))

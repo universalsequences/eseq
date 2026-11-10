@@ -10,10 +10,7 @@ use crate::effects::{
     MAX_SLOT_PARAMS,
 };
 use crate::graph::{GraphVisualizationSnapshot, ProjectGraphOverrides};
-use crate::neural::{
-    remap_neural_network_routes_after_track_delete, NeuralVisualizationSnapshot,
-    ProjectNeuralNetwork,
-};
+use crate::neural::{NeuralVisualizationSnapshot, ProjectNeuralNetwork};
 use crate::plock_variants::{
     live_track_key_lock_variant_key, live_track_key_lock_variant_keys, live_track_variant_key,
     live_track_variant_keys, PlockVariantAssignment, PlockVariantDomain, PlockVariantKey,
@@ -55,6 +52,8 @@ mod kit_parking;
 pub use kit_parking::*;
 mod instance_parking;
 pub use instance_parking::*;
+mod instance_routes;
+pub use instance_routes::*;
 mod parking;
 pub use parking::*;
 mod project_import;
@@ -91,6 +90,8 @@ use audio_clock::AudioClockStamp;
 mod arrangement;
 mod audio_regions;
 pub use audio_regions::*;
+mod scene_push_lane;
+pub use scene_push_lane::*;
 pub use arrangement::*;
 mod track_delete_remap;
 use track_delete_remap::*;
