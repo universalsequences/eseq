@@ -347,6 +347,14 @@ pub(crate) mod f {
     pub(crate) const TRACK_CLIPS: FieldKey = (TRACK, "clips");
     /// An audio track's regions (docs/audio-tracks-spec.md), as maps.
     pub(crate) const TRACK_AUDIO_REGIONS: FieldKey = (TRACK, "audio-regions");
+    /// An audio track's input (docs/audio-tracks-spec.md §12): a map of its
+    /// device, channels, monitor mode and stream status, or nil.
+    pub(crate) const TRACK_AUDIO_INPUT: FieldKey = (TRACK, "audio-input");
+    /// The level arriving at an audio track's input, 0..1, with a fall.
+    pub(crate) const TRACK_INPUT_PEAK: FieldKey = (TRACK, "input-peak");
+    /// The take an audio track is recording, or nil: `{:start :end}` beats,
+    /// `:sample` (its waveform so far) and `:span` seconds.
+    pub(crate) const TRACK_AUDIO_RECORDING: FieldKey = (TRACK, "audio-recording");
     pub(crate) const TRACK_CELLS: FieldKey = (TRACK, "cells");
     /// Whether one of the track's cells plays (the mixer's clip stop).
     pub(crate) const TRACK_CLIP_PLAYING: FieldKey = (TRACK, "clip-playing");
@@ -1301,6 +1309,9 @@ pub(crate) mod f {
 
     pub(crate) const PROJECT_TRACKS: FieldKey = (PROJECT, "tracks");
     pub(crate) const PROJECT_ORDERED_TRACKS: FieldKey = (PROJECT, "ordered-tracks");
+    /// What an audio track can record from: `{:label :device :left :right}`
+    /// per device channel and channel pair.
+    pub(crate) const PROJECT_AUDIO_INPUT_OPTIONS: FieldKey = (PROJECT, "audio-input-options");
     pub(crate) const PROJECT_SCENES: FieldKey = (PROJECT, "scenes");
     pub(crate) const PROJECT_BANKS: FieldKey = (PROJECT, "banks");
     pub(crate) const PROJECT_BUSES: FieldKey = (PROJECT, "buses");
@@ -1408,6 +1419,9 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     // shared latch mask.
     (f::TRACK_CLIPS, "(list-of clip)", Model),
     (f::TRACK_AUDIO_REGIONS, "(list-of :any)", Model),
+    (f::TRACK_AUDIO_INPUT, ":any", Model),
+    (f::TRACK_INPUT_PEAK, ":number", Model),
+    (f::TRACK_AUDIO_RECORDING, ":any", Model),
     (f::TRACK_CELLS, "(list-of cell)", Model),
     (f::TRACK_CLIP_PLAYING, ":bool", Model),
     // Bank-scoped display (`bank_usage`), when the scenes moved.
@@ -1940,6 +1954,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SELECTION_PLOCK_VARIANT, ":string", Model),
     (f::PROJECT_TRACKS, "(list-of track)", Model),
     (f::PROJECT_ORDERED_TRACKS, "(list-of track)", Model),
+    (f::PROJECT_AUDIO_INPUT_OPTIONS, "(list-of :any)", Model),
     (f::PROJECT_SCENES, "(list-of scene)", Model),
     (f::PROJECT_BANKS, "(list-of bank)", Model),
     (f::PROJECT_BUSES, "(list-of bus)", Model),
@@ -3075,6 +3090,7 @@ impl HostKinds {
         sync_phase("sync-groove-library", || self.sync_groove_library(&mut pusher, app));
         sync_phase("sync-song-model", || self.sync_song_model(&mut pusher, app));
         sync_phase("sync-audio-regions", || self.sync_audio_regions(&mut pusher, app));
+        sync_phase("sync-audio-inputs", || self.sync_audio_inputs(&mut pusher, app));
         sync_phase("sync-push-lane", || self.sync_push_lane(&mut pusher, app));
         sync_phase("sync-rack-lanes", || self.sync_rack_lanes(&mut pusher, app));
         sync_phase("sync-song-pushed", || self.sync_song_pushed(&mut pusher, app));

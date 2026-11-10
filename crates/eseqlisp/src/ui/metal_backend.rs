@@ -4833,13 +4833,21 @@ fragment float4 live_spectrogram_frag(
             });
         }
 
+        /// The peak buffer of `sample_key`'s level, rebuilt when the sample
+        /// has grown since it was made (`waveform_buffer_is_stale`).
+        /// `bucket_count` is the level's length the primitive was built
+        /// against.
         fn ensure_waveform_buffer(
             &mut self,
             sample_key: &str,
             samples_per_bucket: u32,
+            bucket_count: u32,
         ) -> Option<&WaveformGpuResource> {
             let key = (sample_key.to_string(), samples_per_bucket);
-            if !self.waveform_buffers.contains_key(&key) {
+            let stale = self.waveform_buffers.get(&key).is_some_and(|kept| {
+                crate::audio::sample::waveform_buffer_is_stale(sample_key, samples_per_bucket, kept.bucket_count, bucket_count)
+            });
+            if stale || !self.waveform_buffers.contains_key(&key) {
                 let sample = get_registered_sample(sample_key)?;
                 let level = sample
                     .levels()
@@ -5182,7 +5190,11 @@ fragment float4 live_spectrogram_frag(
         ) {
             for primitive in primitives {
                 let Some((waveform_buffer, bucket_count)) = self
-                    .ensure_waveform_buffer(&primitive.sample_key, primitive.samples_per_bucket)
+                    .ensure_waveform_buffer(
+                        &primitive.sample_key,
+                        primitive.samples_per_bucket,
+                        primitive.bucket_count,
+                    )
                     .map(|resource| (resource.buffer.clone(), resource.bucket_count))
                 else {
                     continue;

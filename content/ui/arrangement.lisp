@@ -37,7 +37,7 @@
 (import eseq.export-song)
 (import eseq.file-dialogs)
 (import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of rgb-part))
-(import eseq.kinds :refer (track tracks ordered-tracks track-order groups scenes banks song transport selection
+(import eseq.kinds :refer (track tracks ordered-tracks track-order groups scenes banks song transport selection project
                            select-region! clear-region!))
 
 (export arr-view
@@ -2640,7 +2640,29 @@
       (host-command "audio-regions-drop"
         (dict :track i :beat (audio-drop-beat event) :paths files)))))
 
+;; The take lane i is recording, as an item that grows with the playhead.
+(def recording-items (i)
+  (let ((t (track i)))
+    (if (or (= t nil) (= t.audio-recording nil))
+      '()
+      (list (dict
+        :id -1
+        :lane 0
+        :start (get t.audio-recording :start)
+        :end (get t.audio-recording :end)
+        :kind :audio
+        :label "Recording"
+        ;; The waveform so far, registered by the host as the take grows;
+        ;; :span is the item's whole length, so it fills in from the left.
+        :content (dict :sample (get t.audio-recording :sample) :offset 0
+                   :span (get t.audio-recording :span)
+                   :loop-start 0 :loop-end 0)
+        :color '(0.78 0.16 0.14))))))
+
 (def audio-items (i)
+  (append (audio-region-items i) (recording-items i)))
+
+(def audio-region-items (i)
   (let ((color (lane-clip-color i)))
     (map |r|
       (dict
@@ -3364,6 +3386,74 @@
 
 ;; ── Buffer composition (spec 4.1) ──────────────────────────────────────────
 
+;; ── Audio input (docs/audio-tracks-spec.md §12) ────────────────────────────
+;; Under an audio track's header: what it records from, whether the input
+;; is heard through the track, and the level arriving. Arming the track
+;; (the dot in the header) opens the input; transport Record in this view
+;; then records it onto the lane.
+
+(defcustom arrangement-audio-record-offset-ms 0
+  :type :number :min -50 :max 50 :step 0.1
+  :doc "Milliseconds a recorded audio take is moved earlier. Takes are placed by the audio device's clock; raise this if your recordings still land late (the converters' own latency), by the amount a loopback recording of a click lands late.")
+
+;; The host places takes, so it has to hear the knob: sent when an input
+;; row draws with a value the host has not been told.
+(def record-offset-sent nil)
+(def sync-record-offset ()
+  (unless (= record-offset-sent arrangement-audio-record-offset-ms)
+    (set! record-offset-sent arrangement-audio-record-offset-ms)
+    (host-command "audio-record-offset" (dict :ms arrangement-audio-record-offset-ms))))
+
+(def no-input-label "No Input")
+
+(def input-options () (or project.audio-input-options '()))
+
+(def set-input! (i label)
+  (let ((o (first (filter |o| (= (get o :label) label) (input-options)))))
+    (if (= o nil)
+      (host-command "audio-track-set-input" (dict :track i))
+      (host-command "audio-track-set-input"
+        (dict :track i :device (get o :device) :left (get o :left) :right (get o :right))))))
+
+;; Monitor modes cycle on click: heard while armed, always, never.
+(def next-monitor (mode)
+  (cond ((= mode "auto") "in") ((= mode "in") "off") (else "auto")))
+
+(def monitor-label (mode)
+  (cond ((= mode "in") "In") ((= mode "off") "Off") (else "Auto")))
+
+(def input-row (i t)
+  (let ((in t.audio-input)
+        (label (if (= t.audio-input nil) nil (get t.audio-input :label)))
+        (mode (if (= t.audio-input nil) nil (get t.audio-input :monitor))))
+    (sync-record-offset)
+    (h-stack :gap 0.4 :align :center :padding 0.3
+      (box :width 2.4)
+      (dropdown :key (str "arr-audio-input-" t.tid) :width 14.5 :height 1.15 :font-size 9
+        :bg-color :mixer-strip-bg :border-color :mixer-strip-selected-bg
+        :badge-color :transparent
+        :value (or label no-input-label)
+        :options (cons no-input-label (map |o| (get o :label) (input-options)))
+        :on-change |picked| (set-input! i picked))
+      (button (monitor-label mode)
+        :key (str "arr-audio-monitor-" t.tid)
+        :width 3.4 :height 1.15 :padding 0 :font-size 9
+        :border-color :transparent
+        :active (and (not (= in nil)) (get in :monitoring))
+        :background-color :sequencer-toggle-off-bg
+        :active-background-color :sequencer-solo-on-bg
+        :color :gray
+        :active-color :sequencer-solo-on-fg
+        :on-click |event|
+          (unless (= label nil)
+            (host-command "audio-track-set-monitor" (dict :track i :mode (next-monitor mode)))))
+      (box
+        :key (str "arr-audio-input-meter-" t.tid)
+        :width 6.5 :height 0.7
+        :background "seqv-track-volume-meter"
+        :level #'t.input-peak
+        :volume 1.0))))
+
 (def track-header (i)
   (let ((t (track i)))
     ;; The header's height is the lane's, read here rather than filled:
@@ -3381,7 +3471,11 @@
       :selected #'t.in-selection
       :background-color :buffer-bg
       :selected-background-color :mixer-strip-selected-bg
-      (eseq.sequencer/track-header t true :toggle (lane-collapse-toggle t)))))
+      (if (and (audio-track? t) (not (let ((h (arr-lane t.tid))) h.collapsed)))
+        (v-stack :gap 0
+          (eseq.sequencer/track-header t true :toggle (lane-collapse-toggle t))
+          (input-row i t))
+        (eseq.sequencer/track-header t true :toggle (lane-collapse-toggle t))))))
 
 ;; Rows wrap their h-stack in a :width :fill box (the sequencer.lisp track-row
 ;; idiom): the box stretches to the pane, which gives the inner h-stack a

@@ -575,6 +575,8 @@ pub(crate) fn run_event_loop(
         }
         app.graph_controller().reap_due_rack_teardowns();
         app.sync_audio_track_playback();
+        app.sync_audio_inputs();
+        app.drive_audio_recording();
         if let Err(error) = publish_sample_browser_results(&mut editor, &shared.sample_browser) {
             editor.handle_host_event(HostEvent::Error(format!(
                 "Failed to query samples.db browser state: {error}"

@@ -340,6 +340,9 @@ impl App {
             timeline_start_beat,
             self.tracks.len(),
         ));
+        // Armed audio tracks record their inputs over the same pass
+        // (audio-tracks spec §12.7).
+        self.begin_audio_takes();
         // A new take is new provisional content: a capture started in the
         // same tick another ended must not show the old one's.
         self.pending_revision = self.pending_revision.wrapping_add(1);
@@ -353,6 +356,7 @@ impl App {
         // Pending take content lives in detached buffers (takes spec 8.5
         // Cancel): dropping it touches neither the pattern pool nor the song.
         self.take_recording = None;
+        self.discard_audio_takes();
         self.pending_revision = self.pending_revision.wrapping_add(1);
     }
 
@@ -512,6 +516,9 @@ impl App {
         &mut self,
         end_raw_beats: f64,
     ) -> Result<String, String> {
+        // Audio takes stop with the pass whatever becomes of its launches
+        // and notes; their regions land as their own edit once written.
+        self.finish_audio_takes();
         let result = self.try_finish_song_capture_take(end_raw_beats);
         self.state.take_rack_macro_override.clear();
         self.song_capture_take = None;

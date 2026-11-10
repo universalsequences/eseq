@@ -305,6 +305,11 @@ impl SongPositionShared {
         })
     }
 
+    /// The sample the current (or last) pass started on.
+    pub fn pass_start_sample(&self) -> u64 {
+        self.pass_start_sample.load(Ordering::Relaxed)
+    }
+
     fn mark_pass_start(&self, sample: u64) {
         self.pass_start_sample.store(sample, Ordering::Relaxed);
     }

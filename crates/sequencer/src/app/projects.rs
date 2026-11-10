@@ -59,6 +59,7 @@ pub(crate) struct ProjectCapture {
     grooves: Vec<crate::project::ProjectGroove>,
     track_lane_rosters: Vec<crate::process::TrackLaneRoster>,
     track_order: Vec<crate::sequencer::TrackId>,
+    audio_inputs: Vec<crate::audio_input::ProjectAudioInput>,
 }
 
 /// The sample-source registries [`App::capture_sampler_source_path`]
@@ -3003,6 +3004,7 @@ impl App {
                 }
             },
             track_order: self.saved_track_order(),
+            audio_inputs: self.saved_audio_inputs(),
         })
     }
 }
@@ -3340,6 +3342,7 @@ impl ProjectCapture {
             track_sounds,
             track_lane_rosters: self.track_lane_rosters,
             track_order: self.track_order,
+            audio_inputs: self.audio_inputs,
         })
     }
 
@@ -4762,6 +4765,7 @@ impl App {
             track_sounds,
             track_lane_rosters,
             track_order,
+            audio_inputs,
             instances,
             grooves,
         } = pending.project;
@@ -4895,6 +4899,7 @@ impl App {
         // The display order (eseq-ssd6): ids the file no longer holds are
         // dropped by the reader, so a hand-edited list cannot hide a track.
         self.track_order = track_order;
+        self.load_audio_inputs(audio_inputs);
         // Per-track record-arm flags (takes spec 8.1), persisted like
         // mute/solo. The UI-shared arm vector syncs FROM `graph.record_armed`
         // on the next tick via `record_arm_sync_pending`.
@@ -7044,6 +7049,7 @@ mod tests {
             track_sounds: Vec::new(),
             track_lane_rosters: Vec::new(),
             track_order: Vec::new(),
+            audio_inputs: Vec::new(),
         }
     }
 

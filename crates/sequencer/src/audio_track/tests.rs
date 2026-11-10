@@ -25,6 +25,9 @@ fn player() -> RegionPlayerState {
         last_beat: 0.0,
         last_beats_per_sample: 0.0,
         region_hint: 0,
+        monitor_seen: std::ptr::null(),
+        monitor_cursor: 0,
+        monitor_ramp: 0.0,
     }
 }
 
@@ -203,6 +206,8 @@ fn retired_snapshots_wait_for_the_audio_thread_to_finish_a_block() {
         song: song as *const SongPositionShared,
         applied_playback: AtomicU64::new(0),
         applied_region: std::sync::atomic::AtomicI64::new(-1),
+        monitor_ring: AtomicPtr::new(std::ptr::null_mut()),
+        monitor_channels: std::sync::atomic::AtomicU32::new(0),
         rendered: rendered as *const AtomicU64,
     }));
     players.publish(0, AudioTrackPlayback::default());
@@ -234,6 +239,8 @@ fn lock_slot() -> AudioTrackSlot {
         playback: AtomicPtr::new(std::ptr::null_mut()),
         applied_playback: AtomicU64::new(0),
         applied_region: std::sync::atomic::AtomicI64::new(-1),
+        monitor_ring: AtomicPtr::new(std::ptr::null_mut()),
+        monitor_channels: std::sync::atomic::AtomicU32::new(0),
         song: song as *const SongPositionShared,
         rendered: rendered as *const AtomicU64,
     }
@@ -348,4 +355,88 @@ fn a_crossfade_hands_one_source_to_the_other() {
     assert!(level_at(&playback, 3.5).abs() < 1e-4, "equal gain at the middle: 1 - 1 = 0");
     assert!((level_at(&playback, 3.999) + 1.0).abs() < 1e-3, "the tail has taken over by the cut");
     assert!((level_at(&playback, 4.0) + 1.0).abs() < 1e-6, "no declick dip at a crossfaded start");
+}
+
+/// A stereo ring holding `frames` frames: left is the frame number, right
+/// its negative.
+fn input_ring(frames: usize, block: usize) -> crate::audio_input::InputRing {
+    let ring = crate::audio_input::InputRing::new(2, 48_000);
+    let mut from = 0;
+    while from < frames {
+        let take = block.min(frames - from);
+        let samples: Vec<f32> = (from..from + take).flat_map(|n| [n as f32, -(n as f32)]).collect();
+        ring.write(&samples, None);
+        from += take;
+    }
+    ring
+}
+
+#[test]
+fn the_monitor_trails_the_device_by_the_rings_margin_and_ramps_in() {
+    let ring = input_ring(4_096, 256);
+    let mut state = player();
+    let (mut left, mut right) = (vec![1.0f32; 128], vec![1.0f32; 128]);
+    // Left from channel 0, right from channel 1.
+    mix_monitor(&mut state, &ring, 1 << 16, &mut left, &mut right);
+    let margin = ring.monitor_margin();
+    assert_eq!(margin, 256 + 32);
+    // After the block the cursor sits one margin behind the newest frame.
+    assert_eq!(state.monitor_cursor, 4_096 - margin);
+    let first = (4_096 - margin - 128) as f32;
+    // Added to what the regions played, under a short ramp.
+    assert!((left[0] - (1.0 + first / 64.0)).abs() < 1e-3, "{}", left[0]);
+    assert_eq!(left[127], 1.0 + first + 127.0);
+    assert_eq!(right[127], 1.0 - (first + 127.0));
+    // The next block carries on from the cursor, at full level.
+    ring.write(&vec![0.5; 256], None);
+    let (mut left, mut right) = (vec![0.0f32; 128], vec![0.0f32; 128]);
+    mix_monitor(&mut state, &ring, 1 << 16, &mut left, &mut right);
+    assert_eq!(left[0], first + 128.0);
+    assert_eq!(ring.underruns(), 0);
+}
+
+#[test]
+fn a_stalled_input_is_silence_until_the_monitor_rejoins_it() {
+    let ring = input_ring(2_048, 256);
+    let mut state = player();
+    let block = || (vec![0.0f32; 512], vec![0.0f32; 512]);
+    let (mut left, mut right) = block();
+    mix_monitor(&mut state, &ring, 0, &mut left, &mut right);
+    assert!(left[511] != 0.0);
+    // The device delivers nothing: the ring cannot cover the next block.
+    let (mut left, mut right) = block();
+    mix_monitor(&mut state, &ring, 0, &mut left, &mut right);
+    assert!(left.iter().all(|sample| *sample == 0.0), "no stale audio is replayed");
+    assert_eq!(ring.underruns(), 1);
+    // It comes back: the monitor rejoins a margin behind it, ramping in.
+    for _ in 0..16 {
+        ring.write(&vec![1.0; 256 * 2], None);
+    }
+    let (mut left, mut right) = block();
+    mix_monitor(&mut state, &ring, 0, &mut left, &mut right);
+    assert!(left[0] < 0.1 && left[511] == 1.0);
+    // No ring: nothing is added, and the cursor is forgotten.
+    let (mut left, mut right) = block();
+    mix_monitor(&mut state, std::ptr::null(), 0, &mut left, &mut right);
+    assert!(left.iter().all(|sample| *sample == 0.0));
+    assert!(state.monitor_seen.is_null());
+}
+
+#[test]
+fn a_slot_monitors_what_it_is_pointed_at_and_stops_when_cleared() {
+    let rendered = Box::leak(Box::new(AtomicU64::new(0)));
+    let mut players = AudioTrackPlayers::default();
+    players.rendered = Some(rendered as *const AtomicU64);
+    players.slots.push(Box::new(lock_slot()));
+    let ring = Arc::new(input_ring(64, 64));
+    players.set_monitor(0, Some((&ring, 3, 4)));
+    players.set_monitor(0, Some((&ring, 1, 1)));
+    assert_eq!(players.monitor_rings.len(), 1, "a ring is kept once");
+    assert_eq!(players.slots[0].monitor_ring.load(Ordering::Acquire) as *const _, Arc::as_ptr(&ring));
+    assert_eq!(players.slots[0].monitor_channels.load(Ordering::Relaxed), 1 | 1 << 16);
+    players.set_monitor(0, None);
+    assert!(players.slots[0].monitor_ring.load(Ordering::Acquire).is_null());
+    players.set_monitor(0, Some((&ring, 0, 0)));
+    players.clear(0);
+    assert!(players.slots[0].monitor_ring.load(Ordering::Acquire).is_null());
 }

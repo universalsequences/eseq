@@ -211,6 +211,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <string>$MINIMUM_MACOS</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>ESeq records audio tracks from the input you choose.</string>
 </dict>
 </plist>
 PLIST

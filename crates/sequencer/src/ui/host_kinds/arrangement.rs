@@ -120,6 +120,15 @@ pub(super) struct SongState {
     /// What the tracks' `audio-regions` were last pushed under:
     /// `App::audio_view_key` and the track instances.
     audio_key: Option<((u64, u32, usize), Vec<Option<InstanceId>>)>,
+    /// What the tracks' `audio-input` was last pushed under: the input
+    /// view key, the arm flags and the track instances.
+    audio_input_key: Option<((u64, usize, usize), Vec<bool>, Vec<Option<InstanceId>>)>,
+    /// The input devices `project.audio-input-options` was last built from.
+    audio_devices: Option<Vec<sequencer::audio_input::InputDeviceInfo>>,
+    /// Each track's `input-peak` as last pushed.
+    input_peaks: Vec<f32>,
+    /// The tracks whose `audio-recording` is not nil.
+    recording_tracks: Vec<usize>,
     /// The committed song revision `song.pushes` was last pushed under.
     pushes_key: Option<u64>,
     /// What `song.pending-pushes` was last pushed under: the capture take's
@@ -703,6 +712,89 @@ impl HostKinds {
             pusher.push(track_id, f::TRACK_AUDIO_REGIONS, list);
         }
         self.song.audio_key = Some(key);
+    }
+
+    /// The input side of every audio track (docs/audio-tracks-spec.md §12):
+    /// `project.audio-input-options` when the device list moved,
+    /// `audio-input` when an input, a monitor mode, an arm or a stream's
+    /// state did, then per tick the input meters and the takes being
+    /// recorded.
+    pub(super) fn sync_audio_inputs(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
+        if !(0..app.tracks.len()).any(|track| app.is_audio_track(track)) {
+            self.song.audio_input_key = None;
+            return;
+        }
+        let devices = app.audio_input_devices();
+        if self.song.audio_devices.as_ref() != Some(&devices) {
+            if let Some(project) = pusher.singleton(PROJECT) {
+                let options = devices.iter().flat_map(|device| {
+                    let mono = (0..device.channels).map(|channel| (channel, None));
+                    let pairs = (0..device.channels / 2).map(|pair| (pair * 2, Some(pair * 2 + 1)));
+                    // Pairs first: a stereo interface's 1/2 is the usual pick.
+                    pairs.chain(mono).map(|(left, right)| {
+                        crate::values::map_value([
+                            ("label", text(&sequencer::audio_input::input_label(&device.name, left, right))),
+                            ("device", text(&device.name)),
+                            ("left", number(left)),
+                            ("right", right.map_or(Value::Nil, number)),
+                        ])
+                    })
+                });
+                pusher.push(project, f::PROJECT_AUDIO_INPUT_OPTIONS, crate::values::list_value(options));
+            }
+            self.song.audio_devices = Some(devices);
+        }
+        let key = (app.audio_input_view_key(), app.graph.record_armed.clone(), self.track_ids.clone());
+        if self.song.audio_input_key.as_ref() != Some(&key) {
+            let views = app.audio_input_views();
+            for (track, id) in self.track_ids.iter().enumerate() {
+                let Some(track_id) = *id else { continue };
+                let value = match views.get(track).cloned().flatten() {
+                    Some(view) => crate::values::map_value([
+                        ("device", view.input.as_ref().map_or(Value::Nil, |input| text(&input.device))),
+                        ("label", view.input.as_ref().map_or(Value::Nil, |input| text(&input.label()))),
+                        ("monitor", view.input.as_ref().map_or(Value::Nil, |input| text(input.monitor.name()))),
+                        ("status", text(&view.status)),
+                        ("monitoring", Value::Bool(view.monitoring)),
+                    ]),
+                    None => Value::Nil,
+                };
+                pusher.push(track_id, f::TRACK_AUDIO_INPUT, value);
+            }
+            self.song.audio_input_key = Some(key);
+        }
+        // Meters: the level since the last tick, falling when it drops.
+        self.song.input_peaks.resize(self.track_ids.len(), 0.0);
+        for (track, id) in self.track_ids.iter().enumerate() {
+            let Some(track_id) = *id else { continue };
+            let shown = self.song.input_peaks[track];
+            let level = app.audio_input_peak(track).unwrap_or(0.0).min(1.0).max(shown * 0.82);
+            let level = if level < 0.001 { 0.0 } else { level };
+            if level != shown {
+                self.song.input_peaks[track] = level;
+                pusher.push(track_id, f::TRACK_INPUT_PEAK, number(level));
+            }
+        }
+        // Takes being recorded grow every tick.
+        let recording = app.audio_recording_views();
+        for track in std::mem::take(&mut self.song.recording_tracks) {
+            if !recording.iter().any(|view| view.track == track) {
+                if let Some(track_id) = self.track_ids.get(track).copied().flatten() {
+                    pusher.push(track_id, f::TRACK_AUDIO_RECORDING, Value::Nil);
+                }
+            }
+        }
+        for view in recording {
+            let Some(track_id) = self.track_ids.get(view.track).copied().flatten() else { continue };
+            let span = crate::values::map_value([
+                ("start", number(view.start_beat)),
+                ("end", number(view.end_beat)),
+                ("sample", text(&view.waveform_key)),
+                ("span", number(view.seconds)),
+            ]);
+            pusher.push(track_id, f::TRACK_AUDIO_RECORDING, span);
+            self.song.recording_tracks.push(view.track);
+        }
     }
 
     /// `song.pushes` (eseq-vum0): the push lane's regions as maps the

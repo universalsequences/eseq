@@ -25,6 +25,9 @@ pub(super) const COMMANDS: &[&str] = &[
     "audio-region-fade-end",
     "audio-regions-paste",
     "audio-lock-select",
+    "audio-track-set-input",
+    "audio-track-set-monitor",
+    "audio-record-offset",
 ];
 
 type PayloadMap = HashMap<String, Rc<RefCell<Value>>>;
@@ -80,6 +83,38 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                 1 => "Added audio region".to_string(),
                 n => format!("Added {n} audio regions"),
             })
+        }
+        "audio-track-set-input" => {
+            let track = require_whole(map, "track")? as usize;
+            let device = match map.get("device").map(|cell| cell.borrow().clone()) {
+                Some(Value::String(device)) if !device.is_empty() => Some(device),
+                _ => None,
+            };
+            let Some(device) = device else {
+                app.set_audio_track_input(track, None)?;
+                return Ok(format!("Track {}: no input", track + 1));
+            };
+            let left = require_whole(map, "left")? as u16;
+            let right = match map.get("right").map(|cell| cell.borrow().clone()) {
+                None | Some(Value::Nil) => None,
+                Some(_) => Some(require_whole(map, "right")? as u16),
+            };
+            app.set_audio_track_input(track, Some((device.clone(), left, right)))?;
+            Ok(format!("Track {} records from {device}", track + 1))
+        }
+        "audio-track-set-monitor" => {
+            let track = require_whole(map, "track")? as usize;
+            let mode = match map.get("mode").map(|cell| cell.borrow().clone()) {
+                Some(Value::String(mode)) => sequencer::audio_input::MonitorMode::parse(&mode),
+                _ => None,
+            }
+            .ok_or_else(|| "expected :mode \"off\", \"auto\" or \"in\"".to_string())?;
+            app.set_audio_track_monitor(track, mode)?;
+            Ok(format!("Track {} monitor: {}", track + 1, mode.name()))
+        }
+        "audio-record-offset" => {
+            app.set_audio_record_offset_ms(require_number(map, "ms")? as f32);
+            Ok(String::new())
         }
         "audio-region-move" => {
             let id = region_id(map)?;
@@ -208,6 +243,13 @@ pub(super) fn handle(
                 ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
             }
             Err(error) => editor.handle_host_event(HostEvent::Error(format!("{name} failed: {error}"))),
+        }
+        return;
+    }
+    if name == "audio-record-offset" {
+        // A setting, not a song edit: nothing for the status line.
+        if let Err(error) = result {
+            editor.handle_host_event(HostEvent::Error(format!("{name} failed: {error}")));
         }
         return;
     }

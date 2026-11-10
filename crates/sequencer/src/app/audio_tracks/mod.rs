@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
 
 use crate::audio_track::{AudioTrackPlayback, LockParam, PlaybackRegion, SourcePcm};
 use crate::instruments::sample_core;
@@ -24,6 +23,9 @@ use crate::sequencer::{
 };
 
 use super::App;
+
+pub mod recording;
+pub use recording::{AudioInputRuntime, AudioInputView, AudioRecordingView};
 
 /// One region as the arrangement and clip editor draw it.
 #[derive(Clone, Debug, PartialEq)]
@@ -153,10 +155,6 @@ impl AudioTrackRuntime {
     }
 }
 
-fn sha256_file_name(bytes: &[u8]) -> String {
-    format!("{:x}.wav", Sha256::digest(bytes))
-}
-
 /// A sample path's display name: the library title when it has one, else
 /// the file stem.
 fn source_display_name(path: &Path) -> String {
@@ -209,21 +207,9 @@ impl App {
         let path = crate::app_paths::resolve_sample_ref(path);
         let bytes = std::fs::read(&path)
             .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
-        let file = sha256_file_name(&bytes);
         let decoded = eseqlisp::audio::sample::decode_wav_bytes(&bytes)
             .map_err(|error| format!("Failed to decode {}: {error}", path.display()))?;
-        let store = self.audio_tracks.store_dir();
-        let stored = store.join(&file);
-        if !stored.exists() {
-            std::fs::create_dir_all(&store)
-                .map_err(|error| format!("Failed to create {}: {error}", store.display()))?;
-            // Write beside, then rename, so a crash never leaves a truncated
-            // file under a content hash.
-            let partial = store.join(format!("{file}.partial"));
-            std::fs::write(&partial, &bytes)
-                .and_then(|_| std::fs::rename(&partial, &stored))
-                .map_err(|error| format!("Failed to store {}: {error}", stored.display()))?;
-        }
+        let file = crate::audio_input::store_audio_bytes(&self.audio_tracks.store_dir(), &bytes)?;
         let meta = AudioSourceMeta {
             file,
             name: source_display_name(&path),

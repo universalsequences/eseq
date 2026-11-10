@@ -19,12 +19,18 @@
 //! the param ring has one producer, and nodes run on parallel workers. Once
 //! per block [`apply_region_locks`] finds the region each locked track is in
 //! and pushes its locked values (the track values when it leaves one).
+//!
+//! The same node is the track's input monitor (spec §12.5): while the slot
+//! names an [`InputRing`], the node follows it a safe margin behind the
+//! device and adds the chosen channels to its output, so a monitored input
+//! runs through the track's fx chain and mixer like its regions do.
 
 use std::ffi::CString;
 use std::os::raw::{c_int, c_void};
-use std::sync::atomic::{AtomicI64, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use crate::audio_input::InputRing;
 use crate::audiograph::NodeVTable;
 use crate::instruments::sample_core;
 use crate::sequencer::{crossfade_gains, fade_shape, SongPositionShared, SongRenderMapping};
@@ -206,6 +212,11 @@ pub struct AudioTrackSlot {
     /// snapshot's generation and the region index in it, `-1` for none.
     applied_playback: AtomicU64,
     applied_region: AtomicI64,
+    /// The input the track monitors, null for none. Rings are kept alive by
+    /// [`AudioTrackPlayers`] for as long as the graph can run.
+    monitor_ring: AtomicPtr<InputRing>,
+    /// The monitored channels: left in the low 16 bits, right above.
+    monitor_channels: AtomicU32,
     song: *const SongPositionShared,
     /// `SequencerState::audio_rendered_sample`: while the graph renders a
     /// block it still holds that block's first sample.
@@ -230,6 +241,13 @@ struct RegionPlayerState {
     last_beat: f64,
     last_beats_per_sample: f64,
     region_hint: u64,
+    /// The ring the monitor cursor belongs to (a change resyncs it).
+    monitor_seen: *const InputRing,
+    /// The next ring frame the monitor plays.
+    monitor_cursor: u64,
+    /// 0..1 ramp in after a resync, so joining the input never clicks;
+    /// negative after a block the ring could not cover.
+    monitor_ramp: f32,
 }
 
 const STATE_SIZE: usize = std::mem::size_of::<RegionPlayerState>();
@@ -253,6 +271,9 @@ unsafe extern "C" fn region_player_init(
             last_beat: 0.0,
             last_beats_per_sample: 0.0,
             region_hint: 0,
+            monitor_seen: std::ptr::null(),
+            monitor_cursor: 0,
+            monitor_ramp: 0.0,
         },
     );
 }
@@ -280,7 +301,65 @@ unsafe extern "C" fn region_player_process(
     let block_start = (*slot.rendered).load(Ordering::Acquire);
     let mapping = (*slot.song).render_mapping(block_start);
     render_block(&mut player, playback, mapping, block_start, left, right);
+    let ring = slot.monitor_ring.load(Ordering::Acquire) as *const InputRing;
+    let channels = slot.monitor_channels.load(Ordering::Relaxed);
+    mix_monitor(&mut player, ring, channels, left, right);
     std::ptr::write_unaligned(state as *mut RegionPlayerState, player);
+}
+
+/// Add the monitored input to the block. The cursor trails the device by
+/// the ring's margin. When the ring cannot cover the block (the input
+/// stalled) the block is left as it is and the next one rejoins the device,
+/// ramping in; a cursor that has fallen far behind (the two callbacks
+/// drifted apart) rejoins at once.
+fn mix_monitor(
+    player: &mut RegionPlayerState,
+    ring: *const InputRing,
+    channels: u32,
+    left: &mut [f32],
+    right: &mut [f32],
+) {
+    let Some(input) = (unsafe { ring.as_ref() }) else {
+        player.monitor_seen = std::ptr::null();
+        return;
+    };
+    let frames = left.len() as u64;
+    let written = input.written();
+    let margin = input.monitor_margin();
+    let rejoin = written.saturating_sub(margin + frames);
+    if player.monitor_seen != ring {
+        player.monitor_seen = ring;
+        player.monitor_cursor = rejoin;
+        player.monitor_ramp = 0.0;
+    } else if player.monitor_ramp < 0.0 {
+        // After a short block: rejoin the device, never replaying audio
+        // the cursor already passed.
+        player.monitor_cursor = player.monitor_cursor.max(rejoin);
+        player.monitor_ramp = 0.0;
+    }
+    if player.monitor_cursor + frames > written {
+        // Nothing has arrived yet on a ring that only just opened.
+        if written >= margin + frames {
+            input.count_underrun();
+        }
+        player.monitor_ramp = -1.0;
+        return;
+    }
+    if written - player.monitor_cursor > 4 * (margin + frames) {
+        // The callbacks drifted apart: the monitor is late, not short.
+        input.count_underrun();
+        player.monitor_cursor = rejoin;
+        player.monitor_ramp = 0.0;
+    }
+    let (left_channel, right_channel) = ((channels & 0xffff) as usize, (channels >> 16) as usize);
+    let ramp_step = (1.0 / DECLICK_FRAMES) as f32;
+    for (offset, (left, right)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+        let frame = player.monitor_cursor + offset as u64;
+        player.monitor_ramp = (player.monitor_ramp + ramp_step).min(1.0);
+        *left += input.sample(frame, left_channel) * player.monitor_ramp;
+        *right += input.sample(frame, right_channel) * player.monitor_ramp;
+    }
+    player.monitor_cursor += frames;
 }
 
 /// The node's block body, separate from the FFI shell so tests drive it.
@@ -365,6 +444,9 @@ pub struct AudioTrackPlayers {
     rendered: Option<*const AtomicU64>,
     /// The last [`AudioTrackPlayback::generation`] handed out.
     generation: u64,
+    /// Every ring a slot has monitored, kept for good: a node may still be
+    /// reading one in the block after its slot lets go.
+    monitor_rings: Vec<Arc<InputRing>>,
 }
 
 // SAFETY: see `AudioTrackSlot`; retired pointers are owned boxes.
@@ -391,6 +473,8 @@ impl AudioTrackPlayers {
             playback: AtomicPtr::new(std::ptr::null_mut()),
             applied_playback: AtomicU64::new(0),
             applied_region: AtomicI64::new(-1),
+            monitor_ring: AtomicPtr::new(std::ptr::null_mut()),
+            monitor_channels: AtomicU32::new(0),
             song: song as *const SongPositionShared,
             rendered: rendered as *const AtomicU64,
         });
@@ -434,12 +518,30 @@ impl AudioTrackPlayers {
         self.reclaim();
     }
 
+    /// What `slot`'s track monitors: `ring`'s channels `left` and `right`
+    /// (the same channel twice for a mono input), or nothing.
+    pub fn set_monitor(&mut self, slot: usize, monitor: Option<(&Arc<InputRing>, u16, u16)>) {
+        let Some(slot) = self.slots.get(slot) else {
+            return;
+        };
+        let Some((ring, left, right)) = monitor else {
+            slot.monitor_ring.store(std::ptr::null_mut(), Ordering::Release);
+            return;
+        };
+        if !self.monitor_rings.iter().any(|kept| Arc::ptr_eq(kept, ring)) {
+            self.monitor_rings.push(Arc::clone(ring));
+        }
+        slot.monitor_channels.store(u32::from(left) | u32::from(right) << 16, Ordering::Relaxed);
+        slot.monitor_ring.store(Arc::as_ptr(ring) as *mut InputRing, Ordering::Release);
+    }
+
     /// Detach a deleted track's slot. The node may still run until its
     /// deletion applies, so the snapshot is retired, not freed.
     pub fn clear(&mut self, slot: usize) {
         let Some(slot) = self.slots.get(slot) else {
             return;
         };
+        slot.monitor_ring.store(std::ptr::null_mut(), Ordering::Release);
         let old = slot.playback.swap(std::ptr::null_mut(), Ordering::AcqRel);
         if !old.is_null() {
             let stamp = self.rendered_now();
@@ -590,6 +692,9 @@ impl Drop for AudioTrackPlayers {
         self.retired.clear();
         for slot in self.slots.drain(..) {
             std::mem::forget(slot);
+        }
+        for ring in self.monitor_rings.drain(..) {
+            std::mem::forget(ring);
         }
     }
 }

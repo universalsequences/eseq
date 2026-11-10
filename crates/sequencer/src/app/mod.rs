@@ -1134,6 +1134,9 @@ pub struct App {
     pub(crate) audio_players: crate::audio_track::AudioTrackPlayers,
     /// Decoded audio sources and what each player last published.
     pub(crate) audio_tracks: audio_tracks::AudioTrackRuntime,
+    /// Audio-track inputs, monitoring and the takes being recorded
+    /// (docs/audio-tracks-spec.md §12).
+    pub(crate) audio_input: audio_tracks::AudioInputRuntime,
     pub rack_selected_slots: Vec<usize>,
     pub sample_path_registry: HashMap<String, PathBuf>,
     pub sample_buffer_path_registry: HashMap<i32, PathBuf>,
@@ -3084,6 +3087,7 @@ impl App {
             sampler_paths: Vec::new(),
             audio_players: Default::default(),
             audio_tracks: Default::default(),
+            audio_input: Default::default(),
             rack_selected_slots: Vec::new(),
             sample_path_registry: HashMap::new(),
             sample_buffer_path_registry: HashMap::new(),

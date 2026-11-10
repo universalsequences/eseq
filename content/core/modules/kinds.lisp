@@ -1158,6 +1158,9 @@
          ;; The arrangement.
          (clips     (list-of clip) :doc "The clips on the track's arrangement lane, in time order")
          (audio-regions (list-of :any) :doc "An audio track's regions in time order: maps with :cid :start :end (beats) :name :sample (waveform key) :offset :span :duration (seconds) :gain (dB) :fade-in :fade-out :muted :loaded :pitch (semitones) :loop :loop-start :loop-end (seconds)")
+         (audio-input :any :doc "An audio track's input, or nil: a map with :device :label (device and channels) :monitor (\"off\" \"auto\" \"in\") :status (\"opening\" \"open\" \"failed: …\") :monitoring (heard now)")
+         (input-peak :number :doc "The level arriving at an audio track's input, 0..1")
+         (audio-recording :any :doc "The take an audio track is recording, or nil: a map with :start :end (beats) :sample (the waveform so far, a registry key) :span (seconds)")
          (cells     (list-of cell) :doc "The track's patterns (the mixer's clip grid), by pattern id")
          (clip-playing :bool :doc "One of the track's cells plays (a cell's `active`): what the mixer's clip stop stops")
          (used-banks (list-of bank) :doc "The banks with a scene that uses the track: one that gives it a pattern cell (steps or none); a kit's pad follows its kit (the kit's used-banks); empty when no scene does. Bank-scoped views hide a track the viewed bank does not use (docs/rig-spec.md §9, eseq.scene-banks/used-in-viewed-bank?)")
@@ -1893,6 +1896,7 @@
   :key ()
   :host ((tracks (list-of track))
          (ordered-tracks (list-of track) :doc "The tracks in display order (drag-reorderable); (tracks) stays in index order")
+         (audio-input-options (list-of :any) :doc "What an audio track can record from: maps with :label :device :left :right (zero-based channels; :right nil for mono)")
          (scenes (list-of scene))
          (banks  (list-of bank))
          (buses  (list-of bus))

@@ -641,3 +641,254 @@ fn a_fade_dragged_toward_a_neighbour_with_nothing_to_blend_keeps_its_fade() {
     assert_eq!(regions[0].fade_out_seconds, 0.25);
     assert_eq!((regions[1].crossfade_pre_seconds, regions[1].crossfade_post_seconds), (0.0, 0.0));
 }
+
+// ── Recording (docs/audio-tracks-spec.md §12–§13) ──────────────────────────
+
+use crate::audio_input::{output_epoch, InputRing, MonitorMode};
+use crate::app::audio_tracks::recording::TakeStart;
+
+const INPUT: &str = "Test Interface";
+
+/// An armed audio track listening to channel 1 of a virtual stereo device
+/// whose frame `f` was captured under output sample `f + 480` (10 ms).
+fn armed_fixture() -> (Fixture, Arc<InputRing>) {
+    let mut f = fixture();
+    let track = f.track;
+    let app = f.rig.app();
+    let ring = app.audio_input.hub.insert_virtual(INPUT, 2, 48_000);
+    output_epoch().set(0);
+    ring.epoch().set(10_000_000);
+    app.graph.record_armed[track] = true;
+    app.set_audio_track_input(track, Some((INPUT.to_string(), 0, None))).unwrap();
+    (f, ring)
+}
+
+/// Drive the app until its audio takes have landed.
+fn land_takes(app: &mut App) {
+    for _ in 0..500 {
+        app.drive_audio_recording();
+        if !app.audio_takes_pending() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("the take never landed");
+}
+
+/// `frames` stereo frames of quiet noise with a click on the left at
+/// frame `click`.
+fn input_with_click(frames: usize, click: usize) -> Vec<f32> {
+    (0..frames)
+        .flat_map(|n| if n == click { [1.0, 0.0] } else { [0.001, 0.0] })
+        .collect()
+}
+
+#[test]
+fn a_take_lands_under_the_samples_that_were_playing_when_it_was_captured() {
+    let (mut f, ring) = armed_fixture();
+    let track = f.track;
+    let app = f.rig.app();
+    // The pass starts on output sample 48_000 at beat 4 (120 bpm: 24_000
+    // samples a beat). The performer clicks along with beat 4.5: output
+    // sample 60_000, captured as input frame 59_520.
+    ring.write(&input_with_click(96_000, 59_520), None);
+    app.begin_audio_takes();
+    app.set_audio_take_start(TakeStart { sample: 48_000, beat: 4.0, beats_per_sample: 1.0 / 24_000.0 });
+    app.drive_audio_recording();
+    // The lane shows the take while it records, with its waveform so far.
+    app.state.set_audio_rendered_sample(60_000);
+    let mut shown = None;
+    for _ in 0..200 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        app.drive_audio_recording();
+        let view = app.audio_recording_views().pop().expect("a recording view");
+        assert_eq!((view.track, view.start_beat, view.end_beat, view.seconds), (track, 4.0, 4.5, 0.25));
+        shown = eseqlisp::audio::sample::get_registered_sample(&view.waveform_key);
+        // 48_480 frames from the take's first to the newest: 484 buckets.
+        if shown.as_ref().is_some_and(|sample| sample.frames == 968) {
+            break;
+        }
+    }
+    let shown = shown.expect("the take's waveform is registered while it records");
+    assert_eq!((shown.frames, shown.sample_rate), (968, 960));
+    assert!((shown.duration_seconds - 48_400.0 / 48_000.0).abs() < 1e-9);
+    let key = shown.cache_key();
+    let depth = app.history.undo_len();
+    // Stop one beat in.
+    app.state.set_audio_rendered_sample(72_000);
+    app.finish_audio_takes();
+    land_takes(app);
+
+    let regions = lane(app, track);
+    assert_eq!(regions.len(), 1);
+    let region = &regions[0];
+    assert_eq!((region.start_beat, region.end_beat, region.source_offset), (4.0, 5.0, 0));
+    let meta = app
+        .state
+        .with_committed_arrangement(|arr| arr.unwrap().audio_source(region.source).cloned())
+        .unwrap();
+    assert_eq!((meta.frames, meta.channels, meta.sample_rate), (24_000, 1, 48_000));
+    // The click is half a beat into the source: on beat 4.5.
+    let pcm = &app.audio_tracks.pcm[&meta.file];
+    assert_eq!(pcm.samples[12_000 * 2], 1.0);
+    assert!(app.audio_tracks.store_dir().join(&meta.file).exists());
+    assert_eq!(app.history.undo_len(), depth + 1, "one undo step");
+    assert!(app.audio_recording_views().is_empty());
+    assert!(eseqlisp::audio::sample::get_registered_sample(&key).is_none(), "the preview is dropped");
+    crate::app::edit::undo(app);
+    assert!(lane(app, track).is_empty());
+}
+
+#[test]
+fn the_record_offset_moves_a_take_earlier_and_a_take_starts_no_earlier_than_its_input() {
+    let (mut f, ring) = armed_fixture();
+    let track = f.track;
+    let app = f.rig.app();
+    // 5 ms of converter latency the clocks do not see: 240 frames.
+    app.set_audio_record_offset_ms(5.0);
+    ring.write(&input_with_click(96_000, 24_240), None);
+    app.begin_audio_takes();
+    // Input frame f now sits under output sample f + 240. The pass starts
+    // on output sample 0, 240 frames before the input's first frame: the
+    // take starts at frame 0 instead, placed where that frame belongs.
+    app.set_audio_take_start(TakeStart { sample: 0, beat: 0.0, beats_per_sample: 1.0 / 24_000.0 });
+    app.drive_audio_recording();
+    app.state.set_audio_rendered_sample(48_480);
+    app.finish_audio_takes();
+    land_takes(app);
+    let regions = lane(app, track);
+    assert_eq!(regions.len(), 1);
+    // Output sample 240: 0.01 beats in.
+    assert!((regions[0].start_beat - 0.01).abs() < 1e-9, "{}", regions[0].start_beat);
+    let meta = app
+        .state
+        .with_committed_arrangement(|arr| arr.unwrap().audio_source(regions[0].source).cloned())
+        .unwrap();
+    assert_eq!(meta.frames, 48_240);
+    assert_eq!(app.audio_tracks.pcm[&meta.file].samples[24_240 * 2], 1.0);
+}
+
+#[test]
+fn a_silent_input_records_nothing_and_says_why() {
+    let (mut f, ring) = armed_fixture();
+    let track = f.track;
+    let app = f.rig.app();
+    ring.write(&vec![0.0; 96_000 * 2], None);
+    app.begin_audio_takes();
+    app.set_audio_take_start(TakeStart { sample: 48_000, beat: 4.0, beats_per_sample: 1.0 / 24_000.0 });
+    app.drive_audio_recording();
+    app.state.set_audio_rendered_sample(72_000);
+    app.finish_audio_takes();
+    land_takes(app);
+    assert!(lane(app, track).is_empty());
+    let status = app.editor.status_message.as_ref().unwrap().0.clone();
+    assert!(status.contains("silence") && status.contains("Microphone"), "{status}");
+    assert_eq!(std::fs::read_dir(app.audio_tracks.store_dir()).unwrap().count(), 0, "no silent file is kept");
+}
+
+#[test]
+fn only_armed_tracks_with_an_input_record_and_a_cancelled_pass_leaves_nothing() {
+    let (mut f, ring) = armed_fixture();
+    let track = f.track;
+    let app = f.rig.app();
+    let other = app.add_audio_track().unwrap();
+    ring.write(&input_with_click(48_000, 100), None);
+    // Disarmed: no take.
+    app.graph.record_armed[track] = false;
+    app.begin_audio_takes();
+    assert!(!app.audio_takes_pending());
+    // Armed without an input: no take either.
+    app.graph.record_armed[other] = true;
+    app.begin_audio_takes();
+    assert!(!app.audio_takes_pending());
+    // Cancel throws the audio away. (Disarming closed the device.)
+    app.graph.record_armed[track] = true;
+    let ring = app.audio_input.hub.insert_virtual(INPUT, 2, 48_000);
+    ring.write(&input_with_click(48_000, 100), None);
+    app.begin_audio_takes();
+    app.set_audio_take_start(TakeStart { sample: 1_000, beat: 0.0, beats_per_sample: 1.0 / 24_000.0 });
+    app.drive_audio_recording();
+    assert!(app.audio_takes_pending());
+    app.discard_audio_takes();
+    assert!(!app.audio_takes_pending());
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    let store = app.audio_tracks.store_dir();
+    assert!(!store.exists() || std::fs::read_dir(store).unwrap().count() == 0);
+    assert!(lane(app, track).is_empty());
+}
+
+#[test]
+fn monitoring_follows_the_mode_and_the_arm_and_devices_close_when_unused() {
+    let (mut f, ring) = armed_fixture();
+    let track = f.track;
+    let app = f.rig.app();
+    let view = |app: &App| app.audio_input_views()[track].clone().unwrap();
+    assert_eq!(view(app).input.unwrap().monitor, MonitorMode::Auto);
+    assert!(view(app).monitoring, "auto: heard while armed");
+    assert_eq!(view(app).status, "open");
+    ring.write(&[0.5, 0.25, -0.75, 0.1], None);
+    assert_eq!(app.audio_input_peak(track), Some(0.75), "the meter reads the chosen channel");
+    app.set_audio_track_monitor(track, MonitorMode::Off).unwrap();
+    assert!(!view(app).monitoring);
+    app.set_audio_track_monitor(track, MonitorMode::In).unwrap();
+    app.graph.record_armed[track] = false;
+    app.sync_audio_inputs();
+    assert!(view(app).monitoring, "in: heard whether armed or not");
+    // Auto and disarmed: nothing listens, so the device closes.
+    app.set_audio_track_monitor(track, MonitorMode::Auto).unwrap();
+    assert!(!view(app).monitoring);
+    assert!(app.audio_input.hub.open_names().is_empty());
+    // A built-in microphone starts unmonitored; a non-audio track has no input.
+    app.audio_input.hub.insert_virtual("MacBook Pro Microphone", 1, 48_000);
+    app.set_audio_track_input(track, Some(("MacBook Pro Microphone".to_string(), 0, None))).unwrap();
+    assert_eq!(app.audio_track_input(track).unwrap().monitor, MonitorMode::Off);
+    let synth = app.graph_controller().add_empty_track().unwrap();
+    assert!(app.set_audio_track_input(synth, Some((INPUT.to_string(), 0, None))).is_err());
+    app.set_audio_track_input(track, None).unwrap();
+    assert!(view(app).input.is_none());
+}
+
+#[test]
+fn track_inputs_survive_save_and_load() {
+    let (mut f, _ring) = armed_fixture();
+    let track = f.track;
+    let app = f.rig.app();
+    app.set_audio_track_input(track, Some((INPUT.to_string(), 0, Some(1)))).unwrap();
+    app.set_audio_track_monitor(track, MonitorMode::In).unwrap();
+    let saved = app.audio_track_input(track).cloned().unwrap();
+    let project = app.capture_project("inputs").unwrap();
+    assert_eq!(project.audio_inputs.len(), 1);
+    f.rig.reload("inputs", project);
+    let app = f.rig.app();
+    assert_eq!(app.audio_track_input(track), Some(&saved));
+}
+
+#[test]
+fn a_take_starts_on_the_pass_or_where_it_was_punched_in() {
+    use crate::app::audio_tracks::recording::resolve_take_start;
+    use crate::sequencer::SongRenderMapping;
+    let mapping = |pass_start_sample| SongRenderMapping {
+        // The block at sample 60_000 starts on beat 4.5.
+        beat: 4.5,
+        beats_per_sample: 1.0 / 24_000.0,
+        pass_start_sample,
+        end_beat: 64.0,
+        anchor_beat: 4.0,
+        anchor_wrapped: false,
+        loop_window: None,
+        open_ended: true,
+    };
+    // Record + Play at sample 40_000: nothing until the scheduler starts
+    // the pass (the song still shows the last one, from sample 9_000).
+    assert_eq!(resolve_take_start(40_000, false, 9_000, 60_000, None), None);
+    assert_eq!(resolve_take_start(40_000, false, 9_000, 60_000, Some(mapping(9_000))), None);
+    // It starts on sample 48_000: beat 4, half a beat before this block.
+    let start = resolve_take_start(40_000, false, 9_000, 60_000, Some(mapping(48_000))).unwrap();
+    assert_eq!((start.sample, start.beat), (48_000, 4.0));
+    // A pass the scheduler started a little before the app's own count.
+    let early = resolve_take_start(40_000, false, 9_000, 60_000, Some(mapping(39_500))).unwrap();
+    assert_eq!(early.sample, 39_500);
+    // Punched in at sample 54_000 of a pass long under way: beat 4.25.
+    let punch = resolve_take_start(54_000, true, 9_000, 60_000, Some(mapping(9_000))).unwrap();
+    assert_eq!((punch.sample, punch.beat), (54_000, 4.25));
+}

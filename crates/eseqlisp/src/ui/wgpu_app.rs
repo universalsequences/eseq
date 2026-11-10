@@ -1035,9 +1035,16 @@ impl WgpuAppBackend {
         angle
     }
 
-    fn ensure_waveform_resource(&mut self, sample_key: &str, samples_per_bucket: u32) -> bool {
+    /// Make sure the peak buffer of `sample_key`'s level exists, rebuilding
+    /// it when the sample has grown since it was made
+    /// (`waveform_buffer_is_stale`). `bucket_count` is the level's length
+    /// the primitive was built against.
+    fn ensure_waveform_resource(&mut self, sample_key: &str, samples_per_bucket: u32, bucket_count: u32) -> bool {
         let key = (sample_key.to_string(), samples_per_bucket);
-        if self.waveform_buffers.contains_key(&key) {
+        let stale = self.waveform_buffers.get(&key).is_some_and(|kept| {
+            crate::audio::sample::waveform_buffer_is_stale(sample_key, samples_per_bucket, kept.bucket_count, bucket_count)
+        });
+        if !stale && self.waveform_buffers.contains_key(&key) {
             return true;
         }
         let Some(gpu) = self.gpu.as_ref() else {
@@ -1353,8 +1360,11 @@ impl WgpuAppBackend {
 
             // Waveforms
             for primitive in gpu_scene::collect_waveform_primitives(seg_prims) {
-                if !self.ensure_waveform_resource(&primitive.sample_key, primitive.samples_per_bucket)
-                {
+                if !self.ensure_waveform_resource(
+                    &primitive.sample_key,
+                    primitive.samples_per_bucket,
+                    primitive.bucket_count,
+                ) {
                     continue;
                 }
                 let key = (primitive.sample_key.clone(), primitive.samples_per_bucket);

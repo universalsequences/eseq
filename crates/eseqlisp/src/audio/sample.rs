@@ -516,6 +516,27 @@ fn build_peak_pyramid_from(samples: &[f32], first: usize) -> Vec<WaveformMipLeve
     levels
 }
 
+/// Whether a peak buffer of `kept_buckets` buckets, built for the level of
+/// `samples_per_bucket` of the sample registered as `key`, is out of date: a
+/// sample re-registered under its key with more audio (a take's waveform
+/// while it records) has outgrown it. `drawn_buckets` is the level's length
+/// the primitive being drawn was built against (0: unknown); it is only a
+/// hint, since the primitive may be the one that is behind, so the registry
+/// decides, and is only asked when the two disagree.
+pub fn waveform_buffer_is_stale(key: &str, samples_per_bucket: u32, kept_buckets: u32, drawn_buckets: u32) -> bool {
+    drawn_buckets != 0
+        && kept_buckets != drawn_buckets
+        && get_registered_sample(key)
+            .and_then(|sample| {
+                sample
+                    .levels()
+                    .iter()
+                    .find(|level| level.samples_per_bucket as u32 == samples_per_bucket)
+                    .map(|level| level.buckets.len() as u32)
+            })
+            .is_some_and(|registered| registered != kept_buckets)
+}
+
 pub fn get_registered_sample(key: &str) -> Option<Arc<SampleBuffer>> {
     let registry = SAMPLE_REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     registry.lock().ok()?.get(key).cloned()

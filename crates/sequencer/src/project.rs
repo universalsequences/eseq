@@ -455,6 +455,10 @@ pub struct ProjectFile {
     /// before it, and a project never reordered) is the legacy order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub track_order: Vec<TrackId>,
+    /// What each audio track records from (docs/audio-tracks-spec.md
+    /// §12.2), by stable track id. Tracks without an input are absent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_inputs: Vec<crate::audio_input::ProjectAudioInput>,
     /// Per scene, the rack clip pointers of `ProjectScene::rack_clips`
     /// (rack-clips spec 3): `(group id, clip id)`. Outer index = scene; a rack
     /// with no entry is silent in that scene. Absent in files below v13, whose
@@ -680,6 +684,8 @@ struct ProjectFileWire {
     #[serde(default)]
     track_order: Vec<TrackId>,
     #[serde(default)]
+    audio_inputs: Vec<crate::audio_input::ProjectAudioInput>,
+    #[serde(default)]
     scene_rack_clips: Vec<Vec<(u64, RackClipId)>>,
     #[serde(default)]
     scene_slot_enable: Vec<Vec<(usize, Vec<u64>)>>,
@@ -763,6 +769,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             track_sounds: wire.track_sounds,
             track_lane_rosters: wire.track_lane_rosters,
             track_order: wire.track_order,
+            audio_inputs: wire.audio_inputs,
             scene_rack_clips: wire.scene_rack_clips,
             scene_slot_enable: wire.scene_slot_enable,
             scene_parked_kits: wire.scene_parked_kits,
@@ -5441,6 +5448,7 @@ mod tests {
             track_sounds: Vec::new(),
             track_lane_rosters: Vec::new(),
             track_order: Vec::new(),
+            audio_inputs: Vec::new(),
         }
     }
 
