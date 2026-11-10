@@ -1586,13 +1586,17 @@ fragment float4 waveform_frag(
         y_max = center + min_thickness * 0.5;
     }
 
-    float edge_aa = max(length(float2(fwidth(content_uv.x), fwidth(content_uv.y))) * 1.5, 0.002);
+    // Antialias the envelope over one *vertical* pixel. Mixing in the
+    // horizontal derivative made narrow rects (short clips, zoomed out)
+    // smear their edges over dozens of pixels.
+    float px_y = max(fwidth(content_uv.y), 1e-5);
+    float edge_aa = px_y * 0.5;
     float above_min = smoothstep(y_min - edge_aa, y_min + edge_aa, content_uv.y);
     float below_max = smoothstep(y_max + edge_aa, y_max - edge_aa, content_uv.y);
     float fill_alpha = above_min * below_max;
 
-    float upper_edge = 1.0 - smoothstep(0.0, edge_aa * 1.5, abs(content_uv.y - y_max));
-    float lower_edge = 1.0 - smoothstep(0.0, edge_aa * 1.5, abs(content_uv.y - y_min));
+    float upper_edge = 1.0 - smoothstep(0.0, px_y, abs(content_uv.y - y_max));
+    float lower_edge = 1.0 - smoothstep(0.0, px_y, abs(content_uv.y - y_min));
     float edge_alpha = max(upper_edge, lower_edge);
 
     bool in_selection = has_selection &&

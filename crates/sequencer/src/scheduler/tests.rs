@@ -14565,6 +14565,47 @@
         );
     }
 
+    /// Push regions are stored in song beats, and the scheduler folds them
+    /// in at `song_beat_at(clock)`: the clock reads zero at a mid-song Play
+    /// and again after every loop wrap, so a push at beat 3 must still be
+    /// found at beat 3 then (eseq-vum0).
+    #[test]
+    fn song_beat_at_maps_the_clock_through_a_mid_song_start_and_a_wrap() {
+        let (state, _) = song_mode_fixture();
+        state.set_committed_song(Some(crate::sequencer::ProjectSong {
+            rows: vec![song_mode_row(0, 0.0, 0, Vec::new())],
+            end_beat: 12.0,
+            loop_enabled: true,
+            loop_range: Some((2.0, 6.0)),
+            next_row_id: 1,
+        }));
+        let song = state.preflight_runtime_song().expect("preflight");
+        let spq = 24_000.0;
+        let mailbox = state.song_playback();
+        let mut runtime =
+            crate::sequencer::SongPlaybackRuntime::new(Arc::clone(&song), 3.0, spq).expect("runtime");
+        assert_eq!(runtime.song_beat_at(0.0), 3.0, "Play at beat 3: clock zero is song beat 3");
+        assert_eq!(runtime.song_beat_at(1.5), 4.5);
+
+        let (mut at, mut clock, mut wrapped_once) = (0u64, 0.0, false);
+        for _ in 0..8 {
+            match runtime.next_chunk(at, clock, 24_000, mailbox) {
+                crate::sequencer::SongChunkPlan::Schedule { frames, wrapped, .. } => {
+                    if wrapped {
+                        clock = 0.0;
+                        wrapped_once = true;
+                        assert_eq!(runtime.song_beat_at(clock), 2.0, "the wrap lands on the loop start");
+                    }
+                    at += frames as u64;
+                    clock += frames as f64 / spq;
+                }
+                crate::sequencer::SongChunkPlan::Ended => panic!("a looping song never ends"),
+            }
+        }
+        assert!(wrapped_once, "the run crossed the loop end");
+        assert!((runtime.song_beat_at(clock) - (2.0 + clock)).abs() < 1e-9);
+    }
+
     #[test]
     fn song_loop_wraps_inside_the_loop_brace() {
         let (state, _) = song_mode_fixture();

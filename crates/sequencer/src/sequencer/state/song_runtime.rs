@@ -682,6 +682,13 @@ impl SongPlaybackRuntime {
         self.row
     }
 
+    /// The song beat at scheduler clock beat `clock_beats`. The clock starts
+    /// at zero on Play and rewinds at every loop wrap, so anything stored in
+    /// song beats (push regions) must be read through this.
+    pub fn song_beat_at(&self, clock_beats: f64) -> f64 {
+        self.clock_beat_offset + clock_beats
+    }
+
     pub fn is_ended(&self) -> bool {
         self.ended
     }

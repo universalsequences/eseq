@@ -3405,9 +3405,9 @@
   (let ((px (/ (+  x) design-px))
       (py (/ (- x y) design-px))
       (mottle (+ (* 9.2 (eseq.materials/surface-noise (/ px 110.0) (/ py 110.0)))
-          (* 3.8 (eseq.materials/surface-noise (/ px 7.0) (/ py 37.0)))))
+          (* 0.8 (eseq.materials/surface-noise (/ px 7.0) (/ py 37.0)))))
       (grain (- (eseq.materials/surface-hash (floor px) (floor py)) 0.5))
-      (sheen (* 0.5 (- 1.0 (/ y height))))
+      (sheen (* 0.8 (- 1.0 (/ y height))))
       (base (vec3 fill-r fill-g fill-b))
       (tint (vec3 (* 0.3 tint-r) (* 0.3 tint-g) (* 0.3 tint-b))))
     (sdf/layer
@@ -3423,7 +3423,7 @@
               (eseq.materials/color-cell 
                 (rgba (+ base
                     (* 2.2 tint (+ (* 0.035 (- mottle 0.45)) (* 0.045 rim)))
-                    (* 0.8 (vec3 lift lift lift)))
+                    (* 0.5 (vec3 lift lift lift)))
                   1.0)
                 (rgba (+ base
                     (* tint (+ (* 0.035 (- mottle 0.45)) (* 0.045 rim)))

@@ -322,7 +322,7 @@
                  rate-p wave-p depth-p trig-p sync-p div-p fm-p fmsrc-p am-p amsrc-p
                  ar-attack-p ar-release-p ar-depth-p split-p output-p mix-p
                  f1-freq-p f1-res-p f1-mode-p f2-freq-p f2-res-p f2-mode-p)
-          (h-stack :gap 0.35 :align :start
+          (h-stack :gap 0.05 :align :start
             (input-box fx input-p hieq-p sense-p noise-p feedback-p)
             (filters-box fx f1-freq-p f1-res-p f1-mode-p
               f2-freq-p f2-res-p f2-mode-p harmonics-p correction-p serpar-p crunch-p)

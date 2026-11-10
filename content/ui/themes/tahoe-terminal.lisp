@@ -101,7 +101,7 @@
       :scene-queued-pulse             '(0.150 0.640 0.580 0.0)
       :scene-bank-indicator           '(0.700 0.920 0.860 1.0)
       :scene-action-base              '(0.022 0.077 0.098 1.0)
-      :scene-active-fg                '(0.888 0.888 0.888 1.0)
+      :scene-active-fg                '(0.0 0.0 0.0 1.0)
       :scene-clip-bg                  '(0.151 0.444 0.551 1.0)
       :scene-clip-fg                  '(0.931 0.967 0.980 1.0)
       :clip-label-fg                  '(0.022 0.077 0.098 1.0)

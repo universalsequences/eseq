@@ -584,6 +584,28 @@ fn a_split_leaves_the_fade_in_on_the_head_and_the_fade_out_on_the_tail() {
     assert_eq!((regions[1].fade_in_seconds, regions[1].fade_out_seconds), (0.0, 0.5));
 }
 
+/// Cutting the middle out of a faded region (eseq: deleted slices left a
+/// fade curve over empty timeline): the head drops the fade-out, as a split
+/// does, and the shorter tail's fade-out shrinks to fit inside it.
+#[test]
+fn a_cut_through_a_long_fade_out_keeps_each_fade_inside_its_piece() {
+    let mut f = fixture();
+    let long = write_wav(f.dir.path(), "long.wav", 4 * 48_000, 48_000);
+    let short = write_wav(f.dir.path(), "short.wav", 48_000, 48_000);
+    let app = f.rig.app();
+    let id = app.audio_regions_drop(f.track, 0.0, &[long]).unwrap()[0];
+    // 120 bpm, 8 beats: a fade-out from beat 1 lasts 3.5 s.
+    app.audio_region_fade(id, FadeHandle::Out, 1.0, false).unwrap();
+    assert_eq!(lane(app, f.track)[0].fade_out_seconds, 3.5);
+    // A one-second file dropped at beat 3 clears [3, 5): head [0, 3), tail [5, 8).
+    let cut = app.audio_regions_drop(f.track, 3.0, &[short]).unwrap()[0];
+    app.audio_regions_delete(&[cut]).unwrap();
+    let regions = lane(app, f.track);
+    assert_eq!(regions.len(), 2);
+    assert_eq!(regions[0].fade_out_seconds, 0.0, "the head's end is a cut");
+    assert_eq!(regions[1].fade_out_seconds, 1.5, "the tail's fade fits its 1.5 s");
+}
+
 #[test]
 fn a_fade_in_dragged_left_crossfades_even_when_its_file_starts_at_the_cut() {
     // The left region is a trimmed file (audio past its end), the right one

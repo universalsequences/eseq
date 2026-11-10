@@ -3572,6 +3572,47 @@ mod tests {
     }
 
     #[test]
+    fn nested_shrinking_panel_keeps_footer_below_sibling_header_in_view() {
+        // Sample browser column: a search header above the samples panel,
+        // whose chip filter shrinks to keep the results list and preview
+        // strip in view. The panel measures itself against the column's full
+        // height, so unless it is `:shrink` too the column cannot take the
+        // header's height back and the preview strip falls off the bottom.
+        let engine = LayoutEngine::new(80, 20, 1.0);
+        let panel = build_widget(
+            "v-stack",
+            vec![
+                kw("width"), kw("fill"), kw("flex"), num(1.0), kw("shrink"), num(1.0),
+                build_widget("box", vec![
+                    kw("width"), kw("fill"), kw("shrink"), num(1.0), kw("min-height"), num(2.0),
+                    build_widget("scroll", vec![
+                        kw("width"), kw("fill"), kw("fit-content"), Value::Bool(true),
+                        build_widget("box", vec![kw("height"), num(30.0)]),
+                    ]),
+                ]),
+                build_widget("box", vec![
+                    kw("width"), kw("fill"), kw("flex"), num(1.0), kw("min-height"), num(8.0),
+                ]),
+                build_widget("box", vec![kw("width"), kw("fill"), kw("height"), num(2.0)]),
+            ],
+        );
+        let tree = build_widget(
+            "v-stack",
+            vec![
+                kw("width"), kw("fill"), kw("height"), kw("fill"),
+                build_widget("box", vec![kw("width"), kw("fill"), kw("height"), num(3.0)]),
+                panel,
+            ],
+        );
+        let layout = engine.layout(&tree).expect("layout");
+        let panel = &layout.children[1];
+        assert_f32_approx(panel.rect.row + panel.rect.height, 20.0);
+        let strip = &panel.children[2];
+        assert_f32_approx(strip.rect.row + strip.rect.height, 20.0);
+        assert_f32_approx(panel.children[1].rect.height, 8.0);
+    }
+
+    #[test]
     fn scroll_fill_content_uses_viewport_minimum_and_preserves_overflow() {
         for fill in [false, true] {
             for viewport in [5.0, 30.0, 8.0] {

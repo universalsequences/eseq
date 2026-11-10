@@ -296,7 +296,7 @@
 ;; flush (the track rows) must draw only ONE of the two edges, otherwise two
 ;; adjacent 1 px borders read as a 2 px seam — see `track-lane`.
 (def lane-border-top-color :bg)
-(def lane-border-bottom-color :bg)
+(def lane-border-bottom-color :transparent)
 (def lane-border-width 3)
 ;; Vertical distance in CELLS between one track row's top and the next.
 ;; Track rows stack in a :gap 0 v-stack (see the buffer composition below), so
@@ -2209,6 +2209,44 @@
        (list push.start (max (get drag :time) (+ push.start push-min-length))))
       (else (list (get drag :start) (+ (get drag :start) length))))))
 
+;; The push amount at fraction `at` of a curve published as region
+;; fractions: linear between points, held past either end.
+(def push-curve-at (points at)
+  (let ((before (filter |p| (<= p.offset at) points))
+        (after (filter |p| (> p.offset at) points)))
+    (cond
+      ((= (len before) 0) (if (= (len after) 0) 0 (get (first after) :value)))
+      ((= (len after) 0) (get (nth before (- (len before) 1)) :value))
+      (else
+       (let ((p (nth before (- (len before) 1)))
+             (q (first after))
+             (frac (/ (- at p.offset) (- q.offset p.offset))))
+         (+ p.value (* frac (- q.value p.value))))))))
+
+;; Push `push`'s curve redrawn over `span` (start end) while an edge of it
+;; is dragged: every point keeps its beat, so an edge cut in trims the
+;; curve there and one pulled out holds its value, as the committed resize
+;; will. Without this the fractions stretch across the ghost until release.
+;; A move or no drag keeps the curve as published.
+(def push-ghost-curve (push span)
+  (let ((drag arr-push.drag)
+        (resizing (and drag (= (get drag :id) push.cid) (get drag :edge))))
+    (if (not resizing)
+      push.points
+      (let ((length (- push.end push.start))
+            (points push.points)
+            (a (/ (- (first span) push.start) length))
+            (b (/ (- (nth span 1) push.start) length))
+            (cut-a (> a 0))
+            (cut-b (< b 1)))
+        (map |p| (dict :offset (/ (- p.offset a) (- b a)) :value p.value)
+          (append
+            (if cut-a (list (dict :offset a :value (push-curve-at points a))) '())
+            (filter |p| (and (or (not cut-a) (> p.offset a))
+                             (or (not cut-b) (< p.offset b)))
+              points)
+            (if cut-b (list (dict :offset b :value (push-curve-at points b))) '())))))))
+
 (def push-items ()
   (let ((all (scenes)))
     (map |push|
@@ -2219,7 +2257,7 @@
           :start (first span)
           :end (nth span 1)
           :label (push-target-label all push)
-          :content (dict :curve push.points)
+          :content (dict :curve (push-ghost-curve push span))
           :selected (listed? push.cid arr-push.selected)
           :color (scene-color)))
       (or song.pushes '()))))

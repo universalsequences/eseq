@@ -4,10 +4,11 @@
 (module eseq.materials)
 
 (export slider-material
-        slider-muted-material
-        color
-        surface-hash
-        surface-noise)
+  slider-muted-material
+  color
+  liquid-glass
+  surface-hash
+  surface-noise)
 
 ;; Migration compat aliases (spec §10 slice 3): every renamed macro with a
 ;; caller outside this file. `aqua-color` has ~10 call sites in
@@ -228,3 +229,28 @@
   (sdf/layer
     (sdf/fill (sdf/circle 0.45)
       (material :color (if (= active 1) (rgba 1 1 1 1) (rgba 0 0 0 0))))))
+
+
+(defwidget liquid-glass
+  :width 1 :ehight 1
+  :shader
+  (sdf/layer 
+    (sdf/fill
+      (sdf/rounded-rect width height height)
+      (material
+        :lighting (lighting :edge-min -0.115 :edge-max 0.813
+          :light (vec3 0.31 4.5 3.5) :shininess 91.0)
+        :color
+        (eseq.materials/color-cell 
+          :transport-controls-bg 
+          (mix (* 1.0 :white) :transport-controls-bg
+            (mix 1 0 (smoothstep 0.3 1.5 (abs y)))
+            )
+          )
+        ))
+    
+    (sdf/fill
+      (sdf/rounded-rect (* width 0.9999 ) (* 0.96 height) height)
+      (* (mix 1 0.5 (smoothstep -0.2 0.03 d )) :transport-controls-bg )
+      )
+    ))

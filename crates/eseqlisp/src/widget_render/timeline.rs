@@ -2391,7 +2391,7 @@ const SELECTED_ITEM_BODY_COLOR: crate::backend::Color = crate::backend::Color {
 
 /// Minimum on-screen item width (px) below which item content is skipped
 /// entirely — narrower than this the dots/bars would only alias
-/// (docs/arrangement-timeline-ui-spec.md 7.3).
+/// (docs/arrangement-timeline-ui-spec.md 7.3). Waveforms are exempt.
 const ITEM_CONTENT_MIN_WIDTH_PX: f32 = 14.0;
 
 fn item_cycle_separator_xs(
@@ -2506,7 +2506,10 @@ fn push_item_content_primitives(
     viewport: super::WidgetViewport,
 ) {
     let (x, y, width, height) = rect;
-    if width * viewport.cell_w < ITEM_CONTENT_MIN_WIDTH_PX {
+    // A waveform is one min/max column per pixel, so it stays legible on a
+    // slice only a few pixels wide; only dot/bar content aliases there.
+    let is_waveform = matches!(item.content, Some(TimelineItemContent::Waveform { .. }));
+    if width * viewport.cell_w < ITEM_CONTENT_MIN_WIDTH_PX && !is_waveform {
         return;
     }
     match &item.content {

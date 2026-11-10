@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "name": "filterbank",
+  "params": [
+    "x",
+    "f1",
+    "f2",
+    "mode1",
+    "mode2",
+    "res",
+    "drive_db",
+    "crunch",
+    "fm",
+    "corr",
+    "par",
+    "harm",
+    "mix"
+  ],
+  "outputs": [
+    "out"
+  ],
+  "summary": "Builtin Filterbank as a patchable voice stage: tube/diode drive, two switched-capacitor SVFs with crunch, audio-rate FM, correction, serial/parallel, harmonic link, dry/wet.",
+  "tags": [
+    "filter",
+    "distortion",
+    "synth",
+    "effect"
+  ]
+}

@@ -88,7 +88,7 @@
       :filterbank-control-on                '(0.98 0.78 0.14 1.0)
       :filterbank-readout                   '(0.93 0.88 0.72 1.0)
       ;; Semantic control roles preserve the original UI independently of accent.
-      :scene-active-base              '(0.00 0.01 0.42 1.0)
+      :scene-active-base              '(0.175 0.184 0.269 1.0)
       :scene-hover-base               '(0.10 0.10 0.12 0.72)
       :scene-push-base                '(0.04 0.24 0.88 1.0)
       :scene-queued-base              '(0.01 0.03 0.38 1.0)
@@ -103,7 +103,7 @@
       :icon-active-fg                 '(1.0 1.0 1.0 1.0)
       :save-icon-fg                   '(0.92 0.92 0.96 1.0)
       :play-active-base               '(0.05 0.28 0.03 1.0)
-      :arrangement-return-base        '(0.80 0.38 0.16 1.0)
+      :arrangement-return-base        '(0.395 0.438 0.954 1.0)
       :arrangement-return-fg          '(0.10 0.045 0.02 1.0)
       :record-active-base             '(0.12 0.001 0.001 1.0)
       :record-idle-fg                 '(0.65 0.18 0.18 1.0)

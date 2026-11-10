@@ -936,11 +936,16 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     prebuilt,
                     base_snapshot,
                 );
+                // Push regions are in song beats; the clock is not (it
+                // starts at zero on Play and rewinds at every loop wrap).
+                let song_beat = song_playback
+                    .as_ref()
+                    .map_or(clock.total_beats, |song| song.song_beat_at(clock.total_beats));
                 with_live_macro_overrides(
                     &mut scheduler.live_macro_override_chunk,
                     prebuilt,
                     base_snapshot,
-                    clock.total_beats,
+                    song_beat,
                 )
             });
         let snapshot: &SequencerSnapshot = prebuilt_snapshot.as_deref().unwrap_or(base_snapshot);

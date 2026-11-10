@@ -256,6 +256,15 @@ impl AudioRegion {
         }
     }
 
+    /// Keep the fades inside the region (in + out never longer than it),
+    /// after a cut shortened it: a fade outlasting its region would start
+    /// before it and darken the whole of it.
+    pub fn clamp_fades(&mut self, seconds_per_beat: f64) {
+        let length = self.length_seconds(seconds_per_beat) as f32;
+        self.fade_in_seconds = self.fade_in_seconds.min(length).max(0.0);
+        self.fade_out_seconds = self.fade_out_seconds.min(length - self.fade_in_seconds).max(0.0);
+    }
+
     /// Timeline seconds the region spans.
     pub fn length_seconds(&self, seconds_per_beat: f64) -> f64 {
         (self.end_beat - self.start_beat).max(0.0) * seconds_per_beat
@@ -406,6 +415,13 @@ impl ProjectArrangement {
         seconds_per_beat: f64,
     ) -> Result<(), String> {
         let lane = std::mem::take(self.audio_lane_mut(track));
+        // A region the span cuts in two: its fade-out belonged to its end,
+        // which the tail keeps (as `audio_region_split` does).
+        let straddling: Vec<ClipId> = lane
+            .iter()
+            .filter(|region| region.start_beat < start && region.end_beat > end)
+            .map(|region| region.id)
+            .collect();
         let sources = &self.audio_sources;
         let mut next_clip_id = self.next_clip_id;
         let kept = occlude_lane(
@@ -425,7 +441,15 @@ impl ProjectArrangement {
             },
         );
         self.next_clip_id = next_clip_id;
-        self.audio_lanes[track] = kept?;
+        let mut kept = kept?;
+        for region in &mut kept {
+            if straddling.contains(&region.id) {
+                region.fade_out_seconds = 0.0;
+                region.fade_out_curve = 0.0;
+            }
+            region.clamp_fades(seconds_per_beat);
+        }
+        self.audio_lanes[track] = kept;
         Ok(())
     }
 

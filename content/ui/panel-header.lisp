@@ -9,10 +9,34 @@
 
 (export pill chip note)
 
+(defwidget liquid-glass
+  :width 1 :ehight 1
+  :shader
+  (sdf/layer 
+    (sdf/fill
+      (sdf/rounded-rect width height height)
+      (material
+        :lighting (lighting :edge-min -0.115 :edge-max 0.813
+          :light (vec3 0.31 4.5 3.5) :shininess 91.0)
+        :color
+        (eseq.materials/color-cell 
+          :transport-controls-bg 
+          (mix (* 1.0 :white) :transport-controls-bg
+            (mix 1 0 (smoothstep 0.3 1.5 (abs y)))
+            )
+          )
+        ))
+    
+    (sdf/fill
+      (sdf/rounded-rect (* width 0.9999 ) (* 0.96 height) height)
+      (* (mix 1 0.4 (smoothstep -0.1 0.03 d )) :transport-controls-bg )
+      )
+    ))
 ;; The pill: `chip` then `summary`, on the selected-strip background.
 (def pill (chip summary)
-  (box :padding 0.25 :background-color :mixer-strip-selected-bg :corner-radius 12 :v-align :center
+  (box :padding 0.25 :background "liquid-glass" :corner-radius 12 :v-align :center
     (h-stack :gap 0.45 :align :start
+      (box :width 0.0)
       chip
       summary)))
 
@@ -23,7 +47,7 @@
     :key key
     :width width :height 1.0
     :padding 0
-    :corner-radius 8
+    :corner-radius 16
     :v-align :center
     :muted muted
     :background-color fill

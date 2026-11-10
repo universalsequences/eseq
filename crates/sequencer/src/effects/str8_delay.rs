@@ -58,7 +58,10 @@ const STATE_MOD_CUTOFF_DEPTH_4: usize = 51;
 /// Frames the input and every delay-line write have stayed quiet
 /// (`effects::tail_sleep`). Runtime only, never a param.
 const STATE_QUIET_FRAMES: usize = 52;
-const STATE_BUF_OFFSET: usize = 53;
+/// Stereo link: when on, the right ear runs on the left ear's
+/// sync/div/offset/time so one set of edits and modulation drives both.
+const STATE_LINK: usize = 53;
+const STATE_BUF_OFFSET: usize = 54;
 const STATE_BUF_R_OFFSET: usize = STATE_BUF_OFFSET + MAX_DELAY_SAMPLES;
 const STATE_END: usize = STATE_BUF_OFFSET + MAX_DELAY_SAMPLES * 2;
 
@@ -81,6 +84,7 @@ pub const STR8_DELAY_PARAM_MOD_RATE: u64 = STATE_MOD_RATE as u64;
 pub const STR8_DELAY_PARAM_MOD_AMOUNT: u64 = STATE_MOD_AMOUNT as u64;
 pub const STR8_DELAY_PARAM_MOD_PHASE: u64 = STATE_MOD_PHASE as u64;
 pub const STR8_DELAY_PARAM_BPM: u64 = STATE_BPM as u64;
+pub const STR8_DELAY_PARAM_LINK: u64 = STATE_LINK as u64;
 pub const STR8_DELAY_PARAM_MOD_TIME_DEPTH_1: u64 = STATE_MOD_TIME_DEPTH_1 as u64;
 pub const STR8_DELAY_PARAM_MOD_TIME_DEPTH_2: u64 = STATE_MOD_TIME_DEPTH_2 as u64;
 pub const STR8_DELAY_PARAM_MOD_TIME_DEPTH_3: u64 = STATE_MOD_TIME_DEPTH_3 as u64;
@@ -271,7 +275,7 @@ unsafe extern "C" fn str8_delay_init(
     *s.add(STATE_HP_Z2_R) = 0.0;
     *s.add(STATE_LP_Z1_R) = 0.0;
     *s.add(STATE_LP_Z2_R) = 0.0;
-    for i in STATE_MOD_TIME_DEPTH_1..STATE_BUF_OFFSET {  // includes STATE_QUIET_FRAMES
+    for i in STATE_MOD_TIME_DEPTH_1..STATE_BUF_OFFSET {  // includes STATE_QUIET_FRAMES, STATE_LINK
         *s.add(i) = 0.0;
     }
     for i in STATE_BUF_OFFSET..STATE_END {
@@ -329,14 +333,18 @@ unsafe extern "C" fn str8_delay_process(
         bpm,
         sr,
     );
-    let target_right = target_samples(
-        *s.add(STATE_RIGHT_SYNC),
-        *s.add(STATE_RIGHT_DIV),
-        *s.add(STATE_RIGHT_OFFSET),
-        *s.add(STATE_RIGHT_TIME_MS),
-        bpm,
-        sr,
-    );
+    let target_right = if *s.add(STATE_LINK) > 0.5 {
+        target_left
+    } else {
+        target_samples(
+            *s.add(STATE_RIGHT_SYNC),
+            *s.add(STATE_RIGHT_DIV),
+            *s.add(STATE_RIGHT_OFFSET),
+            *s.add(STATE_RIGHT_TIME_MS),
+            bpm,
+            sr,
+        )
+    };
     let target_filter_freq = (*s.add(STATE_FILTER_FREQ)).clamp(20.0, 20_000.0);
     let target_filter_width = (*s.add(STATE_FILTER_Q)).clamp(0.25, 6.0);
     let mod_rate = (*s.add(STATE_MOD_RATE)).clamp(0.01, 20.0);
@@ -514,7 +522,7 @@ mod tests {
         STATE_MOD_TIME_DEPTH_1, STATE_MOD_WET_DEPTH_1, STATE_RIGHT_SYNC, STATE_RIGHT_TIME_MS,
         STATE_SMOOTH_FEEDBACK, STATE_SMOOTH_FILTER_FREQ, STATE_SMOOTH_LEFT_SAMPLES,
         STATE_SMOOTH_RIGHT_SAMPLES, STATE_SMOOTH_WET, STATE_WET, STR8_DELAY_STATE_SIZE,
-        MAX_DELAY_SAMPLES, STATE_QUIET_FRAMES,
+        MAX_DELAY_SAMPLES, STATE_LINK, STATE_QUIET_FRAMES,
     };
     use std::ffi::c_void;
 
@@ -590,6 +598,26 @@ mod tests {
             done += n;
         }
         rendered
+    }
+
+    #[test]
+    fn link_drives_the_right_ear_from_the_left_ear_time() {
+        // One 512-frame block, so `render_blocks` returns [left.., right..].
+        let frames = 512;
+        let mut state = initialized_state(2.0, 1.0, 0.0, 1140.0);
+        state[STATE_RIGHT_TIME_MS] = 6.0;
+        state[STATE_SMOOTH_RIGHT_SAMPLES] = 6.0 * SAMPLE_RATE as f32 / 1000.0;
+        let unlinked = render_blocks(&mut state.clone(), frames);
+        let (l, r) = unlinked.split_at(frames);
+        assert!(peak_index(r) > peak_index(l) + 150, "unlinked ears differ");
+
+        // Linked: the right ear follows the left ear's 2 ms even though its
+        // own time still reads 6 ms.
+        state[STATE_LINK] = 1.0;
+        state[STATE_SMOOTH_RIGHT_SAMPLES] = 2.0 * SAMPLE_RATE as f32 / 1000.0;
+        let linked = render_blocks(&mut state, frames);
+        let (l, r) = linked.split_at(frames);
+        assert_eq!(peak_index(l), peak_index(r));
     }
 
     #[test]

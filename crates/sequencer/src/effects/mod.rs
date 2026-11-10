@@ -3200,6 +3200,12 @@ mod tests {
                 ),
             ]
         );
+        // `link` was appended after every earlier param so saved p-lock
+        // indices stay put; it defaults off so old slots stay unlinked.
+        let link = desc.params.last().expect("str8 delay params");
+        assert_eq!(link.name, "link");
+        assert_eq!(link.default, 0.0);
+        assert!(matches!(link.kind, ParamKind::Boolean));
     }
 
     #[test]
@@ -4604,6 +4610,22 @@ impl EffectDescriptor {
             4.0,
             Some("oct"),
         );
+
+        // Appended last: param order is append-only (p-locks persist by
+        // descriptor index), and a saved slot without it reads off.
+        desc.params.push(ParamDescriptor {
+            name: "link".to_string(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            kind: ParamKind::Boolean,
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_LINK as u32,
+            node_param_span: 1,
+            percent_ratio: false,
+            host_control: None,
+            ui_metadata: None,
+        });
 
         desc
     }

@@ -1575,7 +1575,11 @@ Previews each preset as you move through the list; Esc puts the loaded one back.
         (origins (get listing :origins))
         (packs (if (get listing :packs) (get listing :packs) (list)))
         (items (get listing :items)))
-      (v-stack :key "samples-browser-panel" :width :fill :gap 0.35 :flex 1
+      ;; :shrink lets the tab column take the search header's height back:
+      ;; the panel measures against the column's full height, so without it
+      ;; a chip filter tall enough to scroll pushed the preview strip below
+      ;; the buffer and made the whole sidebar scroll.
+      (v-stack :key "samples-browser-panel" :width :fill :gap 0.35 :flex 1 :shrink 1
         ;; The filter chips size to their content but shrink (scrolling) once
         ;; the results list would drop below its :min-height.
         (box :key "sample-tag-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35 :shrink 1 :min-height 4

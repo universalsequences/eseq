@@ -478,6 +478,7 @@ impl App {
             resized.start_beat = start_beat;
             resized.end_beat = end_beat;
             resized.source_offset = offset.round() as u64;
+            resized.clamp_fades(spb);
             arrangement.take_audio_region(id);
             arrangement.occlude_audio_span(track, start_beat, end_beat, spb)?;
             arrangement.insert_audio_region_sorted(track, resized);
@@ -505,6 +506,8 @@ impl App {
             // The fade-out belonged to the region's end, which the tail has.
             head.fade_out_seconds = 0.0;
             head.fade_out_curve = 0.0;
+            head.clamp_fades(spb);
+            tail.clamp_fades(spb);
             arrangement.insert_audio_region_sorted(track, head);
             arrangement.insert_audio_region_sorted(track, tail);
             Ok(())

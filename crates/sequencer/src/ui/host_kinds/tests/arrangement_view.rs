@@ -959,6 +959,97 @@ fn push_lane_sweeps_clear_a_range_and_edges_resize() {
     assert!((pushed.value_at(5.0) - 0.125).abs() < 1.0e-4, "the curve stays in time");
 }
 
+/// eseq-vum0: while an edge of a push drags, its curve keeps its beats (an
+/// edge cut in trims it, one pulled out holds) instead of stretching across
+/// the ghost — the ghost draws exactly the curve the release commits.
+#[test]
+fn push_resize_ghost_draws_the_curve_the_release_commits() {
+    use sequencer::sequencer::{ScenePushPoint, ScenePushRegion};
+    let mut h = distro();
+    h.app.set_arrangement_view_visible(true);
+    h.command("clone-pattern", Value::Nil);
+    h.settle();
+    let mut arrangement = h.app.state.committed_arrangement().expect("arrangement");
+    let id = arrangement.allocate_clip_id().expect("id");
+    arrangement.end_beat = arrangement.end_beat.max(32.0);
+    arrangement.push_lane.push(ScenePushRegion {
+        id,
+        start_beat: 4.0,
+        end_beat: 12.0,
+        target_scene: 1,
+        points: vec![
+            ScenePushPoint { beat: 0.0, value: 0.0 },
+            ScenePushPoint { beat: 2.0, value: 1.0 },
+            ScenePushPoint { beat: 8.0, value: 0.0 },
+        ],
+    });
+    h.app.state.set_committed_arrangement(Some(arrangement)).expect("commit");
+    h.settle();
+    // The drawn curve as (offset, value) pairs; offsets are region fractions.
+    let curve = |h: &mut Harness| -> Vec<(f64, f64)> {
+        let flat = h.eval(
+            "(reduce |acc p| (append acc (list p.offset p.value)) '() \
+               (get (get (first (eseq.arrangement/push-items)) :content) :curve))",
+        );
+        let Value::List(items) = flat else { panic!("curve list, got {flat:?}") };
+        let numbers: Vec<f64> = items
+            .iter()
+            .map(|item| match *item.borrow() {
+                Value::Number(n) => n,
+                ref other => panic!("number, got {other:?}"),
+            })
+            .collect();
+        numbers.chunks(2).map(|pair| (pair[0], pair[1])).collect()
+    };
+    // Drawn as beats, so a ghost and a committed curve that look the same
+    // compare equal however their points are split.
+    let sample = |points: &[(f64, f64)]| -> Vec<f64> {
+        (0..=32)
+            .map(|i| {
+                let at = i as f64 / 32.0;
+                let before = points.iter().rev().find(|p| p.0 <= at);
+                let after = points.iter().find(|p| p.0 > at);
+                match (before, after) {
+                    (Some(p), Some(q)) => p.1 + (q.1 - p.1) * (at - p.0) / (q.0 - p.0),
+                    (Some(p), None) => p.1,
+                    (None, Some(q)) => q.1,
+                    (None, None) => 0.0,
+                }
+            })
+            .map(|value| (value * 1.0e4).round() / 1.0e4)
+            .collect()
+    };
+    let span = |h: &mut Harness| -> (f64, f64) {
+        let item = h.eval("(let ((i (first (eseq.arrangement/push-items)))) (list (get i :start) (get i :end)))");
+        let Value::List(items) = item else { panic!("span") };
+        let n = |i: usize| match *items[i].borrow() {
+            Value::Number(n) => n,
+            _ => panic!("span number"),
+        };
+        (n(0), n(1))
+    };
+
+    // End in, end out past the original, start in, start out.
+    for (edge, time) in [("end", 8.0), ("end", 14.0), ("start", 7.0), ("start", 2.0)] {
+        h.eval(&format!(
+            "(eseq.arrangement/push-lane-action (dict :type :resize-item-absolute :id {} :edge :{edge} :time {time}))",
+            id.0
+        ));
+        h.settle();
+        let ghost_span = span(&mut h);
+        let ghost = curve(&mut h);
+        h.eval("(eseq.arrangement/push-lane-action (dict :type :finish-resize-items))");
+        h.settle();
+        assert_eq!(span(&mut h), ghost_span, "{edge} → {time}: the ghost spans what commits");
+        let committed = curve(&mut h);
+        assert_eq!(
+            sample(&ghost),
+            sample(&committed),
+            "{edge} → {time}: ghost {ghost:?} draws the committed {committed:?}"
+        );
+    }
+}
+
 /// The ruler's loop brace (Ableton's loop): a drag repaints it live and
 /// commits once, on release; the toggle turns looping on with the brace
 /// where it is, and the ruler draws exactly what the song holds.
