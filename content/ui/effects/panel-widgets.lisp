@@ -57,14 +57,16 @@
 
 (defwidget fx-panel-bg
   :width 1 :height 1
-  :state (selected header-r header-g header-b selected-header-r selected-header-g selected-header-b)
+  ;; tall-header: 1 doubles the header bar (a folded effect panel stacks its
+  ;; enable dot and fold button in it).
+  :state (selected header-r header-g header-b selected-header-r selected-header-g selected-header-b tall-header)
   :shader
   (let ((panel-radius (min (* 3 (fwidth y)) (* 0.5 (min width height))))
       (panel (sdf/rounded-rect (* 1 width) (* 1 height) (* 2 panel-radius)))
       ;; Use derivatives to convert a real pixel height into the shader's
       ;; normalized/SDF y-space. This keeps the header bar visually constant
       ;; as panels get taller/shorter.
-      (header-h (* 35 (fwidth y)))
+      (header-h (* (if (> tall-header 0.5) 70 35) (fwidth y)))
       (header-bottom (+ (- height) header-h))
       (header-shape (max panel (- y header-bottom))))
     (sdf/layer

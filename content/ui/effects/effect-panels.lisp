@@ -89,14 +89,21 @@
         (material :color fg-col)))))
 
 (def fx-panel (title params fx)
-  (let ((selected (pb/fx-panel-selected? fx)))
+  (let ((selected (pb/fx-panel-selected? fx))
+        (collapsed (st/device-collapsed? (get fx :collapse-key))))
   (box
-    (v-stack :gap 0 :height :fill
-      (pf/fx-panel-header title params fx)
-      (pf/fx-panel-body (if (get fx :midi-fx) "midi-fx-panel-content" "audio-fx-panel-content")
-        (if (get fx :midi-fx)
-          (pb/midi-fx-panel-body fx)
-          (pb/audio-fx-panel-body fx params))))
+    ;; Folded, the panel is a thin strip (pf/fx-collapsed-strip): the body is
+    ;; not built at all, so a folded effect costs no knobs.
+    (if collapsed
+      (pf/fx-collapsed-strip title params fx)
+      (v-stack :gap 0 :height :fill
+        (pf/fx-panel-header title params fx)
+        (pf/fx-panel-body (if (get fx :midi-fx) "midi-fx-panel-content" "audio-fx-panel-content")
+          (if (get fx :midi-fx)
+            (pb/midi-fx-panel-body fx)
+            (pb/audio-fx-panel-body fx params)))))
+    :width (if collapsed st/fx-collapsed-panel-width nil)
+    :tall-header (if collapsed 1 0)
     :part "fx/panel" :device title
     :background (pf/panel-surface)
     :color :fx-panel-bg
@@ -116,13 +123,18 @@
     :padding 0)))
 
 (def midi-fx-panel (title params fx)
-  (let ((selected (pb/fx-panel-selected? fx)))
+  (let ((selected (pb/fx-panel-selected? fx))
+        (collapsed (st/device-collapsed? (get fx :collapse-key))))
   (box :key (str "midi-fx-panel-" (get fx :slot-idx) "-" (get fx :name))
-    (v-stack :gap 0 :height :fill
-      (pf/fx-panel-header title params fx)
-      (pf/fx-panel-body "midi-fx-panel-content"
-        (subtree :key (str "midi-fx-panel-body-" (get fx :slot-idx) "-" (get fx :name))
-          (pb/midi-fx-panel-body fx))))
+    (if collapsed
+      (pf/fx-collapsed-strip title params fx)
+      (v-stack :gap 0 :height :fill
+        (pf/fx-panel-header title params fx)
+        (pf/fx-panel-body "midi-fx-panel-content"
+          (subtree :key (str "midi-fx-panel-body-" (get fx :slot-idx) "-" (get fx :name))
+            (pb/midi-fx-panel-body fx)))))
+    :width (if collapsed st/fx-collapsed-panel-width nil)
+    :tall-header (if collapsed 1 0)
     :part "fx/panel" :device title
     :background (pf/panel-surface)
     :color :fx-panel-bg

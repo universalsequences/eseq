@@ -32378,6 +32378,92 @@ use panel_kinds_seed::*;
         assert_layout_inside(filter_actions, filter_header, "filter action menu");
     }
 
+    // eseq-q7zn: a folded effect panel is a thin strip that keeps the enable
+    // dot and drops the header and body; folding again restores the panel.
+    #[test]
+    fn metal_seq_fx_panel_collapses_to_a_thin_strip_and_back() {
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                "Filter",
+                0,
+                test_filter_params(),
+            ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
+        seed_values(vec![]);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def eseq.browser/clear-editor-name! () nil)
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate eseq.seq-core-state/selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor, &panel_seed);
+        editor.refresh_runtime_side_effects();
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 18);
+        let root = "audio-fx-panel-root-0-Filter";
+        let toggle = "(eseq.effects.state/toggle-device-collapsed! \
+            (get (first (eseq.effects.panel-data/current-effect-panels)) :collapse-key))";
+
+        let layout = editor.widget_layout().expect("open fx layout");
+        let open_width = find_layout_node_by_debug_name(&layout, root)
+            .expect("open filter panel")
+            .rect
+            .width;
+        assert!(layout_contains_debug_name(&layout, "audio-fx-panel-header"));
+
+        editor.runtime_mut().eval_str(toggle).expect("fold the filter");
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("folded fx layout");
+        let folded = find_layout_node_by_debug_name(&layout, root).expect("folded filter panel");
+        assert_finite_nonzero_rect(folded, "folded filter panel");
+        assert!(
+            folded.rect.width < 3.0 && folded.rect.width < open_width,
+            "a folded panel should be a thin strip, got {:?} (open width {open_width})",
+            folded.rect
+        );
+        let strip = find_layout_node_by_debug_name(&layout, "audio-fx-panel-collapsed")
+            .expect("folded strip should render");
+        assert_finite_nonzero_rect(strip, "folded strip");
+        let name = find_layout_node_by_debug_name(&layout, "fx-collapsed-title")
+            .expect("folded strip should show the name");
+        assert!(name.props.contains_key("on-double-click"));
+        assert!(layout_contains_debug_name(&layout, "fx-collapse-button"));
+        assert!(
+            !layout_contains_debug_name(&layout, "audio-fx-panel-header")
+                && !layout_contains_widget_type(&layout, "response-curve-editor"),
+            "a folded panel should build neither its header nor its body"
+        );
+
+        editor.runtime_mut().eval_str(toggle).expect("unfold the filter");
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("unfolded fx layout");
+        let reopened = find_layout_node_by_debug_name(&layout, root).expect("reopened panel");
+        assert_eq!(reopened.rect.width, open_width);
+        assert!(layout_contains_widget_type(&layout, "response-curve-editor"));
+    }
+
     // The Filter curve used to mirror every drag event into `defstate` globals
     // so the knobs could show the in-flight value. Those `set!`s dirtied the
     // enclosing panel effect, so `VM::invoke`'s synchronous reactive pass
