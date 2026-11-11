@@ -1894,7 +1894,7 @@ mod tests {
     }
 
     #[test]
-    fn factory_instrument_categories_preserve_ids_and_flat_synths() {
+    fn factory_instrument_categories_preserve_ids_and_hide_deprecated() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/instruments");
         // Deprecated instruments need no category: they never reach the tree.
         let visible = |categorized| {
@@ -1925,10 +1925,32 @@ mod tests {
                 assert!(category.children.iter().all(|item| item.name.is_some() && item.children.is_empty()));
             }
         }
+        // Synths groups only the families with a shared lineage (the
+        // Mutable Instruments ports, the Monomachine-inspired machines); the
+        // rest stay flat beside those groups.
         let synths = grouped.iter().find(|item| item.label == "Synths").unwrap();
-        assert!(synths.children.iter().all(|item| item.name.is_some() && item.children.is_empty()));
+        let group = |label: &str| {
+            let node = synths.children.iter().find(|item| item.label == label)
+                .unwrap_or_else(|| panic!("missing Synths category {label}"));
+            assert!(node.name.is_none() && node.folder.is_none());
+            node.children.iter().map(|item| item.label.as_str()).collect::<Vec<_>>()
+        };
+        assert_eq!(group("Mutable Instruments"), ["Beads", "Elements", "Plaits", "Rings"]);
+        assert_eq!(group("Machines"), ["Grit", "Melt", "Vox"]);
+        assert_eq!(group("Felucca"), ["Felucca CZ", "Felucca FM6"]);
+        assert!(synths.children.iter().any(|item| item.label == "Digi Wave" && item.name.is_some()));
         let original_synths = original.iter().find(|item| item.label == "Synths").unwrap();
         assert_eq!(names(&synths.children), names(&original_synths.children));
+        // Hidden, never deleted: still on disk, absent from the browser.
+        let all = names(&grouped);
+        for hidden in ["Synths/Poseidon/", "Drums/Latent Kick/", "Drums/Latent Kick Morph/",
+                       "Physical Models/PM Hi-Hat/", "Physical Models/PM Ride/", "Drums/PM Tabla/"] {
+            assert!(root.join(hidden).join("dsp.lisp").exists(), "{hidden} must stay on disk");
+            assert!(!all.contains(&hidden.to_string()), "{hidden} should be hidden");
+        }
+        for kept in ["Drums/PM Ride Kit/", "Drums/PM Bongos/", "Physical Models/PM Piano/", "Physical Models/PM Flute/"] {
+            assert!(all.contains(&kept.to_string()), "{kept} should stay listed");
+        }
     }
 
     fn category_test_items() -> Vec<InstrumentTreeNode> {

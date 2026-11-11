@@ -1,1 +1,5 @@
-{"version": 1, "run_mode": "instrument"}
+{
+  "version": 1,
+  "run_mode": "instrument",
+  "deprecated": true
+}
