@@ -7634,6 +7634,207 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(counts(1), vec![5, 0, 5], "{out:?}");
     }
 
+    /// Runs a `(jak …)` form for `beats` beats and returns, per track, how
+    /// many notes each cycle of `cycle_units` sixteenths got.
+    fn jaki_cycle_counts(
+        form: &str,
+        beats: f64,
+        cycle_units: u64,
+    ) -> impl Fn(usize) -> Vec<usize> {
+        let mut rt = jaki_runtime();
+        rt.eval(&format!("(import alez.jaki.surface :refer (jak))\n{form}"))
+            .expect("jak form");
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            beats,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+        let cycle_len = cycle_units * 12_000;
+        let cycles = ((beats * 48_000.0) as u64).div_ceil(cycle_len);
+        move |track: usize| {
+            (0..cycles)
+                .map(|cycle| {
+                    let start = cycle * cycle_len;
+                    out.iter()
+                        .filter(|e| {
+                            e.event.track == Some(track)
+                                && e.sample_time >= start
+                                && e.sample_time < start + cycle_len
+                        })
+                        .count()
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn jaki_zero_velocity_hits_send_nothing() {
+        // A lane scaled to silence must not reach its track at all: a silent
+        // trig on a shared track retriggers or cuts the voice another lane
+        // holds there.
+        let counts = jaki_cycle_counts(
+            r#"(jak "silent" :16
+                 . . . .
+                 -> 0 (vel* 0)
+                 -> 1 (vel* (0 1))
+                 -> 2)"#,
+            2.0,
+            4,
+        );
+        assert_eq!(counts(0), vec![0, 0]);
+        assert_eq!(counts(1), vec![0, 4]);
+        assert_eq!(counts(2), vec![4, 4]);
+    }
+
+    #[test]
+    fn jaki_rest_and_play_take_a_condition() {
+        // (rest COND) rests where COND is 1, (play COND) plays where it is 1.
+        // A plain list steps per cycle, (seq :hit …) per hit, and a list of
+        // words headed by `rest` is still the word alternation.
+        let counts = jaki_cycle_counts(
+            r#"(jak "sparse" :16
+                 . . . .
+                 -> 0 (rest (1 0))
+                 -> 1 (play (0 0 0 1))
+                 -> 2 (rest (seq :hit 0 0 1))
+                 -> 3 (rest rest id)
+                 -> 4 (on left (rest (0 1)))
+                 -> 5 (rest 1)
+                 -> 6 (play 1))"#,
+            4.0,
+            4,
+        );
+        assert_eq!(counts(0), vec![0, 4, 0, 4]);
+        assert_eq!(counts(1), vec![0, 0, 0, 4]);
+        // hits 2, 5, 8, 11 and 14 of 16 rest
+        assert_eq!(counts(2), vec![3, 3, 2, 3]);
+        assert_eq!(counts(3), vec![0, 0, 4, 0]);
+        // only the left hand (2 of 4 hits) rests, every other cycle
+        assert_eq!(counts(4), vec![4, 2, 4, 2]);
+        assert_eq!(counts(5), vec![0, 0, 0, 0]);
+        assert_eq!(counts(6), vec![4, 4, 4, 4]);
+    }
+
+    #[test]
+    fn jaki_like_links_a_lane_to_another_lanes_words() {
+        // (like LANE) stands for that lane's words, by name or number; an
+        // `off` lane plays nothing and is still a lane to link to; a link to
+        // itself or round in a circle is dropped instead of looping.
+        let counts = jaki_cycle_counts(
+            r#"(jak "links" :16
+                 . . - .
+                 -> 0 (as kick) left
+                 -> 1 (like kick) (rest (seq :hit 1 0 0))
+                 -> off (as tpl) right
+                 -> 2 (like tpl)
+                 -> 3 (like 0)
+                 -> 4 (like 6)
+                 -> 5 (like 5) right
+                 -> 6 (like nobody))"#,
+            1.25,
+            5,
+        );
+        // `. . - .`: left hand 3 hits, right hand 2; lane 1 adds its own word
+        // after the linked ones (the first of the 3 left hits rests)
+        assert_eq!(counts(0), vec![3]);
+        assert_eq!(counts(1), vec![2]);
+        assert_eq!(counts(2), vec![2]);
+        assert_eq!(counts(3), vec![3]);
+        // lanes count the `off` one too, so tracks 4 and 5 are lanes 5 and 6:
+        // 5 → 6 → (5 again: dropped), both end up with lane 6's own `right`
+        assert_eq!(counts(4), vec![2]);
+        assert_eq!(counts(5), vec![2]);
+        assert_eq!(counts(6), vec![5]);
+    }
+
+    #[test]
+    fn jaki_linked_lane_rolls_its_masters_coins() {
+        // A rule's coins are seeded by its route. A linked lane takes the
+        // master's seed along, so "the master's hits, also over here" really
+        // is the same hits; an unlinked copy of the words rolls its own.
+        let counts = jaki_cycle_counts(
+            r#"(jak "coins" :16
+                 . . . .
+                 -> 0 (as m) (rule any (coin :p 0.5) rest)
+                 -> 1 (like m)
+                 -> 2 (rule any (coin :p 0.5) rest))"#,
+            16.0,
+            4,
+        );
+        let master = counts(0);
+        assert!(master.iter().any(|n| *n > 0) && master.iter().any(|n| *n < 4), "{master:?}");
+        assert_eq!(counts(1), master);
+        assert_ne!(counts(2), master);
+    }
+
+    #[test]
+    fn jaki_steal_gives_a_lane_priority() {
+        let counts = jaki_cycle_counts(
+            r#"(jak "steals" :16
+                 (. . - .
+                  -> 0 (as main)
+                  -> 1 (like main) accent (steal main))
+                 (. . . .
+                  -> 2
+                  -> 2 (play (0 1)) left (steal :cycle))
+                 (. . . .
+                  -> 3
+                  -> 3 left (steal :gate))
+                 (. . . .
+                  -> 4
+                  -> 4 left (steal))
+                 (. . . .
+                  -> 5 (steal)
+                  -> 5 (steal)))"#,
+            2.0,
+            4,
+        );
+        // the accent moves to track 1: over 8 units (1.6 cycles of 5) the
+        // pattern has 8 hits, 1 of them an accent
+        assert_eq!(counts(0).iter().sum::<usize>(), 7);
+        assert_eq!(counts(1).iter().sum::<usize>(), 1);
+        // :cycle — the thief plays cycle 1 only, and there the other lane is
+        // silent for the whole cycle: just the thief's 2 left hits
+        assert_eq!(counts(2), vec![4, 2]);
+        // :gate — the left hand's legato gates cover the right hand's hits
+        assert_eq!(counts(3), vec![2, 2]);
+        // :hit — only the hits that coincide go: 2 thief + 2 untouched
+        assert_eq!(counts(4), vec![4, 4]);
+        // two lanes stealing from each other: the lower one wins, once
+        assert_eq!(counts(5), vec![4, 4]);
+    }
+
+    #[test]
+    fn jaki_doc_body_keeps_off_rows_as_lanes_once_rows_link() {
+        let mut rt = jaki_runtime();
+        let value = rt
+            .eval(
+                r#"(import alez.jaki.doc)
+                   (source (alez.jaki.doc/body
+                             (list (list :dot :dot))
+                             (list (dict :route -1 :name "kick" :mods (list "left"))
+                                   (dict :route 0 :mods (list (list "like" "kick") "stac"))
+                                   (dict :route 1 :mods (list (list "steal" "1" ":gate")
+                                                              (list "steal" "all" ":hit"))))
+                             3))"#,
+            )
+            .expect("eval")
+            .expect("value");
+        assert_eq!(
+            value,
+            Value::String(
+                "((fig (. .)) -> off left -> 0 (like 0) stac -> 1 (steal 1 :gate) (steal all :hit))"
+                    .into()
+            )
+        );
+    }
+
     #[test]
     fn jaki_word_alternation_covers_xf_words_and_id() {
         // Parameterized/xf members alternate too: ((rot 1) id) rotates the

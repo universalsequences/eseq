@@ -16,6 +16,12 @@
 ;; `(every 2 (rev swap))` on its `+`, scrub numbers, pick words; any argument
 ;; may be a list, one per cycle.
 ;;
+;; A row is a lane (jaki-sequencer-spec §7.6). Its number, at the left, is how
+;; other rows name it; double-click it to give it a name instead. Row words
+;; `(like LANE)` (that lane's whole chain, live) and `(steal LANE :scope)`
+;; (priority over it) pick from the pattern's other lanes. Right-click a row
+;; for Copy / Paste / Paste as Link / Duplicate / Name / Detach / Clear.
+;;
 ;; A row's `rules` toggle, before its words, opens a box of its rules under it
 ;; (docs/jaki-row-processes-spec.md §9, §15), one line each: TRIGGER ->
 ;; STAGES… ACTIONS…, both sexp-slots; `+ rule` adds one, and the row's seed
@@ -33,12 +39,15 @@
 
 (import alez.jaki.doc)
 (import alez.jaki.chords)
-(import eseq.view-kit :refer (color-rgba))
+(import eseq.view-kit :refer (color-rgba open-menu! menu-of listed?))
 (import eseq.kinds :refer (tracks groups generator-of generator-mark-named generator-mark-of))
 (import eseq.scene-banks :refer (scene-viewed-bank bank-tracks))
 (import eseq.glance)
 
-(export jk-panel)
+(export jk-panel
+        ;; the row menu's edits, for tests
+        jk-commit-name jk-hold-row jk-paste-row jk-paste-link jk-duplicate-row
+        jk-detach-row jk-clear-row)
 
 (def jk-max-rows 16)
 (def jk-row-height 1.3)
@@ -127,6 +136,263 @@
 (def jk-set-mods (self k index mods)
   (jk-edit-row self k index (lambda (row) (merge row :mods mods))))
 
+;; ── lanes: names, links, the row menu ─────────────────────────────────────
+;; (alez.jaki.doc, "lanes"). A lane reference is stored as the lane's label:
+;; its name, or its number as a word. Whatever changes a label — a rename, a
+;; row moving down — rewrites the references to it in the same edit.
+
+(def jk-take (xs n) (map (lambda (i) (nth xs i)) (range 0 (min n (len xs)))))
+
+(def jk-padded-rows (rows n)
+  (if (< n (len rows))
+    rows
+    (append rows (map (lambda (j) alez.jaki.doc/default-row) (range (len rows) (+ n 1))))))
+
+;; a stored lane reference naming `old`: the label itself, or a typed number
+(def jk-ref-is? (x old)
+  (or (= x old) (and (number? x) (= (str (round x)) old))))
+
+;; a row's words with every lane reference passed through `f`
+(def jk-map-refs (row f)
+  (merge row :mods
+    (map (lambda (m)
+           (if (alez.jaki.doc/like-item? m)
+             (list "like" (f (nth m 1)))
+             (if (alez.jaki.doc/steal-item? m)
+               (cons "steal" (map (lambda (x) (if (or (= x "all") (and (string? x) (= (substring x 0 1) ":")))
+                                                x
+                                                (f x)))
+                                  (rest m)))
+               m)))
+         (alez.jaki.doc/row-mods row))))
+
+(def jk-relabel (rows old new)
+  (map (lambda (row) (jk-map-refs row (lambda (x) (if (jk-ref-is? x old) new x)))) rows))
+
+;; One write for a pattern's rows and row count, so they undo together.
+(def jk-put-rows (self k rows count)
+  (if (= k 0)
+    (__instance-doc-write-many self "rows" rows "row-count" count)
+    (set! self.patterns
+      (jk-update-nth self.patterns (- k 1)
+        (lambda (p) (merge p :rows rows :row-count count))))))
+
+;; A name another lane answers to, a number, or a steal word would make
+;; references ambiguous: such a name is refused (the old label stays).
+(def jk-name-ok? (name rows count index)
+  (and (not (= name "all"))
+       (and (not (= (substring name 0 1) ":"))
+            (and (not (number? (read-string name)))
+                 (not (listed? name (alez.jaki.doc/lane-labels rows count index)))))))
+
+(def jk-start-naming (self k index)
+  (let ((name (alez.jaki.doc/row-name (alez.jaki.doc/row-at (jk-field self k :rows) index))))
+    (set! self.name-draft (if name name ""))
+    (set! self.naming (jk-rules-key k index))))
+
+;; "" clears the name: the row answers to its number again
+(def jk-commit-name (self k index)
+  (let ((rows (jk-padded-rows (jk-field self k :rows) index))
+        (count (jk-field self k :row-count))
+        (name self.name-draft))
+    (set! self.naming "")
+    (when (or (= name "") (jk-name-ok? name rows count index))
+      (let ((old (alez.jaki.doc/lane-label rows index))
+            (new (if (= name "") (str index) name)))
+        (jk-put self k :rows
+          (jk-relabel (jk-update-nth rows index (lambda (row) (merge row :name name)))
+                      old new))))))
+
+;; the row menu's target, and the copied lane. Singletons: one menu is open
+;; at a time, and a lane copied in one jaki pastes into another.
+(def-kind jk-row-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)
+          (inst :any :default nil)
+          (k 0)
+          (index 0)))
+
+(def-kind jk-clip
+  :key ()
+  :state ((row :any :default nil)
+          (inst :any :default nil)
+          (k 0)
+          (index 0)))
+
+(def jk-open-row-menu (self k index event)
+  (set! jk-row-menu.inst self.id)
+  (set! jk-row-menu.k k)
+  (set! jk-row-menu.index index)
+  (open-menu! jk-row-menu event))
+
+;; a row's words as the text a jak form holds: left (dashdecay 0)
+(def jk-row-text (row)
+  (reduce (lambda (acc w) (if (= acc "") (source w) (str acc " " (source w))))
+          "" (map alez.jaki.doc/mod-form (get row :mods))))
+
+;; Copy keeps the lane here (words, rules, seed) and puts its words on the
+;; system clipboard as text.
+(def jk-hold-row (self k index)
+  (set! jk-clip.row (alez.jaki.doc/row-at (jk-field self k :rows) index))
+  (set! jk-clip.inst self.id)
+  (set! jk-clip.k k)
+  (set! jk-clip.index index))
+
+(def jk-copy-row (self k index)
+  (jk-hold-row self k index)
+  (clipboard-write (jk-row-text jk-clip.row)))
+
+(def jk-row-seed (row) (let ((s (get row :seed))) (if (and (number? s) (>= s 0)) s -1)))
+
+;; Paste replaces the row's words, rules and seed; its destination and its
+;; name stay.
+(def jk-paste-row (self k index)
+  (let ((src jk-clip.row))
+    (when src
+      (jk-edit-row self k index
+        (lambda (row)
+          (merge row :mods (alez.jaki.doc/row-mods src)
+                     :procs (alez.jaki.doc/row-procs src)
+                     :seed (jk-row-seed src)))))))
+
+;; the copied lane can be linked to from row `index`: same jaki, same pattern
+;; (a link shares the pattern's figures), another row
+(def jk-can-link? (self k index)
+  (and jk-clip.row
+       (and (= jk-clip.inst self.id)
+            (and (= jk-clip.k k)
+                 (and (not (= jk-clip.index index))
+                      (< jk-clip.index (jk-field self k :row-count)))))))
+
+(def jk-paste-link (self k index)
+  (when (jk-can-link? self k index)
+    (let ((ref (alez.jaki.doc/lane-label (jk-field self k :rows) jk-clip.index)))
+      (jk-edit-row self k index
+        (lambda (row) (merge row :mods (list (list "like" ref)) :procs (list) :seed -1))))))
+
+;; A copy of the row right under it, without its name. Rows below move down
+;; one (the last falls off a full pattern), and references to their numbers
+;; follow them.
+(def jk-duplicate-row (self k index)
+  (let ((count (jk-field self k :row-count)))
+    (let ((rows (jk-padded-rows (jk-field self k :rows) (- count 1))))
+      (let ((moved (reduce (lambda (rs j) (jk-relabel rs (str j) (str (+ j 1))))
+                           rows
+                           ;; highest first, so a moved number is not moved twice
+                           (map (lambda (i) (- (+ count index) i)) (range (+ index 1) count))))
+            (n (min jk-max-rows (+ count 1))))
+        ;; a copied lane below the new row moved down with the rest
+        (when (and (= jk-clip.inst self.id) (and (= jk-clip.k k) (> jk-clip.index index)))
+          (set! jk-clip.index (+ jk-clip.index 1)))
+        (jk-put-rows self k
+          (jk-take (append (jk-take moved (+ index 1))
+                           (list (merge (nth moved index) :name ""))
+                           (map (lambda (j) (nth moved j)) (range (+ index 1) (len moved))))
+                   jk-max-rows)
+          n)))))
+
+(def jk-row-links? (row)
+  (reduce (lambda (a m) (or a (alez.jaki.doc/like-item? m))) false (alez.jaki.doc/row-mods row)))
+
+;; Detach: each (like LANE) becomes a copy of what the link gave the row:
+;; that lane's words as they are now (not its steals, which a link never
+;; carries), its rules, and its seed when the row has none of its own.
+(def jk-detach-row (self k index)
+  (let ((rows (jk-field self k :rows)) (count (jk-field self k :row-count)))
+    (let ((master (lambda (m)
+                    (let ((j (alez.jaki.doc/lane-ref-index rows count (nth m 1))))
+                      (if (and (>= j 0) (not (= j index))) (alez.jaki.doc/row-at rows j) nil)))))
+      (jk-edit-row self k index
+        (lambda (row)
+          (let ((got (reduce (lambda (acc m)
+                               (let ((src (if (alez.jaki.doc/like-item? m) (master m) nil)))
+                                 (if src
+                                   (dict :mods (append (get acc :mods)
+                                                       (filter (lambda (x) (not (alez.jaki.doc/steal-item? x)))
+                                                             (alez.jaki.doc/row-mods src)))
+                                         :procs (append (get acc :procs) (alez.jaki.doc/row-procs src))
+                                         :seed (if (< (get acc :seed) 0) (jk-row-seed src) (get acc :seed)))
+                                   (if (alez.jaki.doc/like-item? m)
+                                     acc
+                                     (merge acc :mods (append (get acc :mods) (list m)))))))
+                             (dict :mods (list) :procs (list) :seed (jk-row-seed row))
+                             (alez.jaki.doc/row-mods row))))
+            (merge row :mods (get got :mods)
+                       :procs (append (get got :procs) (alez.jaki.doc/row-procs row))
+                       :seed (get got :seed))))))))
+
+(def jk-clear-row (self k index)
+  (jk-edit-row self k index (lambda (row) (merge row :mods (list) :procs (list) :seed -1))))
+
+(def jk-menu-do (action)
+  (set! jk-row-menu.open false)
+  (action))
+
+;; The open row menu, drawn by the jaki whose row it is.
+(def jk-row-menu-view (self)
+  (if (and (= jk-row-menu.inst self.id) (< jk-row-menu.k (len (jk-patterns self))))
+    (let ((k jk-row-menu.k) (index jk-row-menu.index))
+      (let ((row (alez.jaki.doc/row-at (jk-field self k :rows) index)))
+        (menu-of jk-row-menu
+          (menu-item "Copy Lane" :key "jaki-row-menu-copy"
+            :on-select (lambda (event) (jk-menu-do (lambda () (jk-copy-row self k index)))))
+          (menu-item "Paste Lane" :key "jaki-row-menu-paste"
+            :disabled (not jk-clip.row)
+            :on-select (lambda (event) (jk-menu-do (lambda () (jk-paste-row self k index)))))
+          (menu-item "Paste as Link" :key "jaki-row-menu-paste-link"
+            :disabled (not (jk-can-link? self k index))
+            :on-select (lambda (event) (jk-menu-do (lambda () (jk-paste-link self k index)))))
+          (menu-item "Duplicate Below" :key "jaki-row-menu-duplicate"
+            :on-select (lambda (event) (jk-menu-do (lambda () (jk-duplicate-row self k index)))))
+          (menu-item "Name Lane…" :key "jaki-row-menu-name"
+            :on-select (lambda (event) (jk-menu-do (lambda () (jk-start-naming self k index)))))
+          (menu-item "Detach Link" :key "jaki-row-menu-detach"
+            :disabled (not (jk-row-links? row))
+            :on-select (lambda (event) (jk-menu-do (lambda () (jk-detach-row self k index)))))
+          (menu-item "Clear Lane" :key "jaki-row-menu-clear"
+            :on-select (lambda (event) (jk-menu-do (lambda () (jk-clear-row self k index))))))))
+    nil))
+
+;; What a row's (like LANE) words bring in, spelled out dim after its own
+;; words — or, in the error color, the lane they cannot find.
+(def jk-link-hint (rows count row index)
+  (reduce
+    (lambda (acc m)
+      (if (alez.jaki.doc/like-item? m)
+        (let ((j (alez.jaki.doc/lane-ref-index rows count (nth m 1))))
+          (if (or (< j 0) (= j index))
+            (list (str "no lane " (nth m 1)) :error)
+            (if (and acc (= (nth acc 1) :error))
+              acc
+              (let ((src (alez.jaki.doc/row-at rows j)))
+                (let ((n (len (alez.jaki.doc/row-procs src))) (text (jk-row-text src)))
+                  (list (str (if acc (str (nth acc 0) "  ") "")
+                             (if (= text "") "(no words)" text)
+                             (if (> n 0) (str "  + rules " n) ""))
+                        :dim))))))
+        acc))
+    nil (alez.jaki.doc/row-mods row)))
+
+;; The row's lane label: its name or number. Double-click names it.
+(def jk-label-width 4.6)
+
+(def jk-row-label (self k index row live)
+  (if (= self.naming (jk-rules-key k index))
+    (text-input :key (jk-key k (str "jaki-row-name-" index))
+      :width jk-label-width :height jk-row-height :font-size 9
+      :value self.name-draft :placeholder (str index)
+      :auto-focus true :select-all-on-focus true
+      :on-change (lambda (value) (set! self.name-draft value))
+      :on-submit (lambda () (jk-commit-name self k index))
+      :on-cancel (lambda () (set! self.naming "")))
+    (let ((name (alez.jaki.doc/row-name row)))
+      (label (if name name (str index)) :key (jk-key k (str "jaki-row-label-" index))
+        :width jk-label-width :height jk-row-height :font-size 9 :h-align :center
+        :color (if name :process-lane-accent (if live :foreground :dim)) :bg :transparent
+        :on-double-click (lambda (event) (jk-start-naming self k index))
+        :on-right-click (lambda (event) (jk-open-row-menu self k index event))))))
+
 ;; ── row rules (docs/jaki-row-processes-spec.md §9; stored as :procs) ───────
 
 (def jk-set-procs (self k index procs)
@@ -158,6 +424,8 @@
 
 ;; Removing the first pattern moves the second into its place.
 (def jk-remove-pattern (self k)
+  ;; a copied lane's pattern number no longer says where it came from
+  (when (= jk-clip.inst self.id) (set! jk-clip.k -1))
   (if (> k 0)
     (set! self.patterns (jk-remove-nth self.patterns (- k 1)))
     (if (empty? self.patterns)
@@ -491,8 +759,9 @@
           0 (range 0 k)))
 
 ;; `sounding`: the row is routed and its pattern plays, so its route has marks
-(def jk-row (self k index row route-slot sounding viewed)
+(def jk-row (self k index row route-slot sounding viewed rows count)
   (let ((live (alez.jaki.doc/row-live? row))
+        (hint (jk-link-hint rows count row index))
         (routes (jk-route-tracks self))
         (menu (jk-menu-routes self routes row viewed))
         (t (jk-row-track routes row))
@@ -500,11 +769,11 @@
         (reason (jk-row-reason self k index)))
     (box :key (jk-key k (str "jaki-row-" index))
       :height jk-row-height :padding 0 :background-color :transparent
+      :on-right-click (lambda (event) (jk-open-row-menu self k index event))
       (h-stack :gap 0.4 :align :center
         (box :width 0.3 :height jk-row-height :corner-radius 2
           :background-color (jk-route-color row t))
-        (label (str index) :width 1.4 :height jk-row-height :font-size 9
-          :h-align :center :color (if live :foreground :dim) :bg :transparent)
+        (jk-row-label self k index row live)
         (dropdown
           :key (jk-key k (str "jaki-route-" index))
           :value-index (jk-menu-index routes menu row)
@@ -518,7 +787,10 @@
         (sexp-slot
           :key (jk-key k (str "jaki-mods-" index))
           ;; a Chords row offers only progression words
-          :schema (if (jk-chords-row? row) alez.jaki.doc/chords-row-schema alez.jaki.doc/row-schema)
+          ;; (like LANE) / (steal LANE …) pick from this pattern's other lanes
+          :schema (if (jk-chords-row? row)
+                    alez.jaki.doc/chords-row-schema
+                    (alez.jaki.doc/row-schema-for (alez.jaki.doc/lane-labels rows count index)))
           :value (alez.jaki.doc/row-mods row)
           :height jk-row-height :font-size 9
           ;; one line always: the row is one line tall, a wrapped second
@@ -542,6 +814,10 @@
           :dyn-context (if t t.index nil)
           :on-hover (lambda (item) (jk-hover-row self k index item t))
           :on-change (lambda (mods) (jk-set-mods self k index mods)))
+        (if hint
+          (label (nth hint 0) :height jk-row-height :font-size 9 :v-align :center
+            :color (nth hint 1) :bg :transparent)
+          nil)
         (if reason
           (label reason :width 12 :height jk-row-height :font-size 9
             :color :error :bg :transparent)
@@ -551,7 +827,7 @@
 
 ;; where the row's words start (color bar, index, route dropdown, gaps), so
 ;; the rules box lines up under them
-(def jk-rule-indent 10.9)
+(def jk-rule-indent 14.1)
 
 (def jk-rules-toggle (self k index row)
   (let ((n (len (alez.jaki.doc/row-procs row))) (open (jk-rules-open? self k index)))
@@ -666,7 +942,8 @@
               (let ((row (alez.jaki.doc/row-at rows i))
                   (slot (+ base (jk-live-rows-before rows i))))
                 (v-stack :gap 0.25
-                  (jk-row self k i row slot (and sounds (alez.jaki.doc/row-live? row)) viewed)
+                  (jk-row self k i row slot (and sounds (alez.jaki.doc/row-live? row)) viewed
+                          rows (get pat :row-count))
                   (if (jk-rules-open? self k i)
                     (jk-rules self k i row slot)
                     nil)))))))))
@@ -711,7 +988,8 @@
           (box :width :fill :padding 0.4 :background-color :bg :corner-radius 6
             (v-stack :gap 0.1
               (each (jk-code-lines self pats) |line|
-                (label line :width 92 :height 1.0 :font-size 8 :color :dim :bg :transparent)))))))))
+                (label line :width 92 :height 1.0 :font-size 8 :color :dim :bg :transparent))))
+          (jk-row-menu-view self))))))
 
 ;; The kind (docs/instance-kinds-spec.md, docs/jaki-kind-spec.md). Each
 ;; instance publishes the :generator under its own id; its tick reads the
@@ -730,8 +1008,11 @@
   ;; Where rows store their track (a member position on a rack): the host
   ;; shifts these when a track or member is removed (Off when it was theirs).
   :routes '((rows * route) (patterns * rows * route))
-  ;; view only: the row whose rules box is open ("k:index")
-  :state ((rules-open ""))
+  ;; view only: the row whose rules box is open ("k:index"),
+  ;; and the row being named ("k:index") with the name as typed so far
+  :state ((rules-open "")
+          (naming "")
+          (name-draft ""))
   :view jk-panel)
 
 ;; The kind's glance (docs/rig-spec.md §7, eseq.glance): the first

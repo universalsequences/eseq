@@ -2589,6 +2589,11 @@ impl Runtime {
                 "(read-string text)",
                 "One s-expression of data read from text, never evaluated; nil when the text is not exactly one piece of data.",
             ),
+            (
+                "clipboard-write",
+                "(clipboard-write text)",
+                "Put text on the system clipboard; true when it was taken.",
+            ),
             ("number?", "(number? x)", "Whether x is a number."),
             ("string?", "(string? x)", "Whether x is a string."),
             ("map?", "(map? x)", "Whether x is a map (a dict)."),

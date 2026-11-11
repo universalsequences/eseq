@@ -4507,6 +4507,14 @@ pub fn register_core_natives(vm: &mut VM) {
         _ => Value::Nil,
     });
 
+    // (clipboard-write text) → true when the system clipboard took the text.
+    // Write only: a view copies what it shows as text for other apps, and
+    // keeps its own structured copy for pasting.
+    vm.register_native("clipboard-write", |args| match args.first() {
+        Some(Value::String(text)) => Value::Bool(crate::clipboard::write(text).is_ok()),
+        _ => Value::Bool(false),
+    });
+
     // (substring s start [end]) → character-indexed substring
     vm.register_native("substring", |args| {
         let Some(Value::String(s)) = args.first() else {

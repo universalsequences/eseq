@@ -507,6 +507,90 @@ processes spec).
              (remap :in-lo -1 :in-hi 1 :out-lo 0 :out-hi 1) dashdecay*))
 ```
 
+## 7.6 Sparse lanes: `rest` / `play`, `as` / `like`, `steal`
+
+A route is a **lane**. These words make lanes that are mostly silent, lanes
+derived from another lane, and lanes that take hits away from another.
+
+**Silence sends nothing.** A hit whose final velocity is 0, that rests, or
+that another lane steals emits no note, no gate and no mark. (A silent trig
+on a shared track still retriggers or cuts the voice another lane holds.)
+
+**`(rest COND)` / `(play COND)`.** Bare `rest` drops every hit. With a
+condition it rests where COND is 1 (>= 0.5); `play` is the inverse. COND is
+value data like any per-hit argument:
+
+```lisp
+-> 0 (rest (1 0))                 ; rest every other cycle
+-> 0 (play (0 0 0 1))             ; silent three cycles, play the fourth
+-> 0 (rest (seq :fig 1 0 0 1))    ; stepped per figure
+-> 0 (rest (seq :hit 0 0 1))      ; every third hit
+-> 0 (on accent (rest (0 1)))     ; only the accents, every other cycle
+```
+
+A per-cycle COND is a post op that removes the events (surviving hits keep
+their timing and gates); a hit-clocked COND (`:hit` `:fig` `:span`) defers to
+emit like every clocked value. `(rest w…)` with WORD members — `(rest rest
+id)` — is still the word alternation of §11.2: a list is a condition only
+when its single argument is a number, a value list, or `(seq|cyc|chan …)`.
+
+**`(as NAME)` / `(like LANE)`.** A voice's routes are its lanes, numbered
+from 0 in body order. `(as kick)` names one. `(like LANE)` (a number or a
+name) stands for that lane's whole word chain, resolved from the body on
+every prepare, so the link is live; words after it add on:
+
+```lisp
+-> 0   (as kick) left (dashdecay 0)
+-> 1   (like kick) accent
+-> off (as tpl) right (rule any (coin :p 0.5) rest)
+-> 2   (like tpl)
+```
+
+- The destination is not inherited, and neither is the lane's `steal`.
+- Rules and seed come along. A linked lane without its own `(seed n)` gets
+  the seed the master's route plays with, so it rolls the same coins.
+- `-> off` is a lane that plays nothing: a template. It still counts in the
+  lane numbering and takes no route index.
+- Links reach lanes of the same voice only (they share its figures). A link
+  to itself, to a missing lane, or round in a circle is dropped.
+- Inherited words light nothing on the linking row (§7.3): its own words
+  keep their item indices.
+
+**`(steal [LANE] [:hit | :gate | :cycle])`.** Priority between lanes. Bare
+(or `all`) the lane wins against every route playing the same track, in any
+voice; with a lane it wins against that lane wherever it plays.
+
+| scope    | takes                                                       |
+|----------|-------------------------------------------------------------|
+| `:hit`   | hits that start exactly when one of its own does (default)  |
+| `:gate`  | also hits that start while one of its hits is held          |
+| `:cycle` | every hit of a cycle it plays in at all                     |
+
+```lisp
+-> 1 (like kick) accent (steal kick)             ; accents move to track 1
+-> 0 (like kick) (play (0 0 0 1)) (fast 2) (steal :cycle)   ; a fill takes over
+```
+
+When two lanes steal from each other the later one (the lower row) wins.
+`prepare` works out who takes from whom (`opts :thieves`) and a play order
+with every thief before its victims; a victim then checks what its thieves
+emitted this tick (`steal-log`), their held gates (generator state, for
+`:gate` across ticks) or their evaluated cycle (`:cycle`). A hit a thief
+rests or loses itself takes nothing. Limits: `:cycle` reads the evaluated
+cycle, so a per-cycle `(play …)` counts but a hit-clocked `(rest (seq :hit
+…))` does not empty it; `-> chords` and control routes take no part.
+
+**Kind panel** (`alez.jaki.kind`, `alez.jaki.doc`). A row's optional `:name`
+is its lane name (double-click the row number); the row words are
+`("like" LANE)` and `("steal" LANE-or-all SCOPE)` with LANE stored as the
+row's label (name, or number as a word), which `body` turns into lane
+numbers. A pattern with such words emits every row as a segment (`-> off`
+for Off rows) so a segment's place is its row number. Renaming a row or
+moving it (Duplicate Below) rewrites the references in the same edit. The
+row's right-click menu: Copy Lane (also puts the words on the system
+clipboard as text), Paste Lane, Paste as Link, Duplicate Below, Name Lane…,
+Detach Link, Clear Lane. Paste keeps the row's destination and name.
+
 ## 8. Runtime Model
 
 ### 8.1 Generator integration
