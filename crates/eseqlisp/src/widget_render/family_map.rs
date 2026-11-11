@@ -696,6 +696,70 @@ fn dot_radius_px(axis3: f32) -> f32 {
     2.5 + (axis3.clamp(-3.0, 3.0) + 3.0) * 0.7
 }
 
+/// The share of the plot an average-sized dot per member may cover before the
+/// dots are scaled down, and how far down they go.
+const DOT_COVERAGE: f32 = 0.16;
+const DOT_SCALE_MIN: f32 = 0.42;
+/// Outline around every dot, in the plot's background colour (design pixels).
+const DOT_OUTLINE_PX: f32 = 0.9;
+/// How opaque the plate behind a label on the plot is.
+const LABEL_PLATE_ALPHA: f32 = 0.78;
+/// A highlighted member (a marker's nearest, A, B) never shrinks below this.
+const NEAR_DOT_MIN_PX: f32 = 3.0;
+
+/// Radius of a highlighted member's dot: scaled like the rest, but not below
+/// `NEAR_DOT_MIN_PX` (or its own unscaled size, when that is smaller).
+fn near_dot_radius_px(axis3: f32, scale: f32) -> f32 {
+    let full = dot_radius_px(axis3);
+    (full * scale).max(NEAR_DOT_MIN_PX.min(full))
+}
+
+/// Dot radius scale for a family of `count` members on `plot_rect`: 1 for a
+/// small family, shrinking once the dots would cover more than
+/// `DOT_COVERAGE` of the plot, so a trained set of a thousand points stays a
+/// cloud of points instead of a blob.
+fn dot_scale(count: usize, plot_rect: Rect, cell_w: f32, cell_h: f32) -> f32 {
+    let px = super::ui_design_px(1.0).max(1e-3);
+    let area = (plot_rect.width * cell_w / px) * (plot_rect.height * cell_h / px);
+    let target = (DOT_COVERAGE * area / (std::f32::consts::PI * count.max(1) as f32)).sqrt();
+    (target / dot_radius_px(0.0)).clamp(DOT_SCALE_MIN, 1.0)
+}
+
+/// A translucent rounded plate behind a label at `(row, col)` that is `width`
+/// cells wide and one row tall, so the label reads over the dots.
+fn label_plate(mesh: &mut ShadedMesh, row: f32, col: f32, width: f32, background: Color, viewport: WidgetViewport) {
+    let cell_w = viewport.cell_w.max(1.0);
+    let cell_h = viewport.cell_h.max(1.0);
+    let pad_x = super::ui_design_px(4.0) / cell_w;
+    let pad_y = super::ui_design_px(1.5) / cell_h;
+    let (left, right) = (col - pad_x, col + width + pad_x);
+    let (top, bottom) = (row - pad_y, row + 1.0 + pad_y);
+    let radius_px = super::ui_design_px(4.0).min((bottom - top) * cell_h * 0.5);
+    const CORNER_STEPS: usize = 5;
+    // Left corner, straight run, right corner: how far the edge is pulled in
+    // at each x.
+    let mut tops = Vec::with_capacity(CORNER_STEPS * 2 + 2);
+    let mut bottoms = Vec::with_capacity(CORNER_STEPS * 2 + 2);
+    let mut push = |x: f32, inset_px: f32| {
+        tops.push([x, top + inset_px / cell_h]);
+        bottoms.push([x, bottom - inset_px / cell_h]);
+    };
+    // Sampled by angle, so the steep part of the arc gets its share of points.
+    let corner = |k: usize| {
+        let (sin, cos) = (std::f32::consts::FRAC_PI_2 * k as f32 / CORNER_STEPS as f32).sin_cos();
+        (radius_px * (1.0 - cos), radius_px * (1.0 - sin))
+    };
+    for k in 0..=CORNER_STEPS {
+        let (dx, inset) = corner(k);
+        push(left + dx / cell_w, inset);
+    }
+    for k in (0..=CORNER_STEPS).rev() {
+        let (dx, inset) = corner(k);
+        push(right - dx / cell_w, inset);
+    }
+    mesh.push_band(&tops, &bottoms, with_alpha(background, LABEL_PLATE_ALPHA));
+}
+
 /// The blend point and where Exaggerate + the axis offsets take it.
 fn morph_points(family: &Family, morph: &Morph) -> ([f32; 3], [f32; 3]) {
     let sa = family.scores[morph.a];
@@ -1613,6 +1677,12 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
         }
 
         let mut mesh = ShadedMesh::new();
+        // Plates behind the plot's labels: over the dots, under the text.
+        let mut plates = ShadedMesh::new();
+        let scale = dot_scale(family.members.len(), plot_rect, cell_w, cell_h);
+        let dot = |mesh: &mut ShadedMesh, at: [f32; 2], radius: f32, color: Color| {
+            mesh.push_dot(at, radius, color, background, DOT_OUTLINE_PX, viewport);
+        };
         let markers = markers_from_props(props, family.members.len());
         if !markers.is_empty() {
             let selected = selected_marker(props, &markers);
@@ -1630,12 +1700,17 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
             let near_color = |i: usize| {
                 markers.iter().zip(&colors).rev().find(|(m, _)| m.near == Some(i)).map(|(_, c)| *c)
             };
-            for (_, score) in family.scores.iter().enumerate().filter(|(i, _)| near_color(*i).is_none()) {
-                mesh.push_disc(plot.point(score[0], score[1]), dot_radius_px(score[2]), dot_color, viewport);
+            // Big dots first, so a small one is never buried under them.
+            let mut rest: Vec<&[f32; 3]> =
+                family.scores.iter().enumerate().filter(|(i, _)| near_color(*i).is_none()).map(|(_, s)| s).collect();
+            rest.sort_by(|a, b| b[2].total_cmp(&a[2]));
+            for score in rest {
+                dot(&mut mesh, plot.point(score[0], score[1]), dot_radius_px(score[2]) * scale, dot_color);
             }
             for (i, score) in family.scores.iter().enumerate() {
                 if let Some(color) = near_color(i) {
-                    mesh.push_disc(plot.point(score[0], score[1]), dot_radius_px(score[2]), color, viewport);
+                    let radius = near_dot_radius_px(score[2], scale);
+                    dot(&mut mesh, plot.point(score[0], score[1]), radius, color);
                 }
             }
             // Leads from each marker's nearest member, then the rings, the
@@ -1698,7 +1773,12 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
             // label that would cover one already placed (two rings close
             // together) takes the other side, else moves down a line.
             let mut placed: Vec<(f32, f32, f32)> = Vec::new();
-            for (i, (row, col, width)) in label_slots(&markers, &centers, plot_rect, pad_w, cell_w, &mut placed) {
+            let slots = label_slots(&markers, &centers, plot_rect, pad_w, cell_w, &mut placed);
+            for &(_, (row, col, width)) in &slots {
+                label_plate(&mut plates, row, col, width, background, viewport);
+            }
+            plates.push_into(&mut prims);
+            for (i, (row, col, width)) in slots {
                 let mut primitive = text(row, col, markers[i].label.clone(), 9.0, colors[i]);
                 if let GpuPrimitive::ProportionalText(t) = &mut primitive {
                     t.align_width = width;
@@ -1729,7 +1809,12 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
             } else {
                 dot_color
             };
-            mesh.push_disc(plot.point(score[0], score[1]), dot_radius_px(score[2]), color, viewport);
+            let radius = if i == morph.a || i == morph.b {
+                near_dot_radius_px(score[2], scale)
+            } else {
+                dot_radius_px(score[2]) * scale
+            };
+            dot(&mut mesh, plot.point(score[0], score[1]), radius, color);
         }
         let (ring_center, ring_axis3) = match point {
             Some(point) => {
@@ -1773,29 +1858,32 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
 
         // Tags for A and B, right of their dots, or left of them when the
         // name would run past the plot's right edge.
-        let tag = |p: [f32; 2], label: String, color: Color| {
+        let mut tag = |p: [f32; 2], label: String, color: Color| {
             let gap = super::ui_design_px(13.0) / cell_w;
             let width = label.chars().count() as f32 * 0.62;
-            if p[0] + gap + width > plot_rect.col + plot_rect.width - pad_w {
-                let mut primitive = text(p[1] - 0.5, p[0] - gap - width, label, 9.5, color);
-                if let GpuPrimitive::ProportionalText(t) = &mut primitive {
-                    t.align_width = width;
-                    t.h_align = 1.0;
-                }
-                primitive
-            } else {
-                text(p[1] - 0.5, p[0] + gap, label, 9.5, color)
+            let left = p[0] + gap + width > plot_rect.col + plot_rect.width - pad_w;
+            let col = if left { p[0] - gap - width } else { p[0] + gap };
+            label_plate(&mut plates, p[1] - 0.5, col, width, background, viewport);
+            let mut primitive = text(p[1] - 0.5, col, label, 9.5, color);
+            if left && let GpuPrimitive::ProportionalText(t) = &mut primitive {
+                t.align_width = width;
+                t.h_align = 1.0;
             }
+            primitive
         };
         // A point forces a == b; in latent mode the tag is the name alone.
-        if point.is_some() || (morph.a == morph.b && latent_mode(props)) {
-            prims.push(tag(pa, family.members[morph.a].clone(), accent));
+        let tags = if point.is_some() || (morph.a == morph.b && latent_mode(props)) {
+            vec![tag(pa, family.members[morph.a].clone(), accent)]
         } else if morph.a == morph.b {
-            prims.push(tag(pa, format!("ab {}", family.members[morph.a]), accent));
+            vec![tag(pa, format!("ab {}", family.members[morph.a]), accent)]
         } else {
-            prims.push(tag(pb, format!("b {}", family.members[morph.b]), b_color));
-            prims.push(tag(pa, format!("a {}", family.members[morph.a]), accent));
-        }
+            vec![
+                tag(pb, format!("b {}", family.members[morph.b]), b_color),
+                tag(pa, format!("a {}", family.members[morph.a]), accent),
+            ]
+        };
+        plates.push_into(&mut prims);
+        prims.extend(tags);
         prims.extend(recording_badge(props, plot_rect, background, cell_w, cell_h, viewport));
         prims
     }

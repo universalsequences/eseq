@@ -372,6 +372,18 @@ impl ShadedMesh {
         color: Color,
         viewport: WidgetViewport,
     ) {
+        self.disc_px_steps(center, radius_px, DISC_SEGMENTS, color, viewport);
+    }
+
+    /// [`Self::push_disc_px`] with an explicit facet count.
+    fn disc_px_steps(
+        &mut self,
+        center: [f32; 2],
+        radius_px: f32,
+        steps: usize,
+        color: Color,
+        viewport: WidgetViewport,
+    ) {
         if radius_px <= 0.0 || color.a <= 0.0 {
             return;
         }
@@ -386,7 +398,7 @@ impl ShadedMesh {
             cell_h,
             0.0,
             TAU,
-            DISC_SEGMENTS,
+            steps,
             inner,
             inner + fringe_px,
             color,
@@ -395,6 +407,29 @@ impl ShadedMesh {
 }
 
 impl ShadedMesh {
+    /// A scatter-plot dot: a `fill` disc of `radius` design pixels over a
+    /// slightly larger `outline` disc. Drawn in sequence, each dot's outline
+    /// cuts an edge into the dots under it, so a dense cloud still reads as
+    /// separate points. Small dots use fewer facets than [`Self::push_disc`].
+    pub fn push_dot(
+        &mut self,
+        center: [f32; 2],
+        radius: f32,
+        fill: Color,
+        outline: Color,
+        outline_width: f32,
+        viewport: WidgetViewport,
+    ) {
+        let radius_px = super::ui_design_px(radius);
+        if radius_px <= 0.0 {
+            return;
+        }
+        let outline_px = super::ui_design_px(outline_width);
+        let steps = ((TAU * (radius_px + outline_px) / 2.5).ceil() as usize).clamp(8, DISC_SEGMENTS);
+        self.disc_px_steps(center, radius_px + outline_px, steps, outline, viewport);
+        self.disc_px_steps(center, radius_px, steps, fill, viewport);
+    }
+
     /// Anti-aliased circle outline (an SVG `<circle>` stroke): `stroke_px`
     /// device pixels wide, centred on `radius_px`. Each edge fades over the
     /// fringe straddling it, so ink coverage matches the nominal width; a
