@@ -522,6 +522,11 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
         } else {
             d = min(abs(drop) - stroke, glint);
         }
+    } else if (input.value_t > 22.5) {
+        // lane: an automation breakpoint on its line (Ableton's lane
+        // toggle), the same in either style.
+        var line: f32 = button_icon_segment(p, vec2<f32>(-0.50, 0.0), vec2<f32>(0.50, 0.0)) - stroke;
+        d = min(line, length(p - vec2<f32>(-0.16, 0.0)) - 0.20);
     } else if (input.value_t > 21.5) {
         // swatch: a solid disc, the same in either style (a color chip whose
         // color is the glyph's own).

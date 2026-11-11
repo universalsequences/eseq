@@ -1087,3 +1087,91 @@ fn the_loop_brace_drags_live_commits_once_and_toggles() {
     widgets_with_prop(&h.buffer_tree("*arrangement*").0, "loop-brace", &mut braced);
     assert_eq!(braced.len(), 1, "one ruler draws the brace");
 }
+
+/// A sound designed in session view survives the arrangement round trip:
+/// scene 1 launched (every lane latched and pinned to its pattern), its clip
+/// clicked and released in the arrangement, a scene cloned with `+`, a Place
+/// rejected for overlap, back to session. Releasing the clip used to load
+/// the track's stock sound into the latched lane, and the clone's save-back
+/// wrote it over scene 1's pattern.
+#[test]
+fn a_session_sound_survives_a_clip_click_and_scene_clone_in_the_arrangement() {
+    let mut h = distro();
+    h.app.set_arrangement_view_visible(false);
+    let p1 = h
+        .app
+        .state
+        .with_project_scenes(|scenes| scenes.effective_pattern_id(0))
+        .expect("scene 1 has a pattern on track 0");
+    let target = 0.33f32;
+    sequencer::app::try_apply_command(
+        &mut h.app,
+        sequencer::app::AppCommand::SetTrackVolume { track: 0, value: target },
+    )
+    .expect("edit");
+    let stored = |h: &Harness, pattern| {
+        h.app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0].get(pattern).expect("pattern").track_params.volume
+        })
+    };
+    let live = |h: &Harness| h.app.state.pattern.track_params[0].get_volume();
+    let step = |h: &mut Harness| {
+        h.settle();
+        h.app.sync_track_sound_bindings();
+    };
+    // The scene pill: a manual launch latches every lane.
+    h.command("switch-pattern", map_value([("idx", Value::Number(0.0))]));
+    step(&mut h);
+    assert_ne!(h.app.state.song_manual_latch_mask() & 1, 0, "the launch latches");
+
+    h.app.set_arrangement_view_visible(true);
+    h.command(
+        "arrangement-scene-insert",
+        map_value([
+            ("beat", Value::Number(0.0)),
+            ("scene", Value::Number(0.0)),
+            ("place-patterns", Value::Bool(true)),
+        ]),
+    );
+    step(&mut h);
+    let clip = h.app.state.committed_arrangement().expect("arrangement").track_lanes[0][0].id;
+    h.click_clip(0, clip);
+    h.app.sync_track_sound_bindings();
+    h.eval("(eseq.arrangement/track-action 0 (dict :type :select :ids (list) :time 90))");
+    step(&mut h);
+    assert_eq!(h.app.song_clip_selection, None);
+    assert_eq!(live(&h), target, "releasing the clip keeps the latched pattern's sound");
+
+    h.click_clip(0, clip);
+    h.app.sync_track_sound_bindings();
+    h.eval_with("(import eseq.transport :refer (seq-clone-pattern))", "(seq-clone-pattern)");
+    step(&mut h);
+    assert_eq!(h.app.state.current_scene_index(), 1, "the clone is current");
+    assert_eq!(stored(&h, p1), target, "the clone's save-back spares scene 1");
+    let p2 = h
+        .app
+        .state
+        .with_project_scenes(|scenes| scenes.effective_pattern_id(0))
+        .expect("the clone has a pattern");
+    assert_ne!(p2, p1);
+    assert_eq!(
+        h.app.state.with_project_scenes(|scenes| scenes.track_overrides[0]),
+        Some(p2),
+        "the latched lane is pinned to the clone"
+    );
+
+    h.eval("(eseq.arrangement/begin-placement)");
+    h.settle();
+    h.eval("(eseq.arrangement/track-action 0 (dict :type :place-item :time 4))");
+    step(&mut h);
+    assert!(h.app.song_edit_error.is_some(), "the overlapping Place is rejected");
+    h.eval("(eseq.arrangement/track-action 0 (dict :type :select :ids (list) :time 90))");
+    step(&mut h);
+    assert_eq!(live(&h), target, "the lane still sounds as designed");
+
+    h.app.set_arrangement_view_visible(false);
+    h.command("switch-pattern", map_value([("idx", Value::Number(0.0))]));
+    step(&mut h);
+    assert_eq!((stored(&h, p1), stored(&h, p2)), (target, target));
+    assert_eq!(live(&h), target, "scene 1 plays the sound it was given");
+}

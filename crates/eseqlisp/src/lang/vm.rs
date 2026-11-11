@@ -8294,6 +8294,17 @@ impl VM {
         if self.dag.is_dirty(node_id) {
             return None;
         }
+        // The cached tree embeds its nested subtrees' last renders. A dirty
+        // one (a field only it reads changed) would come back stale, and its
+        // own pending rerender can lose to this ancestor's replacement in
+        // the flush (the step panel's p-lock chips kept the previous
+        // selection's highlight). Render the body instead: its clean nested
+        // subtrees are still reused, the dirty ones rebuilt in place.
+        if (self.dag.descendant_subtree_effect_ids(root_id).iter())
+            .any(|&id| self.dag.is_dirty(id))
+        {
+            return None;
+        }
         self.registered_subtree_owner(root_id)?;
         let cached = self.subtree_render_cache.get(&root_id)?;
         if cached.parent_root_id != parent_root_id {

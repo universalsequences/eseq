@@ -75,6 +75,12 @@ pub enum MotionClass {
     /// Deliberately discontinuous: the response jumps between frame regions.
     /// Still bounded and validated, just not smooth.
     Jump,
+    /// A figure rather than a journey: a loop, a chord progression, an
+    /// interference pattern. The other three classes all describe where the
+    /// energy centre travels; a figure's motion is in its structure, and its
+    /// centroid may hardly move at all. Validated only for bounded steps and
+    /// for actually changing.
+    Figure,
 }
 
 /// How one element parameter moves across the 64 frames. `frame` is
@@ -378,6 +384,81 @@ pub enum Element {
         depth_db: Traj,
         drift_octaves: Traj,
     },
+    /// A peaking resonance with the skirts of a real second-order section:
+    /// `gain_db` at `center`, falling back to 0 dB along `1 / (1 + d^2)` in
+    /// power, where `d = q * (f/f0 - f0/f)`. Negative `gain_db` is the
+    /// matching notch.
+    ///
+    /// The difference from [`Element::Peak`] is the tails. A Gaussian in dB
+    /// has none: it is an EQ bump. A pole pair has a sharp top and long
+    /// skirts, and the skirts are what survives the runtime's finite
+    /// response length and still reads as "a resonance".
+    Resonance { center: Traj, q: Traj, gain_db: Traj },
+    /// Two-pole resonant lowpass: 0 dB at DC, a lip of `20*log10(q)` at
+    /// `edge`, -12 dB/octave above. Summing several (a cascade) is the
+    /// classic formant synthesizer: each formant's level then follows from
+    /// where the others sit, the way it does in a real vocal tract.
+    PoleLowpass { edge: Traj, q: Traj },
+    /// Magnitude of a feedback comb `1 / (1 - g z^-D)`: sharp peaks at whole
+    /// multiples of `spacing` (in units of the reference harmonic, like
+    /// [`Element::Comb`]) with broad valleys between. Negative `feedback`
+    /// moves the peaks to the half-multiples (the hollow, odd-harmonic
+    /// comb). `stretch` warps tooth positions like [`Element::Comb`];
+    /// `damp` shrinks the feedback with frequency (`g * exp(-damp * f/ref)`)
+    /// so upper teeth blunt the way a lossy string's do.
+    FeedbackComb {
+        spacing: Traj,
+        feedback: Traj,
+        stretch: Traj,
+        damp: Traj,
+    },
+    /// Power sum of the inner elements: `10*log10(sum 10^(dB/10))`. Elements
+    /// at the top level of a recipe multiply (a series chain); `Parallel`
+    /// adds them side by side, so several combs or resonators keep their own
+    /// peaks instead of carving holes in each other.
+    Parallel { inner: Vec<Element> },
+    /// A struck modal body: every mode is a complex second-order (velocity)
+    /// resonator and the modes are summed *before* taking the magnitude, so the
+    /// response has genuine antiresonances between neighbouring modes
+    /// rather than a row of independent bumps.
+    ///
+    /// Mode `i` sits at `2^base * ratio_i` (reference-harmonic units), where
+    /// `ratio_i` is the geometric blend of the mode's `from` and `to` ratios
+    /// by `morph` (0..1). Morphing the ratio set is morphing the *material*:
+    /// the same strike on a different object.
+    ModalBank {
+        modes: Vec<Mode>,
+        morph: Traj,
+        base: Traj,
+        q: Traj,
+    },
+    /// An elementary cellular automaton painted across the table: `cells`
+    /// bands spanning `[low, high]` octaves along the frequency axis,
+    /// `generations` successive states along the frame axis. A live cell
+    /// passes (0 dB), a dead one sits at `-depth_db`; `edge_octaves` rounds
+    /// the band boundaries. `rule` is the Wolfram rule number, the row is
+    /// bounded by dead cells, and `seed == 0` starts from a single live cell at
+    /// `start_cell` (any other seed fills the first row from the LCG).
+    Automaton {
+        rule: u8,
+        seed: u32,
+        start_cell: u32,
+        cells: u32,
+        generations: u32,
+        low: f32,
+        high: f32,
+        depth_db: f32,
+        edge_octaves: f32,
+    },
+}
+
+/// One mode of an [`Element::ModalBank`]: its frequency ratio at either end
+/// of the morph, and its peak level.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Mode {
+    pub from: f32,
+    pub to: f32,
+    pub gain_db: f32,
 }
 
 /// A complete deterministic generation recipe, embedded verbatim in the
@@ -455,6 +536,37 @@ fn value_noise(seed: u32, position: f32) -> f32 {
     let left = lattice_value(seed, index);
     let right = lattice_value(seed, index + 1);
     left + (right - left) * smooth
+}
+
+/// State of an elementary cellular automaton after `generation` steps, one
+/// bit per cell (bit `i` is cell `i`), on a row of `cells` cells bounded by
+/// dead cells.
+fn automaton_row(rule: u8, seed: u32, start_cell: u32, cells: u32, generation: u32) -> u64 {
+    let cells = cells.clamp(3, 64);
+    let mask = if cells == 64 { u64::MAX } else { (1u64 << cells) - 1 };
+    let mut state = if seed == 0 {
+        1u64 << start_cell.min(cells - 1)
+    } else {
+        (0..cells).fold(0u64, |bits, cell| {
+            bits | (u64::from(lattice_value(seed, cell as i32) > 0.5) << cell)
+        })
+    };
+    for _ in 0..generation {
+        // Neighbourhood value is (left << 2) | (centre << 1) | right, with
+        // "left" the next cell down in frequency.
+        let left = (state << 1) & mask;
+        let right = state >> 1;
+        let mut next = 0u64;
+        for pattern in 0..8u8 {
+            if rule & (1 << pattern) == 0 {
+                continue;
+            }
+            let pick = |bits: u64, wanted: u8| if wanted != 0 { bits } else { !bits };
+            next |= pick(left, pattern & 4) & pick(state, pattern & 2) & pick(right, pattern & 1);
+        }
+        state = next & mask;
+    }
+    state
 }
 
 impl Element {
@@ -652,6 +764,104 @@ impl Element {
                 let noise = value_noise(*seed, position);
                 depth_db.at(frame) * (noise * 2.0 - 1.0)
             }
+            Element::Resonance { center, q, gain_db } => {
+                let gain = gain_db.at(frame);
+                let ratio = 2.0f32.powf(o - center.at(frame));
+                let detune = q.at(frame).max(0.1) * (ratio - 1.0 / ratio);
+                let linear = 10.0f32.powf(gain.abs() / 20.0);
+                let power = 1.0 + (linear * linear - 1.0) / (1.0 + detune * detune);
+                gain.signum() * 10.0 * power.log10()
+            }
+            Element::PoleLowpass { edge, q } => {
+                let ratio = 2.0f32.powf(o - edge.at(frame));
+                let through = 1.0 - ratio * ratio;
+                let across = ratio / q.at(frame).max(0.3);
+                -10.0 * (through * through + across * across).max(1.0e-9).log10()
+            }
+            Element::FeedbackComb { spacing, feedback, stretch, damp } => {
+                let reference = bin as f32 / REFERENCE_HARMONIC as f32;
+                let harmonic = reference / spacing.at(frame).max(1.0e-3);
+                let warped = harmonic * (1.0 + stretch.at(frame) * harmonic);
+                let g = (feedback.at(frame) * (-damp.at(frame).max(0.0) * reference).exp())
+                    .clamp(-0.98, 0.98);
+                let power = 1.0 + g * g - 2.0 * g * (std::f32::consts::TAU * warped).cos();
+                -10.0 * power.max(1.0e-6).log10()
+            }
+            Element::Parallel { inner } => {
+                if inner.is_empty() {
+                    return 0.0;
+                }
+                let power: f32 = inner
+                    .iter()
+                    .map(|element| 10.0f32.powf(element.db(frame, bin) / 10.0))
+                    .sum();
+                10.0 * power.max(1.0e-12).log10()
+            }
+            Element::ModalBank { modes, morph, base, q } => {
+                let blend = morph.at(frame).clamp(0.0, 1.0);
+                let root = 2.0f32.powf(base.at(frame));
+                let q = q.at(frame).max(0.5);
+                let reference = bin as f32 / REFERENCE_HARMONIC as f32;
+                let (mut re, mut im) = (0.0f32, 0.0f32);
+                for mode in modes {
+                    let ratio = mode.from.max(1.0e-3).powf(1.0 - blend)
+                        * mode.to.max(1.0e-3).powf(blend);
+                    let x = reference / (root * ratio);
+                    // Velocity response a * (j x/q) / (1 - x^2 + j x/q): the
+                    // mode peaks at exactly its own gain and falls away on
+                    // both sides, so the body is quiet below its lowest mode
+                    // instead of sitting on a stiffness plateau.
+                    let through = 1.0 - x * x;
+                    let across = x / q;
+                    let scale = 10.0f32.powf(mode.gain_db / 20.0)
+                        / (through * through + across * across);
+                    re += scale * across * across;
+                    im += scale * across * through;
+                }
+                10.0 * (re * re + im * im).max(1.0e-12).log10()
+            }
+            Element::Automaton {
+                rule,
+                seed,
+                start_cell,
+                cells,
+                generations,
+                low,
+                high,
+                depth_db,
+                edge_octaves,
+            } => {
+                let cells = (*cells).clamp(3, 64);
+                let generations = (*generations).max(1);
+                let generation =
+                    ((frame.clamp(0.0, 1.0) * generations as f32) as u32).min(generations - 1);
+                let row = automaton_row(*rule, *seed, *start_cell, cells, generation);
+                let alive = |cell: i64| {
+                    if cell < 0 || cell >= cells as i64 {
+                        0.0f32
+                    } else {
+                        ((row >> cell) & 1) as f32
+                    }
+                };
+                let width = ((high - low) / cells as f32).max(1.0e-3);
+                let position = (o - low) / width;
+                let cell = position.floor();
+                let within = position - cell;
+                let cell = cell as i64;
+                // Round each band boundary over `edge_octaves`, centred on
+                // the boundary, so neighbouring live cells merge seamlessly.
+                let edge = (edge_octaves / width).clamp(1.0e-3, 0.5);
+                let level = if within < edge {
+                    let blend = smoothstep(0.5 + 0.5 * within / edge);
+                    alive(cell - 1) + (alive(cell) - alive(cell - 1)) * blend
+                } else if within > 1.0 - edge {
+                    let blend = smoothstep(0.5 * (within - (1.0 - edge)) / edge);
+                    alive(cell) + (alive(cell + 1) - alive(cell)) * blend
+                } else {
+                    alive(cell)
+                };
+                -depth_db * (1.0 - level)
+            }
         }
     }
 }
@@ -788,7 +998,7 @@ fn grating(
 /// `db_floor` values here are correspondingly shallow (-30 dB territory) so
 /// carving colours the sound instead of removing it.
 pub fn factory_presets() -> Vec<PresetDefinition> {
-    vec![
+    let mut presets = vec![
         // ---- pass-filter motion -------------------------------------------------
         PresetDefinition {
             stem: "swoop-low",
@@ -1736,6 +1946,320 @@ pub fn factory_presets() -> Vec<PresetDefinition> {
                 ],
             },
         },
+    ];
+    presets.extend(transfer_function_presets());
+    presets
+}
+
+/// Octave coordinate of a frequency in Hz at the identity cutoff (where
+/// table bins line up with spectrum bins at 44.1 kHz). Lets a recipe be
+/// written in the units its source material is measured in.
+fn hz(frequency: f32) -> f32 {
+    (frequency / 516.8).log2()
+}
+
+/// A trajectory that holds each of `values` for an equal share of the frame
+/// axis and spends the last `glide` (0..1) of each share sliding to the next.
+fn plateaus(values: &[f32], glide: f32) -> Traj {
+    let share = 1.0 / values.len().max(1) as f32;
+    let mut points = Vec::with_capacity(values.len() * 2);
+    for (index, value) in values.iter().enumerate() {
+        let start = index as f32 * share;
+        points.push((start, *value));
+        if index + 1 < values.len() {
+            points.push((start + share * (1.0 - glide), *value));
+        }
+    }
+    points.push((1.0, *values.last().unwrap_or(&0.0)));
+    Traj::Segments { points }
+}
+
+/// The second factory generation: responses computed from actual transfer
+/// functions (pole pairs, feedback combs, coupled modes, a formant cascade)
+/// and from structures that are patterns rather than shapes (an endless
+/// staircase, moiré fringes, a cellular automaton).
+///
+/// These deliberately break the layering doctrine above. They are built for
+/// what the runtime can render and the ear can follow: features at least a
+/// few hundred Hz wide, tens of dB of contrast, and motion that is *about*
+/// something. Floors are deep, because a resonance over a floor is the point
+/// here, and the runtime's RMS makeup restores the level.
+fn transfer_function_presets() -> Vec<PresetDefinition> {
+    // ---- Risset Stair: nine resonances an octave apart, each climbing
+    // exactly one octave across the table under a fixed bell-shaped
+    // envelope, so the last frame is the first frame and the climb never
+    // arrives.
+    //
+    // Each resonance's height follows a raised-cosine bell of its *own*
+    // centre, reaching exactly zero where a voice enters and leaves. (A
+    // frequency window over the sum would not close the loop: the skirt of
+    // the voice still waiting below the window leaks into it.)
+    let bell = |from: f32, to: f32, gain_db: f32| {
+        let points = (0..=16)
+            .map(|step| {
+                let at = step as f32 / 16.0;
+                let distance = ((from + (to - from) * at) - 0.8).abs() / 4.2;
+                let height = if distance >= 1.0 {
+                    0.0
+                } else {
+                    0.5 + 0.5 * (std::f32::consts::PI * distance).cos()
+                };
+                (at, gain_db * height)
+            })
+            .collect();
+        Traj::Segments { points }
+    };
+    let mut risset = Vec::new();
+    for voice in 0..9 {
+        let start = -4.0 + voice as f32;
+        risset.push(Element::Resonance {
+            center: sweep(start, start + 1.0),
+            q: hold(9.0),
+            gain_db: bell(start, start + 1.0, 26.0),
+        });
+        // The counter-staircase: notches walking *down* an octave, so the
+        // peaks and the holes pass through each other twice per lap.
+        risset.push(Element::Resonance {
+            center: sweep(start + 1.5, start + 0.5),
+            q: hold(5.0),
+            gain_db: bell(start + 1.5, start + 0.5, -14.0),
+        });
+    }
+    risset.push(Element::Tilt { db_per_octave: hold(-2.0), pivot: hold(0.0) });
+
+    // ---- I Owe You: formant targets (Hz) for /a i o u j u/, one per column.
+    // Every sound in the phrase is voiced and open, so a filter can say all
+    // of it; F2 zig-zags 1090 -> 1990 -> 840 -> 2290 -> 870.
+    let phrase = |targets: &[(f32, f32)]| {
+        Traj::Segments {
+            points: targets.iter().map(|(at, frequency)| (*at, hz(*frequency))).collect(),
+        }
+    };
+    let f1 = phrase(&[
+        (0.0, 730.0), (0.10, 730.0), (0.26, 400.0), (0.34, 400.0), (0.44, 570.0),
+        (0.54, 570.0), (0.62, 440.0), (0.72, 280.0), (0.78, 270.0), (0.90, 300.0),
+        (1.0, 300.0),
+    ]);
+    let f2 = phrase(&[
+        (0.0, 1090.0), (0.10, 1090.0), (0.26, 1990.0), (0.34, 1990.0), (0.44, 840.0),
+        (0.54, 840.0), (0.62, 1020.0), (0.72, 2250.0), (0.78, 2290.0), (0.90, 870.0),
+        (1.0, 870.0),
+    ]);
+    let f3 = phrase(&[
+        (0.0, 2440.0), (0.10, 2440.0), (0.26, 2550.0), (0.34, 2550.0), (0.44, 2410.0),
+        (0.54, 2410.0), (0.62, 2240.0), (0.72, 2950.0), (0.78, 3010.0), (0.90, 2240.0),
+        (1.0, 2240.0),
+    ]);
+
+    // ---- Skin To Bell: twelve modes, ideal circular membrane -> bell
+    // partials (hum, prime, tierce, quint, nominal, ...), with the strike
+    // getting harder (upper modes louder) as the material rings longer.
+    let membrane = [
+        1.0, 1.594, 2.136, 2.296, 2.653, 2.918, 3.156, 3.501, 3.600, 3.652, 4.060, 4.154,
+    ];
+    let bell = [1.0, 2.0, 2.4, 3.0, 4.0, 5.0, 5.34, 6.0, 8.0, 10.66, 13.34, 16.0];
+    let modes = membrane
+        .iter()
+        .zip(bell)
+        .enumerate()
+        .map(|(index, (from, to))| Mode { from: *from, to, gain_db: -1.1 * index as f32 })
+        .collect::<Vec<_>>();
+
+    // ---- Four Chords: three lossy strings per chord, Am - F - C - G, in
+    // units of the reference harmonic (2.0 is the C an octave above it).
+    // They sit this high because the runtime cannot separate teeth closer
+    // than ~120 Hz, and a third is narrower than that any lower down.
+    let string = |notes: [f32; 4]| Element::FeedbackComb {
+        spacing: plateaus(&notes, 0.22),
+        feedback: hold(0.88),
+        stretch: hold(0.0),
+        damp: hold(0.05),
+    };
+
+    // ---- Overtone Singer: a melody on the harmonic series. Harmonic 8 sits
+    // at the cutoff, so with cutoff at 8x a drone's pitch the peak lands on
+    // the drone's real partials.
+    let melody = [
+        8.0f32, 9.0, 10.0, 12.0, 10.0, 9.0, 8.0, 6.0, 8.0, 10.0, 9.0, 12.0, 13.0, 12.0, 10.0,
+        8.0,
+    ];
+    let sung = |offset_octaves: f32| {
+        let notes = melody
+            .iter()
+            .map(|harmonic| (harmonic / 8.0).log2() + offset_octaves)
+            .collect::<Vec<_>>();
+        plateaus(&notes, 0.3)
+    };
+
+    vec![
+        PresetDefinition {
+            stem: "risset-stair",
+            display_name: "Risset Stair",
+            intent: "an endless staircase: resonances an octave apart climb forever while notches descend through them; frame 63 is frame 0, so a looping ramp on frame never arrives",
+            default_controls: DEFAULT_CONTROLS,
+            recipe: Recipe {
+                generator_version: GENERATOR_VERSION,
+                db_floor: -40.0,
+                motion: MotionClass::Glide,
+                elements: risset,
+            },
+        },
+        PresetDefinition {
+            stem: "i-owe-you",
+            display_name: "I Owe You",
+            intent: "a formant cascade that says \"I owe you\" as the frame crosses the table: four real pole-pair formants on measured vowel targets",
+            default_controls: DEFAULT_CONTROLS,
+            recipe: Recipe {
+                generator_version: GENERATOR_VERSION,
+                db_floor: -54.0,
+                motion: MotionClass::Wobble,
+                elements: vec![
+                    Element::PoleLowpass { edge: f1, q: hold(10.0) },
+                    Element::PoleLowpass { edge: f2, q: hold(13.0) },
+                    Element::PoleLowpass { edge: f3, q: hold(11.0) },
+                    Element::PoleLowpass { edge: hold(hz(3400.0)), q: hold(5.0) },
+                    // Half of the lip-radiation tilt: enough to keep the
+                    // upper formants present without burying F1.
+                    Element::Tilt { db_per_octave: hold(3.0), pivot: hold(0.0) },
+                ],
+            },
+        },
+        PresetDefinition {
+            stem: "skin-to-bell",
+            display_name: "Skin To Bell",
+            intent: "one strike, two objects: the coupled modes of a drum head spread and sharpen into the partials of a bell, antiresonances and all",
+            default_controls: DEFAULT_CONTROLS,
+            recipe: Recipe {
+                generator_version: GENERATOR_VERSION,
+                db_floor: -46.0,
+                motion: MotionClass::Glide,
+                elements: vec![
+                    Element::ModalBank {
+                        modes,
+                        morph: sweep(0.0, 1.0),
+                        base: hold(-1.0),
+                        q: swoop(7.0, 46.0, 1.5),
+                    },
+                    Element::Tilt { db_per_octave: sweep(-3.0, 1.5), pivot: hold(0.0) },
+                ],
+            },
+        },
+        PresetDefinition {
+            stem: "through-zero",
+            display_name: "Through Zero",
+            intent: "a feedback flanger swept through zero delay: the comb opens until it vanishes, then returns inverted and hollow",
+            default_controls: DEFAULT_CONTROLS,
+            recipe: Recipe {
+                generator_version: GENERATOR_VERSION,
+                db_floor: -40.0,
+                motion: MotionClass::Figure,
+                elements: vec![Element::FeedbackComb {
+                    // Tooth spacing is 1/|delay|; the delay runs linearly
+                    // from one side of zero to the other.
+                    spacing: segments(&[
+                        (0.0, 0.9), (0.1, 1.1), (0.2, 1.44), (0.3, 2.1), (0.4, 4.0),
+                        (0.46, 9.0), (0.5, 60.0), (0.54, 9.0), (0.6, 4.0), (0.7, 2.1),
+                        (0.8, 1.44), (0.9, 1.1), (1.0, 0.9),
+                    ]),
+                    feedback: segments(&[(0.0, 0.8), (0.47, 0.8), (0.53, -0.8), (1.0, -0.8)]),
+                    stretch: hold(0.0),
+                    damp: hold(0.03),
+                }],
+            },
+        },
+        PresetDefinition {
+            stem: "four-chords",
+            display_name: "Four Chords",
+            intent: "three sympathetic strings retuning through Am - F - C - G: anything broadband comes out as the chord",
+            default_controls: DEFAULT_CONTROLS,
+            recipe: Recipe {
+                generator_version: GENERATOR_VERSION,
+                db_floor: -40.0,
+                motion: MotionClass::Figure,
+                elements: vec![
+                    Element::Parallel {
+                        inner: vec![
+                            string([2.0, 2.0, 2.0, 2.245]),
+                            string([2.520, 2.670, 2.520, 2.997]),
+                            string([3.364, 3.364, 2.997, 3.775]),
+                        ],
+                    },
+                    // Every positive-feedback comb also has a tooth at DC;
+                    // without this it would be the loudest thing in the
+                    // table and the strings would sit 10 dB under it.
+                    Element::Highpass { edge: hold(0.7), slope_db_per_octave: hold(24.0) },
+                    Element::Tilt { db_per_octave: hold(-1.5), pivot: hold(0.0) },
+                ],
+            },
+        },
+        PresetDefinition {
+            stem: "moire",
+            display_name: "Moiré",
+            intent: "two combs a hair apart in spacing: where their teeth agree the spectrum is raked, where they disagree it goes smooth, and the fringes pour down from the top as the spacings diverge",
+            default_controls: DEFAULT_CONTROLS,
+            recipe: Recipe {
+                generator_version: GENERATOR_VERSION,
+                db_floor: -40.0,
+                motion: MotionClass::Figure,
+                elements: vec![
+                    Element::Comb { spacing: hold(0.9), depth_db: hold(18.0), stretch: hold(0.0) },
+                    Element::Comb {
+                        spacing: sweep(0.92, 1.35),
+                        depth_db: hold(18.0),
+                        stretch: sweep(0.0, 0.002),
+                    },
+                ],
+            },
+        },
+        PresetDefinition {
+            stem: "rule-150",
+            display_name: "Rule 150",
+            intent: "a cellular automaton run across the spectrum: one live band branches into a fractal of passbands, collapses to three, regrows from the edges and the centre, and after thirty generations is back to the single band it started from",
+            default_controls: DEFAULT_CONTROLS,
+            recipe: Recipe {
+                generator_version: GENERATOR_VERSION,
+                db_floor: -36.0,
+                motion: MotionClass::Jump,
+                elements: vec![Element::Automaton {
+                    // On 33 cells between dead walls, rule 150 from the
+                    // centre cell has period 30: the table is a loop.
+                    rule: 150,
+                    seed: 0,
+                    start_cell: 16,
+                    cells: 33,
+                    generations: 30,
+                    low: -2.4,
+                    high: 5.0,
+                    depth_db: 30.0,
+                    edge_octaves: 0.05,
+                }],
+            },
+        },
+        PresetDefinition {
+            stem: "overtone-singer",
+            display_name: "Overtone Singer",
+            intent: "throat singing: a needle of resonance picking out a melody on harmonics 6-13 over a dark chest drone; put cutoff at 8x the pitch of a held note",
+            default_controls: DEFAULT_CONTROLS,
+            recipe: Recipe {
+                generator_version: GENERATOR_VERSION,
+                db_floor: -48.0,
+                motion: MotionClass::Jump,
+                elements: vec![
+                    // Chest: a broad hump around harmonics 2-3. A hump, not
+                    // a lowpass: elements multiply, and a lowpass here
+                    // would roll 17 dB off the whistle above it.
+                    Element::Resonance { center: hold(-1.5), q: hold(1.2), gain_db: hold(10.0) },
+                    // The whistle. Q 12 is as sharp as the runtime can
+                    // render at this frequency; a narrower peak only loses
+                    // height to the response-length limit.
+                    Element::Resonance { center: sung(0.0), q: hold(12.0), gain_db: hold(30.0) },
+                    // The tongue's antiresonance just under it, and the
+                    // steep wall above it.
+                    Element::Resonance { center: sung(-0.55), q: hold(3.0), gain_db: hold(-12.0) },
+                    Element::Lowpass { edge: sung(0.3), slope_db_per_octave: hold(30.0) },
+                ],
+            },
+        },
     ]
 }
 
@@ -2031,6 +2555,20 @@ mod tests {
                         "{stem}: a wobble preset that satisfies the glide bounds is just a glide preset"
                     );
                 }
+                MotionClass::Figure => {
+                    // No centroid story to hold it to: bounded, and it has
+                    // to change.
+                    assert!(
+                        report.max_step < 1.0,
+                        "{stem}: figure presets must stay bounded, worst step rms={}",
+                        report.max_step
+                    );
+                    assert!(
+                        report.max_excursion > 0.05,
+                        "{stem}: figure presets must change, excursion={}",
+                        report.max_excursion
+                    );
+                }
                 MotionClass::Jump => {
                     // Discontinuous on purpose, but still bounded: a jump is
                     // a re-throw of the response, never garbage.
@@ -2221,6 +2759,135 @@ mod tests {
             // And the stem resolves through the normal asset lookup.
             assert_eq!(resolve_asset_path(preset.stem), Some(path));
         }
+    }
+
+    /// dB of one element at an octave position, on the nearest table bin.
+    fn element_db_at(element: &Element, frame: f32, octave: f32) -> f32 {
+        let bin = (REFERENCE_HARMONIC as f32 * 2.0f32.powf(octave)).round() as usize;
+        element.db(frame, bin)
+    }
+
+    #[test]
+    fn resonance_has_pole_skirts_not_gaussian_ones() {
+        let resonance = Element::Resonance { center: hold(0.0), q: hold(8.0), gain_db: hold(24.0) };
+        assert!((element_db_at(&resonance, 0.0, 0.0) - 24.0).abs() < 0.01);
+        // An octave out a pole pair is still several dB up; a Gaussian peak
+        // of the same height is long gone.
+        let skirt = element_db_at(&resonance, 0.0, 1.0);
+        assert!(skirt > 3.0 && skirt < 6.0, "pole skirt one octave out: {skirt} dB");
+        let gaussian = Element::Peak { center: hold(0.0), width_octaves: hold(0.2), gain_db: hold(24.0) };
+        assert!(element_db_at(&gaussian, 0.0, 1.0) < 0.01);
+        // A negative gain is the mirror-image notch.
+        let notch = Element::Resonance { center: hold(0.0), q: hold(8.0), gain_db: hold(-24.0) };
+        assert!((element_db_at(&notch, 0.0, 0.0) + 24.0).abs() < 0.01);
+        assert!((element_db_at(&notch, 0.0, 1.0) + skirt).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn pole_lowpass_peaks_at_q_and_falls_twelve_db_per_octave() {
+        let lowpass = Element::PoleLowpass { edge: hold(0.0), q: hold(10.0) };
+        assert!((element_db_at(&lowpass, 0.0, 0.0) - 20.0).abs() < 0.01);
+        assert!(element_db_at(&lowpass, 0.0, -4.0).abs() < 0.1);
+        let slope = element_db_at(&lowpass, 0.0, 4.0) - element_db_at(&lowpass, 0.0, 3.0);
+        assert!((slope + 12.0).abs() < 0.3, "asymptotic slope {slope} dB/octave");
+    }
+
+    #[test]
+    fn feedback_comb_peaks_on_multiples_and_inverts_with_its_sign() {
+        let comb = |feedback: f32| Element::FeedbackComb {
+            spacing: hold(1.0),
+            feedback: hold(feedback),
+            stretch: hold(0.0),
+            damp: hold(0.0),
+        };
+        let on_tooth = REFERENCE_HARMONIC * 3;
+        let between = REFERENCE_HARMONIC * 3 + REFERENCE_HARMONIC / 2;
+        let peak = -20.0 * (1.0f32 - 0.8).log10();
+        let trough = -20.0 * (1.0f32 + 0.8).log10();
+        assert!((comb(0.8).db(0.0, on_tooth) - peak).abs() < 0.01);
+        assert!((comb(0.8).db(0.0, between) - trough).abs() < 0.01);
+        assert!((comb(-0.8).db(0.0, on_tooth) - trough).abs() < 0.01);
+        assert!((comb(-0.8).db(0.0, between) - peak).abs() < 0.01);
+    }
+
+    #[test]
+    fn parallel_keeps_each_branchs_peak_where_a_series_sum_would_carve_it() {
+        let low = Element::Resonance { center: hold(-1.0), q: hold(10.0), gain_db: hold(20.0) };
+        let high = Element::Band {
+            low: hold(0.5),
+            high: hold(1.5),
+            edge_octaves: hold(0.1),
+            gain_db: hold(-30.0),
+        };
+        let parallel = Element::Parallel { inner: vec![low.clone(), high.clone()] };
+        // Inside the band's hole the series sum is -30 dB; in parallel the
+        // resonator's skirt carries straight through it.
+        let series = element_db_at(&low, 0.0, 1.0) + element_db_at(&high, 0.0, 1.0);
+        assert!(series < -25.0);
+        assert!(element_db_at(&parallel, 0.0, 1.0) > 0.0);
+        assert_eq!(Element::Parallel { inner: Vec::new() }.db(0.0, 24), 0.0);
+    }
+
+    #[test]
+    fn modal_bank_modes_peak_at_their_gain_with_an_antiresonance_between() {
+        let bank = |morph: f32| Element::ModalBank {
+            modes: vec![
+                Mode { from: 1.0, to: 1.0, gain_db: 0.0 },
+                Mode { from: 2.0, to: 4.0, gain_db: 0.0 },
+            ],
+            morph: hold(morph),
+            base: hold(0.0),
+            q: hold(30.0),
+        };
+        assert!(element_db_at(&bank(0.0), 0.0, 0.0).abs() < 0.5);
+        assert!(element_db_at(&bank(0.0), 0.0, 1.0).abs() < 0.5);
+        // Between two in-phase modes the responses cancel.
+        let dip = (-10..=10)
+            .map(|step| element_db_at(&bank(0.0), 0.0, 0.5 + step as f32 * 0.02))
+            .fold(f32::INFINITY, f32::min);
+        assert!(dip < -30.0, "antiresonance between the modes: {dip} dB");
+        // Morphing moves the second mode from 2x to 4x.
+        assert!(element_db_at(&bank(1.0), 0.0, 2.0).abs() < 0.5);
+        assert!(element_db_at(&bank(1.0), 0.0, 1.0) < -15.0);
+    }
+
+    #[test]
+    fn automaton_rows_follow_their_rule_between_dead_walls() {
+        // Rule 90 is left XOR right: one cell becomes its two neighbours.
+        assert_eq!(automaton_row(90, 0, 3, 7, 0), 0b000_1000);
+        assert_eq!(automaton_row(90, 0, 3, 7, 1), 0b001_0100);
+        assert_eq!(automaton_row(90, 0, 3, 7, 2), 0b010_0010);
+        // Nothing wraps past the walls: an edge cell has one neighbour.
+        assert_eq!(automaton_row(90, 0, 0, 7, 1), 0b000_0010);
+        // The period the Rule 150 preset relies on to be a loop.
+        let start = automaton_row(150, 0, 16, 33, 0);
+        assert_eq!(automaton_row(150, 0, 16, 33, 30), start);
+        assert!((1..30).all(|generation| automaton_row(150, 0, 16, 33, generation) != start));
+    }
+
+    #[test]
+    fn risset_stair_closes_its_loop() {
+        let preset = factory_presets()
+            .into_iter()
+            .find(|preset| preset.stem == "risset-stair")
+            .expect("risset-stair exists");
+        let table = bake(&preset.recipe).expect("bake risset-stair");
+        let first = &table.data[..NBINS];
+        let last = &table.data[(FRAMES - 1) * NBINS..];
+        let worst = first
+            .iter()
+            .zip(last)
+            .map(|(a, b)| (20.0 * (a / b).log10()).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 0.05, "frame 63 must equal frame 0, worst difference {worst} dB");
+        // ...and it is not simply standing still.
+        let middle = &table.data[(FRAMES / 2) * NBINS..(FRAMES / 2 + 1) * NBINS];
+        let moved = first
+            .iter()
+            .zip(middle)
+            .map(|(a, b)| (20.0 * (a / b).log10()).abs())
+            .fold(0.0f32, f32::max);
+        assert!(moved > 10.0, "the staircase must climb, got {moved} dB");
     }
 
     #[test]

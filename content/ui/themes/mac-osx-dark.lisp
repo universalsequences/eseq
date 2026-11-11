@@ -357,7 +357,7 @@
       :patcher-back-button-hover-border '(0.00 0.48 0.95)
       :patcher-back-button-text '(0.62 0.63 0.66)
       :patcher-back-button-hover-text '(0.88 0.93 1.00)
-      :sampler-grid                   '(0.187 0.187 0.189 1.0)
+      :sampler-grid                   '(0.562 0.562 0.569 1.0)
       :timeline-ruler-bg              '(0.098 0.098 0.107 1.0)
       )))
 

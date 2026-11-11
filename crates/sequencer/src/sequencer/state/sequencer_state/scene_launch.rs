@@ -1562,6 +1562,15 @@ impl SequencerState {
                 Some((bank, inheritance)) => scenes.new_scene_in_bank(bank, inheritance)?,
                 None => scenes.new_scene(),
             };
+            // Scene create clears every override, but a latch outlives it
+            // and a latched lane without its pin is stale with no self-write
+            // carve-out (see `resync_live_grid_to_current_scene`). Pin each
+            // latched lane to the new scene's cell: the clone of what the
+            // lane was playing, so the mirror already holds its content.
+            let latched = self.song_manual_latch_mask();
+            for track in (0..num_tracks.min(64)).filter(|track| latched >> track & 1 == 1) {
+                scenes.pin_track_override_to_effective(track);
+            }
             if new_idx != old_scene_count {
                 self.with_committed_song_mut(|song| {
                     if let Some(song) = song {

@@ -719,6 +719,9 @@ impl SequencerState {
             let mut bound = self.sound_binding_patterns.lock().unwrap();
             bound.retain(|track, _| *track >= 64 || mask >> *track & 1 == 0);
         }
+        // Read once, after the borrow bits cleared: a released lane is
+        // track-owned unless a latch still claims it.
+        let track_owned = self.track_owned_lane_mask();
         let restore: Vec<(usize, TrackPatternData)> = {
             let scenes = self.pattern.scenes.lock().unwrap();
             (0..64)
@@ -730,7 +733,13 @@ impl SequencerState {
                     // context. Restoring nothing would leave the borrow's
                     // device state behind for the next save-back to write
                     // into the track sound.
-                    let installed = !self.arrangement_context();
+                    //
+                    // A LATCHED lane is the performer's launch in either
+                    // view (rule 2), never the track's: its owner is the
+                    // pattern it plays. Installing the track sound there
+                    // hands the next save-back a mirror the latch's override
+                    // pin files straight over that pattern.
+                    let installed = track_owned >> track & 1 == 0;
                     let data = installed
                         .then(|| scenes.effective_track_pattern(track))
                         .flatten()

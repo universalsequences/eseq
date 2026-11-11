@@ -173,3 +173,42 @@ fn instance_views_get_buffers_and_tabs_that_follow_the_instance_lifecycle() {
     assert!(has_buffer(&editor, "*probe · Other*"));
     assert_eq!(tab_buffer(&mut editor, 1), Some(Value::String("*probe · Other*".into())));
 }
+
+/// A kind that declares no `:keymap` (a package's def-kind tab, e.g. jaki)
+/// still opens the command palette on `/`, without inheriting the step-grid
+/// keys of a grid its tab is not showing.
+#[test]
+fn an_instance_view_without_a_keymap_still_binds_the_command_palette() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    sequencer::lisp_host::clear_kind_registry();
+    let mut editor = full_grid_editor_for_scroll_tests();
+    sequencer::lisp_host::register_def_kind_native(editor.runtime_mut());
+    eval(
+        &mut editor,
+        r#"
+(def bare-view (s) (label (str "n=" s.n) :key "count"))
+(def-kind probe :state ((n 0)) :view bare-view)
+"#,
+    );
+
+    let mut instances = ProjectInstances::default();
+    instances.list.push(instance(1, "Kit A"));
+    sync(&mut editor, &instances, false);
+
+    let name = "*probe · Kit A*";
+    assert!(has_buffer(&editor, name));
+    assert_eq!(
+        editor.buffer_mode_keybinding(name, KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
+        Some("eseq.sequencer-keys/open-command-palette"),
+    );
+    assert_eq!(
+        editor.buffer_mode_keybinding(name, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+        None,
+    );
+    // The grid's own buffer keeps the key through the inherited base mode.
+    assert_eq!(
+        editor.buffer_mode_keybinding("*sequencer*", KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
+        Some("eseq.sequencer-keys/open-command-palette"),
+    );
+}

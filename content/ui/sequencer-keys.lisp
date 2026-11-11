@@ -20,6 +20,7 @@
 (import eseq.view-kit :refer (index-of))
 
 (export mode-name
+        view-mode-name
         cursor-left
         cursor-right
         cursor-select-left
@@ -132,7 +133,17 @@
                       "; scene: " (if scene (str scene.number " " scene.name " of bank " scene.bank.label) "none")
                       "; " (if transport.playing "playing" "stopped") " at " transport.bpm " bpm"))))
 
-(define-mode "eseq.sequencer-keys/sequencer-keys" :read-only true :live-keys true :describe "describe-view")
+;; The keys every view in the sequencer pane answers, whatever else it binds:
+;; today only the command palette. The host gives this mode to an instance
+;; view whose kind declares no :keymap (a package's def-kind tab), so `/`
+;; works there without handing the view the step-grid keys below, which
+;; would edit a grid the tab is not showing.
+(def view-mode-name "eseq.sequencer-keys/view-keys")
+(define-mode "eseq.sequencer-keys/view-keys" :read-only true :live-keys true :describe "describe-view")
+(mode-bind-key view-mode-name "/" "open-command-palette")
+
+(define-mode "eseq.sequencer-keys/sequencer-keys" :read-only true :live-keys true :describe "describe-view"
+  :inherit "eseq.sequencer-keys/view-keys")
 (mode-bind-key mode-name "LEFT" "cursor-left")
 (mode-bind-key mode-name "RIGHT" "cursor-right")
 (mode-bind-key mode-name "S-LEFT" "cursor-select-left")
@@ -148,4 +159,3 @@
 (mode-bind-key mode-name "C-RIGHT" "scene-next")
 (mode-bind-key mode-name "M-s-LEFT" "bank-previous")
 (mode-bind-key mode-name "M-s-RIGHT" "bank-next")
-(mode-bind-key mode-name "/" "open-command-palette")
