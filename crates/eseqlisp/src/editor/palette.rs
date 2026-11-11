@@ -616,34 +616,51 @@ impl Editor {
 
     /// Adds every `:searchable` command's final choices to the commands
     /// stage, each under a section named for the command with the picks
-    /// before it as its value (`808 Kick` · `Kicks › Digi Kick`). Walked
-    /// on the first keystroke after they changed (see
-    /// [`PaletteSearchCache`]), else copied from the last walk.
+    /// before it as its value (`808 Kick` · `Kicks › Digi Kick`). Copied
+    /// from the last walk (see [`PaletteSearchCache`]); walked here, on the
+    /// first keystroke, only when the host has not warmed it since it
+    /// changed ([`Editor::warm_palette_search`]).
     fn load_search_leaves(&mut self, state: &mut PaletteState) {
         state.leaves_loaded = true;
-        let commands = self.searchable_commands();
-        if self.palette_search_cache.as_ref().is_none_or(|cache| cache.commands != commands) {
-            let mut entries = Vec::new();
-            let mut group_icons = Vec::new();
-            for leaf in self.walk_search_leaves(commands.clone()) {
-                let (label, crumbs) = leaf.labels.split_last().expect("a leaf has its own label");
-                let mut entry = PaletteEntry::new(label.clone(), leaf.command.clone(), false);
-                entry.group = Some(leaf.title.clone());
-                entry.detail = leaf.detail.clone().or_else(|| (!crumbs.is_empty()).then(|| crumbs.join(" › ")));
-                entry.args = Some(leaf.args);
-                entry.stands_for_parent = leaf.stands_for_parent;
-                entries.push(entry);
-                if let Some(icon) = leaf.icon {
-                    group_icons.push((leaf.title, icon));
-                }
-            }
-            self.palette_search_cache = Some(PaletteSearchCache { commands, entries, group_icons });
-        }
+        self.warm_palette_search();
         let cache = self.palette_search_cache.as_ref().expect("filled above");
         state.stages[0].entries.extend(cache.entries.iter().cloned());
         for (title, icon) in &cache.group_icons {
             state.group_icons.entry(title.clone()).or_insert_with(|| icon.clone());
         }
+    }
+
+    /// Walks the `:searchable` commands' choices now unless the last walk
+    /// still stands, so the palette's first keystroke only copies them. The
+    /// walk runs every choice source (disk scans behind the instrument and
+    /// package trees): a host calls this while idle, after startup and
+    /// after [`Editor::invalidate_palette_search`].
+    pub fn warm_palette_search(&mut self) {
+        let commands = self.searchable_commands();
+        if self.palette_search_cache.as_ref().is_some_and(|cache| cache.commands == commands) {
+            return;
+        }
+        let mut entries = Vec::new();
+        let mut group_icons = Vec::new();
+        for leaf in self.walk_search_leaves(commands.clone()) {
+            let (label, crumbs) = leaf.labels.split_last().expect("a leaf has its own label");
+            let mut entry = PaletteEntry::new(label.clone(), leaf.command.clone(), false);
+            entry.group = Some(leaf.title.clone());
+            entry.detail = leaf.detail.clone().or_else(|| (!crumbs.is_empty()).then(|| crumbs.join(" › ")));
+            entry.args = Some(leaf.args);
+            entry.stands_for_parent = leaf.stands_for_parent;
+            entries.push(entry);
+            if let Some(icon) = leaf.icon {
+                group_icons.push((leaf.title, icon));
+            }
+        }
+        self.palette_search_cache = Some(PaletteSearchCache { commands, entries, group_icons });
+    }
+
+    /// Whether a walk of the search entries is kept (it may still be
+    /// replaced on use if the searchable commands themselves changed).
+    pub fn palette_search_warm(&self) -> bool {
+        self.palette_search_cache.is_some()
     }
 
     /// The host's data behind the `:searchable` commands' choices moved
@@ -1649,6 +1666,30 @@ mod tests {
             .eval_str(r#"(def pal-fx (fx) :command "Add FX" :choices pal-kits :searchable true (set! ran fx))"#)
             .unwrap();
         assert!(search(&mut editor, "kicks").iter().any(|row| row == "Kicks"));
+    }
+
+    #[test]
+    fn a_warmed_search_is_what_the_first_keystroke_lists() {
+        let mut editor = two_step_editor();
+        assert!(!editor.palette_search_warm());
+        editor.warm_palette_search();
+        assert!(editor.palette_search_warm());
+
+        // The sources are not run again on the keystroke: a change after
+        // the warm-up stays unseen until the host invalidates.
+        editor.runtime_mut().eval_str(r#"(def pal-sounds (kit) (list "Rim Snare"))"#).unwrap();
+        editor.run_command(COMMAND_PALETTE);
+        type_text(&mut editor, "clap");
+        assert!(labels(&editor).iter().any(|row| row == "Clap Snare"));
+        editor.handle_key(key(KeyCode::Esc));
+
+        editor.invalidate_palette_search();
+        assert!(!editor.palette_search_warm());
+        editor.warm_palette_search();
+        editor.run_command(COMMAND_PALETTE);
+        type_text(&mut editor, "snare");
+        let found = labels(&editor);
+        assert!(found.iter().any(|row| row == "Rim Snare") && !found.iter().any(|row| row == "Clap Snare"));
     }
 
     #[test]

@@ -1551,6 +1551,11 @@ pub fn preset_name_index_generation() -> u64 {
     PRESET_NAME_INDEX_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether a rebuild is running: names it has not reached answer empty, so
+/// a reader that keeps what it read (the palette's search walk) waits.
+pub fn preset_name_index_building() -> bool {
+    preset_name_index().lock().unwrap().building
+}
 
 /// Rebuilds the index on a background thread from every saved instrument
 /// (startup, a bank change, the content library changing on disk). The

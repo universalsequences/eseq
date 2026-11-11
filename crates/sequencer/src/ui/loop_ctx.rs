@@ -202,6 +202,9 @@ pub(crate) struct FrameDiffState {
     /// preset index generation, and the project's engines.
     pub(crate) palette_search_library: (u64, u64),
     pub(crate) palette_search_engines: Vec<String>,
+    /// The last backend event (key, pointer, scroll): the palette's search
+    /// walk is warmed only once input has been quiet for a moment.
+    pub(crate) last_input_at: Instant,
     /// Arming/clearing a delete target republishes only the delete-target
     /// read surfaces (version reactive + mixer/rack binding fields) off this
     /// counter — it deliberately does NOT ride `ui_epoch`.
