@@ -410,6 +410,11 @@ impl App {
         super::edit::finish_active_gesture(self);
         let checkpoint = self.history.clone();
         let history_len = self.history.undo_len();
+        // An import's own patches can exceed the history byte budget. Hold
+        // eviction until they are one entry: `history_len` must stay a valid
+        // index, or a completed import reads as "nothing imported" (and is
+        // neither finished nor rolled back) or squashes only its tail.
+        self.history.hold_budget();
         self.begin_import_sample_sharing();
         let result = self.import_from_project_inner(source, request);
         self.end_import_sample_sharing();
@@ -437,12 +442,19 @@ impl App {
                         super::edit::squash_history_since(self, history_len, label);
                     }
                 }
+                self.history.release_budget();
                 self.sync_expr_process_classes_after_import();
                 Ok(summary)
             }
+            // A rollback that succeeds installs the checkpoint, cloned before
+            // this hold was taken (keep that order); one that fails leaves
+            // this history, still held.
             Err(error) => match super::edit::rollback_history_to(self, checkpoint) {
                 Ok(()) => Err(error),
-                Err(rollback) => Err(format!("Import failed ({error}); undoing it also failed ({rollback:?})")),
+                Err(rollback) => {
+                    self.history.release_budget();
+                    Err(format!("Import failed ({error}); undoing it also failed ({rollback:?})"))
+                }
             },
         }
     }

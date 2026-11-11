@@ -347,6 +347,7 @@ fn run_import(payload: Value, app: &mut app::App, editor: &mut Editor, ctx: &mut
         }
     }
     let tracks_before = app.tracks.len();
+    let shape_before = (app.tracks.len(), app.buses.len(), app.groups.len());
     let result = app.import_from_project_then(&source, &request, |app, summary| {
         let focus = (app.tracks.len() > tracks_before).then_some(tracks_before);
         let groups: Vec<u64> = summary.groups.iter().map(|(_, new)| *new).collect();
@@ -387,6 +388,15 @@ fn run_import(payload: Value, app: &mut app::App, editor: &mut Editor, ctx: &mut
             }
             editor.show_toast(toast, eseqlisp::ToastKind::Success);
         }
-        Err(error) => fail(editor, error),
+        Err(error) => {
+            // A failed import normally rolls back to what the mirrors
+            // already show. Should the rollback itself fail, the project
+            // holds part of the import: publish it, or the next bus pull
+            // would drop a bus the mirrors never saw from under its group.
+            if (app.tracks.len(), app.buses.len(), app.groups.len()) != shape_before {
+                super::host_commands::finish_imported_racks(app, editor, ctx, &[], &[], None);
+            }
+            fail(editor, error);
+        }
     }
 }

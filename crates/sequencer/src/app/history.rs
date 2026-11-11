@@ -1284,6 +1284,9 @@ pub struct UndoManager<P> {
     active_gesture_updated_at: Option<Instant>,
     pending_gesture: Option<PendingGesture<P>>,
     newest_entry_exceeds_byte_budget: bool,
+    /// Open [`Self::hold_budget`] calls. While any is open nothing is
+    /// evicted, so a transaction's `undo_len` checkpoint stays a valid index.
+    budget_holds: u32,
 }
 
 impl<P> Default for UndoManager<P> {
@@ -1307,6 +1310,27 @@ impl<P> UndoManager<P> {
             active_gesture_updated_at: None,
             pending_gesture: None,
             newest_entry_exceeds_byte_budget: false,
+            budget_holds: 0,
+        }
+    }
+
+    /// Suspends budget eviction until the matching [`Self::release_budget`].
+    /// A transaction that commits several entries and squashes them into one
+    /// measures itself by `undo_len`; evicting the oldest entries under it
+    /// (its own patches can exceed the byte budget) would make that count
+    /// lie and drop part of the transaction's undo.
+    pub fn hold_budget(&mut self) {
+        self.budget_holds += 1;
+    }
+
+    /// Closes a [`Self::hold_budget`]; the last one enforces the budget,
+    /// keeping the newest entry (the squashed transaction) even if oversized.
+    pub fn release_budget(&mut self) {
+        debug_assert!(self.budget_holds > 0, "release_budget without hold_budget");
+        self.budget_holds = self.budget_holds.saturating_sub(1);
+        if self.budget_holds == 0 {
+            let newest = self.undo.back().map(|entry| entry.revision_after);
+            self.enforce_budget(newest);
         }
     }
 
@@ -1727,6 +1751,9 @@ impl<P> UndoManager<P> {
     }
 
     fn enforce_budget(&mut self, protected_revision: Option<u64>) {
+        if self.budget_holds > 0 {
+            return;
+        }
         self.newest_entry_exceeds_byte_budget = protected_revision
             .and_then(|revision| {
                 self.undo

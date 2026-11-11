@@ -1429,10 +1429,14 @@ impl App {
     }
 
     pub fn add_bus_channel(&mut self, name: impl Into<String>) -> BusId {
+        // Above every live bus AND every bus a group still names: should a
+        // group ever outlive its bus, a new group must not adopt that id and
+        // end up sharing one bus with it.
         let next_id = self
             .buses
             .iter()
             .map(|bus| bus.id.0)
+            .chain(self.groups.iter().map(|group| group.bus_id))
             .max()
             .unwrap_or(crate::sequencer::DEFAULT_BUS_B_ID)
             .saturating_add(1);
@@ -2256,11 +2260,15 @@ impl App {
     /// whole load squashes into one undo entry.
     pub fn load_kit_as_rack(&mut self, path: &Path) -> Result<(u64, Vec<String>), String> {
         let history_len = self.history.undo_len();
+        // As a controlled import: the load's patches must all survive until
+        // the squash, whatever the byte budget.
+        self.history.hold_budget();
         let result = self.load_kit_as_rack_inner(path);
         if result.is_ok() {
             crate::app::edit::squash_history_since(self, history_len, "Load kit");
             self.sync_expr_process_classes_after_import();
         }
+        self.history.release_budget();
         result
     }
 
