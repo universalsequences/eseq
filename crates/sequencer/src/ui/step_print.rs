@@ -4,7 +4,7 @@ Live parameter printing (beads eseq-jc9 and eseq-prm).
 While transport and recording are active, touching an eligible parameter
 latches a [`PrintTarget`]. Step targets print onto the triggered steps the
 scheduler plays while latched; device targets p-lock every step boundary the
-playhead passes, triggered or not. The hold ends on control release;
+scheduler schedules while latched, triggered or not. The hold ends on control release;
 transport/recording-off or a focused-track change also disarms it. Multiple
 held targets print together.
 
@@ -13,6 +13,11 @@ played, and the scheduler logs every step it substitutes
 ([`StepPrintHeard`](sequencer::sequencer::StepPrintHeard)). Those logged
 values — not the latch's position when the UI frame runs — are what land in
 live `step_data`, so the recorded pass reproduces exactly what was heard.
+Device targets work the same way through versions: every latch change bumps
+a version (kept in a short history), and the scheduler clock logs each
+boundary on the armed track with the version current when it was scheduled
+([`PrintBoundary`](sequencer::sequencer::PrintBoundary)); that version's
+values are what get p-locked there.
 Device targets write live p-lock storage, but the scheduler resolves every device p-lock family from its published snapshot (deep-copied
 at publish time), so instrument, effect, MIDI-FX, and rack targets are all
 coalesced into one copy-on-write scheduler-track publish per tick, and bus
@@ -24,6 +29,7 @@ device-edit gesture history.
 
 use super::*;
 use sequencer::sequencer::DeviceParamPrintTarget;
+use std::collections::VecDeque;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PrintTarget {
@@ -74,13 +80,12 @@ pub(crate) struct StepPrintState {
     track: usize,
     /// Latched (target, value) pairs — only touched params print.
     values: Vec<(PrintTarget, f32)>,
-    /// Device targets only: playhead step reported last tick, so each
-    /// boundary prints once and a frame that skipped steps can catch up
-    /// across the gap (wrap-aware). Step targets print from the heard log.
-    last_step: Option<usize>,
-    /// Device targets only: a latch/value change since the last tick
-    /// re-reports the step under the playhead without a boundary crossing.
-    touch_dirty: bool,
+    /// Version of the last published device-target latch (0 = never).
+    latch_version: u64,
+    /// Recent (version, device targets) pairs, oldest first: the scheduler
+    /// logs boundaries by version, and a boundary can still be in flight a
+    /// few versions after it was scheduled (or after the release).
+    device_history: VecDeque<(u64, Vec<(PrintTarget, f32)>)>,
     /// Tracks (bitmask) whose printed values are in live pattern state but
     /// not yet in the scheduler snapshot. Per-track so the flush can use
     /// copy-on-write `publish_scheduler_track` publishes — a full snapshot
@@ -89,22 +94,33 @@ pub(crate) struct StepPrintState {
     dirty_unpublished_tracks: u64,
 }
 
+/// How many latch versions the device history keeps. A boundary is drained
+/// within a frame or two of being scheduled; a drag mints at most a few
+/// versions per frame, so this is many frames of slack.
+const DEVICE_HISTORY_LEN: usize = 64;
+
+/// One scheduled boundary's device-param print: the held device targets as
+/// they stood when the scheduler scheduled `step` on `track`. Lands on every
+/// boundary, triggered or not (an off-step device p-lock is track-level
+/// automation: it applies to all voices at that boundary and holds until the
+/// next p-lock or ON trigger).
+#[derive(Debug, PartialEq)]
+pub(crate) struct DevicePrint {
+    pub(crate) track: usize,
+    pub(crate) step: usize,
+    pub(crate) targets: Vec<(PrintTarget, f32)>,
+}
+
 /// One frame's print result.
 ///
 /// `heard` lists the step params written from the scheduler's heard log as
 /// (track, step, param): each is the value that step actually played with.
-///
-/// `steps`/`targets` are the device-param prints: every step boundary the
-/// playhead passed on `track`, and the held device targets to p-lock onto
-/// them. Device p-lock prints land on every passed step (an off-step device
-/// p-lock is track-level automation: it applies to all voices at that
-/// boundary and holds until the next p-lock or ON trigger).
+/// `device` lists the device-param p-locks still to write (they need the
+/// `App`, so `tick_step_print` applies them).
 #[derive(Default)]
 pub(crate) struct PrintedSteps {
-    pub(crate) track: usize,
-    pub(crate) steps: Vec<usize>,
-    pub(crate) targets: Vec<(PrintTarget, f32)>,
     pub(crate) heard: Vec<(usize, usize, StepParam)>,
+    pub(crate) device: Vec<DevicePrint>,
 }
 
 /// The step params the *step* panel pickers can print, by their Lisp keyword.
@@ -124,11 +140,17 @@ pub(crate) fn print_step_param_from_keyword(name: &str) -> Option<StepParam> {
     }
 }
 
+/// `track`'s bit in a per-track dirty mask.
+fn track_bit(track: usize) -> u64 {
+    debug_assert!(track < sequencer::sequencer::MAX_TRACKS);
+    1u64 << track.min(sequencer::sequencer::MAX_TRACKS - 1)
+}
+
 impl StepPrintState {
     /// `track`'s printed values are in live pattern state but not yet in the
     /// scheduler snapshot.
     fn mark_dirty(&mut self, track: usize) {
-        self.dirty_unpublished_tracks |= 1u64 << track.min(sequencer::sequencer::MAX_TRACKS - 1);
+        self.dirty_unpublished_tracks |= track_bit(track);
     }
 
     pub(crate) fn armed(&self) -> bool {
@@ -167,7 +189,6 @@ impl StepPrintState {
             Some(entry) => entry.1 = value,
             None => self.values.push((target, value)),
         }
-        self.touch_dirty = true;
     }
 
     /// End the print latch. Deliberately keeps `dirty_unpublished_tracks`:
@@ -175,8 +196,6 @@ impl StepPrintState {
     pub(crate) fn disarm(&mut self) {
         self.track = 0;
         self.values.clear();
-        self.last_step = None;
-        self.touch_dirty = false;
     }
 
     /// Mouse-up on one picker ends that param's print (hold-to-print: the
@@ -190,6 +209,43 @@ impl StepPrintState {
             return true;
         }
         false
+    }
+
+    /// Record the held device targets as a new latch version and point the
+    /// scheduler's boundary log at it; no device targets disarms the log.
+    fn publish_device_version(&mut self, state: &SequencerState) {
+        let targets = self
+            .values
+            .iter()
+            .filter(|(target, _)| !matches!(target, PrintTarget::Step(_)))
+            .copied()
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            state.print_boundary_log.disarm();
+            return;
+        }
+        // A step-only change or a release that kept every device target
+        // re-arms the current version instead of spending a history slot.
+        let unchanged = self
+            .device_history
+            .back()
+            .is_some_and(|(version, held)| *version == self.latch_version && *held == targets);
+        if !unchanged {
+            self.latch_version += 1;
+            if self.device_history.len() == DEVICE_HISTORY_LEN {
+                self.device_history.pop_front();
+            }
+            self.device_history.push_back((self.latch_version, targets));
+        }
+        state.print_boundary_log.arm(self.track, self.latch_version);
+    }
+
+    /// The device targets held at latch `version`, if still in the history.
+    fn device_targets_at(&self, version: u64) -> Option<&[(PrintTarget, f32)]> {
+        self.device_history
+            .iter()
+            .find(|(held, _)| *held == version)
+            .map(|(_, targets)| targets.as_slice())
     }
 
     /// Pointer release ends device-param print gestures. Step targets have
@@ -210,12 +266,15 @@ impl StepPrintState {
     /// writes land behind the playhead — and every trigger stamps device
     /// params from the snapshot — so without this the print would only be
     /// heard one loop later). Call after every latch change; `print_pass`
-    /// clears the engine side on disarm.
-    pub(crate) fn publish_engine_override(&self, state: &SequencerState) {
+    /// clears the engine side on disarm. Also versions the device targets and
+    /// arms the scheduler's boundary log with that version — last, so a
+    /// boundary logged under the new version already plays its values.
+    pub(crate) fn publish_engine_override(&mut self, state: &SequencerState) {
         if !self.armed() {
             state.step_print_override.clear();
             state.device_print_override.clear();
             state.rack_macro_print_override.clear();
+            self.publish_device_version(state);
             return;
         }
         let step_entries = self
@@ -274,6 +333,7 @@ impl StepPrintState {
                 .rack_macro_print_override
                 .set(self.track, &rack_macro_entries);
         }
+        self.publish_device_version(state);
     }
 }
 
@@ -307,89 +367,70 @@ pub(crate) fn try_latch_param_print(
     true
 }
 
-/// One frame of print mode. First, write every step the scheduler logged as
-/// played with latched step params, with exactly the values it played (this
-/// also drains steps scheduled just before a release). Then disarm when the
-/// (recording && playing && same focused track) gate fails, otherwise report
-/// every step boundary the playhead has passed since the previous frame
-/// (walking the wrap, so a loop boundary keeps printing) for the held device
-/// targets. Pure state + pattern mutation; invalidations/publishing live in
-/// `tick_step_print`.
+/// One frame of print mode. First drain the scheduler's logs — steps that
+/// played with latched step params (written here with exactly the values
+/// played) and boundaries scheduled under a device-target latch version
+/// (returned for `tick_step_print` to p-lock) — which also covers steps
+/// scheduled just before a release. Then disarm when the (recording &&
+/// playing && same focused track) gate fails. Pure state + pattern mutation;
+/// invalidations/publishing live in `tick_step_print`.
 pub(crate) fn print_pass(
     state: &SequencerState,
     print: &mut StepPrintState,
     focused_track: usize,
     recording: bool,
 ) -> PrintedSteps {
-    let mut printed = PrintedSteps {
+    let printed = PrintedSteps {
         heard: print_heard_steps(state, print, recording),
-        ..PrintedSteps::default()
+        device: logged_device_prints(state, print, recording),
     };
-    if !print.armed() {
-        return printed;
-    }
-    if !recording
-        || !state.is_playing()
-        || print.track != focused_track
-        || print.track >= state.pattern.patterns.len()
+    if print.armed()
+        && (!recording
+            || !state.is_playing()
+            || print.track != focused_track
+            || print.track >= state.pattern.patterns.len())
     {
         // Pause/stop, record-off, or a focus move ends printing cleanly —
         // the next touch during the next record+play session re-arms. The
         // engine-side override dies with the latch.
         print.disarm();
-        state.step_print_override.clear();
-        state.device_print_override.clear();
-        state.rack_macro_print_override.clear();
-        return printed;
+        print.publish_engine_override(state);
     }
-    let track = print.track;
-    let num_steps = state.pattern.track_params[track]
-        .get_num_steps()
-        .clamp(1, sequencer::sequencer::MAX_STEPS);
-    let playhead =
-        state.transport.track_playheads[track].load(Ordering::Relaxed) as usize % num_steps;
-    let mut boundary_steps = Vec::new();
-    match print.last_step {
-        // First tick after the touch: print the step under the playhead.
-        None => boundary_steps.push(playhead),
-        Some(prev) => {
-            if prev != playhead {
-                // Walk (prev, playhead] modulo the track length so skipped
-                // frames and the loop wrap both keep the latch printing.
-                let mut step = (prev + 1) % num_steps;
-                for _ in 0..num_steps {
-                    boundary_steps.push(step);
-                    if step == playhead {
-                        break;
-                    }
-                    step = (step + 1) % num_steps;
-                }
-            } else if print.touch_dirty {
-                // Value moved within the same step: reprint it.
-                boundary_steps.push(playhead);
-            }
-        }
-    }
-    print.last_step = Some(playhead);
-    print.touch_dirty = false;
-    // Step params never print from the boundary walk: the heard log above
-    // carries them with the values the scheduler actually played.
-    if boundary_steps.is_empty() {
-        return printed;
-    }
-    let device_targets = print
-        .values
-        .iter()
-        .filter(|(target, _)| !matches!(target, PrintTarget::Step(_)))
-        .copied()
-        .collect::<Vec<_>>();
-    if device_targets.is_empty() {
-        return printed;
-    }
-    printed.track = track;
-    printed.steps = boundary_steps;
-    printed.targets = device_targets;
     printed
+}
+
+/// Resolve the scheduler's boundary log into device prints: each boundary
+/// takes the device targets of the latch version it was scheduled under.
+/// Same play+record gate as [`print_heard_steps`]; a version that aged out of
+/// the history (only possible if the UI stalled for many latch changes) is
+/// skipped rather than guessed.
+fn logged_device_prints(
+    state: &SequencerState,
+    print: &StepPrintState,
+    recording: bool,
+) -> Vec<DevicePrint> {
+    if !state.print_boundary_log.has_entries() {
+        return Vec::new();
+    }
+    let boundaries = state.print_boundary_log.drain();
+    if !recording || !state.is_playing() {
+        return Vec::new();
+    }
+    boundaries
+        .into_iter()
+        .filter(|boundary| {
+            boundary.track < state.pattern.patterns.len()
+                && boundary.step < sequencer::sequencer::MAX_STEPS
+        })
+        .filter_map(|boundary| {
+            let targets = print.device_targets_at(boundary.value)?;
+            Some(DevicePrint {
+                track: boundary.track,
+                step: boundary.step,
+                targets: targets.to_vec(),
+            })
+        })
+        .collect()
 }
 
 /// Write the scheduler's heard log into live pattern state: each entry is a
@@ -403,8 +444,11 @@ fn print_heard_steps(
     print: &mut StepPrintState,
     recording: bool,
 ) -> Vec<(usize, usize, StepParam)> {
+    if !state.step_print_override.has_heard() {
+        return Vec::new();
+    }
     let heard = state.step_print_override.drain_heard();
-    if heard.is_empty() || !recording || !state.is_playing() {
+    if !recording || !state.is_playing() {
         return Vec::new();
     }
     let mut writes = Vec::new();
@@ -415,7 +459,7 @@ fn print_heard_steps(
         {
             continue;
         }
-        for (param, value) in entry.values.iter() {
+        for (param, value) in entry.value.iter() {
             state.set_step_param_no_publish(entry.track, entry.step, param, value);
             writes.push((entry.track, entry.step, param));
         }
@@ -444,6 +488,7 @@ pub(crate) fn tick_step_print(app: &mut app::App, shared: &SharedHandles) -> Ste
     if !print.armed()
         && print.dirty_unpublished_tracks == 0
         && !shared.state.step_print_override.has_heard()
+        && !shared.state.print_boundary_log.has_entries()
     {
         return StepPrintTick::default();
     }
@@ -457,16 +502,6 @@ pub(crate) fn tick_step_print(app: &mut app::App, shared: &SharedHandles) -> Ste
         std::mem::take(&mut print.dirty_unpublished_tracks)
     };
     drop(print);
-    // Copy-on-write per-track publishes: only the printed track changed, and
-    // the latch is audible through the engine-side override anyway — the
-    // publish just has to land before the latch ends. A full snapshot capture
-    // here ran every printing frame and starved the scheduler thread.
-    let mut remaining = publish_tracks;
-    while remaining != 0 {
-        let track = remaining.trailing_zeros() as usize;
-        remaining &= remaining - 1;
-        shared.state.publish_scheduler_track(track);
-    }
     let mut wrote = !printed.heard.is_empty();
     for &(track, step, param) in &printed.heard {
         shared.ui_invalidations.push(UiInvalidation::Step {
@@ -482,131 +517,114 @@ pub(crate) fn tick_step_print(app: &mut app::App, shared: &SharedHandles) -> Ste
             });
         }
     }
-    let mut track_snapshot_dirty = false;
+    let mut track_snapshot_dirty = 0u64;
     let mut bus_runtime_dirty = false;
-    let mut plock_presence_steps = Vec::new();
-    for step in &printed.steps {
+    let mut plock_presence_steps: Vec<(usize, Vec<usize>)> = Vec::new();
+    for &DevicePrint {
+        track,
+        step,
+        ref targets,
+    } in &printed.device
+    {
         let mut wrote_plock = false;
-        for (target, value) in &printed.targets {
-            match target {
-                PrintTarget::Step(_) => unreachable!("print_pass filters step targets out"),
+        for &(target, value) in targets {
+            // (wrote, whether the write lives in the track's own snapshot)
+            let (target_wrote, track_scoped) = match target {
+                PrintTarget::Step(_) => unreachable!("device history holds device targets only"),
                 PrintTarget::Instrument { param_idx } => {
-                    let target_wrote =
-                        app.print_instrument_plock(printed.track, *step, *param_idx, *value);
-                    wrote |= target_wrote;
-                    wrote_plock |= target_wrote;
-                    track_snapshot_dirty |= target_wrote;
+                    (app.print_instrument_plock(track, step, param_idx, value), true)
                 }
                 PrintTarget::Effect {
                     slot_idx,
                     param_idx,
-                } => {
-                    let target_wrote =
-                        app.print_effect_plock(printed.track, *step, *slot_idx, *param_idx, *value);
-                    wrote |= target_wrote;
-                    wrote_plock |= target_wrote;
-                    track_snapshot_dirty |= target_wrote;
-                }
+                } => (
+                    app.print_effect_plock(track, step, slot_idx, param_idx, value),
+                    true,
+                ),
                 PrintTarget::BusEffect {
                     bus_idx,
                     slot_idx,
                     param_idx,
-                } => {
-                    let target_wrote =
-                        app.print_bus_effect_plock(*bus_idx, *step, *slot_idx, *param_idx, *value);
-                    wrote |= target_wrote;
-                    wrote_plock |= target_wrote;
-                    bus_runtime_dirty |= target_wrote;
-                }
+                } => (
+                    app.print_bus_effect_plock(bus_idx, step, slot_idx, param_idx, value),
+                    false,
+                ),
                 PrintTarget::MidiFx {
                     slot_idx,
                     param_idx,
-                } => {
-                    let target_wrote = app.print_midi_fx_plock(
-                        printed.track,
-                        *step,
-                        *slot_idx,
-                        *param_idx,
-                        *value,
-                    );
-                    wrote |= target_wrote;
-                    wrote_plock |= target_wrote;
-                    track_snapshot_dirty |= target_wrote;
-                }
-                PrintTarget::RackSlotParam { slot_idx, param } => {
-                    let target_wrote = app.print_rack_slot_param_plock(
-                        printed.track,
-                        *step,
-                        *slot_idx,
-                        *param,
-                        *value,
-                    );
-                    wrote |= target_wrote;
-                    wrote_plock |= target_wrote;
-                    track_snapshot_dirty |= target_wrote;
-                }
+                } => (
+                    app.print_midi_fx_plock(track, step, slot_idx, param_idx, value),
+                    true,
+                ),
+                PrintTarget::RackSlotParam { slot_idx, param } => (
+                    app.print_rack_slot_param_plock(track, step, slot_idx, param, value),
+                    true,
+                ),
                 PrintTarget::RackSlotInstrument {
                     slot_idx,
                     param_idx,
-                } => {
-                    let target_wrote = app.print_rack_slot_instrument_plock(
-                        printed.track,
-                        *step,
-                        *slot_idx,
-                        *param_idx,
-                        *value,
-                    );
-                    wrote |= target_wrote;
-                    wrote_plock |= target_wrote;
-                    track_snapshot_dirty |= target_wrote;
-                }
+                } => (
+                    app.print_rack_slot_instrument_plock(track, step, slot_idx, param_idx, value),
+                    true,
+                ),
                 PrintTarget::RackSlotEffect {
                     rack_slot_idx,
                     effect_slot_idx,
                     param_idx,
-                } => {
-                    let target_wrote = app.print_rack_slot_effect_plock(
-                        printed.track,
-                        *step,
-                        *rack_slot_idx,
-                        *effect_slot_idx,
-                        *param_idx,
-                        *value,
-                    );
-                    wrote |= target_wrote;
-                    wrote_plock |= target_wrote;
-                    track_snapshot_dirty |= target_wrote;
-                }
+                } => (
+                    app.print_rack_slot_effect_plock(
+                        track,
+                        step,
+                        rack_slot_idx,
+                        effect_slot_idx,
+                        param_idx,
+                        value,
+                    ),
+                    true,
+                ),
                 PrintTarget::RackMacro { macro_idx } => {
-                    let target_wrote =
-                        app.print_rack_macro_plock(printed.track, *step, *macro_idx, *value);
-                    wrote |= target_wrote;
-                    wrote_plock |= target_wrote;
-                    track_snapshot_dirty |= target_wrote;
+                    (app.print_rack_macro_plock(track, step, macro_idx, value), true)
                 }
+            };
+            if !target_wrote {
+                continue;
+            }
+            wrote = true;
+            wrote_plock = true;
+            if track_scoped {
+                track_snapshot_dirty |= track_bit(track);
+            } else {
+                bus_runtime_dirty = true;
             }
         }
         if wrote_plock {
-            plock_presence_steps.push(*step);
+            match plock_presence_steps.iter_mut().find(|(held, _)| *held == track) {
+                Some((_, steps)) => steps.push(step),
+                None => plock_presence_steps.push((track, vec![step])),
+            }
         }
     }
-    // Every track-scoped device p-lock family (instrument, effect, MIDI-FX,
-    // rack) reaches the scheduler only through its published per-track
-    // snapshot — live `SlotPLockData` writes are atomic but the snapshot
-    // capture deep-copies them, so an unpublished print is inaudible until
-    // the next unrelated publish (or transport restart). Bus p-locks live in
-    // the separately published bus runtime. Coalesce each publication once
-    // per tick after all writes land; never publish once per target/step.
-    if track_snapshot_dirty {
-        if roll_publish_pending {
-            // Same deferral contract as the step-param publish above: a held
-            // roll owns the track snapshot until its release grace window, so
-            // publishing here would make its written steps audible early. Mark
-            // the track dirty and let a later tick (or the roll's own release
-            // publish) carry the printed p-locks along.
-            shared.step_print.lock().unwrap().mark_dirty(printed.track);
-        } else {
-            shared.state.publish_scheduler_track(printed.track);
+    // Step-param prints and every track-scoped device p-lock family
+    // (instrument, effect, MIDI-FX, rack) reach the scheduler only through
+    // the published per-track snapshot — live `SlotPLockData` writes are
+    // atomic but the snapshot capture deep-copies them, so an unpublished
+    // print is inaudible until the next unrelated publish (or transport
+    // restart). Bus p-locks live in the separately published bus runtime.
+    // Coalesce: one copy-on-write publish per dirty track per tick, after all
+    // writes land (a full snapshot capture here ran every printing frame and
+    // starved the scheduler thread).
+    if roll_publish_pending {
+        // A held roll owns the track snapshot until its release grace
+        // window, so publishing here would make its written steps audible
+        // early. Keep the tracks dirty for a later tick (or the roll's own
+        // release publish) to carry the prints along.
+        shared.step_print.lock().unwrap().dirty_unpublished_tracks |= track_snapshot_dirty;
+    } else {
+        let mut remaining = publish_tracks | track_snapshot_dirty;
+        while remaining != 0 {
+            let track = remaining.trailing_zeros() as usize;
+            remaining &= remaining - 1;
+            shared.state.publish_scheduler_track(track);
         }
     }
     if bus_runtime_dirty {
@@ -617,12 +635,12 @@ pub(crate) fn tick_step_print(app: &mut app::App, shared: &SharedHandles) -> Ste
     // several steps. Publish one track-scoped presence batch after every
     // p-lock write has landed, rather than invalidating per target (or
     // widening the update through ui_epoch/fx_epoch).
-    if !plock_presence_steps.is_empty() {
+    for (track, steps) in plock_presence_steps {
         shared
             .ui_invalidations
             .push(UiInvalidation::StepInvalidationBatch {
-                track: printed.track,
-                steps: plock_presence_steps,
+                track,
+                steps,
                 change: StepInvalidation::PlockPresence,
             });
     }
@@ -666,7 +684,7 @@ mod step_print_tests {
         let mut print = StepPrintState::default();
         schedule(&state, 0, 0);
         let printed = print_pass(&state, &mut print, 0, true);
-        assert!(printed.heard.is_empty() && printed.steps.is_empty());
+        assert!(printed.heard.is_empty() && printed.device.is_empty());
         assert_eq!(
             state.pattern.step_data[0].get(0, StepParam::Velocity),
             before
@@ -687,7 +705,7 @@ mod step_print_tests {
         schedule(&state, 0, 4);
         let printed = print_pass(&state, &mut print, 0, true);
         assert_eq!(printed.heard, vec![(0, 4, StepParam::Velocity)]);
-        assert_eq!(printed.steps, Vec::<usize>::new(), "no device targets held");
+        assert!(printed.device.is_empty(), "no device targets held");
         assert_eq!(state.pattern.step_data[0].get(4, StepParam::Velocity), 0.25);
         assert_eq!(
             state.pattern.step_data[0].get(4, StepParam::Duration),
@@ -763,32 +781,74 @@ mod step_print_tests {
         );
     }
 
+    /// The device analog of the reported bug: the knob keeps moving after a
+    /// boundary was scheduled. Each boundary must p-lock the value the latch
+    /// held when the scheduler scheduled it, not the knob's later position.
     #[test]
-    fn device_targets_walk_every_passed_boundary_across_the_wrap() {
+    fn device_boundaries_print_the_latch_version_they_were_scheduled_under() {
         let state = playing_state();
-        state.pattern.patterns[0].toggle_step(14);
-        state.pattern.patterns[0].toggle_step(1);
-        set_playhead(&state, 13);
         let mut print = StepPrintState::default();
         let target = PrintTarget::Instrument { param_idx: 2 };
         print.latch(0, target, 0.5);
         print.latch(0, StepParam::Duration, 3.0);
-        let printed = print_pass(&state, &mut print, 0, true);
-        assert_eq!(printed.steps, vec![13]);
-        assert_eq!(
-            printed.targets,
-            vec![(target, 0.5)],
-            "step targets never ride the boundary walk"
-        );
-        // Frame gap across the wrap: every passed step, triggered or not
-        // (off-step device p-locks are track-level automation).
-        set_playhead(&state, 1);
-        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![14, 15, 0, 1]);
-        // A still latch on the same step does not re-report it; a moved
-        // value reprints the current step.
-        assert!(print_pass(&state, &mut print, 0, true).steps.is_empty());
+        print.publish_engine_override(&state);
+        // Touching alone prints nothing: the boundary under the playhead was
+        // scheduled before the touch.
+        assert!(print_pass(&state, &mut print, 0, true).device.is_empty());
+        state.print_boundary_log.record(0, 14);
+        // The knob moves after step 14 was scheduled, before the UI frame.
         print.latch(0, target, 0.75);
-        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![1]);
+        print.publish_engine_override(&state);
+        // Off steps (15, 0) take device prints too: an off-step p-lock is
+        // track-level automation. The wrap is just more boundaries.
+        for step in [15, 0, 1] {
+            state.print_boundary_log.record(0, step);
+        }
+        let printed = print_pass(&state, &mut print, 0, true);
+        let device = |step, value| super::DevicePrint {
+            track: 0,
+            step,
+            targets: vec![(target, value)],
+        };
+        assert_eq!(
+            printed.device,
+            vec![device(14, 0.5), device(15, 0.75), device(0, 0.75), device(1, 0.75)],
+            "each boundary keeps its own scheduled value; step targets never ride along"
+        );
+        assert!(
+            print_pass(&state, &mut print, 0, true).device.is_empty(),
+            "drained boundaries never reprint"
+        );
+    }
+
+    #[test]
+    fn device_boundaries_scheduled_before_release_still_print() {
+        let state = playing_state();
+        let mut print = StepPrintState::default();
+        let target = PrintTarget::Effect {
+            slot_idx: 0,
+            param_idx: 1,
+        };
+        print.latch(0, target, 0.3);
+        print.publish_engine_override(&state);
+        state.print_boundary_log.record(0, 6);
+        print.release_device_param_gesture(&state);
+        assert!(!print.armed());
+        // Released: later boundaries are not logged...
+        state.print_boundary_log.record(0, 7);
+        // ...but the one scheduled under the latch still prints.
+        let printed = print_pass(&state, &mut print, 0, true);
+        assert_eq!(printed.device.len(), 1);
+        assert_eq!((printed.device[0].step, printed.device[0].targets.clone()), (6, vec![(target, 0.3)]));
+    }
+
+    #[test]
+    fn a_step_only_latch_never_arms_the_boundary_log() {
+        let state = playing_state();
+        let mut print = StepPrintState::default();
+        touch(&state, &mut print, StepParam::Velocity, 0.4);
+        state.print_boundary_log.record(0, 2);
+        assert!(!state.print_boundary_log.has_entries());
     }
 
     #[test]
@@ -804,7 +864,7 @@ mod step_print_tests {
             let mut print = StepPrintState::default();
             print.latch(0, StepParam::Velocity, 0.1);
             let printed = print_pass(&state, &mut print, focused_track, recording);
-            assert!(printed.steps.is_empty() && printed.heard.is_empty());
+            assert!(printed.device.is_empty() && printed.heard.is_empty());
             assert!(
                 !print.armed(),
                 "gate ({playing}, {recording}, track {focused_track}) must disarm"
@@ -814,7 +874,7 @@ mod step_print_tests {
                 before
             );
             state.transport.playing.store(true, Ordering::Relaxed);
-            assert!(print_pass(&state, &mut print, 0, true).steps.is_empty());
+            assert!(print_pass(&state, &mut print, 0, true).device.is_empty());
         }
     }
 
@@ -841,10 +901,18 @@ mod step_print_tests {
         let mut print = StepPrintState::default();
         let target = PrintTarget::Instrument { param_idx: 2 };
         print.latch(0, target, 0.8);
+        print.publish_engine_override(&state);
+        state.print_boundary_log.record(0, 3);
 
         let printed = print_pass(&state, &mut print, 0, true);
-        assert_eq!(printed.steps, vec![3]);
-        assert_eq!(printed.targets, vec![(target, 0.8)]);
+        assert_eq!(
+            printed.device,
+            vec![super::DevicePrint {
+                track: 0,
+                step: 3,
+                targets: vec![(target, 0.8)],
+            }]
+        );
         assert_eq!(state.pattern.instrument_slots[0].defaults.get(2), 0.2);
         assert_eq!(state.pattern.instrument_slots[0].plocks.get(3, 2), None);
         assert!(

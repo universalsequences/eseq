@@ -1049,7 +1049,8 @@ mod tests {
 
         // With no selection, record+play diverts the normal base-param host
         // command into the print latch. The base stays untouched and the tick
-        // writes only the triggered step under the playhead.
+        // p-locks only the boundaries the scheduler logged under the latch
+        // (`print_boundary_log.record` stands in for the scheduler clock).
         const PRINT_STEP: usize = 5;
         selected_steps.lock().unwrap().clear();
         state.pattern.patterns[TRACK].toggle_step(PRINT_STEP);
@@ -1062,7 +1063,8 @@ mod tests {
             ui_epoch.load(Ordering::Relaxed),
         );
         // Replay consecutive real handler updates from one drag before the
-        // frame tick. Only the latest held value should print, and the tick
+        // boundary is scheduled. Only the value held at schedule time (the
+        // latest) prints, and the tick
         // must enqueue one presence batch rather than rebuilding *fx*.
         dispatch_custom_host_command(
             "set-instrument-param",
@@ -1105,6 +1107,7 @@ mod tests {
             print_epochs_before,
             "the display-only latch mirror must not bump any epoch"
         );
+        state.print_boundary_log.record(TRACK, PRINT_STEP);
         let tick = tick_step_print(&mut app, &shared);
         assert!(tick.printed);
         assert_eq!(
@@ -1167,6 +1170,7 @@ mod tests {
             batch_defaults_before,
             "a printed batch must never write the instrument base values"
         );
+        state.print_boundary_log.record(TRACK, PRINT_STEP);
         assert!(tick_step_print(&mut app, &shared).printed);
         assert_eq!(state.pattern.instrument_slots[TRACK].plocks.get(PRINT_STEP, 2), Some(1_500.0));
         assert_eq!(state.pattern.instrument_slots[TRACK].plocks.get(PRINT_STEP, 3), Some(0.6));
@@ -1219,6 +1223,7 @@ mod tests {
             epochs_before,
             "the effect display-only latch mirror must not bump any epoch"
         );
+        state.print_boundary_log.record(TRACK, PRINT_STEP);
         assert!(tick_step_print(&mut app, &shared).printed);
         assert_eq!(effect_slot.plocks.get(PRINT_STEP, 2), Some(1_800.0));
         assert_eq!(
@@ -1245,6 +1250,7 @@ mod tests {
             &mut editor,
             &mut ctx,
         );
+        state.print_boundary_log.record(TRACK, PRINT_STEP);
         assert!(tick_step_print(&mut app, &shared).printed);
         assert_eq!(effect_slot.plocks.get(PRINT_STEP, 2), Some(2_200.0));
         assert_eq!(effect_slot.plocks.get(PRINT_STEP, 3), Some(0.8));
@@ -1266,6 +1272,7 @@ mod tests {
             &mut editor,
             &mut ctx,
         );
+        state.print_boundary_log.record(TRACK, PRINT_STEP);
         assert!(tick_step_print(&mut app, &shared).printed);
         assert_eq!(effect_slot.plocks.get(PRINT_STEP, 1), Some(1.0));
         assert_eq!(effect_slot.defaults.get(1), descriptor.params[1].default);
@@ -1303,6 +1310,7 @@ mod tests {
         // from its published snapshot, not live slot state, so this tick must
         // republish the track by itself (no rack target may piggyback the
         // publish).
+        state.print_boundary_log.record(TRACK, PRINT_STEP);
         assert!(tick_step_print(&mut app, &shared).printed);
         assert_eq!(
             state.pattern.midi_fx_slots[TRACK][0].defaults.get(0),
@@ -1369,6 +1377,7 @@ mod tests {
             &mut editor,
             &mut ctx,
         );
+        state.print_boundary_log.record(TRACK, PRINT_STEP);
         assert!(tick_step_print(&mut app, &shared).printed);
         assert_eq!(app.buses[0].effect_slots[0].defaults[2], bus_default_before);
         assert_eq!(app.buses[0].effect_slots[0].plocks.cell(PRINT_STEP, 2).copied(), Some(1_600.0));

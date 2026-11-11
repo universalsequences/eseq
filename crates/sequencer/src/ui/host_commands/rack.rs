@@ -2766,6 +2766,8 @@ mod tests {
                 Some(value)
             );
         }
+        // The scheduler clock schedules STEP under the held latch.
+        h.state.print_boundary_log.record(TRACK, STEP);
         assert!(tick_step_print(&mut h.app, &h.shared).printed);
         let slot = h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap();
         assert_eq!(&[3, 4, 5].map(|param| slot.effect_slots[0].plocks.cell(STEP, param).copied()),

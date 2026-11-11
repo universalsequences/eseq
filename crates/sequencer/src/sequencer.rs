@@ -58,6 +58,7 @@ pub use state::{
     audio_frames_to_beats, crossfade_gains, crossfade_room, crossfade_window, fade_curve_for_midpoint,
     fade_curve_power, fade_shape, regions_abut, FadeHandle,
     DeviceParamPrintOverride, DeviceParamPrintTarget, DeviceParamPrintValues, RackMacroPrintOverride,
+    PrintBoundary, PrintBoundaryLog, ScheduledStep, ScheduledStepLog, StepPrintHeard,
     EffectInstanceId, InstrumentDeviceValuesSnapshot, InstrumentSlotResetSummary,
     GeneratorTickErrorNotice, MidiFxInstanceId, PatternId, PatternSnapshot, ProjectScenes, RackClip, RackClipBank, RackClipId, rack_clip_label, PublishedSequencer, RackMacro, RackMacroCurve,
     ResolvedSceneSlot, SceneSlotStore, SCENE_SLOT_SOFT_SERIALIZED_BYTES, SCENE_TRANSPOSE_SLOT,

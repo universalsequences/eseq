@@ -6017,6 +6017,9 @@
                         // between frames: this is the boundary that prints.
                         state.transport.track_playheads[track]
                             .store(next_playhead as u32, Ordering::Relaxed);
+                        // ...and the scheduler clock logged that boundary
+                        // under the current print latch version.
+                        state.print_boundary_log.record(track, next_playhead);
                         let tick = tick_step_print(&mut app, &shared);
                         let print_done = Instant::now();
                         if tick.printed {

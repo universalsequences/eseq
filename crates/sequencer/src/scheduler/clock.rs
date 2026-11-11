@@ -921,6 +921,11 @@ impl SnapshotSequencerClock {
                 samples_per_quarter,
                 &mut triggers,
             );
+            // Recovered trigs play too, so their boundaries owe a device
+            // print (a boundary already logged before the resync dedupes).
+            for trigger in &triggers {
+                state.print_boundary_log.record(trigger.track, trigger.step);
+            }
         }
         // Under a sequence-roll window reads remap per sample, so every
         // sample is evaluated; otherwise quiet stretches are skipped below.
@@ -1012,6 +1017,10 @@ impl SnapshotSequencerClock {
                                     recovered_lag: None,
                                 });
                             }
+                            // Device-param printing: this boundary is
+                            // scheduled under the current latch version (a
+                            // scene-silenced track still records automation).
+                            state.print_boundary_log.record(t, step);
                             state.transport.track_playheads[t].store(step_u32, Ordering::Relaxed);
                         }
                     }

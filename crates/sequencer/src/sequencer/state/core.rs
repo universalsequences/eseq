@@ -445,10 +445,7 @@ pub struct StepPrintOverride {
     track: std::sync::atomic::AtomicUsize,
     mask: AtomicU32,
     values: [AtomicU32; NUM_PARAMS],
-    heard: Mutex<Vec<StepPrintHeard>>,
-    /// Lock-free "the heard log is non-empty", so the idle UI frame never
-    /// takes the mutex.
-    has_heard: AtomicBool,
+    heard: ScheduledStepLog<StepPrintOverrideValues>,
 }
 
 impl Default for StepPrintOverride {
@@ -457,8 +454,7 @@ impl Default for StepPrintOverride {
             track: std::sync::atomic::AtomicUsize::new(0),
             mask: AtomicU32::new(0),
             values: std::array::from_fn(|_| AtomicU32::new(0)),
-            heard: Mutex::new(Vec::new()),
-            has_heard: AtomicBool::new(false),
+            heard: ScheduledStepLog::default(),
         }
     }
 }
@@ -467,15 +463,70 @@ impl Default for StepPrintOverride {
 /// hits): only reached when the control thread never drains.
 pub(crate) const SCHEDULER_MAILBOX_CAP: usize = 4096;
 
-/// One scheduled pattern step that played with latched print values: the
-/// exact values the scheduler substituted, which the control thread then
-/// writes onto that step.
-#[derive(Clone, Copy)]
-pub struct StepPrintHeard {
+/// One step the scheduler scheduled, with what it logged for that step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScheduledStep<T> {
     pub track: usize,
     pub step: usize,
-    pub values: StepPrintOverrideValues,
+    pub value: T,
 }
+
+/// Scheduler→control mailbox of scheduled steps (the print logs). The
+/// scheduler records; the control thread drains once per UI frame.
+pub struct ScheduledStepLog<T> {
+    log: Mutex<Vec<ScheduledStep<T>>>,
+    /// Lock-free "the log is non-empty", so the idle UI frame never takes
+    /// the mutex.
+    has_entries: AtomicBool,
+}
+
+impl<T> Default for ScheduledStepLog<T> {
+    fn default() -> Self {
+        Self {
+            log: Mutex::new(Vec::new()),
+            has_entries: AtomicBool::new(false),
+        }
+    }
+}
+
+impl<T> ScheduledStepLog<T> {
+    /// Scheduler side. A re-schedule of the same (track, step) replaces its
+    /// value.
+    pub fn record(&self, track: usize, step: usize, value: T) {
+        let mut log = self.log.lock().unwrap();
+        if let Some(entry) = log
+            .iter_mut()
+            .find(|entry| entry.track == track && entry.step == step)
+        {
+            entry.value = value;
+            return;
+        }
+        // Backstop for a control thread that never drains (headless
+        // schedulers): printing cannot be armed there, so dropping is safe.
+        if log.len() < SCHEDULER_MAILBOX_CAP {
+            log.push(ScheduledStep { track, step, value });
+            self.has_entries.store(true, Ordering::Release);
+        }
+    }
+
+    pub fn has_entries(&self) -> bool {
+        self.has_entries.load(Ordering::Acquire)
+    }
+
+    /// Control side: take every entry logged since the last drain, in
+    /// schedule order. Drains in place so the shared Vec keeps its capacity:
+    /// the scheduler never reallocates under the lock while a print runs.
+    pub fn drain(&self) -> Vec<ScheduledStep<T>> {
+        let mut log = self.log.lock().unwrap();
+        self.has_entries.store(false, Ordering::Release);
+        log.drain(..).collect()
+    }
+}
+
+/// A scheduled pattern step that played with latched print values: the exact
+/// values the scheduler substituted, which the control thread then writes
+/// onto that step.
+pub type StepPrintHeard = ScheduledStep<StepPrintOverrideValues>;
 
 /// A snapshot of the latched overrides for one track, taken in a single
 /// `Acquire` read so the scheduler never mixes values from two latch states.
@@ -527,41 +578,19 @@ impl StepPrintOverride {
     /// Scheduler side: `step` on `track` was scheduled with `values`
     /// substituted. A re-schedule of the same step replaces its entry.
     pub fn record_heard(&self, track: usize, step: usize, values: StepPrintOverrideValues) {
-        if values.is_empty() {
-            return;
-        }
-        let mut heard = self.heard.lock().unwrap();
-        if let Some(entry) = heard
-            .iter_mut()
-            .find(|entry| entry.track == track && entry.step == step)
-        {
-            entry.values = values;
-            return;
-        }
-        // Backstop for a control thread that never drains (headless
-        // schedulers): printing cannot be armed there, so dropping is safe.
-        if heard.len() < SCHEDULER_MAILBOX_CAP {
-            heard.push(StepPrintHeard {
-                track,
-                step,
-                values,
-            });
-            self.has_heard.store(true, Ordering::Release);
+        if !values.is_empty() {
+            self.heard.record(track, step, values);
         }
     }
 
     /// Whether heard steps are waiting to be printed.
     pub fn has_heard(&self) -> bool {
-        self.has_heard.load(Ordering::Acquire)
+        self.heard.has_entries()
     }
 
     /// Control side: take every heard step logged since the last drain.
-    /// Drains in place so the shared Vec keeps its capacity: the scheduler
-    /// never reallocates under the lock while a print is running.
     pub fn drain_heard(&self) -> Vec<StepPrintHeard> {
-        let mut heard = self.heard.lock().unwrap();
-        self.has_heard.store(false, Ordering::Release);
-        heard.drain(..).collect()
+        self.heard.drain()
     }
 
     /// The latched overrides for `track`; empty when disarmed or armed for a
@@ -578,6 +607,69 @@ impl StepPrintOverride {
             }
         }
         StepPrintOverrideValues { mask, values }
+    }
+}
+
+/// Device-param print boundary log (bead eseq-t49x). While a print latch
+/// holds device targets (instrument / effect / bus / MIDI-FX / rack), the UI
+/// versions every latch change and arms this log with (track, version); the
+/// scheduler clock records each step boundary it schedules on the armed track
+/// with the version current at that moment. The control thread p-locks each
+/// logged boundary with that version's values — the latch as it stood when
+/// the boundary was scheduled (and, for the scheduler-substituted families,
+/// as it was heard) rather than wherever the knob had moved by the time the
+/// UI frame ran.
+#[derive(Default)]
+pub struct PrintBoundaryLog {
+    /// `(version << PRINT_TRACK_BITS) | track`; 0 = disarmed. One word, so
+    /// the scheduler never pairs a track with another latch's version.
+    armed: AtomicU64,
+    log: ScheduledStepLog<u64>,
+}
+
+const PRINT_TRACK_BITS: u32 = 8;
+const PRINT_TRACK_MASK: u64 = (1 << PRINT_TRACK_BITS) - 1;
+const _: () = assert!(MAX_TRACKS as u64 <= PRINT_TRACK_MASK + 1);
+
+/// One scheduled step boundary on the armed track and (as `value`) the latch
+/// version it was scheduled under.
+pub type PrintBoundary = ScheduledStep<u64>;
+
+impl PrintBoundaryLog {
+    /// Arm for `track` at latch `version` (must be non-zero).
+    pub fn arm(&self, track: usize, version: u64) {
+        debug_assert!(version != 0 && version >> (64 - PRINT_TRACK_BITS) == 0);
+        debug_assert!(track < MAX_TRACKS);
+        self.armed.store(
+            (version << PRINT_TRACK_BITS) | (track as u64 & PRINT_TRACK_MASK),
+            Ordering::Release,
+        );
+    }
+
+    /// Stop logging. Deliberately keeps logged boundaries: they were
+    /// scheduled under the latch and still owe their print.
+    pub fn disarm(&self) {
+        self.armed.store(0, Ordering::Release);
+    }
+
+    /// Scheduler side: `step` on `track` was just scheduled. A re-schedule of
+    /// the same boundary replaces its version.
+    pub fn record(&self, track: usize, step: usize) {
+        let armed = self.armed.load(Ordering::Acquire);
+        if armed == 0 || (armed & PRINT_TRACK_MASK) as usize != track {
+            return;
+        }
+        self.log.record(track, step, armed >> PRINT_TRACK_BITS);
+    }
+
+    pub fn has_entries(&self) -> bool {
+        self.log.has_entries()
+    }
+
+    /// Control side: take every boundary logged since the last drain, in
+    /// schedule order.
+    pub fn drain(&self) -> Vec<PrintBoundary> {
+        self.log.drain()
     }
 }
 
@@ -779,6 +871,10 @@ pub struct SequencerState {
     /// Rack-macro analog of `device_print_override`: latched macro values the
     /// audio thread substitutes when applying rack macros at a trigger.
     pub rack_macro_print_override: RackMacroPrintOverride,
+    /// Step boundaries scheduled while device targets are latched, for the
+    /// control thread to p-lock with the latch version they were scheduled
+    /// under (bead eseq-t49x).
+    pub print_boundary_log: PrintBoundaryLog,
     pub take_rack_macro_override: TakeRackMacroOverride,
     pub runtime: RuntimeBindingState,
     pub(super) scheduler_snapshot: Mutex<Arc<SequencerSnapshot>>,

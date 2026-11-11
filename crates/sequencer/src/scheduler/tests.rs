@@ -2306,7 +2306,7 @@
         assert_eq!(heard.len(), 1, "one scheduled step, one heard entry");
         assert_eq!((heard[0].track, heard[0].step), (0, 0));
         assert_eq!(
-            heard[0].values.iter().collect::<Vec<_>>(),
+            heard[0].value.iter().collect::<Vec<_>>(),
             vec![(StepParam::Duration, 3.0), (StepParam::Velocity, 0.25)],
             "the heard log carries the values substituted at schedule time"
         );
@@ -2340,6 +2340,65 @@
         assert!(
             state.step_print_override.drain_heard().is_empty(),
             "a disarmed latch logs nothing to print"
+        );
+    }
+
+    /// Device-param printing (bead eseq-t49x): the scheduler clock logs every
+    /// boundary it schedules on the armed track — off steps included, since
+    /// an off-step device p-lock is track-level automation — tagged with the
+    /// latch version current at schedule time. Disarmed, nothing is logged.
+    #[test]
+    fn scheduler_clock_logs_print_boundaries_with_the_armed_latch_version() {
+        run_with_scheduler_stack(scheduler_clock_logs_print_boundaries_body);
+    }
+
+    fn scheduler_clock_logs_print_boundaries_body() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        // Step 0 has no trigger: the boundary is still logged.
+        state.transport.playing.store(true, Ordering::Relaxed);
+        state.print_boundary_log.arm(0, 7);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let mut scratch_runtime = None;
+        let run = |state: &Arc<SequencerState>, scratch_runtime: &mut _| {
+            let queue = ScheduledEventQueue::<16>::new();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            schedule_playing_lookahead(
+                &mut scheduler,
+                state,
+                &snapshot,
+                &queue,
+                scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                6_000,
+                48_000,
+                6_000,
+                24_000.0,
+                0,
+                false,
+                false,
+            );
+        };
+        run(&state, &mut scratch_runtime);
+        assert_eq!(
+            state.print_boundary_log.drain(),
+            vec![crate::sequencer::PrintBoundary {
+                track: 0,
+                step: 0,
+                value: 7,
+            }],
+            "the off-step boundary is logged under the armed version"
+        );
+
+        state.print_boundary_log.disarm();
+        run(&state, &mut scratch_runtime);
+        assert!(
+            !state.print_boundary_log.has_entries(),
+            "a disarmed log records nothing"
         );
     }
 

@@ -786,6 +786,7 @@ fn a_live_print_drag_rerenders_neither_the_fx_root_nor_the_plock_panel() {
         assert_eq!(h.rerender_reasons(), Vec::<String>::new(), "{name}: the latch only repaints");
         for step in 1..4u32 {
             h.shared.state.transport.track_playheads[2].store(step, Ordering::Relaxed);
+            h.shared.state.print_boundary_log.record(2, step as usize);
             tick_step_print(&mut h.app, &h.shared);
             h.drain_and_sync();
             h.show_all();

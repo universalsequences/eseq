@@ -304,6 +304,7 @@ impl SequencerState {
             step_print_override: StepPrintOverride::default(),
             device_print_override: DeviceParamPrintOverride::default(),
             rack_macro_print_override: RackMacroPrintOverride::default(),
+            print_boundary_log: PrintBoundaryLog::default(),
             take_rack_macro_override: TakeRackMacroOverride::default(),
             track_output_events: Mutex::new(Vec::new()),
             track_output_events_revision: AtomicU64::new(0),
