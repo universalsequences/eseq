@@ -2339,6 +2339,14 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
 }"#;
 
 pub const ROAR_SHAPER_SHADER: &str = r#"
+fn roarCircuitCurve(x: f32, fit: vec4<f32>) -> f32 {
+    var limit: f32 = fit.z;
+    var knee: f32 = fit.w;
+    if (x >= 0.0) { limit = fit.x; knee = fit.y; }
+    var u: f32 = min(abs(x), 64.0);
+    return sign(x) * limit * u / pow(pow(u, knee) + pow(limit, knee), 1.0 / knee);
+}
+
 fn roarShaperCurve(shaper: i32, a: f32, x: f32) -> f32 {
     if (shaper == 1) { return clamp(x, -1.0, 1.0); }
     if (shaper == 2) {
@@ -2373,6 +2381,14 @@ fn roarShaperCurve(shaper: i32, a: f32, x: f32) -> f32 {
         var t: f32 = fract((x + 1.0) * 0.25);
         return 1.0 - 4.0 * abs(t - 0.5);
     }
+    if (shaper == 12) { return roarCircuitCurve(x, vec4<f32>(1.8300, 2.8137, 1.3855, 4.0145)); }
+    if (shaper == 13) {
+        var fit: vec4<f32> = vec4<f32>(1.8300, 2.8137, 1.3855, 4.0145);
+        return -roarCircuitCurve(-6.27968 * roarCircuitCurve(x / 6.27968, fit), fit);
+    }
+    if (shaper == 14) { return roarCircuitCurve(x, vec4<f32>(0.5530, 2.3059, 0.5530, 2.3059)); }
+    if (shaper == 15) { return roarCircuitCurve(x, vec4<f32>(0.5183, 8.8843, 0.4932, 12.0)); }
+    if (shaper == 16) { return roarCircuitCurve(x, vec4<f32>(1.5393, 5.0860, 1.5393, 5.0860)); }
     return sin(clamp(x, -1.5707963, 1.5707963));
 }
 
@@ -2380,7 +2396,7 @@ fn roarShaperCurve(shaper: i32, a: f32, x: f32) -> f32 {
 fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
 {
     var uv: vec2<f32> = input.uv;
-    var shaper: i32 = clamp(i32(round(input.value_t)), 0, 11);
+    var shaper: i32 = clamp(i32(round(input.value_t)), 0, 16);
     var amount: f32 = clamp(input.uniform_a.x, 0.0, 1.0);
     var bias: f32 = clamp(input.uniform_a.y, -1.0, 1.0);
     var driveMin: f32 = clamp(input.uniform_a.z, -2.0, 2.0);

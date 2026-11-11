@@ -13,6 +13,7 @@
 (load "@/ui/effects/builtin/chorus.lisp")
 (load "@/ui/effects/builtin/phaser-flanger.lisp")
 (load "@/ui/effects/builtin/roar.lisp")
+(load "@/ui/effects/builtin/saturator.lisp")
 (load "@/ui/effects/builtin/filter-panel.lisp")
 (load "@/ui/effects/builtin/dynamics.lisp")
 (load "@/ui/effects/builtin/compressor.lisp")

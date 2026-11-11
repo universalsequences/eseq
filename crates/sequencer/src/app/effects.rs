@@ -1771,7 +1771,7 @@ impl App {
                 crate::effects::phaser_flanger::PHASER_FLANGER_STATE_SIZE
                     * std::mem::size_of::<f32>(),
             ),
-            "Roar" => (
+            "Roar" | "Saturator" => (
                 crate::effects::roar::roar_vtable(),
                 crate::effects::roar::ROAR_STATE_SIZE * std::mem::size_of::<f32>(),
             ),

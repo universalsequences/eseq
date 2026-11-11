@@ -604,6 +604,7 @@ use panel_kinds_seed::*;
             "ui/effects/builtin/dimension.lisp",
             "ui/effects/builtin/phaser-flanger.lisp",
             "ui/effects/builtin/roar.lisp",
+            "ui/effects/builtin/saturator.lisp",
             "ui/effects/builtin/filter-panel.lisp",
             "ui/effects/builtin/dynamics.lisp",
             "ui/effects/builtin/multiband.lisp",

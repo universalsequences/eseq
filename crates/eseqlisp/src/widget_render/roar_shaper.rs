@@ -85,6 +85,22 @@ fn prop_num(props: &HashMap<String, Value>, key: &str, default: f32) -> f32 {
     props.get(key).and_then(value_num).unwrap_or(default)
 }
 
+// (positive limit, positive knee, negative limit, negative knee) of a solved
+// circuit's display curve: `sequencer::effects::triode::STATIC_*` and its
+// siblings.
+const TRIODE_FIT: [f32; 4] = [1.8300, 2.8137, 1.3855, 4.0145];
+const OPAMP_CLIP_FIT: [f32; 4] = [0.5530, 2.3059, 0.5530, 2.3059];
+const FUZZ_FIT: [f32; 4] = [0.5183, 8.8843, 0.4932, 12.0];
+const HYSTERESIS_FIT: [f32; 4] = [1.5393, 5.0860, 1.5393, 5.0860];
+// `triode::TWIN_INTERSTAGE * triode::SMALL_SIGNAL_GAIN`.
+const TWIN_GAIN: f32 = 6.27968;
+
+fn circuit_curve(x: f32, fit: [f32; 4]) -> f32 {
+    let (limit, knee) = if x >= 0.0 { (fit[0], fit[1]) } else { (fit[2], fit[3]) };
+    let u = x.abs().min(64.0);
+    x.signum() * limit * u / (u.powf(knee) + limit.powf(knee)).powf(1.0 / knee)
+}
+
 /// Mirror of `sequencer::effects::roar::shaper_transfer` (stateless part).
 pub fn shaper_transfer(shaper: usize, amount: f32, x: f32) -> f32 {
     let a = amount.clamp(0.0, 1.0);
@@ -131,6 +147,13 @@ pub fn shaper_transfer(shaper: usize, amount: f32, x: f32) -> f32 {
             let t = ((x + 1.0) * 0.25).rem_euclid(1.0);
             1.0 - 4.0 * (t - 0.5).abs()
         }
+        // The solved circuits: each one's `static_transfer` in
+        // `sequencer::effects`, same fit constants.
+        12 => circuit_curve(x, TRIODE_FIT),
+        13 => -circuit_curve(-TWIN_GAIN * circuit_curve(x / TWIN_GAIN, TRIODE_FIT), TRIODE_FIT),
+        14 => circuit_curve(x, OPAMP_CLIP_FIT),
+        15 => circuit_curve(x, FUZZ_FIT),
+        16 => circuit_curve(x, HYSTERESIS_FIT),
         _ => soft_sine(x),
     }
 }
@@ -146,7 +169,7 @@ struct Display {
 }
 
 fn display_from_props(props: &HashMap<String, Value>, frame: Option<BandMeterFrame>) -> Display {
-    let shaper = prop_num(props, "shaper", 0.0).round().clamp(0.0, 11.0) as usize;
+    let shaper = prop_num(props, "shaper", 0.0).round().clamp(0.0, 16.0) as usize;
     let amount = prop_num(props, "amount", 0.0).clamp(0.0, 1.0);
     let bias = prop_num(props, "bias", 0.0).clamp(-1.0, 1.0);
     let stage = prop_num(props, "stage", 0.0).round().clamp(0.0, 2.0) as usize;
@@ -182,7 +205,7 @@ impl WidgetDefinition for RoarShaperWidget {
 curve (input across, output up) with :amount drive and :bias baked in, a marker at the \
 shifted centre, and a translucent band showing how much of the curve the live input \
 is currently driving. Display only, no callbacks. :shaper is the shaper type index \
-(0..11, Roar's list), :amount 0..1, :bias -1..1, :stage 0..2 picks which stage's \
+(0..16, Roar's list), :amount 0..1, :bias -1..1, :stage 0..2 picks which stage's \
 meter to read; bind them to the effective param values. :source is the Roar effect \
 selector (dict :kind :track-effect :index track :slot slot) or :bus-effect, used only \
 for the drive band. Colours: :background-color, :grid-color, :curve-color, \
@@ -326,6 +349,14 @@ Example: (roar-shaper :source (effect-source fx) :stage 0 :shaper shp :amount am
 // Dual-maintained with `sequencer::effects::roar::shaper_transfer` and the Rust
 // mirror above.
 const ROAR_SHAPER_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
+float roarCircuitCurve(float x, float4 fit)
+{
+    float limit = (x >= 0.0) ? fit.x : fit.z;
+    float knee = (x >= 0.0) ? fit.y : fit.w;
+    float u = min(abs(x), 64.0);
+    return sign(x) * limit * u / pow(pow(u, knee) + pow(limit, knee), 1.0 / knee);
+}
+
 float roarShaperCurve(int shaper, float a, float x)
 {
     if (shaper == 1) { return clamp(x, -1.0, 1.0); }
@@ -361,13 +392,21 @@ float roarShaperCurve(int shaper, float a, float x)
         float t = fract((x + 1.0) * 0.25);
         return 1.0 - 4.0 * abs(t - 0.5);
     }
+    if (shaper == 12) { return roarCircuitCurve(x, float4(1.8300, 2.8137, 1.3855, 4.0145)); }
+    if (shaper == 13) {
+        float4 fit = float4(1.8300, 2.8137, 1.3855, 4.0145);
+        return -roarCircuitCurve(-6.27968 * roarCircuitCurve(x / 6.27968, fit), fit);
+    }
+    if (shaper == 14) { return roarCircuitCurve(x, float4(0.5530, 2.3059, 0.5530, 2.3059)); }
+    if (shaper == 15) { return roarCircuitCurve(x, float4(0.5183, 8.8843, 0.4932, 12.0)); }
+    if (shaper == 16) { return roarCircuitCurve(x, float4(1.5393, 5.0860, 1.5393, 5.0860)); }
     return sin(clamp(x, -1.5707963, 1.5707963));
 }
 
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
-    int shaper = clamp(int(round(in.value_t)), 0, 11);
+    int shaper = clamp(int(round(in.value_t)), 0, 16);
     float amount = clamp(in.uniform_a.x, 0.0, 1.0);
     float bias = clamp(in.uniform_a.y, -1.0, 1.0);
     float driveMin = clamp(in.uniform_a.z, -2.0, 2.0);
