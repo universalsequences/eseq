@@ -56,10 +56,16 @@ pub(super) fn piano_roll_edit_landed(ctx: &LoopCtx<'_>, track: usize, landing: P
         track,
         change: PianoRollInvalidation::Items,
     });
+    // A drag frame bumps no epoch: the host kinds diff the piano roll's
+    // notes (scheduler snapshot), the step grid's steps (per tick) and the
+    // arrangement's clip dots (pattern content) themselves. A `ui_epoch`
+    // bump per frame re-ran the whole model sync (every track, device and
+    // send) and relaid out *sequencer* on every mouse move of a note drag.
+    // The release and one-shot edits still bump both, once.
     if landing != PianoRollLanding::Frame {
         shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+        shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
     }
-    shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
 }
 
 #[allow(clippy::too_many_lines)]

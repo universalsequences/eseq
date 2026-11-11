@@ -542,12 +542,19 @@ macro_rules! theme_slots {
         pub fn apply_value_to(theme: &mut Theme, value: &Value) {
             if let Value::Map(map) = value {
                 let mut widgets = theme.widgets.slots();
+                // Each key normalized once (the first spelling of a slot
+                // wins, as the old per-slot scan found it): the host syncs
+                // THEME after every Lisp invoke, so a per-slot scan of every
+                // key (slots x keys allocations) cost ~13ms per call.
+                let mut normalized = HashMap::with_capacity(map.len());
+                for (key, value) in map.iter() {
+                    normalized.entry(normalize_name(key)).or_insert(value);
+                }
                 $(
-                    if let Some(value) = map.get(stringify!($field)).or_else(|| {
-                        map.iter()
-                            .find(|(key, _)| normalize_name(key) == stringify!($field))
-                            .map(|(_, value)| value)
-                    }) {
+                    if let Some(value) = map
+                        .get(stringify!($field))
+                        .or_else(|| normalized.get(stringify!($field)).copied())
+                    {
                         let value = value.borrow();
                         if let Some(color) = parse_color_value(&value) {
                             theme.$field = color;
@@ -1989,6 +1996,34 @@ fn normalize_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THEME as Lisp holds it: every slot under its hyphenated keyword. The
+    /// host folds it after every Lisp invoke, so every slot must land
+    /// through the normalized index, not only the exact-key hit.
+    #[test]
+    fn a_hyphen_keyed_theme_sets_every_slot() {
+        let slots = slot_colors_in(&default_theme());
+        let color = |i: usize| {
+            let r = (i % 251) as f64 / 251.0;
+            Value::List(
+                [r, 0.5, 0.25, 1.0]
+                    .into_iter()
+                    .map(|n| Rc::new(RefCell::new(Value::Number(n))))
+                    .collect(),
+            )
+        };
+        let mut map: HashMap<String, Rc<RefCell<Value>>> = (slots.iter().enumerate())
+            .map(|(i, (name, _))| (name.clone(), Rc::new(RefCell::new(color(i)))))
+            .collect();
+        map.insert("Not A Slot".to_string(), Rc::new(RefCell::new(color(0))));
+        let value = Value::Map(map);
+        let mut theme = default_theme();
+        apply_value_to(&mut theme, &value);
+        for (i, (name, applied)) in slot_colors_in(&theme).into_iter().enumerate() {
+            let r = (i % 251) as f32 / 251.0;
+            assert!((applied.r - r).abs() < 1e-3, "{name} not applied: {applied:?}");
+        }
+    }
 
     #[test]
     fn split_off_slots_follow_their_parent_unless_set() {

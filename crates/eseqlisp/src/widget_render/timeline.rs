@@ -262,6 +262,9 @@ struct TimelineView {
     grid_density: f64,
     /// `:fine-grid`: the zoomed-in grid density at every zoom.
     fine_grid: bool,
+    /// `:grid-subdivide N` (1..8): N times the readable grid at every zoom
+    /// (`TimeViewport::grid_subdivide`).
+    grid_subdivide: f64,
     content_length: Option<f64>,
     content_length_min: f64,
     content_length_max: f64,
@@ -344,7 +347,16 @@ struct TimelineView {
     min_duration: Option<f64>,
     create_duration: Option<f64>,
     move_alignment_helper: bool,
+    /// `:move-snap-mode :mouse-delta` (`mouse_delta_move_start`).
+    move_mouse_delta: bool,
     resize_alignment_helper: bool,
+    /// `:resize-direction-lock true` — an end-edge resize's first movement
+    /// fixes its meaning for the whole gesture (`direction_locked_resize_end`).
+    resize_direction_lock: bool,
+    /// `:lane-center` — overrides `:lane-scroll`: the widget scrolls so this
+    /// (fractional) lane sits mid-viewport, measured against its ACTUAL
+    /// height, which the caller may not know (a remembered, draggable pane).
+    lane_center: Option<f64>,
     smooth_scroll: bool,
     /// `:scroll-passthrough :vertical` — this instance owns no vertical
     /// scrolling: vertical-dominant wheel/touchpad deltas are declined so an
@@ -614,7 +626,10 @@ lines; :time-ruler (dict :mode :bars-beats :beats-per-bar 4) or :seconds labels 
 the header (:header-height, default 1). :content-length draws a draggable loop \
 end. :tool is :pointer (default), :draw, :erase, :marquee, :pan or :scrub; :snap \
 is the step grid (:snap-mode :floor, :resize-snap :grid, :move-snap-mode \
-:alignment-helper). The widget is stateless: every gesture and key calls \
+:alignment-helper, :resize-direction-lock true: an end resize dragged left first \
+shrinks unsnapped, right first only grows by whole grid steps). :lane-center \
+overrides :lane-scroll, centering that lane in the widget's real height; \
+:zoom-lanes and lane-moving :scroll-view carry the :lane-scroll actually shown. The widget is stateless: every gesture and key calls \
 :on-action with ONE map whose :type says what happened, e.g. :select (:ids \
 :mode :time), :set-cursor (:time), :create-item/:finish-create-item (:lane \
 :start :end), :move-items-absolute (:ids :anchor-id :start :lane) then \
@@ -639,11 +654,11 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
             "lanes", "items", "on-action", "view-start", "view-duration", "zoom-min-duration",
             "zoom-max-duration", "playhead-time", "cursor-time", "time-ruler", "header-height",
             "header-bottom-gutter", "sidebar-width", "sidebar-style", "tool", "snap", "snap-mode",
-            "resize-snap", "resize-snap-mode", "move-snap-mode", "marquee-snap", "min-duration",
-            "create-duration", "grid-density", "fine-grid", "content-length", "content-length-min",
+            "resize-snap", "resize-snap-mode", "resize-direction-lock", "move-snap-mode", "marquee-snap", "min-duration",
+            "create-duration", "grid-density", "grid-subdivide", "fine-grid", "content-length", "content-length-min",
             "content-length-max", "selection", "selection-rect", "selection-rect-style",
             "double-click-items", "band-slide", "window-marker", "window-span", "window-repeat",
-            "lane-scroll", "lane-height", "scroll-viewport-height", "scroll-mode",
+            "lane-scroll", "lane-center", "lane-height", "scroll-viewport-height", "scroll-mode",
             "scroll-passthrough", "title-bar-height", "item-corner-radius", "item-color",
             "item-label-color", "item-label-font-size", "item-content-color", "loop-color",
             "loop-visible", "loop-brace", "loop-start", "loop-end", "loop-on",
@@ -2971,6 +2986,7 @@ impl TimelineView {
             zoom_max_duration: self.zoom_max_duration,
             grid_density: self.grid_density,
             fine_grid: self.fine_grid,
+            grid_subdivide: self.grid_subdivide,
         }
     }
 
@@ -2989,6 +3005,8 @@ impl TimelineView {
         let view_duration = get_num(props, "view-duration", 16.0).max(0.0001);
         let view_start = get_num(props, "view-start", 0.0).max(0.0);
         let header_height = get_num(props, "header-height", 1.0).max(0.0) as f32;
+        let move_snap_mode = props.get("move-snap-mode").and_then(as_string);
+        let move_snap_mode = move_snap_mode.as_deref();
         let mut view = Self {
             rect,
             background_color: props
@@ -3004,6 +3022,7 @@ impl TimelineView {
             zoom_max_duration: get_num(props, "zoom-max-duration", 128.0).max(0.0001),
             grid_density: get_num(props, "grid-density", 1.0).clamp(1.0, 8.0),
             fine_grid: props.get("fine-grid").and_then(as_bool).unwrap_or(false),
+            grid_subdivide: get_num(props, "grid-subdivide", 1.0),
             content_length: props
                 .get("content-length")
                 .and_then(as_number)
@@ -3121,14 +3140,17 @@ impl TimelineView {
                 .get("create-duration")
                 .and_then(as_number)
                 .map(|duration| duration.max(0.0001)),
-            move_alignment_helper: matches!(
-                props.get("move-snap-mode"),
-                Some(Value::Keyword(mode)) | Some(Value::String(mode)) if mode == "alignment-helper"
-            ),
+            move_alignment_helper: move_snap_mode == Some("alignment-helper"),
+            move_mouse_delta: move_snap_mode == Some("mouse-delta"),
             resize_alignment_helper: matches!(
                 props.get("resize-snap-mode"),
                 Some(Value::Keyword(mode)) | Some(Value::String(mode)) if mode == "alignment-helper"
             ),
+            resize_direction_lock: props
+                .get("resize-direction-lock")
+                .and_then(as_bool)
+                .unwrap_or(false),
+            lane_center: props.get("lane-center").and_then(as_number),
             smooth_scroll: matches!(
                 props.get("scroll-mode"),
                 Some(Value::Keyword(mode)) | Some(Value::String(mode)) if mode == "smooth"
@@ -3149,7 +3171,10 @@ impl TimelineView {
                 _ => SelectionRectStyle::Marquee,
             },
         };
-        view.lane_scroll = view.clamp_lane_scroll(view.lane_scroll);
+        view.lane_scroll = match view.lane_center {
+            Some(center) => view.centered_lane_scroll(center),
+            None => view.clamp_lane_scroll(view.lane_scroll),
+        };
         view.apply_bound_channels(props);
         view.grow_items_to_playhead();
         view
@@ -3466,21 +3491,48 @@ impl TimelineView {
     }
 
     fn max_lane_scroll(&self) -> f64 {
-        let content = self.content_rect();
         let scroll_content_height = self
             .scroll_viewport_height
             .map(|height| (height - self.header_height).max(0.0))
-            .unwrap_or(content.height);
+            .unwrap_or(self.content_rect().height);
         if scroll_content_height <= 0.0 || self.lanes.is_empty() {
             return 0.0;
         }
+        self.lane_scroll_range(scroll_content_height).1
+    }
+
+    /// The lanes a `height` shows, and the furthest scroll that keeps them full.
+    fn lane_scroll_range(&self, height: f32) -> (f64, f64) {
         let lane_height = self.lane_height().max(0.2) as f64;
-        let visible_lanes = (scroll_content_height as f64 / lane_height).max(1.0);
-        (self.lanes.len() as f64 - visible_lanes).max(0.0)
+        let visible = (height as f64 / lane_height).max(1.0);
+        (visible, (self.lanes.len() as f64 - visible).max(0.0))
     }
 
     fn clamp_lane_scroll(&self, lane_scroll: f64) -> f64 {
         lane_scroll.max(0.0).min(self.max_lane_scroll())
+    }
+
+    /// The lane scroll that puts lane position `center` mid-viewport, using
+    /// the rendered content height (not `:scroll-viewport-height`, which a
+    /// caller sizes for its smallest pane).
+    fn centered_lane_scroll(&self, center: f64) -> f64 {
+        let (visible, max_scroll) = self.lane_scroll_range(self.content_rect().height);
+        (center - visible * 0.5).clamp(0.0, max_scroll)
+    }
+
+    /// A lane zoom by `factor` anchored at `local_row`.
+    fn zoom_lanes_action(&self, local_row: f32, factor: f64) -> Value {
+        action_map(vec![
+            ("type", keyword(":zoom-lanes")),
+            (
+                "anchor-lane",
+                Value::Number(self.anchor_lane_at_row(local_row)),
+            ),
+            ("factor", Value::Number(factor)),
+            // The scroll the anchor was measured against (`:lane-center`
+            // can make it differ from the caller's `:lane-scroll`).
+            ("lane-scroll", Value::Number(self.lane_scroll)),
+        ])
     }
 
     fn anchor_lane_at_row(&self, local_row: f32) -> f64 {
@@ -3582,7 +3634,7 @@ impl TimelineView {
         let previous_cell_snap_start =
             anchor_cell_start - grid * (1.0 - ALIGNMENT_HELPER_BACKWARD_SNAP_PROXIMITY);
         let anchor_has_delay = anchor_time > anchor_cell_start + f64::EPSILON;
-        let has_snapped = map_bool(gesture_value, "alignment-helper-snapped");
+        let has_snapped = map_bool(gesture_value, "move-snapped");
 
         if has_snapped {
             return self.alignment_helper_snapped_time(
@@ -3598,7 +3650,7 @@ impl TimelineView {
             || (raw_time < anchor_cell_start && anchor_has_delay)
             || raw_time <= previous_cell_snap_start
         {
-            set_map_bool(gesture_value, "alignment-helper-snapped", true);
+            set_map_bool(gesture_value, "move-snapped", true);
             self.alignment_helper_snapped_time(
                 raw_time,
                 anchor_cell_start,
@@ -3619,6 +3671,20 @@ impl TimelineView {
         gesture: &HashMap<String, Value>,
         anchor_start: f64,
     ) -> Option<f64> {
+        if self.move_mouse_delta {
+            let raw_time_offset = as_number(
+                gesture
+                    .get("raw-time-offset")
+                    .or_else(|| gesture.get("time-offset"))?,
+            )?;
+            let latched = map_bool(gesture_value, "move-snapped");
+            let (start, snapped) =
+                self.mouse_delta_move_start(raw_time - raw_time_offset, anchor_start, latched);
+            if snapped {
+                set_map_bool(gesture_value, "move-snapped", true);
+            }
+            return Some(start);
+        }
         if !self.move_alignment_helper {
             let time_offset = as_number(gesture.get("time-offset")?)?;
             return Some(self.snap_time(snapped_time - time_offset));
@@ -3631,6 +3697,41 @@ impl TimelineView {
         )?;
         let raw_start = raw_time - raw_time_offset;
         Some(self.alignment_helper_time_for_drag(raw_start, anchor_start, gesture_value))
+    }
+
+    /// `:move-snap-mode :mouse-delta` (Ableton's note drag), a pure function
+    /// of the pointer's travel since the press (`delta`, in grid steps of
+    /// the zoom-adaptive ruler):
+    /// - between the grid lines just below and just above the original
+    ///   start the note moves freely;
+    /// - forward, the first snap is its start crossing the line above; the
+    ///   next comes at 1.5 steps of travel, then one per step (the snapped
+    ///   offset from the original cell is `round(delta)`, never below that
+    ///   first line);
+    /// - backward, the first snap is its start crossing the line below, then
+    ///   one per further step of travel;
+    /// - once a gesture has snapped (`latched`), it never moves freely again:
+    ///   back between those two lines, the start takes the nearest line.
+    ///
+    /// Returns the start and whether it is snapped.
+    fn mouse_delta_move_start(&self, raw_start: f64, anchor_start: f64, latched: bool) -> (f64, bool) {
+        const EPS: f64 = 1e-9;
+        let grid = self.alignment_helper_grid_step();
+        let cell = (anchor_start / grid + EPS).floor();
+        let on_grid = (anchor_start / grid - cell).abs() < 1e-6;
+        let line_above = (cell + 1.0) * grid;
+        let line_below = if on_grid { (cell - 1.0) * grid } else { cell * grid };
+        if raw_start >= line_above - EPS {
+            let delta = (raw_start - anchor_start) / grid;
+            let stepped = (cell + (delta + 0.5 + EPS).floor()) * grid;
+            (stepped.max(line_above), true)
+        } else if raw_start <= line_below + EPS {
+            ((raw_start / grid - EPS).ceil() * grid, true)
+        } else if latched {
+            ((raw_start / grid).round() * grid, true)
+        } else {
+            (raw_start, false)
+        }
     }
 
     fn resize_end_for_drag(
@@ -3648,6 +3749,43 @@ impl TimelineView {
         let raw_time_offset = as_number(gesture.get("raw-time-offset")?)?;
         let raw_end = raw_time - raw_time_offset;
         Some(self.alignment_helper_time_for_drag(raw_end, anchor_end, gesture_value))
+    }
+
+    /// `:resize-direction-lock`: the gesture's first movement picks what it
+    /// does. Left first shrinks: the end follows the pointer unsnapped for
+    /// the rest of the gesture, even back past where it started. Right first
+    /// grows: the duration takes whole multiples of the grid step and never
+    /// drops below the original, so swinging back left returns the note to
+    /// its original length instead of flooring it to its grid cell (which
+    /// collapsed a short note to `:min-duration`).
+    fn direction_locked_resize_end(
+        &self,
+        raw_time: f64,
+        gesture_value: &Value,
+        gesture: &HashMap<String, Value>,
+        anchor_end: f64,
+        start: f64,
+    ) -> Option<f64> {
+        let raw_end = raw_time - as_number(gesture.get("raw-time-offset")?)?;
+        if !map_bool(gesture_value, "resize-grow") && !map_bool(gesture_value, "resize-shrink") {
+            // A quarter column of dead zone so the click itself never picks.
+            let content = self.content_rect();
+            let threshold = self.view_duration / content.width.max(1.0) as f64 * 0.25;
+            if raw_end > anchor_end + threshold {
+                set_map_bool(gesture_value, "resize-grow", true);
+            } else if raw_end < anchor_end - threshold {
+                set_map_bool(gesture_value, "resize-shrink", true);
+            } else {
+                return Some(anchor_end);
+            }
+        }
+        if map_bool(gesture_value, "resize-shrink") {
+            return Some(raw_end);
+        }
+        let grid = self.alignment_helper_grid_step();
+        let original = anchor_end - start;
+        let cells = ((raw_end - start) / grid + 1e-9).floor();
+        Some(start + original.max(cells * grid))
     }
 
     /// Start-edge mirror of `resize_end_for_drag`
@@ -4067,10 +4205,14 @@ impl TimelineView {
                         ("min-start", Value::Number(min_start)),
                         ("time-offset", Value::Number(current_time - item.start)),
                         ("raw-time-offset", Value::Number(raw_time - item.start)),
-                        ("alignment-helper-snapped", Value::Bool(false)),
+                        ("move-snapped", Value::Bool(false)),
                         // Flipped by the first drag event that leaves home
                         // (`set_map_bool` only writes keys that exist).
                         ("moved", Value::Bool(false)),
+                        // The last emitted start/lane (`:mouse-delta` skips
+                        // a frame that would repeat it).
+                        ("last-start", Value::Number(f64::NAN)),
+                        ("last-lane", Value::Number(f64::NAN)),
                         (
                             "lane-offset",
                             Value::Number(current_lane as f64 - item.lane as f64),
@@ -4090,7 +4232,9 @@ impl TimelineView {
                         ("ids", list_value(ids)),
                         ("anchor-end", Value::Number(item.end)),
                         ("raw-time-offset", Value::Number(raw_time - item.end)),
-                        ("alignment-helper-snapped", Value::Bool(false)),
+                        ("move-snapped", Value::Bool(false)),
+                        ("resize-grow", Value::Bool(false)),
+                        ("resize-shrink", Value::Bool(false)),
                     ]))
                 }
                 HitRegion::ItemEdgeStart { item } => {
@@ -4107,7 +4251,7 @@ impl TimelineView {
                         ("anchor-start", Value::Number(item.start)),
                         ("anchor-end", Value::Number(item.end)),
                         ("raw-time-offset", Value::Number(raw_time - item.start)),
-                        ("alignment-helper-snapped", Value::Bool(false)),
+                        ("move-snapped", Value::Bool(false)),
                     ]))
                 }
                 HitRegion::ContentLengthEnd => {
@@ -4405,6 +4549,18 @@ impl TimelineView {
                     return None;
                 }
                 set_map_bool(gesture_value, "moved", true);
+                if self.move_mouse_delta {
+                    // A snapped note sits still while the pointer travels;
+                    // re-sending the same position would make the host redo
+                    // a whole edit frame per mouse move for nothing.
+                    let last_start = map_number(gesture_value, "last-start");
+                    let last_lane = map_number(gesture_value, "last-lane");
+                    if last_start == Some(clamped_start) && last_lane == Some(next_lane) {
+                        return None;
+                    }
+                    set_map_number(gesture_value, "last-start", clamped_start);
+                    set_map_number(gesture_value, "last-lane", next_lane);
+                }
                 Some(action_map(vec![
                     ("type", keyword(":move-items-absolute")),
                     ("ids", gesture.get("ids")?.clone()),
@@ -4420,15 +4576,24 @@ impl TimelineView {
                     .get("anchor-end")
                     .and_then(as_number)
                     .unwrap_or(item.end);
-                let next_time = self
-                    .resize_end_for_drag(
+                let next_time = if self.resize_direction_lock {
+                    self.direction_locked_resize_end(
+                        raw_time,
+                        gesture_value,
+                        &gesture,
+                        anchor_end,
+                        item.start,
+                    )?
+                } else {
+                    self.resize_end_for_drag(
                         raw_time,
                         current_resize_time,
                         gesture_value,
                         &gesture,
                         anchor_end,
                     )?
-                    .max(self.minimum_end_for(item));
+                }
+                .max(self.minimum_end_for(item));
                 Some(action_map(vec![
                     ("type", keyword(":resize-item-absolute")),
                     ("id", id.clone()),
@@ -4585,14 +4750,7 @@ impl TimelineView {
                 MouseEventKind::ScrollDown => 1.0 / 1.08,
                 _ => return None,
             };
-            return Some(action_map(vec![
-                ("type", keyword(":zoom-lanes")),
-                (
-                    "anchor-lane",
-                    Value::Number(self.anchor_lane_at_row(local_row)),
-                ),
-                ("factor", Value::Number(factor)),
-            ]));
+            return Some(self.zoom_lanes_action(local_row, factor));
         }
         match mouse_kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -4658,14 +4816,7 @@ impl TimelineView {
         let sensitivity = self.magnify_sensitivity.max(0.0);
         let factor = 2.0_f64.powf((delta * sensitivity).clamp(-2.0, 2.0));
         if matches!(hit, HitRegion::Sidebar { .. }) {
-            return Some(action_map(vec![
-                ("type", keyword(":zoom-lanes")),
-                (
-                    "anchor-lane",
-                    Value::Number(self.anchor_lane_at_row(local_row)),
-                ),
-                ("factor", Value::Number(factor)),
-            ]));
+            return Some(self.zoom_lanes_action(local_row, factor));
         }
         self.zoom_action(self.time_at_col(local_col), factor)
     }
@@ -4701,14 +4852,7 @@ impl TimelineView {
                 return None;
             }
             let factor = 2.0_f64.powf((delta_y as f64 / 240.0).clamp(-1.0, 1.0));
-            return Some(action_map(vec![
-                ("type", keyword(":zoom-lanes")),
-                (
-                    "anchor-lane",
-                    Value::Number(self.anchor_lane_at_row(local_row)),
-                ),
-                ("factor", Value::Number(factor)),
-            ]));
+            return Some(self.zoom_lanes_action(local_row, factor));
         }
 
         let horizontal_dominant = delta_x.abs() >= delta_y.abs();
@@ -5558,14 +5702,30 @@ fn map_bool(value: &Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn set_map_bool(value: &Value, key: &str, next: bool) {
+fn map_number(value: &Value, key: &str) -> Option<f64> {
+    let Value::Map(map) = value else {
+        return None;
+    };
+    map.get(key).and_then(|value| as_number(&value.borrow()))
+}
+
+/// Overwrites an existing gesture-map entry (absent keys stay absent).
+fn set_map_value(value: &Value, key: &str, next: Value) {
     let Value::Map(map) = value else {
         return;
     };
     if let Some(value) = map.get(key) {
-        crate::vm::debug_assert_cell_not_frozen(value, "timeline set_map_bool");
-        *value.borrow_mut() = Value::Bool(next);
+        crate::vm::debug_assert_cell_not_frozen(value, "timeline set_map_value");
+        *value.borrow_mut() = next;
     }
+}
+
+fn set_map_number(value: &Value, key: &str, next: f64) {
+    set_map_value(value, key, Value::Number(next));
+}
+
+fn set_map_bool(value: &Value, key: &str, next: bool) {
+    set_map_value(value, key, Value::Bool(next));
 }
 
 fn as_usize(value: &Value) -> Option<usize> {
@@ -6690,6 +6850,142 @@ mod tests {
             view.handle_pointer_drag(10.2, 2.1, Some(&gesture))
                 .is_none()
         );
+    }
+
+    fn mouse_delta_view(start: f64) -> TimelineView {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![("id", number_value(0.0))])]),
+            ),
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(10.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(start)),
+                    ("end", number_value(start + 1.0)),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("snap".to_string(), number_value(1.0)),
+            ("move-snap-mode".to_string(), keyword_value("mouse-delta")),
+        ]);
+        // 8 cells per unit so the shared grid resolves at step 1.0.
+        TimelineView::from_props(
+            &props,
+            Rect { row: 0.0, col: 0.0, width: 128.0, height: 8.0 },
+        )
+    }
+
+    /// (pointer travel in grid steps, expected start) for a note at `start`.
+    fn assert_mouse_delta_moves(start: f64, cases: &[(f64, f64)]) {
+        let view = mouse_delta_view(start);
+        assert_eq!(view.alignment_helper_grid_step(), 1.0);
+        for &(delta, expected) in cases {
+            let (got, _) = view.mouse_delta_move_start(start + delta, start, false);
+            assert!((got - expected).abs() < 1e-6, "start {start} delta {delta}: got {got}, want {expected}");
+        }
+    }
+
+    #[test]
+    fn mouse_delta_move_on_grid_note_snaps_at_line_then_one_and_a_half_then_every_step() {
+        assert_mouse_delta_moves(
+            4.0,
+            &[
+                // Free until the start crosses the next line.
+                (0.6, 4.6),
+                (0.99, 4.99),
+                (1.0, 5.0),
+                (1.49, 5.0),
+                // Second snap at 1.5 steps of travel, then one per step.
+                (1.5, 6.0),
+                (2.49, 6.0),
+                (2.5, 7.0),
+                // Backward: free until the line below, then one per step.
+                (-0.5, 3.5),
+                (-1.0, 3.0),
+                (-1.9, 3.0),
+                (-2.0, 2.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn mouse_delta_move_delayed_note_snaps_at_line_then_one_and_a_half_then_every_step() {
+        assert_mouse_delta_moves(
+            4.3,
+            &[
+                (0.5, 4.8),
+                (0.7, 5.0),
+                (1.4, 5.0),
+                (1.5, 6.0),
+                (2.5, 7.0),
+                (-0.2, 4.1),
+                (-0.3, 4.0),
+                (-1.29, 4.0),
+                (-1.3, 3.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn mouse_delta_move_drives_the_pointer_drag() {
+        let view = mouse_delta_view(4.0);
+        // Press mid-note (4.5 = col 36), drag 1.5 steps (12 cols).
+        let gesture = view.begin_gesture(36.0, 2.0).expect("gesture");
+        let Some(Value::Map(map)) = view.handle_pointer_drag(48.0, 2.0, Some(&gesture)) else {
+            panic!("expected move action");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(6.0))
+        );
+        // Further travel that keeps the snapped start emits nothing.
+        assert!(view.handle_pointer_drag(50.0, 2.0, Some(&gesture)).is_none());
+        assert!(view.handle_pointer_drag(55.0, 2.0, Some(&gesture)).is_none(), "2.375 steps: still 6");
+        let Some(Value::Map(map)) = view.handle_pointer_drag(56.0, 2.0, Some(&gesture)) else {
+            panic!("2.5 steps of travel: the next snap");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(7.0))
+        );
+    }
+
+    /// Once a drag has snapped it stays snapped: swinging back between the
+    /// lines around the original start takes the nearest line instead of
+    /// moving freely again.
+    #[test]
+    fn mouse_delta_move_stays_snapped_after_its_first_snap() {
+        let start_of = |action: Option<Value>| {
+            let Some(Value::Map(map)) = action else {
+                panic!("expected move action");
+            };
+            let start = map.get("start").map(|value| value.borrow().clone());
+            start
+        };
+        let view = mouse_delta_view(4.0);
+        // Press mid-note (4.5 = col 36). Before any snap, a small move is free.
+        let gesture = view.begin_gesture(36.0, 2.0).expect("gesture");
+        assert_eq!(start_of(view.handle_pointer_drag(38.0, 2.0, Some(&gesture))), Some(Value::Number(4.25)));
+        // Cross the line above: snapped.
+        assert_eq!(start_of(view.handle_pointer_drag(44.0, 2.0, Some(&gesture))), Some(Value::Number(5.0)));
+        // Back to a quarter step past the start: the nearest line, not 4.25.
+        assert_eq!(start_of(view.handle_pointer_drag(38.0, 2.0, Some(&gesture))), Some(Value::Number(4.0)));
+        // A quarter step before it, too: not 3.75.
+        assert!(view.handle_pointer_drag(34.0, 2.0, Some(&gesture)).is_none(), "still 4.0");
+        // Past the half: the next line.
+        assert_eq!(start_of(view.handle_pointer_drag(41.0, 2.0, Some(&gesture))), Some(Value::Number(5.0)));
+
+        let (unlatched, snapped) = view.mouse_delta_move_start(4.25, 4.0, false);
+        assert_eq!((unlatched, snapped), (4.25, false));
+        // An off-grid note's free zone latches to its nearest line as well.
+        let delayed = mouse_delta_view(4.3);
+        assert_eq!(delayed.mouse_delta_move_start(4.3, 4.3, true), (4.0, true));
+        assert_eq!(delayed.mouse_delta_move_start(4.6, 4.3, true), (5.0, true));
     }
 
     #[test]
@@ -8502,6 +8798,121 @@ mod tests {
             map.get("time").map(|value| value.borrow().clone()),
             Some(Value::Number(4.0))
         );
+    }
+
+    fn direction_lock_view() -> TimelineView {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(10.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(5.0)),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("snap".to_string(), number_value(1.0)),
+            ("resize-snap".to_string(), number_value(1.0)),
+            ("min-duration".to_string(), number_value(0.03125)),
+            (
+                "resize-snap-mode".to_string(),
+                keyword_value("alignment-helper"),
+            ),
+            ("resize-direction-lock".to_string(), Value::Bool(true)),
+        ]);
+        // 8 cells per unit so the promoted shared grid stays at step 1.0.
+        TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 128.0,
+                height: 8.0,
+            },
+        )
+    }
+
+    fn drag_resize_time(view: &TimelineView, col: f32, gesture: &Value) -> f64 {
+        let Some(Value::Map(map)) = view.handle_pointer_drag(col, 2.0, Some(gesture)) else {
+            panic!("expected resize action map");
+        };
+        let Some(Value::Number(time)) = map.get("time").map(|value| value.borrow().clone()) else {
+            panic!("expected resize time");
+        };
+        time
+    }
+
+    #[test]
+    fn direction_lock_grow_snaps_to_grid_and_never_shrinks_below_original() {
+        let view = direction_lock_view();
+        let gesture = view.begin_gesture(40.0, 2.0).expect("gesture");
+        // Right first: grow. Short of the next grid step stays put.
+        assert_eq!(drag_resize_time(&view, 43.2, &gesture), 5.0);
+        assert_eq!(drag_resize_time(&view, 48.8, &gesture), 6.0);
+        // Back left past the note's own grid line: the original length, not
+        // the old floor-to-cell collapse to :min-duration (4.03125).
+        assert_eq!(drag_resize_time(&view, 33.6, &gesture), 5.0);
+        assert_eq!(drag_resize_time(&view, 56.8, &gesture), 7.0);
+    }
+
+    #[test]
+    fn direction_lock_shrink_follows_pointer_unsnapped_both_ways() {
+        let view = direction_lock_view();
+        let gesture = view.begin_gesture(40.0, 2.0).expect("gesture");
+        // Left first: shrink, unsnapped.
+        assert!((drag_resize_time(&view, 36.0, &gesture) - 4.5).abs() < 1e-4);
+        // Back right in the same gesture: still unsnapped.
+        assert!((drag_resize_time(&view, 44.0, &gesture) - 5.5).abs() < 1e-4);
+        // Clamped at :min-duration.
+        assert!((drag_resize_time(&view, 20.0, &gesture) - 4.03125).abs() < 1e-4);
+    }
+
+    #[test]
+    fn direction_lock_ignores_sub_threshold_jitter_before_picking() {
+        let view = direction_lock_view();
+        let gesture = view.begin_gesture(40.0, 2.0).expect("gesture");
+        assert_eq!(drag_resize_time(&view, 39.9, &gesture), 5.0);
+        // The jitter did not lock shrink: moving right now grows by grid.
+        assert_eq!(drag_resize_time(&view, 48.8, &gesture), 6.0);
+    }
+
+    #[test]
+    fn lane_center_centers_in_rendered_height_not_scroll_viewport_height() {
+        let lanes: Vec<Value> = (0..40)
+            .map(|i| map_value_raw(vec![("id", number_value(i as f64))]))
+            .collect();
+        let view_for = |center: f64| {
+            TimelineView::from_props(
+                &HashMap::from([
+                    ("lanes".to_string(), list_value_raw(lanes.clone())),
+                    ("lane-height".to_string(), number_value(0.5)),
+                    ("lane-scroll".to_string(), number_value(3.0)),
+                    ("lane-center".to_string(), number_value(center)),
+                    // Sized for a smaller pane than the one rendered.
+                    ("scroll-viewport-height".to_string(), number_value(4.0)),
+                ]),
+                Rect {
+                    row: 0.0,
+                    col: 0.0,
+                    width: 64.0,
+                    height: 8.0,
+                },
+            )
+        };
+        // 7 content rows (1-row header) / 0.5 = 14 visible lanes.
+        assert_eq!(view_for(20.0).lane_scroll, 13.0);
+        assert_eq!(view_for(2.0).lane_scroll, 0.0);
+        assert_eq!(view_for(39.0).lane_scroll, 26.0);
     }
 
     #[test]

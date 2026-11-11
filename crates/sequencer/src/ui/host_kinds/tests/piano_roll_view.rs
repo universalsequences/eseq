@@ -125,7 +125,7 @@ fn the_view_scrolls_zooms_and_fits_its_notes() {
     );
     // Nothing to fit: C4 centred over the visible lanes.
     h.eval_pr("(eseq.piano-roll/piano-roll-request-fit-for-track 0)");
-    assert_eq!(field(&mut h, "lane-scroll"), number(42.5));
+    assert_eq!(field(&mut h, "lane-scroll"), number(44.0));
     let action = |h: &mut Harness, event: &str| {
         h.eval_pr(&format!(
             "(eseq.piano-roll/piano-roll-action (dict {event}))"
@@ -136,7 +136,7 @@ fn the_view_scrolls_zooms_and_fits_its_notes() {
         &mut h,
         ":type :scroll-view :lane-scroll 1000 :delta-lanes 0",
     );
-    assert_eq!(field(&mut h, "lane-scroll"), number(85.0));
+    assert_eq!(field(&mut h, "lane-scroll"), number(88.0));
     // A created or resized note's length is the next new note's.
     action(&mut h, ":type :finish-create-item :start 20 :end 22.5");
     h.show_all();
@@ -161,7 +161,7 @@ fn the_view_scrolls_zooms_and_fits_its_notes() {
     h.eval_pr("(set! view.lane-height 0.5) (eseq.piano-roll/piano-roll-request-fit)");
     assert_eq!(field(&mut h, "start"), number(1.0));
     assert_eq!(field(&mut h, "duration"), number(16.0));
-    assert_eq!(field(&mut h, "lane-scroll"), number(34.5));
+    assert_eq!(field(&mut h, "lane-scroll"), number(36.0));
     assert_eq!(h.eval_pr("view.fit"), Value::Nil, "applied");
 }
 
@@ -215,7 +215,7 @@ fn a_fit_for_another_track_waits_for_its_notes() {
     assert_eq!(h.eval_pr("view.fit"), Value::Nil, "applied");
     assert_eq!(
         h.eval_pr("(list view.start view.duration view.lane-scroll)"),
-        h.eval_pr("(list 11 4 42.5)")
+        h.eval_pr("(list 11 4 44)")
     );
 }
 
@@ -425,4 +425,165 @@ fn the_clip_panel_shows_the_pinned_clip() {
         timeline["window-marker"],
         h.eval_pr("piano-roll.window-marker")
     );
+}
+
+/// A fit hands the timeline a lane to center in its real height (the pane
+/// is ratio-sized and remembered, so the Lisp cannot know it); the first
+/// lane scroll or lane zoom adopts the scroll the timeline showed.
+#[test]
+fn a_fit_centers_in_the_rendered_grid_until_the_lanes_scroll() {
+    let mut h = distro();
+    h.write_notes(0, 0, &[(0.0, 1.0, 0.0)]);
+    h.open_piano_roll(0);
+    h.eval_pr("(eseq.piano-roll/piano-roll-request-fit-for-track 0)");
+    let center = h.eval_pr("view.lane-center");
+    assert!(matches!(center, Value::Number(_)), "{center:?}");
+    h.show_all();
+    assert_eq!(h.piano_roll_timeline()["lane-center"], center);
+    // A purely horizontal scroll keeps the centering.
+    h.eval_pr("(eseq.piano-roll/piano-roll-action (dict :type :scroll-view :delta-time 2 :delta-lanes 0))");
+    assert_eq!(h.eval_pr("view.lane-center"), center);
+    // A lane zoom measures from the scroll the timeline showed.
+    h.eval_pr(
+        "(eseq.piano-roll/piano-roll-action
+           (dict :type :zoom-lanes :anchor-lane 50 :factor 1 :lane-scroll 40))",
+    );
+    assert_eq!(h.eval_pr("view.lane-center"), Value::Nil);
+    assert_eq!(h.eval_pr("view.lane-scroll"), number(40.0));
+}
+
+/// Perf probe (ignored; run in release with `--run-ignored only
+/// --no-capture`): a note dragged through the piano roll's real path — the
+/// Lisp action, the queued `piano-roll-gesture-update`, the production
+/// reactive tick and the re-render — per frame, split by frame kind: a
+/// repeat of the last position, a move within the note's step, and a move
+/// that crosses into the next step.
+#[test]
+#[ignore]
+fn piano_roll_note_drag_frame_cost_probe() {
+    use std::time::Instant;
+    let mut h = distro();
+    for track in 0..2 {
+        for step in (0..16).step_by(2) {
+            h.write_notes(track, step, &[(step as f32 % 7.0, 1.0, 0.0)]);
+        }
+    }
+    h.sync();
+    h.open_piano_roll(0);
+    let note = h.eval_pr("(let ((n (first piano-roll.notes))) (list n.item (- eseq.kinds/pitch-max n.pitch) n.start))");
+    let Value::List(parts) = note else { panic!("{note:?}") };
+    let parts: Vec<f64> = parts.iter().map(|p| num(p.borrow().clone())).collect();
+    let (id, lane, start) = (parts[0], parts[1], parts[2]);
+    let frame = |h: &mut Harness, at: f64| {
+        let t0 = Instant::now();
+        h.eval_pr(&format!(
+            "(eseq.piano-roll/piano-roll-action (dict :type :move-items-absolute :ids (list {id}) :anchor-id {id} :start {at} :lane {lane}))"
+        ));
+        let t1 = Instant::now();
+        h.drain();
+        let t2 = Instant::now();
+        h.tick();
+        let t3 = Instant::now();
+        h.show_all();
+        let t4 = Instant::now();
+        [t1 - t0, t2 - t1, t3 - t2, t4 - t3]
+    };
+    let mut buckets: HashMap<&str, Vec<[Duration; 4]>> = HashMap::new();
+    for _round in 0..3 {
+        for step in 0..8 {
+            let base = start + step as f64;
+            for (kind, offset) in [("cross", 0.0), ("repeat", 0.0), ("within", 0.25), ("within", 0.5), ("repeat", 0.5)] {
+                let cost = frame(&mut h, base + offset);
+                buckets.entry(kind).or_default().push(cost);
+            }
+        }
+        let cost = frame(&mut h, start);
+        buckets.entry("cross").or_default().push(cost);
+        h.eval_pr("(eseq.piano-roll/piano-roll-action (dict :type :finish-move-items))");
+        h.drain();
+        h.tick();
+        h.show_all();
+    }
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    for (kind, costs) in &buckets {
+        let n = costs.len() as f64;
+        let mean = |i: usize| costs.iter().map(|c| ms(c[i])).sum::<f64>() / n;
+        let total: Vec<f64> = costs.iter().map(|c| c.iter().map(|d| ms(*d)).sum()).collect();
+        let mut sorted = total.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!(
+            "[pr-drag] {kind:7} n={:3} median={:7.2}ms max={:7.2}ms | lisp={:6.2} drain={:6.2} tick={:6.2} render={:6.2}",
+            costs.len(),
+            sorted[sorted.len() / 2],
+            sorted[sorted.len() - 1],
+            mean(0), mean(1), mean(2), mean(3),
+        );
+    }
+}
+
+/// The lane footer's toggle hides and shows the automation lane; the
+/// footer (toggle and picker) stays either way.
+#[test]
+fn the_lane_footer_toggle_hides_and_shows_the_lane() {
+    let mut h = distro();
+    h.write_notes(0, 0, &[(0.0, 1.0, 0.0)]);
+    h.open_piano_roll(0);
+    let present = |h: &Harness, key: &str| {
+        let (tree, _) = h.buffer_tree("*piano-roll*");
+        widget_keyed(&tree, key).is_some()
+    };
+    assert!(present(&h, "automation-lane"));
+    assert!(present(&h, "automation-lane-toggle"));
+    assert!(present(&h, "automation-param"));
+    h.eval_pr("(set! lane-view.shown false)");
+    h.show_all();
+    assert!(!present(&h, "automation-lane"), "hidden");
+    assert!(present(&h, "automation-lane-toggle"));
+    assert!(present(&h, "automation-param"));
+    h.eval_pr("(set! lane-view.shown true)");
+    h.show_all();
+    assert!(present(&h, "automation-lane"), "shown again");
+}
+
+/// A note drag frame, through the real path (the action, the queued
+/// `piano-roll-gesture-update`, the tick), bumps neither epoch, yet the
+/// piano roll and the step grid both show the moved note; the release
+/// bumps them once.
+#[test]
+fn a_note_drag_frame_bumps_no_epoch_but_every_view_follows() {
+    let mut h = distro();
+    h.write_notes(0, 2, &[(0.0, 1.0, 0.0)]);
+    h.sync();
+    h.open_piano_roll(0);
+    let parts = h.eval_pr(
+        "(let ((n (first piano-roll.notes))) (list n.item (- eseq.kinds/pitch-max n.pitch)))",
+    );
+    let Value::List(parts) = parts else { panic!("{parts:?}") };
+    let parts: Vec<f64> = parts.iter().map(|p| num(p.borrow().clone())).collect();
+    let (id, lane) = (parts[0], parts[1]);
+    let step_active = |h: &mut Harness, step: usize| {
+        h.eval_pr(&format!("(let ((s (nth (track 0).steps {step}))) s.active)"))
+    };
+    assert_eq!(step_active(&mut h, 2), Value::Bool(true));
+    let epochs = |h: &Harness| {
+        (
+            h.shared.ui_epoch.load(Ordering::Relaxed),
+            h.shared.fx_epoch.load(Ordering::Relaxed),
+        )
+    };
+    let before = epochs(&h);
+    h.eval_pr(&format!(
+        "(eseq.piano-roll/piano-roll-action (dict :type :move-items-absolute :ids (list {id}) :anchor-id {id} :start 5 :lane {lane}))"
+    ));
+    h.drain();
+    assert_eq!(epochs(&h), before, "a drag frame bumps no epoch");
+    h.tick();
+    h.show_all();
+    assert_eq!(h.eval_pr("(map |n| n.start piano-roll.notes)"), h.eval_pr("(list 5)"));
+    assert_eq!(step_active(&mut h, 5), Value::Bool(true), "the step grid follows");
+    assert_eq!(step_active(&mut h, 2), Value::Bool(false));
+    h.eval_pr("(eseq.piano-roll/piano-roll-action (dict :type :finish-move-items))");
+    h.drain();
+    let after = epochs(&h);
+    assert_eq!((after.0 - before.0, after.1 - before.1), (1, 1), "the release bumps once");
 }

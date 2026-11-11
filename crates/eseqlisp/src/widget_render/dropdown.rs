@@ -835,7 +835,7 @@ adds dim right-hand text per row, :detail dim text on the trigger; :filterable \
 true lets typing narrow an open menu (:filter-placeholder). `menu-button` is the \
 same menu behind an icon trigger (:icon text, default \"•••\") that does not show a \
 selection: use it for action menus. Colours: :text-color, :bg-color, \
-:border-color, :chevron-color, :menu-bg, :hover-bg, :check-color; :font-size, \
+:border-color, :chevron-color (:badge false drops the chevron's plate), :menu-bg, :hover-bg, :check-color; :font-size, \
 :menu-min-width. The trigger is as wide as its text unless :width is given. \
 `describe 'select` shows this text, but `select` builds a bare leaf without this \
 menu behaviour, so use `dropdown`; dropdown-chevron and similar names are internal \
@@ -847,7 +847,7 @@ draw passes. Example: \
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "options", "headers", "value", "value-index", "value-index-offset", "width",
-            "height", "font-size", "icon", "focusable", "action-menu", "badge-color", "bg-color",
+            "height", "font-size", "icon", "focusable", "action-menu", "badge", "badge-color", "bg-color",
             "border-color", "border-width", "check-color", "chevron-color", "corner-radius", "hover-bg",
             "menu-bg", "menu-border-color", "ring-color", "scrollbar-color", "text-color",
             "on-change", "plock-active", "plock-color-r", "plock-color-g", "plock-color-b",
@@ -1352,8 +1352,12 @@ draw passes. Example: \
             }
 
             // ── Chevron badge + arrows ──
+            // `:badge false`: the bare chevron, no badge plate or ring (a
+            // low-key trigger that reads as text, like Ableton's footers).
+            let show_badge = super::get_bool_prop(&node.props, "badge", true);
             let badge_color =
                 resolve_named_color(&node.props, "badge-color", theme::DROPDOWN_BADGE_BG());
+            if show_badge {
             prims.push(surface_face(
                 DROPDOWN_BADGE_FACE_WIDGET,
                 &node.props,
@@ -1369,6 +1373,7 @@ draw passes. Example: \
                 },
                 false,
             ));
+            }
             let chevron_slot =
                 painted_slot((!has_color_prop(&node.props, "chevron-color")).then_some(CHEVRON_SLOT));
             prims.push(
