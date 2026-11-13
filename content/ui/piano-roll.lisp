@@ -47,6 +47,8 @@
 ;; real height (the pane is ratio-sized and its divider remembered, so this
 ;; file cannot know it); the first scroll or lane zoom adopts the scroll the
 ;; timeline actually shows and clears it.
+;; `pressed-lane`: the keyboard-gutter key held down (sounding, and drawn
+;; pressed), -1 for none: a bound float, which has no nil.
 ;; `arrangement`: the piano roll was entered from arrangement clip gestures,
 ;; so it shows the selected clip (or that none is). `fit`: the track whose
 ;; notes the view fits to once the piano roll shows them. Re-evaluating this
@@ -62,7 +64,8 @@
           (marquee :any :default nil)
           (create-duration 1)
           (arrangement false)
-          (fit track :default nil)))
+          (fit track :default nil)
+          (pressed-lane -1)))
 
 ;; The automation lane's parameter: a step param by name (`step`), or a
 ;; device param (`param`) or rack macro (`macro`) of the piano roll's track,
@@ -285,12 +288,51 @@
   (when (= piano-roll.focus-kind "pattern")
     (focus-command "focus-finish-num-steps" (dict))))
 
+;; ── Keyboard gutter audition ──────────────────────────────────────────────
+;; Pressing a piano key sounds the track at that pitch until the release;
+;; gliding along the keys moves the held note, like a keyboard glissando.
+;; The pitch is the note's own (semitones from C4), which is the live
+;; keyboard's transpose, so a drum rack plays the pad on that row.
+(def audition-note (pitch on)
+  (let ((t piano-roll.track))
+    (when t
+      (host-command "audition-track-note" (dict :track t.index :pitch pitch :on on)))))
+
+(def release-audition ()
+  (let ((held piano-roll-view.pressed-lane))
+    (when (>= held 0)
+      (audition-note (- pitch-max held) false)
+      (set! piano-roll-view.pressed-lane -1))))
+
+(def press-audition (lane)
+  (unless (= lane piano-roll-view.pressed-lane)
+    (release-audition)
+    (audition-note (- pitch-max lane) true)
+    (set! piano-roll-view.pressed-lane lane)))
+
+;; BS / Delete in the piano roll: the selected notes, whether or not the note
+;; grid has keyboard focus (Cmd+A selects them from any panel and focuses
+;; the piano roll's window, not its grid). No selection declines the key so
+;; the inherited step keymap still gets it.
+(def delete-selected-notes ()
+  (let ((ids (map |n| n.item (filter |n| n.selected piano-roll.notes))))
+    (if (empty? ids)
+      false
+      (do (piano-roll-action (dict :type :delete-items :ids ids))
+          true))))
+
 (def piano-roll-action (event)
   (match event.type
     :scroll-view (scroll-view event)
     :zoom-view (zoom-view event)
     :zoom-lanes (zoom-lanes event)
-    :set-cursor (set! piano-roll-view.cursor event.time)
+    ;; A press on the keyboard gutter carries a lane, not a time: it plays
+    ;; the key and leaves the cursor where it was.
+    :set-cursor (if event.sidebar
+                  (press-audition event.lane)
+                  (set! piano-roll-view.cursor event.time))
+    :drag-sidebar (press-audition event.lane)
+    :release-sidebar (release-audition)
     ;; A take's band is read-only here (its Length picker edits it).
     :resize-content-length (unless (take-focus?) (set-focus-length event.length))
     :finish-resize-content-length (unless (take-focus?) (finish-focus-length))
@@ -337,6 +379,7 @@
       ;; :width 0 :flex 1 an h-stack child lays out against an INFINITE max
       ;; width.
       (timeline
+        :key "note-grid-timeline"
         :width :fill
         :height :fill
         :focusable true
@@ -349,6 +392,7 @@
         :tool :pointer
         :playhead-time #'piano-roll.playhead
         :cursor-time #'piano-roll-view.cursor
+        :pressed-lane #'piano-roll-view.pressed-lane
         :lanes lanes
         :items (map note-item piano-roll.notes)
         :selection-rect v.marquee
@@ -778,10 +822,17 @@
                 (subtree :key "automation-row" (automation-row t)))))
           (nothing))))))
 
-;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
-;; The audio clip editor's mode: sequencer keys plus the arrangement region
-;; keys while an audio track is being edited (eseq.audio-clip).
-(set-buffer-mode-for "*piano-roll*" "audio-clip-mode")
+;; Widget-only buffer: the piano roll's own keys over the audio clip editor's
+;; mode (sequencer keys plus the arrangement region keys while an audio track
+;; is being edited, eseq.audio-clip).
+;; Spelled qualified: a bare mode name auto-qualifies to THIS module
+;; (eseq.piano-roll/…), and a mode that does not exist left the buffer with
+;; no keymap at all — no musical typing, no arrows, no Backspace.
+(define-mode "piano-roll-mode" :read-only true :live-keys true
+  :inherit "eseq.audio-clip/audio-clip-mode")
+(mode-bind-key "piano-roll-mode" "BS" "delete-selected-notes")
+(mode-bind-key "piano-roll-mode" "Delete" "delete-selected-notes")
+(set-buffer-mode-for "*piano-roll*" "piano-roll-mode")
 (effect-buffer "*piano-roll*"
   ;; Opaque, so the buffer's status text never shows through a gap.
   (box :key "piano-roll-panel" :width :fill :height :fill :background-color :buffer-bg

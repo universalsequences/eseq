@@ -47863,3 +47863,6 @@ mod about_ui_tests;
 
 #[path = "application_menu_tests.rs"]
 mod application_menu_tests;
+
+#[path = "piano_roll_keys_tests.rs"]
+mod piano_roll_keys_tests;

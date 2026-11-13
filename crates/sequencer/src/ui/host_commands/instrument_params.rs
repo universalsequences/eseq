@@ -3,6 +3,7 @@ use crate::*;
 pub(super) const COMMANDS: &[&str] = &[
     "set-instrument-param",
     "audition-instrument-key",
+    "audition-track-note",
     "set-instrument-key-lock",
     "set-instrument-key-lock-multi",
     "set-instrument-key-lock-option",
@@ -157,6 +158,52 @@ pub(super) fn handle(
                         }
                     }
                 }
+            }
+        }
+        // A held audition (the piano roll's keyboard gutter): `:on true`
+        // sounds `:track` at `:pitch` (semitones from C4, the piano roll's
+        // pitch = the live keyboard's transpose, so racks resolve pads the
+        // same way musical typing does) until the matching `:on false`. The
+        // press is parked as a pending audition with a long safety release,
+        // so a lost release (the pointer leaving mid-press) still stops.
+        // No `retrospective.trig`: a held note's length is unknown up front.
+        "audition-track-note" => {
+            let Value::Map(ref map) = payload else {
+                return;
+            };
+            let (Some(track), Some(pitch)) = (map_usize(map, "track"), map_number(map, "pitch"))
+            else {
+                return;
+            };
+            if track >= app.tracks.len() {
+                return;
+            }
+            let transpose = pitch.round() as f32;
+            release_matching_key_lock_auditions(
+                &mut ctx.sessions.pending_key_lock_auditions,
+                &keyboard_tx,
+                track,
+                transpose,
+            );
+            if !extract_bool_from_payload(&payload, "on") {
+                return;
+            }
+            if keyboard_tx
+                .send(sequencer::sequencer::LiveInputEvent::Note(KeyboardTrigger {
+                    generation: 0,
+                    source: None,
+                    track,
+                    transpose,
+                    velocity: 1.0,
+                    note_off: false,
+                }))
+                .is_ok()
+            {
+                ctx.sessions.pending_key_lock_auditions.push(PendingKeyLockAudition {
+                    track,
+                    transpose,
+                    release_at: Instant::now() + HELD_AUDITION_SAFETY_RELEASE,
+                });
             }
         }
         "set-instrument-key-lock" => {

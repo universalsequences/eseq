@@ -587,3 +587,86 @@ fn a_note_drag_frame_bumps_no_epoch_but_every_view_follows() {
     let after = epochs(&h);
     assert_eq!((after.0 - before.0, after.1 - before.1), (1, 1), "the release bumps once");
 }
+
+/// Cmd+A from another panel selects the notes and activates the piano
+/// roll's window, not its grid widget: Backspace must still delete them
+/// through the buffer's own mode. With nothing selected it declines, so the
+/// inherited step keymap keeps the key.
+#[test]
+fn backspace_deletes_the_selected_notes_without_grid_focus() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut h = distro();
+    h.write_notes(0, 0, &[(0.0, 1.0, 0.0)]);
+    h.write_notes(0, 3, &[(5.0, 1.0, 0.0)]);
+    h.open_piano_roll(0);
+    assert!(h.editor.switch_active_tile_to_buffer_named("*piano-roll*"));
+    h.editor.blur_all_widget_focus();
+    let backspace = |h: &mut Harness| {
+        h.editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        h.drain();
+        h.tick();
+        h.show_all();
+    };
+    backspace(&mut h);
+    assert_eq!(h.eval_pr("(len piano-roll.notes)"), number(2.0), "nothing selected");
+
+    h.shared.piano_roll_selection.lock().unwrap().insert(piano_roll_item_id(3, 0));
+    h.sync();
+    h.show_all();
+    backspace(&mut h);
+    assert_eq!(h.eval_pr("(map |n| n.pitch piano-roll.notes)"), h.eval_pr("(list 0)"));
+}
+
+/// Pressing a key on the keyboard gutter holds an audition of the piano
+/// roll's track at that pitch; gliding to another key moves it; the release
+/// ends it. (The headless engine has no live-input receiver, so this reads
+/// the commands the gestures send rather than the held notes.)
+#[test]
+fn the_keyboard_gutter_holds_an_audition_until_release() {
+    let mut h = distro();
+    h.open_piano_roll(0);
+    let _ = h.editor.drain_host_commands();
+    let act = |h: &mut Harness, form: &str| {
+        h.eval_pr(&format!("(eseq.piano-roll/piano-roll-action {form})"));
+        h.editor
+            .drain_host_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                HostCommand::Custom { name, payload } if name == "audition-track-note" => {
+                    Some((get(&payload, "track"), get(&payload, "pitch"), get(&payload, "on")))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let on = |pitch: f64| (number(0.0), number(pitch), Value::Bool(true));
+    let off = |pitch: f64| (number(0.0), number(pitch), Value::Bool(false));
+    let cursor = h.eval_pr("view.cursor");
+    // Lane 41 is G4: pitch-max (48) minus the lane.
+    assert_eq!(act(&mut h, "(dict :type :set-cursor :lane 41 :sidebar true)"), vec![on(7.0)]);
+    assert_eq!(h.eval_pr("view.pressed-lane"), number(41.0), "the key draws pressed");
+    assert_eq!(h.eval_pr("view.cursor"), cursor, "a key press leaves the cursor");
+    assert!(act(&mut h, "(dict :type :drag-sidebar :lane 41)").is_empty(), "same key: no retrigger");
+    assert_eq!(act(&mut h, "(dict :type :drag-sidebar :lane 48)"), vec![off(7.0), on(0.0)]);
+    assert_eq!(act(&mut h, "(dict :type :release-sidebar :lane 41)"), vec![off(0.0)]);
+    assert_eq!(h.eval_pr("view.pressed-lane"), number(-1.0), "and pops back up");
+    assert!(act(&mut h, "(dict :type :release-sidebar :lane 41)").is_empty(), "nothing held");
+}
+
+/// The piano roll's own mode keeps musical typing whether or not its note
+/// grid has keyboard focus: the grid has no use for the home row.
+#[test]
+fn a_focused_note_grid_keeps_musical_typing() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut h = distro();
+    h.open_piano_roll(0);
+    assert!(h.editor.switch_active_tile_to_buffer_named("*piano-roll*"));
+    let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut h.editor, 240, 80);
+    assert!(
+        h.editor.focus_widget_by_stable_key("eseq.piano-roll/note-grid-timeline", Some("timeline")),
+        "the note grid is focusable by its key"
+    );
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+    assert!(crate::input::should_route_to_live_keyboard(&h.editor, &key, &held, false));
+}

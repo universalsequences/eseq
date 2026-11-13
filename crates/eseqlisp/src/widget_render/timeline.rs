@@ -287,6 +287,8 @@ struct TimelineView {
     time_ruler: Option<TimeRuler>,
     playhead_time: Option<f64>,
     cursor_time: Option<f64>,
+    /// The piano-gutter key drawn held down (a host's audition), by lane.
+    pressed_lane: Option<usize>,
     /// Cursor rendering is split so a composed timeline can put the marker
     /// on its ruler lane and the vertical line on a separate content lane.
     cursor_marker_visible: bool,
@@ -652,7 +654,7 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "lanes", "items", "on-action", "view-start", "view-duration", "zoom-min-duration",
-            "zoom-max-duration", "playhead-time", "cursor-time", "time-ruler", "header-height",
+            "zoom-max-duration", "playhead-time", "cursor-time", "pressed-lane", "time-ruler", "header-height",
             "header-bottom-gutter", "sidebar-width", "sidebar-style", "tool", "snap", "snap-mode",
             "resize-snap", "resize-snap-mode", "resize-direction-lock", "move-snap-mode", "marquee-snap", "min-duration",
             "create-duration", "grid-density", "grid-subdivide", "fine-grid", "content-length", "content-length-min",
@@ -683,6 +685,8 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
         &[
             "playhead-time",
             "cursor-time",
+            // A held piano key repaints only the gutter.
+            "pressed-lane",
             "background-color",
             "border-width",
             "item-label-font-size",
@@ -1148,6 +1152,19 @@ Example: (timeline :width :fill :height 10 :lanes lanes :items notes :snap 1 \
         build_primitives(node, viewport)
     }
 
+    /// A piano gutter animates its key press and release.
+    fn wants_animation_frames(&self, node: &LayoutNode) -> bool {
+        get_sidebar_style(&node.props) == SidebarStyle::Piano
+            && super::piano_keyboard::piano_animation_active(
+            node.widget_id,
+            crate::widget_render::sdf_widget::current_sdf_time_seconds(),
+        )
+    }
+
+    fn animation_frame_policy(&self) -> super::AnimationFramePolicy {
+        super::AnimationFramePolicy::RuntimeState
+    }
+
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
         let callback = node.props.get("on-action")?.clone();
         let action = match event {
@@ -1521,103 +1538,31 @@ fn build_primitives(
         let Some((row_start, lane_height)) = view.metal_lane_rect(lane_index) else {
             continue;
         };
-        if view.sidebar_width > 0.0 {
+        // The piano gutter is drawn whole after the lanes (its keys span
+        // lane edges); a plain gutter is one quad and label per lane.
+        if view.sidebar_width > 0.0 && view.sidebar_style != SidebarStyle::Piano {
             let lane = &view.lanes[lane_index];
             let sidebar_bg = lane.sidebar_bg.unwrap_or(theme::BLACK());
-            if view.sidebar_style == SidebarStyle::Piano {
-                let white_key = theme::PIANO_WHITE_KEY();
-                let border_color = theme::PIANO_KEY_BORDER();
-                let is_black_key = lane.black_key;
-                primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
-                    x: rect.col,
-                    y: row_start,
-                    width: view.sidebar_width,
-                    height: lane_height,
-                    color: white_key,
-                }));
-                let separator_height = (1.0 / viewport.cell_h).min(lane_height);
-                push_rounded_rect(
-                    &mut primitives,
-                    Rect {
-                        row: row_start + lane_height * 0.5 - separator_height * 0.5,
-                        col: rect.col,
-                        width: view.sidebar_width,
-                        height: separator_height,
-                    },
-                    border_color,
-                    viewport,
-                    0.0,
-                );
-                if is_black_key {
-                    let black_width = (view.sidebar_width * 0.66).max(0.0);
-                    let black_height = (lane_height * 0.78).max(0.24);
-                    let black_color = theme::PIANO_BLACK_KEY();
-                    let black_rect = Rect {
-                        row: row_start + ((lane_height - black_height) * 0.5),
-                        col: rect.col,
-                        width: black_width,
-                        height: black_height,
-                    };
-                    let cap_width = (black_height * 0.7).min(black_width);
-                    let body_width = (black_width - cap_width * 0.5).max(0.0);
-                    primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
-                        x: black_rect.col,
-                        y: black_rect.row,
-                        width: body_width,
-                        height: black_rect.height,
-                        color: black_color,
-                    }));
-                    push_rounded_rect(
-                        &mut primitives,
-                        Rect {
-                            row: black_rect.row,
-                            col: black_rect.col + black_width - cap_width,
-                            width: cap_width,
-                            height: black_rect.height,
-                        },
-                        black_color,
-                        viewport,
-                        super::ui_design_px(16.0),
-                    );
-                }
-            } else {
-                primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
-                    x: rect.col,
-                    y: row_start,
-                    width: view.sidebar_width,
-                    height: lane_height,
-                    color: sidebar_bg,
-                }));
-            }
-            // Lane label text
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+                x: rect.col,
+                y: row_start,
+                width: view.sidebar_width,
+                height: lane_height,
+                color: sidebar_bg,
+            }));
             let label = lane.label.as_deref().unwrap_or("");
             if !label.is_empty() {
-                let label_fg = lane.label_fg.unwrap_or(theme::FG());
                 primitives.push(GpuPrimitive::ProportionalText(
                     GpuProportionalTextPrimitive {
-                        row: row_start + ((lane_height - 1.0).max(0.0) * 0.5)
-                            - 0.02
-                            - if view.sidebar_style == SidebarStyle::Piano {
-                                lane_height * 0.5
-                            } else {
-                                0.0
-                            },
-                        col: if view.sidebar_style == SidebarStyle::Piano {
-                            rect.col + 0.24
-                        } else {
-                            rect.col + 0.12
-                        },
+                        row: row_start + ((lane_height - 1.0).max(0.0) * 0.5) - 0.02,
+                        col: rect.col + 0.12,
                         align_width: 0.0,
                         h_align: 0.0,
                         text: label.to_string(),
                         font_size: 10.5,
                         scale: 1.0,
-                        fg: label_fg,
-                        bg: if view.sidebar_style == SidebarStyle::Piano {
-                            theme::PIANO_WHITE_KEY()
-                        } else {
-                            sidebar_bg
-                        },
+                        fg: lane.label_fg.unwrap_or(theme::FG()),
+                        bg: sidebar_bg,
                         face: crate::ui::glyph_atlas::TextFace::Regular,
                     },
                 ));
@@ -1644,6 +1589,10 @@ fn build_primitives(
             height: lane_height,
             color: grid_color,
         }));
+    }
+
+    if view.sidebar_width > 0.0 && view.sidebar_style == SidebarStyle::Piano {
+        push_piano_gutter(&mut primitives, &view, rect, node.widget_id, viewport);
     }
 
     let grid_lines = view.metal_grid_lines();
@@ -3056,6 +3005,12 @@ impl TimelineView {
                 .and_then(get_map)
                 .and_then(|map| get_time_ruler(&map)),
             playhead_time: props.get("playhead-time").and_then(as_number),
+            // Bound as a float, so "no key held" is any negative value.
+            pressed_lane: props
+                .get("pressed-lane")
+                .and_then(as_number)
+                .filter(|lane| *lane >= 0.0)
+                .map(|lane| lane.round() as usize),
             // Negative cursor times mean "no cursor in this lane": the
             // arrangement publishes the per-lane cursor as a bound float, and
             // floats have no nil.
@@ -4383,9 +4338,13 @@ impl TimelineView {
                         Value::Number(self.cursor_snap_time(self.time_at_col(local_col))),
                     ),
                 ])),
+                // `:sidebar` marks a press on the lane gutter (a piano
+                // key): a host can audition the lane until the gesture's
+                // `:release-sidebar`.
                 HitRegion::Sidebar { lane } => Some(action_map(vec![
                     ("type", keyword(":set-cursor")),
                     ("lane", Value::Number(lane as f64)),
+                    ("sidebar", Value::Bool(true)),
                 ])),
             },
             TimelineTool::Erase => match hit {
@@ -4714,6 +4673,16 @@ impl TimelineView {
                 ("type", keyword(":set-cursor")),
                 ("time", Value::Number(current_time)),
             ])),
+            // A press on the gutter glides along it (each lane it reaches,
+            // a piano roll auditions in turn); off the gutter it does
+            // nothing — it must never fall through to the erase sweep below.
+            Some(Value::Keyword(kind)) if kind == "sidebar" => match current_hit? {
+                HitRegion::Sidebar { lane } => Some(action_map(vec![
+                    ("type", keyword(":drag-sidebar")),
+                    ("lane", Value::Number(lane as f64)),
+                ])),
+                _ => None,
+            },
             _ => match current_hit? {
                 HitRegion::ItemBody { item }
                 | HitRegion::ItemEdgeEnd { item }
@@ -4991,6 +4960,11 @@ impl TimelineView {
                     ("type", keyword(":finish-slide-band")),
                     ("delta-time", Value::Number(raw_time - anchor)),
                 ]))
+            }
+            // Wherever the pointer is released: ends the gutter press. The
+            // host tracks the held key itself (a glide moves it).
+            Some(Value::Keyword(kind)) if kind == "sidebar" => {
+                Some(action_map(vec![("type", keyword(":release-sidebar"))]))
             }
             _ => None,
         }
@@ -5328,6 +5302,143 @@ struct ParsedItems {
 
 /// Widgets with a parse kept at most; past it the cache starts over.
 const PARSED_ITEMS_CAP: usize = 512;
+
+/// The piano-roll gutter as a real keyboard on its side. A key is its lane
+/// plus, toward a black neighbour, half of that neighbour's lane: white keys
+/// meet at E/F and B/C lane edges and under the black keys' centers, so each
+/// key's outline holds its own note row. The held key (`:pressed-lane`) is
+/// drawn pressed exactly as `piano-keyboard` draws one (the same motion,
+/// inset and track-color fill), on that outline.
+fn push_piano_gutter(
+    primitives: &mut Vec<GpuPrimitive>,
+    view: &TimelineView,
+    rect: Rect,
+    widget_id: u64,
+    viewport: super::WidgetViewport,
+) {
+    use super::piano_keyboard::{held_key_press_depths, pressed_key_color, pressed_key_rect};
+    let content = view.content_rect();
+    if content.height <= 0.0 {
+        return;
+    }
+    let (clip_top, clip_bottom) = (content.row, content.row + content.height);
+    let lane_height = view.lane_height();
+    let lane_top =
+        |index: usize| content.row + (index as f32 - view.lane_scroll as f32) * lane_height;
+    let is_black = |index: Option<usize>| {
+        index.and_then(|index| view.lanes.get(index)).is_some_and(|lane| lane.black_key)
+    };
+    let depths = held_key_press_depths(widget_id, view.pressed_lane, viewport.time_seconds);
+    let depth = |index: usize| depths.get(index).copied().unwrap_or(0.0);
+    let clip = |key: Rect| {
+        let top = key.row.max(clip_top);
+        let bottom = (key.row + key.height).min(clip_bottom);
+        (bottom > top).then(|| Rect { row: top, height: bottom - top, ..key })
+    };
+    // The gutter's ground shows through the gaps between keys as their seams.
+    primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+        x: rect.col,
+        y: clip_top,
+        width: view.sidebar_width,
+        height: content.height,
+        color: theme::PIANO_KEY_BORDER(),
+    }));
+    let seam = (1.0 / viewport.cell_h.max(1.0)).min(lane_height * 0.2);
+    let pressed_fill = |black: bool| pressed_key_color(view.item_color, black);
+    let visible = |index: usize| {
+        let top = lane_top(index);
+        top + lane_height * 1.5 > clip_top && top - lane_height * 0.5 < clip_bottom
+    };
+    let mut labels = Vec::new();
+    for index in (0..view.lanes.len()).filter(|index| !view.lanes[*index].black_key) {
+        if !visible(index) {
+            continue;
+        }
+        let top = lane_top(index);
+        let above = if is_black(index.checked_sub(1)) { lane_height * 0.5 } else { 0.0 };
+        let below = if is_black(Some(index + 1)) { lane_height * 0.5 } else { 0.0 };
+        let key = Rect {
+            row: top - above,
+            col: rect.col,
+            width: view.sidebar_width,
+            height: (above + lane_height + below - seam).max(0.0),
+        };
+        let key = pressed_key_rect(key, depth(index), 1.0);
+        let color = if view.pressed_lane == Some(index) {
+            pressed_fill(false)
+        } else {
+            theme::PIANO_WHITE_KEY()
+        };
+        if let Some(key) = clip(key) {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+                x: key.col,
+                y: key.row,
+                width: key.width,
+                height: key.height,
+                color,
+            }));
+        }
+        let label = view.lanes[index].label.as_deref().unwrap_or("");
+        if !label.is_empty() {
+            labels.push((index, label.to_string(), color));
+        }
+    }
+    for index in (0..view.lanes.len()).filter(|index| view.lanes[*index].black_key) {
+        if !visible(index) {
+            continue;
+        }
+        let height = (lane_height * 0.78).max(0.24);
+        let width = (view.sidebar_width * 0.66).max(0.0);
+        let key = Rect {
+            row: lane_top(index) + (lane_height - height) * 0.5,
+            col: rect.col,
+            width,
+            height,
+        };
+        let key = pressed_key_rect(key, depth(index), 1.0);
+        let color = if view.pressed_lane == Some(index) {
+            pressed_fill(true)
+        } else {
+            theme::PIANO_BLACK_KEY()
+        };
+        let Some(key) = clip(key) else { continue };
+        let cap_width = (key.height * 0.7).min(key.width);
+        primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+            x: key.col,
+            y: key.row,
+            width: (key.width - cap_width * 0.5).max(0.0),
+            height: key.height,
+            color,
+        }));
+        push_rounded_rect(
+            primitives,
+            Rect { col: key.col + key.width - cap_width, width: cap_width, ..key },
+            color,
+            viewport,
+            super::ui_design_px(16.0),
+        );
+    }
+    // Labels last: a C key's label sits on its own row, under nothing.
+    for (index, label, bg) in labels {
+        let top = lane_top(index);
+        let row = top + ((lane_height - 1.0).max(0.0) * 0.5) - 0.02 - lane_height * 0.5;
+        if row < clip_top - 0.5 || row > clip_bottom - 0.5 {
+            continue;
+        }
+        primitives.push(GpuPrimitive::ProportionalText(GpuProportionalTextPrimitive {
+            row,
+            col: rect.col + 0.24,
+            align_width: 0.0,
+            h_align: 0.0,
+            text: label,
+            font_size: 10.5,
+            scale: 1.0,
+            fg: view.lanes[index].label_fg.unwrap_or(theme::FG()),
+            bg,
+            face: crate::ui::glyph_atlas::TextFace::Regular,
+        }));
+    }
+}
 
 thread_local! {
     /// Parsed items per timeline widget id.
@@ -5853,6 +5964,86 @@ mod tests {
             node.props.insert("border-width".into(), Value::Number(0.0));
             assert_eq!(build_primitives(&node, viewport).len(), baseline.len());
         }
+    }
+
+    /// The piano gutter draws real key outlines: a white key reaches half
+    /// into a black neighbour's lane and stops at a white neighbour's lane
+    /// edge, so each outline holds its own note row. `:pressed-lane` draws
+    /// that key pressed the way `piano-keyboard` does: inset inside its
+    /// outline and filled with the track color; -1 is "none".
+    #[test]
+    fn piano_gutter_keys_hold_their_rows_and_the_pressed_key_sinks() {
+        let viewport = WidgetViewport {
+            cell_w: 10.0, cell_h: 20.0, vp_w: 1920.0, vp_h: 1080.0,
+            time_seconds: 10.0, focused_widget_id: None, focused_branch: false,
+            overlay_viewport_bottom: 12.0, scroll_top: 0.0, scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        // Top to bottom: D, C#, C, B (lane 1 black).
+        let lanes = list_value_raw(
+            [("D", false), ("C#", true), ("C", false), ("B", false)]
+                .into_iter()
+                .enumerate()
+                .map(|(id, (label, black))| {
+                    map_value_raw(vec![
+                        ("id", number_value(id as f64)),
+                        ("label", Value::String(label.into())),
+                        ("sidebar-bg", keyword_value(if black { "black" } else { "white" })),
+                    ])
+                })
+                .collect(),
+        );
+        let rect = Rect { row: 0.0, col: 0.0, width: 32.0, height: 9.0 };
+        let node_with = |pressed: f64, id: u64| LayoutNode {
+            widget_id: id, stable_widget_id: None, subtree_root_id: None,
+            parent_subtree_root_id: None, stable_key: None,
+            widget_type: "timeline".into(), rect,
+            props: HashMap::from([
+                ("sidebar-width".into(), Value::Number(4.0)),
+                ("sidebar-style".into(), keyword(":piano")),
+                ("header-height".into(), Value::Number(1.0)),
+                ("lane-height".into(), Value::Number(2.0)),
+                ("lanes".into(), lanes.clone()),
+                ("item-color".into(), keyword(":red")),
+                ("pressed-lane".into(), Value::Number(pressed)),
+            ]),
+            children: vec![], focusable: false, animation: Default::default(),
+        };
+        let view = TimelineView::from_node(&node_with(-1.0, 990));
+        assert!(view.lanes[1].black_key, "lanes parse their black keys");
+        let quads_at = |node: &LayoutNode, time_seconds: f32| {
+            build_primitives(node, WidgetViewport { time_seconds, ..viewport })
+                .into_iter()
+                .filter_map(|primitive| match primitive {
+                    GpuPrimitive::Quad(quad) if quad.x < 4.0 => Some(quad),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let white = theme::PIANO_WHITE_KEY();
+        let idle = quads_at(&node_with(-1.0, 990), 10.0);
+        let whites: Vec<_> = idle.iter().filter(|q| q.color == white).collect();
+        assert_eq!(whites.len(), 3);
+        let content_top = view.content_rect().row;
+        let lane_top = |lane: f32| content_top + lane * 2.0;
+        let seam = 1.0 / 20.0;
+        // D: its lane plus half of C#'s below.
+        assert!((whites[0].y - lane_top(0.0)).abs() < 1e-4);
+        assert!((whites[0].y + whites[0].height - (lane_top(1.5) - seam)).abs() < 1e-4);
+        // C: half of C#'s above, down to the B/C lane edge — its own row.
+        assert!((whites[1].y - lane_top(1.5)).abs() < 1e-4);
+        assert!((whites[1].y + whites[1].height - (lane_top(3.0) - seam)).abs() < 1e-4);
+
+        // Hold C: the press motion settles, inset inside C's outline, filled
+        // with the track color.
+        let held_node = node_with(2.0, 991);
+        let _ = quads_at(&held_node, 10.0);
+        let held = quads_at(&held_node, 11.0);
+        let fill = super::super::piano_keyboard::pressed_key_color(view.item_color, false);
+        let pressed = held.iter().find(|q| q.color == fill).expect("C is drawn pressed");
+        assert!(pressed.y > whites[1].y && pressed.y + pressed.height < whites[1].y + whites[1].height);
+        assert!(pressed.width < 4.0);
+        assert_eq!(held.iter().filter(|q| q.color == white).count(), 2);
     }
 
     #[test]
@@ -9600,6 +9791,64 @@ mod tests {
             map.get("factor").map(|value| value.borrow().clone()),
             Some(Value::Number(factor)) if factor > 1.0
         ));
+    }
+
+    /// A press on the lane gutter (a piano key) is a held gesture: the press
+    /// names its lane, a glide along the gutter names each lane it reaches,
+    /// and the release ends the press on the lane it began on. Gliding off
+    /// the gutter over a note must not erase it.
+    #[test]
+    fn sidebar_press_glides_and_releases_without_erasing_notes() {
+        let rect = Rect { row: 0.0, col: 0.0, width: 32.0, height: 8.0 };
+        let base = |items: Vec<Value>| {
+            HashMap::from([
+                ("tool".to_string(), keyword_value("pointer")),
+                ("sidebar-width".to_string(), number_value(4.0)),
+                ("lane-scroll".to_string(), number_value(10.0)),
+                ("lane-height".to_string(), number_value(2.0)),
+                ("lanes".to_string(), lanes_value(24)),
+                ("view-start".to_string(), number_value(0.0)),
+                ("view-duration".to_string(), number_value(28.0)),
+                ("items".to_string(), list_value_raw(items)),
+            ])
+        };
+        let probe = TimelineView::from_props(&base(Vec::new()), rect);
+        let press_lane = probe.lane_at_row(1.0) as f64;
+        let glide_lane = probe.lane_at_row(5.0) as f64;
+        assert_ne!(press_lane, glide_lane);
+        let note = map_value_raw(vec![
+            ("id", number_value(7.0)),
+            ("lane", number_value(glide_lane)),
+            ("start", number_value(0.0)),
+            ("end", number_value(28.0)),
+        ]);
+        let view = TimelineView::from_props(&base(vec![note]), rect);
+        let field = |action: &Value, key: &str| match action {
+            Value::Map(map) => map.get(key).map(|value| value.borrow().clone()),
+            _ => panic!("expected action map"),
+        };
+
+        let press = view.handle_pointer_down(1.0, 1.0).expect("press action");
+        assert_eq!(field(&press, "type"), Some(Value::Keyword("set-cursor".to_string())));
+        assert_eq!(field(&press, "lane"), Some(Value::Number(press_lane)));
+        assert_eq!(field(&press, "sidebar"), Some(Value::Bool(true)));
+
+        let gesture = view.begin_gesture(1.0, 1.0).expect("sidebar gesture");
+        let glide = view
+            .handle_pointer_drag(1.0, 5.0, Some(&gesture))
+            .expect("glide action");
+        assert_eq!(field(&glide, "type"), Some(Value::Keyword("drag-sidebar".to_string())));
+        assert_eq!(field(&glide, "lane"), Some(Value::Number(glide_lane)));
+        assert_eq!(
+            view.handle_pointer_drag(20.0, 5.0, Some(&gesture)),
+            None,
+            "off the gutter, over a note: no erase"
+        );
+
+        let release = view
+            .handle_pointer_up(20.0, 5.0, Some(&gesture))
+            .expect("release action");
+        assert_eq!(field(&release, "type"), Some(Value::Keyword("release-sidebar".to_string())));
     }
 
     #[test]

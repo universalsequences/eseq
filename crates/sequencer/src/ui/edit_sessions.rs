@@ -494,6 +494,9 @@ pub(super) struct PendingKeyLockAudition {
 }
 
 pub(super) const KEY_LOCK_AUDITION_DURATION: Duration = Duration::from_millis(220);
+/// A held audition (`audition-track-note`) normally ends on its release; this
+/// only bounds one whose release never arrives.
+pub(super) const HELD_AUDITION_SAFETY_RELEASE: Duration = Duration::from_secs(8);
 
 pub(super) fn send_keyboard_note_off(
     keyboard_tx: &std::sync::mpsc::Sender<sequencer::sequencer::LiveInputEvent>,
