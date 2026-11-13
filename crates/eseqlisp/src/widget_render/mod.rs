@@ -3514,6 +3514,24 @@ pub fn widget_hidden_drag(widget_type: &str) -> bool {
 }
 
 thread_local! {
+    /// A pointer handler's request (`grab-pointer`) to keep the gesture in
+    /// progress on the widget it started on: `Some(hide)`, taken by the
+    /// editor once the handler returns.
+    static POINTER_GRAB_REQUEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Ask for the gesture in progress to be captured by its widget (every
+/// further drag reaches it, wherever the pointer is), hiding the pointer
+/// when `hide`.
+pub(crate) fn request_pointer_grab(hide: bool) {
+    POINTER_GRAB_REQUEST.with(|request| request.set(Some(hide)));
+}
+
+pub(crate) fn take_pointer_grab_request() -> Option<bool> {
+    POINTER_GRAB_REQUEST.with(std::cell::Cell::take)
+}
+
+thread_local! {
     /// True while dispatching a mouse event that belongs to a hidden-cursor
     /// drag gesture. Widgets whose value math depends on the pointer's
     /// distance to a screen edge (number-picker) read this and switch to a

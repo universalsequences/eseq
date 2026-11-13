@@ -2227,6 +2227,27 @@ impl Editor {
         })
     }
 
+    /// Apply a `grab-pointer` a handler asked for during the event just
+    /// dispatched: the gesture in progress becomes a captured one (drags go
+    /// to its widget instead of hit-testing across boxes) and, when asked,
+    /// a hidden-cursor one (the app loop starts the hidden drag on its next
+    /// pass). Without a gesture the request is dropped.
+    pub(super) fn apply_pointer_grab_request(&mut self) {
+        let Some(hide) = widget_render::take_pointer_grab_request() else {
+            return;
+        };
+        if let Some(gesture) = self.active_leaf_mut().active_widget_gesture.as_mut() {
+            let box_pointer = matches!(
+                gesture.gesture_data.as_ref(),
+                Some(Value::String(kind)) if kind == "box-pointer"
+            );
+            if box_pointer {
+                gesture.gesture_data = Some(Value::String("capture-pointer".to_string()));
+            }
+            gesture.hidden_drag |= hide;
+        }
+    }
+
     /// True while a pointer gesture on a hidden-cursor-drag widget (knob,
     /// knob-number, inline-knob, number-picker) is live. The app loop drives
     /// the backend's cursor hide/lock from edge transitions of this flag, so

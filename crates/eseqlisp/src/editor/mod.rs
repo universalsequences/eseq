@@ -8181,6 +8181,7 @@ impl Editor {
                         );
                     }
                 }
+                self.apply_pointer_grab_request();
                 if text_visible {
                     self.handle_text_drag(
                         mouse,
@@ -8195,6 +8196,8 @@ impl Editor {
                 self.last_mouse_precise = Some((precise_col, precise_row));
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                // A grab asked for with no drag left to apply it to ends here.
+                let _ = crate::widget_render::take_pointer_grab_request();
                 if crate::widget_render::button_press::end_press(
                     crate::widget_render::sdf_widget::current_sdf_time_fallback_seconds(),
                 ) {
