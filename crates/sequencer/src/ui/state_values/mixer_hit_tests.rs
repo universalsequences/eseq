@@ -167,16 +167,20 @@ fn rack_clip_scroll_owns_vertical_gestures_across_the_visible_list() {
     assert_eq!(get_scroll_state(key).offset_y, before);
 }
 
+fn pointer_at(editor: &mut Editor, kind: MouseEventKind, at: (f32, f32)) {
+    editor.handle_tiled_mouse_precise(MouseEvent {
+        kind,
+        column: at.0 as u16,
+        row: at.1.max(0.0) as u16,
+        modifiers: KeyModifiers::NONE,
+    }, at.0, at.1, 0);
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+}
+
 fn click_at(editor: &mut Editor, at: (f32, f32)) {
     for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)] {
-        editor.handle_tiled_mouse_precise(MouseEvent {
-            kind,
-            column: at.0 as u16,
-            row: at.1 as u16,
-            modifiers: KeyModifiers::NONE,
-        }, at.0, at.1, 0);
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
+        pointer_at(editor, kind, at);
     }
 }
 

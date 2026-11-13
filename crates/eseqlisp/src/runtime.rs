@@ -2610,7 +2610,7 @@ impl Runtime {
             ),
             (
                 "box",
-                "(box :background value :background-color color :border-color color :border-width px :corner-radius px :padding cells :width cells :height cells :aspect ratio :align mode :h-align mode :v-align mode :flex weight :selected bool :selected-background-color color :selected-border-color color :muted bool :muted-background-color color :muted-border-color color :drop-hover-background-color color :drop-hover-border-color color :drag-type type :drag-payload value :drag-modifier modifier :capture-pointer bool :focusable bool :key value :on-click callback :on-right-click callback :on-double-click callback :on-drag callback :on-drop callback :on-mouse-down callback :on-mouse-up callback child ...)",
+                "(box :background value :background-color color :border-color color :border-width px :corner-radius px :padding cells :width cells :height cells :aspect ratio :align mode :h-align mode :v-align mode :flex weight :selected bool :selected-background-color color :selected-border-color color :muted bool :muted-background-color color :muted-border-color color :drop-hover-background-color color :drop-hover-border-color color :drag-type type :drag-payload value :drag-modifier modifier :capture-pointer bool :hidden-drag bool :focusable bool :focus-decoration :corners :focus-color color :key value :on-click callback :on-right-click callback :on-double-click callback :on-drag callback :on-drop callback :on-mouse-down callback :on-mouse-up callback child ...)",
                 "Create a layout container with optional background, border, interaction, drag/drop, and selection styling.",
             ),
             (

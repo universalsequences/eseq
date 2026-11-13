@@ -1586,7 +1586,7 @@ impl Editor {
         });
         crate::widget_render::scroll::set_current_event_scroll_offset(None);
         if let Some((node, gesture_data)) = gesture_node {
-            let hidden_drag = widget_render::widget_hidden_drag(&node.widget_type);
+            let hidden_drag = widget_render::node_hidden_drag(&node);
             self.active_leaf_mut().active_widget_gesture = Some(WidgetGesture {
                 widget_id: node.widget_id,
                 node,

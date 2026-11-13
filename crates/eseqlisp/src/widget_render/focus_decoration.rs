@@ -36,6 +36,9 @@ pub struct FocusCornerStyle {
 }
 
 impl FocusCornerStyle {
+    /// The marks' colour when a widget names none: the edit yellow.
+    pub const DEFAULT_COLOR: Color = Color { r: 1.0, g: 0.95, b: 0.25, a: 1.0 };
+
     pub fn new(color: Color) -> Self {
         Self {
             color,

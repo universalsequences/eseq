@@ -37,11 +37,19 @@ fn meter_color(level: f32, threshold: f32) -> Color {
     }
 }
 
+/// The text row that puts a scale label's digits on its tick. The text
+/// renderer centres a run's cap band in the one-cell row starting at `row`,
+/// whatever the font size, so the digits' centre is `row + 0.5`;
+/// `font_height` is the digits' own height, which keeps the first and last
+/// labels wholly inside the meter.
 fn label_row(rect: Rect, position: f32, font_height: f32, top_inset: f32) -> f32 {
     let scale_top = rect.row + top_inset.max(0.0);
-    let scale_height = (rect.height - top_inset.max(0.0)).max(0.0);
-    let centered = scale_top + position.clamp(0.0, 1.0) * scale_height - font_height * 0.5;
-    centered.clamp(scale_top, rect.row + (rect.height - font_height).max(0.0))
+    let bottom = rect.row + rect.height;
+    let scale_height = (bottom - scale_top).max(0.0);
+    let half = font_height * 0.5;
+    let tick = scale_top + position.clamp(0.0, 1.0) * scale_height;
+    let center = tick.min(bottom - half).max(scale_top + half);
+    center - 0.5
 }
 
 impl WidgetDefinition for MixerMeterWidget {
@@ -185,14 +193,19 @@ mod tests {
             height: 4.24,
         };
         let top_inset = 0.45;
-        assert!((label_row(rect, 0.0, 0.42, top_inset) - (rect.row + top_inset)).abs() < 0.0001);
+        // Digits are centred half a row below the text row.
+        let digits = |position| {
+            let center = label_row(rect, position, 0.42, top_inset) + 0.5;
+            (center - 0.21, center + 0.21)
+        };
+        assert!((digits(0.0).0 - (rect.row + top_inset)).abs() < 0.0001);
         assert!(
-            (label_row(rect, 1.0, 0.42, top_inset) - (rect.row + rect.height - 0.42)).abs()
-                < 0.0001
+            (digits(1.0).1 - (rect.row + rect.height)).abs() < 0.0001,
+            "the last label ends at the meter's bottom edge, not below it"
         );
-        let minus_six_row = label_row(rect, 0.14, 0.42, top_inset);
-        assert!(minus_six_row >= rect.row + top_inset + 0.3);
-        assert!(minus_six_row < rect.row + rect.height * 0.25);
+        let (top, bottom) = digits(0.42);
+        let tick = rect.row + top_inset + 0.42 * (rect.height - top_inset);
+        assert!(((top + bottom) * 0.5 - tick).abs() < 0.0001, "inner labels sit on their tick");
     }
 
     #[test]
@@ -247,7 +260,7 @@ mod tests {
             .unwrap();
 
         assert!((first_bar_row - rect.row).abs() < 0.0001);
-        assert!((top_label_row - (rect.row + 0.45)).abs() < 0.0001);
+        assert!((top_label_row + 0.5 - 0.21 - (rect.row + 0.45)).abs() < 0.0001);
     }
 
     #[test]

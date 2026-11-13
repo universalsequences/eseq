@@ -139,12 +139,7 @@ fn knob_edit_color(props: &HashMap<String, Value>) -> Color {
     resolve_named_color(
         props,
         "edit-color",
-        Color {
-            r: 1.0,
-            g: 0.95,
-            b: 0.25,
-            a: 1.0,
-        },
+        FocusCornerStyle::DEFAULT_COLOR,
     )
 }
 
