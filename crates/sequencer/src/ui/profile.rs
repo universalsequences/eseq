@@ -25,6 +25,12 @@ pub(crate) fn note_sync_phase(name: &'static str, elapsed: Duration) {
     }
 }
 
+/// The phases recorded since the last take (probes print them per update).
+#[cfg(test)]
+pub(crate) fn take_sync_phases() -> Vec<(&'static str, Duration)> {
+    SYNC_PHASES.with(|phases| std::mem::take(&mut *phases.borrow_mut()))
+}
+
 /// A running phase timer over the current reactive sync; reads no clock
 /// unless profiling.
 pub(crate) struct SyncMark(Option<Instant>);

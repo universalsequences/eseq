@@ -53,6 +53,11 @@
 //! strip is a number picker over the members: a vertical drag (up = next,
 //! one member per `STRIP_STEP_PX`) or the scroll wheel dispatches
 //! `(on-pick index id)` for that strip's marker at every step.
+//!
+//! Zoom: `:zoom` about (`:view-x`, `:view-y`) shows part of the map, and the
+//! host keeps the three. A pinch over the plot dispatches `(on-zoom factor x
+//! y)` about the pointer; with `:on-pan` a two-finger scroll over a zoomed
+//! plot dispatches `(on-pan dx dy)`, and without it the wheel zooms instead.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -99,6 +104,30 @@ const CLICK_SLOP_PX: f32 = 3.0;
 const SCORE_LIMIT: f32 = 3.0;
 /// Markers mode: design pixels of vertical drag per member step on a strip.
 const STRIP_STEP_PX: f32 = 12.0;
+/// `:zoom` is clamped to 1..MAX_ZOOM; one wheel step multiplies it by `ZOOM_STEP`.
+const MAX_ZOOM: f32 = 64.0;
+const ZOOM_STEP: f32 = 1.25;
+/// Cells the map moves per pixel of two-finger scroll (the patcher's pan rate).
+const PAN_CELLS_PER_PIXEL: f32 = 0.05;
+
+thread_local! {
+    /// The cell height of the last draw: the pinch and scroll-gesture hooks
+    /// are not handed one, and the default view's plot / strip split needs it.
+    static LAST_CELL_H: std::cell::Cell<f32> = const { std::cell::Cell::new(16.0) };
+}
+
+/// The zoomed plot for a pinch or scroll gesture at (col, row), when the
+/// pointer is over it.
+fn gesture_plot(node: &LayoutNode, col: f32, row: f32) -> Option<Plot> {
+    let family = family_from_props(&node.props)?;
+    let rect = view_rects(&node.props, node.rect, LAST_CELL_H.with(|cell| cell.get())).0;
+    rect.contains(col, row).then(|| Plot::for_node(rect, &family, &node.props))
+}
+
+/// The node's `:zoom`, 1 (the whole family) up to `MAX_ZOOM`.
+fn zoom_of(props: &HashMap<String, Value>) -> f32 {
+    get_f32_prop(props, "zoom", 1.0).clamp(1.0, MAX_ZOOM)
+}
 
 /// One per-member column, in the domain the DSP blends it in.
 #[derive(Clone, Debug)]
@@ -640,6 +669,8 @@ fn family_from_props(props: &HashMap<String, Value>) -> Option<Arc<Family>> {
 struct Plot {
     center: [f32; 2],
     sd: [f32; 2],
+    /// The edge margin `point` clamps to (set from the unzoomed plot, so zooming does not widen it).
+    margin: [f32; 2],
     rect: Rect,
 }
 
@@ -653,17 +684,44 @@ impl Plot {
                 .max(MIN_EXTENT_SD / EXTENT_MARGIN)
                 * EXTENT_MARGIN
         };
+        let sd = [rect.width * 0.5 / extent(0), rect.height * 0.5 / extent(1)];
         Self {
             center: [rect.col + rect.width * 0.5, rect.row + rect.height * 0.5],
-            sd: [rect.width * 0.5 / extent(0), rect.height * 0.5 / extent(1)],
+            sd,
+            margin: [sd[0] * 0.15, sd[1] * 0.15],
             rect,
         }
     }
 
+    /// The plot as the node's `:zoom` / `:view-x` / `:view-y` show it: zoom
+    /// (1 = the whole family, at most `MAX_ZOOM`) about the score point
+    /// (view-x, view-y), which sits at the centre of the rect.
+    fn for_node(rect: Rect, family: &Family, props: &HashMap<String, Value>) -> Self {
+        let mut plot = Self::new(rect, family);
+        let zoom = zoom_of(props);
+        if zoom > 1.0 {
+            let at = |key| get_f32_prop(props, key, 0.0).clamp(-SCORE_LIMIT, SCORE_LIMIT);
+            plot.sd = [plot.sd[0] * zoom, plot.sd[1] * zoom];
+            plot.center = [plot.center[0] - at("view-x") * plot.sd[0], plot.center[1] + at("view-y") * plot.sd[1]];
+        }
+        plot
+    }
+
+    /// Whether a score point falls inside the rect (before `point`'s edge
+    /// clamp). A zoomed plot leaves out the members that do not.
+    fn shows(&self, x: f32, y: f32) -> bool {
+        let col = self.center[0] + x * self.sd[0];
+        let row = self.center[1] - y * self.sd[1];
+        col >= self.rect.col + self.margin[0]
+            && col <= self.rect.col + self.rect.width - self.margin[0]
+            && row >= self.rect.row + self.margin[1]
+            && row <= self.rect.row + self.rect.height - self.margin[1]
+    }
+
     /// Axis 1 to the right, axis 2 up, clamped inside the rect.
     fn point(&self, x: f32, y: f32) -> [f32; 2] {
-        let margin_x = self.sd[0] * 0.15;
-        let margin_y = self.sd[1] * 0.15;
+        let margin_x = self.margin[0];
+        let margin_y = self.margin[1];
         [
             (self.center[0] + x * self.sd[0])
                 .clamp(self.rect.col + margin_x, self.rect.col + self.rect.width - margin_x),
@@ -690,6 +748,35 @@ fn split_rect(rect: Rect, cell_h: f32) -> (Rect, Rect) {
     let plot = Rect { height: rect.height - strip_h, ..rect };
     let strip = Rect { row: rect.row + rect.height - strip_h, height: strip_h, ..rect };
     (plot, strip)
+}
+
+/// `:view`: which part of the widget this node draws. The default is the
+/// plot over the strip; `:map` gives the whole rect to the plot, `:strip` to
+/// the preview strip (so a panel can lay the map and each marker's preview
+/// out as separate widgets over one family).
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Both,
+    Map,
+    Strip,
+}
+
+fn view_from_props(props: &HashMap<String, Value>) -> View {
+    match super::live_audio::prop_keyword(props, "view").as_deref() {
+        Some("map") => View::Map,
+        Some("strip") => View::Strip,
+        _ => View::Both,
+    }
+}
+
+/// The plot and strip rects for the node's `:view`; the part a view leaves
+/// out is an empty rect, which contains no pointer position.
+fn view_rects(props: &HashMap<String, Value>, rect: Rect, cell_h: f32) -> (Rect, Rect) {
+    match view_from_props(props) {
+        View::Both => split_rect(rect, cell_h),
+        View::Map => (rect, Rect { row: rect.row + rect.height, height: 0.0, ..rect }),
+        View::Strip => (Rect { height: 0.0, ..rect }, rect),
+    }
 }
 
 fn dot_radius_px(axis3: f32) -> f32 {
@@ -783,6 +870,7 @@ fn nearest_member(
         .scores
         .iter()
         .enumerate()
+        .filter(|(_, score)| plot.shows(score[0], score[1]))
         .map(|(i, score)| {
             let p = plot.point(score[0], score[1]);
             let dx = (p[0] - col) * cell_w;
@@ -820,6 +908,81 @@ fn gesture_move(score: [f32; 2], phase: u8, marker: Option<(i64, [f32; 2])>) -> 
             tagged_event("move", &[at(0), at(1), phase as f64, id as f64])
         }
     }
+}
+
+/// `:blend-count k` with `:on-blend`: a marker move reports the `k` (1..=4) members nearest the point and their
+/// weights instead of the bare point, so the host can play a blend of them. Weights are 1/d - 1/d(k+1)
+/// (distance in score units), normalised: a member fades in from zero as it becomes one of the nearest,
+/// and a point on a member is that member alone.
+fn blend_count(props: &HashMap<String, Value>) -> usize {
+    if !prop_set(props, "on-blend") {
+        return 0;
+    }
+    let k = get_f32_prop(props, "blend-count", 0.0);
+    if k >= 1.0 { (k.round() as usize).min(4) } else { 0 }
+}
+
+fn blend_mix(family: &Family, at: [f32; 2], k: usize) -> Vec<(usize, f32)> {
+    let mut near: Vec<(usize, f32)> = family
+        .scores
+        .iter()
+        .enumerate()
+        .map(|(i, score)| (i, (score[0] - at[0]).hypot(score[1] - at[1])))
+        .collect();
+    near.sort_by(|a, b| a.1.total_cmp(&b.1));
+    near.truncate(k + 1);
+    let Some(&(first, d0)) = near.first() else {
+        return Vec::new();
+    };
+    if d0 < 1e-4 || near.len() < 2 {
+        return vec![(first, 1.0)];
+    }
+    // The (k+1)-th nearest sets the zero; with fewer members than that, the furthest kept one does.
+    let floor = if near.len() > k { 1.0 / near[k].1.max(1e-6) } else { 0.0 };
+    let mut mix: Vec<(usize, f32)> =
+        near.iter().take(k).map(|&(i, d)| (i, (1.0 / d.max(1e-6) - floor).max(0.0))).collect();
+    let total: f32 = mix.iter().map(|m| m.1).sum();
+    if total <= 0.0 {
+        return vec![(first, 1.0)];
+    }
+    for m in &mut mix {
+        m.1 /= total;
+    }
+    mix.sort_by(|a, b| b.1.total_cmp(&a.1));
+    mix
+}
+
+/// A marker move as the host hears it: `(:blend x y phase id i1 w1 .. ik wk)` when blending is on
+/// (missing members padded with the first at weight 0), else the plain `(:move x y phase id)`.
+fn marker_gesture(
+    props: &HashMap<String, Value>,
+    family: &Family,
+    score: [f32; 2],
+    phase: u8,
+    marker: Option<(i64, [f32; 2])>,
+) -> WidgetEvent {
+    let k = blend_count(props);
+    let Some((id, offset)) = marker.filter(|_| k > 0) else {
+        return gesture_move(score, phase, marker);
+    };
+    let at = [
+        (score[0] + offset[0]).clamp(-SCORE_LIMIT, SCORE_LIMIT),
+        (score[1] + offset[1]).clamp(-SCORE_LIMIT, SCORE_LIMIT),
+    ];
+    let mix = blend_mix(family, at, k);
+    // Missing members are padded with the first at weight 0.
+    let entry = |j: usize| mix.get(j).copied().unwrap_or((mix.first().map_or(0, |m| m.0), 0.0));
+    if k >= 2 {
+        let blend = [entry(0).0 as f32, entry(1).0 as f32, entry(2).0 as f32, entry(1).1, entry(2).1];
+        DROPPED.with(|dropped| dropped.borrow_mut().insert((file_key(props), id), (at, blend)));
+    }
+    let mut numbers = vec![at[0] as f64, at[1] as f64, phase as f64, id as f64];
+    for j in 0..k {
+        let (i, w) = entry(j);
+        numbers.push(i as f64);
+        numbers.push(w as f64);
+    }
+    tagged_event("blend", &numbers)
 }
 
 /// A prop that is present and not nil / false.
@@ -903,6 +1066,8 @@ struct Marker {
     size: f32,
     label: String,
     near: Option<usize>,
+    /// The members a blended point is made of (a lead is drawn to each).
+    mix: Vec<usize>,
     color: Option<Color>,
 }
 
@@ -935,6 +1100,16 @@ fn markers_from_props(props: &HashMap<String, Value>, count: usize) -> Vec<Marke
                 .filter(|_| count > 0)
                 .map(|n| ((n.max(0.0) + 0.5).floor() as usize).min(count - 1));
             let color = map.get("color").and_then(|cell| theme::parse_color_value(&cell.borrow()));
+            let mix = match map.get("mix").map(|cell| cell.borrow().clone()) {
+                Some(Value::List(items)) if count > 0 => items
+                    .iter()
+                    .filter_map(|item| match &*item.borrow() {
+                        Value::Number(n) if n.is_finite() && *n >= 0.0 => Some(((*n + 0.5).floor() as usize).min(count - 1)),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
             Some(Marker {
                 id: map_number(map, "id").map_or(position as i64, |id| id.round() as i64),
                 x: coord("x"),
@@ -942,10 +1117,134 @@ fn markers_from_props(props: &HashMap<String, Value>, count: usize) -> Vec<Marke
                 size: coord("size"),
                 label,
                 near,
+                mix,
                 color,
             })
         })
         .collect()
+}
+
+/// The kept plain-dot layers (a panel shows one map; each layer is megabytes
+/// for a large family, so only the last couple of views stay warm).
+const DOT_LAYER_ENTRIES: usize = 2;
+
+type DotsKey = (usize, [u32; 22]);
+
+thread_local! {
+    static DOT_LAYERS: RefCell<Vec<(DotsKey, Rc<Vec<super::GpuShadedVertex>>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Everything the plain-dot layer's triangles depend on.
+fn dots_key(family: &Arc<Family>, plot: &Plot, scale: f32, dot: Color, background: Color, cell_w: f32, cell_h: f32) -> DotsKey {
+    let numbers = [
+        plot.center[0], plot.center[1], plot.sd[0], plot.sd[1], plot.margin[0], plot.margin[1],
+        plot.rect.col, plot.rect.row, plot.rect.width, plot.rect.height,
+        scale, cell_w, cell_h, super::ui_design_px(1.0),
+        dot.r, dot.g, dot.b, dot.a,
+        background.r, background.g, background.b, background.a,
+    ];
+    (Arc::as_ptr(family) as usize, numbers.map(f32::to_bits))
+}
+
+/// Marker ids that can be bound to hit params (`:hit-0` .. `:hit-3`).
+const BOUND_MARKERS: i64 = 4;
+
+thread_local! {
+    /// Where a blended marker was last dropped, with the blend it reported
+    /// there: (file, marker id) -> (point, [hit, hit2, hit3, w2, w3] in view
+    /// indices). While the bound params still hold that blend the ring stays
+    /// under the pointer instead of at its hits' weighted centre.
+    static DROPPED: RefCell<HashMap<(String, i64), ([f32; 2], [f32; 5])>> = RefCell::new(HashMap::new());
+}
+
+fn file_key(props: &HashMap<String, Value>) -> String {
+    match props.get("file") {
+        Some(Value::String(path)) => path.clone(),
+        _ => String::new(),
+    }
+}
+
+/// The view index of a whole-family member, when the view shows it.
+fn local_of(props: &HashMap<String, Value>, global: usize, count: usize) -> Option<usize> {
+    match props.get("globals") {
+        Some(Value::List(items)) => items
+            .iter()
+            .take(count)
+            .position(|item| matches!(&*item.borrow(), Value::Number(n) if n.round() as usize == global && *n >= 0.0)),
+        _ => (global < count).then_some(global),
+    }
+}
+
+/// The `:markers`, with every marker whose id has a bound `:hit-<id>` placed
+/// from the params instead of its dict: at the hit (`:hit-<id>`, an index
+/// into the whole family; `:globals` lists the view's members and
+/// `:global-file` holds the positions of the ones the view hides), or, with
+/// `:w2-<id>` / `:w3-<id>` above zero, at the weighted centre of `:hit-<id>`,
+/// `:hit2-<id>` and `:hit3-<id>` with a lead to each. Bound props follow the
+/// params without the panel building its marker list again.
+fn node_markers(props: &HashMap<String, Value>, family: &Family) -> Vec<Marker> {
+    let count = family.members.len();
+    let mut markers = markers_from_props(props, count);
+    if count == 0 || !markers.iter().any(|m| (0..BOUND_MARKERS).contains(&m.id) && props.contains_key(&format!("hit-{}", m.id))) {
+        return markers;
+    }
+    let whole = match props.get("global-file") {
+        Some(Value::String(path)) => load_family(path),
+        _ => None,
+    };
+    let score_of = |global: usize| -> Option<[f32; 3]> {
+        match &whole {
+            Some(whole) => whole.scores.get(global).copied(),
+            None => local_of(props, global, count).map(|local| family.scores[local]),
+        }
+    };
+    let file = file_key(props);
+    for marker in &mut markers {
+        let id = marker.id;
+        if !(0..BOUND_MARKERS).contains(&id) || !props.contains_key(&format!("hit-{id}")) {
+            continue;
+        }
+        let index = |key: &str| (get_f32_prop(props, &format!("{key}-{id}"), 0.0).max(0.0) + 0.5).floor() as usize;
+        let weight = |key: &str| get_f32_prop(props, &format!("{key}-{id}"), 0.0).clamp(0.0, 1.0);
+        let hits = [index("hit"), index("hit2"), index("hit3")];
+        let (w2, w3) = (weight("w2"), weight("w3"));
+        let Some(first) = score_of(hits[0]) else {
+            continue;
+        };
+        marker.near = local_of(props, hits[0], count);
+        marker.size = first[2].clamp(-SCORE_LIMIT, SCORE_LIMIT);
+        marker.mix.clear();
+        if w2 + w3 <= 0.001 {
+            marker.x = first[0].clamp(-SCORE_LIMIT, SCORE_LIMIT);
+            marker.y = first[1].clamp(-SCORE_LIMIT, SCORE_LIMIT);
+            continue;
+        }
+        if !marker.label.is_empty() {
+            marker.label.push_str(" blend");
+        }
+        let weights = [(1.0 - w2 - w3).max(0.0), w2, w3];
+        let locals = hits.map(|hit| local_of(props, hit, count));
+        marker.mix = locals.iter().flatten().copied().collect();
+        let dropped = DROPPED.with(|dropped| dropped.borrow().get(&(file.clone(), id)).copied()).filter(|(_, blend)| {
+            let same_hit = |k: usize, w: f32| w <= 1e-3 || locals[k] == Some(blend[k].round() as usize);
+            same_hit(0, 1.0) && same_hit(1, w2) && same_hit(2, w3) && (blend[3] - w2).abs() < 2e-3 && (blend[4] - w3).abs() < 2e-3
+        });
+        let at = match dropped {
+            Some((at, _)) => at,
+            None => {
+                let mut at = [0.0f32; 2];
+                for (k, hit) in hits.iter().enumerate() {
+                    let score = score_of(*hit).unwrap_or(first);
+                    at[0] += weights[k] * score[0];
+                    at[1] += weights[k] * score[1];
+                }
+                at
+            }
+        };
+        marker.x = at[0].clamp(-SCORE_LIMIT, SCORE_LIMIT);
+        marker.y = at[1].clamp(-SCORE_LIMIT, SCORE_LIMIT);
+    }
+    markers
 }
 
 /// Position in `markers` of the `:selected` id (the first marker by default).
@@ -1052,7 +1351,7 @@ fn latent_mouse_event(
     cell_w: f32,
     cell_h: f32,
 ) -> MouseEventOutcome {
-    let plot = Plot::new(split_rect(node.rect, cell_h).0, family);
+    let plot = Plot::for_node(view_rects(&node.props, node.rect, cell_h).0, family, &node.props);
     let slop = super::ui_design_px(CLICK_SLOP_PX);
     let pointer = plot.score(col, row);
     match mouse_kind {
@@ -1061,15 +1360,15 @@ fn latent_mouse_event(
                 // The preview strip: a marker's strip starts a picker drag,
                 // anything else ignores the whole gesture.
                 LATENT_PRESS.with(|press| *press.borrow_mut() = None);
-                let markers = markers_from_props(&node.props, family.members.len());
-                let press = strip_marker_at(&markers, split_rect(node.rect, cell_h).1, col).map(|i| {
+                let markers = node_markers(&node.props, family);
+                let press = strip_marker_at(&markers, view_rects(&node.props, node.rect, cell_h).1, col).map(|i| {
                     let near = markers[i].near.unwrap_or(0);
                     StripPress { widget_id: node.widget_id, id: markers[i].id, row, start: near, last: near }
                 });
                 STRIP_PRESS.with(|slot| *slot.borrow_mut() = press);
                 return MouseEventOutcome::Consume;
             }
-            let markers = markers_from_props(&node.props, family.members.len());
+            let markers = node_markers(&node.props, family);
             let (dot, marker) = if markers.is_empty() {
                 let dot = nearest_member(family, &plot, col, row, cell_w, cell_h)
                     .map(|index| (index, armed_slot(&node.props, modifiers)));
@@ -1100,7 +1399,7 @@ fn latent_mouse_event(
             });
             match dot {
                 Some(_) => MouseEventOutcome::Consume,
-                None => MouseEventOutcome::Dispatch(gesture_move(pointer, 0, marker)),
+                None => MouseEventOutcome::Dispatch(marker_gesture(&node.props, family, pointer, 0, marker)),
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
@@ -1135,7 +1434,7 @@ fn latent_mouse_event(
                 Some((phase, state.marker))
             });
             match gesture {
-                Some((phase, marker)) => MouseEventOutcome::Dispatch(gesture_move(pointer, phase, marker)),
+                Some((phase, marker)) => MouseEventOutcome::Dispatch(marker_gesture(&node.props, family, pointer, phase, marker)),
                 None => MouseEventOutcome::Consume,
             }
         }
@@ -1155,12 +1454,22 @@ fn latent_mouse_event(
                 {
                     MouseEventOutcome::Dispatch(pick_event(index, slot))
                 }
-                _ => MouseEventOutcome::Dispatch(gesture_move(pointer, 2, state.marker)),
+                _ => MouseEventOutcome::Dispatch(marker_gesture(&node.props, family, pointer, 2, state.marker)),
             }
         }
+        // The wheel over the plot zooms about the pointer: `(on-zoom factor x y)`.
+        // A host with `:on-pan` zooms by pinch instead, and scrolling pans.
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            if plot.rect.contains(col, row)
+                && prop_set(&node.props, "on-zoom")
+                && !prop_set(&node.props, "on-pan") =>
+        {
+            let factor = if matches!(mouse_kind, MouseEventKind::ScrollUp) { ZOOM_STEP } else { 1.0 / ZOOM_STEP };
+            MouseEventOutcome::Dispatch(tagged_event("zoom", &[factor as f64, pointer[0] as f64, pointer[1] as f64]))
+        }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if !plot.rect.contains(col, row) => {
-            let markers = markers_from_props(&node.props, family.members.len());
-            let Some(i) = strip_marker_at(&markers, split_rect(node.rect, cell_h).1, col) else {
+            let markers = node_markers(&node.props, family);
+            let Some(i) = strip_marker_at(&markers, view_rects(&node.props, node.rect, cell_h).1, col) else {
                 return MouseEventOutcome::Ignore;
             };
             let near = markers[i].near.unwrap_or(0);
@@ -1389,6 +1698,30 @@ impl WidgetDefinition for FamilyMapWidget {
             "selected",
             "recording",
             "playing",
+            "zoom",
+            "view-x",
+            "view-y",
+            "blend-count",
+            "hit-0",
+            "hit2-0",
+            "hit3-0",
+            "w2-0",
+            "w3-0",
+            "hit-1",
+            "hit2-1",
+            "hit3-1",
+            "w2-1",
+            "w3-1",
+            "hit-2",
+            "hit2-2",
+            "hit3-2",
+            "w2-2",
+            "w3-2",
+            "hit-3",
+            "hit2-3",
+            "hit3-3",
+            "w2-3",
+            "w3-3",
         ]
     }
 
@@ -1412,6 +1745,20 @@ Several points: :markers (list (dict :id 0 :x .. :y .. :size .. :label \"START\"
 on-move gets (x y phase id), a dot click calls (on-pick index id) for the selected marker \
 (Shift: the next), and markers with :near get side-by-side preview strips; dragging a strip \
 vertically or scrolling it steps (on-pick index id) through the members. \
+:view :map draws the plot alone over the whole widget and :view :strip the preview strip(s) alone \
+(markers mode), so a panel can place the map and each marker's preview separately. \
+:zoom (1 = the whole family) about (:view-x, :view-y) in score units shows part of the map, \
+leaving out members outside it; with :on-zoom a pinch over the plot calls (on-zoom factor x y) \
+with the score point under the pointer, and the host keeps the three values. With :on-pan a two-finger \
+scroll over a zoomed plot calls (on-pan dx dy), the amounts to add to :view-x and :view-y; without it \
+the scroll wheel zooms instead. With :on-blend and \
+:blend-count k (1..4) a marker move calls (on-blend x y phase id i1 w1 .. ik wk) instead of on-move: the k \
+members nearest the point and their weights (sum 1, heaviest first), for a host that plays blends. A marker's \
+:mix (list i j k) draws a lead to each member a blended point is made of. \
+Bound markers: with :hit-<id> (id 0..3) bound to a param holding a member index, marker <id> sits on that member \
+and previews it, following the param without the panel running again (so a drag stays cheap); :hit2-<id> :hit3-<id> \
+:w2-<id> :w3-<id> make it a blend at the weighted centre. Those indices count over the whole family: :globals lists \
+the view's members as whole-family indices and :global-file is the whole family's sidecar (for members the view hides). \
 :recording and :playing (bind #'transport.recording and #'transport.playing) show a \
 \"recording\" badge in the plot's bottom right while both are on: drags then print p-locks. \
 Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-label \"deep\" \
@@ -1460,6 +1807,36 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
             "recording",
             "playing",
             "recording-color",
+            "view",
+            "zoom",
+            "view-x",
+            "view-y",
+            "on-zoom",
+            "on-pan",
+            "globals",
+            "global-file",
+            "hit-0",
+            "hit2-0",
+            "hit3-0",
+            "w2-0",
+            "w3-0",
+            "hit-1",
+            "hit2-1",
+            "hit3-1",
+            "w2-1",
+            "w3-1",
+            "hit-2",
+            "hit2-2",
+            "hit3-2",
+            "w2-2",
+            "w3-2",
+            "hit-3",
+            "hit2-3",
+            "hit3-3",
+            "w2-3",
+            "w3-3",
+            "blend-count",
+            "on-blend",
         ]
     }
 
@@ -1557,11 +1934,43 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
         let Some(family) = family_from_props(&node.props) else {
             return MouseEventOutcome::Ignore;
         };
-        let plot = Plot::new(split_rect(node.rect, cell_h).0, &family);
+        let plot = Plot::for_node(view_rects(&node.props, node.rect, cell_h).0, &family, &node.props);
         match nearest_member(&family, &plot, local_col, local_row, cell_w.max(1.0), cell_h.max(1.0)) {
             Some(index) => MouseEventOutcome::Dispatch(pick_event(index, armed_slot(&node.props, modifiers))),
             None => MouseEventOutcome::Consume,
         }
+    }
+
+    /// A pinch over the plot zooms about the pointer: `(on-zoom factor x y)`.
+    fn magnify_event(&self, node: &LayoutNode, local_col: f32, local_row: f32, delta: f64) -> Option<WidgetEvent> {
+        if !prop_set(&node.props, "on-zoom") || delta.abs() < f64::EPSILON {
+            return None;
+        }
+        let row = super::scroll::event_content_row(local_row);
+        let pointer = gesture_plot(node, local_col, row)?.score(local_col, row);
+        let factor = 2.0_f64.powf(delta.clamp(-2.0, 2.0));
+        Some(tagged_event("zoom", &[factor, pointer[0] as f64, pointer[1] as f64]))
+    }
+
+    /// A two-finger scroll over a zoomed plot pans it: `(on-pan dx dy)`, the
+    /// move of the view point in score units (the map follows the fingers).
+    /// At the whole map there is nothing to pan and the scroll passes through.
+    fn scroll_gesture_event(
+        &self,
+        node: &LayoutNode,
+        local_col: f32,
+        local_row: f32,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> Option<WidgetEvent> {
+        if !prop_set(&node.props, "on-pan") || zoom_of(&node.props) <= 1.0 {
+            return None;
+        }
+        let row = super::scroll::event_content_row(local_row);
+        let plot = gesture_plot(node, local_col, row)?;
+        let dx = -delta_x * PAN_CELLS_PER_PIXEL / plot.sd[0].max(1e-6);
+        let dy = delta_y * PAN_CELLS_PER_PIXEL / plot.sd[1].max(1e-6);
+        Some(tagged_event("pan", &[dx as f64, dy as f64]))
     }
 
     /// Drags follow the pointer outside the rect (latent mode). The trait
@@ -1585,6 +1994,9 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
         let key = match &*kind.borrow() {
             Value::Keyword(kind) if kind == "move" => "on-move",
             Value::Keyword(kind) if kind == "pick" => "on-pick",
+            Value::Keyword(kind) if kind == "zoom" => "on-zoom",
+            Value::Keyword(kind) if kind == "pan" => "on-pan",
+            Value::Keyword(kind) if kind == "blend" => "on-blend",
             _ => return None,
         };
         let callback = node.props.get(key)?.clone();
@@ -1636,8 +2048,10 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
             morph.b = morph.a;
             morph.blend = 0.0;
         }
-        let (plot_rect, strip) = split_rect(rect, cell_h);
-        let plot = Plot::new(plot_rect, &family);
+        let view = view_from_props(props);
+        LAST_CELL_H.with(|cell| cell.set(cell_h));
+        let (plot_rect, strip) = view_rects(props, rect, cell_h);
+        let plot = Plot::for_node(plot_rect, &family, props);
         let hair_w = super::ui_design_px(1.0) / cell_w;
         let hair_h = super::ui_design_px(1.0) / cell_h;
 
@@ -1662,7 +2076,7 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
         }
         let pad_w = super::ui_design_px(8.0) / cell_w;
         let pad_h = super::ui_design_px(6.0) / cell_h;
-        if let Some(Value::String(x_label)) = props.get("x-label") {
+        if let Some(Value::String(x_label)) = props.get("x-label").filter(|_| view != View::Strip) {
             let chars = x_label.chars().count() as f32;
             prims.push(text(
                 plot.center[1] - 1.0 - pad_h * 0.2,
@@ -1672,18 +2086,22 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
                 label_color,
             ));
         }
-        if let Some(Value::String(y_label)) = props.get("y-label") {
+        if let Some(Value::String(y_label)) = props.get("y-label").filter(|_| view != View::Strip) {
             prims.push(text(plot_rect.row + pad_h * 0.4, plot.center[0] + pad_w * 0.6, y_label.clone(), 9.0, label_color));
         }
 
         let mut mesh = ShadedMesh::new();
         // Plates behind the plot's labels: over the dots, under the text.
         let mut plates = ShadedMesh::new();
-        let scale = dot_scale(family.members.len(), plot_rect, cell_w, cell_h);
+        // Zoomed in, fewer members share the plot: the dots grow back towards full size.
+        let scale = {
+            let base = dot_scale(family.members.len(), plot_rect, cell_w, cell_h);
+            (base * zoom_of(props).sqrt()).min(1.0).max(base)
+        };
         let dot = |mesh: &mut ShadedMesh, at: [f32; 2], radius: f32, color: Color| {
             mesh.push_dot(at, radius, color, background, DOT_OUTLINE_PX, viewport);
         };
-        let markers = markers_from_props(props, family.members.len());
+        let markers = node_markers(props, &family);
         if !markers.is_empty() {
             let selected = selected_marker(props, &markers);
             let colors: Vec<Color> = markers
@@ -1692,58 +2110,94 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
                 .map(|(i, marker)| marker.color.unwrap_or(if i == 0 { accent } else { b_color }))
                 .collect();
             let centers: Vec<[f32; 2]> = markers.iter().map(|m| plot.point(m.x, m.y)).collect();
-            // The morph path, START -> END, faint.
-            if centers.len() > 1 {
-                mesh.push_polyline(&centers, with_alpha(line_color, 0.45), viewport, 0.6);
-            }
-            // Members, the markers' nearest ones on top in their colours.
-            let near_color = |i: usize| {
-                markers.iter().zip(&colors).rev().find(|(m, _)| m.near == Some(i)).map(|(_, c)| *c)
-            };
-            // Big dots first, so a small one is never buried under them.
-            let mut rest: Vec<&[f32; 3]> =
-                family.scores.iter().enumerate().filter(|(i, _)| near_color(*i).is_none()).map(|(_, s)| s).collect();
-            rest.sort_by(|a, b| b[2].total_cmp(&a[2]));
-            for score in rest {
-                dot(&mut mesh, plot.point(score[0], score[1]), dot_radius_px(score[2]) * scale, dot_color);
-            }
-            for (i, score) in family.scores.iter().enumerate() {
-                if let Some(color) = near_color(i) {
-                    let radius = near_dot_radius_px(score[2], scale);
-                    dot(&mut mesh, plot.point(score[0], score[1]), radius, color);
+            if view != View::Strip {
+                // The morph path, START -> END, faint.
+                if centers.len() > 1 {
+                    mesh.push_polyline(&centers, with_alpha(line_color, 0.45), viewport, 0.6);
                 }
-            }
-            // Leads from each marker's nearest member, then the rings, the
-            // selected one last (on top), heavier, with a soft halo.
-            let order: Vec<usize> = (0..markers.len()).filter(|&i| i != selected).chain([selected]).collect();
-            for &i in &order {
-                if let Some(near) = markers[i].near {
-                    let score = family.scores[near];
-                    dashed(&mut mesh, plot.point(score[0], score[1]), centers[i], with_alpha(colors[i], 0.7), viewport);
+                // Members, the markers' nearest ones on top in their colours.
+                let near_color = |i: usize| {
+                    markers.iter().zip(&colors).rev().find(|(m, _)| m.near == Some(i)).map(|(_, c)| *c)
+                };
+                // Every member's plain dot is one kept layer: it depends on
+                // the view alone, so a marker drag (which only recolours the
+                // nearest members, drawn over their plain dots below) does
+                // not tessellate the whole family again.
+                let key = dots_key(&family, &plot, scale, dot_color, background, cell_w, cell_h);
+                let layer = DOT_LAYERS.with(|layers| {
+                    let mut layers = layers.borrow_mut();
+                    if let Some(at) = layers.iter().position(|(k, _)| *k == key) {
+                        let hit = layers.remove(at);
+                        layers.push(hit);
+                    } else {
+                        // Big dots first, so a small one is never buried under them.
+                        let mut rest: Vec<&[f32; 3]> = family.scores.iter().collect();
+                        rest.sort_by(|a, b| b[2].total_cmp(&a[2]));
+                        let mut base = ShadedMesh::new();
+                        for score in rest {
+                            if plot.shows(score[0], score[1]) {
+                                dot(&mut base, plot.point(score[0], score[1]), dot_radius_px(score[2]) * scale, dot_color);
+                            }
+                        }
+                        if layers.len() >= DOT_LAYER_ENTRIES {
+                            layers.remove(0);
+                        }
+                        layers.push((key, Rc::new(base.into_vertices())));
+                    }
+                    layers.last().map(|(_, layer)| layer.clone())
+                });
+                if let Some(layer) = layer {
+                    mesh.extend_from_vertices(&layer);
                 }
-            }
-            for &i in &order {
-                let radius = marker_ring_px(markers[i].size);
-                if i == selected {
-                    mesh.push_disc(centers[i], radius, with_alpha(colors[i], 0.16), viewport);
-                    mesh.push_polyline(&ring_points(centers[i], radius, viewport), colors[i], viewport, 1.15);
-                    mesh.push_disc(centers[i], 1.8, colors[i], viewport);
-                } else {
-                    mesh.push_polyline(&ring_points(centers[i], radius, viewport), colors[i], viewport, 0.7);
+                for (i, score) in family.scores.iter().enumerate() {
+                    if !plot.shows(score[0], score[1]) {
+                        continue;
+                    }
+                    if let Some(color) = near_color(i) {
+                        let radius = near_dot_radius_px(score[2], scale);
+                        dot(&mut mesh, plot.point(score[0], score[1]), radius, color);
+                    }
+                }
+                // Leads from each marker's nearest member, then the rings, the
+                // selected one last (on top), heavier, with a soft halo.
+                let order: Vec<usize> = (0..markers.len()).filter(|&i| i != selected).chain([selected]).collect();
+                for &i in &order {
+                    if !markers[i].mix.is_empty() {
+                        // A blended point: a lead to every member it is made of.
+                        for &member in &markers[i].mix {
+                            let score = family.scores[member];
+                            dashed(&mut mesh, plot.point(score[0], score[1]), centers[i], with_alpha(colors[i], 0.7), viewport);
+                        }
+                    } else if let Some(near) = markers[i].near {
+                        let score = family.scores[near];
+                        dashed(&mut mesh, plot.point(score[0], score[1]), centers[i], with_alpha(colors[i], 0.7), viewport);
+                    }
+                }
+                for &i in &order {
+                    let radius = marker_ring_px(markers[i].size);
+                    if i == selected {
+                        mesh.push_disc(centers[i], radius, with_alpha(colors[i], 0.16), viewport);
+                        mesh.push_polyline(&ring_points(centers[i], radius, viewport), colors[i], viewport, 1.15);
+                        mesh.push_disc(centers[i], 1.8, colors[i], viewport);
+                    } else {
+                        mesh.push_polyline(&ring_points(centers[i], radius, viewport), colors[i], viewport, 0.7);
+                    }
                 }
             }
 
             // Strip: one side-by-side preview per marker that names a member.
             let previewed: Vec<usize> = (0..markers.len()).filter(|&i| markers[i].near.is_some()).collect();
-            prims.push(GpuPrimitive::Rect(GpuRectPrimitive { rect: strip, color: inset_color }));
-            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
-                rect: Rect { height: hair_h, ..strip },
-                color: with_alpha(grid_color, 2.2),
-            }));
             let mut labels = Vec::new();
+            if view == View::Both {
+                prims.push(GpuPrimitive::Rect(GpuRectPrimitive { rect: strip, color: inset_color }));
+                prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
+                    rect: Rect { height: hair_h, ..strip },
+                    color: with_alpha(grid_color, 2.2),
+                }));
+            }
             let voice = voice_from_props(props);
             let share = strip.width / previewed.len().max(1) as f32;
-            for (k, &i) in previewed.iter().enumerate() {
+            for (k, &i) in previewed.iter().enumerate().filter(|_| view != View::Map) {
                 let near = markers[i].near.unwrap_or(0);
                 let side = Rect { col: strip.col + share * k as f32, width: share, ..strip };
                 if k > 0 {
@@ -1769,24 +2223,26 @@ Example: (family-map :file (vk-family-file) :a a :b b :blend blend :armed 0 :x-l
             }
             mesh.push_into(&mut prims);
 
-            // Ring labels, right of the ring (left of it near the edge). A
-            // label that would cover one already placed (two rings close
-            // together) takes the other side, else moves down a line.
-            let mut placed: Vec<(f32, f32, f32)> = Vec::new();
-            let slots = label_slots(&markers, &centers, plot_rect, pad_w, cell_w, &mut placed);
-            for &(_, (row, col, width)) in &slots {
-                label_plate(&mut plates, row, col, width, background, viewport);
-            }
-            plates.push_into(&mut prims);
-            for (i, (row, col, width)) in slots {
-                let mut primitive = text(row, col, markers[i].label.clone(), 9.0, colors[i]);
-                if let GpuPrimitive::ProportionalText(t) = &mut primitive {
-                    t.align_width = width;
+            if view != View::Strip {
+                // Ring labels, right of the ring (left of it near the edge). A
+                // label that would cover one already placed (two rings close
+                // together) takes the other side, else moves down a line.
+                let mut placed: Vec<(f32, f32, f32)> = Vec::new();
+                let slots = label_slots(&markers, &centers, plot_rect, pad_w, cell_w, &mut placed);
+                for &(_, (row, col, width)) in &slots {
+                    label_plate(&mut plates, row, col, width, background, viewport);
                 }
-                prims.push(primitive);
+                plates.push_into(&mut prims);
+                for (i, (row, col, width)) in slots {
+                    let mut primitive = text(row, col, markers[i].label.clone(), 9.0, colors[i]);
+                    if let GpuPrimitive::ProportionalText(t) = &mut primitive {
+                        t.align_width = width;
+                    }
+                    prims.push(primitive);
+                }
+                prims.extend(recording_badge(props, plot_rect, background, cell_w, cell_h, viewport));
             }
             prims.extend(labels);
-            prims.extend(recording_badge(props, plot_rect, background, cell_w, cell_h, viewport));
             return prims;
         }
         let pa = plot.point(family.scores[morph.a][0], family.scores[morph.a][1]);
@@ -2378,4 +2834,134 @@ mod tests {
         assert!(a.1 > 20.0 && b.1 + b.2 < 20.0, "START right of the ring, END left of it: {slots:?}");
         let _ = std::fs::remove_file(path);
     }
+    #[test]
+    fn family_map_zoom_shows_part_of_the_map_and_keeps_the_view_point_centred() {
+        let (node, path) = test_node("zoom", &[("zoom", Value::Number(4.0)), ("view-x", Value::Number(1.0)), ("view-y", Value::Number(-0.5))]);
+        let family = load_family(path.to_str().unwrap()).expect("family");
+        let rect = split_rect(node.rect, 16.0).0;
+        let plot = Plot::for_node(rect, &family, &node.props);
+        let whole = Plot::new(rect, &family);
+        assert!((plot.sd[0] - whole.sd[0] * 4.0).abs() < 1e-3);
+        let p = plot.point(1.0, -0.5);
+        assert!((p[0] - (rect.col + rect.width * 0.5)).abs() < 1e-3 && (p[1] - (rect.row + rect.height * 0.5)).abs() < 1e-3);
+        assert!(plot.shows(1.0, -0.5) && !plot.shows(-2.5, 2.5));
+        let s = plot.score(p[0], p[1]);
+        assert!((s[0] - 1.0).abs() < 1e-3 && (s[1] + 0.5).abs() < 1e-3);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn family_map_pinch_zooms_about_the_pointer_and_scroll_pans_a_zoomed_plot() {
+        let args_of = |node: &LayoutNode, event: Option<WidgetEvent>| -> Option<(Value, Vec<f64>)> {
+            let output = FAMILY_MAP_WIDGET.handle_event(node, event?).expect("routed to a callback");
+            Some((output.callback, output.args.iter().map(|v| match v { Value::Number(n) => *n, _ => f64::NAN }).collect()))
+        };
+        let extra = |zoom: f64| {
+            vec![
+                ("view", Value::Keyword("map".to_string())),
+                ("zoom", Value::Number(zoom)),
+                ("view-x", Value::Number(1.0)),
+                ("view-y", Value::Number(-0.5)),
+                ("on-zoom", Value::Keyword("zm".to_string())),
+                ("on-pan", Value::Keyword("pan".to_string())),
+                ("on-move", Value::Keyword("mv".to_string())),
+            ]
+        };
+        let (node, path) = test_node("pinch-pan", &extra(4.0));
+        let family = load_family(path.to_str().unwrap()).expect("family");
+        let plot = Plot::for_node(node.rect, &family, &node.props);
+        // Pinch: the factor is 2^delta and the anchor is the score under the pointer.
+        let (col, row) = (30.0, 4.0);
+        let at = plot.score(col, row);
+        let (callback, args) = args_of(&node, FAMILY_MAP_WIDGET.magnify_event(&node, col, row, 1.0)).expect("pinch zooms");
+        assert_eq!(callback, Value::Keyword("zm".to_string()));
+        assert_close(&args, &[2.0, at[0] as f64, at[1] as f64]);
+        assert!(FAMILY_MAP_WIDGET.magnify_event(&node, 100.0, row, 1.0).is_none(), "off the plot");
+        // Scroll: the map follows the fingers, so a point moves by the scrolled cells.
+        let (callback, args) = args_of(&node, FAMILY_MAP_WIDGET.scroll_gesture_event(&node, col, row, 40.0, 20.0)).expect("scroll pans");
+        assert_eq!(callback, Value::Keyword("pan".to_string()));
+        let mut moved = node.clone();
+        moved.props.insert("view-x".to_string(), Value::Number(1.0 + args[0]));
+        moved.props.insert("view-y".to_string(), Value::Number(-0.5 + args[1]));
+        let after = Plot::for_node(node.rect, &family, &moved.props);
+        assert!((after.center[0] - plot.center[0] - 40.0 * PAN_CELLS_PER_PIXEL).abs() < 1e-3);
+        assert!((after.center[1] - plot.center[1] - 20.0 * PAN_CELLS_PER_PIXEL).abs() < 1e-3);
+        // With on-pan the wheel no longer zooms.
+        assert!(send(&node, MouseEventKind::ScrollUp, col, row).is_none());
+        // The whole map has nothing to pan: the scroll passes through.
+        let (whole, whole_path) = test_node("pinch-pan-whole", &extra(1.0));
+        assert!(FAMILY_MAP_WIDGET.scroll_gesture_event(&whole, col, row, 40.0, 20.0).is_none());
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(whole_path);
+    }
+
+    #[test]
+    fn family_map_bound_markers_follow_their_hit_params() {
+        // The view shows whole-family members 5 and 3 as its members 0 and 1.
+        let globals = Value::List([5.0, 3.0].iter().map(|n| Rc::new(RefCell::new(Value::Number(*n)))).collect());
+        let bound = |extra: &[(&str, Value)]| {
+            let mut props = vec![
+                ("on-move", Value::Keyword("mv".to_string())),
+                ("markers", two_markers([2.0, 2.0], [2.0, 2.0])),
+                ("globals", globals.clone()),
+                ("hit-0", Value::Number(3.0)),
+            ];
+            props.extend(extra.iter().cloned());
+            test_node("bound", &props)
+        };
+        let (node, path) = bound(&[]);
+        let family = load_family(path.to_str().unwrap()).expect("family");
+        let markers = node_markers(&node.props, &family);
+        // Marker 0 sits on view member 1 (whole-family 3); marker 1 keeps its dict.
+        assert_eq!(markers[0].near, Some(1));
+        assert!((markers[0].x - family.scores[1][0]).abs() < 1e-5 && (markers[0].y - family.scores[1][1]).abs() < 1e-5);
+        assert!(markers[0].mix.is_empty() && markers[0].label == "START");
+        assert!((markers[1].x - 2.0).abs() < 1e-5, "an unbound marker stays where its dict puts it");
+        // A blend: the weighted centre of its hits, a lead to each, and the label says so.
+        let (node, _) = bound(&[("hit2-0", Value::Number(5.0)), ("w2-0", Value::Number(0.25))]);
+        let markers = node_markers(&node.props, &family);
+        let centre = |k: usize| 0.75 * family.scores[1][k] + 0.25 * family.scores[0][k];
+        assert!((markers[0].x - centre(0).clamp(-3.0, 3.0)).abs() < 1e-4 && (markers[0].y - centre(1).clamp(-3.0, 3.0)).abs() < 1e-4);
+        assert_eq!(markers[0].mix, vec![1, 0]);
+        assert_eq!(markers[0].label, "START blend");
+        // A hit the view hides has no position without :global-file: the dict's stays.
+        let (node, _) = bound(&[("hit-0", Value::Number(7.0))]);
+        let markers = node_markers(&node.props, &family);
+        assert!((markers[0].x - 2.0).abs() < 1e-5 && markers[0].near == Some(0), "the dict's marker is left alone");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn family_map_blend_count_one_reports_the_nearest_member() {
+        let (mut node, path) = marker_node("snap", None);
+        node.props.insert("on-blend".to_string(), Value::Keyword("bl".to_string()));
+        node.props.insert("blend-count".to_string(), Value::Number(1.0));
+        node.props.insert("view".to_string(), Value::Keyword("map".to_string()));
+        let family = load_family(path.to_str().unwrap()).expect("family");
+        let plot = Plot::for_node(node.rect, &family, &node.props);
+        let target = plot.point(family.scores[1][0], family.scores[1][1]);
+        let (col, row) = (target[0] + 0.9, target[1] + 0.2);
+        let _ = send(&node, MouseEventKind::Down(MouseButton::Left), col, row);
+        let (callback, args) = send(&node, MouseEventKind::Drag(MouseButton::Left), col + 0.4, row).expect("a drag reports the nearest member");
+        assert_eq!(callback, Value::Keyword("bl".to_string()));
+        assert_eq!(args.len(), 6, "(x y phase id i1 w1): {args:?}");
+        assert_eq!(args[4] as usize, blend_mix(&family, plot.score(col + 0.4, row), 1)[0].0);
+        assert!((args[5] - 1.0).abs() < 1e-6);
+        let _ = send(&node, MouseEventKind::Up(MouseButton::Left), col + 0.4, row);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn blend_mix_weights_sum_to_one_and_a_point_on_a_member_is_that_member() {
+        let (_, path) = test_node("blendmix", &[]);
+        let family = load_family(path.to_str().unwrap()).expect("family");
+        let at = [family.scores[1][0], family.scores[1][1]];
+        assert_eq!(blend_mix(&family, at, 3), vec![(1, 1.0)]);
+        let mix = blend_mix(&family, [at[0] + 0.07, at[1] - 0.05], 3);
+        assert!(mix.len() <= 3 && mix[0].0 == 1);
+        assert!((mix.iter().map(|m| m.1).sum::<f32>() - 1.0).abs() < 1e-5);
+        assert!(mix.windows(2).all(|w| w[0].1 >= w[1].1));
+        let _ = std::fs::remove_file(path);
+    }
+
 }

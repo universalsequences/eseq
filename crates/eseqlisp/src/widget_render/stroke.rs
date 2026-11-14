@@ -114,6 +114,16 @@ impl ShadedMesh {
         &self.vertices
     }
 
+    /// The finished triangles, for a widget that keeps a layer.
+    pub fn into_vertices(self) -> Vec<GpuShadedVertex> {
+        self.vertices
+    }
+
+    /// Append a layer built earlier with the same viewport metrics.
+    pub fn extend_from_vertices(&mut self, vertices: &[GpuShadedVertex]) {
+        self.vertices.extend_from_slice(vertices);
+    }
+
     /// Emit the accumulated geometry as one `ForegroundMesh` primitive. A mesh
     /// with nothing in it pushes nothing.
     pub fn push_into(self, primitives: &mut Vec<GpuPrimitive>) {

@@ -2527,6 +2527,18 @@
     }
 
     #[test]
+    #[ignore = "release-mode perf probe: a marker drag on a latent family-map (ESEQ_PROBE_LATENT_INSTRUMENT, default the local Research Latent Snare 1196 Morph) through real mouse events, the panel's own lisp callbacks and the real set-instrument-param-batch dispatch under the production multi-pane layout; ESEQ_PROBE_LATENT_ZOOM > 1 measures the zoomed 3-way blend drag"]
+    fn project_92_full_layout_latent_map_drag_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-full-layout-latent-map-drag-probe".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::LatentMapDrag))
+            .expect("spawn project 92 latent map drag probe")
+            .join()
+            .expect("project 92 latent map drag probe should pass");
+    }
+
+    #[test]
     #[ignore = "manual release-mode latency probe; ESEQ_LIVE_INPUT_PROJECT must name a saved drum-rack project"]
     fn drum_rack_keyboard_dispatch_latency() {
         project_92_ui_performance_probe_impl(Project92UiProbe::LiveKeyboardLatency);
@@ -2686,6 +2698,14 @@
         /// final values exactly once. Cold press + first drag is timed
         /// separately from warm drags, as in `InstrumentKnobColdFocusDrag`.
         TritonAdsrDrag,
+        /// A marker drag on a latent instrument's `family-map` (the Latent
+        /// Kick / Snare / Hat Morph panels): the instrument is added as a
+        /// real track like `TritonAdsrDrag`, the START ring is dragged over
+        /// the map by real mouse events, and every update runs the panel's
+        /// own `on-move` / `on-blend` lisp and the real
+        /// `set-instrument-param-batch` dispatch. The instrument is local
+        /// research content, so the probe reports and skips when it is absent.
+        LatentMapDrag,
         /// Same-instrument track switching on the checked-in `drift-switch`
         /// fixture (eseq-pgru): the reported nine-track project with two
         /// `factory:core/drift` tracks (3 and 4), two
@@ -2745,6 +2765,7 @@
                 | Project92UiProbe::PrintPlockKnobDrag
                 | Project92UiProbe::RackSlotPlockKnobDrag
                 | Project92UiProbe::TritonAdsrDrag
+                | Project92UiProbe::LatentMapDrag
                 | Project92UiProbe::DriftTrackSwitch
                 | Project92UiProbe::DriftTrackSwitchSmoke
                 | Project92UiProbe::FullLayoutPass
@@ -2839,6 +2860,7 @@
                 | Project92UiProbe::PrintPlockKnobDrag
                 | Project92UiProbe::RackSlotPlockKnobDrag
                 | Project92UiProbe::TritonAdsrDrag
+                | Project92UiProbe::LatentMapDrag
                 | Project92UiProbe::ExpandedStepSliderDrag
         ) {
             let source = std::fs::read_to_string(&project_fixture).expect("read probe fixture");
@@ -4899,6 +4921,7 @@
             Project92UiProbe::InstrumentKnobColdFocusDrag
                 | Project92UiProbe::CustomFxSectionKnobDrag
                 | Project92UiProbe::TritonAdsrDrag
+                | Project92UiProbe::LatentMapDrag
                 | Project92UiProbe::PrintPlockKnobDrag
                 | Project92UiProbe::RackSlotPlockKnobDrag
         ) {
@@ -4907,6 +4930,17 @@
             const WARM_PER_ROUND: usize = 12;
             const RACK_PLOCK_STEP: usize = 8;
             let triton_probe = probe == Project92UiProbe::TritonAdsrDrag;
+            let latent_probe = probe == Project92UiProbe::LatentMapDrag;
+            let latent_instrument = std::env::var("ESEQ_PROBE_LATENT_INSTRUMENT")
+                .unwrap_or_else(|_| "Research/Latent Snare (1196 v1) Morph".to_string());
+            let latent_zoom: f64 = std::env::var("ESEQ_PROBE_LATENT_ZOOM")
+                .ok()
+                .and_then(|zoom| zoom.parse().ok())
+                .unwrap_or(1.0);
+            if latent_probe && sequencer::lisp_host::load_instrument_source(&latent_instrument).is_err() {
+                eprintln!("[project-92-fullayout-latent-map] skipped: no instrument {latent_instrument:?}");
+                return;
+            }
             let print_probe = probe == Project92UiProbe::PrintPlockKnobDrag;
             let rack_probe = probe == Project92UiProbe::RackSlotPlockKnobDrag;
             let fx_section_probe = probe == Project92UiProbe::CustomFxSectionKnobDrag;
@@ -4916,6 +4950,8 @@
                 "project-92-fullayout-custom-fx-section-knob"
             } else if triton_probe {
                 "project-92-fullayout-triton-adsr"
+            } else if latent_probe {
+                "project-92-fullayout-latent-map"
             } else if print_probe {
                 "project-92-fullayout-print-plock"
             } else if rack_probe {
@@ -4951,10 +4987,11 @@
 
             // Triton: a real track through the production compile/load path,
             // then make it current so the *fx* tile shows its custom UI.
-            let track: usize = if triton_probe {
+            let track: usize = if triton_probe || latent_probe {
+                let name = if latent_probe { latent_instrument.as_str() } else { "core/triton" };
                 let track = app
-                    .add_saved_instrument_track_sync("core/triton")
-                    .expect("add the checked-in core/triton instrument as a track");
+                    .add_saved_instrument_track_sync(name)
+                    .expect("add the probe's custom instrument as a track");
                 current_track.store(track, Ordering::Relaxed);
                 *record_armed.lock().unwrap() = vec![false; app.tracks.len()];
                 app.sync_track_sound_bindings();
@@ -5267,8 +5304,22 @@
              -> ColdUpdate {
                 let started = Instant::now();
                 app.sync_track_sound_bindings();
+                let bindings_done = Instant::now();
                 host_kinds.sync_with(app, editor.runtime_mut(), &kinds_handles, &Default::default());
                 let tick_sync_done = Instant::now();
+                if std::env::var_os("ESEQ_PROBE_TICK_SPLIT").is_some() {
+                    let phases = super::profile::take_sync_phases()
+                        .into_iter()
+                        .filter(|(_, elapsed)| elapsed.as_micros() >= 200)
+                        .map(|(name, elapsed)| format!("{name}={:.2}", duration_ms(elapsed)))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    eprintln!(
+                        "[tick-split] sound_bindings_ms={:.3} host_kinds_ms={:.3} {phases}",
+                        duration_ms(bindings_done - started),
+                        duration_ms(tick_sync_done - bindings_done)
+                    );
+                }
                 let invalidations = ui_invalidations.drain();
                 if !invalidations.is_empty() {
                     apply_ui_invalidations(
@@ -5416,6 +5467,42 @@
             // knob, see the bead filed from this probe) legitimately runs the
             // structural fx rebuild on every write, which is not the
             // regression under test.
+            // The zoomed variant: zoom the map about its centre through the
+            // panel's own on-zoom callback, as the header's "+" does.
+            if latent_probe && latent_zoom > 1.0 {
+                let fx_buffer_idx = editor
+                    .buffers
+                    .iter()
+                    .position(|buffer| buffer.name == "*fx*")
+                    .expect("fx buffer index");
+                let fx_tile = editor
+                    .tile_root
+                    .leaf_ids()
+                    .into_iter()
+                    .find(|tile_id| {
+                        editor
+                            .tile_root
+                            .find_leaf(*tile_id)
+                            .is_some_and(|leaf| leaf.buffer_idx == fx_buffer_idx)
+                    })
+                    .expect("the production layout must show *fx*");
+                editor.switch_active_tile(fx_tile);
+                let layout = editor.widget_layout().expect("fx layout");
+                let mut nodes = Vec::new();
+                collect_layout_nodes(
+                    &layout,
+                    &mut |node| node.widget_type == "family-map" && node.props.contains_key("on-zoom"),
+                    &mut nodes,
+                );
+                let on_zoom = nodes.first().expect("a zoomable family-map").props["on-zoom"].clone();
+                editor
+                    .runtime_mut()
+                    .invoke(on_zoom, vec![Value::Number(latent_zoom), Value::Number(0.0), Value::Number(0.0)])
+                    .expect("zoom the map");
+                editor.refresh_runtime_side_effects();
+                editor.switch_active_tile(sequencer_tile);
+                let _ = finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+            }
             let rack_knob_keys: Vec<String> = sequencer::effects::EffectDescriptor::builtin_sampler()
                 .params
                 .iter()
@@ -5529,6 +5616,26 @@
                             - cur_scroll_left + fx_scroll_left,
                         cur_origin_row - fx_origin_row + node.rect.row + node.rect.height * 0.5
                             - cur_scroll_top + fx_scroll_top,
+                        node.widget_id,
+                    )
+                } else if latent_probe {
+                    let mut nodes = Vec::new();
+                    collect_layout_nodes(
+                        layout,
+                        &mut |node| {
+                            node.widget_type == "family-map" && node.props.contains_key("on-move")
+                        },
+                        &mut nodes,
+                    );
+                    let node = nodes
+                        .first()
+                        .copied()
+                        .expect("the latent panel must render a draggable family-map");
+                    // An empty-ish spot right of centre: the press moves the
+                    // selected ring there, the drags sweep it sideways.
+                    (
+                        node.rect.col + node.rect.width * 0.62,
+                        node.rect.row + node.rect.height * 0.5,
                         node.widget_id,
                     )
                 } else if triton_probe {
@@ -6549,6 +6656,8 @@
                 assert!(locked, "the seeding gesture must have written a rack slot p-lock");
             }
 
+            let mut latent_warm_phases: Vec<[f64; 6]> = Vec::new();
+            let mut latent_hits: Vec<(f64, f64, f64)> = Vec::new();
             for round in 0..ROUNDS {
                 // De-warm: the user was working in the sequencer tile.
                 editor.switch_active_tile(sequencer_tile);
@@ -6567,7 +6676,7 @@
                 } else {
                     -1.2
                 };
-                let (drag_col, drag_row) = if triton_probe {
+                let (drag_col, drag_row) = if triton_probe || latent_probe {
                     (down_col + cold_offset, down_row)
                 } else {
                     (down_col, down_row + cold_offset)
@@ -6610,6 +6719,22 @@
                     "*fx*",
                     "round {round}: pressing the control must activate the fx tile"
                 );
+                if latent_probe && commands.is_empty() {
+                    let status = editor.runtime_mut().take_status_message();
+                    let layout = editor.widget_layout().expect("fx layout");
+                    let mut nodes = Vec::new();
+                    collect_layout_nodes(
+                        &layout,
+                        &mut |node| node.widget_type == "family-map" && node.props.contains_key("on-move"),
+                        &mut nodes,
+                    );
+                    eprintln!(
+                        "[{probe_prefix}-no-drag] round={round} down_commands={} status={status:?} active={} gesture_id={gesture_widget_id} maps={:?}",
+                        down_commands.len(),
+                        editor.active_buffer().name,
+                        nodes.iter().map(|node| (node.widget_id, node.rect)).collect::<Vec<_>>(),
+                    );
+                }
                 assert!(
                     !commands.is_empty(),
                     "round {round}: the first drag must emit a host command"
@@ -6728,7 +6853,10 @@
                 // --- warm: steady-state drags of the same gesture ---------
                 for iteration in 0..WARM_PER_ROUND {
                     let offset = if iteration % 2 == 0 { -1.2 } else { 1.2 };
-                    let (drag_col, drag_row) = if triton_probe {
+                    let (drag_col, drag_row) = if latent_probe {
+                        // A sweep across the map, never the same point twice.
+                        (down_col + (iteration as f32 - 6.0) * 0.9, down_row + offset * 0.5)
+                    } else if triton_probe {
                         (down_col + offset, down_row)
                     } else {
                         (down_col, down_row + offset)
@@ -6806,6 +6934,36 @@
                         .push(duration_ms(dispatch_done - started));
                     samples.warm_host.push(duration_ms(host_done - dispatch_done));
                     samples.warm_scene.push(update.scene_ms);
+                    if latent_probe {
+                        // The ring must follow the drag through its bound
+                        // hit param, with no panel rebuild.
+                        let layout = editor.widget_layout().expect("fx layout during the drag");
+                        let mut nodes = Vec::new();
+                        collect_layout_nodes(
+                            &layout,
+                            &mut |node| node.widget_type == "family-map" && node.props.contains_key("on-move"),
+                            &mut nodes,
+                        );
+                        let map = nodes.first().copied().expect("the map during the drag");
+                        let number = |key: &str| layout_prop_number(map, key).unwrap_or(f64::NAN);
+                        // The press may land on (and so grab) either ring.
+                        latent_hits.push((
+                            number("hit-0") + 100_000.0 * number("hit-1"),
+                            number("w2-0").max(number("w2-1")),
+                            number("zoom"),
+                        ));
+                        if map.widget_id != gesture_widget_id {
+                            widget_id_changes += 1;
+                        }
+                        latent_warm_phases.push([
+                            update.tick_sync_ms,
+                            update.invalidation_ms,
+                            update.reactive_ms,
+                            update.frame_ms,
+                            update.retained_ms,
+                            update.scene_ms,
+                        ]);
+                    }
                     if update.ui_epoch_fired || update.fx_epoch_fired {
                         samples.mid_gesture_epoch_updates += 1;
                     }
@@ -6924,6 +7082,46 @@
                 samples.commit_epoch_updates,
                 samples.structural_rebuilds_mid_gesture,
             );
+            if latent_probe {
+                let names = ["tick_sync", "invalidation", "reactive", "frame", "retained", "scene"];
+                let report = names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| {
+                        let mut column: Vec<f64> = latent_warm_phases.iter().map(|row| row[i]).collect();
+                        format!("{name}_median_ms={:.3}", percentile(&mut column, 0.5))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                eprintln!("[{probe_prefix}-warm-phases] zoom={latent_zoom} {report}");
+                let mut distinct: Vec<i64> = latent_hits.iter().map(|hit| hit.0.round() as i64).collect();
+                distinct.sort_unstable();
+                distinct.dedup();
+                let blended = latent_hits.iter().filter(|hit| hit.1 > 0.001).count();
+                let shown_zoom = latent_hits.first().map_or(f64::NAN, |hit| hit.2);
+                eprintln!(
+                    "[{probe_prefix}-follow] drags={} distinct_hits={} blended_drags={blended} shown_zoom={shown_zoom}",
+                    latent_hits.len(),
+                    distinct.len()
+                );
+                // What one mid-drag scheduler republish costs on this project
+                // (`edit::publish_open_gesture_device_values`, at most 25/s).
+                let publish_started = Instant::now();
+                for _ in 0..20 {
+                    app.state.publish_scheduler_snapshot();
+                }
+                eprintln!(
+                    "[{probe_prefix}-scheduler-publish] mean_ms={:.3}",
+                    duration_ms(publish_started.elapsed()) / 20.0
+                );
+                if !baseline {
+                    assert!(distinct.len() >= 4, "the ring's bound hit must follow the drag: {distinct:?}");
+                    assert!((shown_zoom - latent_zoom).abs() < 1e-6, "the map must show the probe's zoom");
+                    if latent_zoom > 1.0 {
+                        assert!(blended > 0, "a zoomed drag must author blends");
+                    }
+                }
+            }
             {
                 let mut cold_reactive = samples.cold_reactive.clone();
                 let mut cold_frame = samples.cold_frame.clone();
@@ -6940,10 +7138,12 @@
             }
 
             // A continuous drag must not resync the world per event.
-            assert_eq!(
-                samples.mid_gesture_epoch_updates, 0,
-                "no drag update may bump ui/fx epochs mid-gesture"
-            );
+            if !(latent_probe && baseline) {
+                assert_eq!(
+                    samples.mid_gesture_epoch_updates, 0,
+                    "no drag update may bump ui/fx epochs mid-gesture"
+                );
+            }
             if triton_probe {
                 // The commit is the one place the epoch bump is the contract
                 // (rack.rs bumps both on `commit: true`).
