@@ -10,6 +10,13 @@ process, which isolates tests that touch shared global state (e.g. the shared
 and schedules the suite better. Fall back to `cargo test` only when installing
 nextest is not possible.
 
+The dev profile is lightly optimized (`[profile.dev]` in `Cargo.toml`); do not
+revert it to speed up compilation. Unoptimized, the full workspace took 46
+minutes on Apple Silicon; it is 3m41s as of 2026-11-13
+(`docs/test-suite-performance.md`). To run the app while developing, use
+`cargo run --profile fast -p sequencer --bin metal_seq`; `--release` is for
+benchmarks and shipping.
+
 Use the narrowest test target that validates the behavior changed. Do not run a
 full package or workspace test suite as a default validation or finishing step.
 

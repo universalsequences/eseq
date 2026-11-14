@@ -427,11 +427,11 @@ fn a_capture_in_flight_grows_the_rack_row() {
     h.share_buses_and_groups();
     h.app.set_arrangement_view_visible(true);
     h.app.song_transport_play(true).expect("capture starts");
-    // Anchor the record clock 4 s (8 beats at 120 BPM) in the past, so the
-    // record head has passed the starting scene's launch.
-    let now = Instant::now();
-    let anchor = now - Duration::from_secs(4);
-    h.app.state.transport.record_clock.publish(0.0, anchor);
+    // Put the record head 8 beats in, past the starting scene's launch. The
+    // beats carry the offset: the clock counts from a process-wide origin, so
+    // an anchor back-dated by 4 s saturates to zero in a process younger than
+    // that, and the head only moved while booting the harness took longer.
+    h.app.state.transport.record_clock.publish(8.0, Instant::now());
     h.settle();
     let head = quantized_pending_head(&h.app).expect("a record head");
     assert!(head > 0.0, "the record head moved: {head}");

@@ -1570,12 +1570,19 @@ pub fn refresh_preset_name_index() {
         index.building = true;
     }
     let spawned = std::thread::Builder::new().name("preset-name-index".into()).spawn(|| loop {
-        let mut names = std::collections::HashMap::new();
-        for instrument in list_saved_instruments() {
-            let key = preset_index_key(&instrument).to_string();
-            let presets = load_instrument_preset_names(&key).unwrap_or_default();
-            names.insert(key, std::sync::Arc::new(presets));
-        }
+        // One pass resolves every instrument's bank; without the snapshot
+        // each leaf-name fallback re-walks its whole root, which made this
+        // thread the largest source of filesystem syscalls at startup.
+        let names: std::collections::HashMap<_, _> = with_leaf_walk_snapshot(|| {
+            list_saved_instruments()
+                .into_iter()
+                .map(|instrument| {
+                    let key = preset_index_key(&instrument).to_string();
+                    let presets = load_instrument_preset_names(&key).unwrap_or_default();
+                    (key, std::sync::Arc::new(presets))
+                })
+                .collect()
+        });
         let mut index = preset_name_index().lock().unwrap();
         // Replace rather than merge: instruments that went away drop out.
         index.names = names;

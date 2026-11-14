@@ -85,8 +85,15 @@ Linux build automatically pulls in eseqlisp's wgpu backend):
 cargo run -p sequencer --release --bin metal_seq
 ```
 
-The first build compiles the full workspace and takes a while; subsequent runs
-are incremental.
+While developing, use the incremental optimized profile instead: after the
+first build, an edit rebuilds in seconds rather than minutes.
+
+```sh
+cargo run -p sequencer --profile fast --bin metal_seq
+```
+
+`--release` rebuilds every crate downstream of an edit from scratch; keep it
+for benchmarks and shipping.
 
 ## Realtime audio on Linux
 

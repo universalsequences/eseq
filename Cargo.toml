@@ -18,3 +18,31 @@ cpal = { path = "vendor/cpal-0.15.3" }
 debug = true
 strip = "none"
 split-debuginfo = "packed"
+
+# Tests run under the dev profile, and the suite is dominated by tests that
+# boot the real Lisp UI: unoptimized, one of those costs 6.5 s; optimized, 1.3 s.
+# Light optimization of our own crates plus full optimization of third-party
+# dependencies (compiled once) is what keeps the full suite near ten minutes.
+# debug-assertions and overflow-checks stay on (dev defaults), so
+# `cfg(debug_assertions)` coverage is unchanged. Line tables keep backtraces
+# readable; build with `--config profile.dev.debug=true` for LLDB locals.
+# Measurements: docs/test-suite-performance.md.
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+# The everyday optimized build: `cargo run --profile fast -p sequencer --bin metal_seq`.
+# Same opt-level as release, but incremental (an edit re-codegens only the
+# units it touched) and without the whole-binary dsymutil pass that
+# `split-debuginfo = "packed"` runs on every link. `release` stays the
+# shipping/benchmark configuration. Measurements: docs/test-suite-performance.md.
+[profile.fast]
+inherits = "release"
+incremental = true
+codegen-units = 256
+debug = "line-tables-only"
+split-debuginfo = "unpacked"

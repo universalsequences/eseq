@@ -1,4 +1,85 @@
-# Test suite performance baseline
+# Test suite and build performance
+
+## Current state (2026-11-13, Apple Silicon macOS, 10 cores, nextest 0.9.140)
+
+Full workspace, `cargo nextest run --workspace --no-fail-fast`, 8,040 tests in
+42 binaries (78 skipped):
+
+| Configuration | Test phase | Cold test build | `target/debug` |
+|---|---:|---:|---:|
+| before: unoptimized dev profile | 46m15s | not measured cold | 54 GB |
+| optimized dev profile | 5m50s | 6m09s | 8 GB |
+| + preset-index walk fix | **3m41s** | same | same |
+
+All three runs fail the same 20 tests (listed at the end of this section); the
+profile change moved no test between pass and fail.
+
+### What was wrong
+
+- **Unoptimized code, not test count, was the cost.** 497 `host_kinds::tests`
+  and 650 `state_values::tests` in the `metal_seq` binary each boot the real
+  Lisp UI. Unoptimized, one boot is 6.5 s alone and ~42 s with ten running at
+  once; those 497 tests were 20,970 of the run's 28,187 test-seconds. The same
+  test is 1.3 s optimized.
+- **The preset-name index walked the instrument tree once per instrument.**
+  `refresh_preset_name_index` resolved every saved instrument without a
+  leaf-walk snapshot, so each lookup re-walked its whole root. It runs on a
+  background thread at every app start and every harness boot; kernel time per
+  UI-boot test fell from 1.12 s to 0.43 s, and full-suite system time from
+  1,410 s to about 450 s.
+
+### What changed
+
+- `Cargo.toml` `[profile.dev]`: `opt-level = 1`, line-table debuginfo;
+  third-party dependencies at `opt-level = 2` with no debuginfo.
+  `debug-assertions` and `overflow-checks` keep their dev defaults.
+- `.config/nextest.toml`: tests are flagged at 30 s and killed at 2 minutes.
+- `host_kinds::tests::arrangement_view::a_capture_in_flight_grows_the_rack_row`
+  back-dated the record clock by 4 s, which saturates to zero in a process
+  younger than 4 s. It passed only while booting the harness took longer than
+  that; it now publishes the 8 beats directly.
+
+### Edit loops
+
+One-function edit, then rebuild. `fast` is the new incremental optimized
+profile (`cargo run --profile fast -p sequencer --bin metal_seq`).
+
+| Edit in | `--release` | `--profile fast` | test binaries (`--no-run`) |
+|---|---:|---:|---:|
+| `sequencer` library | 3m17s | 14 s | 17 s (lib or `metal_seq` tests), 30 s (workspace) |
+| `metal_seq` binary (`src/ui`) | 1m22s | 3.5 s | 10 s |
+| `eseqlisp` | 3m58s | 19 s | 10 s (eseqlisp tests), 44 s (workspace) |
+
+`fast` cold-builds in 3m21s. Its runtime speed against `release` has not been
+measured; it trades 16 codegen units for 256, so use `--release` for
+benchmarks and shipping.
+
+The first build of a new package selection is cold for the workspace crates
+(about two minutes): `-p eseqlisp`, `-p sequencer` and `--workspace` resolve
+different feature sets, so each keeps its own artifacts.
+
+### Where the remaining time is
+
+2,178 test-seconds in total: `metal_seq` binary 1,793 s (1,640 tests),
+`sequencer` library 245 s (3,679), `eseqlisp` 119 s (2,706). The 1,147
+UI-boot tests are 82% of it. The slowest test is
+`graph_demos_view::every_graph_demo_loads_project_owned_and_rack_owned` at
+22 s; nothing else exceeds 9 s.
+
+### Failing in this working tree (uncommitted changes present)
+
+`eseqlisp`: `lang::sdf_codegen::tests::content_shader_corpus_emits_valid_wgsl`,
+`tests::import_eseq_effects_loads_factory_ui_modules`.
+`metal_seq`: `host_kinds::tests::generator::` (2), `host_kinds::tests::graph::`
+(8), `host_kinds::tests::panels_view::editing_a_param_repaints_without_rebuilding_the_panels`,
+`host_kinds::tests::piano_roll_view::` (3), and four `state_values::tests`
+(`macro_mapping_mode_selects_device_params_and_marks_owned_controls_read_only`,
+`metal_seq_browser_default_layout_has_one_relocated_search_input`,
+`param_knob_right_click_offers_clear_plock_actions_only_for_locked_params`,
+`print_latch_and_plock_presence_reach_the_param_wrappers`). Not checked
+against clean HEAD.
+
+## Historical baseline (2026-08-20)
 
 Measured for bead `eseq-4tl` on 2026-08-20, Apple Silicon macOS, with
 `cargo-nextest 0.9.140`. Timings below are warm-build test times unless a build
