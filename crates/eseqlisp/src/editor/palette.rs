@@ -4,11 +4,13 @@
 //!
 //! The first stage opens on a flat home list: recently run commands, then
 //! the `:pinned` ones in definition order (every command when none is
-//! pinned); while typing, `:group` sections appear, matches rank by title and name, sections ordered by their best
-//! match, and anything else M-x can run follows under "Functions" (matched
-//! as a substring of its name). A command with `:choices` opens a second
-//! stage that picks its argument — the field shows the command's badge
-//! (`Theme`) and Backspace on an empty field goes back.
+//! pinned); while typing, `:group` sections appear, matches rank by title
+//! and name, sections ordered by their best match; commands matching only
+//! as a subsequence follow every direct match under "Other Matches", and
+//! anything else M-x can run closes under "Functions" (matched as a
+//! substring of its name). A command with `:choices` opens a second stage
+//! that picks its argument — the field shows the command's badge (`Theme`)
+//! and Backspace on an empty field goes back.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -31,6 +33,9 @@ const RECENT_SHOWN: usize = 5;
 const MATCH_LIMIT: usize = 200;
 /// The section uncurated M-x names list under while typing.
 const FUNCTIONS_SECTION: &str = "Functions";
+/// The section curated commands list under while typing when they match
+/// only as a subsequence, below every direct match.
+const FUZZY_SECTION: &str = "Other Matches";
 /// What a `:search :parent` leaf adds to its match score: more than any
 /// plain leaf match scores, so instruments list above their presets.
 const PARENT_LEAF_BOOST: i32 = 1100;
@@ -220,57 +225,80 @@ impl Stage {
         top.iter().chain(&recent).copied().chain(home).map(Row::Item).collect()
     }
 
-    /// Ranked matches for `input`, sectioned: ungrouped and each group
-    /// ordered by their best match, uncurated names last.
+    /// Ranked matches for `input`, in three tiers that never interleave:
+    /// direct (substring) matches sectioned by group in order of their
+    /// best match, then curated commands that only match as a subsequence
+    /// under their own header, then uncurated names.
     fn search_rows(&self) -> Vec<Row> {
+        /// Worst first, so the derived order ranks `Direct` highest.
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        enum Tier {
+            Function,
+            Fuzzy,
+            Direct,
+        }
         let query = self.input.to_lowercase();
-        let mut scored: Vec<(i32, usize)> = self
+        let mut scored: Vec<(Tier, i32, usize)> = self
             .entries
             .iter()
             .enumerate()
             .filter_map(|(idx, entry)| {
-                let score = if entry.curated {
-                    let by_label = match_score(&entry.label_lower, &query);
-                    let by_name = match_score(&entry.name_lower, &query).map(|score| score - 50);
-                    by_label.max(by_name).map(|score| score + 2000)
+                let ranked = if entry.curated {
+                    let by_label = substring_score(&entry.label_lower, &query);
+                    let by_name = substring_score(&entry.name_lower, &query).map(|score| score - 50);
+                    match by_label.max(by_name) {
+                        Some(score) => Some((Tier::Direct, score + 2000)),
+                        None => subsequence_score(&entry.label_lower, &query)
+                            .max(subsequence_score(&entry.name_lower, &query))
+                            .map(|score| (Tier::Fuzzy, score)),
+                    }
                 } else if entry.args.is_some() {
                     // A searchable choice: by its label, as a substring; one
                     // standing for its parent pick (an instrument) above
                     // every deeper choice (its presets).
                     let boost = if entry.stands_for_parent { PARENT_LEAF_BOOST } else { 0 };
-                    substring_score(&entry.label_lower, &query).map(|score| score + boost)
+                    substring_score(&entry.label_lower, &query).map(|score| (Tier::Direct, score + boost))
                 } else {
                     // A subsequence over thousands of names is mostly
                     // noise: uncurated names match as substrings only.
-                    substring_score(&entry.name_lower, &query)
+                    substring_score(&entry.name_lower, &query).map(|score| (Tier::Function, score))
                 };
-                score.map(|score| (score, idx))
+                ranked.map(|(tier, score)| (tier, score, idx))
             })
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
         scored.truncate(MATCH_LIMIT);
 
-        // Sections in order of their best match (`scored` is best first).
-        let section = |idx: usize| -> Option<&str> {
-            let entry = &self.entries[idx];
-            if entry.curated || entry.args.is_some() { entry.group.as_deref() } else { Some(FUNCTIONS_SECTION) }
-        };
-        let mut sections: Vec<Option<&str>> = Vec::new();
-        for (_, idx) in &scored {
-            let key = section(*idx);
-            if !sections.contains(&key) {
-                sections.push(key);
+        // Each row's section, best row first. Direct matches keep their
+        // groups; the subsequence tier is one flat section, since split by
+        // group it would repeat the headers above it. The tier is part of
+        // the key so a group sharing a tier's header name stays apart.
+        let keyed: Vec<((Tier, Option<&str>), usize)> = scored
+            .iter()
+            .map(|&(tier, _, idx)| {
+                let header = match tier {
+                    Tier::Direct => self.entries[idx].group.as_deref(),
+                    Tier::Fuzzy => Some(FUZZY_SECTION),
+                    Tier::Function => Some(FUNCTIONS_SECTION),
+                };
+                ((tier, header), idx)
+            })
+            .collect();
+        let mut sections: Vec<(Tier, Option<&str>)> = Vec::new();
+        for (key, _) in &keyed {
+            if !sections.contains(key) {
+                sections.push(*key);
             }
         }
-        // Ungrouped commands lead (they have no header, so after another
-        // section they would read as its members); uncurated names close.
-        sections.sort_by_key(|key| (key.is_some(), *key == Some(FUNCTIONS_SECTION)));
-        let mut rows = Vec::with_capacity(scored.len() + sections.len());
-        for key in sections {
-            if let Some(name) = key {
+        // Within the direct tier, ungrouped commands lead (they have no
+        // header, so after another section they would read as its members).
+        sections.sort_by_key(|(tier, header)| (std::cmp::Reverse(*tier), header.is_some()));
+        let mut rows = Vec::with_capacity(keyed.len() + sections.len());
+        for section in sections {
+            if let Some(name) = section.1 {
                 rows.push(Row::Header(name.to_string()));
             }
-            rows.extend(scored.iter().filter(|(_, idx)| section(*idx) == key).map(|(_, idx)| Row::Item(*idx)));
+            rows.extend(keyed.iter().filter(|(key, _)| *key == section).map(|(_, idx)| Row::Item(*idx)));
         }
         rows
     }
@@ -474,13 +502,10 @@ fn substring_score(text: &str, query: &str) -> Option<i32> {
     Some(score + shortness)
 }
 
-/// [`substring_score`], falling back to an in-order subsequence that
-/// rewards characters starting a word ("ct" → "change theme"). `None` when
-/// the query's characters don't all appear in order.
-fn match_score(text: &str, query: &str) -> Option<i32> {
-    if let Some(score) = substring_score(text, query) {
-        return Some(score);
-    }
+/// How well `query` matches `text` as an in-order subsequence, rewarding
+/// characters starting a word ("ct" → "change theme"). `None` when the
+/// query's characters don't all appear in order.
+fn subsequence_score(text: &str, query: &str) -> Option<i32> {
     let mut chars = text.chars();
     let mut score = 0;
     let mut prev: Option<char> = None;
@@ -1404,14 +1429,18 @@ mod tests {
     }
 
     #[test]
-    fn prefix_beats_word_start_beats_substring_beats_subsequence() {
-        let prefix = match_score("change theme", "chan").unwrap();
-        let word = match_score("change theme", "them").unwrap();
-        let substring = match_score("change theme", "hang").unwrap();
-        let subsequence = match_score("change theme", "ct").unwrap();
-        assert!(prefix > word && word > substring && substring > subsequence);
-        assert!(match_score("change theme", "tc").is_none());
+    fn prefix_beats_word_start_beats_substring() {
+        let prefix = substring_score("change theme", "chan").unwrap();
+        let word = substring_score("change theme", "them").unwrap();
+        let substring = substring_score("change theme", "hang").unwrap();
+        assert!(prefix > word && word > substring);
         assert!(substring_score("change theme", "ct").is_none());
+    }
+
+    #[test]
+    fn a_subsequence_matches_in_order_only() {
+        assert!(subsequence_score("change theme", "ct").is_some());
+        assert!(subsequence_score("change theme", "tc").is_none());
     }
 
     #[test]
@@ -1482,6 +1511,17 @@ mod tests {
         editor.run_command(COMMAND_PALETTE);
         type_text(&mut editor, "ran");
         assert!(!labels(&editor).iter().any(|row| row == "ran"), "plain variables are not commands");
+    }
+
+    #[test]
+    fn direct_matches_list_above_every_subsequence_match() {
+        let mut editor = palette_editor();
+        editor.run_command(COMMAND_PALETTE);
+        // "Change Theme" is ungrouped and matches only as a subsequence
+        // (chaNge thEme); "New Track" is grouped and a direct match.
+        type_text(&mut editor, "ne");
+        assert_eq!(rows(&editor)[..4], ["# Tracks", "New Track", "# Other Matches", "Change Theme"]);
+        assert_eq!(editor.palette_frame().unwrap().selected, Some(1));
     }
 
     #[test]
