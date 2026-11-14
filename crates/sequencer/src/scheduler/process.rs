@@ -130,6 +130,7 @@ pub(super) fn resolved_step_param(resolved: &ResolvedStep, param: StepParam) -> 
         StepParam::Chop => resolved.chop,
         StepParam::Retrig => resolved.retrig,
         StepParam::RetrigRate => resolved.retrig_rate,
+        StepParam::Variant => resolved.variant,
         StepParam::Sync => 0.0,
         StepParam::Delay => 0.0,
     }
@@ -148,6 +149,7 @@ pub(super) fn set_resolved_step_param(resolved: &mut ResolvedStep, param: StepPa
         StepParam::Chop => resolved.chop = value,
         StepParam::Retrig => resolved.retrig = value,
         StepParam::RetrigRate => resolved.retrig_rate = value,
+        StepParam::Variant => resolved.variant = value.round(),
         StepParam::Sync | StepParam::Delay => unreachable!("unsupported process step param"),
     }
 }
@@ -2598,6 +2600,7 @@ mod retrig_process_param_tests {
             chop: 1.0,
             retrig: StepParam::Retrig.default_value(),
             retrig_rate: StepParam::RetrigRate.default_value(),
+            variant: 0.0,
         }
     }
 

@@ -194,6 +194,7 @@ fn kit(pads: Vec<ProjectSoundPreset>) -> ProjectKitPreset {
             name: format!("pad{i}"),
             sound: Some(sound),
             modulator: None,
+            variants: Vec::new(),
         })
         .collect();
     kit

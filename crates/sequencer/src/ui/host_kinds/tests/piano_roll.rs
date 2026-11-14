@@ -733,6 +733,7 @@ fn note_handles_follow_legacy_moves_step_moves_and_recording() {
         velocity: 1.0,
         duration_steps: 1.0,
         beat: 0.0,
+        variant: None,
     };
     crate::roll_record::write_rolled_hit_to_pattern(&h.shared.state, &hit);
     h.shared.state.publish_scheduler_track(0);

@@ -142,7 +142,7 @@ impl AuditionPlayer {
                     speed: param(StepParam::Speed), aux_a: param(StepParam::AuxA),
                     aux_b: param(StepParam::AuxB), transpose: param(StepParam::Transpose),
                     pan: param(StepParam::Pan), chop: param(StepParam::Chop),
-                    retrig: param(StepParam::Retrig), retrig_rate: param(StepParam::RetrigRate),
+                    retrig: param(StepParam::Retrig), retrig_rate: param(StepParam::RetrigRate), variant: param(StepParam::Variant),
                 };
                 let chord = chord_data_from_parts(&data.chord, &data.chord_durations,
                     &data.chord_delays, resolved.duration, resolved.transpose);

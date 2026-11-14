@@ -886,6 +886,7 @@
                   (ep/instrument-synth-button)
                   (ep/instrument-mods-toggle-button)
                   (ep/instrument-keys-button)
+                  (ep/instrument-pads-button)
                   ;(ep/instrument-sound-binding-badge inst)
                   )
                 (box :flex 1 :height 0.15)

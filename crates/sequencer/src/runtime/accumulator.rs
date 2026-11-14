@@ -37,6 +37,8 @@ pub struct ResolvedStep {
     pub retrig: f32,
     /// Retrigs per beat.
     pub retrig_rate: f32,
+    /// Drum-rack pad variant id (`StepParam::Variant`); 0 = plain pad.
+    pub variant: f32,
 }
 
 impl ResolvedStep {
@@ -52,6 +54,7 @@ impl ResolvedStep {
             chop: sd.get(step, StepParam::Chop),
             retrig: sd.get(step, StepParam::Retrig),
             retrig_rate: sd.get(step, StepParam::RetrigRate),
+            variant: sd.get(step, StepParam::Variant),
         }
     }
 }

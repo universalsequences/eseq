@@ -510,6 +510,7 @@ pub(super) fn send_keyboard_note_off(
         transpose,
         velocity: 0.0,
         note_off: true,
+        variant: 0,
     }));
 }
 

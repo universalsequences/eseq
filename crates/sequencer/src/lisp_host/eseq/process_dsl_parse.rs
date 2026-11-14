@@ -281,6 +281,7 @@ pub(in crate::lisp_host) fn process_ratchet_event_from_value(
             chop: process_ratchet_event_number(map, "chop")?,
             retrig: process_ratchet_event_number(map, "retrig")?,
             retrig_rate: process_ratchet_event_number(map, "retrig-rate")?,
+            variant: 0.0,
         },
     })
 }

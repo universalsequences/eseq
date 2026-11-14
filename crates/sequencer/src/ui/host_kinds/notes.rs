@@ -371,6 +371,13 @@ pub(super) fn sync_notes<S: KindStore>(
             };
             let item = piano_roll_item_id(key.step, *voice);
             let selected = selection.contains(&item);
+            // Its step's drum-rack pad variant (rack pad variants spec §6.3).
+            let pad_variant = (steps.get(key.step))
+                .map_or(0, |(_, values)| {
+                    sequencer::sequencer::pad_variants::variant_id(
+                        values[StepParam::Variant.index()],
+                    )
+                });
             let fields = [
                 (f::NOTE_PITCH, number(note.transpose.round())),
                 (f::NOTE_START, number(key.step as f32 + note.delay)),
@@ -380,6 +387,7 @@ pub(super) fn sync_notes<S: KindStore>(
                 (f::NOTE_LABEL, Value::String(piano_roll_note_label(note))),
                 (f::NOTE_HIDDEN, Value::Bool(false)),
                 (f::NOTE_ITEM, number(item as f64)),
+                (f::NOTE_PAD_VARIANT, number(pad_variant as f64)),
             ];
             for (field, value) in fields {
                 changed |= put(store, shared, id, field, value);

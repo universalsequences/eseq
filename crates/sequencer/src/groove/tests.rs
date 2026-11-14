@@ -1862,9 +1862,8 @@ fn cross_kit_rows_follow_roles_not_notes() {
     use crate::project::{ProjectRackConfig, ProjectRackPad};
     let (_, groove) = standard_kit_groove();
     let tagged = |pad_note: i32, member: usize, role: PadRole| ProjectRackPad {
-        pad_note,
-        member,
         role: Some(role),
+        ..ProjectRackPad::new(pad_note, member)
     };
     let other_kit = ProjectRackConfig {
         pads: vec![

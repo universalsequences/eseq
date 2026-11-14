@@ -101,6 +101,12 @@ pub(super) fn fire_resolved(
     // path (block events and countdown events alike) lands here.
     let choke_release_sample = data.rendered_samples.load(Ordering::Acquire) + frame_offset as u64;
     release_rack_choke_group_track_voices(data, track_idx, choke_release_sample, frame_offset);
+    if let Some(slot) = data.state.transport.trigger_variant.get(track_idx) {
+        slot.store(
+            crate::sequencer::pad_variants::variant_id(resolved.variant),
+            Ordering::Relaxed,
+        );
+    }
     let tp = &data.state.pattern.track_params[track_idx];
     let instrument_type = InstrumentType::from_runtime_flag(
         data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
@@ -142,6 +148,15 @@ pub(super) fn fire_resolved(
     }
     let is_custom = instrument_type == InstrumentType::Custom;
     let is_modulator = instrument_type == InstrumentType::Modulator;
+    // The step's pad variant (docs/rack-pad-variants-spec.md §4.1), layered
+    // after each voice's key locks below. The snapshot handle is a refcount
+    // bump; it outlives this call through `data.scheduler_snapshot`.
+    let pad_snapshot = Arc::clone(&data.scheduler_snapshot);
+    let pad_variant = pad_snapshot
+        .pad_variants
+        .get(track_idx, crate::sequencer::pad_variants::variant_id(resolved.variant))
+        .map(|overlay| overlay.instrument.as_slice())
+        .filter(|values| !values.is_empty());
     let sampler_lid = data.state.runtime.sampler_lids[track_idx].load(Ordering::Acquire);
     if !is_custom && !is_modulator && sampler_lid == 0 {
         return;
@@ -336,7 +351,7 @@ pub(super) fn fire_resolved(
                     data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
                 }
                 let pitch_hz = custom_pitch_hz(transpose, base_note_offset);
-                let key_locked_params = key_locked_live_instrument_params(
+                let mut key_locked_params = key_locked_live_instrument_params(
                     &data.state,
                     track_idx,
                     transpose,
@@ -344,6 +359,15 @@ pub(super) fn fire_resolved(
                     key_lock_plock_step,
                     &instrument_params,
                 );
+                if let Some(variant) = pad_variant {
+                    apply_live_pad_variant(
+                        &data.state,
+                        track_idx,
+                        variant,
+                        key_lock_plock_step,
+                        &mut key_locked_params,
+                    );
+                }
                 let note_fingerprint = instrument_param_bundle_fingerprint(
                     engine_id,
                     base_note_offset,
@@ -583,7 +607,7 @@ pub(super) fn fire_resolved(
                 data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
             }
             let pitch_hz = custom_pitch_hz(transpose, base_note_offset);
-            let key_locked_params = key_locked_live_instrument_params(
+            let mut key_locked_params = key_locked_live_instrument_params(
                 &data.state,
                 track_idx,
                 transpose,
@@ -591,6 +615,15 @@ pub(super) fn fire_resolved(
                 key_lock_plock_step,
                 &instrument_params,
             );
+            if let Some(variant) = pad_variant {
+                apply_live_pad_variant(
+                    &data.state,
+                    track_idx,
+                    variant,
+                    key_lock_plock_step,
+                    &mut key_locked_params,
+                );
+            }
             let note_fingerprint = instrument_param_bundle_fingerprint(
                 engine_id,
                 base_note_offset,

@@ -118,6 +118,17 @@ fn apply_note_edits(
             steps.insert(step, lanes.note_entries(step));
         }
     };
+    // Each edit's source step's pad variant, read before anything moves: a
+    // note moved to another step carries it (rack pad variants spec §5).
+    let from_variants: Vec<f32> = (edits.iter())
+        .map(|edit| {
+            edit.from
+                .map_or(0.0, |(key, _, _)| lanes.step_param(key.step, StepParam::Variant))
+        })
+        .collect();
+    let lifted_from: Vec<usize> = (edits.iter())
+        .filter_map(|edit| edit.from.map(|(key, _, _)| key.step))
+        .collect();
     for (key, _, _) in edits.iter().filter_map(|edit| edit.from) {
         notes_at(&mut steps, key.step);
         let notes = steps.get_mut(&key.step).expect("just read");
@@ -125,7 +136,8 @@ fn apply_note_edits(
     }
     let mut placed = Vec::with_capacity(edits.len());
     let mut velocities = Vec::new();
-    for edit in edits {
+    let mut variants = Vec::new();
+    for (edit, from_variant) in edits.iter().zip(&from_variants) {
         let Some((step, note)) = edit.to else {
             placed.push(None);
             continue;
@@ -145,13 +157,24 @@ fn apply_note_edits(
         if let Some(velocity) = edit.velocity.or(carried.flatten()) {
             velocities.push((step, velocity));
         }
+        if moved_away && *from_variant >= 0.5 {
+            variants.push((step, *from_variant));
+        }
         placed.push(Some(key));
     }
     for (step, notes) in &steps {
         lanes.set_note_entries(*step, notes);
+        // A source step left empty forgets its pad, so a note drawn there
+        // later starts plain.
+        if notes.is_empty() && lifted_from.contains(step) {
+            lanes.set_step_param(*step, StepParam::Variant, 0.0);
+        }
     }
     for (step, velocity) in velocities {
         lanes.set_step_param(step, StepParam::Velocity, velocity);
+    }
+    for (step, variant) in variants {
+        lanes.set_step_param(step, StepParam::Variant, variant);
     }
     Ok(placed)
 }

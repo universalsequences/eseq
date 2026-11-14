@@ -84,7 +84,9 @@ fn tempo_fit(onsets: &[f64], bpm: f64) -> f64 {
 pub fn detect_capture_loop(notes: &[CapturedNote]) -> Option<CaptureGuess> {
     let mut hits: Vec<(f64, (TrackId, i32))> = notes.iter()
         .filter(|note| note.start.is_finite())
-        .map(|note| (note.start, (note.track, (note.transpose * 100.0).round() as i32)))
+        // A pad variant is a different hit from its member's plain pad.
+        .map(|note| (note.start, (note.track, (note.transpose * 100.0).round() as i32
+            + note.variant.unwrap_or(0) as i32 * 100_000)))
         .collect();
     hits.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut all: Vec<f64> = Vec::new();
@@ -169,6 +171,8 @@ struct LiveNote {
     generation: u64,
     track: TrackId,
     transpose: f32,
+    /// The drum-rack pad variant a pad hit played (`None`: a chromatic note).
+    variant: Option<u32>,
     velocity: f32,
     start: Instant,
     end: Option<Instant>,
@@ -178,6 +182,9 @@ struct LiveNote {
 pub struct CapturedNote {
     pub track: TrackId,
     pub transpose: f32,
+    /// The pad variant a pad hit played (docs/rack-pad-variants-spec.md);
+    /// imported into the step's `StepParam::Variant`. `None`: chromatic.
+    pub variant: Option<u32>,
     pub velocity: f32,
     pub start: f64,
     pub end: f64,
@@ -223,8 +230,8 @@ impl RetrospectiveCapture {
     }
 
     pub fn note_on(
-        &mut self, generation: u64, track: TrackId, transpose: f32, velocity: f32,
-        now: Instant,
+        &mut self, generation: u64, track: TrackId, transpose: f32, variant: Option<u32>,
+        velocity: f32, now: Instant,
     ) {
         if !transpose.is_finite() || !velocity.is_finite() || velocity <= 0.0 {
             return;
@@ -234,7 +241,8 @@ impl RetrospectiveCapture {
             self.last_eviction = self.notes.pop_front().map(|note| note.start);
         }
         self.notes.push_back(LiveNote {
-            generation, track, transpose, velocity: velocity.min(1.0), start: now, end: None,
+            generation, track, transpose, variant, velocity: velocity.min(1.0), start: now,
+            end: None,
         });
     }
 
@@ -248,9 +256,12 @@ impl RetrospectiveCapture {
     }
 
     /// On-screen pads are fixed-duration trigs, rather than held notes.
-    pub fn trig(&mut self, track: TrackId, transpose: f32, now: Instant, duration: Duration) {
+    pub fn trig(
+        &mut self, track: TrackId, transpose: f32, variant: Option<u32>, now: Instant,
+        duration: Duration,
+    ) {
         if !transpose.is_finite() { return; }
-        self.note_on(0, track, transpose, 1.0, now);
+        self.note_on(0, track, transpose, variant, 1.0, now);
         if let Some(note) = self.notes.back_mut() {
             note.end = Some(now + duration);
         }
@@ -265,6 +276,7 @@ impl RetrospectiveCapture {
             CapturedNote {
                 track: note.track,
                 transpose: note.transpose,
+                variant: note.variant,
                 velocity: note.velocity,
                 start: note.start.saturating_duration_since(start).as_secs_f64(),
                 end: note.end.unwrap_or(now).min(now).saturating_duration_since(start).as_secs_f64(),
@@ -283,6 +295,7 @@ impl RetrospectiveCapture {
 /// A captured gesture expressed in the destination pattern's step units.
 struct ImportedNote {
     transpose: f32,
+    variant: Option<u32>,
     duration: f32,
     delay: f32,
     velocity: f32,
@@ -365,8 +378,15 @@ impl App {
             if notes.first().is_some_and(|first| first.velocity != note.velocity) {
                 return Err(format!("Track {} has different velocities within one step. Choose more bars to separate those hits", track + 1));
             }
+            // One pad variant per step, likewise (rack pad variants spec §5).
+            if notes.first().is_some_and(|first| {
+                first.variant.unwrap_or(0) != note.variant.unwrap_or(0)
+            }) {
+                return Err(format!("Track {} has different pad variants within one step. Choose more bars to separate those hits", track + 1));
+            }
             notes.push(ImportedNote {
-                transpose: note.transpose, duration, delay, velocity: note.velocity,
+                transpose: note.transpose, variant: note.variant, duration, delay,
+                velocity: note.velocity,
             });
         } }
         if lanes.is_empty() { return Err("The crop contains no trigs".into()); }
@@ -385,6 +405,8 @@ impl App {
                 data.step_data[step][StepParam::Transpose.index()] = notes[0].transpose;
                 data.step_data[step][StepParam::Duration.index()] = notes[0].duration;
                 data.step_data[step][StepParam::Velocity.index()] = notes[0].velocity;
+                data.step_data[step][StepParam::Variant.index()] =
+                    notes[0].variant.unwrap_or(0) as f32;
                 for note in notes {
                     data.chord_snapshot
                         .push_note(step, note.transpose, note.duration, note.delay);
@@ -490,10 +512,10 @@ mod tests {
         app.retrospective.draft = Some(CaptureDraft {
             duration: 4.0, truncated: false, scene: app.state.current_scene_id().unwrap(),
             notes: vec![
-                CapturedNote { track: TrackId(1), transpose: 0.0, velocity: 0.8, start: 1.0, end: 1.1 },
-                CapturedNote { track: TrackId(1), transpose: 0.0, velocity: 0.8, start: 1.07, end: 1.18 },
-                CapturedNote { track: TrackId(2), transpose: 7.0, velocity: 0.5, start: 2.123, end: 3.5 },
-                CapturedNote { track: TrackId(1), transpose: 12.0, velocity: 0.8, start: 3.0, end: 3.2 },
+                CapturedNote { track: TrackId(1), transpose: 0.0, variant: None, velocity: 0.8, start: 1.0, end: 1.1 },
+                CapturedNote { track: TrackId(1), transpose: 0.0, variant: None, velocity: 0.8, start: 1.07, end: 1.18 },
+                CapturedNote { track: TrackId(2), transpose: 7.0, variant: None, velocity: 0.5, start: 2.123, end: 3.5 },
+                CapturedNote { track: TrackId(1), transpose: 12.0, variant: None, velocity: 0.8, start: 3.0, end: 3.2 },
             ],
         });
     }
@@ -515,7 +537,7 @@ mod tests {
                 wobble = wobble.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 let jitter = ((wobble >> 16) as f64 / 65_536.0 - 0.5) * slop;
                 let time = start + ((repeat * pattern_bars * 16 + step) as f64) * sixteenth + jitter;
-                notes.push(CapturedNote { track: TrackId(track), transpose: 0.0, velocity: 1.0, start: time, end: time + 0.05 });
+                notes.push(CapturedNote { track: TrackId(track), transpose: 0.0, variant: None, velocity: 1.0, start: time, end: time + 0.05 });
             }
         }
         notes.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -529,7 +551,7 @@ mod tests {
 
     #[test]
     fn capture_loop_detection_skips_a_stray_hit_and_finds_the_groove_tempo() {
-        let mut notes = vec![CapturedNote { track: TrackId(1), transpose: 0.0, velocity: 1.0, start: 1.2, end: 1.25 }];
+        let mut notes = vec![CapturedNote { track: TrackId(1), transpose: 0.0, variant: None, velocity: 1.0, start: 1.2, end: 1.25 }];
         notes.extend(groove(9.263, 113.0, BOOM_BAP, 1, 4));
         let guess = detect_capture_loop(&notes).unwrap();
         assert!((guess.start - 9.263).abs() < 0.015, "{guess:?}");
@@ -557,7 +579,7 @@ mod tests {
             (3, &[18.21, 19.78, 21.44, 23.04, 24.54]),
         ];
         let notes: Vec<_> = lanes.iter().flat_map(|(track, times)| times.iter().map(|&start|
-            CapturedNote { track: TrackId(*track), transpose: 0.0, velocity: 1.0, start, end: start + 0.1 }))
+            CapturedNote { track: TrackId(*track), transpose: 0.0, variant: None, velocity: 1.0, start, end: start + 0.1 }))
             .collect();
         let guess = detect_capture_loop(&notes).unwrap();
         assert!((70..=90).contains(&guess.bpm), "{guess:?}");
@@ -589,7 +611,7 @@ mod tests {
         let notes: Vec<_> = (0..24).map(|i| {
             wobble = wobble.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             time += 0.15 + (wobble >> 16) as f64 / 65_536.0 * 0.6;
-            CapturedNote { track: TrackId(1 + i % 3), transpose: 0.0, velocity: 1.0, start: time, end: time + 0.1 }
+            CapturedNote { track: TrackId(1 + i % 3), transpose: 0.0, variant: None, velocity: 1.0, start: time, end: time + 0.1 }
         }).collect();
         assert_eq!(detect_capture_loop(&notes), None);
         assert_eq!(detect_capture_loop(&notes[..3]), None);
@@ -647,9 +669,9 @@ mod tests {
     fn retrospective_window_freezes_held_notes_and_expires_old_trigs() {
         let origin = Instant::now();
         let mut capture = RetrospectiveCapture::new(origin);
-        capture.note_on(1, TrackId(1), 0.0, 0.7, origin);
+        capture.note_on(1, TrackId(1), 0.0, None, 0.7, origin);
         capture.note_off(1, origin + Duration::from_secs(1));
-        capture.note_on(2, TrackId(2), 7.0, 0.4, origin + Duration::from_secs(29));
+        capture.note_on(2, TrackId(2), 7.0, None, 0.4, origin + Duration::from_secs(29));
         let snapshot = capture.snapshot(origin + Duration::from_secs(31), SceneId(1)).clone();
         assert_eq!(snapshot.duration, 30.0);
         assert_eq!(snapshot.notes.len(), 1);
@@ -664,7 +686,7 @@ mod tests {
         let now = Instant::now();
         let mut capture = RetrospectiveCapture::new(now);
         for generation in 0..MAX_CAPTURE_NOTES + 7 {
-            capture.note_on(generation as u64, TrackId(1), 0.0, 1.0, now);
+            capture.note_on(generation as u64, TrackId(1), 0.0, None, 1.0, now);
         }
         assert_eq!(capture.notes.len(), MAX_CAPTURE_NOTES);
         assert_eq!(capture.notes.capacity(), MAX_CAPTURE_NOTES);
@@ -676,11 +698,11 @@ mod tests {
     fn retrospective_release_matches_all_targets_and_fixed_trigs() {
         let now = Instant::now();
         let mut capture = RetrospectiveCapture::new(now);
-        capture.note_on(1, TrackId(1), 0.0, 0.7, now);
-        capture.note_on(1, TrackId(2), 7.0, 0.7, now);
-        capture.note_on(2, TrackId(1), 12.0, 0.8, now);
+        capture.note_on(1, TrackId(1), 0.0, None, 0.7, now);
+        capture.note_on(1, TrackId(2), 7.0, None, 0.7, now);
+        capture.note_on(2, TrackId(1), 12.0, None, 0.8, now);
         capture.note_off(1, now + Duration::from_millis(125));
-        capture.trig(TrackId(2), 0.0, now, Duration::from_millis(50));
+        capture.trig(TrackId(2), 0.0, None, now, Duration::from_millis(50));
         let notes = &capture.snapshot(now + Duration::from_millis(500), SceneId(1)).notes;
         assert_eq!(notes.iter().map(|n| n.end).collect::<Vec<_>>(), vec![0.125, 0.125, 0.5, 0.05]);
     }
@@ -743,6 +765,34 @@ mod tests {
         assert!(!app.state.pattern.patterns[0].is_active(bars * 16 - 1));
     }
 
+    /// Pad hits keep the variant their pad played (rack pad variants spec §5):
+    /// the import writes it into the step; a chromatic note writes none; two
+    /// variants on one step are refused like two velocities.
+    #[test]
+    fn retrospective_import_writes_pad_variants_into_their_steps() {
+        let sixteenth = 15.0 / 120.0;
+        let note = |step: f64, variant: Option<u32>| CapturedNote {
+            track: TrackId(1), transpose: 0.0, velocity: 1.0,
+            start: 1.0 + step * sixteenth, end: 1.0 + step * sixteenth + 0.05, variant,
+        };
+        let notes = vec![note(0.0, Some(0)), note(4.0, Some(2)), note(8.0, None), note(12.0, Some(1))];
+        let mut app = app();
+        app.retrospective.draft = Some(CaptureDraft {
+            duration: 4.0, truncated: false, scene: app.state.current_scene_id().unwrap(), notes,
+        });
+        app.import_retrospective(1.0, 3.0, 1).unwrap();
+        let variant = |step| app.state.pattern.step_data[0].get(step, StepParam::Variant);
+        assert_eq!((variant(0), variant(4), variant(8), variant(12)), (0.0, 2.0, 0.0, 1.0));
+
+        let clash = vec![note(0.0, Some(1)), note(0.1, Some(2))];
+        let mut other = super::tests::app();
+        other.retrospective.draft = Some(CaptureDraft {
+            duration: 4.0, truncated: false, scene: other.state.current_scene_id().unwrap(), notes: clash,
+        });
+        let error = other.import_retrospective(1.0, 3.0, 1).unwrap_err();
+        assert!(error.contains("pad variants"), "{error}");
+    }
+
     /// A flam just before the crop start must not move onto a step one that
     /// already has its own hit: that would double the downbeat, or fail the
     /// import on the mismatched velocity.
@@ -750,7 +800,7 @@ mod tests {
     fn retrospective_import_leaves_a_pre_start_flam_off_an_occupied_step_one() {
         let sixteenth = 15.0 / 120.0;
         let note = |start: f64, velocity: f32| CapturedNote {
-            track: TrackId(1), transpose: 0.0, velocity, start, end: start + 0.05,
+            track: TrackId(1), transpose: 0.0, velocity, start, end: start + 0.05, variant: None,
         };
         let notes = vec![note(1.0 - 0.2 * sixteenth, 0.4), note(1.0, 1.0), note(1.0 + 8.0 * sixteenth, 1.0)];
         let mut app = app();
@@ -769,7 +819,7 @@ mod tests {
     fn retrospective_import_keeps_every_note_of_an_early_downbeat_chord() {
         let sixteenth = 15.0 / 120.0;
         let note = |start: f64, transpose: f32| CapturedNote {
-            track: TrackId(1), transpose, velocity: 1.0, start, end: start + 0.05,
+            track: TrackId(1), transpose, velocity: 1.0, start, end: start + 0.05, variant: None,
         };
         let early = 1.0 - 0.2 * sixteenth;
         let notes = vec![

@@ -602,9 +602,20 @@
 
 (def row-dest (row) (if (= (get row :route) chords-route) 'chords (get row :route)))
 
+;; A row routed to a drum-rack pad variant (docs/rack-pad-variants-spec.md
+;; §7): every hit names the variant, ahead of the row's own words so a row's
+;; own (plock "step-param:variant" …) still wins.
+(def row-variant (row)
+  (let ((v (get row :variant)))
+    (if (and (number? v) (> v 0) (not (= (get row :route) chords-route))) v 0)))
+
+(def variant-words (row)
+  (let ((v (row-variant row)))
+    (if (> v 0) (list (list 'plock "step-param:variant" v)) (list))))
+
 (def row-segment (row)
   (cons '-> (cons (row-dest row)
-                  (append (map mod-form (get row :mods)) (row-tail row)))))
+                  (append (variant-words row) (map mod-form (get row :mods)) (row-tail row)))))
 
 ;; a row word with its lane references as lane numbers
 (def lane-form (rows count m)
@@ -625,7 +636,8 @@
 ;; still be the lane others are like.
 (def linked-segment (rows count row)
   (cons '-> (cons (if (row-live? row) (row-dest row) 'off)
-                  (append (map (lambda (m) (lane-form rows count m)) (get row :mods))
+                  (append (variant-words row)
+                          (map (lambda (m) (lane-form rows count m)) (get row :mods))
                           (row-tail row)))))
 
 ;; ── document -> body ────────────────────────────────────────────────────────

@@ -1419,6 +1419,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 chop: step_snapshot.params[StepParam::Chop.index()],
                 retrig: step_snapshot.params[StepParam::Retrig.index()],
                 retrig_rate: step_snapshot.params[StepParam::RetrigRate.index()],
+                variant: step_snapshot.params[StepParam::Variant.index()],
             };
             let bar_transpose =
                 track.bar_transposes[crate::sequencer::bar_of_step(trigger.step)];

@@ -71,7 +71,7 @@ fn rack_retrig_schedules_every_layer_and_chord_voice_with_resolved_gates() {
     let rack = RackTrackSnapshot::new(vec![custom, sampler], default_rack_macros());
     let resolved = crate::accumulator::ResolvedStep {
         duration: 1.0, velocity: 0.7, speed: 1.5, aux_a: 0.0, aux_b: 0.0,
-        transpose: 5.0, pan: 0.0, chop: 8.0, retrig: 3.0, retrig_rate: 8.0,
+        transpose: 5.0, pan: 0.0, chop: 8.0, retrig: 3.0, retrig_rate: 8.0, variant: 0.0,
     };
     let mut chord = crate::scheduled_event::ScheduledChordData {
         live_origins: [None; MAX_VOICES], count: 2, notes: [0.0; MAX_VOICES],
@@ -246,7 +246,7 @@ fn fit_to_scale_never_quantizes_rack_slot_base_note_offsets() {
         let snapshot = data.state.publish_scheduler_snapshot();
         let resolved = crate::accumulator::ResolvedStep {
             duration: 1.0, velocity: 0.7, speed: 1.0, aux_a: 0.0, aux_b: 0.0,
-            transpose, pan: 0.0, chop: 0.0, retrig: 1.0, retrig_rate: 8.0,
+            transpose, pan: 0.0, chop: 0.0, retrig: 1.0, retrig_rate: 8.0, variant: 0.0,
         };
         let (resolved, chord) =
             crate::scheduler::fit_mod_trigger_to_scale(&snapshot, 0, resolved, no_chord);

@@ -762,10 +762,13 @@ pub(super) fn fire_live_keyboard_rack_note(
         data.state.pattern.track_params[parent_track_idx].get_voice_priority()
     };
 
+    let pad_snapshot = Arc::clone(&data.scheduler_snapshot);
+    let pad_overlay = pad_snapshot.pad_variants.get(parent_track_idx, trigger.variant);
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
         if !slot.enabled {
             continue;
         }
+        let slot_variant = pad_overlay.and_then(|overlay| overlay.rack_slot(slot_idx));
         // A slot re-enabled by a pattern/scene switch may still have its FX
         // chain bypassed from when it was parked; live keys never reach the
         // sequenced trigger path that would restore it.
@@ -910,13 +913,21 @@ pub(super) fn fire_live_keyboard_rack_note(
                 );
             }
             InstrumentType::Custom => {
-                let key_locked_instrument_params = key_locked_snapshot_instrument_params(
+                let mut key_locked_instrument_params = key_locked_snapshot_instrument_params(
                     &slot.instrument_slot,
                     transpose,
                     slot_params.base_note_offset,
                     None,
                     &instrument_params,
                 );
+                if let Some(variant) = slot_variant {
+                    apply_snapshot_pad_variant(
+                        &slot.instrument_slot,
+                        variant,
+                        None,
+                        &mut key_locked_instrument_params,
+                    );
+                }
                 let max_polyphony = if slot.instrument_slot.instrument_forces_mono(&key_locked_instrument_params) {
                     1
                 } else {
@@ -1758,9 +1769,15 @@ pub(super) fn fire_rack_resolved(
     }
 
     let has_solo = rack_has_enabled_solo(&update);
+    // The step's pad variant (docs/rack-pad-variants-spec.md §4.1), per slot.
+    let pad_snapshot = Arc::clone(&data.scheduler_snapshot);
+    let pad_overlay = pad_snapshot
+        .pad_variants
+        .get(track_idx, crate::sequencer::pad_variants::variant_id(resolved.variant));
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
         let slot_params = update.slot_params(slot_idx);
         let muted_by_solo = has_solo && !slot_params.solo;
+        let slot_variant = pad_overlay.and_then(|overlay| overlay.rack_slot(slot_idx));
         let slot_pan_lid =
             data.state.runtime.rack_slot_pan_lids[track_idx][slot_idx].load(Ordering::Acquire);
         unsafe {
@@ -1809,7 +1826,7 @@ pub(super) fn fire_rack_resolved(
                         frame_offset,
                     );
                 }
-                let note_instrument_params = if slot.instrument_type == InstrumentType::Custom {
+                let mut note_instrument_params = if slot.instrument_type == InstrumentType::Custom {
                     key_locked_snapshot_instrument_params(
                         &slot.instrument_slot,
                         transpose,
@@ -1820,6 +1837,14 @@ pub(super) fn fire_rack_resolved(
                 } else {
                     instrument_params.clone()
                 };
+                if let Some(variant) = slot_variant {
+                    apply_snapshot_pad_variant(
+                        &slot.instrument_slot,
+                        variant,
+                        key_lock_plock_step,
+                        &mut note_instrument_params,
+                    );
+                }
                 let instrument_fingerprint = rack_slot_sound_fingerprint(
                     slot,
                     &note_instrument_params,
@@ -1857,7 +1882,7 @@ pub(super) fn fire_rack_resolved(
                     frame_offset,
                 );
             }
-            let note_instrument_params = if slot.instrument_type == InstrumentType::Custom {
+            let mut note_instrument_params = if slot.instrument_type == InstrumentType::Custom {
                 key_locked_snapshot_instrument_params(
                     &slot.instrument_slot,
                     resolved.transpose,
@@ -1868,6 +1893,14 @@ pub(super) fn fire_rack_resolved(
             } else {
                 instrument_params.clone()
             };
+            if let Some(variant) = slot_variant {
+                apply_snapshot_pad_variant(
+                    &slot.instrument_slot,
+                    variant,
+                    key_lock_plock_step,
+                    &mut note_instrument_params,
+                );
+            }
             let instrument_fingerprint = rack_slot_sound_fingerprint(
                 slot,
                 &note_instrument_params,

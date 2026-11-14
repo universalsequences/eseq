@@ -64,7 +64,9 @@ pub(super) fn collect_process_roll_requests(
 pub(super) struct RollState {
     /// Held notes per track. Set semantics: duplicate presses of the same
     /// transpose collapse to one roll voice; empty = not rolling.
-    pub(super) held: [Vec<f32>; MAX_TRACKS],
+    /// Keyed by (transpose, pad variant): two variant pads of one member both
+    /// roll at transpose 0, as voices of their own.
+    pub(super) held: [Vec<(f32, Option<u32>)>; MAX_TRACKS],
     /// Bumped on every NoteOff/ClearAll. Unused in phase 1; phase 4 stamps it
     /// onto enqueued roll events for exact audio-side cancel.
     pub(super) generation: u64,
@@ -74,7 +76,7 @@ pub(super) struct RollState {
     /// rendered it yet; see `schedule_roll_hits`). Consumed by the next pass;
     /// pruned on NoteOff/ClearAll so a tap released before the pass leaves
     /// nothing.
-    pub(super) newly_pressed: Vec<(usize, f32)>,
+    pub(super) newly_pressed: Vec<(usize, f32, Option<u32>)>,
     /// Per-track sequence-roll window anchors in the track's cycle-beat
     /// domain. `None` means normal, free-running pattern reads.
     pub(super) window_start: [Option<f64>; MAX_TRACKS],
@@ -304,19 +306,20 @@ impl RollState {
     pub(super) fn apply_commands(&mut self, commands: &[RollCommand]) {
         for command in commands {
             match *command {
-                RollCommand::NoteOn { track, transpose } => {
-                    if track < MAX_TRACKS
-                        && !self.held[track].iter().any(|held| *held == transpose)
-                    {
-                        self.held[track].push(transpose);
-                        self.newly_pressed.push((track, transpose));
+                RollCommand::NoteOn { track, transpose, variant } => {
+                    let key = (transpose, variant);
+                    if track < MAX_TRACKS && !self.held[track].contains(&key) {
+                        self.held[track].push(key);
+                        self.newly_pressed.push((track, transpose, variant));
                     }
                 }
-                RollCommand::NoteOff { track, transpose } => {
+                RollCommand::NoteOff { track, transpose, variant } => {
                     if track < MAX_TRACKS {
-                        self.held[track].retain(|held| *held != transpose);
-                        self.newly_pressed
-                            .retain(|(t, held)| *t != track || *held != transpose);
+                        let key = (transpose, variant);
+                        self.held[track].retain(|held| *held != key);
+                        self.newly_pressed.retain(|(t, held, v)| {
+                            *t != track || (*held, *v) != key
+                        });
                         self.generation += 1;
                     }
                 }
@@ -391,17 +394,17 @@ pub(super) fn schedule_roll_hits<const QUEUE_CAP: usize>(
             for track in 0..roll.held.len().min(snapshot.tracks.len()) {
                 // Only the freshly pressed notes: any longer-held key on this
                 // track already sounded this line.
-                let notes: Vec<f32> = pressed
+                let notes: Vec<(f32, Option<u32>)> = pressed
                     .iter()
-                    .filter(|(t, transpose)| {
-                        *t == track && roll.held[track].contains(transpose)
+                    .filter(|(t, transpose, variant)| {
+                        *t == track && roll.held[track].contains(&(*transpose, *variant))
                     })
-                    .map(|(_, transpose)| *transpose)
+                    .map(|(_, transpose, variant)| (*transpose, *variant))
                     .collect();
                 if notes.is_empty() {
                     continue;
                 }
-                if !emit_roll_hit(
+                if !emit_roll_hits_by_variant(
                     queue,
                     snapshot,
                     track_output_events,
@@ -437,7 +440,7 @@ pub(super) fn schedule_roll_hits<const QUEUE_CAP: usize>(
                 continue;
             }
             let notes = roll.held[track].clone();
-            if !emit_roll_hit(
+            if !emit_roll_hits_by_variant(
                 queue,
                 snapshot,
                 track_output_events,
@@ -460,6 +463,61 @@ pub(super) fn schedule_roll_hits<const QUEUE_CAP: usize>(
     }
 }
 
+/// [`emit_roll_hit`] once per pad variant among the held `notes`: one event
+/// carries one variant (docs/rack-pad-variants-spec.md), so two variant pads
+/// of one member held together roll as two hits on the line.
+#[allow(clippy::too_many_arguments)]
+fn emit_roll_hits_by_variant<const QUEUE_CAP: usize>(
+    queue: &ScheduledEventQueue<QUEUE_CAP>,
+    snapshot: &SequencerSnapshot,
+    track_output_events: &mut Vec<TrackOutputEvent>,
+    state: &SequencerState,
+    clock: &SnapshotSequencerClock,
+    track: usize,
+    notes: &[(f32, Option<u32>)],
+    grid_beats: f64,
+    boundary_beats: f64,
+    sample_time: u64,
+    samples_per_quarter: f64,
+    groove_floor: crate::groove::GrooveFloor,
+    pattern_epoch: u64,
+    global_transpose: f32,
+) -> bool {
+    let mut variants: Vec<Option<u32>> = Vec::new();
+    for (_, variant) in notes {
+        if !variants.contains(variant) {
+            variants.push(*variant);
+        }
+    }
+    for variant in variants {
+        let transposes: Vec<f32> = notes
+            .iter()
+            .filter(|(_, v)| *v == variant)
+            .map(|(transpose, _)| *transpose)
+            .collect();
+        if !emit_roll_hit(
+            queue,
+            snapshot,
+            track_output_events,
+            state,
+            clock,
+            track,
+            &transposes,
+            variant,
+            grid_beats,
+            boundary_beats,
+            sample_time,
+            samples_per_quarter,
+            groove_floor,
+            pattern_epoch,
+            global_transpose,
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
 /// One roll hit on one track: the enqueue (a normal ResolvedTrigger built
 /// from track defaults, one chord note per transpose — F4) plus the
 /// record-as-heard feedback (spec 6) stamping each note with the track-local
@@ -473,6 +531,7 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
     clock: &SnapshotSequencerClock,
     track: usize,
     notes: &[f32],
+    variant: Option<u32>,
     grid_beats: f64,
     boundary_beats: f64,
     sample_time: u64,
@@ -511,6 +570,7 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
         chop: StepParam::Chop.default_value(),
         retrig: StepParam::Retrig.default_value(),
         retrig_rate: StepParam::RetrigRate.default_value(),
+        variant: variant.unwrap_or(0) as f32,
     };
     // The record feedback stores the position unwound through the feel
     // playback applies to the step it lands on, so playback reproduces the
@@ -600,6 +660,7 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
             velocity: recorded_velocity,
             duration_steps,
             beat: boundary_beats,
+            variant,
         });
     }
     true

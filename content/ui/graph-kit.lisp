@@ -9,11 +9,12 @@
 (module eseq.graph-kit)
 
 (import eseq.kinds :refer (tracks track-number in-display-order groups graph-param-named graph-edge-to graph-quantize-options
-                           set-graph-params!))
+                           set-graph-params! set-graph-node-route-variant))
 (import eseq.view-kit :refer (index-of))
 (import eseq.scene-banks :refer (scene-viewed-bank bank-tracks))
 
 (export route-tracks route-track route-label route-options route-menu-tracks node-route-label set-route-label!
+        route-entries track-variants variant-route-label
         weight-rows set-weight! column cycle-text cycle-labels rack-name
         res-options factor-options set-param-on-nodes! scale-delays! shift-timebases!)
 
@@ -43,19 +44,55 @@
     (bank-tracks (scene-viewed-bank)
       (append keep (filter (lambda (t) t) (map (lambda (n) n.route) g.nodes))))))
 
-(def route-options (g)
-  (append (map (lambda (t) (route-label g t)) (route-menu-tracks g)) (list "Off")))
+;; A drum-rack member's variant pads (docs/rack-pad-variants-spec.md §7),
+;; each a route of its own after the track: "2 Latent Kick · D4 tight".
+(def track-variants (t)
+  (let ((p (if t t.pad nil)))
+    (if p
+      (filter (lambda (v) (and (= v.track t) (> v.variant 0))) p.group.pads)
+      (list))))
 
+(def variant-route-label (g t v)
+  (str (route-label g t) " · " v.label (if (= v.name "") "" (str " " v.name))))
+
+;; Every route over tracks `ts` as (list track variant label): each track,
+;; then its variants.
+(def route-entries (g ts)
+  (reduce
+    (lambda (acc t)
+      (append acc
+              (cons (list t 0 (route-label g t))
+                    (map (lambda (v) (list t v.variant (variant-route-label g t v)))
+                         (track-variants t)))))
+    (list) ts))
+
+(def route-options (g)
+  (append (map (lambda (e) (nth e 2)) (route-entries g (route-menu-tracks g))) (list "Off")))
+
+;; n's route label; a variant whose pad is gone shows its track (it plays
+;; the plain pad)
 (def node-route-label (n)
-  (let ((t n.route)) (if t (route-label n.graph t) "Off")))
+  (let ((t n.route))
+    (if t
+      (let ((v (first (filter (lambda (v) (= v.variant n.route-variant)) (track-variants t)))))
+        (if v (variant-route-label n.graph t v) (route-label n.graph t)))
+      "Off")))
+
+;; The route entry a label names; nil for Off.
+(def route-entry (g label)
+  (first (filter (lambda (e) (= (nth e 2) label)) (route-entries g (route-tracks g)))))
 
 ;; The track a route label names; nil for Off.
 (def route-track (g label)
-  (first (filter (lambda (t) (= (route-label g t) label)) (route-tracks g))))
+  (let ((e (route-entry g label))) (if e (first e) nil)))
 
-;; Route node n to the track its graph's route `label` names (Off: none).
+;; Route node n to the track (and pad variant) its graph's route `label`
+;; names (Off: none), as one edit.
 (def set-route-label! (n label)
-  (set! n.route (route-track n.graph label)))
+  (let ((e (route-entry n.graph label)))
+    (if e
+      (set-graph-node-route-variant n (first e) (nth e 1))
+      (set! n.route nil))))
 
 ;; ── weights ───────────────────────────────────────────────────────────────
 

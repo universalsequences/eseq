@@ -5028,6 +5028,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 vec![0.0, 4.0, 7.0],
                 vec![1.0, 1.0, 1.0],
@@ -5109,6 +5110,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 Vec::new(),
                 Vec::new(),
@@ -5180,6 +5182,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 vec![0.0, 4.0, 7.0],
                 vec![1.0, 1.0, 1.0],
@@ -5281,6 +5284,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 vec![0.0, 4.0, 7.0],
                 vec![6.0, 6.0, 6.0],
@@ -5349,6 +5353,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 vec![0.0, 4.0, 7.0],
                 vec![0.0, 0.0, 0.0],
@@ -5409,6 +5414,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 Vec::new(),
                 Vec::new(),
@@ -5671,6 +5677,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 Vec::new(),
                 Vec::new(),
@@ -5789,6 +5796,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 Vec::new(),
                 Vec::new(),
@@ -5880,6 +5888,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 Vec::new(),
                 Vec::new(),
@@ -5953,6 +5962,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 Vec::new(),
                 Vec::new(),
@@ -6034,6 +6044,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 vec![0.0, 4.0, 7.0],
                 vec![8.0, 8.0, 8.0],
@@ -6106,6 +6117,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 vec![0.0],
                 vec![1.0],
@@ -6147,6 +6159,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 vec![0.0],
                 vec![1.0],
@@ -6208,6 +6221,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 Vec::new(),
                 Vec::new(),
@@ -10265,6 +10279,38 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert!(plock_values(&mixed[0], "instrument:cutoff").iter().all(|v| *v == Some(7.)));
     }
 
+    /// docs/rack-pad-variants-spec.md §7: a row routed to a pad variant names
+    /// it on every hit, ahead of the row's own words (so a row's own
+    /// `(plock "step-param:variant" …)` still wins); variant 0 adds nothing.
+    #[test]
+    fn jaki_doc_variant_rows_name_their_pad_variant_on_every_hit() {
+        let mut rt = jaki_runtime();
+        let value = rt
+            .eval(
+                r#"(import alez.jaki.doc)
+                   (source (list
+                     (alez.jaki.doc/body (list (list :dot :dot))
+                       (list (dict :route 0 :variant 2 :mods (list (list "plock" "step-param:variant" 5))))
+                       1)
+                     (alez.jaki.doc/body (list (list :dot :dot))
+                       (list (dict :route 0 :variant 0 :mods (list)))
+                       1)))"#,
+            )
+            .expect("eval")
+            .expect("value");
+        let Value::String(bodies) = value else { panic!("{value:?}") };
+        assert_eq!(
+            bodies,
+            r#"(((fig (. .)) -> 0 (plock "step-param:variant" 2) (plock "step-param:variant" 5)) ((fig (. .)) -> 0))"#
+        );
+        let body = r#"((fig (. .)) -> 0 (plock "step-param:variant" 2))"#;
+        let t = jaki_surface_plocks(body, 2.0);
+        assert_eq!(plock_values(&t[0], "step-param:variant"), [Some(2.); 8]);
+        let body = r#"((fig (. .)) -> 0 (plock "step-param:variant" 2) (plock "step-param:variant" 5))"#;
+        let t = jaki_surface_plocks(body, 2.0);
+        assert_eq!(plock_values(&t[0], "step-param:variant"), [Some(5.); 8], "the row's own wins");
+    }
+
     #[test]
     fn jaki_doc_plock_route_data_keeps_the_label_a_string() {
         let mut rt = jaki_runtime();
@@ -12602,6 +12648,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 chop: 1.0,
                 retrig: crate::sequencer::StepParam::Retrig.default_value(),
                 retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                variant: 0.0,
             },
         }
     }
@@ -14744,6 +14791,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 chop: 0.0,
                 retrig: crate::sequencer::StepParam::Retrig.default_value(),
                 retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                variant: 0.0,
             },
         };
         let result = scratch
@@ -15064,6 +15112,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                         chop: 1.0,
                         retrig: crate::sequencer::StepParam::Retrig.default_value(),
                         retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                        variant: 0.0,
                     },
                     vec![0.0, 4.0, 7.0],
                     vec![1.0, 1.0, 1.0],
@@ -15154,6 +15203,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                         chop: 1.0,
                         retrig: crate::sequencer::StepParam::Retrig.default_value(),
                         retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                        variant: 0.0,
                     },
                     vec![0.0],
                     vec![1.0],
@@ -15229,6 +15279,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 Vec::new(),
                 Vec::new(),

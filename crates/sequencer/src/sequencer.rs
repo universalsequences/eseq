@@ -2,6 +2,8 @@
 mod clock;
 #[path = "sequencer/data.rs"]
 mod data;
+#[path = "sequencer/pad_variants/mod.rs"]
+pub mod pad_variants;
 #[path = "sequencer/snapshot.rs"]
 mod snapshot;
 #[path = "sequencer/state/mod.rs"]
@@ -27,7 +29,7 @@ pub use data::{
     BARS_PER_PATTERN, BAR_TRANSPOSE_LIMIT,
     MAX_SAMPLER_POOLS, MAX_STEPS, MAX_TRACKS, MIX_BUS_ID, NUM_PARAMS, STEPS_PER_PAGE, SYNC_COUNT,
     SYNC_RESOLUTIONS, TRACK_PATTERN_WORDS, RETRIG_INFINITE, RETRIG_RATE_PITCH_THRESHOLD,
-    RETRIG_RATE_SEMITONE, format_retrig_rate, retrig_rate_hz,
+    RETRIG_RATE_SEMITONE, format_retrig_rate, retrig_rate_hz, MAX_PAD_VARIANT,
 };
 #[allow(unused_imports)]
 pub use snapshot::{

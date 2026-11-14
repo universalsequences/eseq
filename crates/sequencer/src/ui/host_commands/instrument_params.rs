@@ -144,11 +144,12 @@ pub(super) fn handle(
                                 transpose,
                                 velocity: 1.0,
                                 note_off: false,
+                                variant: 0,
                             }))
                             .is_ok()
                         {
                             if let Some(id) = app.track_registry.id_at(track) {
-                                app.retrospective.trig(id, transpose, Instant::now(), KEY_LOCK_AUDITION_DURATION);
+                                app.retrospective.trig(id, transpose, None, Instant::now(), KEY_LOCK_AUDITION_DURATION);
                             }
                             ctx.sessions.pending_key_lock_auditions.push(PendingKeyLockAudition {
                                 track,
@@ -196,6 +197,7 @@ pub(super) fn handle(
                     transpose,
                     velocity: 1.0,
                     note_off: false,
+                    variant: 0,
                 }))
                 .is_ok()
             {

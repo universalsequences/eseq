@@ -178,7 +178,7 @@ impl LaneKey {
     fn read(groove: Option<&ProjectGroove>, rows: &[PadRow<'_>]) -> Self {
         Self {
             groove: groove.cloned(),
-            pads: rows.iter().map(|row| (row.tid, *row.pad)).collect(),
+            pads: rows.iter().map(|row| (row.tid, row.pad.clone())).collect(),
         }
     }
 
@@ -208,6 +208,14 @@ struct RackClipRow {
     name: String,
     /// The scene positions pointing at the clip.
     scenes: Vec<usize>,
+}
+
+/// The pad kind's instance key under its rack: the member's `TrackId`, with
+/// a variant pad's id in the high bits (docs/rack-pad-variants-spec.md), so a
+/// member's plain pad keeps the key it always had and each variant gets its
+/// own instance that survives note moves.
+pub(crate) fn pad_instance_key(tid: u64, variant: u32) -> u64 {
+    tid | (u64::from(variant) << 40)
 }
 
 /// One pad with its member track's position and stable id.
@@ -266,6 +274,11 @@ fn push_pad(
     );
     let standard = standard.map_or("", PadRole::label);
     pusher.push(id, f::PAD_STANDARD_ROLE_LABEL, text(standard));
+    pusher.push(id, f::PAD_VARIANT, number(pad.variant as f64));
+    pusher.push(id, f::PAD_NAME, text(pad.name.as_deref().unwrap_or("")));
+    pusher.push(id, f::PAD_VALUE_NAMES, strings(pad.values.keys()));
+    let values: Vec<f32> = pad.values.values().copied().collect();
+    pusher.push(id, f::PAD_VALUE_VALUES, super::panel::numbers(&values));
 }
 
 impl HostKinds {
@@ -386,7 +399,9 @@ impl HostKinds {
                 continue;
             };
             let rows = pad_rows(group, rack, tids);
-            let wanted: Vec<u64> = rows.iter().map(|row| row.tid).collect();
+            let wanted: Vec<u64> = (rows.iter())
+                .map(|row| pad_instance_key(row.tid, row.pad.variant))
+                .collect();
             let ids = pusher.reconcile_children(group_id, PAD, &wanted);
             let first = pads.len();
             for (row, id) in rows.iter().zip(ids) {
@@ -400,15 +415,21 @@ impl HostKinds {
                     row,
                     rack.choke_group(row.index),
                 );
-                pad_tracks.insert(id, row.track);
-                if let Some(holder) = holders.get_mut(row.track) {
-                    *holder = Some(id);
+                pad_tracks.insert(id, (row.track, row.pad.variant));
+                // `track.pad` is the member's plain pad.
+                if row.pad.is_plain() {
+                    if let Some(holder) = holders.get_mut(row.track) {
+                        *holder = Some(id);
+                    }
                 }
                 pads.push(id);
             }
             let list = instance_list(pads[first..].iter().copied());
             pusher.push(group_id, f::GROUP_PADS, list);
-            self.sync_rack_grooves(pusher, app, group_id, rack, &rows);
+            // Grooves follow member tracks: variant pads share their
+            // member's lane and amount.
+            let plain: Vec<PadRow<'_>> = rows.into_iter().filter(|row| row.pad.is_plain()).collect();
+            self.sync_rack_grooves(pusher, app, group_id, rack, &plain);
         }
         for (track, id) in self.track_ids.iter().enumerate() {
             if let Some(id) = *id {

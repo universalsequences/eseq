@@ -25,6 +25,7 @@
 (import eseq.seq-step-tabs)
 (import eseq.track-collapse)
 (import eseq.audio-clip)
+(import eseq.effects.pad-variants)
 (import eseq.view-kit :refer (nothing listed? color-rgba))
 (import eseq.kinds :refer (track piano-roll pitch-min pitch-max focus-step-params
                            focus-step-value set-focus-step! lock-param! unlock-param!
@@ -366,10 +367,16 @@
       (set! piano-roll-view.marquee nil)
       (seq-piano-roll-action (dict :type :select :ids items)))))
 
-;; A note as the timeline draws it, by the id the editor addresses.
+;; A note as the timeline draws it, by the id the editor addresses. A note
+;; on a step that plays a drum-rack pad variant takes the variant's colour
+;; and names it (docs/rack-pad-variants-spec.md §6.3).
 (def note-item (n)
-  (dict :id n.item :lane (note-lane n) :start n.start :end (note-end n)
-        :selected n.selected :label n.label))
+  (if (> n.pad-variant 0)
+    (dict :id n.item :lane (note-lane n) :start n.start :end (note-end n)
+          :selected n.selected :label (str n.label " v" n.pad-variant)
+          :color (eseq.effects.pad-variants/pad-variant-rgb n.pad-variant))
+    (dict :id n.item :lane (note-lane n) :start n.start :end (note-end n)
+          :selected n.selected :label n.label)))
 
 (def piano-roll-timeline (t)
   (let ((v piano-roll-view))

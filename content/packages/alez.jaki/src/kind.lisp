@@ -126,12 +126,15 @@
   (list (list "key" "C" ":major")
         (list "chord" (list "I" "IV" "V7" "I"))))
 
-(def jk-set-route (self k index route)
-  (jk-edit-row self k index
-    (lambda (row)
-      (if (and (= route alez.jaki.doc/chords-route) (empty? (alez.jaki.doc/row-mods row)))
-        (merge row :route route :mods jk-chords-starter)
-        (merge row :route route)))))
+;; `pick`: (list route variant) from jk-route-of-label; variant 0 plays the
+;; member's plain pad (docs/rack-pad-variants-spec.md §7)
+(def jk-set-route (self k index pick)
+  (let ((route (first pick)) (variant (nth pick 1)))
+    (jk-edit-row self k index
+      (lambda (row)
+        (if (and (= route alez.jaki.doc/chords-route) (empty? (alez.jaki.doc/row-mods row)))
+          (merge row :route route :variant 0 :mods jk-chords-starter)
+          (merge row :route route :variant variant))))))
 
 (def jk-set-mods (self k index mods)
   (jk-edit-row self k index (lambda (row) (merge row :mods mods))))
@@ -474,11 +477,39 @@
 ;; the chord the other rows read (docs/harmony-declaration-spec.md).
 (def jk-chords-label "Chords")
 
+;; A drum-rack member's variant pads, in pad order (none for a track outside
+;; a rack): each is a route of its own (docs/rack-pad-variants-spec.md §7).
+(def jk-track-variants (t)
+  (let ((p (if t t.pad nil)))
+    (if p
+      (filter (lambda (v) (and (= v.track t) (> v.variant 0))) p.group.pads)
+      (list))))
+
+(def jk-track-label (t) (str (eseq.kinds/track-number t) " " t.name))
+
+;; "2 Latent Kick · D4 tight" (the note alone while unnamed)
+(def jk-variant-label (t v)
+  (str (jk-track-label t) " · " v.label (if (= v.name "") "" (str " " v.name))))
+
+;; The menu's entries for tracks `ts`: each track, then its variants, as
+;; (list track variant label).
+(def jk-route-entries (ts)
+  (reduce
+    (lambda (acc t)
+      (append acc
+              (cons (list t 0 (jk-track-label t))
+                    (map (lambda (v) (list t v.variant (jk-variant-label t v)))
+                         (jk-track-variants t)))))
+    (list) ts))
+
 ;; `routes`: (jk-route-tracks self)
 (def jk-route-options (routes)
   (append
-    (cons "Off" (map (lambda (t) (str (eseq.kinds/track-number t) " " t.name)) routes))
+    (cons "Off" (map (lambda (e) (nth e 2)) (jk-route-entries routes)))
     (list jk-chords-label)))
+
+(def jk-row-variant (row)
+  (let ((v (get row :variant))) (if (and (number? v) (> v 0)) v 0)))
 
 (def jk-chords-row? (row) (= (get row :route) alez.jaki.doc/chords-route))
 
@@ -506,16 +537,30 @@
 
 ;; Row `row`'s option in the menu over `menu` (jk-menu-routes of `routes`).
 (def jk-menu-index (routes menu row)
-  (if (jk-chords-row? row)
-    (+ 1 (len menu))
-    (let ((at (jk-route-index row (len routes))))
-      (if (= at 0) 0 (+ 1 (max -1 (jk-index-of menu (nth routes (- at 1)))))))))
+  (let ((entries (jk-route-entries menu)))
+    (if (jk-chords-row? row)
+      (+ 1 (len entries))
+      (let ((at (jk-route-index row (len routes))))
+        (if (= at 0)
+          0
+          (let ((t (nth routes (- at 1))) (variant (jk-row-variant row)))
+            (let ((exact (jk-entry-index entries t variant)))
+              ;; a variant whose pad is gone shows (and plays) the plain pad
+              (+ 1 (max -1 (if (>= exact 0) exact (jk-entry-index entries t 0)))))))))))
 
-;; a dropdown label back to a route: Off -1, a track its index, Chords -2
+(def jk-entry-index (entries t variant)
+  (jk-index-of (map (lambda (e) (list (first e) (nth e 1))) entries) (list t variant)))
+
+;; a dropdown label back to (list route variant): Off -1, a track its index,
+;; Chords -2; variant 0 unless the label names a pad variant
 (def jk-route-of-label (self label)
   (if (= label jk-chords-label)
-    alez.jaki.doc/chords-route
-    (- (max 0 (jk-index-of (jk-route-options (jk-route-tracks self)) label)) 1)))
+    (list alez.jaki.doc/chords-route 0)
+    (let ((routes (jk-route-tracks self)))
+      (let ((entry (first (filter (lambda (e) (= (nth e 2) label)) (jk-route-entries routes)))))
+        (if entry
+          (list (jk-index-of routes (first entry)) (nth entry 1))
+          (list -1 0))))))
 
 ;; The track a row plays (a rack's pad → its member track), or nil when the
 ;; row is Off: the sexp-slot's :dyn-context, so `(plock NAME V)` completes

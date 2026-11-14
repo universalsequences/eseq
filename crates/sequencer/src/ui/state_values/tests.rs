@@ -26619,7 +26619,7 @@ use panel_kinds_seed::*;
 
         let shell_def = eseqlisp::widget_render::sdf_widget::sdf_widget_def("seqv-step-shell")
             .expect("seqv-step-shell should be registered");
-        for uniform in ["track.audible", "track.governed", "step.held", "step.lock-kind"] {
+        for uniform in ["track.audible", "track.governed", "step.held-pad", "step.lock-kind"] {
             assert!(shell_def.state_uniforms.iter().any(|name| name == uniform), "{uniform}");
         }
         assert!(

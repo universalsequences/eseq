@@ -145,6 +145,7 @@ pub(crate) enum StepParamKey {
     Delay,
     Retrig,
     RetrigRate,
+    Variant,
 }
 
 impl From<StepParam> for StepParamKey {
@@ -162,6 +163,7 @@ impl From<StepParam> for StepParamKey {
             StepParam::Delay => Self::Delay,
             StepParam::Retrig => Self::Retrig,
             StepParam::RetrigRate => Self::RetrigRate,
+            StepParam::Variant => Self::Variant,
         }
     }
 }
@@ -181,6 +183,7 @@ impl StepParamKey {
             Self::Delay => StepParam::Delay,
             Self::Retrig => StepParam::Retrig,
             Self::RetrigRate => StepParam::RetrigRate,
+            Self::Variant => StepParam::Variant,
         }
     }
 }

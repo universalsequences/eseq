@@ -2522,6 +2522,38 @@ impl App {
         )
     }
 
+    /// A drum rack pad map edit (docs/rack-pad-variants-spec.md): write
+    /// `after` as `group_id`'s pads and record it as a coalescing gesture
+    /// keyed by `merge_key`, so a variant knob drag on one param joins one
+    /// entry that keeps the pads from before its first write.
+    pub(crate) fn apply_rack_pads_edit(
+        &mut self,
+        group_id: u64,
+        label: &'static str,
+        merge_key: MergeKey,
+        after: super::history::RackPadsState,
+    ) -> Result<EditOutcome, EditError> {
+        stage_field_edit(
+            self,
+            (label, merge_key),
+            (group_id, after),
+            |staged, group_id| match staged {
+                EditPatch::RackPads(staged) if staged.group_id == group_id => {
+                    Some(staged.before.clone())
+                }
+                _ => None,
+            },
+            |app, after| app.write_rack_pads(group_id, after),
+            |group_id, before, after| {
+                EditPatch::RackPads(super::history::RackPadsPatch {
+                    group_id,
+                    before,
+                    after,
+                })
+            },
+        )
+    }
+
     /// The pattern a rack macro edit of `track` writes: the one the live
     /// rack mirrors (a bound take's while the binding borrows the lane, as
     /// step and track param edits resolve it).
@@ -11218,6 +11250,20 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             )
             .map_err(EditError::ReplayFailed)
         }
+        EditPatch::RackPads(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "rack pad replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            app.write_rack_pads(patch.group_id, target)
+                .map(|_| ())
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::RackMacro(patch) => {
             let target = match mode {
                 ApplyMode::Undo => &patch.before,
@@ -11433,6 +11479,8 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         // Its writes publish what the scheduler reads (a mapping edit) or
         // reach the runtime values directly (a value).
         EditPatch::RackMacro(_) => false,
+        // `write_rack_pads` republishes the pad runtime itself.
+        EditPatch::RackPads(_) => false,
         EditPatch::SceneStructure(_) => true,
         EditPatch::RackClipAssignment(_) => true,
         // The arrangement's compiled song has no scheduler runtime.
@@ -11948,6 +11996,7 @@ fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
         EditPatch::GraphOverride(patch) => patch.retained_bytes(),
         EditPatch::NeuralNetwork(patch) => patch.retained_bytes(),
         EditPatch::RackMacro(patch) => patch.retained_bytes(),
+        EditPatch::RackPads(patch) => patch.retained_bytes(),
     }
 }
 
@@ -12108,7 +12157,8 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         | EditPatch::GraphNodeProcessChain(_)
         | EditPatch::GraphOverride(_)
         | EditPatch::NeuralNetwork(_)
-        | EditPatch::RackMacro(_) => {
+        | EditPatch::RackMacro(_)
+        | EditPatch::RackPads(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::SceneStructure(_) => {

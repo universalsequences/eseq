@@ -70,6 +70,10 @@ pub(crate) fn write_rolled_hit_to_pattern(state: &SequencerState, hit: &RollHitR
         .pattern
         .step_data[hit.track]
         .set(hit.step, StepParam::Duration, hit.duration_steps);
+    // A rolled pad key records which pad it was (rack pad variants spec §5).
+    if let Some(variant) = hit.variant {
+        state.pattern.step_data[hit.track].set(hit.step, StepParam::Variant, variant as f32);
+    }
 }
 
 /// Per-frame drain: write arriving hits into live pattern state immediately
@@ -175,6 +179,7 @@ mod roll_record_tests {
             velocity: 1.0,
             duration_steps: 0.5,
             beat,
+            variant: None,
         };
         // A 1/32 roll on a 1/16 track: two hits per step, the second as a
         // half-step delay — record-as-heard, no re-quantize (F5).

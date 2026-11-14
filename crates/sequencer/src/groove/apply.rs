@@ -500,7 +500,7 @@ pub fn rack_member_grooves(
         .iter()
         .enumerate()
         .map(|(member, &track)| {
-            let pad = rack.pads.iter().find(|pad| pad.member == member);
+            let pad = rack.pads.iter().find(|pad| pad.member == member && pad.is_plain());
             let pad_row = pad.and_then(|pad| {
                 groove
                     .resolve_pad_row(pad.pad_note, pad.effective_role())

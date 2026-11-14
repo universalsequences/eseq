@@ -143,6 +143,17 @@ pub(crate) struct MeterCache {
     pub(crate) last_voice_count_log_at: Instant,
 }
 
+/// When the last backend input event arrived. A newtype only so
+/// `FrameDiffState` can keep its test-only `Default` (`Instant` has none).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LastInputAt(pub(crate) Instant);
+
+impl Default for LastInputAt {
+    fn default() -> Self {
+        Self(Instant::now())
+    }
+}
+
 /// Previous-frame values the reactive tick diffs against to decide which
 /// reactives to republish.
 #[cfg_attr(test, derive(Default))]
@@ -204,7 +215,7 @@ pub(crate) struct FrameDiffState {
     pub(crate) palette_search_engines: Vec<String>,
     /// The last backend event (key, pointer, scroll): the palette's search
     /// walk is warmed only once input has been quiet for a moment.
-    pub(crate) last_input_at: Instant,
+    pub(crate) last_input_at: LastInputAt,
     /// Arming/clearing a delete target republishes only the delete-target
     /// read surfaces (version reactive + mixer/rack binding fields) off this
     /// counter — it deliberately does NOT ride `ui_epoch`.

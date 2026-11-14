@@ -70,6 +70,7 @@ pub enum EditPatch {
     GraphOverride(GraphOverridePatch),
     NeuralNetwork(NeuralNetworkPatch),
     RackMacro(RackMacroPatch),
+    RackPads(RackPadsPatch),
 }
 
 /// A scene's clip pointer is an edit, not a snapshot of the rack's topology
@@ -274,6 +275,50 @@ pub struct NeuralNetworkPatch {
 }
 
 impl NeuralNetworkPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.before.retained_bytes() + self.after.retained_bytes()
+    }
+}
+
+/// One drum rack's pad map before and after a pad variant edit
+/// (docs/rack-pad-variants-spec.md): small enough to snapshot whole, so a
+/// variant knob drag coalesces into one entry without touching the rest of
+/// the bus/group structure.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RackPadsPatch {
+    pub group_id: u64,
+    pub before: RackPadsState,
+    pub after: RackPadsState,
+}
+
+/// A rack's pads and their parallel choke groups.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RackPadsState {
+    pub pads: Vec<crate::project::ProjectRackPad>,
+    pub choke_groups: Vec<Option<u8>>,
+}
+
+impl RackPadsState {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .pads
+                .iter()
+                .map(|pad| {
+                    std::mem::size_of_val(pad)
+                        + pad.name.as_ref().map_or(0, String::len)
+                        + pad
+                            .values
+                            .keys()
+                            .map(|name| name.len() + std::mem::size_of::<f32>() + 32)
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+            + self.choke_groups.len()
+    }
+}
+
+impl RackPadsPatch {
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>() + self.before.retained_bytes() + self.after.retained_bytes()
     }

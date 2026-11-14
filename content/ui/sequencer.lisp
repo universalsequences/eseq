@@ -865,6 +865,28 @@
           (material :color (rgba 1.00 1.08 1.0 0.25))))
       (rgba 0 0 0 0))))
 
+;; A step's drum-rack pad variant (docs/rack-pad-variants-spec.md §6.3): a
+;; small square above the step in the variant's colour (the p-lock tick sits
+;; below it, as a bar; shader y points down), so a step can show both. `pv` is
+;; `step.pad-variant`, 0 for the plain pad. The palette mirrors
+;; `crate::plock_variants::VARIANT_PALETTE` and the pads tab's.
+;; Shaders spell it `eseq.sequencer/pad-variant-tick` (hazard h).
+(defmacro pad-variant-tick (pv)
+  `(let ((pvar ,pv)
+         (pvk (- pvar (* 6.0 (floor (/ (- pvar 1.0) 6.0))))))
+     (sdf/fill
+       (sdf/translate 0.0 -0.89
+         (sdf/rounded-rect 0.15 0.15 0.04))
+       (material
+         :color (if (< pvar 0.5)
+                  (rgba 0 0 0 0)
+                  (if (< pvk 1.5) (rgba 0.2706 0.7843 0.8627 1)
+                    (if (< pvk 2.5) (rgba 0.9098 0.6431 0.3098 1)
+                      (if (< pvk 3.5) (rgba 0.6627 0.4941 0.9098 1)
+                        (if (< pvk 4.5) (rgba 0.4353 0.8078 0.5412 1)
+                          (if (< pvk 5.5) (rgba 0.9098 0.4157 0.4157 1)
+                            (rgba 0.8510 0.7882 0.3529 1)))))))))))
+
 ;; The step shell's layers, shared by the grid's `seqv-step-shell` and the
 ;; expanded editor's `seqv-slot-shell`: the gate `active`, the p-lock kind
 ;; `lock` (0 none, 1 a lock, 2 a p-lock variant) with the variant's color
@@ -961,13 +983,16 @@
       (material
         :lighting (lighting :edge-min -0.32 :edge-max 1.293
           :light (vec3 0.8 -0.8 3.5) :shininess 92.0)
-        :color (* 0.65 (if (= step.held 1)
+        :color (* 0.65 (if (= (- step.held-pad (* 2.0 (floor (/ step.held-pad 2.0)))) 1)
                         (if (= muted 1)
                           (rgba 0 0 0 0)
                           (eseq.materials/color
                             (mix border (rgba (* tc 0.85) 0.5) (if (= selected 1) 0.8 0.6))
                             (if (= selected 1) border (rgba tc 0.6))))
-                        (rgba 0 0 0 0)))))))
+                        (rgba 0 0 0 0)))))
+    ;; the pad variant square, over the span; `held-pad` packs held (0/1)
+    ;; and the pad variant: one shader float
+    (eseq.sequencer/pad-variant-tick (floor (/ step.held-pad 2.0)))))
 
 ;; The copy flash over the copied track's step grid box (`grid-box`): a
 ;; bright band sweeping left to right along its frame for 0.45s once
@@ -1395,7 +1420,8 @@
   :state (step track selected off-fill-r off-fill-g off-fill-b)
   :shader
   (eseq.sequencer/step-shell-shader step.active step.lock-kind step.variant-color
-    step.toggled-at))
+    step.toggled-at
+    (eseq.sequencer/pad-variant-tick step.pad-variant)))
 
 ;; A slot past the pattern's end: an off step's shell.
 (defwidget seqv-slot-shell-off
@@ -4146,9 +4172,28 @@
           :h-align :center
           :font-size 6.8 :color :white :bg :transparent
           :text-align :center)
-        (label (if (and p (> p.choke 0)) (str "choke " p.choke) "")
-          :font-size 6.2 :color :dim :bg :transparent
-          :width :fill :text-align :center)))))
+        ;; A pad variant (docs/rack-pad-variants-spec.md) names itself in its
+        ;; colour, the one its steps and its pads-tab cell show; a plain pad
+        ;; shows its choke group here instead.
+        (if (pad-variant? p)
+          (label (str (pad-variant-name p) (if (> p.choke 0) (str " · ch" p.choke) ""))
+            :font-size 6.6 :color (pad-variant-label-color p) :bg :transparent
+            :width 5 :h-align :center :text-align :center)
+          (label (if (and p (> p.choke 0)) (str "choke " p.choke) "")
+            :font-size 6.2 :color :dim :bg :transparent
+            :width :fill :text-align :center))
+        (if (pad-variant? p)
+          (box :width :fill :height 0.14 :corner-radius 2
+            :background-color (eseq.effects.pad-variants/pad-variant-rgb p.variant))
+          (box :width :fill :height 0.14 :bg :transparent))))))
+
+(def pad-variant? (p) (and p (> p.variant 0)))
+
+(def pad-variant-name (p)
+  (if (= p.name "") (str "v" p.variant) (substring p.name 0 9)))
+
+(def pad-variant-label-color (p)
+  (cons 'rgba (append (eseq.effects.pad-variants/pad-variant-rgb p.variant) (list 1.0))))
 
 ;; Row 0 renders at the TOP and carries the page's HIGHEST four notes: the
 ;; grid reads bottom-up, so the bottom-left cell is the page's C.

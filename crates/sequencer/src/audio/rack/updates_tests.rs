@@ -241,6 +241,7 @@ fn rack_update_and_release_dispatch_do_not_allocate_or_free() {
     let rack = snapshot.tracks[0].rack_track.as_ref().unwrap();
     let trigger = KeyboardTrigger {
         generation: 1, source: None, track: 0, transpose: 0.0, velocity: 0.7, note_off: false,
+        variant: 0,
     };
     let (fired, counts) = crate::test_alloc::measure(|| {
         fire_live_keyboard_rack_note(&mut data, 0, &trigger, 0.0, rack)
@@ -372,6 +373,7 @@ fn disabled_rack_slot_takes_no_voice_and_bypasses_its_effects() {
     let rack = snapshot.tracks[0].rack_track.as_ref().unwrap();
     let trigger = KeyboardTrigger {
         generation: 1, source: None, track: 0, transpose: 0.0, velocity: 0.7, note_off: false,
+        variant: 0,
     };
     // Simulate the enabled slot having been parked before a pattern switch:
     // its filter is still bypassed on the node.

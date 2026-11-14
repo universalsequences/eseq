@@ -407,6 +407,7 @@ pub(crate) mod f {
     pub(crate) const GRAPH_NODE_QUANTIZE_CYCLE: FieldKey = (GRAPH_NODE, "quantize-cycle");
     pub(crate) const GRAPH_NODE_DELAY: FieldKey = (GRAPH_NODE, "delay");
     pub(crate) const GRAPH_NODE_ROUTE: FieldKey = (GRAPH_NODE, "route");
+    pub(crate) const GRAPH_NODE_ROUTE_VARIANT: FieldKey = (GRAPH_NODE, "route-variant");
     pub(crate) const GRAPH_NODE_GENERATOR: FieldKey = (GRAPH_NODE, "generator");
     pub(crate) const GRAPH_NODE_RESTART: FieldKey = (GRAPH_NODE, "restart");
     pub(crate) const GRAPH_NODE_SEED_ROUTE: FieldKey = (GRAPH_NODE, "seed-route");
@@ -682,6 +683,7 @@ pub(crate) mod f {
     pub(crate) const NOTE_VELOCITY: FieldKey = (NOTE, "velocity");
     pub(crate) const NOTE_SELECTED: FieldKey = (NOTE, "selected");
     pub(crate) const NOTE_LABEL: FieldKey = (NOTE, "label");
+    pub(crate) const NOTE_PAD_VARIANT: FieldKey = (NOTE, "pad-variant");
     pub(crate) const NOTE_HIDDEN: FieldKey = (NOTE, "hidden");
     pub(crate) const NOTE_ITEM: FieldKey = (NOTE, "item");
 
@@ -822,6 +824,10 @@ pub(crate) mod f {
     pub(crate) const PAD_STANDARD_ROLE: FieldKey = (PAD, "standard-role");
     pub(crate) const PAD_STANDARD_ROLE_LABEL: FieldKey = (PAD, "standard-role-label");
     pub(crate) const PAD_TRIGGERED: FieldKey = (PAD, "triggered");
+    pub(crate) const PAD_VARIANT: FieldKey = (PAD, "variant");
+    pub(crate) const PAD_NAME: FieldKey = (PAD, "name");
+    pub(crate) const PAD_VALUE_NAMES: FieldKey = (PAD, "value-names");
+    pub(crate) const PAD_VALUE_VALUES: FieldKey = (PAD, "value-values");
 
     pub(crate) const RACK_CLIP_GROUP: FieldKey = (RACK_CLIP, "group");
     pub(crate) const RACK_CLIP_CID: FieldKey = (RACK_CLIP, "cid");
@@ -950,12 +956,16 @@ pub(crate) mod f {
     pub(crate) const STEP_PLAYING: FieldKey = (STEP, "playing");
     pub(crate) const STEP_SELECTED: FieldKey = (STEP, "selected");
     pub(crate) const STEP_HELD: FieldKey = (STEP, "held");
+    /// `held` + 2 × the step's pad variant: the grid shell's shader reads
+    /// both from one float (its state budget is 16).
+    pub(crate) const STEP_HELD_PAD: FieldKey = (STEP, "held-pad");
     pub(crate) const STEP_VELOCITY: FieldKey = (STEP, "velocity");
     pub(crate) const STEP_DURATION: FieldKey = (STEP, "duration");
     pub(crate) const STEP_TRANSPOSE: FieldKey = (STEP, "transpose");
     pub(crate) const STEP_DELAY: FieldKey = (STEP, "delay");
     pub(crate) const STEP_RETRIG: FieldKey = (STEP, "retrig");
     pub(crate) const STEP_RETRIG_RATE: FieldKey = (STEP, "retrig-rate");
+    pub(crate) const STEP_PAD_VARIANT: FieldKey = (STEP, "pad-variant");
     pub(crate) const STEP_PAN: FieldKey = (STEP, "pan");
     pub(crate) const STEP_SYNC: FieldKey = (STEP, "sync");
     pub(crate) const STEP_AUX_A: FieldKey = (STEP, "aux-a");
@@ -1443,6 +1453,10 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::PAD_STANDARD_ROLE, ":string", Model),
     (f::PAD_STANDARD_ROLE_LABEL, ":string", Model),
     (f::PAD_TRIGGERED, ":bool", Live),
+    (f::PAD_VARIANT, ":int", Model),
+    (f::PAD_NAME, ":string", Model),
+    (f::PAD_VALUE_NAMES, "(list-of :string)", Model),
+    (f::PAD_VALUE_VALUES, "(list-of :number)", Model),
     (f::RACK_CLIP_GROUP, "group", Model),
     (f::RACK_CLIP_CID, ":int", Model),
     (f::RACK_CLIP_INDEX, ":int", Model),
@@ -1572,12 +1586,14 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::STEP_PLAYING, ":bool", Live),
     (f::STEP_SELECTED, ":bool", Live),
     (f::STEP_HELD, ":bool", Live),
+    (f::STEP_HELD_PAD, ":number", Live),
     (f::STEP_VELOCITY, ":number", Live),
     (f::STEP_DURATION, ":number", Live),
     (f::STEP_TRANSPOSE, ":number", Live),
     (f::STEP_DELAY, ":number", Live),
     (f::STEP_RETRIG, ":number", Live),
     (f::STEP_RETRIG_RATE, ":number", Live),
+    (f::STEP_PAD_VARIANT, ":number", Live),
     (f::STEP_PAN, ":number", Live),
     (f::STEP_SYNC, ":number", Live),
     (f::STEP_AUX_A, ":number", Live),
@@ -2295,6 +2311,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::NOTE_VELOCITY, ":number", Model),
     (f::NOTE_SELECTED, ":bool", Model),
     (f::NOTE_LABEL, ":string", Model),
+    (f::NOTE_PAD_VARIANT, ":int", Model),
     (f::NOTE_HIDDEN, ":bool", Model),
     (f::NOTE_ITEM, ":int", Model),
     // The piano roll's focus steps (`focus_steps`): registered on the first
@@ -2359,6 +2376,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::GRAPH_NODE_QUANTIZE_CYCLE, "(list-of :string)", Model),
     (f::GRAPH_NODE_DELAY, ":int", Model),
     (f::GRAPH_NODE_ROUTE, "track", Model),
+    (f::GRAPH_NODE_ROUTE_VARIANT, ":int", Model),
     (f::GRAPH_NODE_GENERATOR, ":int", Model),
     (f::GRAPH_NODE_RESTART, ":bool", Model),
     (f::GRAPH_NODE_SEED_ROUTE, ":bool", Model),
@@ -2526,14 +2544,16 @@ pub(super) static GENERATOR_MARK_LIVE: LazyLock<LiveFields> =
 /// The step fields diffed by value per tick (beside `active`, `selected`
 /// and `playing`): `held`, then the step parameters, whose field names are
 /// their `seq-set-step-param` keywords ([`step_param_named`]).
-pub(super) const STEP_VALUES: [FieldKey; 10] = [
+pub(super) const STEP_VALUES: [FieldKey; 12] = [
     f::STEP_HELD,
+    f::STEP_HELD_PAD,
     f::STEP_VELOCITY,
     f::STEP_DURATION,
     f::STEP_TRANSPOSE,
     f::STEP_DELAY,
     f::STEP_RETRIG,
     f::STEP_RETRIG_RATE,
+    f::STEP_PAD_VARIANT,
     f::STEP_PAN,
     f::STEP_SYNC,
     f::STEP_AUX_A,

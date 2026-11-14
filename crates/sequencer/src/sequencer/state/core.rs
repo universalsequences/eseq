@@ -166,6 +166,10 @@ pub struct TransportState {
     pub callback_busy_ns: AtomicU64,
     pub callback_budget_ns: AtomicU64,
     pub trigger_flash: Vec<AtomicU32>,
+    /// The pad variant each track's last hit played (docs/rack-pad-variants-
+    /// spec.md), so the light reaches the pad that was hit, not every pad of
+    /// its member. Written beside `trigger_flash`.
+    pub trigger_variant: Vec<AtomicU32>,
     pub num_tracks: AtomicU32,
     pub track_playheads: Vec<AtomicU32>,
     /// Per-track step count a `length!` process last set (the length lane),
@@ -980,6 +984,11 @@ pub struct SequencerState {
     /// "Scheduler snapshot"), mirrored from the app's rack configs by the same
     /// group-topology funnel as `rack_memberships`.
     pub(super) rack_groove_variants: Mutex<Arc<crate::groove::RackGrooveVariants>>,
+    /// Every rack member's pad variants as param names + values
+    /// (docs/rack-pad-variants-spec.md §3.3), mirrored by the same funnel;
+    /// each scheduler snapshot resolves them against the live instruments.
+    pub(super) rack_pad_variants:
+        Mutex<Arc<Vec<crate::sequencer::pad_variants::RackPadVariantRuntime>>>,
     pub(super) published_sequencers_version: AtomicU64,
     /// Scene-slot declarations (`defscene` name → default) shared across VMs.
     /// Each runtime keeps its own declaration table for the slots it evaluated

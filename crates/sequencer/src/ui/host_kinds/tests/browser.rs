@@ -551,6 +551,7 @@ fn retro_capture_rows_and_the_live_audition() {
         notes: vec![sequencer::app::retrospective::CapturedNote {
             track,
             transpose: 0.0,
+            variant: None,
             velocity: 1.0,
             start: 1.0,
             end: 1.1,

@@ -149,6 +149,7 @@ pub(crate) fn step_param_named(name: &str) -> Option<StepParam> {
         "speed" => StepParam::Speed,
         "retrig" | "rtrg" => StepParam::Retrig,
         "retrig-rate" | "retrig_rate" | "rate" => StepParam::RetrigRate,
+        "variant" | "pad-variant" => StepParam::Variant,
         _ => return None,
     })
 }
@@ -5390,6 +5391,7 @@ pub(crate) fn init_runtime(
             "speed" => StepParam::Speed,
             "retrig" | "rtrg" => StepParam::Retrig,
             "retrig-rate" | "retrig_rate" | "rate" => StepParam::RetrigRate,
+            "variant" | "pad-variant" => StepParam::Variant,
             other => return Err(format!("unknown param :{other}").into()),
         };
         let track = ct.load(Ordering::Relaxed);

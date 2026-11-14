@@ -129,6 +129,10 @@ pub(crate) fn extract_kit(source: &ImportSource, group_id: u64) -> Result<Extrac
     let mut pad_tracks = Vec::with_capacity(rack.pads.len());
     let mut member_to_pad = vec![None; group.members.len()];
     for (pad_index, pad) in rack.pads.iter().enumerate() {
+        // A kit pad is a member track; its variant pads ride along on it.
+        if !pad.is_plain() {
+            continue;
+        }
         let Some(track) = group.members.get(pad.member).copied() else {
             continue;
         };
@@ -164,6 +168,10 @@ pub(crate) fn extract_kit(source: &ImportSource, group_id: u64) -> Result<Extrac
             name,
             sound,
             modulator,
+            variants: rack
+                .variant_pads_of(pad.member)
+                .map(crate::project::ProjectKitPadVariant::from_pad)
+                .collect(),
         });
     }
     if pads.iter().all(|pad| pad.modulator.is_some()) {

@@ -335,6 +335,47 @@ pub struct ProjectKitPad {
     /// one of `sound` / `modulator` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modulator: Option<ProjectEffectSlot>,
+    /// The member's variant pads (docs/rack-pad-variants-spec.md): they play
+    /// this pad's member track with saved values, so they travel with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<ProjectKitPadVariant>,
+}
+
+/// One variant pad a kit pad carries: its note, id, name, role and values,
+/// exactly as the rack pad had them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectKitPadVariant {
+    pub pad_note: i32,
+    pub variant: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<PadRole>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub values: BTreeMap<String, f32>,
+}
+
+impl ProjectKitPadVariant {
+    pub fn from_pad(pad: &ProjectRackPad) -> Self {
+        Self {
+            pad_note: pad.pad_note,
+            variant: pad.variant,
+            name: pad.name.clone(),
+            role: pad.role,
+            values: pad.values.clone(),
+        }
+    }
+
+    pub fn to_pad(&self, member: usize) -> ProjectRackPad {
+        ProjectRackPad {
+            pad_note: self.pad_note,
+            member,
+            role: self.role,
+            variant: self.variant,
+            name: self.name.clone(),
+            values: self.values.clone(),
+        }
+    }
 }
 
 impl ProjectKitPad {
@@ -1580,7 +1621,17 @@ impl ProjectTrackGroup {
     pub fn rack_pad_index_of_track(&self, track: usize) -> Option<usize> {
         let rack = self.rack.as_ref()?;
         let member = self.members.iter().position(|member| *member == track)?;
-        rack.pads.iter().position(|pad| pad.member == member)
+        rack.pads
+            .iter()
+            .position(|pad| pad.member == member && pad.is_plain())
+    }
+
+    /// Track and variant the pad answering `pad_note` plays: the live pad
+    /// route with the variant the hit must carry (0 = plain pad).
+    pub fn rack_pad_target(&self, pad_note: i32) -> Option<(usize, u32)> {
+        let rack = self.rack.as_ref()?;
+        let pad = rack.pads.get(rack.pad_index_for_note(pad_note)?)?;
+        Some((self.members.get(pad.member).copied()?, pad.variant))
     }
 }
 
@@ -1801,27 +1852,67 @@ impl ProjectInstances {
 }
 
 /// One pad: the MIDI note it answers to and the member track backing it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A member has exactly one *plain* pad (`variant == 0`) and any number of
+/// *variant* pads that play it with saved parameter values on top
+/// (docs/rack-pad-variants-spec.md).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectRackPad {
     /// MIDI note this pad answers to. Unique within a rack.
     pub pad_note: i32,
-    /// Index into `ProjectTrackGroup::members`. A member backs at most one pad.
+    /// Index into `ProjectTrackGroup::members`.
     pub member: usize,
     /// Explicit drum role (docs/rack-groove-spec.md, "Pad roles"); `None`
     /// means "Standard": the role the standard layout infers from `pad_note`.
     /// It travels with the pad, so a note move or swap keeps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<PadRole>,
+    /// 0 = the member's plain pad; 1.. = a variant, unique per member. Steps
+    /// reference a variant by this id (`StepParam::Variant`), never by note,
+    /// so moving the pad keeps its steps.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub variant: u32,
+    /// Display name of a variant ("tight"); `None` shows the pad note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Instrument param name -> value (the param's own units) this pad
+    /// layers over the patch. Keyed by name so values survive param
+    /// reordering; a name the instrument lacks is kept but ignored.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub values: BTreeMap<String, f32>,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 impl ProjectRackPad {
-    /// A pad with no explicit role.
+    /// A plain pad with no explicit role.
     pub const fn new(pad_note: i32, member: usize) -> Self {
         Self {
             pad_note,
             member,
             role: None,
+            variant: 0,
+            name: None,
+            values: BTreeMap::new(),
         }
+    }
+
+    /// A variant pad of `member` with no values yet.
+    pub const fn new_variant(pad_note: i32, member: usize, variant: u32) -> Self {
+        Self {
+            pad_note,
+            member,
+            role: None,
+            variant,
+            name: None,
+            values: BTreeMap::new(),
+        }
+    }
+
+    /// The member's plain pad (as opposed to a variant).
+    pub fn is_plain(&self) -> bool {
+        self.variant == 0
     }
 
     /// The explicit role, else the standard layout's for `pad_note`.
@@ -1886,8 +1977,36 @@ impl ProjectRackConfig {
         self.pads.iter().position(|pad| pad.pad_note == pad_note)
     }
 
+    /// The member's plain pad (variant 0). Variant pads are not the
+    /// member's pad for routing, choke or arming purposes.
     pub fn pad_index_for_member(&self, member: usize) -> Option<usize> {
-        self.pads.iter().position(|pad| pad.member == member)
+        self.pad_index_for_variant(member, 0)
+    }
+
+    /// The pad playing `member` with variant `variant` (0 = plain pad).
+    pub fn pad_index_for_variant(&self, member: usize, variant: u32) -> Option<usize> {
+        self.pads
+            .iter()
+            .position(|pad| pad.member == member && pad.variant == variant)
+    }
+
+    /// The member's variant pads (not its plain pad), in pad order.
+    pub fn variant_pads_of(&self, member: usize) -> impl Iterator<Item = &ProjectRackPad> {
+        self.pads
+            .iter()
+            .filter(move |pad| pad.member == member && !pad.is_plain())
+    }
+
+    /// The id a new variant of `member` gets: one past its highest, so an
+    /// id is never handed out while a pad still holds it.
+    pub fn next_variant_id(&self, member: usize) -> u32 {
+        self.pads
+            .iter()
+            .filter(|pad| pad.member == member)
+            .map(|pad| pad.variant)
+            .max()
+            .unwrap_or(0)
+            + 1
     }
 
     /// Lowest pad note no pad answers to yet, or `None` once every note in the
@@ -1959,11 +2078,15 @@ impl ProjectRackConfig {
         Some(pad)
     }
 
-    /// A member left `group.members` at `member_position`: drop its pad (if it
-    /// had one) and shift every later pad's member index down to match the
-    /// compacted `members` vec.
+    /// A member left `group.members` at `member_position`: drop its pads (the
+    /// plain one and every variant) and shift every later pad's member index
+    /// down to match the compacted `members` vec.
     pub fn remap_after_member_removed(&mut self, member_position: usize) {
-        if let Some(pad_index) = self.pad_index_for_member(member_position) {
+        while let Some(pad_index) = self
+            .pads
+            .iter()
+            .position(|pad| pad.member == member_position)
+        {
             self.remove_pad(pad_index);
         }
         for pad in &mut self.pads {
@@ -1974,8 +2097,9 @@ impl ProjectRackConfig {
     }
 
     /// Enforces the rack invariants against a member count: pads point at live
-    /// members, `pad_note` is inside the pad domain and unique, and a member
-    /// backs at most one pad. Choke groups stay parallel to the surviving pads.
+    /// members, `pad_note` is inside the pad domain and unique, and
+    /// `(member, variant)` is unique (one plain pad per member, any number of
+    /// variants). Choke groups stay parallel to the surviving pads.
     ///
     /// The domain check migrates projects saved when pad notes spanned 0..127
     /// (before eseq-4b5.15 shrank the domain to C1..D#8): a pad at a note no
@@ -1989,7 +2113,7 @@ impl ProjectRackConfig {
     pub fn sanitize(&mut self, member_count: usize) {
         self.choke_groups.resize(self.pads.len(), None);
         let mut seen_notes: Vec<i32> = Vec::with_capacity(self.pads.len());
-        let mut seen_members: Vec<usize> = Vec::with_capacity(self.pads.len());
+        let mut seen_members: Vec<(usize, u32)> = Vec::with_capacity(self.pads.len());
         let mut keep: Vec<bool> = Vec::with_capacity(self.pads.len());
         // Parallel to the surviving pads: the pad sat outside the current pad
         // domain and needs a fresh in-domain note once the survivors are known.
@@ -2000,13 +2124,13 @@ impl ProjectRackConfig {
             // Out-of-domain notes are about to be replaced, so they cannot
             // collide with anything; only in-domain notes must be unique.
             let valid = pad.member < member_count
-                && !seen_members.contains(&pad.member)
+                && !seen_members.contains(&(pad.member, pad.variant))
                 && (!in_domain || !seen_notes.contains(&pad.pad_note));
             if valid {
                 if in_domain {
                     seen_notes.push(pad.pad_note);
                 }
-                seen_members.push(pad.member);
+                seen_members.push((pad.member, pad.variant));
             }
             keep.push(valid);
             needs_note.push(valid && !in_domain);
@@ -5348,6 +5472,7 @@ mod tests {
                         delay_steps: Some(3),
                         quantize: Some(crate::graph::ProjectGraphQuantizeOverride::Off),
                         route: Some(crate::graph::ProjectGraphRouteOverride::Track(1)),
+                        route_variant: None,
                         seed_from: Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0])),
                         seed_on_reset: None,
                         duration: None,
@@ -6203,6 +6328,83 @@ mod tests {
     /// Pad roles (eseq-groove.10): an explicit role round-trips on its pad, a
     /// Standard pad writes no `role` key, and a project saved before roles
     /// loads with every pad Standard (its role inferred from its note).
+    #[test]
+    fn rack_pad_variants_round_trip_and_plain_pads_serialize_unchanged() {
+        let mut project = sample_project();
+        let mut tight = ProjectRackPad::new_variant(DRUM_RACK_FIRST_PAD_NOTE + 2, 0, 1);
+        tight.name = Some("tight".to_string());
+        tight.values.insert("decay".to_string(), 0.1);
+        project.groups = vec![ProjectTrackGroup {
+            id: 3,
+            name: "Kit".to_string(),
+            color: [0.4, 0.2, 0.6],
+            collapsed: false,
+            members: vec![0],
+            bus_id: 7,
+            rack: Some(ProjectRackConfig {
+                pads: vec![ProjectRackPad::new(DRUM_RACK_FIRST_PAD_NOTE, 0), tight.clone()],
+                choke_groups: vec![None, None],
+                ..Default::default()
+            }),
+            rack_members: Vec::new(),
+        }];
+        let json = serde_json::to_string(&project).expect("serialize project");
+        assert_eq!(json.matches("\"variant\"").count(), 1, "plain pads omit it: {json}");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        let rack = restored.groups[0].rack.as_ref().expect("rack");
+        assert!(rack.pads[0].is_plain());
+        assert_eq!(rack.pads[1], tight);
+        assert_eq!(rack.pad_index_for_member(0), Some(0), "the plain pad is the member's pad");
+        assert_eq!(rack.pad_index_for_variant(0, 1), Some(1));
+        assert_eq!(rack.variant_pads_of(0).count(), 1);
+        assert_eq!(rack.next_variant_id(0), 2);
+    }
+
+    #[test]
+    fn rack_sanitize_keeps_variants_and_dedups_member_variant_pairs() {
+        let mut rack = ProjectRackConfig::default();
+        rack.push_pad(ProjectRackPad::new(DRUM_RACK_FIRST_PAD_NOTE, 0));
+        rack.push_pad(ProjectRackPad::new_variant(DRUM_RACK_FIRST_PAD_NOTE + 1, 0, 1));
+        rack.push_pad(ProjectRackPad::new_variant(DRUM_RACK_FIRST_PAD_NOTE + 2, 0, 2));
+        // Duplicate (member, variant): dropped.
+        rack.push_pad(ProjectRackPad::new_variant(DRUM_RACK_FIRST_PAD_NOTE + 3, 0, 1));
+        // A second plain pad for member 0: dropped.
+        rack.push_pad(ProjectRackPad::new(DRUM_RACK_FIRST_PAD_NOTE + 4, 0));
+        rack.sanitize(1);
+        let notes: Vec<i32> = rack.pads.iter().map(|pad| pad.pad_note).collect();
+        assert_eq!(
+            notes,
+            vec![
+                DRUM_RACK_FIRST_PAD_NOTE,
+                DRUM_RACK_FIRST_PAD_NOTE + 1,
+                DRUM_RACK_FIRST_PAD_NOTE + 2
+            ]
+        );
+        assert_eq!(rack.choke_groups.len(), rack.pads.len());
+    }
+
+    #[test]
+    fn rack_member_removal_drops_its_variants_and_shifts_later_members() {
+        let mut rack = ProjectRackConfig::default();
+        rack.push_pad(ProjectRackPad::new(DRUM_RACK_FIRST_PAD_NOTE, 0));
+        rack.push_pad(ProjectRackPad::new_variant(DRUM_RACK_FIRST_PAD_NOTE + 1, 0, 1));
+        rack.push_pad(ProjectRackPad::new(DRUM_RACK_FIRST_PAD_NOTE + 2, 1));
+        rack.push_pad(ProjectRackPad::new_variant(DRUM_RACK_FIRST_PAD_NOTE + 3, 1, 1));
+        rack.remap_after_member_removed(0);
+        assert_eq!(rack.pads.len(), 2);
+        assert!(rack.pads.iter().all(|pad| pad.member == 0));
+        assert_eq!(rack.pad_index_for_variant(0, 1), Some(1));
+    }
+
+    #[test]
+    fn rack_with_only_a_variant_for_a_member_regains_a_plain_pad_on_repair() {
+        let mut rack = ProjectRackConfig::default();
+        rack.push_pad(ProjectRackPad::new_variant(DRUM_RACK_FIRST_PAD_NOTE, 0, 3));
+        assert_eq!(rack.map_unmapped_members(1), 1);
+        assert!(rack.pad_index_for_member(0).is_some());
+        assert!(rack.pad_index_for_variant(0, 3).is_some());
+    }
+
     #[test]
     fn rack_pad_roles_round_trip_and_old_projects_load_without_roles() {
         let mut project = sample_project();
@@ -8164,6 +8366,7 @@ mod tests {
                     name: "Kick".to_string(),
                     sound: Some(pad_sound("Kick", "samples/kick.wav")),
                     modulator: None,
+                    variants: Vec::new(),
                 },
                 ProjectKitPad {
                     pad_note: 42,
@@ -8172,6 +8375,7 @@ mod tests {
                     name: "Hat".to_string(),
                     sound: Some(pad_sound("Hat", "samples/hat.wav")),
                     modulator: None,
+                    variants: Vec::new(),
                 },
             ],
             bus_chain: Some(ProjectKitBusChain {

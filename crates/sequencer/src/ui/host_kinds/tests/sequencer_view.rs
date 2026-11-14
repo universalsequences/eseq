@@ -75,7 +75,8 @@ fn the_grid_binds_its_host_state_through_kinds_and_only_repaints_on_playback() {
     let steps = h.steps_of(t0);
     assert!(!steps.is_empty());
     for step in &steps {
-        for field in ["active", "selected", "held", "lock-kind", "variant-color"] {
+        // `held-pad`: held and the pad variant packed into one shader float.
+        for field in ["active", "selected", "held-pad", "lock-kind", "variant-color"] {
             assert!(
                 bound.contains(&(*step, field.to_string())),
                 "step {step:?}'s {field} is bound"

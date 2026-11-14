@@ -961,6 +961,7 @@ mod tests {
             delay_steps: None,
             quantize: None,
             route: Some(ProjectGraphRouteOverride::Track(route)),
+            route_variant: None,
             seed_from: None,
             seed_on_reset: None,
             duration: None,

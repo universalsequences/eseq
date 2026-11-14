@@ -107,6 +107,7 @@ fn expr_graph_chain_state(nodes: usize, steps: &[usize]) -> Arc<SequencerState> 
         delay_steps: None,
         quantize: None,
         route: None,
+        route_variant: None,
         seed_from: seed,
         seed_on_reset: None,
         duration: None,

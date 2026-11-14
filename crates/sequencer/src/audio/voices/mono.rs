@@ -99,6 +99,7 @@ mod tests {
             transpose: key as f32 - 60.0,
             velocity: 0.75,
             note_off: false,
+            variant: 0,
         }
     }
 

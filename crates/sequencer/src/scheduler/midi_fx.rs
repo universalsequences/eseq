@@ -1166,6 +1166,7 @@ pub(super) fn schedule_live_midi_fx(
                 chop: 1.0,
                 retrig: StepParam::Retrig.default_value(),
                 retrig_rate: StepParam::RetrigRate.default_value(),
+                variant: 0.0,
             };
             let print_overrides = state.device_print_override.values_for_track(track_idx);
             let event = MidiFxEvent {
@@ -1303,6 +1304,7 @@ pub(super) fn schedule_live_midi_fx(
                 chop: 1.0,
                 retrig: StepParam::Retrig.default_value(),
                 retrig_rate: StepParam::RetrigRate.default_value(),
+                variant: 0.0,
             };
             let print_overrides = state.device_print_override.values_for_track(track_idx);
             let event = MidiFxEvent {

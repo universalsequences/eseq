@@ -366,6 +366,9 @@ pub(super) fn render_audio_block(
             }
             enforce_mute_group_for_winning_track(data, kt.track, block_start_sample, 0);
             release_rack_choke_group_track_voices(data, kt.track, block_start_sample, 0);
+            if let Some(slot) = data.state.transport.trigger_variant.get(kt.track) {
+                slot.store(kt.variant, Ordering::Relaxed);
+            }
             if instrument_type == InstrumentType::Rack {
                 let snapshot = Arc::clone(&data.scheduler_snapshot);
                 let rack = snapshot
@@ -388,7 +391,7 @@ pub(super) fn render_audio_block(
                     resolve_snapshot_instrument_defaults(&data.scheduler_snapshot, kt.track);
                 let default_tensor_params =
                     resolve_live_instrument_tensor_defaults(&data.state, kt.track);
-                let key_locked_params = key_locked_live_instrument_params(
+                let mut key_locked_params = key_locked_live_instrument_params(
                     &data.state,
                     kt.track,
                     resolved_transpose,
@@ -396,6 +399,17 @@ pub(super) fn render_audio_block(
                     None,
                     &default_params,
                 );
+                // A live pad hit's variant (rack pad variants spec §4.2).
+                let pad_snapshot = Arc::clone(&data.scheduler_snapshot);
+                if let Some(overlay) = pad_snapshot.pad_variants.get(kt.track, kt.variant) {
+                    apply_live_pad_variant(
+                        &data.state,
+                        kt.track,
+                        &overlay.instrument,
+                        None,
+                        &mut key_locked_params,
+                    );
+                }
                 let locked_mono = data.scheduler_snapshot.tracks.get(kt.track)
                     .is_some_and(|track| track.instrument_slot.instrument_forces_mono(&key_locked_params));
                 let track_polyphonic = track_polyphonic && !locked_mono;

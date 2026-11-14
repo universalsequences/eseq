@@ -116,7 +116,8 @@ fn groove_source_lanes(
         ),
     };
     let mut lanes = Vec::with_capacity(rack.pads.len());
-    for pad in &rack.pads {
+    // One lane per member track: variant pads play on their member's lane.
+    for pad in rack.pads.iter().filter(|pad| pad.is_plain()) {
         let Some(&track) = group.members.get(pad.member) else {
             continue;
         };

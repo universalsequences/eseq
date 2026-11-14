@@ -80,6 +80,10 @@ pub(crate) struct LiveNoteTarget {
     /// record-as-heard stamp for this trigger (bead eseq-2awi); until then it
     /// holds the wall-clock press estimate as a fallback.
     stamped: bool,
+    /// The pad variant an armed-rack pad hit plays (rack pad variants spec
+    /// §5): recording writes it into the step. `None` for a chromatic
+    /// (armed-track) target, which leaves the step's variant alone.
+    variant: Option<u32>,
 }
 
 pub(crate) fn layout_node_by_id(
@@ -1775,16 +1779,28 @@ const FRONTIER_FALLBACK_WINDOW: std::time::Duration = std::time::Duration::from_
 /// pad by `pad_note`, the pad names a member track, and that track is
 /// triggered directly — no `ByPitch` slot matching, and unmapped notes are
 /// simply ignored.
+#[cfg(test)]
 fn armed_rack_pad_track(
     groups: &[sequencer::project::ProjectTrackGroup],
     armed_rack: Option<u64>,
     note: f32,
 ) -> Option<usize> {
+    armed_rack_pad_target(groups, armed_rack, note).map(|(track, _)| track)
+}
+
+/// [`armed_rack_pad_track`] plus the pad's variant (0 = plain pad), which the
+/// hit carries to the audio thread and into a recorded step
+/// (docs/rack-pad-variants-spec.md §4.2, §5).
+fn armed_rack_pad_target(
+    groups: &[sequencer::project::ProjectTrackGroup],
+    armed_rack: Option<u64>,
+    note: f32,
+) -> Option<(usize, u32)> {
     let group_id = armed_rack?;
     groups
         .iter()
         .find(|group| group.id == group_id)?
-        .rack_pad_track(note.round() as i32)
+        .rack_pad_target(note.round() as i32)
 }
 
 /// Intercept keyboard events for live recording.
@@ -2025,6 +2041,7 @@ fn live_note_on(
                     transpose: pitch.transpose_for_track(state, track),
                     position: press_record_position(state, track, press_time),
                     stamped: false,
+                    variant: None,
                 });
             }
         }
@@ -2033,8 +2050,8 @@ fn live_note_on(
     // pad's member track is triggered at base pitch. A note with no
     // pad is ignored; a member that is somehow armed as a track too
     // keeps its chromatic entry rather than sounding twice.
-    if let Some(track) =
-        armed_rack_pad_track(&app.groups, *armed_rack.lock().unwrap(), pad_note)
+    if let Some((track, variant)) =
+        armed_rack_pad_target(&app.groups, *armed_rack.lock().unwrap(), pad_note)
     {
         if !targets.iter().any(|t| t.track == track) {
             targets.push(LiveNoteTarget {
@@ -2042,6 +2059,7 @@ fn live_note_on(
                 transpose: 0.0,
                 position: press_record_position(state, track, press_time),
                 stamped: false,
+                variant: Some(variant),
             });
         }
     }
@@ -2062,6 +2080,7 @@ fn live_note_on(
             state.push_roll_command(sequencer::sequencer::RollCommand::NoteOn {
                 track: target.track,
                 transpose: target.transpose,
+                variant: target.variant,
             });
         } else {
             let sent = keyboard_tx.send(sequencer::sequencer::LiveInputEvent::Note(KeyboardTrigger {
@@ -2071,10 +2090,13 @@ fn live_note_on(
                 transpose: target.transpose,
                 velocity,
                 note_off: false,
+                variant: target.variant.unwrap_or(0),
             }));
             if sent.is_ok() {
                 if let Some(track) = app.track_registry.id_at(target.track) {
-                    app.retrospective.note_on(generation, track, target.transpose, velocity, press_time);
+                    app.retrospective.note_on(
+                        generation, track, target.transpose, target.variant, velocity, press_time,
+                    );
                 }
             }
         }
@@ -2168,6 +2190,7 @@ fn live_note_off(
                 state.push_roll_command(sequencer::sequencer::RollCommand::NoteOff {
                     track: target.track,
                     transpose: target.transpose,
+                    variant: target.variant,
                 });
             }
             // The audio note-off always goes out so a sounding voice
@@ -2179,6 +2202,7 @@ fn live_note_off(
                 transpose: target.transpose,
                 velocity: 0.0,
                 note_off: true,
+                variant: 0,
             }));
         }
         if roll_mode {
@@ -2218,6 +2242,7 @@ fn live_note_off(
                 transpose,
                 position,
                 stamped,
+                variant,
             } in &note.targets
             {
                 // Durations are in steps of the target track's OWN
@@ -2303,6 +2328,15 @@ fn live_note_off(
                     StepParam::Duration,
                     duration_steps,
                 );
+                // A pad hit records which pad it was (rack pad variants
+                // spec §5): one variant per step, the last hit wins.
+                if let Some(variant) = variant {
+                    state.pattern.step_data[track].set(
+                        local_step,
+                        StepParam::Variant,
+                        variant as f32,
+                    );
+                }
                 if !recorded_steps.contains(&(track, local_step)) {
                     recorded_steps.push((track, local_step));
                 }
@@ -2497,6 +2531,7 @@ mod live_keyboard_tests {
                     phase: 0.0,
                 },
                 stamped: false,
+                variant: None,
             }],
         }]));
         let key = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
@@ -2520,12 +2555,14 @@ mod live_keyboard_tests {
                     transpose: 5.0,
                     position: RecordPosition { step: 9, phase: 0.9 },
                     stamped: false,
+                    variant: None,
                 },
                 LiveNoteTarget {
                     track: 1,
                     transpose: 5.0,
                     position: RecordPosition { step: 9, phase: 0.9 },
                     stamped: false,
+                    variant: None,
                 },
             ],
         }]));
@@ -2591,6 +2628,7 @@ mod live_keyboard_tests {
                 phase: 0.9,
             },
             stamped: false,
+            variant: None,
         };
         let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
             generation: 0,

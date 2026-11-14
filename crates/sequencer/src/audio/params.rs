@@ -624,6 +624,61 @@ pub(super) fn key_locked_snapshot_instrument_params(
     params
 }
 
+/// Layer a hit's pad variant (docs/rack-pad-variants-spec.md §4) over voice
+/// params that already carry the key locks: precedence is key lock → pad
+/// variant → step p-lock, so a param with a valid step p-lock on `step_idx`
+/// keeps it. A value whose param identity no longer matches the live slot
+/// (an instrument swap mid-flight) is skipped rather than applied to
+/// whatever param now sits at that index.
+pub(super) fn apply_live_pad_variant(
+    state: &SequencerState,
+    track_idx: usize,
+    variant: &[crate::sequencer::pad_variants::PadVariantParam],
+    step_idx: Option<usize>,
+    params: &mut ScheduledInstrumentParams,
+) {
+    let Some(slot) = state.pattern.instrument_slots.get(track_idx) else {
+        return;
+    };
+    for entry in variant {
+        if entry.identity.is_none() || slot.param_node_id(entry.param_idx) != entry.identity {
+            continue;
+        }
+        if live_step_has_valid_plock(slot, step_idx, entry.param_idx) {
+            continue;
+        }
+        let Some((target, idx, span)) = live_param_route(slot, entry.param_idx) else {
+            continue;
+        };
+        upsert_instrument_param(params, target, idx, span, entry.value);
+    }
+}
+
+/// [`apply_live_pad_variant`] for a rack slot's snapshot instrument.
+pub(super) fn apply_snapshot_pad_variant(
+    slot: &EffectSlotSnapshot,
+    variant: &[crate::sequencer::pad_variants::PadVariantParam],
+    step_idx: Option<usize>,
+    params: &mut ScheduledInstrumentParams,
+) {
+    for entry in variant {
+        let Some(raw_idx) = slot.node_param_idx(entry.param_idx) else {
+            continue;
+        };
+        let identity = slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx);
+        if identity.is_none() || identity != entry.identity {
+            continue;
+        }
+        if snapshot_step_has_valid_plock(slot, step_idx, entry.param_idx) {
+            continue;
+        }
+        let Some((target, idx, span)) = snapshot_param_route(slot, entry.param_idx) else {
+            continue;
+        };
+        upsert_instrument_param(params, target, idx, span, entry.value);
+    }
+}
+
 pub(super) fn resolve_live_instrument_defaults(
     state: &SequencerState,
     track_idx: usize,

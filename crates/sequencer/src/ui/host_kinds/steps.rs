@@ -245,6 +245,7 @@ pub(super) fn sync_steps(
         if param.is_none() {
             fill_track_held_steps(state, track, num_steps, &mut diff.held);
         }
+        let held_pad = STEP_VALUES[slot] == f::STEP_HELD_PAD;
         let last = &mut diff.values[slot];
         let fresh = !primed || last.len() != num_steps;
         last.resize(num_steps, f64::NAN);
@@ -253,6 +254,15 @@ pub(super) fn sync_steps(
                 Some(param) => pusher
                     .sources
                     .shown_step_param(track, step, param, print_step),
+                None if held_pad => {
+                    let variant = pusher.sources.shown_step_param(
+                        track,
+                        step,
+                        StepParam::Variant,
+                        print_step,
+                    );
+                    f64::from(u8::from(diff.held[step])) + 2.0 * variant.round().max(0.0)
+                }
                 None => f64::from(u8::from(diff.held[step])),
             };
             if fresh || *previous != value {

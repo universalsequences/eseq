@@ -7418,6 +7418,68 @@ mod tests {
         graph.process_block();
     }
 
+    /// docs/rack-pad-variants-spec.md: a variant pad is one more pad on a
+    /// member; its value drag on one param is one undo entry; undo/redo
+    /// replays the pad map and the runtime follows it.
+    #[test]
+    fn pad_variant_edits_record_coalesce_and_publish_the_runtime() {
+        let graph = TestLiveGraph::new("drum-rack-pad-variant-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Kit".to_string()))
+            .expect("drum rack should be created");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("kick pad");
+        let rack_index = app.groups.iter().position(|group| group.id == group_id).expect("rack");
+
+        let variant = app.add_rack_pad_variant(group_id, kick, 38).expect("variant pad");
+        assert_eq!(variant, 1);
+        assert_eq!(app.groups[rack_index].rack_pad_target(38), Some((kick, 1)));
+        assert_eq!(app.groups[rack_index].rack_pad_target(36), Some((kick, 0)));
+        assert!(
+            app.add_rack_pad_variant(group_id, kick, 36).is_err(),
+            "an occupied note is refused"
+        );
+        assert!(app.set_rack_pad_variant_value(group_id, 36, "gain", Some(0.5)).is_err(),
+            "the plain pad plays the patch");
+
+        let undo_before = app.history.undo_len();
+        for value in [0.2, 0.4, 0.6] {
+            app.set_rack_pad_variant_value(group_id, 38, "gain", Some(value)).expect("value");
+        }
+        crate::app::edit::finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), undo_before + 1, "one drag, one entry");
+        let published = app.state.rack_pad_variants();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].track, kick);
+        assert_eq!(published[0].variant, 1);
+        assert_eq!(published[0].values, vec![("gain".to_string(), 0.6)]);
+
+        app.rename_rack_pad_variant(group_id, 38, Some(" tight ".to_string())).expect("rename");
+        let pad = |app: &App| {
+            let rack = app.groups[rack_index].rack.as_ref().unwrap();
+            rack.pads[rack.pad_index_for_note(38).unwrap()].clone()
+        };
+        assert_eq!(pad(&app).name.as_deref(), Some("tight"));
+
+        // Undo the rename, then the drag: the variant is back to no values.
+        crate::app::edit::undo(&mut app);
+        assert_eq!(pad(&app).name, None);
+        crate::app::edit::undo(&mut app);
+        assert!(pad(&app).values.is_empty());
+        assert_eq!(app.state.rack_pad_variants()[0].values, Vec::new());
+        crate::app::edit::redo(&mut app);
+        assert_eq!(pad(&app).values.get("gain"), Some(&0.6));
+
+        app.remove_rack_pad_variant(group_id, 38).expect("remove");
+        assert_eq!(app.groups[rack_index].rack_pad_target(38), None);
+        assert!(app.state.rack_pad_variants().is_empty());
+        assert!(app.remove_rack_pad_variant(group_id, 36).is_err(), "plain pads stay");
+        crate::app::edit::undo(&mut app);
+        assert_eq!(app.groups[rack_index].rack_pad_target(38), Some((kick, 1)));
+        graph.process_block();
+    }
+
     #[test]
     fn drum_rack_rejects_duplicate_pad_notes_and_double_booked_members() {
         let graph = TestLiveGraph::new("drum-rack-invariant-test", 64, 44_100, 2);
@@ -9696,6 +9758,7 @@ mod tests {
                     delay_steps: None,
                     quantize: None,
                     route: Some(crate::graph::ProjectGraphRouteOverride::Track(2)),
+                    route_variant: None,
                     seed_from: None,
                     seed_on_reset: None,
                     duration: None,
@@ -9993,6 +10056,7 @@ mod tests {
             delay_steps: None,
             quantize: None,
             route: Some(ProjectGraphRouteOverride::Track(route)),
+            route_variant: None,
             seed_from: None,
             seed_on_reset: None,
             duration: None,
@@ -10114,6 +10178,7 @@ mod tests {
             name: "Hat".to_string(),
             sound: kit.pads[0].sound.clone(),
             modulator: None,
+            variants: Vec::new(),
         };
         kit.pads.retain(|pad| pad.pad_note == 36);
         kit.pads.push(new_pad);

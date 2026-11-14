@@ -405,6 +405,7 @@
             chop: 1.0,
             retrig: crate::sequencer::StepParam::Retrig.default_value(),
             retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+            variant: 0.0,
         }
     }
 
@@ -866,6 +867,7 @@
                 delay_steps: None,
                 quantize: None,
                 route: Some(ProjectGraphRouteOverride::Track(route)),
+                route_variant: None,
                 seed_from: None,
                 seed_on_reset: None,
                 duration: None,
@@ -1405,6 +1407,7 @@
             chop: 1.0,
             retrig: crate::sequencer::StepParam::Retrig.default_value(),
             retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+            variant: 0.0,
         };
         let mut chord = ScheduledChordData {
             live_origins: [None; crate::audio::MAX_VOICES],
@@ -2030,6 +2033,7 @@
                 chop: 1.0,
                 retrig: crate::sequencer::StepParam::Retrig.default_value(),
                 retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                variant: 0.0,
             },
             chord: vec![transpose],
             chord_durations: vec![1.0],
@@ -3303,7 +3307,7 @@
                             sequencer_id: published.id,
                             sequencer_name: published.name.clone(),
                             owner_rack: None,
-                            node_intrinsics: vec![ProjectGraphNodeIntrinsicOverride {
+                            node_intrinsics: vec![ProjectGraphNodeIntrinsicOverride { route_variant: None,
                                 group: "nrn".to_string(),
                                 instance: 0,
                                 resolution: None,
@@ -9181,6 +9185,7 @@
                     delay_steps: None,
                     quantize: None,
                     route: None,
+                    route_variant: None,
                     seed_from: seed,
                     seed_on_reset: None,
                     duration: None,
@@ -9402,6 +9407,7 @@
                     delay_steps: None,
                     quantize: None,
                     route: None,
+                    route_variant: None,
                     seed_from: seed,
                     seed_on_reset: None,
                     duration: None,
@@ -9621,6 +9627,7 @@
                     delay_steps: None,
                     quantize: None,
                     route: None,
+                    route_variant: None,
                     seed_from: seed,
                     seed_on_reset: None,
                     duration: None,
@@ -9931,6 +9938,7 @@
                     delay_steps: None,
                     quantize: None,
                     route: None,
+                    route_variant: None,
                     seed_from: seed,
                     seed_on_reset: None,
                     duration: None,
@@ -10326,6 +10334,7 @@
                     delay_steps: None,
                     quantize: None,
                     route: None,
+                    route_variant: None,
                     seed_from: seed,
                     seed_on_reset: None,
                     duration: None,
@@ -10541,6 +10550,7 @@
                         delay_steps: None,
                         quantize: None,
                         route: None,
+                        route_variant: None,
                         seed_from: None,
                         seed_on_reset: None,
                         duration: None,
@@ -10758,6 +10768,7 @@
                         delay_steps: None,
                         quantize: None,
                         route: Some(ProjectGraphRouteOverride::Track(1)),
+                        route_variant: None,
                         seed_from: None,
                         seed_on_reset: None,
                         duration: None,
@@ -10942,6 +10953,7 @@
                     delay_steps: None,
                     quantize: None,
                     route: None,
+                    route_variant: None,
                     seed_from: seed,
                     seed_on_reset: None,
                     duration: None,
@@ -11137,6 +11149,7 @@
                         delay_steps: None,
                         quantize: None,
                         route: None,
+                        route_variant: None,
                         seed_from: Some(ProjectGraphSeedFrom::Tracks(Vec::new())),
                         seed_on_reset: None,
                         duration: None,
@@ -13321,6 +13334,7 @@
                 chop: 1.0,
                 retrig: crate::sequencer::StepParam::Retrig.default_value(),
                 retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                variant: 0.0,
             },
             Vec::new(),
             ScheduledInstrumentParams::new(),
@@ -13385,6 +13399,7 @@
                 chop: 1.0,
                 retrig: crate::sequencer::StepParam::Retrig.default_value(),
                 retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                variant: 0.0,
             },
             Vec::new(),
             ScheduledInstrumentParams::new(),
@@ -13447,6 +13462,7 @@
                 chop: 1.0,
                 retrig: crate::sequencer::StepParam::Retrig.default_value(),
                 retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                variant: 0.0,
             },
             Vec::new(),
             ScheduledInstrumentParams::new(),
@@ -13505,6 +13521,7 @@
                 chop: 1.0,
                 retrig: crate::sequencer::StepParam::Retrig.default_value(),
                 retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                variant: 0.0,
             },
             Vec::new(),
             ScheduledInstrumentParams::new(),
@@ -13614,7 +13631,7 @@
         let note = |port, channel| KeyboardTrigger {
             generation: 0,
             source: Some(LiveNoteSource::Midi { port, channel, note: 60 }),
-            track: 0, transpose: 0.0, velocity: 0.8, note_off: false,
+            track: 0, transpose: 0.0, velocity: 0.8, note_off: false, variant: 0,
         };
         let a = note(0, 0);
         let b = note(1, 0);
@@ -13800,6 +13817,7 @@
                 delay_steps: None,
                 quantize: None,
                 route: None,
+                route_variant: None,
                 seed_from: Some(ProjectGraphSeedFrom::Tracks(Vec::new())),
                 seed_on_reset: Some(hot),
                 duration: None,
@@ -16576,6 +16594,7 @@
             scheduler.roll.apply_commands(&[RollCommand::NoteOn {
                 track: *track,
                 transpose: *transpose,
+                variant: None,
             }]);
         }
         (state, scheduler)
@@ -16713,6 +16732,7 @@
             scheduler.roll.apply_commands(&[RollCommand::NoteOff {
                 track: 0,
                 transpose: 3.0,
+                variant: None,
             }]);
             assert!(scheduler.roll.generation > generation_before);
             drive_roll_chunks(&state, &mut scheduler, &queue, 24_000, scheduled_until);
@@ -16740,8 +16760,9 @@
             scheduler.roll.apply_commands(&[RollCommand::NoteOn {
                 track: 0,
                 transpose: 3.0,
+                variant: None,
             }]);
-            assert_eq!(scheduler.roll.held[0].as_slice(), &[3.0, 7.0]);
+            assert_eq!(scheduler.roll.held[0].as_slice(), &[(3.0, None), (7.0, None)]);
             let queue = ScheduledEventQueue::<64>::new();
             drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
             let triggers = drain_roll_triggers(&queue);
@@ -16752,6 +16773,33 @@
         });
     }
 
+    /// docs/rack-pad-variants-spec.md: two variant pads of one member both
+    /// roll at transpose 0 but stay two voices, each hit naming its variant,
+    /// and the record feedback carries it into the step.
+    #[test]
+    fn rolled_pad_variants_hit_separately_and_record_their_variant() {
+        run_with_scheduler_stack(|| {
+            let (state, mut scheduler) = roll_test_state(&[]);
+            scheduler.roll.apply_commands(&[
+                RollCommand::NoteOn { track: 0, transpose: 0.0, variant: Some(1) },
+                RollCommand::NoteOn { track: 0, transpose: 0.0, variant: Some(2) },
+            ]);
+            assert_eq!(scheduler.roll.held[0].len(), 2, "two voices, not one");
+            let queue = ScheduledEventQueue::<64>::new();
+            drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+            let mut variants = Vec::new();
+            while let Some(event) = queue.pop_owned() {
+                if let ScheduledEventKind::ResolvedTrigger { resolved, .. } = event.kind {
+                    variants.push(resolved.variant as u32);
+                }
+            }
+            assert!(variants.contains(&1) && variants.contains(&2), "{variants:?}");
+            let recorded: Vec<Option<u32>> =
+                state.drain_roll_recorded_hits().iter().map(|hit| hit.variant).collect();
+            assert!(recorded.contains(&Some(1)) && recorded.contains(&Some(2)), "{recorded:?}");
+        });
+    }
+
     #[test]
     fn clear_all_empties_held_state_and_bumps_the_generation() {
         let mut roll = RollState::new();
@@ -16759,10 +16807,12 @@
             RollCommand::NoteOn {
                 track: 0,
                 transpose: 3.0,
+                variant: None,
             },
             RollCommand::NoteOn {
                 track: 2,
                 transpose: -5.0,
+                variant: None,
             },
         ]);
         assert!(roll.any_held());
@@ -16788,6 +16838,7 @@
             roll.apply_commands(&[RollCommand::NoteOn {
                 track: 0,
                 transpose: 0.0,
+                variant: None,
             }]);
             let queue = ScheduledEventQueue::<64>::new();
             let mut track_output_events = Vec::new();
@@ -16952,6 +17003,7 @@
             scheduler.roll.apply_commands(&[RollCommand::NoteOn {
                 track: 0,
                 transpose: 3.0,
+                variant: None,
             }]);
             drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, 5_800, frontier);
             let triggers = drain_roll_triggers(&queue);
@@ -16982,6 +17034,7 @@
             scheduler.roll.apply_commands(&[RollCommand::NoteOn {
                 track: 0,
                 transpose: 3.0,
+                variant: None,
             }]);
             drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, 1_001, frontier);
             let triggers = drain_roll_triggers(&queue);
@@ -17010,6 +17063,7 @@
             scheduler.roll.apply_commands(&[RollCommand::NoteOn {
                 track: 0,
                 transpose: 3.0,
+                variant: None,
             }]);
             drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, frontier, frontier);
             let triggers = drain_roll_triggers(&queue);
@@ -17046,6 +17100,7 @@
             scheduler.roll.apply_commands(&[RollCommand::NoteOn {
                 track: 0,
                 transpose: 3.0,
+                variant: None,
             }]);
             drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, 500, frontier);
             let triggers = drain_roll_triggers(&queue);
@@ -18226,6 +18281,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                     delay_steps: None,
                     quantize: None,
                     route: Some(ProjectGraphRouteOverride::Track(1)),
+                    route_variant: None,
                     seed_from: seed,
                     seed_on_reset: None,
                     duration: None,

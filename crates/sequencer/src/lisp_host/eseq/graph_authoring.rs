@@ -1021,7 +1021,7 @@ fn graph_node_edit_slots(
         edit.resolution.map(|v| Field::Resolution(Some(v))),
         edit.delay_steps.map(|v| Field::Delay(Some(v))),
         edit.quantize.map(|v| Field::Quantize(Some(v))),
-        edit.route.map(|v| Field::Route(Some(v))),
+        edit.route.map(|v| Field::Route(Some(v), None)),
         edit.seed_from.map(|v| Field::SeedFrom(Some(v))),
         edit.seed_on_reset.map(|v| Field::SeedOnReset(Some(v))),
         edit.duration.map(|v| Field::Duration(Some(v))),

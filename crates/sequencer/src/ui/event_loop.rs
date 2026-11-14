@@ -415,7 +415,7 @@ pub(crate) fn run_event_loop(
         prev_sound_binding_epoch: 0,
         palette_search_library: (0, 0),
         palette_search_engines: Vec::new(),
-        last_input_at: Instant::now(),
+        last_input_at: crate::loop_ctx::LastInputAt(Instant::now()),
         prev_delete_target_version: 0,
         prev_multi_track_selection: Vec::new(),
         prev_active_buffer_name: editor.active_buffer().name.clone(),
@@ -719,7 +719,7 @@ pub(crate) fn run_event_loop(
             let Some(event) = event else { break; };
             let event_started = Instant::now();
             input_batch.begin_event(event_started);
-            frame.last_input_at = event_started;
+            frame.last_input_at = crate::loop_ctx::LastInputAt(event_started);
             let mut live_key_consumed = false;
             match event {
                 BackendEvent::Quit => editor.request_quit(),
@@ -2475,7 +2475,7 @@ pub(crate) fn run_event_loop(
         // A held pointer is a drag that may only be resting.
         if !editor.palette_search_warm()
             && !gesture.pointer_down
-            && frame.last_input_at.elapsed() >= PALETTE_WARM_INPUT_QUIET
+            && frame.last_input_at.0.elapsed() >= PALETTE_WARM_INPUT_QUIET
             && !sequencer::lisp_host::preset_name_index_building()
         {
             editor.warm_palette_search();

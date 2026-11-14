@@ -74,6 +74,7 @@ fn live_scene_transpose_reaches_synth_and_preserves_held_note_identity() {
         let first = KeyboardTrigger {
             generation: 1, source: Some(LiveNoteSource::Key('s')), track: 0,
             transpose: 2.0, velocity: 0.7, note_off: false,
+            variant: 0,
         };
         tx.send(LiveInputEvent::Note(first)).unwrap();
         render(&mut data);
@@ -231,6 +232,7 @@ fn saved_drum_rack_live_notes_share_a_render_sample() {
                     transpose: 0.0,
                     velocity: 1.0,
                     note_off: false,
+                    variant: 0,
                 }))
                 .unwrap();
         }
@@ -268,6 +270,7 @@ fn saved_drum_rack_live_notes_share_a_render_sample() {
                     transpose: 0.0,
                     velocity: 0.0,
                     note_off: true,
+                    variant: 0,
                 }))
                 .unwrap();
         }

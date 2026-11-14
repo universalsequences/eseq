@@ -18,6 +18,7 @@
         instrument-mods-toggle-button
         instrument-sound-binding-badge
         instrument-keys-button
+        instrument-pads-button
         effect-mods-toggle-button
         effect-toggle-mods-view)
 
@@ -226,6 +227,14 @@
 (def instrument-keys-button ()
   (instrument-header-tab-button "keys" (= instrument-view.tab 1) 4.0
     (lambda (info) (do (set! instrument-view.tab 1) (set! instrument-view.mods-open false)))))
+
+;; The pads tab (docs/rack-pad-variants-spec.md §6.1): only on a drum-rack
+;; member, beside keys (a rack member can still be played chromatically).
+(def instrument-pads-button ()
+  (if (eseq.effects.pad-variants/pads-tab-available?)
+    (instrument-header-tab-button "pads" (= instrument-view.tab 2) 4.0
+      (lambda (info) (do (set! instrument-view.tab 2) (set! instrument-view.mods-open false))))
+    (box :width 0 :height 0)))
 
 (def effect-toggle-mods-view (fx)
   (let ((chain (pf/fx-effect-chain-kind fx))

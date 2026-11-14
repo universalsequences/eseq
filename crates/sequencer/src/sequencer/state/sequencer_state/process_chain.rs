@@ -56,6 +56,31 @@ impl SequencerState {
     pub fn rack_memberships(&self) -> Vec<crate::graph::RackMembership> {
         self.rack_memberships.lock().unwrap().clone()
     }
+    /// Mirror of every rack member's pad variants (rack pad variants spec
+    /// §3.3). Publishes only when something changed.
+    pub fn set_rack_pad_variants(
+        &self,
+        variants: Vec<crate::sequencer::pad_variants::RackPadVariantRuntime>,
+    ) {
+        let changed = {
+            let mut current = self.rack_pad_variants.lock().unwrap();
+            let changed = **current != variants;
+            if changed {
+                *current = Arc::new(variants);
+            }
+            changed
+        };
+        if changed {
+            self.publish_pad_variants();
+        }
+    }
+
+    pub fn rack_pad_variants(
+        &self,
+    ) -> Arc<Vec<crate::sequencer::pad_variants::RackPadVariantRuntime>> {
+        Arc::clone(&self.rack_pad_variants.lock().unwrap())
+    }
+
     /// Mirror of every rack member's resolved groove (rack groove spec,
     /// "Scheduler snapshot"), read into every scheduler snapshot: the rack
     /// defaults plus each clip's own groove, which scenes pick among by the
