@@ -11998,6 +11998,45 @@ use panel_kinds_seed::*;
             other => panic!("expected move-rack-slot-effect command, got {other:?}"),
         }
 
+        // A track effect dropped into one of its own track's rack slots moves
+        // there (with its settings); it is not re-added from the library.
+        for (target, position, target_slot) in [
+            (r#"(dict :chain "rack" :track 0 :rack-slot 0 :slot 1)"#, "rack", Some(1.0)),
+            (r#"(dict :chain "append" :track 0 :rack-slot 0)"#, "append", None),
+        ] {
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    r#"(eseq.effects.drag-drop/drop-on-effect
+                        (dict
+                          :payload (dict :kind "audio-effect-instance"
+                                         :chain "audio"
+                                         :track 0
+                                         :rack-slot -1
+                                         :slot 7
+                                         :name "Filter")
+                          :target {target}))"#
+                ))
+                .expect("drop track effect into a rack slot");
+            let commands = editor.drain_host_commands();
+            assert_eq!(commands.len(), 1);
+            let eseqlisp::host::HostCommand::Custom { name, payload } = &commands[0] else {
+                panic!("expected move-track-effect-to-rack-slot, got {:?}", commands[0]);
+            };
+            assert_eq!(name, "move-track-effect-to-rack-slot");
+            let Value::Map(payload) = payload else {
+                panic!("move-track-effect-to-rack-slot payload should be a dict: {payload:?}");
+            };
+            let field = |key: &str| payload.get(key).map(|value| value.borrow().clone());
+            assert_eq!(field("track"), Some(Value::Number(0.0)));
+            assert_eq!(field("rack-slot"), Some(Value::Number(0.0)));
+            assert_eq!(field("source-slot"), Some(Value::Number(7.0)));
+            assert_eq!(field("position"), Some(Value::String(position.to_string())));
+            if let Some(target_slot) = target_slot {
+                assert_eq!(field("target-slot"), Some(Value::Number(target_slot)));
+            }
+        }
+
         editor
             .runtime_mut()
             .eval_str(

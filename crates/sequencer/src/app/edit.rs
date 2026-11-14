@@ -1409,6 +1409,96 @@ impl App {
         Ok(destination_slot)
     }
 
+    /// Move a track-chain effect into one of the same track's rack slots as
+    /// ONE undo step covering both chains. A failure anywhere restores both.
+    pub fn move_track_effect_to_rack_slot_recorded(
+        &mut self,
+        track: usize,
+        source_slot: usize,
+        rack_slot: usize,
+        target_slot: Option<usize>,
+    ) -> Result<usize, String> {
+        finish_active_gesture(self);
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let rack_slot_id = self.device_registry.rack_slot(track_id, rack_slot);
+        let track_before = self.capture_track_effect_chain_state(track, None)?;
+        let rack_before = self.capture_rack_effect_chain_state(track, rack_slot, None)?;
+        // Neither sync edit below rebinds device identities, so the surviving
+        // effects are recognised by node rather than by chain position.
+        let track_ids_by_node = track_before.instances.iter().enumerate()
+            .map(|(offset, instance)| {
+                let node_id = self.state.pattern.effect_chains[track][BUILTIN_SLOT_COUNT + offset]
+                    .node_id
+                    .load(Ordering::Relaxed);
+                (node_id, instance.id)
+            })
+            .collect::<HashMap<_, _>>();
+        let rack_ids_by_node = rack_before.instances.iter().enumerate()
+            .map(|(slot, instance)| {
+                (rack_before.patterns.live.effect_slots[slot].node_id, instance.id)
+            })
+            .collect::<HashMap<_, _>>();
+
+        let applied = (|| {
+            let effect_slot = self.move_track_effect_to_rack_slot_sync(
+                track, source_slot, rack_slot, target_slot,
+            )?;
+            let track_after_move =
+                self.capture_track_effect_chain_state(track, Some(&track_ids_by_node))?;
+            self.remap_recorded_track_effect_edit(track, &track_before, &track_after_move)?;
+            self.revalidate_live_macro_targets();
+            self.state.publish_scheduler_snapshot();
+            let track_after = self.capture_track_effect_chain_state(track, None)?;
+            let rack_after =
+                self.capture_rack_effect_chain_state(track, rack_slot, Some(&rack_ids_by_node))?;
+            Ok::<_, String>((effect_slot, track_after, rack_after))
+        })();
+        let (effect_slot, track_after, rack_after) = match applied {
+            Ok(applied) => applied,
+            Err(error) => {
+                // Undo order: take the effect back out of the rack slot before
+                // the track chain gets it again.
+                let rollback = (|| {
+                    let current = self.capture_rack_effect_chain_state(
+                        track, rack_slot, Some(&rack_ids_by_node),
+                    )?;
+                    self.restore_rack_effect_chain_state(track, rack_slot, &current, &rack_before)?;
+                    let current =
+                        self.capture_track_effect_chain_state(track, Some(&track_ids_by_node))?;
+                    self.restore_track_effect_chain_state(track, &current, &track_before)
+                })();
+                return match rollback {
+                    Ok(()) => Err(error),
+                    Err(rollback) => Err(format!(
+                        "Moving the effect into the rack slot failed ({error}); restoring both chains also failed ({rollback})"
+                    )),
+                };
+            }
+        };
+
+        let track_patch = EffectChainPatch {
+            track: track_id, before: track_before, after: track_after,
+        };
+        let rack_patch = RackEffectChainPatch {
+            track: track_id, rack_slot: rack_slot_id, before: rack_before, after: rack_after,
+        };
+        let retained_bytes = std::mem::size_of::<Vec<EditPatch>>()
+            + track_patch.retained_bytes() + rack_patch.retained_bytes();
+        // Replay removes the track effect before the rack slot gains it, and
+        // undo runs in reverse, so the effect never exists in both chains.
+        self.history.commit(
+            "Move audio effect into rack slot",
+            None,
+            EditPatch::Composite(vec![
+                EditPatch::EffectChain(track_patch),
+                EditPatch::RackEffectChain(rack_patch),
+            ]),
+            retained_bytes,
+        );
+        Ok(effect_slot)
+    }
+
     pub fn apply_recorded_track_effect_chain_mutation<T>(
         &mut self,
         track: usize,
