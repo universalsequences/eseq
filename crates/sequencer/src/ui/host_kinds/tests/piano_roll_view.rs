@@ -123,9 +123,11 @@ fn the_view_scrolls_zooms_and_fits_its_notes() {
            (match name \"start\" view.start \"duration\" view.duration
                        \"lane-scroll\" view.lane-scroll \"lane-height\" view.lane-height))",
     );
-    // Nothing to fit: C4 centred over the visible lanes.
+    // Nothing to fit: C4 centred over the visible lanes. The 11.5-row pane
+    // less the 2-row header, the 1-row footer and the 3-row automation lane
+    // leaves 5.5 rows: 11 half-row lanes, so lane 48.5 centres at scroll 43.
     h.eval_pr("(eseq.piano-roll/piano-roll-request-fit-for-track 0)");
-    assert_eq!(field(&mut h, "lane-scroll"), number(44.0));
+    assert_eq!(field(&mut h, "lane-scroll"), number(43.0));
     let action = |h: &mut Harness, event: &str| {
         h.eval_pr(&format!(
             "(eseq.piano-roll/piano-roll-action (dict {event}))"
@@ -136,7 +138,7 @@ fn the_view_scrolls_zooms_and_fits_its_notes() {
         &mut h,
         ":type :scroll-view :lane-scroll 1000 :delta-lanes 0",
     );
-    assert_eq!(field(&mut h, "lane-scroll"), number(88.0));
+    assert_eq!(field(&mut h, "lane-scroll"), number(86.0));
     // A created or resized note's length is the next new note's.
     action(&mut h, ":type :finish-create-item :start 20 :end 22.5");
     h.show_all();
@@ -161,7 +163,7 @@ fn the_view_scrolls_zooms_and_fits_its_notes() {
     h.eval_pr("(set! view.lane-height 0.5) (eseq.piano-roll/piano-roll-request-fit)");
     assert_eq!(field(&mut h, "start"), number(1.0));
     assert_eq!(field(&mut h, "duration"), number(16.0));
-    assert_eq!(field(&mut h, "lane-scroll"), number(36.0));
+    assert_eq!(field(&mut h, "lane-scroll"), number(35.0));
     assert_eq!(h.eval_pr("view.fit"), Value::Nil, "applied");
 }
 
@@ -215,7 +217,7 @@ fn a_fit_for_another_track_waits_for_its_notes() {
     assert_eq!(h.eval_pr("view.fit"), Value::Nil, "applied");
     assert_eq!(
         h.eval_pr("(list view.start view.duration view.lane-scroll)"),
-        h.eval_pr("(list 11 4 44)")
+        h.eval_pr("(list 11 4 43)")
     );
 }
 
@@ -562,7 +564,7 @@ fn a_note_drag_frame_bumps_no_epoch_but_every_view_follows() {
     let parts: Vec<f64> = parts.iter().map(|p| num(p.borrow().clone())).collect();
     let (id, lane) = (parts[0], parts[1]);
     let step_active = |h: &mut Harness, step: usize| {
-        h.eval_pr(&format!("(let ((s (nth (track 0).steps {step}))) s.active)"))
+        h.eval_pr(&format!("(let ((t0 (track 0)) (s (nth t0.steps {step}))) s.active)"))
     };
     assert_eq!(step_active(&mut h, 2), Value::Bool(true));
     let epochs = |h: &Harness| {
@@ -571,6 +573,11 @@ fn a_note_drag_frame_bumps_no_epoch_but_every_view_follows() {
             h.shared.fx_epoch.load(Ordering::Relaxed),
         )
     };
+    // Settle first: opening the piano roll queues commands, and the first
+    // tick bumps the fx epoch once for its own bookkeeping (the theme tint,
+    // the sound binding). Neither belongs to the drag.
+    h.drain();
+    h.tick();
     let before = epochs(&h);
     h.eval_pr(&format!(
         "(eseq.piano-roll/piano-roll-action (dict :type :move-items-absolute :ids (list {id}) :anchor-id {id} :start 5 :lane {lane}))"

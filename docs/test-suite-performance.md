@@ -11,8 +11,8 @@ Full workspace, `cargo nextest run --workspace --no-fail-fast`, 8,040 tests in
 | optimized dev profile | 5m50s | 6m09s | 8 GB |
 | + preset-index walk fix | **3m41s** | same | same |
 
-All three runs fail the same 20 tests (listed at the end of this section); the
-profile change moved no test between pass and fail.
+All three runs failed the same 20 tests; the profile change moved no test
+between pass and fail. They are fixed, see the end of this section.
 
 ### What was wrong
 
@@ -66,18 +66,29 @@ UI-boot tests are 82% of it. The slowest test is
 `graph_demos_view::every_graph_demo_loads_project_owned_and_rack_owned` at
 22 s; nothing else exceeds 9 s.
 
-### Failing in this working tree (uncommitted changes present)
+### The failures, resolved (2026-11-14)
 
-`eseqlisp`: `lang::sdf_codegen::tests::content_shader_corpus_emits_valid_wgsl`,
-`tests::import_eseq_effects_loads_factory_ui_modules`.
-`metal_seq`: `host_kinds::tests::generator::` (2), `host_kinds::tests::graph::`
-(8), `host_kinds::tests::panels_view::editing_a_param_repaints_without_rebuilding_the_panels`,
-`host_kinds::tests::piano_roll_view::` (3), and four `state_values::tests`
-(`macro_mapping_mode_selects_device_params_and_marks_owned_controls_read_only`,
-`metal_seq_browser_default_layout_has_one_relocated_search_input`,
-`param_knob_right_click_offers_clear_plock_actions_only_for_locked_params`,
-`print_latch_and_plock_presence_reach_the_param_wrappers`). Not checked
-against clean HEAD.
+The 20 failures above were 10 once the other in-flight work was committed
+(`c616dc47c`), and the suite is now green: 8,042 passed, 78 skipped.
+
+- `ui/panel-header.lisp` used `eseq.materials/color-cell` without importing
+  `eseq.materials` (5 tests; it only loaded when something else had imported
+  the module first).
+- Folded effect panels were keyed by the device's `did`, which is a
+  placeholder until the device's first recorded edit. The first knob move on
+  an effect therefore changed the key and re-ran the whole `*fx*` body
+  mid-drag (`panels_view::editing_a_param_repaints_without_rebuilding_the_panels`).
+  The fold state now holds the device handle.
+- Three `piano_roll_view` tests carried lane-scroll constants for a 2-row
+  lane footer (it is 1 row), one used `(track 0).steps`, which the reader
+  does not parse, and its epoch baseline was sampled before the harness had
+  settled.
+- `metal_seq_browser_default_layout_has_one_relocated_search_input` still
+  expected the search header beside the tab rail; `7deed0c4d` moved it above.
+
+Seen once, not reproduced: `agent::tools::tests::effect_examples_are_named_by_folder_and_include_ui`
+read a `__test-ambiguous-*` folder that a `lisp_host` test creates and removes
+under the shared `.local/instruments`.
 
 ## Historical baseline (2026-08-20)
 

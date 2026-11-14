@@ -3,9 +3,11 @@
 ;; *processes* dock's instance name) and muted secondary text. One home so
 ;; *step* and the dock stay identical (eseq-waa9.22).
 ;;
-;; No imports: a leaf both eseq.effects.track-panels and
-;; eseq.processes-buffer import.
+;; Nearly a leaf: both eseq.effects.track-panels and eseq.processes-buffer
+;; import it, and it imports only the shader materials its pill is made of.
 (module eseq.panel-header)
+
+(import eseq.materials)
 
 (export pill chip note)
 

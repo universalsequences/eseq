@@ -142,7 +142,7 @@
       (material :color :fg))))
 
 (def fx-collapse-button (fx)
-  (box :key (str "fx-collapse-" (get fx :collapse-key))
+  (box :key (str "fx-collapse-" (fx-enabled-toggle-key fx))
     :debug-name "fx-collapse-button"
     :width 1.55 :height 0.99 :padding 0 :h-align :center :v-align :center
     (v-stack :gap 0 :align :center

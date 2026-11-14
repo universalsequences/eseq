@@ -279,10 +279,13 @@
 
 ;; ── Effects ──
 
-;; Effect `d`'s stable identity, as the key its folded panel is remembered
-;; by (eseq.effects.state/device-collapsed?): its owner's id and its own.
-(def collapse-key (d)
-  (str d.role ":" (if d.bus (str "b" d.bus.bid) (str "t" d.track.tid)) ":" d.did))
+;; What effect `d`'s folded panel is remembered by
+;; (eseq.effects.state/device-collapsed?): the device itself. Not a string
+;; built from `d.did`: a device's did is a placeholder until its first
+;; recorded edit binds its identity, so a key that read it changed on the
+;; first knob move and re-ran the whole effects pane mid-drag. The handle
+;; stays on its device through that bind and through a reorder.
+(def collapse-key (d) d)
 
 ;; The effect panel's sources and modulators.
 (def with-sources (fx d make)

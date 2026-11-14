@@ -6304,6 +6304,29 @@ fn edit_menu_copy_paste_delete_reach_a_focused_patcher() {
     );
 }
 
+/// The clipboard chord off macOS is Ctrl-Shift-C/V, which is what Edit >
+/// Copy/Paste send there; the patcher has to bind it on every platform.
+#[test]
+fn ctrl_shift_copy_paste_reach_a_focused_patcher() {
+    let path = temp_file_path("patcher-ctrl-shift-clipboard");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+    let mut editor = real_patcher_lisp_editor(&[&path]);
+    let patcher = patcher_layout_nodes(&editor).remove(0);
+    editor.set_focused_widget(patcher.clone());
+    crate::widget_render::patcher::select_first_patcher_node_for_test(&patcher)
+        .expect("a node to select");
+    let before = crate::widget_render::patcher::patcher_visible_node_count_for_test(&patcher);
+    let chord = KeyModifiers::CONTROL.union(KeyModifiers::SHIFT);
+
+    assert!(editor.deliver_key_to_focused_widget(KeyEvent::new(KeyCode::Char('c'), chord)));
+    assert!(editor.deliver_key_to_focused_widget(KeyEvent::new(KeyCode::Char('v'), chord)));
+    assert_eq!(
+        crate::widget_render::patcher::patcher_visible_node_count_for_test(&patcher),
+        before + 1,
+        "Ctrl-Shift-V pastes the copied node"
+    );
+}
+
 /// Escape dismisses an error bubble through the Lisp ESC binding. The patcher
 /// refuses Escape outside text entry, so the editor's Escape path must offer
 /// it to :on-focus-key before blurring.

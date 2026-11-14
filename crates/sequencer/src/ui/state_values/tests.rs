@@ -4423,9 +4423,11 @@ use panel_kinds_seed::*;
             header.rect,
             search_inputs[0].rect
         );
+        // The search header spans the browser above the tab rail and the
+        // content column (eseq.browser's "tabbed-browser-column").
         assert!(
-            header.rect.col >= rail.rect.col + rail.rect.width,
-            "search header should live in the content column to the right of the rail: rail={:?}, header={:?}; rendered:\n{rendered}",
+            header.rect.row + header.rect.height <= rail.rect.row,
+            "search header should sit above the tab rail: rail={:?}, header={:?}; rendered:\n{rendered}",
             rail.rect,
             header.rect
         );

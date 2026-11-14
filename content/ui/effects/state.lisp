@@ -124,25 +124,25 @@
 (def reset-rack-panel-views! ()
   (do
     (set! rack-panel-view.views '())
-    (set! collapsed-devices.keys '())))
+    (set! collapsed-devices.devices '())))
 
 ;; The effect panels folded to a thin strip (the header's – button),
-;; by each panel dict's :collapse-key (eseq.effects.panel-data): the device's
-;; stable identity, so a fold follows its effect through a reorder.
+;; by each panel dict's :collapse-key (eseq.effects.panel-data): the device
+;; itself, so a fold follows its effect through a reorder.
 (def-kind collapsed-devices
   :key ()
-  :state ((keys (list-of :string) :default '())))
+  :state ((devices (list-of :any) :default '())))
 
 ;; Whether the panel of `key` is folded (never, for a panel with no key).
 (def device-collapsed? (key)
-  (if key (listed? key collapsed-devices.keys) false))
+  (if key (listed? key collapsed-devices.devices) false))
 
 (def toggle-device-collapsed! (key)
   (when key
-    (set! collapsed-devices.keys
+    (set! collapsed-devices.devices
       (if (device-collapsed? key)
-        (filter (lambda (k) (not (= k key))) collapsed-devices.keys)
-        (cons key collapsed-devices.keys)))))
+        (filter (lambda (k) (not (= k key))) collapsed-devices.devices)
+        (cons key collapsed-devices.devices)))))
 
 ;; These are temporary render-context globals used by generated custom synth UI.
 ;; They must NOT be view state: custom UI functions set them while rendering, and

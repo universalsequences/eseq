@@ -2619,6 +2619,10 @@ pub const DEFAULT_PATCHER_BINDINGS: &[(&str, &str)] = &[
     ("C-c", "copy"),
     ("C-v", "paste"),
     ("C-e", "encapsulate"),
+    // The clipboard chord off macOS (ui/platform.rs), which Edit >
+    // Copy/Paste send to a focused patcher there.
+    ("C-S-c", "copy"),
+    ("C-S-v", "paste"),
 ];
 
 /// Resolve a `P-` pattern from `DEFAULT_PATCHER_BINDINGS` to the editor's
