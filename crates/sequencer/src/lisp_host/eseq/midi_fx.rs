@@ -671,6 +671,7 @@ pub(in crate::lisp_host) fn apply_step_param_set(resolved: &mut ResolvedStep, pa
         StepParam::Chop => resolved.chop = value.max(1.0),
         StepParam::Retrig => resolved.retrig = clamp_step_param(param, value),
         StepParam::RetrigRate => resolved.retrig_rate = clamp_step_param(param, value),
+        StepParam::Variant => resolved.variant = clamp_step_param(param, value.round()),
     }
 }
 
@@ -687,6 +688,9 @@ pub(in crate::lisp_host) fn apply_step_param_add(resolved: &mut ResolvedStep, pa
         StepParam::RetrigRate => {
             resolved.retrig_rate = clamp_step_param(param, resolved.retrig_rate + delta)
         }
+        StepParam::Variant => {
+            resolved.variant = clamp_step_param(param, (resolved.variant + delta).round())
+        }
     }
 }
 
@@ -702,6 +706,9 @@ pub(in crate::lisp_host) fn apply_step_param_scale(resolved: &mut ResolvedStep, 
         StepParam::Retrig => resolved.retrig = clamp_step_param(param, resolved.retrig * factor),
         StepParam::RetrigRate => {
             resolved.retrig_rate = clamp_step_param(param, resolved.retrig_rate * factor)
+        }
+        StepParam::Variant => {
+            resolved.variant = clamp_step_param(param, (resolved.variant * factor).round())
         }
     }
 }

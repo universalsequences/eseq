@@ -10,6 +10,8 @@
 
 (module eseq.effects.state)
 
+(import eseq.view-kit :refer (listed?))
+
 (export instrument-view
         key-lock-view
         effect-mods
@@ -21,9 +23,12 @@
         rack-panel-macros-open
         rack-panel-set-view
         reset-rack-panel-views!
+        device-collapsed?
+        toggle-device-collapsed!
         seq-timebase-options
         fx-fixed-panel-height
         fx-panel-header-height
+        fx-collapsed-panel-width
         fx-panel-body-content-height)
 
 ;; The instrument panel: its tab (0 synth, 1 keys), the sampler's source tab,
@@ -113,9 +118,31 @@
       (filter (lambda (view) (not (= (get view :track-id) track-id))) rack-panel-view.views)
       (list (dict :track-id track-id :slots slots :macros macros :device device)))))
 
-;; Called by the host when a project replaces the previous one.
+;; Called by the host when a project replaces the previous one. The
+;; collapsed effect panels go with it: they are keyed by track, bus and
+;; device ids, which restart with every project too.
 (def reset-rack-panel-views! ()
-  (set! rack-panel-view.views '()))
+  (do
+    (set! rack-panel-view.views '())
+    (set! collapsed-devices.devices '())))
+
+;; The effect panels folded to a thin strip (the header's – button),
+;; by each panel dict's :collapse-key (eseq.effects.panel-data): the device
+;; itself, so a fold follows its effect through a reorder.
+(def-kind collapsed-devices
+  :key ()
+  :state ((devices (list-of :any) :default '())))
+
+;; Whether the panel of `key` is folded (never, for a panel with no key).
+(def device-collapsed? (key)
+  (if key (listed? key collapsed-devices.devices) false))
+
+(def toggle-device-collapsed! (key)
+  (when key
+    (set! collapsed-devices.devices
+      (if (device-collapsed? key)
+        (filter (lambda (k) (not (= k key))) collapsed-devices.devices)
+        (cons key collapsed-devices.devices)))))
 
 ;; These are temporary render-context globals used by generated custom synth UI.
 ;; They must NOT be view state: custom UI functions set them while rendering, and
@@ -145,6 +172,8 @@
 ;; Matches a standard built-in FX panel with four parameter rows.
 (def fx-fixed-panel-height 11.2)
 (def fx-panel-header-height 1.0)
+;; A folded effect panel's strip.
+(def fx-collapsed-panel-width 1.9)
 (def fx-panel-body-padding 0.25)
 (def fx-panel-body-top-spacer-height 0.16)
 (def fx-panel-body-content-height

@@ -279,6 +279,14 @@
 
 ;; ── Effects ──
 
+;; What effect `d`'s folded panel is remembered by
+;; (eseq.effects.state/device-collapsed?): the device itself. Not a string
+;; built from `d.did`: a device's did is a placeholder until its first
+;; recorded edit binds its identity, so a key that read it changed on the
+;; first knob move and re-ran the whole effects pane mid-drag. The handle
+;; stays on its device through that bind and through a reorder.
+(def collapse-key (d) d)
+
 ;; The effect panel's sources and modulators.
 (def with-sources (fx d make)
   (merge fx
@@ -293,7 +301,7 @@
 (def track-effect-panel (t d)
   (with-sources
     (dict :name d.name :slot-idx d.slot :track-idx t.index :builtin d.builtin
-          :meter d.meter
+          :meter d.meter :collapse-key (collapse-key d)
           :params (map (lambda (prm) (effect-main-param d prm)) (params-in d "main")))
     d effect-source-param))
 
@@ -310,13 +318,14 @@
 (def bus-effect-panel (bus d)
   (with-sources
     (dict :name d.name :slot-idx d.slot :bus-idx bus :bus-fx true :builtin d.builtin
-          :meter d.meter
+          :meter d.meter :collapse-key (collapse-key d)
           :params (map (lambda (prm) (effect-main-param d prm)) (params-in d "main")))
     d bus-source-param))
 
 ;; The panel of MIDI effect `d`: every param.
 (def midi-effect-panel (d)
   (dict :name d.name :slot-idx d.slot :midi-fx true
+        :collapse-key (collapse-key d)
         :params (map (lambda (prm) (fx-param prm prm.name)) d.params)))
 
 ;; The panel of effect `d` of drum rack slot `sd` of track t.
@@ -324,6 +333,7 @@
   (with-sources
     (dict :slot-idx d.slot :name d.name :track-idx t.index :rack-slot sd.slot
           :rack-fx true :meter d.meter :builtin d.builtin
+          :collapse-key (collapse-key d)
           :params (map (lambda (prm) (rack-effect-main-param d prm)) (params-in d "main")))
     d (lambda (prm) (rack-slot-param t sd prm prm.label))))
 

@@ -68,7 +68,7 @@
         piano-roll add-note! delete-notes! pitch-min pitch-max
         focus-step-params focus-step-value set-focus-step! set-step-param!
         graph graphs graph-of graph-param-named graph-edge-to set-group-gain!
-        set-group-coupling! set-graph-params! gate-generator! graph-timebase-options
+        set-group-coupling! set-graph-params! gate-generator! set-graph-node-route-variant graph-timebase-options
         graph-quantize-options
         graph-max-poly-selection-options
         table-editor table-editor-open! table-editor-close! table-editor-band!
@@ -291,7 +291,8 @@
 (def pad-setter (field)
   (lambda (p v)
     (host-command "set-pad"
-      (dict :group-id p.group.gid :track-id p.track.tid :field field :value v))))
+      (dict :group-id p.group.gid :track-id p.track.tid :variant p.variant
+            :field field :value v))))
 (def set-group-armed (g v) (seq-set-rack-armed g.gid v))
 (def rack-clip-setter (field)
   (lambda (rc v)
@@ -397,6 +398,10 @@
 ;; member), or nil for off.
 (def set-graph-node-route (n t)
   (graph-edit n.graph "route" nil :node n.index :track-id (if t t.tid nil)))
+;; Route n to track t playing pad variant v (0: the plain pad), one edit
+;; (docs/rack-pad-variants-spec.md §7).
+(def set-graph-node-route-variant (n t v)
+  (graph-edit n.graph "route" nil :node n.index :track-id (if t t.tid nil) :variant v))
 ;; The tracks a node listens to (empty: off); setting them stops following
 ;; the route.
 (def set-graph-node-seeds (n ts)
@@ -438,6 +443,7 @@
          (playing  :bool   :doc "The playhead is on this step while the transport runs")
          (selected :bool   :doc "Selected for editing (the current track's steps only)")
          (held     :bool   :doc "Inside an active step's duration (that step included)")
+         (held-pad :number :doc "held (0/1) + 2 x pad-variant, packed for the step grid's shader")
          ;; Step parameters, in the host's units (seq-set-track-step-param).
          ;; :range and :default are the engine's (StepParam::min/max,
          ;; default_value), for widgets that configure themselves (field-info).
@@ -447,6 +453,8 @@
          (delay       :number :default 0 :set (step-param-setter :delay))
          (retrig      :number :range (0 127) :default 0 :set (step-param-setter :retrig))
          (retrig-rate :number :range (1 1024) :default 4 :set (step-param-setter :retrig-rate))
+         (pad-variant :number :range (0 255) :default 0 :set (step-param-setter :pad-variant)
+                      :doc "The drum-rack pad variant the step plays (pad.variant), 0 the plain pad")
          (pan         :number :range (-1 1) :default 0 :set (step-param-setter :pan))
          (sync        :number :default 0 :set (step-param-setter :sync) :doc "An index into project.sync-options")
          (aux-a       :number :set (step-param-setter :aux-a))
@@ -948,6 +956,7 @@
          (delay      :int    :set (graph-node-setter "delay") :doc "Propagation delay in steps (0 or more)")
          (route      track   :set set-graph-node-route
                      :doc "The track it plays (a rack-owned graph's member track); nil while off or gating a generator")
+         (route-variant :int :doc "The drum-rack pad variant its hits play on that track (pad.variant), 0 for the plain pad; set with set-graph-node-route-variant")
          (generator  :int    :doc "The generator (a jaki instance id) its fires gate or restart, -1 for none (gate-generator!)")
          (restart    :bool   :doc "Its fires restart the generator rather than gate it")
          (seed-route :bool   :set (graph-node-setter "seed-route")
@@ -1395,8 +1404,10 @@
          (unused    :bool   :doc "A drum rack every scene switches off (listed for purge, never deleted for you)")
          (used-banks (list-of bank) :doc "A drum rack's banks: those with a scene that does not switch it off and points at one of its clips (a legacy rack: gives any pad a cell). Empty on a plain group, which shows where any member shows (eseq.scene-banks/group-used-in-bank?, docs/rig-spec.md §9)")))
 
-;; A drum rack pad: (nth g.pads 0). Keyed by its member track, so moving the
-;; pad to another note (a swap included) or reordering keeps the instance.
+;; A drum rack pad: (nth g.pads 0). Keyed by its member track and variant id,
+;; so moving the pad to another note (a swap included) or reordering keeps the
+;; instance. A member has one plain pad (variant 0) and any number of variant
+;; pads that play it with saved values (docs/rack-pad-variants-spec.md).
 (def-kind pad
   :key (group tid)
   :host ((group     group  :doc "The rack")
@@ -1411,7 +1422,12 @@
          (role-label :string :doc "The effective role's name; empty when none")
          (standard-role :string :doc "The role key the standard layout infers from the note (as role, one of pad-role-options); empty when none")
          (standard-role-label :string :doc "That role's name; empty when none")
-         (triggered :bool   :doc "Sounding: lit for a moment after each hit, however it was played")))
+         (triggered :bool   :doc "Sounding: lit for a moment after each hit, however it was played")
+         (variant   :int    :doc "0 for the member's plain pad; else the variant id its steps name (step-param variant)")
+         (name      :string :set (pad-setter "name")
+                    :doc "A variant's own name; empty (set \"\" to clear) while unnamed. Always empty on a plain pad")
+         (value-names  (list-of :string) :doc "A variant's instrument params, by name (parallel to value-values)")
+         (value-values (list-of :number) :doc "A variant's values, in the params' own units")))
 
 ;; A clip of a drum rack's own scene axis: (nth g.clips 0). Keyed by its
 ;; stable clip id. Launch with (launch-rack-clip! rc).
@@ -1846,7 +1862,8 @@
          (selected :bool   :set (note-setter "selected") :doc "Selected in the piano roll (no undo entry)")
          (label    :string :doc "Its pitch name, with its offset when off the step: C4, D#3 +0.50")
          (hidden   :bool   :doc "A script drag's note lies over it: unlisted until the drag ends (or moves on); its set! and delete are errors meanwhile")
-         (item     :int    :doc "The piano roll timeline's id for it (its step and voice), what seq-piano-roll-action's gestures address; another when a chord's voices shift")))
+         (item     :int    :doc "The piano roll timeline's id for it (its step and voice), what seq-piano-roll-action's gestures address; another when a chord's voices shift")
+         (pad-variant :int :doc "Its step's drum-rack pad variant (step.pad-variant), 0 the plain pad")))
 
 ;; A step of the piano roll's source on its axis: (nth piano-roll.steps 5),
 ;; a pinned pattern's or take's step too (step, the live pattern's, reaches
@@ -2254,7 +2271,8 @@
 ;; Hit pad p as a pad key does (its member track at base pitch, so choke and
 ;; the member's effects apply).
 (def trigger-pad! (p)
-  (host-command "trigger-rack-pad" (dict :group-id p.group.gid :track-id p.track.tid)))
+  (host-command "trigger-rack-pad"
+    (dict :group-id p.group.gid :track-id p.track.tid :variant p.variant)))
 
 ;; Launch rack clip rc in the current scene, with the transport's launch
 ;; quantization (one undo entry, as a clip launch).

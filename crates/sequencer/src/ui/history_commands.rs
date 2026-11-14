@@ -219,6 +219,7 @@ pub(super) fn step_param_from_name(name: &str) -> Option<StepParam> {
         "chop" => Some(StepParam::Chop),
         "retrig" | "rtrg" => Some(StepParam::Retrig),
         "retrig-rate" | "retrig_rate" | "rate" => Some(StepParam::RetrigRate),
+        "variant" | "pad-variant" => Some(StepParam::Variant),
         _ => None,
     }
 }

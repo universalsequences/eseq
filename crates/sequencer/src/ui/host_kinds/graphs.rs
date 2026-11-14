@@ -907,6 +907,7 @@ impl HostKinds {
         };
         let route = node.route.and_then(track);
         pusher.push(id, f::GRAPH_NODE_ROUTE, instance_or_nil(route));
+        pusher.push(id, f::GRAPH_NODE_ROUTE_VARIANT, number(node.route_variant as f64));
         let gate = node.gate_target;
         let generator = gate.map_or(-1.0, |gate| gate.id as f64);
         pusher.push(id, f::GRAPH_NODE_GENERATOR, number(generator));

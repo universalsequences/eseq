@@ -149,6 +149,7 @@ pub(crate) fn step_param_named(name: &str) -> Option<StepParam> {
         "speed" => StepParam::Speed,
         "retrig" | "rtrg" => StepParam::Retrig,
         "retrig-rate" | "retrig_rate" | "rate" => StepParam::RetrigRate,
+        "variant" | "pad-variant" => StepParam::Variant,
         _ => return None,
     })
 }
@@ -3804,8 +3805,8 @@ pub(crate) fn init_runtime(
 
     // seq-print-step-param — live step-param printing (bead eseq-jc9): same
     // signature as seq-set-step-param, but while playing+recording the value
-    // latches into print mode and lands on the playhead's passing trigger
-    // steps instead of the cursor step. The step argument is the cursor
+    // latches into print mode and lands on the steps the scheduler plays
+    // while latched instead of the cursor step. The step argument is the cursor
     // fallback if the play/record gate raced off before dispatch. Never
     // clears the selection — printing targets the playhead, not the cursor.
     let ct = current_track.clone();
@@ -5390,6 +5391,7 @@ pub(crate) fn init_runtime(
             "speed" => StepParam::Speed,
             "retrig" | "rtrg" => StepParam::Retrig,
             "retrig-rate" | "retrig_rate" | "rate" => StepParam::RetrigRate,
+            "variant" | "pad-variant" => StepParam::Variant,
             other => return Err(format!("unknown param :{other}").into()),
         };
         let track = ct.load(Ordering::Relaxed);

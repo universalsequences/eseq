@@ -18,7 +18,6 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use super::effects::PreparedRackInstrument;
-use super::fx_chain::RetainedEffectSource;
 use super::graph::{custom_rack_slot_snapshot, sampler_rack_slot_snapshot, RackSlotReplaceScope};
 use super::App;
 use crate::sequencer::{InstrumentType, RackSlotSnapshot, SceneBankId};
@@ -435,7 +434,6 @@ impl App {
                 })
                 .collect();
         let from_locator = Self::rack_slot_fx_locator(track, from);
-        let to_locator = Self::rack_slot_fx_locator(track, to);
         for (effect_slot, name) in effects {
             let source = self
                 .editor
@@ -444,38 +442,7 @@ impl App {
                 .cloned()
                 .map(Ok)
                 .unwrap_or_else(|| self.retained_effect_source_for_name(&name))?;
-            match &source {
-                RetainedEffectSource::NativeBuiltin { name } => {
-                    self.load_builtin_rack_slot_effect_to_slot_sync(track, to, effect_slot, name)?;
-                }
-                RetainedEffectSource::Compiled { name, .. }
-                    if crate::effects::dgen_builtin::find(name).is_some() =>
-                {
-                    self.load_builtin_rack_slot_effect_to_slot_sync(track, to, effect_slot, name)?;
-                }
-                RetainedEffectSource::Compiled {
-                    name,
-                    source: code,
-                    asset_base,
-                    origin,
-                } => {
-                    let result = self.editor.dylib_cache.acquire(
-                        crate::lisp_host::DGenCompileKind::Effect,
-                        *origin,
-                        code,
-                        self.graph.sample_rate,
-                        asset_base.as_deref(),
-                    )?;
-                    self.apply_compiled_rack_slot_effect_to_slot_sync(
-                        track,
-                        to,
-                        effect_slot,
-                        name,
-                        result,
-                    )?;
-                }
-            }
-            self.retain_effect_source(to_locator, effect_slot, source.clone())?;
+            self.load_retained_rack_slot_effect_sync(track, to, effect_slot, source)?;
             let descriptor = self
                 .rack_slot_effect_snapshot(track, to)?
                 .effect_descriptors

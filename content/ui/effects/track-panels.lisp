@@ -7,6 +7,7 @@
 (import eseq.effects.state :as st)
 (import eseq.effects.devices :as dv)
 (import eseq.effects.param-controls :as pc)
+(import eseq.effects.pad-variants :as pv)
 (import eseq.drum-rack-v2)
 ;; The header pill + chip *step* shares with the *processes* dock.
 (import eseq.panel-header :as header)
@@ -225,10 +226,10 @@
     (h-stack :debug-name "track-plock-selection-bar" :width :fill :gap 0.3 :align :center
       (label (str n (if (= n 1) " step selected" " steps selected"))
         :flex 1 :font-size 8.5 :color :dim :bg :transparent)
-      (button "clear" :debug-name "track-plock-clear"
-        :variant :danger
+      (button "clear p-locks" :debug-name "track-plock-clear"
+        :variant :ghost
         :disabled (not locked)
-        :width 4.0 :height 1.0 :font-size 8.5
+        :height 1.0 :font-size 8.5
         :on-click (lambda (event) (plock-clear-selection))))))
 
 ;; A variant chip (v, one of the track's variants), or the def chip (nil).
@@ -352,13 +353,72 @@
           (box :height 0))))
     (box :height 0)))
 
+;; ── pad variants (docs/rack-pad-variants-spec.md §6.3) ──
+;; A drum-rack member's steps each play one of its pads: the plain pad or a
+;; variant. Unlike a p-lock variant (discovered from the locks a step
+;; carries), a pad variant is chosen and named on the pads tab; a step only
+;; points at it. The chips read as pads: a square swatch and the pad's note.
+
+;; The member's pads: its plain pad, then its variants in pad order.
+(def pad-chip-pads (t)
+  (if (and t t.pad)
+    (cons t.pad (filter |p| (and (= p.track t) (> p.variant 0)) t.pad.group.pads))
+    (list)))
+
+(def pad-chip-color (p)
+  (if (> p.variant 0)
+    (let ((c (pv/pad-variant-rgb p.variant))) (rgb (nth c 0) (nth c 1) (nth c 2)))
+    (plock-base-color)))
+
+;; Whether a selected step plays pad p.
+(def pad-chip-current? (p)
+  (> (len (filter |s| (= (round s.pad-variant) p.variant) selection.steps)) 0))
+
+;; With steps selected: they play pad p (one undo entry). Without: select
+;; p on the pads tab, so its knobs edit it.
+(def pad-chip-click (p)
+  (do
+    (eseq.seq-core-state/cool-off-follow)
+    (if (> (len selection.steps) 0)
+      (seq-set-step-param-plock :pad-variant p.variant)
+      (let ((v pv/pad-variant-view)) (set! v.note p.note)))))
+
+(def pad-chip (p)
+  (let ((current (pad-chip-current? p))
+      (color (pad-chip-color p))
+      (c (color-rgba (pad-chip-color p) 1.0)))
+    (box :debug-name (str "track-pad-chip-" p.variant)
+      :height 1.0 :width 5.2 :align :baseline :padding 0.014
+      :background-color (if current (color-rgba color 0.11) :mixer-strip-bg)
+      :border-width (if current 0.75 0.35)
+      :border-color (if current c :mixer-strip-selected-bg)
+      :corner-radius 4
+      :v-align :center
+      :on-click |x y r| (pad-chip-click p)
+      (h-stack :gap 0.16 :align :center
+        (box :width 0.2)
+        ;; a pad: a small square in the pad's colour (p-lock chips: a bar)
+        (box :width 1.0 :height 0.42 :corner-radius 1 :background-color c)
+        (label (substring (if (> p.variant 0) (if (= p.name "") (str "v" p.variant) p.name) "plain") 0 6)
+          :v-align :center :flex 1
+          :font-size 10.0 :color (if current :black :dim) :bg :transparent)
+        (box :width 0.2)))))
+
+(def track-pad-variant-strip (t)
+  (if (and t t.pad (> (len (pad-chip-pads t)) 1))
+    (v-stack :key "track-pad-variant-block" :gap 0.12 :width :fill
+      (label "pad" :height 0.9 :bg :transparent :color :dim :font-size 8)
+      (subtree :key "track-pad-variant-strip"
+        (wrap :width :fill :gap 0.18 :row-gap 0.04 :align :start
+          (each (pad-chip-pads t) |p idx|
+            (subtree :key (list "track-pad-chip" p)
+              (pad-chip p))))))
+    (box :height 0)))
+
 (def track-plocks-panel ()
   (let ((t selection.track))
     (box :debug-name "track-plocks-panel" :padding 0.72
       (v-stack :gap 0.30
-        (if t
-          (label "parameter locks" :height 1 :bg :transparent :color :dim :font-size 8)
-          )
         (if (and t (> (len selection.steps) 0))
           (plock-selection-bar)
           (box :height 0))
@@ -374,6 +434,7 @@
             (each (if t (cons nil t.variants) (list)) |v idx|
               (subtree :key (if v (list "track-plock-chip-variant" v) "track-plock-chip-def")
                 (plock-chip v)))))
+        (track-pad-variant-strip t)
         (if (> (len selection.plock-rows) 0)
           (v-stack :key "track-plock-table" :width :fill :gap 0.1
             (h-stack :key "track-plock-table-header" :width :fill :gap plock-col-gap

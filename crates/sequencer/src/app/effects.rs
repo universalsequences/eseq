@@ -1771,7 +1771,7 @@ impl App {
                 crate::effects::phaser_flanger::PHASER_FLANGER_STATE_SIZE
                     * std::mem::size_of::<f32>(),
             ),
-            "Roar" => (
+            "Roar" | "Saturator" => (
                 crate::effects::roar::roar_vtable(),
                 crate::effects::roar::ROAR_STATE_SIZE * std::mem::size_of::<f32>(),
             ),
@@ -4712,6 +4712,55 @@ impl App {
         Ok(effect_slot)
     }
 
+    /// Rebuild an effect in a rack slot's chain from its retained source (a
+    /// native or DGen builtin by name, anything else compiled from its
+    /// code) and keep that source with the slot.
+    pub(crate) fn load_retained_rack_slot_effect_sync(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        source: RetainedEffectSource,
+    ) -> Result<(), String> {
+        match &source {
+            RetainedEffectSource::Compiled {
+                name,
+                source: code,
+                asset_base,
+                origin,
+            } if crate::effects::dgen_builtin::find(name).is_none() => {
+                let result = self.editor.dylib_cache.acquire(
+                    lisp_host::DGenCompileKind::Effect,
+                    *origin,
+                    code,
+                    self.graph.sample_rate,
+                    asset_base.as_deref(),
+                )?;
+                self.apply_compiled_rack_slot_effect_to_slot_sync(
+                    track,
+                    rack_slot,
+                    effect_slot,
+                    name,
+                    result,
+                )?;
+            }
+            RetainedEffectSource::NativeBuiltin { name }
+            | RetainedEffectSource::Compiled { name, .. } => {
+                self.load_builtin_rack_slot_effect_to_slot_sync(
+                    track,
+                    rack_slot,
+                    effect_slot,
+                    name,
+                )?;
+            }
+        }
+        self.retain_effect_source(
+            Self::rack_slot_fx_locator(track, rack_slot),
+            effect_slot,
+            source,
+        )
+    }
+
     pub fn load_builtin_rack_slot_effect_to_slot_sync(
         &mut self,
         track: usize,
@@ -4950,6 +4999,139 @@ impl App {
             .effect_chain_leases
             .move_slot(locator, source_slot, target_slot)?;
         Ok(())
+    }
+
+    /// Move a track-chain effect into the chain of one of the same track's
+    /// rack slots, before `target_slot` when that slot holds an effect and at
+    /// the end otherwise. The effect is rebuilt in the rack slot from its
+    /// retained source and takes the track effect's current values (scalars,
+    /// tensors, loaded IR / filter table); the track effect is then deleted.
+    /// Step and key locks are dropped, as on a cross-track move. Sidechain
+    /// routing and envelope modulation sources, which rack-slot effects do
+    /// not support, keep the rack slot's defaults.
+    pub fn move_track_effect_to_rack_slot_sync(
+        &mut self,
+        track: usize,
+        source_slot: usize,
+        rack_slot: usize,
+        target_slot: Option<usize>,
+    ) -> Result<usize, String> {
+        if source_slot < BUILTIN_SLOT_COUNT {
+            return Err("Cannot move a built-in effect slot".to_string());
+        }
+        let state = self
+            .state
+            .pattern
+            .effect_chains
+            .get(track)
+            .and_then(|chain| chain.get(source_slot))
+            .filter(|state| state.node_id.load(Ordering::Relaxed) != 0)
+            .ok_or_else(|| "Source effect slot is empty".to_string())?;
+        let source_node = state.node_id.load(Ordering::Relaxed) as i32;
+        let mut values =
+            without_parameter_locks(EffectSlotSnapshot::capture_authoring_values(state));
+        // The loaded reference lives with the node when the snapshot has not
+        // recorded it yet.
+        values.ir = values
+            .ir
+            .or_else(|| crate::effects::conv_reverb::ir_ref_for(source_node));
+        values.table = values
+            .table
+            .or_else(|| crate::effects::filter_table::table_ref_for(source_node));
+        let source_descriptor = self.graph.effect_descriptors[track][source_slot].clone();
+        let name = source_descriptor.name.trim().to_string();
+        let source = self
+            .editor
+            .effect_chain_leases
+            .source(FxChainLocator::Track(track), source_slot)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| self.retained_effect_source_for_name(&name))?;
+
+        let rack = self.rack_slot_effect_snapshot(track, rack_slot)?;
+        if rack.effect_slots.iter().all(|slot| slot.node_id != 0) {
+            return Err("No free rack-slot effect slots available".to_string());
+        }
+        let insert_before = target_slot.filter(|slot| {
+            rack.effect_slots
+                .get(*slot)
+                .is_some_and(|effect| effect.node_id != 0)
+        });
+        let effect_slot = match insert_before {
+            Some(slot) => self.prepare_rack_slot_effect_insert_slot(track, rack_slot, slot)?,
+            None => self
+                .next_free_rack_slot_effect_slot(track, rack_slot)
+                .ok_or_else(|| "No free rack-slot effect slots available".to_string())?,
+        };
+        self.load_retained_rack_slot_effect_sync(track, rack_slot, effect_slot, source)?;
+
+        let rack = self.rack_slot_effect_snapshot(track, rack_slot)?;
+        let target_descriptor = &rack.effect_descriptors[effect_slot];
+        let mut moved = rack.effect_slots[effect_slot].clone();
+        for (param_idx, param) in target_descriptor.params.iter().enumerate() {
+            if matches!(param.host_control, Some(HostControl::FxSidechain { .. })) {
+                continue;
+            }
+            // The two descriptors are built by different hosts and may not
+            // line up index for index: trust the index only when the names
+            // agree, and look the name up otherwise.
+            let source_idx = if source_descriptor
+                .params
+                .get(param_idx)
+                .is_some_and(|candidate| candidate.name == param.name)
+            {
+                Some(param_idx)
+            } else {
+                source_descriptor
+                    .params
+                    .iter()
+                    .position(|candidate| candidate.name == param.name)
+            };
+            let Some(value) = source_idx.and_then(|idx| values.defaults.get(idx).copied()) else {
+                continue;
+            };
+            if crate::instruments::voice_modulator::is_envelope_source_param_value(
+                param.node_param_idx,
+                value,
+            ) {
+                continue;
+            }
+            if let Some(default) = moved.defaults.get_mut(param_idx) {
+                *default = value;
+            }
+        }
+        for tensor in &mut moved.tensor_params {
+            if let Some(source_tensor) = values.tensor_params.iter().find(|candidate| {
+                candidate.name == tensor.name
+                    && candidate.shape == tensor.shape
+                    && candidate.default.len() == tensor.default.len()
+            }) {
+                tensor.default.clone_from(&source_tensor.default);
+            }
+        }
+        moved.ir.clone_from(&values.ir);
+        moved.table.clone_from(&values.table);
+        moved
+            .sampler_slice_edits
+            .clone_from(&values.sampler_slice_edits);
+        if !self
+            .state
+            .update_rack_slot_in_all_pattern_snapshots(track, rack_slot, |slot| {
+                if let Some(effect) = slot.effect_slots.get_mut(effect_slot) {
+                    *effect = moved.clone();
+                }
+            })
+        {
+            return Err("Failed to copy effect values into the rack slot".to_string());
+        }
+        self.push_rack_slot_effect_defaults(track, rack_slot, effect_slot);
+        // The source node's decoded IR / filter table, before it is deleted.
+        self.restore_prepared_rack_effect_data(track, rack_slot, effect_slot, &values)?;
+        self.graph_controller()
+            .delete_custom_effect_slot(track, source_slot)?;
+        self.graph_controller()
+            .refresh_rack_signature_from_live_state(track);
+        Ok(effect_slot)
     }
 
     pub fn set_rack_slot_effect_param(
@@ -7418,6 +7600,68 @@ mod tests {
         graph.process_block();
     }
 
+    /// docs/rack-pad-variants-spec.md: a variant pad is one more pad on a
+    /// member; its value drag on one param is one undo entry; undo/redo
+    /// replays the pad map and the runtime follows it.
+    #[test]
+    fn pad_variant_edits_record_coalesce_and_publish_the_runtime() {
+        let graph = TestLiveGraph::new("drum-rack-pad-variant-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Kit".to_string()))
+            .expect("drum rack should be created");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("kick pad");
+        let rack_index = app.groups.iter().position(|group| group.id == group_id).expect("rack");
+
+        let variant = app.add_rack_pad_variant(group_id, kick, 38).expect("variant pad");
+        assert_eq!(variant, 1);
+        assert_eq!(app.groups[rack_index].rack_pad_target(38), Some((kick, 1)));
+        assert_eq!(app.groups[rack_index].rack_pad_target(36), Some((kick, 0)));
+        assert!(
+            app.add_rack_pad_variant(group_id, kick, 36).is_err(),
+            "an occupied note is refused"
+        );
+        assert!(app.set_rack_pad_variant_value(group_id, 36, "gain", Some(0.5)).is_err(),
+            "the plain pad plays the patch");
+
+        let undo_before = app.history.undo_len();
+        for value in [0.2, 0.4, 0.6] {
+            app.set_rack_pad_variant_value(group_id, 38, "gain", Some(value)).expect("value");
+        }
+        crate::app::edit::finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), undo_before + 1, "one drag, one entry");
+        let published = app.state.rack_pad_variants();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].track, kick);
+        assert_eq!(published[0].variant, 1);
+        assert_eq!(published[0].values, vec![("gain".to_string(), 0.6)]);
+
+        app.rename_rack_pad_variant(group_id, 38, Some(" tight ".to_string())).expect("rename");
+        let pad = |app: &App| {
+            let rack = app.groups[rack_index].rack.as_ref().unwrap();
+            rack.pads[rack.pad_index_for_note(38).unwrap()].clone()
+        };
+        assert_eq!(pad(&app).name.as_deref(), Some("tight"));
+
+        // Undo the rename, then the drag: the variant is back to no values.
+        crate::app::edit::undo(&mut app);
+        assert_eq!(pad(&app).name, None);
+        crate::app::edit::undo(&mut app);
+        assert!(pad(&app).values.is_empty());
+        assert_eq!(app.state.rack_pad_variants()[0].values, Vec::new());
+        crate::app::edit::redo(&mut app);
+        assert_eq!(pad(&app).values.get("gain"), Some(&0.6));
+
+        app.remove_rack_pad_variant(group_id, 38).expect("remove");
+        assert_eq!(app.groups[rack_index].rack_pad_target(38), None);
+        assert!(app.state.rack_pad_variants().is_empty());
+        assert!(app.remove_rack_pad_variant(group_id, 36).is_err(), "plain pads stay");
+        crate::app::edit::undo(&mut app);
+        assert_eq!(app.groups[rack_index].rack_pad_target(38), Some((kick, 1)));
+        graph.process_block();
+    }
+
     #[test]
     fn drum_rack_rejects_duplicate_pad_notes_and_double_booked_members() {
         let graph = TestLiveGraph::new("drum-rack-invariant-test", 64, 44_100, 2);
@@ -9696,6 +9940,7 @@ mod tests {
                     delay_steps: None,
                     quantize: None,
                     route: Some(crate::graph::ProjectGraphRouteOverride::Track(2)),
+                    route_variant: None,
                     seed_from: None,
                     seed_on_reset: None,
                     duration: None,
@@ -9993,6 +10238,7 @@ mod tests {
             delay_steps: None,
             quantize: None,
             route: Some(ProjectGraphRouteOverride::Track(route)),
+            route_variant: None,
             seed_from: None,
             seed_on_reset: None,
             duration: None,
@@ -10114,6 +10360,7 @@ mod tests {
             name: "Hat".to_string(),
             sound: kit.pads[0].sound.clone(),
             modulator: None,
+            variants: Vec::new(),
         };
         kit.pads.retain(|pad| pad.pad_note == 36);
         kit.pads.push(new_pad);
@@ -11544,6 +11791,92 @@ mod tests {
         let replay = crate::app::edit::redo(&mut app);
         assert!(matches!(replay, crate::app::history::HistoryReplay::Applied(_)), "{replay:?}");
         assert_eq!(app.device_registry.audio_effect_location(instance), Some((target_track_id, moved_slot)));
+        graph.process_block();
+    }
+
+    #[test]
+    fn track_effect_move_into_rack_slot_keeps_values_and_is_one_undo_step() {
+        let graph = TestLiveGraph::new("track-fx-into-rack-slot-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller()
+            .add_sampler_rack_track(&[std::path::Path::new(
+                "../../content/impulses/lexicon-300-rich-plate.wav",
+            )
+            .to_path_buf()])
+            .expect("sampler rack should be created");
+        let rack_ott = app.add_builtin_rack_slot_effect_sync(0, 0, "OTT").unwrap();
+        let slot = app
+            .apply_recorded_track_effect_chain_mutation(0, "Add audio effect", |app| {
+                app.add_builtin_effect_sync(0, "Filter")
+            })
+            .unwrap();
+        let kept = app
+            .apply_recorded_track_effect_chain_mutation(0, "Add audio effect", |app| {
+                app.add_builtin_effect_sync(0, "Phaser-Flanger")
+            })
+            .unwrap();
+        let default_value = app.state.pattern.effect_chains[0][slot].defaults.get(0);
+        let authored = if (default_value - 0.37).abs() > 0.05 { 0.37 } else { 0.61 };
+        app.state.pattern.effect_chains[0][slot].defaults.set(0, authored);
+        app.state.pattern.effect_chains[0][slot].plocks.set(0, 0, 0.81);
+        let rack_slot = |app: &App| {
+            app.state.pattern.rack_tracks.lock().unwrap()[0]
+                .clone()
+                .expect("rack should remain live")
+                .slots[0]
+                .clone()
+        };
+
+        // Before the rack slot's existing effect.
+        let undo_len = app.history.undo_len();
+        let moved = app
+            .move_track_effect_to_rack_slot_recorded(0, slot, 0, Some(rack_ott))
+            .unwrap();
+        assert_eq!(moved, rack_ott);
+        assert_eq!(
+            app.history.undo_len(),
+            undo_len + 1,
+            "both chains must share one history entry"
+        );
+        // Every pattern of the track keeps the effect that followed the moved
+        // one (the track sound must not lose a second slot).
+        let kept_params = app.graph.effect_descriptors[0][slot].params.len();
+        for (pattern, values) in app
+            .state
+            .capture_track_effect_chain_values(0, BUILTIN_SLOT_COUNT, 2)
+            .unwrap()
+        {
+            assert_eq!(values[0].num_params, kept_params, "{pattern:?}");
+            assert_eq!(values[1].num_params, 0, "{pattern:?}");
+        }
+        let rack = rack_slot(&app);
+        assert_eq!(rack.effect_descriptors[moved].name, "Filter");
+        assert_eq!(rack.effect_descriptors[moved + 1].name, "OTT");
+        assert_eq!(rack.effect_slots[moved].defaults[0], authored);
+        assert!(rack.effect_slots[moved].plocks.iter().flatten().all(Option::is_none));
+        // The track chain closed the gap over the moved effect.
+        assert_eq!(app.graph.effect_descriptors[0][slot].name, "Phaser-Flanger");
+        assert_eq!(app.state.pattern.effect_chains[0][kept].node_id.load(Ordering::Relaxed), 0);
+        graph.process_block();
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        let rack = rack_slot(&app);
+        assert_eq!(rack.effect_descriptors[rack_ott].name, "OTT");
+        assert_eq!(rack.effect_slots[rack_ott + 1].node_id, 0);
+        assert_eq!(app.graph.effect_descriptors[0][slot].name, "Filter");
+        assert_eq!(app.graph.effect_descriptors[0][kept].name, "Phaser-Flanger");
+        assert_eq!(app.state.pattern.effect_chains[0][slot].defaults.get(0), authored);
+        assert_eq!(app.state.pattern.effect_chains[0][slot].plocks.get(0, 0), Some(0.81));
+
+        let replay = crate::app::edit::redo(&mut app);
+        assert!(matches!(replay, crate::app::history::HistoryReplay::Applied(_)), "{replay:?}");
+        let rack = rack_slot(&app);
+        assert_eq!(rack.effect_descriptors[moved].name, "Filter");
+        assert_eq!(rack.effect_slots[moved].defaults[0], authored);
+        assert_eq!(app.graph.effect_descriptors[0][slot].name, "Phaser-Flanger");
         graph.process_block();
     }
 

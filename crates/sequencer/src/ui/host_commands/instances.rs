@@ -483,6 +483,11 @@ pub(crate) fn run_on_create(editor: &mut Editor, id: u64) {
     }
 }
 
+/// The mode an instance view gets when its kind declares no `:keymap`:
+/// `content/ui/sequencer-keys.lisp`'s base mode, which binds only the keys
+/// every sequencer-pane view answers.
+const DEFAULT_INSTANCE_VIEW_KEYMAP: &str = "eseq.sequencer-keys/view-keys";
+
 /// Host-created per-instance buffers and tabs (docs/instance-kinds-spec.md
 /// §7): reconcile the UI VM's bound view buffers with the instance list,
 /// then mirror each change into the editor and the step-tab registry. A new
@@ -535,10 +540,11 @@ pub(crate) fn sync_instance_views(
     }
     // The kind's :keymap may have changed with a reload; reapply it to
     // every view (cheap: this runs only when the instance key moves).
+    // A kind without one gets the pane's base keys (the command palette),
+    // so no instance tab is a dead end for `/`.
     for view in &views {
-        if let Some(keymap) = view.keymap.as_deref() {
-            editor.ensure_view_buffer(&view.buffer, Some(keymap));
-        }
+        let keymap = view.keymap.as_deref().unwrap_or(DEFAULT_INSTANCE_VIEW_KEYMAP);
+        editor.ensure_view_buffer(&view.buffer, Some(keymap));
     }
     if !removed.is_empty() {
         // The tab unregistration queued `set-window-buffer-for` onto the

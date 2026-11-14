@@ -4507,6 +4507,14 @@ pub fn register_core_natives(vm: &mut VM) {
         _ => Value::Nil,
     });
 
+    // (clipboard-write text) → true when the system clipboard took the text.
+    // Write only: a view copies what it shows as text for other apps, and
+    // keeps its own structured copy for pasting.
+    vm.register_native("clipboard-write", |args| match args.first() {
+        Some(Value::String(text)) => Value::Bool(crate::clipboard::write(text).is_ok()),
+        _ => Value::Bool(false),
+    });
+
     // (substring s start [end]) → character-indexed substring
     vm.register_native("substring", |args| {
         let Some(Value::String(s)) = args.first() else {
@@ -8284,6 +8292,17 @@ impl VM {
         self.drop_render_caches_after_sealed_violation();
         let node_id = self.dag.effect_id_for_subtree_root(root_id)?;
         if self.dag.is_dirty(node_id) {
+            return None;
+        }
+        // The cached tree embeds its nested subtrees' last renders. A dirty
+        // one (a field only it reads changed) would come back stale, and its
+        // own pending rerender can lose to this ancestor's replacement in
+        // the flush (the step panel's p-lock chips kept the previous
+        // selection's highlight). Render the body instead: its clean nested
+        // subtrees are still reused, the dirty ones rebuilt in place.
+        if (self.dag.descendant_subtree_effect_ids(root_id).iter())
+            .any(|&id| self.dag.is_dirty(id))
+        {
             return None;
         }
         self.registered_subtree_owner(root_id)?;

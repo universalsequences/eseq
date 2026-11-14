@@ -31,6 +31,7 @@
 (import eseq.seq-step-tabs)
 (import eseq.effects.drag-drop :as effect-dd)
 (import eseq.effects.param-controls :as pc)
+(import eseq.gestures :refer (drag-gesture))
 ;; Shared scene-bank view state: the clip grid below shows only the bank the
 ;; transport strip is viewing (scene-banks spec 10.1).
 (import eseq.scene-banks :refer (scene-viewed-bank scene-viewed-bank-id scene-viewed-bank-label clip-in-viewed-bank?
@@ -82,7 +83,6 @@
         track-context-menu
         bus-meter
         track-meter
-        pointer-volume
         mod-port-row
         bus-mod-port-row
         strip-menu
@@ -327,12 +327,6 @@
         alpha))
 
 (def arm-color (rgba 0.95 0.20 0.18 1.0))
-
-(def pointer-volume (sy)
-  (max 0.0 (min 1.0 (* 0.5 (- 1.0 sy)))))
-
-(def event-volume (event)
-  (pointer-volume event.sy))
 
 ;; ── Selection ──
 
@@ -966,8 +960,11 @@
 
 ;; ── Faders and meters ──
 
+;; The meter's height in rows: a fader's whole travel.
+(def fader-rows 4.24)
+
 (defwidget mixer-v2-volume-triangle
-  :width 1.35 :height 4.24
+  :width 1.35 :height fader-rows
   :paint-margin 0.15
   :state (value)
   :shader
@@ -989,7 +986,7 @@
 (def meter-display (level-l level-r)
   (mixer-meter
     :level-l level-l :level-r level-r
-    :width 2.22 :height 4.24
+    :width 2.22 :height fader-rows
     :font-size 7 :label-height 0.42 :label-top-inset 0.0
     :label-color :dim))
 
@@ -1006,42 +1003,50 @@
       (meter-display #'master.peak-l #'master.peak-r)
       (meter-display #'b.peak #'b.peak))))
 
-;; A fader `value` binding; `set` takes the pointer's level.
-(def volume-fader (value set)
-  (mixer-v2-volume-triangle
-    :value value
-    :on-click (lambda (sx sy region) (set (pointer-volume sy)))
-    :on-drag (lambda (sx sy region) (set (pointer-volume sy)))))
-
-(def set-track-volume! (t v)
-  (clear-delete-target)
-  (set! t.volume v))
+;; One fader: the volume handle and the meter beside it, as a single control.
+;; A click focuses it (the corner marks show the region that takes the
+;; pointer) and never moves the level; a drag hides the pointer and nudges
+;; the level from where it was, one meter height for the whole range
+;; (Shift held at the press: a quarter of that). (level) is the level now,
+;; (set v) writes it, (press) runs on the press.
+(def meter-fader (key value level set press meter)
+  (apply box :key key :width 3.65 :height fader-rows
+    :focusable true :focus-decoration :corners :hidden-drag true
+    (append
+      (drag-gesture
+        :begin (lambda (e) (do (press) (dict :level (level) :scale (if e.shift 0.25 1.0))))
+        :move (lambda (e start rows cols)
+                (set (clamp (- (get start :level)
+                               (/ (* rows (get start :scale)) fader-rows))
+                            0.0 1.0))))
+      (list
+        (h-stack :gap 0.06 :align :center
+          (mixer-v2-volume-triangle :value value)
+          meter)))))
 
 (def track-meter-control (t)
-  (box :width 3.65 :height 4.24
-    :on-click (lambda (event) (set-track-volume! t (event-volume event)))
-    :on-drag (lambda (event) (set-track-volume! t (event-volume event)))
-    (h-stack :gap 0.06 :align :center
-      (volume-fader #'t.volume (lambda (v) (set-track-volume! t v)))
-      (track-meter t))))
+  (meter-fader (str "track-fader-" t.index) #'t.volume
+    (lambda () t.volume)
+    (lambda (v) (set! t.volume v))
+    (lambda () (clear-delete-target))
+    (track-meter t)))
 
 ;; `spacer` is the room left above the meter: the clip-area equivalent that
 ;; keeps a bus/group meter level with the track strips' meters, or 0 when the
 ;; caller already filled that room (a rack's clip column, mixer §6.2).
 (def bus-meter-control-with-spacer (b is-group spacer)
-  (box :width 3.65 :height 4.24
+  (box :width 3.65 :height fader-rows
     :on-click (lambda (event) (select-bus b))
-    :on-drag (lambda (event) (select-bus b))
     (v-stack
       ;; Level with the track strips' meters, which sit below the clip area.
       (box :width :fill :height spacer)
       (h-stack :gap 0.06
         (box :width (if is-group 6 2))
-        (volume-fader #'b.volume
-          (lambda (v)
-            (select-bus b)
-            (set! b.volume v)))
-        (bus-meter b)))))
+        (meter-fader (str "bus-fader-" b.bid) #'b.volume
+          (lambda () b.volume)
+          (lambda (v) (set! b.volume v))
+          (lambda () (select-bus b))
+          (bus-meter b))))))
 
 (def bus-meter-control (b is-group)
   (bus-meter-control-with-spacer b is-group (if (compact?) 0.2 4.2)))

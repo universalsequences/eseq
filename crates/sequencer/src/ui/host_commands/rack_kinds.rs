@@ -36,7 +36,18 @@ use sequencer::project::{PadRole, ProjectRackConfig, ProjectTrackGroup};
 use sequencer::sequencer::{DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE};
 use std::collections::HashMap;
 
-pub(super) const COMMANDS: &[&str] = &["set-pad", "set-rack-clip", "set-groove", "set-pool-groove"];
+pub(super) const COMMANDS: &[&str] = &[
+    "set-pad",
+    "set-rack-clip",
+    "set-groove",
+    "set-pool-groove",
+    // Pad variants (docs/rack-pad-variants-spec.md).
+    "add-pad-variant",
+    "remove-pad-variant",
+    "set-pad-variant-value",
+    "set-pad-variant-values",
+    "clear-pad-variant-values",
+];
 
 /// The highest choke group a pad takes (the panel offers 1-16).
 pub(crate) const CHOKE_GROUPS: usize = 16;
@@ -60,6 +71,35 @@ enum RackEdit {
         group: u64,
         note: i32,
         role: Option<PadRole>,
+    },
+    PadName {
+        group: u64,
+        note: i32,
+        name: Option<String>,
+    },
+    AddVariant {
+        group: u64,
+        track: usize,
+        note: i32,
+    },
+    RemoveVariant {
+        group: u64,
+        note: i32,
+    },
+    VariantValue {
+        group: u64,
+        note: i32,
+        param: String,
+        value: Option<f32>,
+    },
+    VariantValues {
+        group: u64,
+        note: i32,
+        updates: Vec<(String, f32)>,
+    },
+    ClearVariantValues {
+        group: u64,
+        note: i32,
     },
     ClipName {
         group: u64,
@@ -110,7 +150,10 @@ impl RackEdit {
     /// A value a drag moves: joins the script's drag while the pointer is
     /// down.
     fn continuous(&self) -> bool {
-        matches!(self, Self::Amount { .. })
+        matches!(
+            self,
+            Self::Amount { .. } | Self::VariantValue { .. } | Self::VariantValues { .. }
+        )
     }
 
     /// How the edit lands: the pad map's republish, or a groove edit's (an
@@ -121,6 +164,12 @@ impl RackEdit {
             Self::PadNote { .. }
             | Self::PadChoke { .. }
             | Self::PadRole { .. }
+            | Self::PadName { .. }
+            | Self::AddVariant { .. }
+            | Self::RemoveVariant { .. }
+            | Self::VariantValue { .. }
+            | Self::VariantValues { .. }
+            | Self::ClearVariantValues { .. }
             | Self::ClipName { .. } => None,
             Self::Amount { forks: false, .. } => Some(RackGrooveEdit::Amount(true)),
             _ => Some(RackGrooveEdit::Structure),
@@ -130,7 +179,42 @@ impl RackEdit {
     /// Apply through the panel's recorded edits (`drags`: an amount joins
     /// the script's drag). Returns whether the model changed.
     fn apply(self, app: &mut app::App, drags: bool) -> Result<bool, String> {
+        let changed = |outcome: Result<app::edit::EditOutcome, app::edit::EditError>| {
+            outcome
+                .map(|outcome| outcome.changed())
+                .map_err(|error| format!("{error:?}"))
+        };
         match self {
+            Self::PadName { group, note, name } => {
+                return changed(app.rename_rack_pad_variant(group, note, name));
+            }
+            Self::AddVariant { group, track, note } => {
+                return app
+                    .add_rack_pad_variant(group, track, note)
+                    .map(|_| true)
+                    .map_err(|error| format!("{error:?}"));
+            }
+            Self::RemoveVariant { group, note } => {
+                return changed(app.remove_rack_pad_variant(group, note));
+            }
+            Self::VariantValue {
+                group,
+                note,
+                param,
+                value,
+            } => {
+                return changed(app.set_rack_pad_variant_value(group, note, &param, value));
+            }
+            Self::VariantValues {
+                group,
+                note,
+                updates,
+            } => {
+                return changed(app.set_rack_pad_variant_values(group, note, &updates));
+            }
+            Self::ClearVariantValues { group, note } => {
+                return changed(app.clear_rack_pad_variant_values(group, note));
+            }
             Self::PadNote { group, from, to } => app.set_rack_pad_note_recorded(group, from, to),
             Self::PadChoke { group, note, choke } => {
                 app.set_rack_pad_choke_group_recorded(group, note, choke)
@@ -200,9 +284,88 @@ fn command_rack<'a>(
 /// backs now.
 fn command_pad(app: &app::App, group: &ProjectTrackGroup, map: &Payload) -> Result<usize, String> {
     let track = command_track(app, map)?;
-    group
-        .rack_pad_index_of_track(track)
+    let variant = command_variant(map)?;
+    let rack = group.rack.as_ref().ok_or("the group is no drum rack")?;
+    let member = (group.members.iter().position(|member| *member == track))
+        .ok_or("the pad is gone")?;
+    rack.pad_index_for_variant(member, variant)
         .ok_or_else(|| "the pad is gone".to_string())
+}
+
+/// The optional `:variant` (0, the plain pad, when absent).
+fn command_variant(map: &Payload) -> Result<u32, String> {
+    if !map.contains_key("variant") {
+        return Ok(0);
+    }
+    let max = sequencer::sequencer::MAX_PAD_VARIANT as usize;
+    Ok(SetValue::of(map, "variant", "variant").integer(0, max)? as u32)
+}
+
+/// The pad note `:note` names (a pad variant command's address).
+fn command_note(map: &Payload) -> Result<i32, String> {
+    let range = (DRUM_RACK_FIRST_PAD_NOTE.into(), DRUM_RACK_LAST_PAD_NOTE.into());
+    Ok(SetValue::of(map, "note", "note").signed(range.0, range.1)? as i32)
+}
+
+/// What a pad variant command asks for (docs/rack-pad-variants-spec.md).
+fn variant_request(name: &str, app: &app::App, map: &Payload) -> Result<Option<RackEdit>, String> {
+    let (group, _, rack) = command_rack(app, map)?;
+    let note = command_note(map)?;
+    match name {
+        "add-pad-variant" => {
+            let track = command_track(app, map)?;
+            Ok(Some(RackEdit::AddVariant { group, track, note }))
+        }
+        "remove-pad-variant" => Ok(Some(RackEdit::RemoveVariant { group, note })),
+        // :params and :values: parallel lists (a custom panel's envelope).
+        "set-pad-variant-values" => {
+            let list = |key: &str| match map.get(key).map(|value| value.borrow().clone()) {
+                Some(Value::List(items)) => Ok(items.iter().map(|item| item.borrow().clone()).collect::<Vec<_>>()),
+                _ => Err(format!("{key} must be a list")),
+            };
+            let (params, values) = (list("params")?, list("values")?);
+            if params.len() != values.len() {
+                return Err("params and values differ in length".to_string());
+            }
+            let mut updates = Vec::with_capacity(params.len());
+            for (param, value) in params.iter().zip(&values) {
+                let (Value::String(param), Value::Number(value)) = (param, value) else {
+                    return Err("params are names, values numbers".to_string());
+                };
+                updates.push((param.to_string(), *value as f32));
+            }
+            let index = rack.pad_index_for_note(note).ok_or("the pad is gone")?;
+            let values = &rack.pads[index].values;
+            if updates.iter().all(|(name, value)| values.get(name) == Some(value)) {
+                return Ok(None);
+            }
+            Ok(Some(RackEdit::VariantValues {
+                group,
+                note,
+                updates,
+            }))
+        }
+        "clear-pad-variant-values" => Ok(Some(RackEdit::ClearVariantValues { group, note })),
+        "set-pad-variant-value" => {
+            let param = SetValue::of(map, "param", "param").label()?.to_string();
+            let value = SetValue::of(map, "value", "value");
+            let value = match value.value() {
+                Value::Nil => None,
+                _ => Some(value.finite()? as f32),
+            };
+            let index = rack.pad_index_for_note(note).ok_or("the pad is gone")?;
+            if rack.pads[index].values.get(&param).copied() == value {
+                return Ok(None);
+            }
+            Ok(Some(RackEdit::VariantValue {
+                group,
+                note,
+                param,
+                value,
+            }))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// What `set-pad` asks for; `Ok(None)` when the pad already is so.
@@ -241,6 +404,12 @@ fn pad_request(app: &app::App, map: &Payload) -> Result<Option<RackEdit>, String
             };
             let changed = role != pad.role;
             Ok(changed.then_some(RackEdit::PadRole { group, note, role }))
+        }
+        "name" => {
+            let name = value.label()?.trim();
+            let name = (!name.is_empty()).then(|| name.to_string());
+            let changed = name != pad.name;
+            Ok(changed.then_some(RackEdit::PadName { group, note, name }))
         }
         other => Err(format!("unknown pad field '{other}'")),
     }
@@ -424,6 +593,10 @@ fn request(name: &str, payload: &Value, app: &app::App) -> Result<Option<RackEdi
         "set-rack-clip" => rack_clip_request(app, map),
         "set-groove" => groove_request(app, map),
         "set-pool-groove" => pool_groove_request(app, map),
+        "add-pad-variant" | "remove-pad-variant" | "set-pad-variant-value"
+        | "set-pad-variant-values" | "clear-pad-variant-values" => {
+            variant_request(name, app, map)
+        }
         _ => Ok(None),
     }
 }

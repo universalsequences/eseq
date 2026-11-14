@@ -64,6 +64,59 @@ fn rerendered_parent_reuses_its_clean_nested_subtrees() {
         .all(|root| vm.dag.effect_id_for_subtree_root(*root).is_some()));
 }
 
+#[test]
+fn clean_subtree_is_not_reused_over_a_dirty_nested_subtree() {
+    // A clean middle subtree's cached tree embeds its nested subtrees'
+    // renders. When one of those is dirty (a field only it reads changed)
+    // and an ancestor re-renders first, reusing the middle's cache would
+    // resurrect the stale nested render (the step panel's p-lock chips
+    // kept the last selection's highlight).
+    let mut vm = VM::new(Vec::new());
+    register_core_natives(&mut vm);
+    let leaf_renders = Rc::new(std::cell::Cell::new(0));
+    let leaf_count = leaf_renders.clone();
+    vm.register_native("count-leaf", move |_| {
+        leaf_count.set(leaf_count.get() + 1);
+        Value::Nil
+    });
+    let middle_renders = Rc::new(std::cell::Cell::new(0));
+    let middle_count = middle_renders.clone();
+    vm.register_native("count-middle", move |_| {
+        middle_count.set(middle_count.get() + 1);
+        Value::Nil
+    });
+    vm.eval_str(r#"
+        (def panel ()
+          (subtree :key "outer"
+            (dict :type :box
+                  :children (list
+                    (subtree :key "middle"
+                      (do (count-middle) (dict :type :box
+                            :children (list
+                              (subtree :key "leaf"
+                                (do (count-leaf) (dict :type :label :text "leaf")))))))))))
+    "#).unwrap();
+    let owner = |vm: &VM, key: &str| {
+        let root = explicit_subtree_root_hash(
+            vm.current_effect_source_buffer_id,
+            &vm.current_effect_target,
+            key,
+        );
+        vm.dag.effect_id_for_subtree_root(root).expect("subtree owner")
+    };
+    vm.eval_str("(panel)").unwrap();
+    vm.eval_str("(panel)").unwrap();
+    assert_eq!(leaf_renders.get(), 1, "clean subtrees are reused");
+    // The outer and the leaf read a changed field; the middle reads none.
+    let (outer, leaf) = (owner(&vm, "outer"), owner(&vm, "leaf"));
+    vm.dag.mark_dirty(outer);
+    vm.dag.mark_dirty(leaf);
+    vm.eval_str("(panel)").unwrap();
+    assert_eq!(middle_renders.get(), 2, "the middle's cache holds the stale leaf");
+    assert_eq!(leaf_renders.get(), 2, "the dirty leaf re-renders inside its middle");
+    assert!(!vm.dag.is_dirty(leaf), "rendered in place, not again on its own");
+}
+
 // Pre-optimization comparator, retained only as a benchmark/semantic oracle.
 /// Equality for cached subtree captured inputs. Deliberately stricter than
 /// `Value::PartialEq`: callables compare by chunk index only there, which

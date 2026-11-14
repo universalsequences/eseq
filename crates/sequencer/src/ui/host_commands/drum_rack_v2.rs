@@ -88,15 +88,25 @@ pub(super) fn handle(
         "trigger-rack-pad" => {
             let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
             let group = group_id.and_then(|id| app.groups.iter().find(|group| group.id == id));
-            let track = match extract_usize_from_payload(&payload, "track-id") {
+            // The pad's variant plays (and is captured) too:
+            // `trigger-pad!` names it as `:variant`, a grid hit by its note.
+            let variant = extract_usize_from_payload(&payload, "variant").unwrap_or(0) as u32;
+            let target = match extract_usize_from_payload(&payload, "track-id") {
                 Some(tid) => {
                     let pad = group.ok_or("the rack is gone").and_then(|group| {
                         live_track_index(app, sequencer::sequencer::TrackId(tid as u64))
-                            .filter(|track| group.rack_pad_index_of_track(*track).is_some())
+                            .filter(|track| {
+                                let member = group.members.iter().position(|m| m == track);
+                                (group.rack.as_ref().zip(member))
+                                    .and_then(|(rack, member)| {
+                                        rack.pad_index_for_variant(member, variant)
+                                    })
+                                    .is_some()
+                            })
                             .ok_or("the pad is gone")
                     });
                     match pad {
-                        Ok(track) => Some(track),
+                        Ok(track) => Some((track, variant)),
                         Err(error) => {
                             editor.handle_host_event(HostEvent::Error(format!("{name}: {error}")));
                             return;
@@ -105,10 +115,10 @@ pub(super) fn handle(
                 }
                 None => group.and_then(|group| {
                     extract_i32_from_payload(&payload, "pad-note")
-                        .and_then(|pad_note| group.rack_pad_track(pad_note))
+                        .and_then(|pad_note| group.rack_pad_target(pad_note))
                 }),
             };
-            let Some(track) = track else {
+            let Some((track, variant)) = target else {
                 return;
             };
             release_matching_key_lock_auditions(
@@ -125,11 +135,12 @@ pub(super) fn handle(
                     transpose: 0.0,
                     velocity: 1.0,
                     note_off: false,
+                    variant,
                 }))
                 .is_ok()
             {
                 if let Some(id) = app.track_registry.id_at(track) {
-                    app.retrospective.trig(id, 0.0, Instant::now(), PAD_HIT_DURATION);
+                    app.retrospective.trig(id, 0.0, Some(variant), Instant::now(), PAD_HIT_DURATION);
                 }
                 ctx.sessions
                     .pending_key_lock_auditions

@@ -167,17 +167,90 @@ fn rack_clip_scroll_owns_vertical_gestures_across_the_visible_list() {
     assert_eq!(get_scroll_state(key).offset_y, before);
 }
 
+fn pointer_at(editor: &mut Editor, kind: MouseEventKind, at: (f32, f32)) {
+    editor.handle_tiled_mouse_precise(MouseEvent {
+        kind,
+        column: at.0 as u16,
+        row: at.1.max(0.0) as u16,
+        modifiers: KeyModifiers::NONE,
+    }, at.0, at.1, 0);
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+}
+
 fn click_at(editor: &mut Editor, at: (f32, f32)) {
     for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)] {
-        editor.handle_tiled_mouse_precise(MouseEvent {
-            kind,
-            column: at.0 as u16,
-            row: at.1 as u16,
-            modifiers: KeyModifiers::NONE,
-        }, at.0, at.1, 0);
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
+        pointer_at(editor, kind, at);
     }
+}
+
+/// The fader — volume handle plus the meter beside it — is one control: a
+/// press anywhere on it focuses the whole region (corner marks, not the
+/// container highlight), hides the pointer, and leaves the level alone; the
+/// drag then nudges the level from where it was, one meter height for the
+/// whole range.
+#[test]
+fn track_fader_press_focuses_and_drag_nudges_instead_of_jumping() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    assert!(editor.switch_active_tile_to_buffer_named("*mixer*"));
+    let track = kind_track(editor.runtime(), 0);
+    set_field(editor.runtime_mut(), track, "volume", Value::Number(0.75));
+    // The level the fader last wrote to track 0, nil until it writes one.
+    // (This harness does not apply volume writes back to the track.)
+    let written = Rc::new(RefCell::new(None::<f64>));
+    let sink = written.clone();
+    editor.runtime_mut().register_native("seq-set-track-volume", move |args, _ctx| {
+        if let [Value::Number(track), Value::Number(volume)] = args.as_slice() {
+            if *track == 0.0 {
+                *sink.borrow_mut() = Some(*volume);
+            }
+        }
+        Ok(Value::Bool(true))
+    });
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    let volume = || written.borrow().expect("the drag writes a level");
+
+    let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+    let tile = frame.tiles.iter().find(|t| t.frame.buffer_name == "*mixer*").unwrap();
+    let layout = tile.frame.widget_layout.as_deref().unwrap();
+    let fader = find_layout_node_by_stable_key_suffix(layout, "track-fader-0").unwrap();
+    assert_finite_nonzero_rect(fader, "fader region");
+    assert!(fader.focusable);
+    assert_eq!(
+        fader.props.get("focus-decoration"),
+        Some(&Value::Keyword("corners".to_string())),
+    );
+    let meter = find_layout_node_by_stable_key(layout, "mixer-v2-track-meter-0").unwrap();
+    let height = fader.rect.height;
+    // On the meter (not the handle), three quarters of the way down: an
+    // absolute fader would drop the level to 0.25.
+    let press = (
+        tile.rect.col + meter.rect.col + meter.rect.width * 0.5
+            - tile.frame.widget_layout_scroll_left,
+        tile.rect.row + fader.rect.row + height * 0.75 - tile.frame.widget_scroll_top,
+    );
+    assert!(press.1 >= tile.rect.row && press.1 < tile.rect.row + tile.rect.height);
+    let fader_key = fader.stable_key.clone();
+
+    pointer_at(&mut editor, MouseEventKind::Down(MouseButton::Left), press);
+    assert_eq!(*written.borrow(), None, "a press must not move the level");
+    assert!(editor.hidden_drag_gesture_active(), "the press hides the pointer");
+    let focused = editor.focused_widget_node().expect("the press focuses the fader");
+    assert_eq!(focused.stable_key, fader_key, "the whole fader region takes focus");
+
+    // A quarter of the meter height up, half down, then far past the tile,
+    // where only the hidden pointer can go.
+    let drag = MouseEventKind::Drag(MouseButton::Left);
+    pointer_at(&mut editor, drag, (press.0, press.1 - height * 0.25));
+    assert!((volume() - 1.0).abs() < 1e-4, "{}", volume());
+    pointer_at(&mut editor, drag, (press.0, press.1 + height * 0.5));
+    assert!((volume() - 0.25).abs() < 1e-4, "{}", volume());
+    pointer_at(&mut editor, drag, (press.0 + 40.0, press.1 + height * 3.0));
+    assert_eq!(volume(), 0.0, "the level clamps while the pointer keeps travelling");
+
+    pointer_at(&mut editor, MouseEventKind::Up(MouseButton::Left), press);
+    assert!(!editor.hidden_drag_gesture_active(), "the release restores the pointer");
 }
 
 fn first_badge_click(editor: &mut Editor, buffer: &str, key: &str) -> (f32, f32) {

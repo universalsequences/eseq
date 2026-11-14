@@ -24,6 +24,7 @@
         fx-effect-drop-meta
         fx-effect-drop-types
         fx-panel-header
+        fx-collapsed-strip
         fx-clear-delete-selection
         fx-clear-selected-effect
         device-output-meter)
@@ -123,6 +124,31 @@
         (fx-edit-source fx title)
         (fx-copy-values-to-all-scenes fx)))))
 
+;; The header's fold button, beside the ••• menu: folds the panel to its
+;; thin strip, and unfolds it from the strip. The only fold gesture: a click
+;; on the header (or the strip) selects the effect.
+(def fx-toggle-collapsed (fx)
+  (st/toggle-device-collapsed! (get fx :collapse-key)))
+
+(defwidget fx-collapse-icon
+  ;; The enable dot's size (ep/fx-enabled-dot).
+  :width 1.55 :height 1.0
+  :paint-margin 0.1
+  :shader
+  (sdf/layer
+    (sdf/fill (sdf/circle 0.86)
+      (material :color :mixer-control-bg))
+    (sdf/fill (sdf/rounded-rect 0.46 0.09 0.04)
+      (material :color :fg))))
+
+(def fx-collapse-button (fx)
+  (box :key (str "fx-collapse-" (fx-enabled-toggle-key fx))
+    :debug-name "fx-collapse-button"
+    :width 1.55 :height 0.99 :padding 0 :h-align :center :v-align :center
+    (v-stack :gap 0 :align :center
+      (fx-collapse-icon
+        :on-click |x y r| (fx-toggle-collapsed fx)))))
+
 ;; Only user-authored audio/bus effects have source to open; the Edit item
 ;; lives in the ••• menu rather than as a header button so it is not hit by
 ;; accident.
@@ -215,35 +241,72 @@
         (list "audio-effect" "effect-instance")
         (list "audio-effect" "effect-instance")))))
 
+;; Make `fx` the selected effect (the delete, copy and paste target).
+(def fx-select-effect (fx)
+  (if (get fx :midi-fx)
+    (pw/select-midi-effect (get fx :slot-idx))
+    (if (get fx :rack-fx)
+      (pw/select-rack-effect
+        (get fx :track-idx)
+        (get fx :rack-slot)
+        (get fx :slot-idx))
+      (if (get fx :bus-fx)
+        (pw/select-bus-effect (get fx :bus-idx) (get fx :slot-idx))
+        (pw/select-effect (get fx :slot-idx))))))
+
+(def fx-enabled-toggle-key (fx)
+  (if (get fx :midi-fx)
+    (str "midi-fx-enabled-" (get fx :slot-idx))
+    (if (get fx :bus-fx)
+      (str "bus-fx-enabled-" (get fx :bus-idx) "-" (get fx :slot-idx))
+      (str "audio-fx-enabled-" (get fx :slot-idx)))))
+
+;; A folded panel's name: one character per row, top to bottom (labels do
+;; not rotate), as many as the strip holds.
+(def fx-collapsed-title-rows 9)
+
+(def fx-collapsed-title (title)
+  (let ((n (min (len title) fx-collapsed-title-rows)))
+    (v-stack :gap 0 :align :center
+      (each (range n) |i|
+        (label (substring title i (+ i 1))
+          :height 0.82 :font-size 10 :h-align :center
+          :color :fg :bg :transparent)))))
+
+;; A folded effect panel's content: the enable dot and the fold button in
+;; its double-height header, then the name down the strip. The whole strip
+;; is the header: it selects (for delete, copy) and drags; the fold button
+;; unfolds it.
+(def fx-collapsed-strip (title params fx)
+  (box :width :fill :height :fill :padding 0 :v-align :start :h-align :center
+    :debug-name (if (get fx :midi-fx) "midi-fx-panel-collapsed" "audio-fx-panel-collapsed")
+    :drag-type "effect-instance"
+    :drag-payload (fx-effect-drag-payload fx title)
+    :on-click (lambda (info) (fx-select-effect fx))
+    (v-stack :gap 0 :align :center :width :fill
+      ;; The strip's header is two rows tall (the panel's :tall-header): the
+      ;; enable dot, then the fold button under it.
+      (ep/enabled-toggle (ep/enabled-param params) fx (fx-enabled-toggle-key fx))
+      (box :width :fill :height 1 :padding 0 :h-align :center :v-align :center
+        (fx-collapse-button fx))
+      (box :width 0.1 :height 0.25)
+      (fx-collapsed-title title))))
+
 (def fx-panel-header (title params fx)
   (box :width :fill :height 1 :padding 0 :v-align :center :h-align :start
     :debug-name (if (get fx :midi-fx) "midi-fx-panel-header" "audio-fx-panel-header")
     :drag-type "effect-instance"
     :drag-payload (fx-effect-drag-payload fx title)
-    :on-click (lambda (info)
-      (if (get fx :midi-fx)
-        (pw/select-midi-effect (get fx :slot-idx))
-        (if (get fx :rack-fx)
-          (pw/select-rack-effect
-            (get fx :track-idx)
-            (get fx :rack-slot)
-            (get fx :slot-idx))
-          (if (get fx :bus-fx)
-          (pw/select-bus-effect (get fx :bus-idx) (get fx :slot-idx))
-          (pw/select-effect (get fx :slot-idx))))))
+    :on-click (lambda (info) (fx-select-effect fx))
     (h-stack :gap 0.5 :align :center :width :fill
       (fx-panel-header-leading-spacer)
-      (ep/enabled-toggle (ep/enabled-param params) fx
-        (if (get fx :midi-fx)
-          (str "midi-fx-enabled-" (get fx :slot-idx))
-          (if (get fx :bus-fx)
-            (str "bus-fx-enabled-" (get fx :bus-idx) "-" (get fx :slot-idx))
-            (str "audio-fx-enabled-" (get fx :slot-idx)))))
+      (ep/enabled-toggle (ep/enabled-param params) fx (fx-enabled-toggle-key fx))
       (label title :v-align :center :font-size 11 :color :fg :bg :transparent)
       (if (pc/fx-has-modulators? fx)
         (ep/effect-mods-toggle-button fx)
         (box))
       (box :flex 1 :height 0.15)
+      (fx-collapse-button fx)
       (if (get fx :rack-fx) (box) (fx-header-actions-menu fx title))
       (box :width 0.1 :height 0.2))))
 

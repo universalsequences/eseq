@@ -122,6 +122,10 @@ pub struct SequencerSnapshot {
     /// Drum-rack member lists at capture time, for resolving rack-owned graph
     /// sequencers' member-relative routes (`crate::graph::resolve_rack_member_routes`).
     pub rack_memberships: Vec<crate::graph::RackMembership>,
+    /// Drum-rack pad variants resolved against this snapshot's instruments
+    /// (docs/rack-pad-variants-spec.md §3.3); read by the audio thread when a
+    /// hit names a variant.
+    pub pad_variants: Arc<crate::sequencer::pad_variants::PadVariantOverlays>,
     /// The kits (rack group ids) the scene this snapshot plays switches off
     /// (docs/rig-spec.md §6): their member tracks are `scene_silenced` and
     /// their rack-owned graphs and generators do not run. Set by
@@ -267,6 +271,17 @@ impl SequencerSnapshot {
             .fold(0.0, f64::max)
     }
 
+    /// Resolve the published rack pad variants against this snapshot's
+    /// instruments (docs/rack-pad-variants-spec.md §3.3).
+    pub(super) fn resolve_pad_variants(&mut self, state: &SequencerState) {
+        let published = state.rack_pad_variants();
+        self.pad_variants = if published.is_empty() {
+            Arc::new(Default::default())
+        } else {
+            Arc::new(crate::sequencer::pad_variants::resolve_overlays(self, &published))
+        };
+    }
+
     /// The instrument descriptor a rack slot plays: the builtin sampler's, or
     /// its engine's from the registry table. `None` for an empty slot or an
     /// engine the table does not know yet.
@@ -300,6 +315,7 @@ impl SequencerSnapshot {
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
             rack_memberships: Vec::new(),
+            pad_variants: Arc::new(Default::default()),
             parked_racks: Vec::new(),
             parked_instances: Vec::new(),
             track_grooves: Arc::new(Vec::new()),
@@ -371,6 +387,7 @@ impl SequencerSnapshot {
             neural_networks,
             graph_overrides,
             rack_memberships: state.rack_memberships(),
+            pad_variants: Arc::new(Default::default()),
             parked_racks: Vec::new(),
             parked_instances: Vec::new(),
             track_grooves: state.track_grooves(),
@@ -384,6 +401,7 @@ impl SequencerSnapshot {
         };
         // The playing scene's switched-off kits and project-owned
         // instances (docs/rig-spec.md §6, §10).
+        snapshot.resolve_pad_variants(state);
         snapshot.apply_scene_parking(parking);
         snapshot
     }
@@ -530,6 +548,7 @@ impl SequencerSnapshot {
             neural_networks,
             graph_overrides,
             rack_memberships: state.rack_memberships(),
+            pad_variants: Arc::new(Default::default()),
             parked_racks: Vec::new(),
             parked_instances: Vec::new(),
             track_grooves: state.track_grooves(),
@@ -544,6 +563,7 @@ impl SequencerSnapshot {
             macro_overrides: Arc::new(HashMap::new()),
             scene_push_schedule: None,
         };
+        snapshot.resolve_pad_variants(state);
         snapshot.apply_scene_parking(parking);
         snapshot
     }

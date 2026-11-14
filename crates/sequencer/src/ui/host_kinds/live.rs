@@ -76,7 +76,7 @@ pub(crate) struct KindsShared {
     /// Each pad instance's member track position, as of the last rack sync,
     /// and the trigger lights by track position, copied by the tick
     /// (`pad.triggered`, `track.triggered`).
-    pub(super) pad_tracks: HashMap<InstanceId, usize>,
+    pub(super) pad_tracks: HashMap<InstanceId, (usize, u32)>,
     pad_triggers: Vec<bool>,
     /// The tick's modulation display sample, copied when it changes while
     /// a modulation field is observed (`param.mod-offset`,
@@ -730,6 +730,13 @@ pub(super) fn live_value<S: KindStore>(
                 f::STEP_HELD => {
                     Value::Bool(track_step_duration_covered(&sources.state, track, step))
                 }
+                f::STEP_HELD_PAD => {
+                    let held = track_step_duration_covered(&sources.state, track, step);
+                    let print_step = sources.print_step(&*store, track);
+                    let variant =
+                        sources.shown_step_param(track, step, StepParam::Variant, print_step);
+                    number(f64::from(u8::from(held)) + 2.0 * variant.round().max(0.0))
+                }
                 f::STEP_PLOCKED | f::STEP_LOCK_KIND | f::STEP_VARIANT_COLOR => {
                     track_plock_render(sources, shared, track)
                         .get(step)?
@@ -877,8 +884,13 @@ pub(super) fn live_value<S: KindStore>(
         }
         PAD => {
             let shared = shared.borrow();
-            let track = *shared.pad_tracks.get(&id)?;
-            Value::Bool(shared.pad_triggers.get(track).copied().unwrap_or(false))
+            // A member's pads share its light; the variant its last hit
+            // played picks which of them shows it.
+            let (track, variant) = *shared.pad_tracks.get(&id)?;
+            let lit = shared.pad_triggers.get(track).copied().unwrap_or(false);
+            let last = (sources.state.transport.trigger_variant.get(track))
+                .map_or(0, |slot| slot.load(Ordering::Relaxed));
+            Value::Bool(lit && last == variant)
         }
         ROUTE => {
             let connection = *shared.borrow().routes.get(&id)?;

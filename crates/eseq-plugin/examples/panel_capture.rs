@@ -2,14 +2,21 @@
 //! the plugin's editor draws it: `panel_capture "<X.clap>" out.png [name=value…]`
 //! (values are applied through the param store, as host automation would).
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Instant;
+// The panel host is macOS-only (`eseq_plugin::panel` renders through Metal),
+// and Cargo cannot gate an example by target, so everything here is.
+#[cfg(target_os = "macos")]
+use {
+    eseq_plugin::engine::ParamStore, eseq_plugin::panel::PanelHost, eseq_plugin::payload::Payload,
+    std::path::PathBuf, std::sync::Arc, std::time::Instant,
+};
 
-use eseq_plugin::engine::ParamStore;
-use eseq_plugin::panel::PanelHost;
-use eseq_plugin::payload::Payload;
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("panel_capture needs the plugin panel host, which only exists on macOS");
+    std::process::exit(1);
+}
 
+#[cfg(target_os = "macos")]
 fn main() {
     let mut args = std::env::args().skip(1);
     let bundle = PathBuf::from(args.next().expect("bundle"));

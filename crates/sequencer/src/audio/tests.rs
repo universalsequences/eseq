@@ -15,7 +15,8 @@ use super::{
     collect_rack_choke_group_track_releases, collect_rack_choke_group_voice_releases,
     for_each_custom_voice_route_update, free_patch_transport_route_cache_is_fresh,
     free_patch_transport_route_target, instrument_sound_fingerprint,
-    key_locked_live_instrument_params, live_key_release_cuts_voice, mix_metronome,
+    apply_live_pad_variant, key_locked_live_instrument_params, live_key_release_cuts_voice,
+    mix_metronome,
     mute_group_winner_for_block_events, remap_route_after_track_delete,
     resolve_live_instrument_defaults, resolve_live_keyboard_transpose, resolve_slice,
     resolve_snapshot_instrument_defaults, resolved_chord_transpose, resolved_slot_param_value,
@@ -849,6 +850,103 @@ fn key_locked_live_instrument_params_keep_step_plocks_per_param() {
     );
 }
 
+/// docs/rack-pad-variants-spec.md §2.3/§4.1: patch default → key lock → pad
+/// variant → step p-lock, per parameter; the plain pad and an unknown
+/// variant id layer nothing; a value naming no param is ignored.
+#[test]
+fn pad_variant_layers_over_key_locks_under_step_plocks() {
+    let state = SequencerState::new(1, Vec::new());
+    let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
+        name: "pad-variant-test".to_string(),
+        input_channels: 0,
+        output_channels: 2,
+        instrument_modulators: Vec::new(),
+        declared_latency_samples: None,
+        instrument_modulation_targets: Vec::new(),
+        tensor_params: Vec::new(),
+        params: vec![
+            audio_test_param("cutoff", 100.0, 0),
+            audio_test_param("detune", 0.0, 1),
+            audio_test_param("decay", 0.5, 2),
+        ],
+    });
+    let slot = &state.pattern.instrument_slots[0];
+    slot.apply_descriptor(&desc, 42);
+    slot.defaults.set(0, 100.0);
+    slot.defaults.set(1, 0.0);
+    slot.defaults.set(2, 0.5);
+    slot.set_key_lock(60, 1, -40.0);
+    slot.set_key_lock(60, 2, 0.9);
+    slot.set_plock(5, 0, 2_000.0);
+    state.set_scratch_runtime_descriptors(vec![Vec::new()], vec![desc.clone()]);
+    state.set_rack_pad_variants(vec![crate::sequencer::pad_variants::RackPadVariantRuntime {
+        track: 0,
+        variant: 2,
+        values: vec![
+            ("cutoff".to_string(), 4_000.0),
+            ("detune".to_string(), -20.0),
+            ("no-such-param".to_string(), 1.0),
+        ],
+    }]);
+    let snapshot = state.publish_scheduler_snapshot();
+    assert!(snapshot.pad_variants.get(0, 0).is_none(), "plain pad layers nothing");
+    assert!(snapshot.pad_variants.get(0, 9).is_none(), "unknown id plays plain");
+    let overlay = snapshot.pad_variants.get(0, 2).expect("variant 2 resolved");
+    assert_eq!(overlay.instrument.len(), 2, "unknown names are skipped");
+
+    let mut base_params = resolve_live_instrument_defaults(&state, 0);
+    for param in &mut base_params {
+        if param.target == ScheduledInstrumentParamTarget::Synth && param.idx == 0 {
+            param.value = 2_000.0;
+        }
+    }
+    // A step with a cutoff p-lock: the p-lock wins cutoff, the variant beats
+    // detune's key lock, and decay (not in the variant) keeps its key lock.
+    let mut on_plocked_step =
+        key_locked_live_instrument_params(&state, 0, 0.0, 0.0, Some(5), &base_params);
+    apply_live_pad_variant(&state, 0, &overlay.instrument, Some(5), &mut on_plocked_step);
+    assert_eq!(param_value(&on_plocked_step, 0), Some(2_000.0));
+    assert_eq!(param_value(&on_plocked_step, 1), Some(-20.0));
+    assert_eq!(param_value(&on_plocked_step, 2), Some(0.9));
+
+    // A step without p-locks: the variant's cutoff applies.
+    let base_params = resolve_live_instrument_defaults(&state, 0);
+    let mut plain_step = key_locked_live_instrument_params(&state, 0, 0.0, 0.0, Some(1), &base_params);
+    apply_live_pad_variant(&state, 0, &overlay.instrument, Some(1), &mut plain_step);
+    assert_eq!(param_value(&plain_step, 0), Some(4_000.0));
+}
+
+/// A variant resolved against one instrument must not land on whatever
+/// param sits at the same index after the instrument changes.
+#[test]
+fn pad_variant_skips_values_whose_param_identity_changed() {
+    let state = SequencerState::new(1, Vec::new());
+    let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
+        name: "pad-variant-identity-test".to_string(),
+        input_channels: 0,
+        output_channels: 2,
+        instrument_modulators: Vec::new(),
+        declared_latency_samples: None,
+        instrument_modulation_targets: Vec::new(),
+        tensor_params: Vec::new(),
+        params: vec![audio_test_param("cutoff", 100.0, 0)],
+    });
+    state.pattern.instrument_slots[0].apply_descriptor(&desc, 42);
+    state.set_scratch_runtime_descriptors(vec![Vec::new()], vec![desc.clone()]);
+    state.set_rack_pad_variants(vec![crate::sequencer::pad_variants::RackPadVariantRuntime {
+        track: 0,
+        variant: 1,
+        values: vec![("cutoff".to_string(), 4_000.0)],
+    }]);
+    let snapshot = state.publish_scheduler_snapshot();
+    let overlay = snapshot.pad_variants.get(0, 1).expect("resolved").clone();
+    // The live slot moves to a different node before the snapshot catches up.
+    state.pattern.instrument_slots[0].apply_descriptor(&desc, 77);
+    let mut params = resolve_live_instrument_defaults(&state, 0);
+    apply_live_pad_variant(&state, 0, &overlay.instrument, None, &mut params);
+    assert_eq!(param_value(&params, 0), Some(100.0));
+}
+
 #[test]
 fn key_locked_live_instrument_params_drop_stale_key_lock_identity() {
     let state = SequencerState::new(1, Vec::new());
@@ -1649,6 +1747,7 @@ pub(super) fn test_block_trigger_with(seq: u64, track: usize, transpose: f32, ve
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 chord: ScheduledChordData {
                     live_origins: [None; crate::audio::MAX_VOICES],
@@ -1695,6 +1794,7 @@ fn test_block_network_trigger(seq: u64, track: usize) -> BlockEvent {
                     chop: 1.0,
                     retrig: crate::sequencer::StepParam::Retrig.default_value(),
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
+                    variant: 0.0,
                 },
                 chord: ScheduledChordData {
                     live_origins: [None; crate::audio::MAX_VOICES],
@@ -3062,6 +3162,7 @@ fn retrig_test_step(retrig: f32, retrig_rate: f32) -> ResolvedStep {
         chop: 1.0,
         retrig,
         retrig_rate,
+        variant: 0.0,
     }
 }
 

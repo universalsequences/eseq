@@ -18,6 +18,10 @@ fn drive_host_loop(
     }
 }
 
+/// How long input must be quiet before the palette's search walk runs: it
+/// blocks the UI thread, so it stays out of the way of typing and drags.
+const PALETTE_WARM_INPUT_QUIET: Duration = Duration::from_millis(300);
+
 fn host_animation_active(editor: &Editor, backend: &AppBackend, gesture: &GestureState) -> bool {
     editor.visible_widgets_animating() || editor.toast_animating() || gesture.scroll_inertia.fling_active()
         || (!editor.visible_widget_layouts().is_empty()
@@ -411,6 +415,7 @@ pub(crate) fn run_event_loop(
         prev_sound_binding_epoch: 0,
         palette_search_library: (0, 0),
         palette_search_engines: Vec::new(),
+        last_input_at: crate::loop_ctx::LastInputAt(Instant::now()),
         prev_delete_target_version: 0,
         prev_multi_track_selection: Vec::new(),
         prev_active_buffer_name: editor.active_buffer().name.clone(),
@@ -714,6 +719,7 @@ pub(crate) fn run_event_loop(
             let Some(event) = event else { break; };
             let event_started = Instant::now();
             input_batch.begin_event(event_started);
+            frame.last_input_at = crate::loop_ctx::LastInputAt(event_started);
             let mut live_key_consumed = false;
             match event {
                 BackendEvent::Quit => editor.request_quit(),
@@ -1625,6 +1631,8 @@ pub(crate) fn run_event_loop(
         } else if !pointer_is_down {
             app::edit::finish_active_gesture_if_idle(&mut app);
         }
+        // A drag still held: sequenced triggers hear it from the snapshot.
+        app::edit::publish_open_gesture_device_values(&mut app);
         ui_loop_stats.note_host_commands(host_commands_started.elapsed());
 
         if let Some(completed_load) =
@@ -2458,6 +2466,21 @@ pub(crate) fn run_event_loop(
         )? {
             TickFlow::Quit => return Ok(HostLoopControl::Exit),
             TickFlow::Continue => {}
+        }
+        // The palette's search entries are walked here, between frames while
+        // input is quiet, rather than on the first letter typed into it: the
+        // walk scans the instrument and package trees on disk (~0.1s warm,
+        // near 1s on a cold disk). The tick above drops the entries when what
+        // they list moved, so this re-walks them after startup and after
+        // each change. Waits out the preset index build, whose unfinished
+        // names would be walked as empty and walked again when it lands.
+        // A held pointer is a drag that may only be resting.
+        if !editor.palette_search_warm()
+            && !gesture.pointer_down
+            && frame.last_input_at.0.elapsed() >= PALETTE_WARM_INPUT_QUIET
+            && !sequencer::lisp_host::preset_name_index_building()
+        {
+            editor.warm_palette_search();
         }
         Ok(HostLoopControl::WaitUntil(frame_pacer.next_host_tick(
             Instant::now(),

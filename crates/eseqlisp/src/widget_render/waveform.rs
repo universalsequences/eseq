@@ -1063,6 +1063,7 @@ impl WaveformView {
             // The waveform keeps the stock grid ladder.
             grid_density: 1.0,
             fine_grid: false,
+            grid_subdivide: 1.0,
         }
     }
 

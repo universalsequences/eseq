@@ -357,6 +357,7 @@ pub(super) fn icon_name_value(value: &str) -> Option<f32> {
         "clips" => Some(20.0),
         "save" | "download" => Some(21.0),
         "swatch" | "color" => Some(22.0),
+        "lane" | "automation" | "envelope" => Some(23.0),
         _ => None,
     }
 }
@@ -418,16 +419,38 @@ fn normalized_corner_radius(rect: Rect, viewport: super::WidgetViewport, radius_
 /// the glyph's sides get clipped; the width is corrected by the cell aspect.
 fn button_icon_rect(rect: Rect, viewport: super::WidgetViewport) -> Rect {
     let icon_size = rect.height.min(1.12);
-    let cell_aspect = if viewport.cell_w > 0.0 {
-        viewport.cell_h / viewport.cell_w
-    } else {
-        1.0
-    };
+    let cell_aspect = cell_aspect(viewport);
     Rect {
         row: rect.row + (rect.height - icon_size).max(0.0) * 0.5,
         col: rect.col + 0.56,
         width: icon_size * cell_aspect.max(1.0),
         height: icon_size,
+    }
+}
+
+/// A cell's height over its width (1 when unknown).
+fn cell_aspect(viewport: super::WidgetViewport) -> f32 {
+    if viewport.cell_w > 0.0 {
+        viewport.cell_h / viewport.cell_w
+    } else {
+        1.0
+    }
+}
+
+/// An icon-only button's glyph: centered and inset from the edges, and
+/// shrunk to fit a button narrower than the glyph's square box, so it never
+/// spills past the button (the text layout's left-anchored box would).
+fn icon_only_rect(rect: Rect, viewport: super::WidgetViewport) -> Rect {
+    let cell_aspect = cell_aspect(viewport).max(1.0);
+    let size = (rect.height * 0.78)
+        .min(1.12)
+        .min(rect.width * 0.78 / cell_aspect);
+    let width = size * cell_aspect;
+    Rect {
+        row: rect.row + (rect.height - size) * 0.5,
+        col: rect.col + (rect.width - width) * 0.5,
+        width,
+        height: size,
     }
 }
 
@@ -661,6 +684,11 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         } else {
             d = min(abs(drop) - stroke, glint);
         }
+    } else if (in.value_t > 22.5) {
+        // lane: an automation breakpoint on its line (Ableton's lane
+        // toggle), the same in either style.
+        float line = button_icon_segment(p, float2(-0.50, 0.0), float2(0.50, 0.0)) - stroke;
+        d = min(line, length(p - float2(-0.16, 0.0)) - 0.20);
     } else if (in.value_t > 21.5) {
         // swatch: a solid disc, the same in either style (a color chip whose
         // color is the glyph's own).
@@ -1239,7 +1267,11 @@ active tab. :icon names a glyph drawn left of the text (:plus, :folder, :piano, 
         }
 
         if let Some(icon) = icon_value(&node.props) {
-            let icon_rect = button_icon_rect(node.rect, viewport);
+            let icon_rect = if prop_text(&node.props).is_empty() {
+                icon_only_rect(node.rect, viewport)
+            } else {
+                button_icon_rect(node.rect, viewport)
+            };
             let (ndc_min, ndc_max) = ndc_bounds(icon_rect, viewport);
             let px_w = icon_rect.width * viewport.cell_w;
             let px_h = icon_rect.height * viewport.cell_h;

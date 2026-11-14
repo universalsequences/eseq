@@ -68,6 +68,8 @@ impl SequencerState {
         let step_data: Vec<StepData> = (0..MAX_TRACKS).map(|_| StepData::new()).collect();
         let track_params: Vec<TrackParams> = (0..MAX_TRACKS).map(|_| TrackParams::new()).collect();
         let trigger_flash: Vec<AtomicU32> = (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect();
+        let trigger_variant: Vec<AtomicU32> =
+            (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect();
 
         let mut effect_chains = initial_chains;
         for _ in effect_chains.len()..MAX_TRACKS {
@@ -174,6 +176,7 @@ impl SequencerState {
                 callback_busy_ns: AtomicU64::new(0),
                 callback_budget_ns: AtomicU64::new(0),
                 trigger_flash,
+                trigger_variant,
                 num_tracks: AtomicU32::new(num_tracks as u32),
                 track_playheads: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 track_process_lengths: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
@@ -304,6 +307,7 @@ impl SequencerState {
             step_print_override: StepPrintOverride::default(),
             device_print_override: DeviceParamPrintOverride::default(),
             rack_macro_print_override: RackMacroPrintOverride::default(),
+            print_boundary_log: PrintBoundaryLog::default(),
             take_rack_macro_override: TakeRackMacroOverride::default(),
             track_output_events: Mutex::new(Vec::new()),
             track_output_events_revision: AtomicU64::new(0),
@@ -337,6 +341,7 @@ impl SequencerState {
             published_sequencers: Mutex::new(Vec::new()),
             rack_memberships: Mutex::new(Vec::new()),
             rack_groove_variants: Mutex::new(Arc::new(Default::default())),
+            rack_pad_variants: Mutex::new(Arc::new(Vec::new())),
             published_sequencers_version: AtomicU64::new(0),
             published_scene_slot_declarations: Mutex::new(std::collections::BTreeMap::new()),
             generator_tick_errors: Mutex::new(Vec::new()),

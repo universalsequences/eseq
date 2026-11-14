@@ -3513,6 +3513,32 @@ pub fn widget_hidden_drag(widget_type: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a press on this node starts a hidden-cursor drag: its widget type
+/// always does (knobs, number pickers), or the node asked with
+/// `:hidden-drag true` (a `box` wrapping a composite control).
+pub fn node_hidden_drag(node: &LayoutNode) -> bool {
+    widget_hidden_drag(&node.widget_type)
+        || matches!(node.props.get("hidden-drag"), Some(Value::Bool(true)))
+}
+
+thread_local! {
+    /// A pointer handler's request (`grab-pointer`) to keep the gesture in
+    /// progress on the widget it started on: `Some(hide)`, taken by the
+    /// editor once the handler returns.
+    static POINTER_GRAB_REQUEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Ask for the gesture in progress to be captured by its widget (every
+/// further drag reaches it, wherever the pointer is), hiding the pointer
+/// when `hide`.
+pub(crate) fn request_pointer_grab(hide: bool) {
+    POINTER_GRAB_REQUEST.with(|request| request.set(Some(hide)));
+}
+
+pub(crate) fn take_pointer_grab_request() -> Option<bool> {
+    POINTER_GRAB_REQUEST.with(std::cell::Cell::take)
+}
+
 thread_local! {
     /// True while dispatching a mouse event that belongs to a hidden-cursor
     /// drag gesture. Widgets whose value math depends on the pointer's
@@ -4340,6 +4366,34 @@ mod tests {
             widget_primitive_cache_key(&boxed, viewport).expect("cacheable"),
             box_before,
             "a late defwidget must invalidate a cached box background"
+        );
+    }
+
+    #[test]
+    fn box_focus_corners_are_opt_in() {
+        let rect = Rect { row: 2.0, col: 3.0, width: 5.0, height: 3.0 };
+        let corners = |props: HashMap<String, Value>| {
+            let mut boxed = test_node(43, "box", rect, props, Vec::new());
+            boxed.focusable = true;
+            let viewport = WidgetViewport {
+                focused_widget_id: Some(boxed.widget_id),
+                ..test_viewport()
+            };
+            let count = widget_primitives_for_node(&boxed, viewport)
+                .iter()
+                .filter(|primitive| matches!(primitive, GpuPrimitive::ForegroundRect(_)))
+                .count();
+            (count, suppresses_default_focus(&boxed))
+        };
+
+        assert_eq!(corners(HashMap::new()), (0, false));
+        assert_eq!(
+            corners(HashMap::from([(
+                "focus-decoration".to_string(),
+                Value::Keyword("corners".to_string()),
+            )])),
+            (8, true),
+            "corner marks replace the default container highlight"
         );
     }
 

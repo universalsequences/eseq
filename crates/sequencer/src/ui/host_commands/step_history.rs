@@ -56,10 +56,16 @@ pub(super) fn piano_roll_edit_landed(ctx: &LoopCtx<'_>, track: usize, landing: P
         track,
         change: PianoRollInvalidation::Items,
     });
+    // A drag frame bumps no epoch: the host kinds diff the piano roll's
+    // notes (scheduler snapshot), the step grid's steps (per tick) and the
+    // arrangement's clip dots (pattern content) themselves. A `ui_epoch`
+    // bump per frame re-ran the whole model sync (every track, device and
+    // send) and relaid out *sequencer* on every mouse move of a note drag.
+    // The release and one-shot edits still bump both, once.
     if landing != PianoRollLanding::Frame {
         shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+        shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
     }
-    shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -422,8 +428,8 @@ pub(super) fn handle(
         "print-step-param" => {
             // Live step-param printing (bead eseq-jc9): while playing with
             // record on, a *step*-buffer param touch latches into print mode;
-            // the reactive tick writes the latched value onto passing trigger
-            // steps. No cool-off / auto-follow override here — the performer
+            // the reactive tick prints it onto the steps the scheduler plays
+            // while latched (heard log). No cool-off / auto-follow override here — the performer
             // is watching the playhead, so follow must stay alive.
             if !state.is_playing() || !ctx.shared.recording.load(Ordering::Relaxed) {
                 // The lisp-side gate raced off between the touch and this

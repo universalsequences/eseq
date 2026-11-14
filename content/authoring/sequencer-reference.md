@@ -75,7 +75,7 @@ Slots (all optional except that a sequencer needs `:generator` or
   another type is an error.
 - `:view FN`: `(FN self)` returns the panel widget tree for the instance's
   tab.
-- `:on-create FN`, `:keymap MODE`: optional.
+- `:on-create FN`, `:keymap MODE`: optional. Without `:keymap` the view gets `eseq.sequencer-keys/view-keys` (just `/` for the command palette).
 
 In the view, `self.field` reads and `(set! self.field value)` writes (one
 undoable edit per write). `self.id` is the instance id, `self.owner` is

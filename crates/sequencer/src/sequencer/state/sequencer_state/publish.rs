@@ -134,7 +134,7 @@ impl SequencerState {
         let mut hits = self.roll_recorded_hits.lock().unwrap();
         // Backstop for a control thread that never drains (headless
         // schedulers): recording cannot be on there, so dropping is safe.
-        if hits.len() < 4096 {
+        if hits.len() < super::super::SCHEDULER_MAILBOX_CAP {
             hits.push(hit);
         }
     }
@@ -564,9 +564,29 @@ impl SequencerState {
         };
         next.tracks[track] = Arc::new(next_track);
         next.transport = self.capture_transport_snapshot();
+        // The recaptured track may have a different instrument now.
+        next.resolve_pad_variants(self);
         // The recaptured track starts unparked: parking changes publish in
         // full, so the cloned snapshot's parked set is the playing scene's.
         next.apply_track_parking(track);
+        self.publish_scheduler_snapshot_arc(Arc::new(next))
+    }
+
+    /// Republish only the rack pad variant overlays (docs/rack-pad-variants-
+    /// spec.md §3.3): a variant knob drag changes nothing else, so it reuses
+    /// the current snapshot instead of paying for a whole-project capture.
+    pub fn publish_pad_variants(&self) -> Arc<SequencerSnapshot> {
+        if self.publish_coalesce_depth.load(Ordering::Acquire) > 0 {
+            self.pending_coalesced_publish.store(true, Ordering::Release);
+            return self.latest_scheduler_snapshot();
+        }
+        let current = self.scheduler_snapshot.lock().unwrap().clone();
+        if current.tracks.len() != self.active_track_count() {
+            return self.publish_scheduler_snapshot();
+        }
+        let mut next = (*current).clone();
+        next.resolve_pad_variants(self);
+        next.transport = self.capture_transport_snapshot();
         self.publish_scheduler_snapshot_arc(Arc::new(next))
     }
 

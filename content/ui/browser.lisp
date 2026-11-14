@@ -2321,19 +2321,20 @@ then creates the instance and opens its tab."
               (projects-tab-panel))))))))))
 
 (def tabbed-content ()
-  (h-stack :key "tabbed-content" :width :fill :gap 0.5 :flex 1 :align :stretch
-    (tab-rail)
-    (box 
-      :width 0.2 
-      :height :fill 
-      :background-color :bg
-      )
-    (box
-      :key "active-tab-panel" :width 0 :flex 1 :padding 0
-      (v-stack
-        :key "active-tab-column" :width :fill :height :fill :gap 0.15 :flex 1
-        (search-header)
-        (active-tab-panel)))))
+  (v-stack :key "tabbed-browser-column" :width :fill :height :fill :gap 0.15 :flex 1
+    (search-header)
+    (h-stack :key "tabbed-content" :width :fill :gap 0.5 :flex 1 :align :stretch
+      (tab-rail)
+      (box
+        :width 0.2
+        :height :fill
+        :background-color :bg
+        )
+      (box
+        :key "active-tab-panel" :width 0 :flex 1 :padding 0
+        (v-stack
+          :key "active-tab-column" :width :fill :height :fill :gap 0.15 :flex 1
+          (active-tab-panel))))))
 
 (def main-panel ()
   (v-stack :key "tabbed-browser" :width :fill :height :fill :gap 0.45 :flex 1

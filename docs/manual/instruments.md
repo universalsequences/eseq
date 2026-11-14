@@ -38,11 +38,11 @@ The **Factory**, **Library** and **Packages** chips above the list narrow the sa
 
 ![The Instruments tab: built-in engines, the instruments this project already uses, and the factory folders.](images/instrument-browser.png)
 
-The factory instruments come in three folders, the first two divided into sub-folders:
+The factory instruments come in three folders, each divided into sub-folders where a family shares a role or a lineage:
 
-- **Drums** (16). Kicks: 808 Kick, 909 Kick, Boom Bap Kick, Break Kick, Modal Kick, Virus B BassDrum 23. Snares: Digi Snare, Membrane Snare, Modal Snare. Claps: 808 Clap, Digi Clap. Hats & Cymbals: 909 Open Hat, Digi Cymbal, Digi Hat. Toms: 808 Tom, Orbit Tom 66.
-- **Physical Models** (15). Winds: PM Clarinet, PM Flute, PM Saxophone. Strings: PM Cello, PM Electric Bass. Keys: PM Piano. Cymbals: PM Crash, PM Hi-Hat, PM Ride. Gamelan: PM Bonang, PM Kempyang, PM Kethuk, PM Saron, PM Slenthem, PM Slenthem Slendro. The six Gamelan models are Javanese gamelan instruments.
-- **Synths** (11): Digi FM, Digi Syn, Digi Wave, Felucca CZ, Felucca FM6, Grit, Heat, Melt, Poseidon, Revsynt and Vox. Felucca CZ and Felucca FM6 are ports of the phase-distortion and six-operator FM engines of the Felucca firmware for the FM-1 (GPL-3.0, by Leo Kuroshita of Hügelton Instruments); FM6's synthesis is msfa, the core of Dexed (Apache-2.0).
+- **Drums** (16). Kicks: 808 Kick, 909 Kick, Modal Kick, Virus B BassDrum 23. Snares: Digi Snare, Membrane Snare. Claps: 808 Clap, Digi Clap. Hats & Cymbals: 909 Open Hat, Digi Cymbal, Digi Hat, PM Ride Kit, VILLAIN Hat. Toms: 808 Tom, Orbit Tom 66. Percussion: PM Bongos.
+- **Physical Models** (8). Winds: PM Flute. Keys: PM Piano. Gamelan: PM Bonang, PM Kempyang, PM Kethuk, PM Saron, PM Slenthem, PM Slenthem Slendro. The six Gamelan models are Javanese gamelan instruments.
+- **Synths** (14): Digi FM, Digi Syn, Digi Wave, Heat and Revsynt, plus three sub-folders. Felucca: Felucca CZ, Felucca FM6. Machines: Grit, Melt, Vox, three compact single-engine synths. Mutable Instruments: Beads, Elements, Plaits, Rings, ports of the open-source Mutable Instruments Eurorack modules (https://github.com/pichenettes/eurorack). Felucca CZ and Felucca FM6 are ports of the phase-distortion and six-operator FM engines of the Felucca firmware for the FM-1 (GPL-3.0, by Leo Kuroshita of Hügelton Instruments); FM6's synthesis is msfa, the core of Dexed (Apache-2.0).
 
 Every compiled instrument, factory or not, is the same kind of object: DGenLisp source plus a panel description. A factory instrument has no privileges that one of yours lacks.
 

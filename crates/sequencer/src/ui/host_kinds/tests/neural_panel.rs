@@ -305,6 +305,17 @@ impl Panel {
         self.tiles().into_iter().map(|(name, _)| name).collect()
     }
 
+    /// A full-width tab: no right column at all.
+    fn assert_no_column(&self, when: &str) {
+        let visible = self.visible();
+        for name in ["*processes*", "*step*", "*track*"] {
+            assert!(
+                !visible.iter().any(|shown| shown == name),
+                "{when}: no {name}: {visible:?}"
+            );
+        }
+    }
+
     /// The tiles on screen: the browser always; in the right column either
     /// the dock (with `code` under it, or not) or *step* over *track*.
     fn assert_column(&self, docked: bool, code: Option<&str>, when: &str) {
@@ -1426,8 +1437,9 @@ fn the_process_card_edits_its_inlets_through_the_kinds() {
 
 /// The dock shows only while a node editor is open in the main tile, and
 /// then it takes the right column in place of *step*/*track*; the browser
-/// sidebar never changes. When it hides *step*/*track* come back; the
-/// defcustom keeps it off.
+/// sidebar never changes. With no node editor open the neural tab takes
+/// the whole column (a full-width kind); *step*/*track*
+/// come back on the Seq tab; the defcustom keeps the dock off.
 #[test]
 fn processes_buffer_replaces_step_and_track_while_a_node_editor_is_open() {
     let mut p = Panel::open();
@@ -1454,24 +1466,34 @@ fn processes_buffer_replaces_step_and_track_while_a_node_editor_is_open() {
     p.assert_column(true, None, "docked");
     assert!(p.visible().iter().any(|name| name == &p.bay));
 
-    // All nodes: the dock goes (the observer re-lays out), *step*/*track*
-    // are back.
+    // All nodes: the dock goes (the observer re-lays out) and the tab
+    // takes the column; *step*/*track* stay away.
     p.expand(-1);
     assert!(!p.showing(), "all nodes: no node editor");
-    p.assert_column(false, None, "all nodes");
+    p.assert_no_column("all nodes");
 
     p.expand(2);
     assert!(p.showing());
     p.assert_column(true, None, "docked again");
-    p.show_seq_tab();
+    // Real tab clicks from here: `show_seq_tab` moves the state without
+    // the tile's selected tab, so a later click on that tab is a no-op.
+    p.click_tab("Seq");
     assert!(!p.showing(), "another tab in the main tile");
-    p.show_tab();
+    p.assert_column(false, None, "Seq tab");
+    p.click_tab("neural 1");
+    assert!(p.showing(), "back on the neural tab");
     p.eval("(setopt eseq.processes-buffer/processes-buffer-auto-split false)");
     assert!(!p.showing(), "the auto-split setting is off");
     let spec = p.column_spec();
     assert!(
+        !spec.contains("*processes*") && !spec.contains("*step*") && !spec.contains("*track*"),
+        "dock off: the tab keeps the full width: {spec}"
+    );
+    p.eval("(setopt eseq.seq-step-tabs/full-width-instance-tabs false)");
+    let spec = p.column_spec();
+    assert!(
         !spec.contains("*processes*") && spec.contains("*step*") && spec.contains("*track*"),
-        "{spec}"
+        "both knobs off: {spec}"
     );
 }
 
@@ -2566,4 +2588,32 @@ fn expr_card_docked_code_keeps_completion_and_mode_across_commit_and_hide_show()
         let body = format!("(+ x {})", 10 + round);
         p.assert_still_expr_buffer(expr, &body, &format!("docked, hide/show {round}"));
     }
+}
+
+/// A jaki tab has no use for *step* and *track*: while it is the tab
+/// showing, the right column goes and the tab takes its width; the Seq tab
+/// brings the column back; the knob turns it off.
+#[test]
+fn a_jaki_tab_takes_the_step_and_track_column() {
+    let mut p = Panel::new();
+    p.eval("(import alez.jaki.kind)");
+    create(&mut p.h, "alez/jaki:jaki", None);
+    p.render();
+    p.relayout();
+    p.click_tab("jaki 1");
+    p.assert_no_column("jaki tab");
+    assert!(
+        !p.column_spec().contains("*step*"),
+        "the spec drops the column: {}",
+        p.column_spec()
+    );
+
+    p.click_tab("Seq");
+    p.assert_column(false, None, "Seq tab");
+
+    p.click_tab("jaki 1");
+    p.eval("(setopt eseq.seq-step-tabs/full-width-instance-tabs false)");
+    p.assert_column(false, None, "knob off");
+    p.eval("(setopt eseq.seq-step-tabs/full-width-instance-tabs true)");
+    p.assert_no_column("knob on");
 }

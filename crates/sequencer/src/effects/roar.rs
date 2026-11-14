@@ -3,7 +3,8 @@
 //! Up to three identical waveshaper stages arranged by one of seven routing
 //! topologies (single / serial / parallel / multiband / mid-side / feedback /
 //! delay). Each stage: optional pre filter -> amount drive -> bias -> shaper
-//! (12 curves, 2x oversampled) -> DC block -> optional post filter -> level.
+//! (twelve static curves, 2x oversampled, or one of five solved circuits,
+//! 4x oversampled) -> DC block -> optional post filter -> level.
 //! Globals: input Drive, Tone tilt/shelf EQ, a feedback network (delay +
 //! stage-2 return + bandpass + soft limiter, audible in the Feedback/Delay
 //! routings), a one-knob output compressor with sidechain HPF, output trim
@@ -18,7 +19,7 @@ use crate::effects::ott::{butterworth, split_bands};
 use std::os::raw::{c_int, c_void};
 
 pub const NUM_STAGES: usize = 3;
-pub const NUM_SHAPERS: usize = 12;
+pub const NUM_SHAPERS: usize = 17;
 pub const NUM_FILTERS: usize = 9;
 
 // Feedback delay line, power of two so reads wrap with a mask. 65536 samples
@@ -50,6 +51,69 @@ pub const SHAPER_FRACTAL: usize = 8;
 pub const SHAPER_TRI_FOLD: usize = 9;
 pub const SHAPER_NOISE: usize = 10;
 pub const SHAPER_SHARDS: usize = 11;
+// The rest are solved circuits, not transfer curves (see `Circuit`).
+/// One 12AX7 gain stage (`effects/triode.rs`).
+pub const SHAPER_TRIODE: usize = 12;
+/// Two of those stages in series (`triode::process_twin`).
+pub const SHAPER_TWIN_TRIODE: usize = 13;
+/// Slew-limited op-amp into silicon diodes (`effects/opamp_clip.rs`).
+pub const SHAPER_OPAMP_CLIP: usize = 14;
+/// Two-transistor germanium fuzz (`effects/fuzz.rs`).
+pub const SHAPER_FUZZ: usize = 15;
+/// Transformer with a hysteretic core (`effects/hysteresis.rs`).
+pub const SHAPER_HYSTERESIS: usize = 16;
+
+/// A shaper that integrates a circuit instead of applying a curve. Each one
+/// oversamples itself 4x (`effects/oversample4.rs`) and takes the bias
+/// control as a circuit quantity, not as an offset on the signal.
+#[derive(Clone, Copy)]
+enum Circuit {
+    Triode(super::triode::TriodeCoeffs),
+    TwinTriode(super::triode::TriodeCoeffs),
+    OpampClip(super::opamp_clip::Coeffs),
+    Fuzz(super::fuzz::Coeffs),
+    Hysteresis(super::hysteresis::Coeffs),
+}
+
+impl Circuit {
+    fn for_shaper(shaper: usize, sample_rate: f64) -> Option<Self> {
+        Some(match shaper {
+            SHAPER_TRIODE => Self::Triode(super::triode::TriodeCoeffs::new(sample_rate)),
+            SHAPER_TWIN_TRIODE => Self::TwinTriode(super::triode::TriodeCoeffs::new(sample_rate)),
+            SHAPER_OPAMP_CLIP => Self::OpampClip(super::opamp_clip::Coeffs::new(sample_rate)),
+            SHAPER_FUZZ => Self::Fuzz(super::fuzz::Coeffs::new(sample_rate)),
+            SHAPER_HYSTERESIS => Self::Hysteresis(super::hysteresis::Coeffs::new(sample_rate)),
+            _ => return None,
+        })
+    }
+
+    /// How far this circuit's clipped output level sits from the triode's,
+    /// which `AUTO_GAIN_KNEE_DB` is fitted to: the op-amp's diodes and the
+    /// fuzz's 9 V supply clip at about a third of it, the transformer's driver
+    /// at about twice (`tools/saturator/measure.py loudness`).
+    fn auto_gain_knee_offset_db(&self) -> f32 {
+        match self {
+            Self::Triode(_) | Self::TwinTriode(_) => 0.0,
+            Self::OpampClip(_) | Self::Fuzz(_) => -9.5,
+            Self::Hysteresis(_) => 5.0,
+        }
+    }
+
+    /// One host-rate sample in the unit domain, `LATENCY_SAMPLES` late.
+    ///
+    /// # Safety
+    /// `st` must point to `STAGE_RT_STRIDE - RT_CIRCUIT` valid floats.
+    #[inline]
+    unsafe fn process(&self, st: *mut f32, x: f32, bias: f32) -> f32 {
+        match self {
+            Self::Triode(c) => super::triode::process(c, st, x, bias),
+            Self::TwinTriode(c) => super::triode::process_twin(c, st, x, bias),
+            Self::OpampClip(c) => super::opamp_clip::process(c, st, x, bias),
+            Self::Fuzz(c) => super::fuzz::process(c, st, x, bias),
+            Self::Hysteresis(c) => super::hysteresis::process(c, st, x, bias),
+        }
+    }
+}
 
 // Stage filter types.
 pub const FILTER_LP: usize = 0;
@@ -160,8 +224,20 @@ const STATE_CFG_FILTER: usize = 116; // 3
 const STATE_CFG_PRE: usize = 119; // 3
 const STATE_XOVER_Z: usize = 122; // 2 ch × 20
                                   // Per-stage-per-channel runtime blocks (index = stage * 2 + channel).
-const STATE_STAGE_RT: usize = 162;
-const STAGE_RT_STRIDE: usize = 64;
+// Auto gain switch (a param slot; it lives here because the param block
+// above is full and its slots are addressed by descriptors).
+const STATE_AUTO_GAIN: usize = 162;
+// 1 while stage 1's right-channel runtime block is still a copy of the
+// left one's (true from init until the two inputs first differ): a solved
+// circuit then runs once for both channels of a mono source.
+const STATE_MONO_LOCK: usize = 163;
+// Auto gain loudness matching: mean squares of the dry and (statically
+// made-up) wet signals, and the trim they imply.
+const STATE_AG_MS_DRY: usize = 164;
+const STATE_AG_MS_WET: usize = 165;
+const STATE_AG_TRIM: usize = 166;
+const STATE_STAGE_RT: usize = 167;
+const STAGE_RT_STRIDE: usize = 256;
 const RT_SVF_IC1: usize = 0;
 const RT_SVF_IC2: usize = 1;
 const RT_AP_BASE: usize = 2; // 4 × (x1, y1) dispersion allpasses
@@ -176,12 +252,45 @@ const RT_COMB_POS: usize = 17;
 const RT_UP_RING: usize = 18; // 16
 const RT_DOWN_RING: usize = 34; // 16
 const RT_OS_POS: usize = 50;
+const RT_CIRCUIT: usize = 64; // a `Circuit`'s state
+const _: () = {
+    let room = STAGE_RT_STRIDE - RT_CIRCUIT;
+    assert!(super::triode::STATE_LEN <= room);
+    assert!(super::opamp_clip::STATE_LEN <= room);
+    assert!(super::fuzz::STATE_LEN <= room);
+    assert!(super::hysteresis::STATE_LEN <= room);
+};
+// The dry ring must hold three circuit stages' worth of latency.
+const _: () = assert!(3 * super::oversample4::LATENCY_SAMPLES < DRY_RING_LEN);
 
 const STATE_FB_BUF_L: usize = STATE_STAGE_RT + 6 * STAGE_RT_STRIDE;
 const STATE_FB_BUF_R: usize = STATE_FB_BUF_L + FB_BUF_LEN;
 const STATE_COMB_BUF: usize = STATE_FB_BUF_R + FB_BUF_LEN; // 6 × COMB_BUF_LEN
 
-pub const ROAR_STATE_SIZE: usize = STATE_COMB_BUF + 6 * COMB_BUF_LEN;
+// Dry-path delay ring (2 channels), so the dry/wet mix stays phase-aligned
+// with the shaper oversamplers' latency.
+const DRY_RING_LEN: usize = 64;
+const STATE_DRY_BUF: usize = STATE_COMB_BUF + 6 * COMB_BUF_LEN;
+const STATE_DRY_POS: usize = STATE_DRY_BUF + 2 * DRY_RING_LEN;
+
+pub const ROAR_STATE_SIZE: usize = STATE_DRY_POS + 1;
+
+// Host-rate latency of one stage's shaper: the 2x halfband pair, a
+// circuit's own 4x chain, or none for the base-rate bit crusher.
+const HALFBAND_LATENCY: usize = 5;
+// Auto gain: the stage's output stops growing once it clips, so makeup is
+// the inverse of a soft-knee limiter law on the total pre-shaper gain. Knee
+// and exponent are fitted to the triode's level-vs-drive curve on -18 dBFS
+// RMS pink noise (`tools/saturator/measure.py loudness`).
+const AUTO_GAIN_KNEE_DB: f32 = 19.5;
+const AUTO_GAIN_EXP: f32 = 2.4;
+// That law is exact for one kind of material at one level. A slow trim
+// closes the rest of the gap: the ratio of dry to wet loudness over this
+// window, held while the input is below the gate, within these bounds.
+const AUTO_GAIN_WINDOW_MS: f32 = 400.0;
+const AUTO_GAIN_GATE_MS: f32 = 2.0e-7; // mean square, about -67 dBFS
+const AUTO_GAIN_TRIM_MIN: f32 = 0.35;
+const AUTO_GAIN_TRIM_MAX: f32 = 2.8;
 
 pub const ROAR_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 pub const ROAR_PARAM_DRIVE: u64 = STATE_DRIVE as u64;
@@ -204,6 +313,7 @@ pub const ROAR_PARAM_COMPRESS: u64 = STATE_COMPRESS as u64;
 pub const ROAR_PARAM_SC_HPF: u64 = STATE_SC_HPF as u64;
 pub const ROAR_PARAM_OUTPUT: u64 = STATE_OUTPUT as u64;
 pub const ROAR_PARAM_MIX: u64 = STATE_MIX as u64;
+pub const ROAR_PARAM_AUTO_GAIN: u64 = STATE_AUTO_GAIN as u64;
 pub const ROAR_PARAM_BPM: u64 = STATE_BPM as u64;
 pub const ROAR_PARAM_MOD_DRIVE_DEPTH_1: u64 = STATE_MOD_DRIVE_DEPTH_1 as u64;
 pub const ROAR_PARAM_MOD_TONE_DEPTH_1: u64 = STATE_MOD_TONE_DEPTH_1 as u64;
@@ -354,6 +464,12 @@ pub fn shaper_transfer(shaper: usize, amount: f32, x: f32) -> f32 {
             1.0 - 4.0 * (t - 0.5).abs()
         }
         SHAPER_NOISE | SHAPER_SHARDS => soft_sine(x),
+        // The stage with its capacitors frozen; the runtime path solves it.
+        SHAPER_TRIODE => super::triode::static_transfer(x),
+        SHAPER_TWIN_TRIODE => super::triode::static_transfer_twin(x),
+        SHAPER_OPAMP_CLIP => super::opamp_clip::static_transfer(x),
+        SHAPER_FUZZ => super::fuzz::static_transfer(x),
+        SHAPER_HYSTERESIS => super::hysteresis::static_transfer(x),
         _ => soft_sine(x),
     }
 }
@@ -422,6 +538,10 @@ struct StageCtx {
     ap_coef: [f32; 4],
     comb_delay: f32,
     hold_interval: f32,
+    // A lowpass parked at the top of its range is no filter at all.
+    filter_open: bool,
+    // Set only for the solved-circuit shapers.
+    circuit: Option<Circuit>,
 }
 
 /// One channel of one stage's filter, selected by type. `rt` points at the
@@ -527,7 +647,7 @@ unsafe fn stage_sample(
     let k = *sm.add(SM_STAGE_K);
 
     let mut y = x;
-    if ctx.pre {
+    if ctx.pre && !ctx.filter_open {
         y = stage_filter_sample(ctx, g, k, y, rt, comb);
     }
     let filtered = y;
@@ -540,7 +660,12 @@ unsafe fn stage_sample(
         extremes[1] = driven;
     }
 
-    let shaped = if ctx.shaper == SHAPER_BIT_CRUSHER {
+    let shaped = if let Some(circuit) = &ctx.circuit {
+        // The circuit oversamples itself, and takes the bias control as one
+        // of its own quantities, not as an offset on the signal (its input
+        // capacitor would just block that).
+        circuit.process(rt.add(RT_CIRCUIT), filtered * gain, bias)
+    } else if ctx.shaper == SHAPER_BIT_CRUSHER {
         // Intentionally aliased: quantizers run at base rate.
         shaper_sample(ctx.shaper, ctx.amount, driven, rt)
     } else {
@@ -571,16 +696,22 @@ unsafe fn stage_sample(
         out
     };
 
-    // One-pole DC blocker (removes bias and rectifier/even-harmonic DC).
-    let dc_y = shaped - *rt.add(RT_DC_X) + dc_r * *rt.add(RT_DC_Y);
-    *rt.add(RT_DC_X) = shaped;
-    *rt.add(RT_DC_Y) = dc_y;
+    // One-pole DC blocker (removes bias and rectifier/even-harmonic DC). The
+    // triode's output capacitor already does this.
+    let dc_y = if matches!(ctx.circuit, Some(Circuit::Triode(_) | Circuit::TwinTriode(_))) {
+        shaped
+    } else {
+        let dc_y = shaped - *rt.add(RT_DC_X) + dc_r * *rt.add(RT_DC_Y);
+        *rt.add(RT_DC_X) = shaped;
+        *rt.add(RT_DC_Y) = dc_y;
+        dc_y
+    };
 
     // Amount 0 keeps the stage null-clean: crossfade the whole nonlinear leg
     // back to the filtered signal.
     y = filtered + engage * (dc_y - filtered);
 
-    if !ctx.pre {
+    if !ctx.pre && !ctx.filter_open {
         y = stage_filter_sample(ctx, g, k, y, rt, comb);
     }
     y * level
@@ -594,6 +725,11 @@ unsafe extern "C" fn roar_init(
 ) {
     let s = state as *mut f32;
     std::ptr::write_bytes(s, 0, ROAR_STATE_SIZE);
+    super::triode::warm_tables();
+    super::opamp_clip::warm_tables();
+    super::hysteresis::warm_tables();
+    *s.add(STATE_MONO_LOCK) = 1.0;
+    *s.add(STATE_AG_TRIM) = 1.0;
     *s.add(STATE_ENABLED) = 1.0;
     *s.add(STATE_DRIVE) = 0.0;
     *s.add(STATE_TONE) = 0.0;
@@ -801,6 +937,8 @@ unsafe extern "C" fn roar_process(
             ap_coef,
             comb_delay: (sr / freq).clamp(2.0, (COMB_BUF_LEN - 2) as f32),
             hold_interval: if freq >= 15_900.0 { 1.0 } else { sr / freq },
+            filter_open: filter == FILTER_LP && freq >= 15_900.0,
+            circuit: Circuit::for_shaper(shaper, sr as f64),
         };
         stage_gain_target[stage] = (amount * AMOUNT_GAIN_OCT).exp2();
         stage_bias_target[stage] = finite_clamp(*s.add(base + STAGE_BIAS), -1.0, 1.0, 0.0);
@@ -829,6 +967,10 @@ unsafe extern "C" fn roar_process(
                     0,
                     COMB_BUF_LEN,
                 );
+            }
+            if stage == 0 {
+                // Both channel blocks are zero again, so identical.
+                *s.add(STATE_MONO_LOCK) = 1.0;
             }
             *s.add(STATE_CFG_SHAPER + stage) = shaper as f32;
             *s.add(STATE_CFG_FILTER + stage) = filter as f32;
@@ -868,6 +1010,39 @@ unsafe extern "C" fn roar_process(
     let fb_buf_r = s.add(STATE_FB_BUF_R);
     let xover_z0 = s.add(STATE_XOVER_Z);
     let xover_z1 = s.add(STATE_XOVER_Z + 20);
+
+    let stage_latency = |stage: usize| match stage_ctx[stage].shaper {
+        _ if stage_ctx[stage].circuit.is_some() => super::oversample4::LATENCY_SAMPLES,
+        SHAPER_BIT_CRUSHER => 0,
+        _ => HALFBAND_LATENCY,
+    };
+    let wet_latency = match routing {
+        ROUTING_SERIAL => stage_latency(0) + stage_latency(1),
+        _ => stage_latency(0),
+    };
+    // See STATE_MONO_LOCK. Any other routing or shaper runs both channels
+    // and so ends the lock on its first sample.
+    let circuit_single = routing == ROUTING_SINGLE && stage_ctx[0].circuit.is_some();
+    let mut mono_lock = *s.add(STATE_MONO_LOCK) > 0.5;
+    let dry_buf = s.add(STATE_DRY_BUF);
+    let mut dry_pos = (*s.add(STATE_DRY_POS)) as usize & (DRY_RING_LEN - 1);
+
+    let auto_gain = *s.add(STATE_AUTO_GAIN) > 0.5;
+    let auto_makeup = if auto_gain {
+        let gain_db = drive_db_knob + amp_to_db(stage_gain_target[0]);
+        let knee_db = AUTO_GAIN_KNEE_DB
+            + stage_ctx[0].circuit.map_or(0.0, |circuit| circuit.auto_gain_knee_offset_db());
+        let over = db_to_amp(gain_db - knee_db);
+        (1.0 + over.powf(AUTO_GAIN_EXP)).powf(1.0 / AUTO_GAIN_EXP) / db_to_amp(gain_db)
+    } else {
+        1.0
+    };
+    let output_target = output_target * auto_makeup;
+    let ag_coef = time_coef(AUTO_GAIN_WINDOW_MS, sr);
+    let mut ag_ms_dry = finite_clamp(*s.add(STATE_AG_MS_DRY), 0.0, 1.0e6, 0.0);
+    let mut ag_ms_wet = finite_clamp(*s.add(STATE_AG_MS_WET), 0.0, 1.0e6, 0.0);
+    let mut ag_trim =
+        finite_clamp(*s.add(STATE_AG_TRIM), AUTO_GAIN_TRIM_MIN, AUTO_GAIN_TRIM_MAX, 1.0);
 
     let mut sm_drive = finite_clamp(*s.add(STATE_SM_DRIVE), 0.0, 128.0, 1.0);
     let mut sm_tone_lo = finite_clamp(*s.add(STATE_SM_TONE_LO), 0.0, 8.0, 1.0);
@@ -925,8 +1100,15 @@ unsafe extern "C" fn roar_process(
     };
 
     for i in 0..nf {
-        let dry_l = *in0.add(i);
-        let dry_r = *in1.add(i);
+        let in_l = *in0.add(i);
+        let in_r = *in1.add(i);
+        // Dry tap, delayed to line up with the wet path.
+        dry_pos = (dry_pos + 1) & (DRY_RING_LEN - 1);
+        *dry_buf.add(dry_pos) = in_l;
+        *dry_buf.add(DRY_RING_LEN + dry_pos) = in_r;
+        let dry_read = (dry_pos + DRY_RING_LEN - wet_latency) & (DRY_RING_LEN - 1);
+        let dry_l = *dry_buf.add(dry_read);
+        let dry_r = *dry_buf.add(DRY_RING_LEN + dry_read);
 
         let mut drive_mod = 0.0_f32;
         let mut tone_mod = 0.0_f32;
@@ -972,8 +1154,8 @@ unsafe extern "C" fn roar_process(
         }
 
         // Input section: Drive then Tone (dry tap already captured).
-        let mut x_l = dry_l * sm_drive;
-        let mut x_r = dry_r * sm_drive;
+        let mut x_l = in_l * sm_drive;
+        let mut x_r = in_r * sm_drive;
         tone_lp_l += tone_lp_coef * (x_l - tone_lp_l);
         tone_lp_r += tone_lp_coef * (x_r - tone_lp_r);
         x_l = sm_tone_lo * tone_lp_l + sm_tone_hi * (x_l - tone_lp_l);
@@ -1061,7 +1243,7 @@ unsafe extern "C" fn roar_process(
                 let cond_l = fb_bp_z[1].tanh();
                 let cond_r = fb_bp_z[3].tanh();
 
-                let in_peak = dry_l.abs().max(dry_r.abs());
+                let in_peak = in_l.abs().max(in_r.abs());
                 let duck_coef = if in_peak > duck_env {
                     duck_attack
                 } else {
@@ -1087,7 +1269,29 @@ unsafe extern "C" fn roar_process(
                     (y_l, y_r)
                 }
             }
-            _ => (run_stage!(0, 0, x_l), run_stage!(0, 1, x_r)),
+            _ => {
+                if mono_lock && circuit_single && x_l.to_bits() == x_r.to_bits() {
+                    let y = run_stage!(0, 0, x_l);
+                    (y, y)
+                } else {
+                    if mono_lock {
+                        // The channels part ways: the right one resumes from
+                        // the state the left one computed for both.
+                        mono_lock = false;
+                        std::ptr::copy_nonoverlapping(
+                            s.add(STATE_STAGE_RT),
+                            s.add(STATE_STAGE_RT + STAGE_RT_STRIDE),
+                            STAGE_RT_STRIDE,
+                        );
+                        std::ptr::copy_nonoverlapping(
+                            s.add(STATE_COMB_BUF),
+                            s.add(STATE_COMB_BUF + COMB_BUF_LEN),
+                            COMB_BUF_LEN,
+                        );
+                    }
+                    (run_stage!(0, 0, x_l), run_stage!(0, 1, x_r))
+                }
+            }
         };
         fb_wpos = (fb_wpos + 1) & FB_BUF_MASK;
 
@@ -1122,6 +1326,18 @@ unsafe extern "C" fn roar_process(
             wet_r *= g;
         }
 
+        if auto_gain {
+            ag_ms_dry += ag_coef * (dry_l * dry_l + dry_r * dry_r - ag_ms_dry);
+            let (m_l, m_r) = (wet_l * auto_makeup, wet_r * auto_makeup);
+            ag_ms_wet += ag_coef * (m_l * m_l + m_r * m_r - ag_ms_wet);
+            if ag_ms_dry > AUTO_GAIN_GATE_MS && ag_ms_wet > 1.0e-12 {
+                ag_trim = (ag_ms_dry / ag_ms_wet)
+                    .sqrt()
+                    .clamp(AUTO_GAIN_TRIM_MIN, AUTO_GAIN_TRIM_MAX);
+            }
+            wet_l *= ag_trim;
+            wet_r *= ag_trim;
+        }
         wet_l *= sm_output;
         wet_r *= sm_output;
 
@@ -1159,6 +1375,11 @@ unsafe extern "C" fn roar_process(
         }
     }
 
+    *s.add(STATE_DRY_POS) = dry_pos as f32;
+    *s.add(STATE_MONO_LOCK) = if mono_lock { 1.0 } else { 0.0 };
+    *s.add(STATE_AG_MS_DRY) = ag_ms_dry;
+    *s.add(STATE_AG_MS_WET) = ag_ms_wet;
+    *s.add(STATE_AG_TRIM) = ag_trim;
     *s.add(STATE_SM_DRIVE) = sm_drive;
     *s.add(STATE_SM_TONE_LO) = sm_tone_lo;
     *s.add(STATE_SM_TONE_HI) = sm_tone_hi;
@@ -1196,6 +1417,91 @@ pub fn roar_vtable() -> NodeVTable {
         migrate: None,
         ..NodeVTable::default()
     }
+}
+
+/// Render stereo audio through a fresh Roar node, outside the audio graph.
+/// `params` are `(state slot, value)` writes applied over the init defaults
+/// (a descriptor's `node_param_idx` and its value). For offline measurement
+/// (`bin/saturator_render`) and tests.
+pub fn render_offline(
+    sample_rate: u32,
+    params: &[(u32, f32)],
+    left: &[f32],
+    right: &[f32],
+) -> (Vec<f32>, Vec<f32>) {
+    const BLOCK: usize = 128;
+    let n = left.len().min(right.len());
+    let mut state = vec![0.0_f32; ROAR_STATE_SIZE];
+    unsafe {
+        roar_init(
+            state.as_mut_ptr() as *mut c_void,
+            sample_rate as c_int,
+            BLOCK as c_int,
+            std::ptr::null(),
+        );
+    }
+    for &(slot, value) in params {
+        if (slot as usize) < STATE_SM_DRIVE || slot as usize == STATE_AUTO_GAIN {
+            state[slot as usize] = value;
+        }
+    }
+    let mut out_left = vec![0.0_f32; n];
+    let mut out_right = vec![0.0_f32; n];
+    let mut in_l = [0.0_f32; BLOCK];
+    let mut in_r = [0.0_f32; BLOCK];
+    let mut mods = [0.0_f32; BLOCK];
+    let mut out_l = [0.0_f32; BLOCK];
+    let mut out_r = [0.0_f32; BLOCK];
+    // Let the parameter smoothers settle from the init defaults to `params`
+    // on silence first, as they would have in a session before audio arrives.
+    for _ in 0..(sample_rate as usize / 4).div_ceil(BLOCK) {
+        let inputs = [
+            in_l.as_mut_ptr(),
+            in_r.as_mut_ptr(),
+            mods.as_mut_ptr(),
+            mods.as_mut_ptr(),
+            mods.as_mut_ptr(),
+            mods.as_mut_ptr(),
+        ];
+        let outputs = [out_l.as_mut_ptr(), out_r.as_mut_ptr()];
+        unsafe {
+            roar_process(
+                inputs.as_ptr(),
+                outputs.as_ptr(),
+                BLOCK as c_int,
+                state.as_mut_ptr() as *mut c_void,
+                std::ptr::null_mut(),
+            );
+        }
+    }
+    let mut pos = 0;
+    while pos < n {
+        let frames = BLOCK.min(n - pos);
+        in_l[..frames].copy_from_slice(&left[pos..pos + frames]);
+        in_r[..frames].copy_from_slice(&right[pos..pos + frames]);
+        let inputs = [
+            in_l.as_mut_ptr(),
+            in_r.as_mut_ptr(),
+            mods.as_mut_ptr(),
+            mods.as_mut_ptr(),
+            mods.as_mut_ptr(),
+            mods.as_mut_ptr(),
+        ];
+        let outputs = [out_l.as_mut_ptr(), out_r.as_mut_ptr()];
+        unsafe {
+            roar_process(
+                inputs.as_ptr(),
+                outputs.as_ptr(),
+                frames as c_int,
+                state.as_mut_ptr() as *mut c_void,
+                std::ptr::null_mut(),
+            );
+        }
+        out_left[pos..pos + frames].copy_from_slice(&out_l[..frames]);
+        out_right[pos..pos + frames].copy_from_slice(&out_r[..frames]);
+        pos += frames;
+    }
+    (out_left, out_right)
 }
 
 #[cfg(test)]
@@ -1619,4 +1925,171 @@ mod tests {
         let p = peak(&l[n / 2..]);
         assert!((p - 0.3).abs() < 0.01, "dry path should be untouched: {p}");
     }
+    // ── Solved-circuit shapers (triode and the other four) through the engine ──
+
+    // The panel's curve display retypes every transfer curve (eseqlisp
+    // cannot depend on this crate); this keeps the two from drifting.
+    #[test]
+    fn curve_display_mirrors_every_shaper_transfer() {
+        use eseqlisp::widget_render::roar_shaper::shaper_transfer as shown;
+        for shaper in 0..NUM_SHAPERS {
+            for amount in [0.0, 0.35, 1.0] {
+                for i in -80..=80 {
+                    let x = i as f32 * 0.05;
+                    let (want, got) = (shaper_transfer(shaper, amount, x), shown(shaper, amount, x));
+                    assert!(
+                        (want - got).abs() < 2e-3,
+                        "shaper {shaper} amount {amount} x {x}: engine {want}, display {got}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn triode_state(amount: f32) -> Vec<f32> {
+        let mut state = make_state();
+        state[STATE_STAGE_BASE + STAGE_SHAPER] = SHAPER_TRIODE as f32;
+        state[STATE_STAGE_BASE + STAGE_AMOUNT] = amount;
+        state
+    }
+
+    #[test]
+    fn triode_dry_wet_blend_stays_phase_aligned() {
+        // Nearly clean triode (amount just engaged) mixed 50/50 with the dry
+        // signal: with the dry tap delayed by the oversampler latency the two
+        // add in phase at every frequency. Unaligned, 21 samples of skew
+        // would notch 1.1 kHz, 3.4 kHz, 5.7 kHz...
+        for freq in [1143.0, 3429.0, 5714.0, 9000.0] {
+            let mut state = triode_state(0.03);
+            state[STATE_MIX] = 0.5;
+            let (out, _) = render(&mut state, sine(freq, 0.01), SR / 2);
+            let level = rms(&out[SR / 4..]) / (0.01 / 2.0_f32.sqrt());
+            // Equal-power mix of two in-phase copies: 2 * cos(45 deg) = +3 dB.
+            assert!(level > 1.25, "{freq} Hz: dry and wet out of phase, gain {level}");
+        }
+    }
+
+    #[test]
+    fn triode_adds_mostly_second_harmonic_at_moderate_drive() {
+        let mut state = triode_state(0.35);
+        let n = SR;
+        let (out, _) = render(&mut state, sine(1000.0, 0.125), n);
+        let tail = &out[n / 2..];
+        let bin = |freq: f32| {
+            let (mut re, mut im) = (0.0_f64, 0.0_f64);
+            for (i, v) in tail.iter().enumerate() {
+                let ph = std::f64::consts::TAU * freq as f64 * i as f64 / SR as f64;
+                re += *v as f64 * ph.cos();
+                im += *v as f64 * ph.sin();
+            }
+            (re * re + im * im).sqrt()
+        };
+        let (h1, h2, h3) = (bin(1000.0), bin(2000.0), bin(3000.0));
+        assert!(h2 / h1 > 0.005, "audible even harmonic: {}", h2 / h1);
+        assert!(h2 > 3.0 * h3, "tube asymmetry: second over third, {h2} vs {h3}");
+    }
+
+    #[test]
+    fn triode_mono_source_matches_the_two_channel_solve() {
+        // Identical channels are solved once (STATE_MONO_LOCK); when the
+        // right channel finally differs it must carry on from that state.
+        let drive = |i: usize| 0.4 * (std::f32::consts::TAU * 220.0 * i as f32 / SR as f32).sin();
+        let split = SR / 4;
+        let mut locked = triode_state(0.5);
+        let (_, locked_r) = render(
+            &mut locked,
+            |i| (drive(i), if i == split { drive(i) + 1.0e-3 } else { drive(i) }),
+            SR / 2,
+        );
+        assert_eq!(locked[STATE_MONO_LOCK], 0.0);
+        // Reference: the lock broken on the first sample, by a blip too
+        // small to hear but enough to make the engine run both channels.
+        let mut unlocked = triode_state(0.5);
+        let (_, unlocked_r) = render(
+            &mut unlocked,
+            |i| {
+                let nudge = if i == 0 { 1.0e-12 } else { 0.0 };
+                (drive(i) + nudge, if i == split { drive(i) + 1.0e-3 } else { drive(i) })
+            },
+            SR / 2,
+        );
+        let worst = locked_r
+            .iter()
+            .zip(&unlocked_r)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(worst < 1.0e-4, "mono-locked render diverged by {worst}");
+    }
+
+    #[test]
+    fn auto_gain_holds_the_level_as_drive_rises() {
+        // Deterministic noise at about -18 dBFS RMS.
+        let noise = |i: usize| {
+            let mut x = (i as u32).wrapping_mul(0x9E37_79B9) ^ 0x85EB_CA6B;
+            x ^= x >> 15;
+            x = x.wrapping_mul(0x2C1B_3C6D);
+            x ^= x >> 12;
+            let v = (x as f32 / u32::MAX as f32 - 0.5) * 0.436;
+            (v, v)
+        };
+        let level = |drive: f32, auto: f32| {
+            let mut state = triode_state(0.35);
+            state[STATE_DRIVE] = drive;
+            state[STATE_AUTO_GAIN] = auto;
+            let (out, _) = render(&mut state, noise, SR);
+            20.0 * rms(&out[SR / 2..]).log10()
+        };
+        let (quiet, loud) = (level(0.0, 0.0), level(24.0, 0.0));
+        assert!(loud - quiet > 5.0, "uncompensated drive is louder: {quiet} -> {loud}");
+        let levels: Vec<f32> = [-6.0, 0.0, 12.0, 24.0, 36.0].iter().map(|d| level(*d, 1.0)).collect();
+        let spread = levels.iter().cloned().fold(f32::MIN, f32::max)
+            - levels.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(spread < 2.5, "auto gain should hold the level: {levels:?}");
+    }
+
+    #[test]
+    fn every_circuit_shaper_runs_aligned_and_bounded() {
+        for shaper in SHAPER_TRIODE..NUM_SHAPERS {
+            let circuit_state = |amount: f32| {
+                let mut state = make_state();
+                state[STATE_STAGE_BASE + STAGE_SHAPER] = shaper as f32;
+                state[STATE_STAGE_BASE + STAGE_AMOUNT] = amount;
+                state
+            };
+            // Nearly clean and mixed 50/50 with the dry signal: in phase, so
+            // about +3 dB, at a frequency the oversampler skew would notch.
+            let mut state = circuit_state(0.03);
+            state[STATE_MIX] = 0.5;
+            let (out, _) = render(&mut state, sine(1143.0, 0.002), SR / 2);
+            let level = rms(&out[SR / 4..]) / (0.002 / 2.0_f32.sqrt());
+            assert!(level > 1.2, "shaper {shaper}: dry and wet out of phase, gain {level}");
+
+            // Slammed: finite, bounded, and still passing signal.
+            let mut state = circuit_state(1.0);
+            state[STATE_DRIVE] = 36.0;
+            let (out, _) = render(&mut state, sine(110.0, 1.0), SR / 2);
+            assert!(out.iter().all(|v| v.is_finite()), "shaper {shaper}");
+            // Once the knob smoothers have arrived (the stage crossfades in
+            // from the driven clean signal while Amount ramps up).
+            let settled = &out[SR / 4..];
+            let peak = settled.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+            assert!(peak < 8.0, "shaper {shaper}: peak {peak}");
+            assert!(rms(settled) > 0.05, "shaper {shaper}: went silent");
+
+            // And back to silence once the input stops.
+            let (out, _) = render(&mut state, |_| (0.0, 0.0), 3 * SR);
+            assert!(rms(&out[5 * SR / 2..]) < 1.0e-4, "shaper {shaper}: does not settle");
+        }
+    }
+
+    #[test]
+    fn open_lowpass_is_no_filter() {
+        // The default stage filter (LP parked at 16 kHz) used to shave the
+        // top octave even though nothing was dialled in.
+        let mut state = make_state();
+        let (out, _) = render(&mut state, sine(15_000.0, 0.1), SR / 4);
+        let level = rms(&out[SR / 8..]) / (0.1 / 2.0_f32.sqrt());
+        assert!(level > 0.9, "15 kHz through the default stage: {level}");
+    }
+
 }

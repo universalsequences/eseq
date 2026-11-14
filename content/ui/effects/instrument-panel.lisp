@@ -442,7 +442,11 @@
 
 (def rack-slot-drop-fx (slot event)
   (let ((payload (get event :payload)))
-    (if (= (get payload :kind) "rack-effect-instance")
+    ;; An effect already in a chain moves (a track effect of this track
+    ;; comes in with its settings); a library effect is added fresh.
+    (if (or (= (get payload :kind) "rack-effect-instance")
+            (and (= (get payload :kind) "audio-effect-instance")
+                 (= (get payload :track) (get slot :track))))
       (dd/drop-existing-effect payload
         (dict :chain "append"
               :track (get slot :track)
@@ -886,6 +890,7 @@
                   (ep/instrument-synth-button)
                   (ep/instrument-mods-toggle-button)
                   (ep/instrument-keys-button)
+                  (ep/instrument-pads-button)
                   ;(ep/instrument-sound-binding-badge inst)
                   )
                 (box :flex 1 :height 0.15)

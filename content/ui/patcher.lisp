@@ -167,3 +167,8 @@
 (bind-key "C-c" "copy")
 (bind-key "C-v" "paste")
 (bind-key "C-e" "encapsulate")
+;; Off macOS the editor's clipboard chord is Ctrl-Shift-C/V
+;; (ui/platform.rs, clipboard_shortcut_modifier_for), and Edit > Copy/Paste
+;; send exactly that to a focused patcher.
+(bind-key "C-S-c" "copy")
+(bind-key "C-S-v" "paste")

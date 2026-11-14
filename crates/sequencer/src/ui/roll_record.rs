@@ -70,6 +70,10 @@ pub(crate) fn write_rolled_hit_to_pattern(state: &SequencerState, hit: &RollHitR
         .pattern
         .step_data[hit.track]
         .set(hit.step, StepParam::Duration, hit.duration_steps);
+    // A rolled pad key records which pad it was (rack pad variants spec §5).
+    if let Some(variant) = hit.variant {
+        state.pattern.step_data[hit.track].set(hit.step, StepParam::Variant, variant as f32);
+    }
 }
 
 /// Per-frame drain: write arriving hits into live pattern state immediately
@@ -79,16 +83,10 @@ pub(crate) fn write_rolled_hit_to_pattern(state: &SequencerState, hit: &RollHitR
 /// refresh the timeline preview.
 pub(crate) fn tick_roll_record(app: &mut app::App, shared: &SharedHandles) -> (bool, bool) {
     let state = &shared.state;
-    let mut drained = state.drain_roll_recorded_hits();
-    // Rolled hits recorded while step-param printing is armed take the
-    // latched values at record time (bead eseq-jc9): the roll records the
-    // trigger, the live print gives it velocity/duration/pitch.
-    if !drained.is_empty() {
-        let print = shared.step_print.lock().unwrap();
-        for hit in &mut drained {
-            print.override_roll_hit(hit);
-        }
-    }
+    // Rolled hits recorded while step-param printing is armed already carry
+    // the latched velocity/duration/pitch the scheduler played them with
+    // (bead eseq-jc9; see `emit_roll_hit`).
+    let drained = state.drain_roll_recorded_hits();
     let mut buffer = shared.roll_record.lock().unwrap();
     let roll_active = state.transport.roll_mode.load(Ordering::Relaxed) && state.is_playing();
     let recording = shared.recording.load(Ordering::Relaxed);
@@ -181,6 +179,7 @@ mod roll_record_tests {
             velocity: 1.0,
             duration_steps: 0.5,
             beat,
+            variant: None,
         };
         // A 1/32 roll on a 1/16 track: two hits per step, the second as a
         // half-step delay — record-as-heard, no re-quantize (F5).

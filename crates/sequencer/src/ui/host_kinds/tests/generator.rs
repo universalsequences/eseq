@@ -203,6 +203,76 @@ fn generators_follow_their_instances_and_go_stale() {
     h.play_at(None);
 }
 
+/// The jaki row menu's edits (alez.jaki.kind, "lanes"): a lane reference is
+/// stored as the lane's label, so a rename or a row moving down rewrites the
+/// references to it in the same edit.
+#[test]
+fn jaki_row_menu_edits_keep_lane_references_pointing_at_their_rows() {
+    let mut h = Harness::new();
+    h.eval("(import alez.jaki.kind)");
+    let before = crate::host_commands::instances::instance_ids(&h.app);
+    instance_command(&mut h, "instance-create", vec![("kind", s(JAKI))]);
+    let created = crate::host_commands::instances::instance_ids(&h.app);
+    let id = *created.difference(&before).next().expect("an instance was created");
+    h.sync();
+    h.eval_gen(&format!("(def j (instance-ref {id}))"));
+    h.eval_gen(
+        r#"(set! j.row-count 3)
+           (set! j.rows
+             (list (dict :route 0 :mods (list "left"))
+                   (dict :route 1 :mods (list (list "like" "0") "stac"))
+                   (dict :route 1 :mods (list (list "steal" "1" ":hit")))))"#,
+    );
+    h.sync();
+    let mods = |h: &mut Harness| h.eval_gen("(source (map (lambda (r) (get r :mods)) j.rows))");
+
+    // naming row 0 renames the references to it
+    h.eval_gen(r#"(set! j.name-draft "kick") (alez.jaki.kind/jk-commit-name j 0 0)"#);
+    h.sync();
+    assert_eq!(
+        mods(&mut h),
+        s(r#"(("left") (("like" "kick") "stac") (("steal" "1" ":hit")))"#)
+    );
+    // a name another lane answers to is refused
+    h.eval_gen(r#"(set! j.name-draft "kick") (alez.jaki.kind/jk-commit-name j 0 1)"#);
+    h.sync();
+    assert_eq!(h.eval_gen("(alez.jaki.doc/row-name (nth j.rows 1))"), Value::Nil);
+
+    // duplicating row 0 moves the rows under it down; the number reference
+    // follows its row, the copy has no name
+    h.eval_gen("(alez.jaki.kind/jk-duplicate-row j 0 0)");
+    h.sync();
+    assert_eq!(
+        mods(&mut h),
+        s(r#"(("left") ("left") (("like" "kick") "stac") (("steal" "2" ":hit")))"#)
+    );
+    assert_eq!(h.eval_gen("j.row-count"), number(4.0));
+    assert_eq!(h.eval_gen("(alez.jaki.doc/row-name (nth j.rows 1))"), Value::Nil);
+
+    // detach bakes the linked words in
+    h.eval_gen("(alez.jaki.kind/jk-detach-row j 0 2)");
+    h.sync();
+    assert_eq!(
+        mods(&mut h),
+        s(r#"(("left") ("left") ("left" "stac") (("steal" "2" ":hit")))"#)
+    );
+
+    // paste as link writes a link to the copied lane's label
+    h.eval_gen("(alez.jaki.kind/jk-hold-row j 0 3) (alez.jaki.kind/jk-paste-link j 0 1)");
+    h.sync();
+    assert_eq!(
+        mods(&mut h),
+        s(r#"(("left") (("like" "3")) ("left" "stac") (("steal" "2" ":hit")))"#)
+    );
+    // paste copies the words; clear empties them
+    h.eval_gen("(alez.jaki.kind/jk-paste-row j 0 0) (alez.jaki.kind/jk-clear-row j 0 2)");
+    h.sync();
+    assert_eq!(
+        mods(&mut h),
+        s(r#"((("steal" "2" ":hit")) (("like" "3")) () (("steal" "2" ":hit")))"#)
+    );
+}
+
 #[test]
 fn a_redefined_script_generator_starts_without_its_old_marks() {
     let mut h = Harness::new();

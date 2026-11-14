@@ -13,6 +13,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "insert-rack-slot-effect-before-slot",
     "delete-rack-slot-effect",
     "move-rack-slot-effect",
+    "move-track-effect-to-rack-slot",
     "set-rack-slot-effect-param",
     "set-rack-slot-effect-plock",
     "set-rack-slot-effect-param-batch",
@@ -788,6 +789,46 @@ pub(super) fn handle(
                 }
                 _ => editor.handle_host_event(HostEvent::Status(
                     "Rack-slot effect move is missing its source".to_string(),
+                )),
+            }
+        }
+        "move-track-effect-to-rack-slot" => {
+            let track = extract_usize_from_payload(&payload, "track");
+            let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+            let source_slot = extract_usize_from_payload(&payload, "source-slot");
+            // No target (or an "append" drop) lands at the end of the chain.
+            let target_slot = if extract_string_from_payload(&payload, "position").as_deref()
+                == Some("append")
+            {
+                None
+            } else {
+                extract_usize_from_payload(&payload, "target-slot")
+            };
+            match (track, rack_slot, source_slot) {
+                (Some(track), Some(rack_slot), Some(source_slot)) => {
+                    match app.move_track_effect_to_rack_slot_recorded(
+                        track,
+                        source_slot,
+                        rack_slot,
+                        target_slot,
+                    ) {
+                        Ok(_) => {
+                            let rt = editor.runtime_mut();
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            refresh_instrument_panel_reactive(&ui_epoch);
+                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            editor.handle_host_event(HostEvent::Status(
+                                "Moved effect into rack slot".to_string(),
+                            ));
+                        }
+                        Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                            "Error moving effect into rack slot: {error}"
+                        ))),
+                    }
+                }
+                _ => editor.handle_host_event(HostEvent::Status(
+                    "Effect move into a rack slot is missing its source".to_string(),
                 )),
             }
         }
@@ -2766,6 +2807,8 @@ mod tests {
                 Some(value)
             );
         }
+        // The scheduler clock schedules STEP under the held latch.
+        h.state.print_boundary_log.record(TRACK, STEP);
         assert!(tick_step_print(&mut h.app, &h.shared).printed);
         let slot = h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap();
         assert_eq!(&[3, 4, 5].map(|param| slot.effect_slots[0].plocks.cell(STEP, param).copied()),

@@ -1,0 +1,6 @@
+# Full-suite budget and measurements: docs/test-suite-performance.md.
+[profile.default]
+# The slowest legitimate test is ~20 s under full-suite load. Flag anything
+# past 30 s and kill it at two minutes, so a hung test costs the run two
+# minutes rather than stalling it.
+slow-timeout = { period = "30s", terminate-after = 4 }

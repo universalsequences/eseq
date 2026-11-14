@@ -683,6 +683,10 @@ pub struct ProjectGraphNodeIntrinsicOverride {
     pub quantize: Option<ProjectGraphQuantizeOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<ProjectGraphRouteOverride>,
+    /// The drum-rack pad variant a routed node's hits play
+    /// (docs/rack-pad-variants-spec.md §7); `None`/0 is the plain pad.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_variant: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed_from: Option<ProjectGraphSeedFrom>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -862,6 +866,9 @@ pub struct GraphNode {
     /// Round-robin cycle of quantize grids, advanced one slot per fire. Always non-empty.
     pub quantize_cycle: Vec<Option<Timebase>>,
     pub route: Option<usize>,
+    /// The pad variant the routed track's hits play (0 = plain pad); rides
+    /// each emission as `step-param:variant` (rack pad variants spec §7).
+    pub route_variant: u32,
     /// The generator this node's fires gate (or restart) instead of sounding
     /// a note (docs/jaki-trig-modes-spec.md §6); `route` is `None` when set.
     pub gate_target: Option<GateTarget>,
@@ -901,6 +908,7 @@ impl Default for GraphNode {
             quantize: None,
             quantize_cycle: vec![None],
             route: None,
+            route_variant: 0,
             gate_target: None,
             seed_track_mask: 0,
             reduce: Reduce::Sum,
@@ -2815,6 +2823,17 @@ impl GraphRuntime {
         event.resolved.transpose = payload.note;
         event.resolved.velocity = payload.velocity;
         event.resolved.duration = payload.duration_beats;
+        // A node routed to a pad variant names it on every hit, applied
+        // after the landing step's params like a jaki plock.
+        let route_variant = self.nodes[node_index].route_variant;
+        if route_variant > 0 {
+            event.named_params.push((
+                crate::process::ParamRef::Step {
+                    param: crate::sequencer::StepParam::Variant,
+                },
+                route_variant as f32,
+            ));
+        }
         let visualization_event = GraphVisualizationEvent {
             node_index,
             track: event.track,
@@ -3790,6 +3809,7 @@ impl GraphManifest {
         let mut node_params = vec![proto_params; num_nodes];
         for idx in 0..num_nodes {
             let mut route = self.node.route;
+            let mut route_variant = 0u32;
             let mut gate_target = None;
             let mut seed_from = self.node.seed_from.clone();
             let mut resolution_cycle = vec![self.node.resolution];
@@ -3826,6 +3846,9 @@ impl GraphManifest {
                     if let Some(value) = &intrinsic.route {
                         route = value.to_route();
                         gate_target = value.to_gate_target();
+                    }
+                    if let Some(value) = intrinsic.route_variant {
+                        route_variant = value;
                     }
                     if let Some(value) = &intrinsic.seed_from {
                         seed_from = SeedFrom::from(value);
@@ -3868,6 +3891,7 @@ impl GraphManifest {
                 quantize: quantize_cycle[0],
                 quantize_cycle,
                 route,
+                route_variant: if route.is_some() { route_variant } else { 0 },
                 gate_target,
                 seed_track_mask,
                 reduce: self.node.reduce,
@@ -4057,6 +4081,7 @@ mod tests {
                 delay_steps: None,
                 quantize: None,
                 route,
+                route_variant: None,
                 seed_from: seed,
                 seed_on_reset: None,
                 duration: None,
@@ -5270,6 +5295,39 @@ mod tests {
         assert_eq!(out[0].sample_time, 48_000);
     }
 
+    /// docs/rack-pad-variants-spec.md §7: a node routed to a pad variant
+    /// names it on every hit (a `step-param:variant` per-hit param, applied
+    /// after the landing step's params); a plain route names none.
+    #[test]
+    fn a_node_routed_to_a_pad_variant_names_it_on_every_hit() {
+        let mut n0 = node(Timebase::Quarter);
+        n0.route = Some(2);
+        n0.route_variant = 3;
+        n0.seed_on_reset = 2.0;
+        let mut n1 = node(Timebase::Quarter);
+        n1.route = Some(2);
+        let nodes = vec![n0, n1];
+        let edges = vec![GraphEdge::new(0, 1, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 4.0);
+        let out = run(&mut runtime, 4.0, 0, vec![1.0, 1.0]);
+        let variant_of = |index: usize| {
+            out.iter()
+                .find(|emission| emission.node_index == index)
+                .map(|emission| emission.event.named_params.clone())
+                .expect("the node fired")
+        };
+        assert_eq!(
+            variant_of(0),
+            vec![(
+                crate::process::ParamRef::Step {
+                    param: crate::sequencer::StepParam::Variant
+                },
+                3.0
+            )]
+        );
+        assert!(variant_of(1).is_empty(), "a plain route names no variant");
+    }
+
     #[test]
     fn reset_every_reseeds_energy() {
         // node seeded with energy 2 (>= threshold 1) fires at the first eval after each
@@ -6266,6 +6324,7 @@ mod tests {
             delay_steps: None,
             quantize: None,
             route: None,
+            route_variant: None,
             seed_from: None,
             seed_on_reset: None,
             duration: None,
@@ -6756,6 +6815,7 @@ mod tests {
                 delay_steps: None,
                 quantize: None,
                 route: None,
+                route_variant: None,
                 seed_from: None,
                 seed_on_reset: None,
                 duration: None,
@@ -6834,6 +6894,7 @@ mod tests {
                 delay_steps: None,
                 quantize: None,
                 route: Some(ProjectGraphRouteOverride::Track(3)),
+                route_variant: None,
                 seed_from: Some(ProjectGraphSeedFrom::Route),
                 seed_on_reset: Some(1.25),
                 duration: None,

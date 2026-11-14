@@ -43,6 +43,11 @@ pub mod roar;
 #[allow(dead_code)]
 pub(crate) mod space_echo;
 pub mod spring;
+pub mod triode;
+pub mod oversample4;
+pub mod opamp_clip;
+pub mod fuzz;
+pub mod hysteresis;
 pub(crate) mod slowdown;
 pub(crate) mod chorus;
 #[allow(dead_code)]
@@ -2146,6 +2151,63 @@ mod tests {
     }
 
     #[test]
+    fn builtin_saturator_is_a_single_stage_roar_with_audible_defaults() {
+        let descriptor = EffectDescriptor::builtin_saturator();
+        assert_eq!(descriptor.name, "Saturator");
+        let roar = EffectDescriptor::builtin_roar();
+        let param = |name: &str| {
+            descriptor
+                .params
+                .iter()
+                .find(|param| param.name == name)
+                .unwrap_or_else(|| panic!("Saturator should expose {name:?}"))
+        };
+        // The panel (ui/effects/builtin/saturator.lisp) looks these up by name.
+        for name in ["drive", "curve", "amount", "bias", "tone", "output", "dry/wet", "auto gain"] {
+            param(name);
+        }
+        // Each one drives the same Roar state slot as its Roar counterpart.
+        for (name, roar_name) in [
+            ("drive", "drive"),
+            ("curve", "s1 shaper"),
+            ("amount", "s1 amount"),
+            ("bias", "s1 bias"),
+            ("tone", "tone"),
+            ("output", "output"),
+            ("dry/wet", "dry/wet"),
+        ] {
+            let roar_param = roar.params.iter().find(|p| p.name == roar_name).unwrap();
+            assert_eq!(param(name).node_param_idx, roar_param.node_param_idx, "{name}");
+        }
+        // Every curve is selectable, and it starts audibly saturating
+        // (Roar's own amount-0 default is a null-clean stage).
+        match &param("curve").kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(labels.len(), crate::effects::roar::NUM_SHAPERS)
+            }
+            other => panic!("curve should be an enum, got {other:?}"),
+        }
+        assert_eq!(param("curve").default, crate::effects::roar::SHAPER_TRIODE as f32);
+        assert!(param("amount").default > 0.0);
+        // Nothing from the routing / feedback / compressor / filter sections.
+        for hidden in ["routing", "fb amount", "compress", "s1 filter", "s2 shaper"] {
+            assert!(
+                descriptor.params.iter().all(|param| param.name != hidden),
+                "Saturator should not expose {hidden:?}"
+            );
+        }
+        for target in &descriptor.instrument_modulation_targets {
+            assert!(target.base_param_idx < descriptor.params.len());
+            assert!(target.depth_param_idx < descriptor.params.len());
+        }
+        assert_eq!(
+            descriptor.instrument_modulation_targets.len(),
+            3 * crate::instruments::voice_modulator::SLOT_COUNT,
+            "drive, tone and mix are modulatable"
+        );
+    }
+
+    #[test]
     fn builtin_roar_exposes_stage_params_within_state_bounds() {
         let descriptor = EffectDescriptor::builtin_roar();
         // The roar panel (ui/effects/builtin/roar.lisp) looks these up by
@@ -2401,6 +2463,7 @@ mod tests {
                 "Phaser-Flanger",
                 "Reverb",
                 "Roar",
+                "Saturator",
                 "Slowdown",
                 "Space Echo",
                 "Str8 Delay",
@@ -2423,7 +2486,7 @@ mod tests {
                 "OTT",
                 "Phaser-Flanger",
                 "Reverb",
-                "Roar",
+                "Saturator",
                 "Slowdown",
                 "Space Echo",
                 "Str8 Delay",
@@ -2448,7 +2511,7 @@ mod tests {
                 "OTT",
                 "Phaser-Flanger",
                 "Reverb",
-                "Roar",
+                "Saturator",
                 "Slowdown",
                 "Space Echo",
                 "Str8 Delay",
@@ -3622,9 +3685,10 @@ impl EffectDescriptor {
     /// "444 Compressor" is replaced by "Compressor"/"Glue Compressor",
     /// "Delay" by "Str8 Delay", and "Multiverb" by the multi-mode "Reverb"
     /// (its plate and hall tanks moved there; quad and mod stay loadable only
-    /// through saved Multiverb slots).
+    /// through saved Multiverb slots). "Roar" is hidden in favour of the
+    /// single-stage "Saturator", which runs the same engine and curves.
     pub const RETIRED_BUILTIN_INSERT_NAMES: &'static [&'static str] =
-        &["444 Compressor", "Delay", "Multiverb"];
+        &["444 Compressor", "Delay", "Multiverb", "Roar"];
 
     /// Every built-in insert that can be instantiated, including retired ones.
     /// User-facing pickers want [`Self::listable_builtin_insert_names`].
@@ -3646,6 +3710,7 @@ impl EffectDescriptor {
             "Phaser-Flanger",
             "Reverb",
             "Roar",
+            "Saturator",
             "Slowdown",
             "Space Echo",
             "Str8 Delay",
@@ -3711,6 +3776,7 @@ impl EffectDescriptor {
             "Dimension" => Some(Self::builtin_dimension()),
             "Phaser-Flanger" => Some(Self::builtin_phaser_flanger()),
             "Roar" => Some(Self::builtin_roar()),
+            "Saturator" => Some(Self::builtin_saturator()),
             "DJ Mixer" => Some(Self::builtin_dj_mixer()),
             "Reverb" => Some(Self::builtin_reverb_insert()),
             "Multiverb" => Some(Self::builtin_multiverb()),
@@ -6425,7 +6491,17 @@ impl EffectDescriptor {
     }
 
     /// Built-in Roar multi-stage saturation descriptor (docs/roar-spec.md).
-    pub fn builtin_roar() -> Self {
+    pub fn builtin_roar() -> Self { Self::builtin_roar_family(false) }
+
+    /// Built-in Saturator: Roar's engine pinned to its single-stage routing,
+    /// exposing only drive / curve / amount / bias / tone / output / dry-wet.
+    /// It runs the Roar node (same vtable and state layout), so every hidden
+    /// Roar param keeps its `roar_init` default: no feedback, no compressor,
+    /// stage filter open. Defaults start on an audibly warm tube curve rather
+    /// than Roar's null-clean amount 0.
+    pub fn builtin_saturator() -> Self { Self::builtin_roar_family(true) }
+
+    fn builtin_roar_family(saturator: bool) -> Self {
         fn continuous(
             name: &str,
             min: f32,
@@ -6490,7 +6566,7 @@ impl EffectDescriptor {
             }
         }
 
-        const SHAPERS: [&str; 12] = [
+        const SHAPERS: [&str; crate::effects::roar::NUM_SHAPERS] = [
             "soft sine",
             "digital clip",
             "bit crusher",
@@ -6503,6 +6579,11 @@ impl EffectDescriptor {
             "tri fold",
             "noise",
             "shards",
+            "triode",
+            "twin triode",
+            "op-amp clip",
+            "ge fuzz",
+            "transformer",
         ];
         const FILTERS: [&str; 9] = [
             "lp",
@@ -6516,165 +6597,236 @@ impl EffectDescriptor {
             "dispersion",
         ];
 
-        let mut params = vec![
-            Self::enabled_param(crate::effects::roar::ROAR_PARAM_ENABLED as u32, 1.0),
-            continuous(
-                "drive",
-                -12.0,
-                36.0,
-                0.0,
-                Some("dB"),
-                ParamScaling::Linear,
-                crate::effects::roar::ROAR_PARAM_DRIVE,
-            ),
-            continuous(
-                "tone",
-                -1.0,
-                1.0,
-                0.0,
-                Some("%"),
-                ParamScaling::Linear,
-                crate::effects::roar::ROAR_PARAM_TONE,
-            ),
-            continuous(
-                "tone freq",
-                50.0,
-                18_000.0,
-                180.0,
-                Some("Hz"),
-                ParamScaling::Exponential,
-                crate::effects::roar::ROAR_PARAM_TONE_FREQ,
-            ),
-            options(
-                "tone mode",
-                &["tilt", "shelf"],
-                0.0,
-                crate::effects::roar::ROAR_PARAM_TONE_MODE,
-            ),
-            options(
-                "routing",
-                &[
-                    "single",
-                    "serial",
-                    "parallel",
-                    "multi band",
-                    "mid side",
-                    "feedback",
-                    "delay",
-                ],
-                0.0,
-                crate::effects::roar::ROAR_PARAM_ROUTING,
-            ),
-            continuous(
-                "blend",
-                0.0,
-                1.0,
-                0.5,
-                Some("%"),
-                ParamScaling::Linear,
-                crate::effects::roar::ROAR_PARAM_BLEND,
-            ),
-            continuous(
-                "xover low",
-                40.0,
-                1_000.0,
-                200.0,
-                Some("Hz"),
-                ParamScaling::Exponential,
-                crate::effects::roar::ROAR_PARAM_XOVER_LOW,
-            ),
-            continuous(
-                "xover high",
-                500.0,
-                10_000.0,
-                2_000.0,
-                Some("Hz"),
-                ParamScaling::Exponential,
-                crate::effects::roar::ROAR_PARAM_XOVER_HIGH,
-            ),
-            options(
-                "fb mode",
-                &["time", "note"],
-                0.0,
-                crate::effects::roar::ROAR_PARAM_FB_MODE,
-            ),
-            continuous(
-                "fb time",
-                0.5,
-                1_000.0,
-                18.2,
-                Some("ms"),
-                ParamScaling::Exponential,
-                crate::effects::roar::ROAR_PARAM_FB_TIME,
-            ),
-            options(
-                "fb div",
-                &[
-                    "1/32", "1/16", "1/16t", "1/8", "1/8t", "1/8.", "1/4", "1/4t", "1/4.", "1/2",
-                    "1",
-                ],
-                3.0,
-                crate::effects::roar::ROAR_PARAM_FB_DIV,
-            ),
-            continuous(
-                "fb amount",
-                0.0,
-                1.0,
-                0.0,
-                Some("%"),
-                ParamScaling::Linear,
-                crate::effects::roar::ROAR_PARAM_FB_AMOUNT,
-            ),
-            boolean("fb invert", 0.0, crate::effects::roar::ROAR_PARAM_FB_INVERT),
-            boolean("fb duck", 0.0, crate::effects::roar::ROAR_PARAM_FB_DUCK),
-            continuous(
-                "fb freq",
-                30.0,
-                18_000.0,
-                1_000.0,
-                Some("Hz"),
-                ParamScaling::Exponential,
-                crate::effects::roar::ROAR_PARAM_FB_FREQ,
-            ),
-            continuous(
-                "fb width",
-                0.5,
-                9.0,
-                8.0,
-                Some("oct"),
-                ParamScaling::Linear,
-                crate::effects::roar::ROAR_PARAM_FB_WIDTH,
-            ),
-            continuous(
-                "compress",
-                0.0,
-                1.0,
-                0.0,
-                Some("%"),
-                ParamScaling::Linear,
-                crate::effects::roar::ROAR_PARAM_COMPRESS,
-            ),
-            boolean("sc hpf", 0.0, crate::effects::roar::ROAR_PARAM_SC_HPF),
-            continuous(
-                "output",
-                -24.0,
-                24.0,
-                0.0,
-                Some("dB"),
-                ParamScaling::Linear,
-                crate::effects::roar::ROAR_PARAM_OUTPUT,
-            ),
-            continuous(
-                "dry/wet",
-                0.0,
-                1.0,
-                1.0,
-                Some("%"),
-                ParamScaling::Linear,
-                crate::effects::roar::ROAR_PARAM_MIX,
-            ),
-        ];
-        for stage in 0..crate::effects::roar::NUM_STAGES {
+        let stage1 = |field| crate::effects::roar::roar_stage_param(0, field);
+        let mut params = if saturator {
+            vec![
+                Self::enabled_param(crate::effects::roar::ROAR_PARAM_ENABLED as u32, 1.0),
+                continuous(
+                    "drive",
+                    -12.0,
+                    36.0,
+                    6.0,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    crate::effects::roar::ROAR_PARAM_DRIVE,
+                ),
+                options(
+                    "curve",
+                    &SHAPERS,
+                    crate::effects::roar::SHAPER_TRIODE as f32,
+                    stage1(crate::effects::roar::RoarStageField::Shaper),
+                ),
+                continuous(
+                    "amount",
+                    0.0,
+                    1.0,
+                    0.35,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    stage1(crate::effects::roar::RoarStageField::Amount),
+                ),
+                continuous(
+                    "bias",
+                    -1.0,
+                    1.0,
+                    0.0,
+                    None,
+                    ParamScaling::Linear,
+                    stage1(crate::effects::roar::RoarStageField::Bias),
+                ),
+                continuous(
+                    "tone",
+                    -1.0,
+                    1.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    crate::effects::roar::ROAR_PARAM_TONE,
+                ),
+                continuous(
+                    "output",
+                    -24.0,
+                    24.0,
+                    0.0,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    crate::effects::roar::ROAR_PARAM_OUTPUT,
+                ),
+                // Level-matches the output as drive and amount go up, so the
+                // knobs change tone, not loudness.
+                boolean("auto gain", 1.0, crate::effects::roar::ROAR_PARAM_AUTO_GAIN),
+                continuous(
+                    "dry/wet",
+                    0.0,
+                    1.0,
+                    1.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    crate::effects::roar::ROAR_PARAM_MIX,
+                ),
+            ]
+        } else {
+            vec![
+                Self::enabled_param(crate::effects::roar::ROAR_PARAM_ENABLED as u32, 1.0),
+                continuous(
+                    "drive",
+                    -12.0,
+                    36.0,
+                    0.0,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    crate::effects::roar::ROAR_PARAM_DRIVE,
+                ),
+                continuous(
+                    "tone",
+                    -1.0,
+                    1.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    crate::effects::roar::ROAR_PARAM_TONE,
+                ),
+                continuous(
+                    "tone freq",
+                    50.0,
+                    18_000.0,
+                    180.0,
+                    Some("Hz"),
+                    ParamScaling::Exponential,
+                    crate::effects::roar::ROAR_PARAM_TONE_FREQ,
+                ),
+                options(
+                    "tone mode",
+                    &["tilt", "shelf"],
+                    0.0,
+                    crate::effects::roar::ROAR_PARAM_TONE_MODE,
+                ),
+                options(
+                    "routing",
+                    &[
+                        "single",
+                        "serial",
+                        "parallel",
+                        "multi band",
+                        "mid side",
+                        "feedback",
+                        "delay",
+                    ],
+                    0.0,
+                    crate::effects::roar::ROAR_PARAM_ROUTING,
+                ),
+                continuous(
+                    "blend",
+                    0.0,
+                    1.0,
+                    0.5,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    crate::effects::roar::ROAR_PARAM_BLEND,
+                ),
+                continuous(
+                    "xover low",
+                    40.0,
+                    1_000.0,
+                    200.0,
+                    Some("Hz"),
+                    ParamScaling::Exponential,
+                    crate::effects::roar::ROAR_PARAM_XOVER_LOW,
+                ),
+                continuous(
+                    "xover high",
+                    500.0,
+                    10_000.0,
+                    2_000.0,
+                    Some("Hz"),
+                    ParamScaling::Exponential,
+                    crate::effects::roar::ROAR_PARAM_XOVER_HIGH,
+                ),
+                options(
+                    "fb mode",
+                    &["time", "note"],
+                    0.0,
+                    crate::effects::roar::ROAR_PARAM_FB_MODE,
+                ),
+                continuous(
+                    "fb time",
+                    0.5,
+                    1_000.0,
+                    18.2,
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    crate::effects::roar::ROAR_PARAM_FB_TIME,
+                ),
+                options(
+                    "fb div",
+                    &[
+                        "1/32", "1/16", "1/16t", "1/8", "1/8t", "1/8.", "1/4", "1/4t", "1/4.", "1/2",
+                        "1",
+                    ],
+                    3.0,
+                    crate::effects::roar::ROAR_PARAM_FB_DIV,
+                ),
+                continuous(
+                    "fb amount",
+                    0.0,
+                    1.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    crate::effects::roar::ROAR_PARAM_FB_AMOUNT,
+                ),
+                boolean("fb invert", 0.0, crate::effects::roar::ROAR_PARAM_FB_INVERT),
+                boolean("fb duck", 0.0, crate::effects::roar::ROAR_PARAM_FB_DUCK),
+                continuous(
+                    "fb freq",
+                    30.0,
+                    18_000.0,
+                    1_000.0,
+                    Some("Hz"),
+                    ParamScaling::Exponential,
+                    crate::effects::roar::ROAR_PARAM_FB_FREQ,
+                ),
+                continuous(
+                    "fb width",
+                    0.5,
+                    9.0,
+                    8.0,
+                    Some("oct"),
+                    ParamScaling::Linear,
+                    crate::effects::roar::ROAR_PARAM_FB_WIDTH,
+                ),
+                continuous(
+                    "compress",
+                    0.0,
+                    1.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    crate::effects::roar::ROAR_PARAM_COMPRESS,
+                ),
+                boolean("sc hpf", 0.0, crate::effects::roar::ROAR_PARAM_SC_HPF),
+                continuous(
+                    "output",
+                    -24.0,
+                    24.0,
+                    0.0,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    crate::effects::roar::ROAR_PARAM_OUTPUT,
+                ),
+                continuous(
+                    "dry/wet",
+                    0.0,
+                    1.0,
+                    1.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    crate::effects::roar::ROAR_PARAM_MIX,
+                ),
+            ]
+        };
+        let roar_stages = if saturator { 0 } else { crate::effects::roar::NUM_STAGES };
+        for stage in 0..roar_stages {
             let prefix = format!("s{}", stage + 1);
             params.push(options(
                 &format!("{prefix} shaper"),
@@ -6765,7 +6917,7 @@ impl EffectDescriptor {
         }
 
         let mut desc = Self::new(EffectDescriptorData {
-            name: "Roar".to_string(),
+            name: if saturator { "Saturator" } else { "Roar" }.to_string(),
             input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
             instrument_modulators: (1..=crate::instruments::voice_modulator::SLOT_COUNT)
@@ -6791,8 +6943,9 @@ impl EffectDescriptor {
         };
         let drive_idx = param_position(&desc, "drive");
         let tone_idx = param_position(&desc, "tone");
-        let fb_amount_idx = param_position(&desc, "fb amount");
         let mix_idx = param_position(&desc, "dry/wet");
+        // Saturator has no feedback network to modulate.
+        let fb_amount_idx = (!saturator).then(|| param_position(&desc, "fb amount"));
 
         let mut append_depth_targets =
             |base_param_idx: usize,
@@ -6851,14 +7004,16 @@ impl EffectDescriptor {
             1.0,
             None,
         );
-        append_depth_targets(
-            fb_amount_idx,
-            "fb amount",
-            crate::effects::roar::ROAR_PARAM_MOD_FB_AMOUNT_DEPTH_1,
-            -1.0,
-            1.0,
-            None,
-        );
+        if let Some(fb_amount_idx) = fb_amount_idx {
+            append_depth_targets(
+                fb_amount_idx,
+                "fb amount",
+                crate::effects::roar::ROAR_PARAM_MOD_FB_AMOUNT_DEPTH_1,
+                -1.0,
+                1.0,
+                None,
+            );
+        }
         append_depth_targets(
             mix_idx,
             "mix",

@@ -1243,3 +1243,74 @@ fn a_duplicated_track_keeps_every_scenes_lane_its_links_and_its_group() {
     assert_eq!(step.label, "Duplicate track");
     assert_eq!(app.tracks.len(), tracks_before);
 }
+
+/// A group made after an import must get its own bus: the imported kit's
+/// bus is still in the project, so the new group cannot take its id.
+#[test]
+fn grouping_host_tracks_after_a_kit_import_gets_its_own_bus() {
+    let (source, kit) = source_project(false);
+    let mut rig = Rig::new();
+    let app = rig.app();
+    target(app);
+    let second = app.graph_controller().add_track(Path::new(PLATE)).expect("second host track");
+    let summary = app
+        .import_from_project(&source, &ImportRequest { kits: vec![kit], ..Default::default() })
+        .expect("import");
+    let group = new_group(&summary, kit);
+    let kit_bus = app.groups.iter().find(|g| g.id == group).unwrap().bus_id;
+    assert!(app.buses.iter().any(|bus| bus.id.0 == kit_bus), "the imported kit's bus exists");
+    let bus = app.group_tracks_recorded(vec![0, second]).expect("group");
+    assert_ne!(bus.0, kit_bus, "the new group has its own bus");
+    assert!(app.buses.iter().any(|bus| bus.id.0 == kit_bus), "the kit's bus is still there");
+}
+
+/// An import's own patches can pass the history byte budget. With undo
+/// entries already there, evicting them mid-import used to make the import
+/// read as "changed nothing": it stayed in the project, unfinished and with
+/// no undo entry.
+#[test]
+fn an_import_larger_than_the_history_budget_is_still_one_undo_step() {
+    let (source, kit) = source_project(false);
+    let mut rig = Rig::new();
+    let app = rig.app();
+    target(app);
+    app.history = crate::app::history::UndoManager::new(crate::app::history::HistoryBudget {
+        max_entries: 256,
+        max_bytes: 1,
+    });
+    for name in ["Bus X", "Bus Y", "Bus A"] {
+        app.rename_bus_recorded(BusId(1), name.to_string()).expect("an earlier edit");
+    }
+    let tracks_before = app.tracks.len();
+    let buses_before = app.buses.len();
+
+    let summary = app
+        .import_from_project(&source, &ImportRequest { kits: vec![kit], ..Default::default() })
+        .expect("the import is not mistaken for a no-op");
+    let group = new_group(&summary, kit);
+    assert!(app.tracks.len() > tracks_before);
+    assert_eq!(app.history.undo_len(), 1, "the oversized import is the one entry kept");
+
+    let crate::app::history::HistoryReplay::Applied(step) = crate::app::edit::undo(app) else {
+        panic!("undo");
+    };
+    assert_eq!(step.label, "Import from source");
+    assert_eq!(app.tracks.len(), tracks_before, "undo takes the whole import back");
+    assert_eq!(app.buses.len(), buses_before);
+    assert!(app.groups.iter().all(|g| g.id != group));
+}
+
+/// A group whose bus is gone still names its id; the next group must not be
+/// handed that id, or the two share one bus (mute, volume, effects).
+#[test]
+fn a_new_group_never_adopts_a_bus_id_another_group_names() {
+    let mut rig = Rig::new();
+    let app = rig.app();
+    target(app);
+    let second = app.graph_controller().add_track(Path::new(PLATE)).expect("second track");
+    let (kit, kit_bus) = app.create_drum_rack_recorded(Some("Kit".into())).expect("kit");
+    // The kit's bus vanishes without its group (as a stale UI mirror did).
+    app.buses.retain(|bus| bus.id != kit_bus);
+    let bus = app.group_tracks_recorded(vec![0, second]).expect("group");
+    assert_ne!(bus, kit_bus, "group {kit} still names that id");
+}

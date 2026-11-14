@@ -3,5 +3,6 @@
   "run_mode": "instrument",
   "voice_controls": {
     "mode": "voice_mode"
-  }
+  },
+  "deprecated": true
 }

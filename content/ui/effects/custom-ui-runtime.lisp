@@ -3,6 +3,7 @@
 
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.devices :as dv)
+(import eseq.effects.pad-variants :as pv)
 (import eseq.effects.param-grid :as pg)
 (import eseq.effects.custom-ui-sections :as sec)
 ;; runtime <-> custom-effect-ui is a converted-module import cycle
@@ -183,6 +184,14 @@
             (list (custom-ui-param-in-scope scope (nth binding 1)) (get env (nth binding 0)))) bindings)))
         (fx (fx-in-scope scope)))
     (if (empty? pairs) false
+      ;; The instrument's params while a pad variant is selected on the pads
+      ;; tab: the variant's values, as one edit (rack pad variants spec §6.1).
+      (if (and (not fx) (pv/pads-authoring-pad))
+        (let ((pad (pv/pads-authoring-pad)))
+          (host-command "set-pad-variant-values"
+            (dict :group-id pad.group.gid :note pad.note
+                  :params (map (lambda (pair) (get (nth pair 0) :name)) pairs)
+                  :values (map (lambda (pair) (nth pair 1)) pairs))))
       (if (and fx (not (get fx :rack-fx)) (not (get fx :bus-fx)) (not (get fx :midi-fx)))
         (host-command
           (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
@@ -197,7 +206,7 @@
                              pairs)
                   :commit (not (get env :active))))
           (map (lambda (pair)
-            (custom-ui-set-param-in-scope scope (nth pair 0) (nth pair 1))) pairs))))))
+            (custom-ui-set-param-in-scope scope (nth pair 0) (nth pair 1))) pairs)))))))
 
 (def custom-ui-set-adsr-in-scope (scope attack decay sustain release env)
   (custom-ui-set-envelope-in-scope scope

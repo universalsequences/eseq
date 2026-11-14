@@ -728,3 +728,60 @@ fn plock_chips_light_every_variant_the_selection_plays_and_clear_unlocks_it() {
         h.eval_x("a.label")
     );
 }
+
+/// The chips the laid-out panel lights, by label (what the renderer draws).
+fn laid_out_lit_plock_chips(h: &mut Harness, buffer: &str) -> Vec<String> {
+    let id = (h.editor.buffers.iter()).find(|b| b.name == buffer).expect("buffer").id;
+    h.editor.set_active_buffer(id);
+    h.editor.set_layout_viewport(24, 60);
+    h.editor.refresh_visible_layouts_for_buffer_named(buffer);
+    let layout = h.editor.widget_layout().expect("layout");
+    fn walk(node: &eseqlisp::layout::LayoutNode, out: &mut Vec<String>) {
+        if let (Some(Value::String(name)), Some(Value::Number(width))) =
+            (node.props.get("debug-name"), node.props.get("border-width"))
+        {
+            if name.starts_with("track-plock-chip-") && *width > 0.5 {
+                out.extend(name.rsplit('-').next().map(str::to_string));
+            }
+        }
+        for child in &node.children {
+            walk(child, out);
+        }
+    }
+    let mut lit = Vec::new();
+    walk(&layout, &mut lit);
+    lit.sort();
+    lit
+}
+
+/// The rendered chips follow the selection: selecting steps lights the
+/// chips they play, and deselecting them lights the shown (def) chip
+/// again rather than keeping the last selection's chips lit.
+#[test]
+fn rendered_plock_chips_unlight_when_the_selection_clears() {
+    let mut h = Harness::with_root(UiRoot::Distro);
+    let slot = h.add_effect(0, "Filter");
+    h.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+    h.sync();
+    for (step, value) in [(2, 500.0), (6, 800.0)] {
+        h.lock_effect(slot, step, 2, value);
+    }
+    app::edit::finish_active_gesture(&mut h.app);
+    h.sync();
+    h.eval_x(
+        "(effect-buffer \"*plock-chips*\" (box :padding 0.5 (v-stack :gap 0.1 \
+         (subtree :key \"step-track-plocks-panel\" \
+           (eseq.effects.track-panels/track-plocks-panel)))))",
+    );
+    h.sync();
+    h.show_all();
+    assert_eq!(laid_out_lit_plock_chips(&mut h, "*plock-chips*"), vec!["def"]);
+    h.shared.selected_steps.lock().unwrap().extend([2, 6]);
+    h.sync();
+    h.show_all();
+    assert_eq!(laid_out_lit_plock_chips(&mut h, "*plock-chips*"), vec!["A", "B"]);
+    h.shared.selected_steps.lock().unwrap().clear();
+    h.sync();
+    h.show_all();
+    assert_eq!(laid_out_lit_plock_chips(&mut h, "*plock-chips*"), vec!["def"]);
+}

@@ -36,7 +36,9 @@
    param-set-control-value))
 (import eseq.effects.param-grid :refer (fx-param-grid))
 
-(export panel)
+;; The knob / dropdown builders and effect-source are shared with the
+;; single-stage Saturator panel (saturator.lisp).
+(export panel parameter-knob percent-knob parameter-toggle option effect-source)
 
 (def orange () (rgba 1.00 0.62 0.25 1.0))
 (def cyan   () (rgba 0.45 0.78 0.95 1.0))

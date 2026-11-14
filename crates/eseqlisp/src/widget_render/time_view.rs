@@ -41,6 +41,11 @@ pub struct TimeViewport {
     /// zoom, not just past `ZOOMED_CELLS_PER_BEAT`. Ruler labels and major
     /// lines keep the readable grid's spacing.
     pub fine_grid: bool,
+    /// Divides the RESOLVED grid (after readability promotion), so the grid
+    /// is always this many times denser than the readable one at any zoom.
+    /// Drives drawing and snapping; ruler labels and major lines keep the
+    /// readable grid's spacing.
+    pub grid_subdivide: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -54,6 +59,7 @@ impl TimeViewport {
     fn readable(&self) -> Self {
         Self {
             fine_grid: false,
+            grid_subdivide: 1.0,
             ..*self
         }
     }
@@ -301,6 +307,7 @@ impl TimeViewport {
                 step *= 2.0;
             }
         }
+        step /= self.grid_subdivide.clamp(1.0, 8.0);
 
         let major_every = match ruler.map(|ruler| &ruler.mode) {
             Some(TimeRulerMode::BarsBeats { beats_per_bar }) => {
@@ -326,7 +333,7 @@ impl TimeViewport {
         }
 
         let (step, mut major_every) = self.grid_spec(ruler);
-        if self.fine_grid {
+        if self.fine_grid || self.grid_subdivide > 1.0 {
             // The fine grid's major lines are the readable grid's, so only
             // minor lines are added between them.
             let (readable_step, readable_major) = self.readable().grid_spec(ruler);
@@ -409,6 +416,7 @@ mod tests {
             zoom_max_duration: 128.0,
             grid_density: 1.0,
             fine_grid: false,
+            grid_subdivide: 1.0,
         };
         let ruler = TimeRuler {
             mode: TimeRulerMode::BarsBeats { beats_per_bar: 4 },
@@ -443,6 +451,7 @@ mod tests {
             zoom_max_duration: 128.0,
             grid_density: 1.0,
             fine_grid: false,
+            grid_subdivide: 1.0,
         };
         let closer = TimeViewport {
             view_duration: 1.0,
@@ -472,6 +481,7 @@ mod tests {
             zoom_max_duration: 1024.0,
             grid_density: 2.0,
             fine_grid: false,
+            grid_subdivide: 1.0,
         };
         let ruler = TimeRuler {
             mode: TimeRulerMode::BarsBeats { beats_per_bar: 4 },
@@ -518,6 +528,7 @@ mod tests {
             zoom_max_duration: 1024.0,
             grid_density: 2.0,
             fine_grid: false,
+            grid_subdivide: 1.0,
         };
         let ruler = TimeRuler {
             mode: TimeRulerMode::BarsBeats { beats_per_bar: 4 },
@@ -553,6 +564,7 @@ mod tests {
             zoom_max_duration: 1024.0,
             grid_density: 2.0,
             fine_grid: false,
+            grid_subdivide: 1.0,
         };
         let fine = TimeViewport {
             fine_grid: true,
@@ -579,6 +591,45 @@ mod tests {
         assert_eq!(majors(&fine), majors(&coarse), "the bar lines stay where they were");
     }
 
+    /// `grid_subdivide` doubles whatever grid the readability floor
+    /// resolved, at every zoom, and leaves the labels and bar lines alone.
+    #[test]
+    fn grid_subdivide_doubles_the_resolved_grid_at_every_zoom() {
+        let ruler = TimeRuler {
+            mode: TimeRulerMode::BarsBeats { beats_per_bar: 4 },
+        };
+        for view_duration in [8.0, 16.0, 64.0, 256.0] {
+            let readable = TimeViewport {
+                rect: Rect { row: 0.0, col: 0.0, width: 144.0, height: 8.0 },
+                header_height: 1.0,
+                sidebar_width: 0.0,
+                view_start: 0.0,
+                view_duration,
+                zoom_min_duration: 4.0,
+                zoom_max_duration: 1024.0,
+                grid_density: 1.0,
+                fine_grid: false,
+                grid_subdivide: 1.0,
+            };
+            let doubled = TimeViewport { grid_subdivide: 2.0, ..readable };
+            let step = readable.grid_step(Some(&ruler));
+            assert_eq!(doubled.grid_step(Some(&ruler)), step / 2.0, "{view_duration}");
+            assert_eq!(
+                doubled.metal_time_ruler_labels(Some(&ruler)),
+                readable.metal_time_ruler_labels(Some(&ruler)),
+                "{view_duration}: labels keep the readable spacing"
+            );
+            let majors = |view: &TimeViewport| {
+                view.metal_grid_lines(Some(&ruler))
+                    .into_iter()
+                    .filter(|(_, major)| *major)
+                    .map(|(x, _)| x)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(majors(&doubled), majors(&readable), "{view_duration}: bar lines stay");
+        }
+    }
+
     #[test]
     fn seconds_ruler_prefers_ms_when_zoomed_in() {
         let viewport = TimeViewport {
@@ -596,6 +647,7 @@ mod tests {
             zoom_max_duration: 128.0,
             grid_density: 1.0,
             fine_grid: false,
+            grid_subdivide: 1.0,
         };
         let ruler = TimeRuler {
             mode: TimeRulerMode::Seconds,

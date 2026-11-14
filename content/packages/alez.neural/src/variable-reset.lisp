@@ -48,7 +48,8 @@
                            clear-port! graph-quantize-options graph-max-poly-selection-options))
 (import eseq.view-kit :refer (rgb-part index-of nothing named))
 (import eseq.glance)
-(import eseq.graph-kit :refer (route-tracks route-menu-tracks route-track route-label node-route-label set-route-label!
+(import eseq.graph-kit :refer (route-tracks route-menu-tracks route-track route-label route-entries
+                               node-route-label set-route-label!
                                weight-rows set-weight! column res-options set-param-on-nodes!))
 
 (export gvr-panel gvr-init-ring-defaults gvr-expand-node gvr-map-arm gvr-jakis gvr-route-menu
@@ -92,9 +93,10 @@
 ;; only (gvr-track-inlet-options).
 (def gvr-jaki-kind "alez/jaki:jaki")
 
-;; The tracks graph g's nodes route to, as route menu labels.
+;; The tracks graph g's nodes route to, as route menu labels: each track,
+;; then its drum-rack pad variants (docs/rack-pad-variants-spec.md §7).
 (def gvr-route-tracks-labels (g)
-  (map (lambda (t) (route-label g t)) (route-menu-tracks g)))
+  (map (lambda (e) (nth e 2)) (route-entries g (route-menu-tracks g))))
 
 ;; The jakis graph g's nodes can gate, as (dict :id :label): the generators
 ;; of g's owner whose instance is a jaki.

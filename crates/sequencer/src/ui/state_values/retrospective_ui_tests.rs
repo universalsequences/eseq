@@ -55,7 +55,7 @@ fn retrospective_command_opens_real_capture_and_cancel_keeps_patterns() {
     state.replace_pattern_repository(vec![sequencer::sequencer::PatternSnapshot::new_default(1, &[])], 0);
     let mut app = test_app_for_track_visual_state(state.clone());
     let now = std::time::Instant::now();
-    app.retrospective.note_on(1, app.track_registry.id_at(0).unwrap(), 0.0, 0.7, now);
+    app.retrospective.note_on(1, app.track_registry.id_at(0).unwrap(), 0.0, None, 0.7, now);
     app.retrospective.note_off(1, now);
     editor.drain_host_commands();
     editor.runtime_mut().eval_str("(eseq.application-menus/capture-midi)").unwrap();
@@ -150,7 +150,7 @@ fn retrospective_detect_command_seeds_the_crop_from_the_groove() {
     starts.extend((0..16).map(|i| 6.0 + i as f64 * 0.3));
     app.retrospective.draft = Some(sequencer::app::retrospective::CaptureDraft {
         notes: starts.iter().map(|&start| sequencer::app::retrospective::CapturedNote {
-            track, transpose: 0.0, velocity: 1.0, start, end: start + 0.05 }).collect(),
+            track, transpose: 0.0, variant: None, velocity: 1.0, start, end: start + 0.05 }).collect(),
         duration: 11.0, truncated: false, scene: app.state.current_scene_id().unwrap(),
     });
     crate::retrospective::handle("retrospective-detect", Value::Nil, &mut app, &mut editor);

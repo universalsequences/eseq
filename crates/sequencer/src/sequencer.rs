@@ -2,6 +2,8 @@
 mod clock;
 #[path = "sequencer/data.rs"]
 mod data;
+#[path = "sequencer/pad_variants/mod.rs"]
+pub mod pad_variants;
 #[path = "sequencer/snapshot.rs"]
 mod snapshot;
 #[path = "sequencer/state/mod.rs"]
@@ -27,7 +29,7 @@ pub use data::{
     BARS_PER_PATTERN, BAR_TRANSPOSE_LIMIT,
     MAX_SAMPLER_POOLS, MAX_STEPS, MAX_TRACKS, MIX_BUS_ID, NUM_PARAMS, STEPS_PER_PAGE, SYNC_COUNT,
     SYNC_RESOLUTIONS, TRACK_PATTERN_WORDS, RETRIG_INFINITE, RETRIG_RATE_PITCH_THRESHOLD,
-    RETRIG_RATE_SEMITONE, format_retrig_rate, retrig_rate_hz,
+    RETRIG_RATE_SEMITONE, format_retrig_rate, retrig_rate_hz, MAX_PAD_VARIANT,
 };
 #[allow(unused_imports)]
 pub use snapshot::{
@@ -58,6 +60,7 @@ pub use state::{
     audio_frames_to_beats, crossfade_gains, crossfade_room, crossfade_window, fade_curve_for_midpoint,
     fade_curve_power, fade_shape, regions_abut, FadeHandle,
     DeviceParamPrintOverride, DeviceParamPrintTarget, DeviceParamPrintValues, RackMacroPrintOverride,
+    PrintBoundary, PrintBoundaryLog, ScheduledStep, ScheduledStepLog, StepPrintHeard,
     EffectInstanceId, InstrumentDeviceValuesSnapshot, InstrumentSlotResetSummary,
     GeneratorTickErrorNotice, MidiFxInstanceId, PatternId, PatternSnapshot, ProjectScenes, RackClip, RackClipBank, RackClipId, rack_clip_label, PublishedSequencer, RackMacro, RackMacroCurve,
     ResolvedSceneSlot, SceneSlotStore, SCENE_SLOT_SOFT_SERIALIZED_BYTES, SCENE_TRANSPOSE_SLOT,

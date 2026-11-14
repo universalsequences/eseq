@@ -1272,6 +1272,7 @@ mod rack_slot_named_param_tests {
                 chop: 1.0,
                 retrig: StepParam::Retrig.default_value(),
                 retrig_rate: StepParam::RetrigRate.default_value(),
+                variant: 0.0,
             },
             chord: ScheduledChordData {
                 live_origins: [None; MAX_VOICES],

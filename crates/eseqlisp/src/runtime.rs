@@ -2589,6 +2589,11 @@ impl Runtime {
                 "(read-string text)",
                 "One s-expression of data read from text, never evaluated; nil when the text is not exactly one piece of data.",
             ),
+            (
+                "clipboard-write",
+                "(clipboard-write text)",
+                "Put text on the system clipboard; true when it was taken.",
+            ),
             ("number?", "(number? x)", "Whether x is a number."),
             ("string?", "(string? x)", "Whether x is a string."),
             ("map?", "(map? x)", "Whether x is a map (a dict)."),
@@ -2605,7 +2610,7 @@ impl Runtime {
             ),
             (
                 "box",
-                "(box :background value :background-color color :border-color color :border-width px :corner-radius px :padding cells :width cells :height cells :aspect ratio :align mode :h-align mode :v-align mode :flex weight :selected bool :selected-background-color color :selected-border-color color :muted bool :muted-background-color color :muted-border-color color :drop-hover-background-color color :drop-hover-border-color color :drag-type type :drag-payload value :drag-modifier modifier :capture-pointer bool :focusable bool :key value :on-click callback :on-right-click callback :on-double-click callback :on-drag callback :on-drop callback :on-mouse-down callback :on-mouse-up callback child ...)",
+                "(box :background value :background-color color :border-color color :border-width px :corner-radius px :padding cells :width cells :height cells :aspect ratio :align mode :h-align mode :v-align mode :flex weight :selected bool :selected-background-color color :selected-border-color color :muted bool :muted-background-color color :muted-border-color color :drop-hover-background-color color :drop-hover-border-color color :drag-type type :drag-payload value :drag-modifier modifier :capture-pointer bool :hidden-drag bool :focusable bool :focus-decoration :corners :focus-color color :key value :on-click callback :on-right-click callback :on-double-click callback :on-drag callback :on-drop callback :on-mouse-down callback :on-mouse-up callback child ...)",
                 "Create a layout container with optional background, border, interaction, drag/drop, and selection styling.",
             ),
             (
@@ -4159,13 +4164,46 @@ impl Runtime {
     ) -> Result<Option<Value>, crate::vm::VMError> {
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.vm.set_current_effect_context(current_buffer_id);
+        // `ESEQLISP_PROFILE_UI`: report invokes slower than 2ms, split into
+        // the VM call and the flushes that follow it (no clock reads when off).
+        let started = self.perf_stats.enabled.then(Instant::now);
+        let lap = || started.map(|s| s.elapsed()).unwrap_or_default();
         let result = self.vm.invoke(callable, args);
+        let vm_done = lap();
+        let mut splits = [std::time::Duration::ZERO; 3];
         if result.is_ok() {
             self.flush_vm_reactive_sets();
+            splits[0] = lap();
             if self.sync_theme_to_global {
                 self.sync_theme_from_vm();
             }
+            splits[1] = lap();
             self.flush_widget_trees();
+            splits[2] = lap();
+        }
+        if let Some(started) = started.filter(|s| s.elapsed() >= std::time::Duration::from_millis(2)) {
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+            // The effects the VM's post-call process_dirty_reactive ran
+            // (kind writes made before the call dirty them).
+            let mut effects = self.vm.take_reactive_exec_timings();
+            let effects_total: std::time::Duration = effects.iter().map(|t| t.elapsed).sum();
+            effects.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
+            let top = effects
+                .iter()
+                .take(5)
+                .map(|t| format!("{}:{:.2}ms", t.label, ms(t.elapsed)))
+                .collect::<Vec<_>>()
+                .join(",");
+            eprintln!(
+                "[ui-profile][slow-invoke] total={:.2}ms vm={:.2}ms (effects n={} {:.2}ms) reactive-sets={:.2}ms theme={:.2}ms widget-trees={:.2}ms top=[{top}]",
+                ms(started.elapsed()),
+                ms(vm_done),
+                effects.len(),
+                ms(effects_total),
+                ms(splits[0].saturating_sub(vm_done)),
+                ms(splits[1].saturating_sub(splits[0])),
+                ms(splits[2].saturating_sub(splits[1])),
+            );
         }
         result
     }

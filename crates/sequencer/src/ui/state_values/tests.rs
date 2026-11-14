@@ -604,6 +604,7 @@ use panel_kinds_seed::*;
             "ui/effects/builtin/dimension.lisp",
             "ui/effects/builtin/phaser-flanger.lisp",
             "ui/effects/builtin/roar.lisp",
+            "ui/effects/builtin/saturator.lisp",
             "ui/effects/builtin/filter-panel.lisp",
             "ui/effects/builtin/dynamics.lisp",
             "ui/effects/builtin/multiband.lisp",
@@ -4422,9 +4423,11 @@ use panel_kinds_seed::*;
             header.rect,
             search_inputs[0].rect
         );
+        // The search header spans the browser above the tab rail and the
+        // content column (eseq.browser's "tabbed-browser-column").
         assert!(
-            header.rect.col >= rail.rect.col + rail.rect.width,
-            "search header should live in the content column to the right of the rail: rail={:?}, header={:?}; rendered:\n{rendered}",
+            header.rect.row + header.rect.height <= rail.rect.row,
+            "search header should sit above the tab rail: rail={:?}, header={:?}; rendered:\n{rendered}",
             rail.rect,
             header.rect
         );
@@ -11995,6 +11998,45 @@ use panel_kinds_seed::*;
                 );
             }
             other => panic!("expected move-rack-slot-effect command, got {other:?}"),
+        }
+
+        // A track effect dropped into one of its own track's rack slots moves
+        // there (with its settings); it is not re-added from the library.
+        for (target, position, target_slot) in [
+            (r#"(dict :chain "rack" :track 0 :rack-slot 0 :slot 1)"#, "rack", Some(1.0)),
+            (r#"(dict :chain "append" :track 0 :rack-slot 0)"#, "append", None),
+        ] {
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    r#"(eseq.effects.drag-drop/drop-on-effect
+                        (dict
+                          :payload (dict :kind "audio-effect-instance"
+                                         :chain "audio"
+                                         :track 0
+                                         :rack-slot -1
+                                         :slot 7
+                                         :name "Filter")
+                          :target {target}))"#
+                ))
+                .expect("drop track effect into a rack slot");
+            let commands = editor.drain_host_commands();
+            assert_eq!(commands.len(), 1);
+            let eseqlisp::host::HostCommand::Custom { name, payload } = &commands[0] else {
+                panic!("expected move-track-effect-to-rack-slot, got {:?}", commands[0]);
+            };
+            assert_eq!(name, "move-track-effect-to-rack-slot");
+            let Value::Map(payload) = payload else {
+                panic!("move-track-effect-to-rack-slot payload should be a dict: {payload:?}");
+            };
+            let field = |key: &str| payload.get(key).map(|value| value.borrow().clone());
+            assert_eq!(field("track"), Some(Value::Number(0.0)));
+            assert_eq!(field("rack-slot"), Some(Value::Number(0.0)));
+            assert_eq!(field("source-slot"), Some(Value::Number(7.0)));
+            assert_eq!(field("position"), Some(Value::String(position.to_string())));
+            if let Some(target_slot) = target_slot {
+                assert_eq!(field("target-slot"), Some(Value::Number(target_slot)));
+            }
         }
 
         editor
@@ -26618,7 +26660,7 @@ use panel_kinds_seed::*;
 
         let shell_def = eseqlisp::widget_render::sdf_widget::sdf_widget_def("seqv-step-shell")
             .expect("seqv-step-shell should be registered");
-        for uniform in ["track.audible", "track.governed", "step.held", "step.lock-kind"] {
+        for uniform in ["track.audible", "track.governed", "step.held-pad", "step.lock-kind"] {
             assert!(shell_def.state_uniforms.iter().any(|name| name == uniform), "{uniform}");
         }
         assert!(
@@ -32375,6 +32417,92 @@ use panel_kinds_seed::*;
         assert_eq!(filter_actions.widget_type, "menu-button");
         assert_finite_nonzero_rect(filter_actions, "filter action menu");
         assert_layout_inside(filter_actions, filter_header, "filter action menu");
+    }
+
+    // eseq-q7zn: a folded effect panel is a thin strip that keeps the enable
+    // dot and drops the header and body; folding again restores the panel.
+    #[test]
+    fn metal_seq_fx_panel_collapses_to_a_thin_strip_and_back() {
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                "Filter",
+                0,
+                test_filter_params(),
+            ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
+        seed_values(vec![]);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def eseq.browser/clear-editor-name! () nil)
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate eseq.seq-core-state/selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor, &panel_seed);
+        editor.refresh_runtime_side_effects();
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 18);
+        let root = "audio-fx-panel-root-0-Filter";
+        let toggle = "(eseq.effects.state/toggle-device-collapsed! \
+            (get (first (eseq.effects.panel-data/current-effect-panels)) :collapse-key))";
+
+        let layout = editor.widget_layout().expect("open fx layout");
+        let open_width = find_layout_node_by_debug_name(&layout, root)
+            .expect("open filter panel")
+            .rect
+            .width;
+        assert!(layout_contains_debug_name(&layout, "audio-fx-panel-header"));
+
+        editor.runtime_mut().eval_str(toggle).expect("fold the filter");
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("folded fx layout");
+        let folded = find_layout_node_by_debug_name(&layout, root).expect("folded filter panel");
+        assert_finite_nonzero_rect(folded, "folded filter panel");
+        assert!(
+            folded.rect.width < 3.0 && folded.rect.width < open_width,
+            "a folded panel should be a thin strip, got {:?} (open width {open_width})",
+            folded.rect
+        );
+        let strip = find_layout_node_by_debug_name(&layout, "audio-fx-panel-collapsed")
+            .expect("folded strip should render");
+        assert_finite_nonzero_rect(strip, "folded strip");
+        // A click on the strip selects the effect; only the button folds.
+        assert!(strip.props.contains_key("on-click"));
+        assert!(!strip.props.contains_key("on-double-click"));
+        assert!(layout_contains_debug_name(&layout, "fx-collapse-button"));
+        assert!(
+            !layout_contains_debug_name(&layout, "audio-fx-panel-header")
+                && !layout_contains_widget_type(&layout, "response-curve-editor"),
+            "a folded panel should build neither its header nor its body"
+        );
+
+        editor.runtime_mut().eval_str(toggle).expect("unfold the filter");
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("unfolded fx layout");
+        let reopened = find_layout_node_by_debug_name(&layout, root).expect("reopened panel");
+        assert_eq!(reopened.rect.width, open_width);
+        assert!(layout_contains_widget_type(&layout, "response-curve-editor"));
     }
 
     // The Filter curve used to mirror every drag event into `defstate` globals
@@ -47776,3 +47904,6 @@ mod about_ui_tests;
 
 #[path = "application_menu_tests.rs"]
 mod application_menu_tests;
+
+#[path = "piano_roll_keys_tests.rs"]
+mod piano_roll_keys_tests;

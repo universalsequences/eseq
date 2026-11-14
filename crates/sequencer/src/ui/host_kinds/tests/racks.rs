@@ -758,3 +758,95 @@ fn rack_option_constants_match_the_host() {
         );
     }
 }
+
+/// docs/rack-pad-variants-spec.md: a variant pad is its own pad instance
+/// (keyed by member + variant), `track.pad` stays the plain pad, and the
+/// variant commands and the `name` setter go through history.
+#[test]
+fn pad_variants_are_pads_with_their_own_fields_and_commands() {
+    let mut h = Harness::new();
+    let gid = h.drum_rack();
+    h.run_7h(&format!(
+        "(host-command \"add-pad-variant\" (dict :group-id g.gid :track-id p0.track.tid :note {}))",
+        KICK + 5
+    ));
+    h.eval_7h("(def v (first (filter (lambda (p) (> p.variant 0)) g.pads)))");
+    assert_eq!(h.eval_7h("(len g.pads)"), Value::Number(3.0));
+    assert_eq!(h.eval_7h("v.variant"), Value::Number(1.0));
+    assert_eq!(h.eval_7h("v.note"), Value::Number((KICK + 5) as f64));
+    assert_eq!(h.eval_7h("(= v.track p0.track)"), Value::Bool(true));
+    assert_eq!(h.eval_7h("(= p0.track.pad p0)"), Value::Bool(true), "track.pad is the plain pad");
+    assert_eq!(h.eval_7h("v.name"), s(""));
+
+    h.run_7h("(set! v.name \"tight\")");
+    assert_eq!(h.eval_7h("v.name"), s("tight"));
+    h.run_7h(&format!(
+        "(host-command \"set-pad-variant-value\" (dict :group-id g.gid :note {} :param \"gain\" :value 0.25))",
+        KICK + 5
+    ));
+    assert_eq!(h.eval_7h("v.value-names"), h.eval_7h("(list \"gain\")"));
+    assert_eq!(h.eval_7h("v.value-values"), h.eval_7h("(list 0.25)"));
+    let rack = h.rack(gid);
+    let pad = &rack.pads[rack.pad_index_for_note(KICK + 5).unwrap()];
+    assert_eq!(pad.values.get("gain"), Some(&0.25));
+
+    // A plain pad is no variant: naming it is refused.
+    h.rejects_7h("(set! p0.name \"x\")", "plain pad");
+    h.run_7h(&format!(
+        "(host-command \"remove-pad-variant\" (dict :group-id g.gid :note {}))",
+        KICK + 5
+    ));
+    assert_eq!(h.eval_7h("(len g.pads)"), Value::Number(2.0));
+    app::edit::undo(&mut h.app);
+    h.share_buses_and_groups();
+    h.sync();
+    assert_eq!(h.eval_7h("(len g.pads)"), Value::Number(3.0), "undo brings it back");
+}
+
+/// A member's light reaches the pad its last hit played: a variant hit lights
+/// that variant's pad, not the member's plain pad (rack pad variants).
+#[test]
+fn a_variant_hit_lights_its_own_pad_only() {
+    let mut h = Harness::new();
+    h.drum_rack();
+    h.run_7h(&format!(
+        "(host-command \"add-pad-variant\" (dict :group-id g.gid :track-id p0.track.tid :note {}))",
+        KICK + 5
+    ));
+    h.eval_7h("(def v (first (filter (lambda (p) (> p.variant 0)) g.pads)))");
+    let track = 0;
+    h.frame.rack_pad_triggers = vec![true, false];
+    h.shared.state.transport.trigger_variant[track].store(1, std::sync::atomic::Ordering::Relaxed);
+    h.sync();
+    assert_eq!(h.eval_7h("v.triggered"), Value::Bool(true));
+    assert_eq!(h.eval_7h("p0.triggered"), Value::Bool(false));
+    h.shared.state.transport.trigger_variant[track].store(0, std::sync::atomic::Ordering::Relaxed);
+    h.sync();
+    assert_eq!(h.eval_7h("v.triggered"), Value::Bool(false));
+    assert_eq!(h.eval_7h("p0.triggered"), Value::Bool(true));
+}
+
+/// A step's pad variant (rack pad variants spec §6.3): `s.pad-variant` reads
+/// and sets `StepParam::Variant` through history, and `held-pad` packs it
+/// with `held` for the grid's shader.
+#[test]
+fn a_steps_pad_variant_reads_sets_and_packs_with_held() {
+    let mut h = Harness::new();
+    h.drum_rack();
+    h.app.state.pattern.patterns[0].toggle_step(2);
+    h.sync();
+    h.eval_7h("(def s (nth p0.track.steps 2))");
+    assert_eq!(h.eval_7h("s.pad-variant"), Value::Number(0.0));
+    let undo = h.app.history.undo_len();
+    h.run_7h("(set! s.pad-variant 2)");
+    assert_eq!(
+        h.app.state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Variant),
+        2.0
+    );
+    assert_eq!(h.eval_7h("s.pad-variant"), Value::Number(2.0));
+    assert_eq!(h.eval_7h("s.held-pad"), Value::Number(5.0), "held 1 + 2 x variant 2");
+    assert_eq!(h.app.history.undo_len(), undo + 1);
+    app::edit::undo(&mut h.app);
+    h.sync();
+    assert_eq!(h.eval_7h("s.pad-variant"), Value::Number(0.0));
+}

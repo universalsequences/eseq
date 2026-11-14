@@ -20,7 +20,7 @@ pub const MAX_INSTRUMENT_ENGINES: usize = MAX_TRACKS * (MAX_RACK_SLOTS + 1);
 pub const MAX_SAMPLER_POOLS: usize = MAX_TRACKS * (MAX_RACK_SLOTS + 1);
 pub const MAX_STEPS: usize = 256;
 pub const STEPS_PER_PAGE: usize = 16;
-pub const NUM_PARAMS: usize = 12;
+pub const NUM_PARAMS: usize = 13;
 pub const DEFAULT_BPM: u32 = 120;
 pub const TRACK_PATTERN_WORDS: usize = MAX_STEPS / 64;
 pub const MIX_BUS_ID: u64 = 0;
@@ -662,7 +662,14 @@ pub enum StepParam {
     /// Machinedrum RTIM, stored musically: retrigs per beat. Continuous and
     /// log-sliderd so the top of the range sweeps into audio-rate pitch.
     RetrigRate = 11,
+    /// Which pad variant of a drum-rack member the step plays
+    /// (docs/rack-pad-variants-spec.md): 0 = the member's plain pad, 1.. =
+    /// the variant pad with that id. A missing id plays the plain pad.
+    Variant = 12,
 }
+
+/// Highest variant id a step can name (`StepParam::Variant`'s range).
+pub const MAX_PAD_VARIANT: u32 = 255;
 
 /// `Retrig` value that means "repeat until the next trig on this track".
 pub const RETRIG_INFINITE: f32 = 127.0;
@@ -692,6 +699,7 @@ impl StepParam {
         StepParam::Delay,
         StepParam::Retrig,
         StepParam::RetrigRate,
+        StepParam::Variant,
     ];
 
     pub const VISIBLE: [StepParam; 9] = [
@@ -720,6 +728,7 @@ impl StepParam {
             StepParam::Delay => 0.0,
             StepParam::Retrig => 0.0,
             StepParam::RetrigRate => 4.0,
+            StepParam::Variant => 0.0,
         }
     }
 
@@ -737,6 +746,7 @@ impl StepParam {
             StepParam::Delay => 0.0,
             StepParam::Retrig => 0.0,
             StepParam::RetrigRate => 1.0,
+            StepParam::Variant => 0.0,
         }
     }
 
@@ -754,6 +764,7 @@ impl StepParam {
             StepParam::Delay => 1.0,
             StepParam::Retrig => RETRIG_INFINITE,
             StepParam::RetrigRate => 1024.0,
+            StepParam::Variant => MAX_PAD_VARIANT as f32,
         }
     }
 
@@ -773,6 +784,7 @@ impl StepParam {
             // Below the pitch threshold the picker walks whole retrigs/beat;
             // above it `increment_at` takes over with semitone steps.
             StepParam::RetrigRate => 1.0,
+            StepParam::Variant => 1.0,
         }
     }
 
@@ -803,6 +815,7 @@ impl StepParam {
             StepParam::Delay => "Delay",
             StepParam::Retrig => "Retrig",
             StepParam::RetrigRate => "Rate",
+            StepParam::Variant => "Variant",
         }
     }
 
@@ -820,6 +833,7 @@ impl StepParam {
             StepParam::Delay => "dly",
             StepParam::Retrig => "rtrg",
             StepParam::RetrigRate => "rate",
+            StepParam::Variant => "var",
         }
     }
 
@@ -933,6 +947,14 @@ impl StepParam {
                 }
             }
             StepParam::RetrigRate => format_retrig_rate(val),
+            StepParam::Variant => {
+                let id = val.round().max(0.0) as u32;
+                if id == 0 {
+                    "plain".to_string()
+                } else {
+                    format!("v{id}")
+                }
+            }
             _ => format!("{:.2}", val),
         }
     }
@@ -969,6 +991,7 @@ impl StepParam {
             StepParam::Delay => 'l',
             StepParam::Retrig => 'r',
             StepParam::RetrigRate => 'e',
+            StepParam::Variant => 'i',
         }
     }
 
@@ -984,6 +1007,7 @@ impl StepParam {
             'y' => Some(StepParam::Sync),
             'r' => Some(StepParam::Retrig),
             'e' => Some(StepParam::RetrigRate),
+            'i' => Some(StepParam::Variant),
             _ => None,
         }
     }
@@ -1002,6 +1026,7 @@ impl StepParam {
             StepParam::Delay => ("d", "l", "y"),
             StepParam::Retrig => ("", "r", "trg"),
             StepParam::RetrigRate => ("ra", "t", "e"),
+            StepParam::Variant => ("var", "i", "ant"),
         }
     }
 }
@@ -2074,13 +2099,18 @@ pub(crate) struct RollInputState {
 /// note-offs and rate switches in order.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RollCommand {
+    /// `variant`: the drum-rack pad variant a pad key rolls
+    /// (docs/rack-pad-variants-spec.md); `None` for a chromatic key, whose
+    /// recorded steps keep their variant.
     NoteOn {
         track: usize,
         transpose: f32,
+        variant: Option<u32>,
     },
     NoteOff {
         track: usize,
         transpose: f32,
+        variant: Option<u32>,
     },
     SetRate {
         rate: Timebase,
@@ -2105,13 +2135,19 @@ pub struct RollHitRecorded {
     /// Sub-step delay in step units (0..1): roll grids finer than the track
     /// timebase, and triplet offsets, land here instead of being rounded.
     pub delay: f32,
+    /// The rolled key's pass-through pitch, or the latched print transpose
+    /// while step-param printing is armed (recorded, not played).
     pub transpose: f32,
     pub velocity: f32,
-    /// Note length in track-step units (one roll-grid note, converted).
+    /// Note length in track-step units (one roll-grid note, converted), or
+    /// the latched print Duration while step-param printing is armed.
     pub duration_steps: f32,
     /// Absolute transport beat of the hit — the take-recording path positions
     /// clip-relative notes from this directly.
     pub beat: f64,
+    /// The pad variant the rolled pad key played, written into the step
+    /// (`None`: a chromatic key, the step's variant is left alone).
+    pub variant: Option<u32>,
 }
 
 /// Audio-callback → control-thread feedback for one live keyboard/pad note-on
@@ -2220,6 +2256,9 @@ pub struct KeyboardTrigger {
     pub transpose: f32,
     pub velocity: f32,
     pub note_off: bool,
+    /// Drum-rack pad variant the hit plays (docs/rack-pad-variants-spec.md
+    /// §4.2); 0 for a plain pad and every non-rack note.
+    pub variant: u32,
 }
 
 impl KeyboardTrigger {

@@ -16,6 +16,7 @@
 (import eseq.kinds :refer (selection macros))
 (import eseq.macro-state :as ms :refer (macro-arm rack-armed?))
 (import eseq.effects.state :refer (instrument-view key-lock-view effect-mods))
+(import eseq.effects.pad-variants :as pv)
 (import eseq.effects.panel-frame :as pf)
 (import eseq.effects.devices :as dv)
 (import eseq.view-kit :refer (open-menu! rgb-part))
@@ -464,11 +465,20 @@
       (let ((row (instrument-param-key-lock-row p note)))
         (if row (nth row 1) (param-base-value false p))))))
 
+;; With a pad variant focused on the pads tab, a knob writes that variant's
+;; value for the param (docs/rack-pad-variants-spec.md §6.1).
+(def fx-set-pad-variant-value (pad p v)
+  (host-command "set-pad-variant-value"
+    (dict :group-id pad.group.gid :note pad.note :param (get p :name) :value v)))
+
 (def fx-set-instrument-value (p v)
   (do
     (pf/fx-clear-selected-effect)
     (let ((rack-track (get p :rack-track))
-          (rack-slot (get p :rack-slot)))
+          (rack-slot (get p :rack-slot))
+          (pad (pv/pads-authoring-pad)))
+      (if (and pad (not (dv/base-note-param? p)))
+        (fx-set-pad-variant-value pad p v)
       (if (instrument-rack-target? p)
         (if (dv/base-note-param? p)
           (host-command (if (seq-has-selection?) "set-rack-slot-param-plock" "set-rack-slot-base-note")
@@ -485,7 +495,7 @@
             (if (instrument-key-lock-authoring-active?)
               "set-instrument-key-lock-multi"
               (if (seq-has-selection?) "set-instrument-plock" "set-instrument-param"))
-            (dict :param-idx (get p :idx) :value v :notes key-lock-view.notes)))))))
+            (dict :param-idx (get p :idx) :value v :notes key-lock-view.notes))))))))
 
 (def fx-set-instrument-option (p label)
   (do
@@ -667,16 +677,21 @@
           empty-target
           (first (param-mod-targets fx p)))))))
 
-;; The value p's control shows: on the keys tab the selected key's lock;
-;; while modulation is open (and p modulatable) the depth of the lane its
-;; knob edits; else the param's value. A binding where the value is live.
+;; The value p's control shows: on the keys tab the selected key's lock; on
+;; the pads tab the focused variant's value; while modulation is open (and p
+;; modulatable) the depth of the lane its knob edits; else the param's value.
+;; A binding where the value is live.
 (def fx-param-value-for (fx p)
   (if (and (not fx) (instrument-keys-active?) (fx-param-has-idx? p))
     (instrument-param-key-lock-value p)
+  (let ((pad (if fx nil (pv/pads-authoring-pad))))
+  (if (and pad (fx-param-has-idx? p))
+    (let ((value (pv/pad-variant-value-of pad (get p :name))))
+      (if (= value nil) (param-base-value fx p) value))
     (if (and (param-mods-open? fx) (get p :modulatable))
       (let ((mt (param-control-mod-target fx p)))
         (if mt (mod-target-depth mt) 0))
-      (param-base-value fx p))))
+      (param-base-value fx p))))))
 
 ;; Options are indexed by the param's value, which is not guaranteed to be in
 ;; range: a synced Delay time, for instance, stores milliseconds while its
@@ -749,8 +764,11 @@
 (def param-plock-active? (fx p)
   (if (and (not fx) (instrument-keys-active?))
     (instrument-param-key-lock-active? p)
+  (let ((pad (if fx nil (pv/pads-authoring-pad))))
+  (if pad
+    (not (= (pv/pad-variant-value-of pad (get p :name)) nil))
     (and (not (param-mods-open? fx))
-         (param-locked? fx p))))
+         (param-locked? fx p))))))
 
 ;; Automation presence (bead eseq-yr6w): this param carries a p-lock on SOME
 ;; step of the pattern, not necessarily the selected one. Drives the corner dot,
@@ -1168,9 +1186,15 @@
 ;; The absolute effective value, for curve visualizers: one binding straight
 ;; into a widget prop (a computed `base + offset` would not follow the bound
 ;; value). The param's value when it is not modulated.
+;; On the pads tab with a variant selected, an instrument param the variant
+;; sets shows the variant's value (a custom panel's map or meter reads this).
 (def param-effective-value-for (fx p)
-  (let ((prm (dv/param-of fx p)))
-    (if prm #'prm.mod-value (get p :value))))
+  (let ((variant (let ((pad (if fx nil (pv/pads-authoring-pad))))
+                   (if pad (pv/pad-variant-value-of pad (get p :name)) nil))))
+    (if (not (= variant nil))
+      variant
+      (let ((prm (dv/param-of fx p)))
+        (if prm #'prm.mod-value (get p :value))))))
 
 ;; The effective value as a 0-1 fraction where p is a fraction % param
 ;; (param.mod-ratio: its display value / 100), for visualizers drawn on the

@@ -55,7 +55,9 @@
         offset-of
         chords-route chord-qualities chords-row-schema
         row-procs proc-word new-chain chain-trigger-items chain-with-trigger
-        proc-trigger-schema proc-body-schema)
+        proc-trigger-schema proc-body-schema
+        row-name lane-label lane-labels lane-ref-index row-linked? row-schema-for
+        like-item? steal-item? link-refs)
 
 ;; ── figures ─────────────────────────────────────────────────────────────────
 
@@ -141,6 +143,10 @@
     ;; rails from the named param (leaf-schema's dyn-num); this wide rail is
     ;; the fallback for an unknown name or an unrouted row
     "plock" (list -100000 100000 0.01 2 0)
+    ;; (rest COND) / (play COND): 1 rests / plays, 0 does not; a list is one
+    ;; per cycle, (seq :hit …) one per hit
+    "rest" (list 0 1 1 0 1)
+    "play" (list 0 1 1 0 1)
     _ nil))
 
 ;; ── schema atoms shared by the row slot and the process chain slots ───────
@@ -186,7 +192,7 @@
 ;; §7.2). The clock word leads; `+` inside adds a value. A plain list of
 ;; numbers still means one per cycle.
 (def seq-clocks (list ":hit" ":fig" ":cycle" ":span"))
-(def per-hit-mods (list "vel" "note" "vel*" "vel+" "note+" "gate" "plock" "voice"))
+(def per-hit-mods (list "vel" "note" "vel*" "vel+" "note+" "gate" "plock" "voice" "rest" "play"))
 ;; A seq's values may be seqs themselves — (seq :hit 2 (seq :cycle 5 9) 3).
 ;; A schema is plain data and cannot refer to itself, so the nesting is
 ;; spelled out seq-depth levels deep (a plain number list nests freely).
@@ -266,6 +272,9 @@
           (list quant-form
                 align-form
                 plock-form
+                ;; (on accent (play (0 1))): the selection plays every other
+                ;; cycle (`rest` is already a word here, so only play is a form)
+                (list "form" "play" (value-schema "play"))
                 (list "form" "every" (num-schema "every") gated-word))))
 
 ;; quality words for (chord Q), :declared first: on a track row it plays
@@ -306,6 +315,10 @@
     ;; or (on a Chords row) declares quality Q; :declared plays the declared
     ;; chord; voice takes the nearest free chord tone
     (list chord-form (list "form" "voice" (value-schema "voice")))
+    ;; sparse lanes: (rest (1 0)) rests every other cycle, (play (0 0 0 1))
+    ;; plays every fourth; (seq :hit …) / (seq :fig …) step per hit / figure
+    (list (list "form" "rest" (value-schema "rest"))
+          (list "form" "play" (value-schema "play")))
     (list (list "form" "on" sel-schema on-body)
           (list "form" "every" (num-schema "every") gated-word)
           (list "form" "every-fig" (num-schema "every-fig") gated-word)
@@ -432,6 +445,81 @@
           (list "form" "then" (list "rest" proc-then-schema))
           (list "form" "next" (list "rest" proc-next-schema)))))
 
+;; ── lanes: names, links, priority ──────────────────────────────────────────
+;; A row is a lane of its pattern, numbered as it shows. Its optional :name
+;; (a string) stands for the number wherever a lane is named. Two row words
+;; refer to lanes (crates/sequencer/docs/jaki-sequencer-spec.md §7.6):
+;;   ("like" LANE)             the lane's whole word chain, live, rules too
+;;   ("steal" LANE-or-all S)   priority over that lane; S is :hit :gate :cycle
+;; LANE is stored as the row's name, or its number as a word ("0"). `body`
+;; turns it into the lane's number, which is all jaki core sees.
+
+(def row-name (row)
+  (let ((n (get row :name))) (if (and (string? n) (not (= n ""))) n nil)))
+
+(def lane-label (rows i)
+  (let ((n (row-name (row-at rows i)))) (if n n (str i))))
+
+;; every lane's label but row i's own, in row order: what a (like …) on row i
+;; may pick
+(def lane-labels (rows count i)
+  (reduce (lambda (acc j) (if (= j i) acc (append acc (list (lane-label rows j)))))
+          (list) (range 0 count)))
+
+;; a stored lane reference → the row's index, -1 when no row answers to it
+(def lane-ref-index (rows count x)
+  (if (number? x)
+    (if (and (>= x 0) (< x count)) (round x) -1)
+    (reduce (lambda (hit j)
+              (if (and (< hit 0) (or (= (row-name (row-at rows j)) x) (= (str j) x))) j hit))
+            -1 (range 0 count))))
+
+(def list-item? (m) (and m (not (string? m)) (not (number? m)) (not (empty? m))))
+(def like-item? (m) (and (list-item? m) (= (first m) "like")))
+(def steal-item? (m) (and (list-item? m) (= (first m) "steal")))
+(def row-linked? (row)
+  (reduce (lambda (a m) (or a (or (like-item? m) (steal-item? m))))
+          false (map mod-item (get row :mods))))
+
+(def steal-scope-words (list ":hit" ":gate" ":cycle"))
+(def steal-plain? (x)
+  (or (number? x) (or (= x "all") (reduce (lambda (a w) (or a (= w x))) false steal-scope-words))))
+
+;; the lane references a row's words hold, as stored
+(def link-refs (row)
+  (reduce (lambda (acc m)
+            (if (like-item? m)
+              (append acc (list (nth m 1)))
+              (if (steal-item? m)
+                (append acc (filter (lambda (x) (not (steal-plain? x))) (rest m)))
+                acc)))
+          (list) (map mod-item (get row :mods))))
+
+;; The row slot's schema for a row that may name these lanes. `like` picks
+;; one; `steal` picks one or `all` (every lane on the same track), then how
+;; much it takes: hits that coincide, hits under its gates, whole cycles.
+;; The slot caches a parsed schema by the list it is handed, so the same
+;; labels give back the same list rather than a fresh copy every render.
+(def lane-schema (labels)
+  (append row-schema
+    (if (empty? labels)
+      (list)
+      (list (list "form" "like" (list "fixed" (cons "word" labels)))))
+    (list (list "form" "steal" (list "fixed" (cons "word" (cons "all" labels)))
+                (list "fixed" (cons "word" steal-scope-words))))))
+
+(def lane-schemas (list))
+
+(def row-schema-for (labels)
+  (let ((hit (reduce (lambda (a e) (if (and (= a nil) (= (first e) labels)) e a))
+                     nil lane-schemas)))
+    (if hit
+      (nth hit 1)
+      (let ((schema (lane-schema labels)))
+        (do (set! lane-schemas
+              (cons (list labels schema) (if (< (len lane-schemas) 32) lane-schemas (list))))
+            schema)))))
+
 ;; ── modifier items -> route words ──────────────────────────────────────────
 
 ;; A saved-before-the-slot record (dict :op "trunc" :args (3)) as a slot item:
@@ -507,12 +595,50 @@
   (let ((route (get row :route)))
     (and (number? route) (or (>= route 0) (= route chords-route)))))
 
+(def row-tail (row)
+  (append (map proc-word (row-procs row))
+          (let ((seed (get row :seed)))
+            (if (and (number? seed) (>= seed 0)) (list (list 'seed seed)) (list)))))
+
+(def row-dest (row) (if (= (get row :route) chords-route) 'chords (get row :route)))
+
+;; A row routed to a drum-rack pad variant (docs/rack-pad-variants-spec.md
+;; §7): every hit names the variant, ahead of the row's own words so a row's
+;; own (plock "step-param:variant" …) still wins.
+(def row-variant (row)
+  (let ((v (get row :variant)))
+    (if (and (number? v) (> v 0) (not (= (get row :route) chords-route))) v 0)))
+
+(def variant-words (row)
+  (let ((v (row-variant row)))
+    (if (> v 0) (list (list 'plock "step-param:variant" v)) (list))))
+
 (def row-segment (row)
-  (cons '-> (cons (if (= (get row :route) chords-route) 'chords (get row :route))
-                  (append (map mod-form (get row :mods))
-                          (map proc-word (row-procs row))
-                          (let ((seed (get row :seed)))
-                            (if (and (number? seed) (>= seed 0)) (list (list 'seed seed)) (list)))))))
+  (cons '-> (cons (row-dest row)
+                  (append (variant-words row) (map mod-form (get row :mods)) (row-tail row)))))
+
+;; a row word with its lane references as lane numbers
+(def lane-form (rows count m)
+  (let ((item (mod-item m)))
+    (if (like-item? item)
+      (list 'like (lane-ref-index rows count (nth item 1)))
+      (if (steal-item? item)
+        (cons 'steal
+              (map (lambda (x)
+                     (if (number? x)
+                       x
+                       (if (steal-plain? x) (read-string x) (lane-ref-index rows count x))))
+                   (rest item)))
+        (route-datum item)))))
+
+;; A pattern with lane words keeps every row as a segment, so a segment's
+;; place is its row's number: an Off row plays nothing (`-> off`) and can
+;; still be the lane others are like.
+(def linked-segment (rows count row)
+  (cons '-> (cons (if (row-live? row) (row-dest row) 'off)
+                  (append (variant-words row)
+                          (map (lambda (m) (lane-form rows count m)) (get row :mods))
+                          (row-tail row)))))
 
 ;; ── document -> body ────────────────────────────────────────────────────────
 
@@ -527,13 +653,15 @@
 ;; The jaki body, or nil when nothing can sound (no figure, or no live row:
 ;; a body without routes would play track 0).
 (def body (figures rows row-count)
-  (let ((live (filter row-live?
-                (map (lambda (i) (row-at rows i)) (range 0 row-count)))))
-    (if (or (empty? figures) (empty? live))
-      nil
-      (append
-        (figures-body figures)
-        (reduce (lambda (acc row) (append acc (row-segment row))) (list) live)))))
+  (let ((all (map (lambda (i) (row-at rows i)) (range 0 row-count))))
+    (let ((live (filter row-live? all)))
+      (if (or (empty? figures) (empty? live))
+        nil
+        (append
+          (figures-body figures)
+          (if (reduce (lambda (a row) (or a (row-linked? row))) false all)
+            (reduce (lambda (acc row) (append acc (linked-segment rows row-count row))) (list) all)
+            (reduce (lambda (acc row) (append acc (row-segment row))) (list) live)))))))
 
 ;; ── patterns ────────────────────────────────────────────────────────────────
 

@@ -2283,6 +2283,17 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "grab-pointer",
+        "(grab-pointer &optional hide)",
+        "From a box's :on-drag (or its :on-mouse-down, taking effect at the first drag): keep the press-drag-release in progress on the box it started on, so every further drag reaches that box's :on-drag wherever the pointer goes (as :capture-pointer does from the press). With `hide` true the pointer also disappears and moves without limit until release, then returns to where it was pressed (as :hidden-drag does). For a gesture that only learns what it is after it starts, e.g. a drag that turns into a value dial.",
+        |args, _ctx| {
+            let hide = !matches!(args.first(), None | Some(Value::Nil | Value::Bool(false)));
+            crate::widget_render::request_pointer_grab(hide);
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "animation-start",
         "(animation-start &optional duration)",
         "Start a one-shot shader animation: returns now on the clock shader `itime` reads, and keeps frames coming for `duration` seconds (none without it). Store the result in state a `defwidget` reads and animate on (- itime start); no reset is needed, the shader settles once the time has passed.",

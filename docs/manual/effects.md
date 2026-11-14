@@ -63,10 +63,13 @@ Each effect in the device panel has a header strip across its top. From left to 
 - the **enable** dot, which bypasses the effect when off, without unloading it or losing its settings. Like any other control, the enable state is stored with the pattern (or, for a bus effect, the scene), so bypassing an effect in one pattern leaves it on in the others;
 - the effect's name;
 - **mods**, on effects that have modulation slots; it switches the panel to the modulation view (see Modulation below);
+- the **–** button, which collapses the panel (see below);
 - the **•••** menu with **Copy current values to all scenes** (Instrument Rack layer effects have no such menu);
 - **edit**, on DGenLisp effects in track and bus chains, which opens the effect's source in the patch editor.
 
 ![Str8 Delay in a track chain. The header holds the enable dot, the name, mods and the ••• menu; the panel below holds the effect's own controls.](images/delay.png)
+
+To save room in a long chain, **collapse** an effect: click the **–** button in its header. The panel folds to a thin strip that keeps the enable dot, with the **–** button under it, and shows the name down its length. The effect keeps processing; only its controls are hidden. The strip still selects, drags and takes drops like a header, and its **–** button unfolds the panel. Collapsing is a view setting for the session: it is not saved with the project.
 
 Below the header each effect draws its own panel. Many built-ins have custom displays, such as the Str8 Delay filter curve, the compressor meter and the EQ8 response.
 
@@ -123,7 +126,7 @@ Most built-in effects are native code compiled into eseq and load instantly. Fil
 
 ### Saturation and colour
 
-- **Roar**: up to three waveshaper stages in serial, parallel, multiband, mid-side, feedback or delay routings, followed by tone, feedback and compressor sections.
+- **Saturator**: analog gain stages solved as circuits, plus twelve static waveshaper curves (soft sine, tube, diode, clipper, bit crusher, rectifiers, folders, noise and shards). The circuit curves are **triode** (the default: a 12AX7 stage whose bias shifts and recovers with the signal), **twin triode** (two of them in series, so the second stage chokes and sputters after loud hits), **op-amp clip** (a slew-limited op-amp into silicon diodes: highs smear while lows square off), **ge fuzz** (a two-transistor germanium fuzz) and **transformer** (an iron core that saturates on bass first). Drive, amount, bias, tone, output and dry/wet, with **Auto Gain** keeping the loudness matched to the input as you push it. On a circuit curve, bias moves a real quantity: the tube's grid bias, the clipper's diode asymmetry, the fuzz's supply voltage (turn it down for a starved, gated sputter) or a standing current in the transformer. The op-amp and fuzz curves thin the low end the way the pedals do; blend with dry/wet to keep the bass.
 - **Tape**: a hysteresis tape model with drive, bias, speed, wow, flutter and hiss.
 
 ### Time and performance
@@ -156,7 +159,7 @@ A coding agent can also write an effect for you; see [Making instruments with an
 
 ## Modulation
 
-The Filter, Filterbank, Str8 Delay, Space Echo, Reverb, Chorus, Dimension, Phaser-Flanger, Roar, Slowdown and DJ Mixer built-ins each have four **modulation slots**. DGenLisp effects can declare slots of their own. Compressor, Glue Compressor, ES Compressor, OTT, Limiter, EQ8, Tape, Filter Table and Convolution Reverb have none.
+The Filter, Filterbank, Str8 Delay, Space Echo, Reverb, Chorus, Dimension, Phaser-Flanger, Saturator, Slowdown and DJ Mixer built-ins each have four **modulation slots**. DGenLisp effects can declare slots of their own. Compressor, Glue Compressor, ES Compressor, OTT, Limiter, EQ8, Tape, Filter Table and Convolution Reverb have none.
 
 Click **mods** in the effect's header to switch the panel to the modulation view: the four slots on the left, with the selected slot's editor beside them. Click **mods** again to return. The mods view works as described in [Instruments](instruments), Modulation: pick a slot and a source, then turn a knob to set that slot's depth on the parameter. The depth is shown in the parameter's own modulation units; the Filter's cutoff depth, for example, is in octaves.
 

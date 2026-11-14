@@ -360,7 +360,42 @@ fn observe_key_activity(
     })
 }
 
-fn piano_animation_active(widget_id: u64, time_seconds: f32) -> bool {
+/// Press depth per key slot for another widget's piano (the timeline's
+/// piano-roll gutter, by lane): the same press/settle/release motion as this
+/// keyboard, keyed by `widget_id`, with `held` the one key down (if any).
+pub(super) fn held_key_press_depths(
+    widget_id: u64,
+    held: Option<usize>,
+    time_seconds: f32,
+) -> [f32; 128] {
+    // An idle gutter that never had a key down keeps no animation state.
+    if held.is_none()
+        && PIANO_ANIMATION_STATES.with(|states| !states.borrow().contains_key(&widget_id))
+    {
+        return [0.0; 128];
+    }
+    let mut active = vec![Vec::new(); 128];
+    if let Some(slot) = held.filter(|slot| *slot < 128) {
+        active[slot].push(ActiveNoteSource {
+            color: Color::rgba(0.0, 0.0, 0.0, 1.0),
+            velocity: 1.0,
+            trigger_id: 0,
+        });
+    }
+    observe_key_activity(widget_id, &active, time_seconds)
+}
+
+/// The fill a pressed key takes in `color` (a track's), as this keyboard
+/// draws it.
+pub(super) fn pressed_key_color(color: Color, black: bool) -> Color {
+    if black {
+        mix_with(color, Color::rgba(0.0, 0.0, 0.0, 1.0), 0.08)
+    } else {
+        mix_with(color, Color::rgba(1.0, 1.0, 1.0, 1.0), 0.12)
+    }
+}
+
+pub(super) fn piano_animation_active(widget_id: u64, time_seconds: f32) -> bool {
     PIANO_ANIMATION_STATES.with(|states| {
         states.borrow().get(&widget_id).is_some_and(|state| {
             state
@@ -371,7 +406,7 @@ fn piano_animation_active(widget_id: u64, time_seconds: f32) -> bool {
     })
 }
 
-fn pressed_key_rect(rect: Rect, press_depth: f32, press_strength: f32) -> Rect {
+pub(super) fn pressed_key_rect(rect: Rect, press_depth: f32, press_strength: f32) -> Rect {
     let depth = press_depth.clamp(0.0, 1.0) * press_strength.clamp(0.0, MAX_PRESS_STRENGTH);
     let width = rect.width * (1.0 - 0.10 * depth);
     let height = rect.height * (1.0 - 0.16 * depth);
@@ -733,11 +768,7 @@ Example: (piano-keyboard :start-note 48 :key-count 25 :height 4 \
                 let sources = displayed_sources(&active[key.note as usize], mode);
                 for (index, source) in sources.iter().enumerate() {
                     let segment_width = key_rect.width / sources.len() as f32;
-                    let mut color = if key.black {
-                        mix_with(source.color, Color::rgba(0.0, 0.0, 0.0, 1.0), 0.08)
-                    } else {
-                        mix_with(source.color, Color::rgba(1.0, 1.0, 1.0, 1.0), 0.12)
-                    };
+                    let mut color = pressed_key_color(source.color, key.black);
                     color.a = source.velocity;
                     primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
                         rect: Rect {

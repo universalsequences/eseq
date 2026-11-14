@@ -683,6 +683,9 @@ struct PianoRollMoveItem {
     delay: f32,
     /// The note's model id, which the move carries.
     note_id: NoteId,
+    /// Its step's drum-rack pad variant (`StepParam::Variant`), which the
+    /// move carries to the destination step (rack pad variants spec §5).
+    variant: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -958,6 +961,7 @@ pub(crate) fn piano_roll_gesture_touched_steps(
                         duration: note.duration,
                         delay: note.delay,
                         note_id: note.id,
+                        variant: lanes.step_param(step, StepParam::Variant),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1314,6 +1318,14 @@ pub(crate) fn apply_piano_roll_action_with_clipboard(
     }
 }
 
+/// A moved note brings its step's pad variant to `step` (one variant per
+/// step: the moved note's wins). A plain note leaves the destination's alone.
+fn carry_pad_variant(lanes: &PianoRollLanes, step: usize, variant: f32) {
+    if variant >= 0.5 && lanes.step_param(step, StepParam::Variant) != variant {
+        lanes.set_step_param(step, StepParam::Variant, variant);
+    }
+}
+
 fn move_piano_roll_items_by_delta(
     lanes: &PianoRollLanes,
     num_steps: usize,
@@ -1335,6 +1347,7 @@ fn move_piano_roll_items_by_delta(
                 note.duration,
                 note.delay,
                 note.id,
+                lanes.step_param(step, StepParam::Variant),
             ))
         })
         .collect::<Vec<_>>();
@@ -1358,10 +1371,13 @@ fn move_piano_roll_items_by_delta(
             })
             .collect::<Vec<_>>();
         lanes.set_note_entries(step, &notes);
+        if notes.is_empty() {
+            lanes.set_step_param(step, StepParam::Variant, 0.0);
+        }
     }
 
     let mut next_ids = Vec::with_capacity(originals.len());
-    for &(_, step, _, transpose, duration, delay, note_id) in &originals {
+    for &(_, step, _, transpose, duration, delay, note_id, variant) in &originals {
         let next_step = (step as isize + delta_time).clamp(0, (num_steps - 1) as isize) as usize;
         let lane = piano_roll_transpose_to_lane(transpose) as isize + delta_lane;
         let next_transpose = piano_roll_lane_to_transpose(lane.max(0) as usize);
@@ -1373,6 +1389,7 @@ fn move_piano_roll_items_by_delta(
             id: note_id,
         });
         lanes.set_note_entries(next_step, &notes);
+        carry_pad_variant(lanes, next_step, variant);
         if let Some(next_voice_idx) =
             piano_roll_find_note_index(lanes, next_step, next_transpose, duration, delay)
         {
@@ -1417,6 +1434,7 @@ fn resize_piano_roll_items_absolute(
                     duration: note.duration,
                     delay: note.delay,
                     note_id: note.id,
+                    variant: lanes.step_param(step, StepParam::Variant),
                 })
             })
             .collect::<Vec<_>>();
@@ -1543,6 +1561,7 @@ fn move_piano_roll_items_absolute(
                     duration: note.duration,
                     delay: note.delay,
                     note_id: note.id,
+                    variant: lanes.step_param(step, StepParam::Variant),
                 })
             })
             .collect::<Vec<_>>();
@@ -1572,6 +1591,11 @@ fn move_piano_roll_items_absolute(
         }) {
             notes.remove(pos);
             lanes.set_note_entries(item.step, &notes);
+            if notes.is_empty() {
+                // An emptied step forgets the pad it played, so a note drawn
+                // there later starts plain.
+                lanes.set_step_param(item.step, StepParam::Variant, 0.0);
+            }
         }
     }
 
@@ -1593,6 +1617,7 @@ fn move_piano_roll_items_absolute(
             id: item.note_id,
         });
         lanes.set_note_entries(next_step, &notes);
+        carry_pad_variant(lanes, next_step, item.variant);
         let next_voice_idx =
             piano_roll_find_note_index(lanes, next_step, next_transpose, item.duration, next_delay)
                 .unwrap_or(0);
@@ -1603,6 +1628,7 @@ fn move_piano_roll_items_absolute(
             duration: item.duration,
             delay: next_delay,
             note_id: item.note_id,
+            variant: item.variant,
         });
     }
     move_state.last_positions = next_positions;
@@ -1618,6 +1644,25 @@ fn move_piano_roll_items_absolute(
 mod resize_tests {
     use super::super::values::{list_value, map_value};
     use super::*;
+
+    /// A moved note takes its step's pad variant along (rack pad variants
+    /// spec §5), and the step it left forgets it.
+    #[test]
+    fn moving_a_note_carries_its_pad_variant() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let lanes = PianoRollLanes::live(&state, 0);
+        let move_state = Arc::new(Mutex::new(None));
+        lanes.set_note_entries(2, &[PianoRollNote {
+            transpose: 0.0, duration: 1.0, delay: 0.0, id: 0,
+        }]);
+        lanes.set_step_param(2, StepParam::Variant, 2.0);
+        let id = piano_roll_item_id(2, 0);
+        let lane = piano_roll_transpose_to_lane(0.0) as isize;
+        move_piano_roll_items_absolute(&lanes, 16, &[id], id, 6.0, lane, &move_state);
+        assert_eq!(lanes.note_entries(6).len(), 1);
+        assert_eq!(lanes.step_param(6, StepParam::Variant), 2.0);
+        assert_eq!(lanes.step_param(2, StepParam::Variant), 0.0, "the emptied step is plain");
+    }
 
     #[test]
     fn resize_short_delayed_note_preserves_its_start_and_selection_delta() {

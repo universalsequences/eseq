@@ -2428,6 +2428,56 @@ pub(crate) mod tests {
         );
     }
 
+    /// A latched lane is the performer's launch in either view (rule 2):
+    /// releasing a clip selection on it puts the latched PATTERN back in the
+    /// mirror, not the track sound. With the track sound there, the latch's
+    /// override pin made the next save-back a self-write of stock devices
+    /// over the pattern (the scene-clone repro: a session sound "reverting
+    /// to defaults" after a clip click in the arrangement).
+    #[test]
+    fn releasing_a_selection_on_a_latched_lane_restores_the_latched_pattern() {
+        let (mut app, _take, scene_pattern, _chunks) = app_with_take();
+        set_view_context(&mut app, false);
+        let carrier = app.state.track_sound_pattern_id(0).expect("track sound");
+        let target = instrument_default(&app, scene_pattern) - 0.25;
+        try_apply_command(
+            &mut app,
+            AppCommand::SetInstrumentParam {
+                track: 0,
+                param_idx: 0,
+                value: target,
+            },
+        )
+        .expect("device edit applies");
+        assert_ne!(instrument_default(&app, carrier), target, "a leak must show");
+        // A scene-pill click: the lane is latched and pinned to its pattern.
+        app.state.latch_song_manual_override([0]);
+        assert!(app.state.pin_track_override_to_effective(0));
+        set_view_context(&mut app, true);
+
+        app.select_song_clip(0, ClipId(0)).expect("clip selects");
+        assert_eq!(app.state.sound_binding_borrowed_mask(), 1);
+        app.set_song_clip_selection(None);
+
+        assert_eq!(
+            app.state.pattern.instrument_slots[0].defaults.get(0),
+            target,
+            "the latched pattern's sound is back, not the track sound"
+        );
+        assert!(app.state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[crate::sequencer::InstrumentType::Sampler],
+        ));
+        assert_eq!(
+            instrument_default(&app, scene_pattern),
+            target,
+            "the save-back leaves the latched pattern's sound alone"
+        );
+    }
+
     /// Track-sound spec §2.9/§5.3.6b: the view switch is a first-class mirror
     /// seam. Leaving arrangement view persists the mirror into the TRACK
     /// SOUND and entering Seq view installs the scene's cells; switching back

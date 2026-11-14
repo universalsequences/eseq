@@ -101,7 +101,7 @@ pub(crate) const UNROUTED_HINT: &str = "route this row to see its parameters";
 /// Step params in the order they are offered, with the spelling used in the
 /// `step-param:` word. Every one must resolve through
 /// `step_param_from_target_name` (sync / delay do not: not per hit).
-const STEP_WORDS: [(StepParam, &str); 10] = [
+const STEP_WORDS: [(StepParam, &str); 11] = [
     (StepParam::Velocity, "velocity"),
     (StepParam::Duration, "duration"),
     (StepParam::Transpose, "transpose"),
@@ -112,6 +112,8 @@ const STEP_WORDS: [(StepParam, &str); 10] = [
     (StepParam::Chop, "chop"),
     (StepParam::Retrig, "retrig"),
     (StepParam::RetrigRate, "retrig-rate"),
+    // A drum-rack member's pad variant (docs/rack-pad-variants-spec.md).
+    (StepParam::Variant, "variant"),
 ];
 
 /// The step params a process port may write, by their canonical

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "groups": [
+    {"label": "Felucca", "instruments": ["Felucca CZ", "Felucca FM6"]},
+    {"label": "Machines", "instruments": ["Grit", "Melt", "Vox"]},
+    {"label": "Mutable Instruments", "instruments": ["Beads", "Elements", "Plaits", "Rings"]}
+  ]
+}

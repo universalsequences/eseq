@@ -90,7 +90,20 @@
                     :source-slot source-slot
                     :target-slot target-slot
                     :position target-chain))
-            (status "Move effects within the same audio, MIDI, bus, or rack-slot chain")))))))
+            ;; A track effect dropped into one of its own track's rack slots
+            ;; moves there with its settings.
+            (if (and (= kind "audio-effect-instance") (= source-chain "audio")
+                     (or (= target-chain "rack") (= target-chain "append"))
+                     (not (= (get target :rack-slot) nil))
+                     (>= (get target :rack-slot) 0)
+                     (= source-track target-track))
+              (host-command "move-track-effect-to-rack-slot"
+                (dict :track target-track
+                      :rack-slot (get target :rack-slot)
+                      :source-slot source-slot
+                      :target-slot target-slot
+                      :position target-chain))
+              (status "Move effects within the same audio, MIDI, bus, or rack-slot chain"))))))))
 
 (def drop-on-effect (event)
   (let ((payload (get event :payload))

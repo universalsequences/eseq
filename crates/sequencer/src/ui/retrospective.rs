@@ -25,21 +25,52 @@ pub(crate) fn register_state(runtime: &mut eseqlisp::Runtime) {
     // (`present-fixture`).
 }
 
+/// A variant pad's name as its cell shows it: "v1 tight", or "v1 D4" while
+/// unnamed; "v1" when the pad is gone.
+fn pad_variant_label(app: &app::App, track: Option<usize>, variant: u32) -> String {
+    let pad = track.and_then(|track| {
+        app.groups.iter().find_map(|group| {
+            let member = group.members.iter().position(|m| *m == track)?;
+            let rack = group.rack.as_ref()?;
+            rack.pads.get(rack.pad_index_for_variant(member, variant)?)
+        })
+    });
+    match pad {
+        Some(pad) => match &pad.name {
+            Some(name) => format!("v{variant} {name}"),
+            None => format!(
+                "v{variant} {}",
+                crate::state_values::drum_rack_pad_label(pad.pad_note)
+            ),
+        },
+        None => format!("v{variant}"),
+    }
+}
+
 pub(crate) fn publish(editor: &mut Editor, app: &app::App, draft: &CaptureDraft) -> Result<(), String> {
     // One row per played track/pitch pair: simultaneous drum-pad hits never
     // hide each other, and pitched performances still show their note names.
-    let mut lanes: Vec<_> = draft.notes.iter().map(|n| (n.track, n.transpose)).collect();
-    lanes.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
+    // A pad variant is its own row (docs/rack-pad-variants-spec.md), named
+    // as the pad shows it.
+    let variant_of = |note_variant: Option<u32>| note_variant.unwrap_or(0);
+    let mut lanes: Vec<_> = draft
+        .notes
+        .iter()
+        .map(|n| (n.track, n.transpose, variant_of(n.variant)))
+        .collect();
+    lanes.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
     lanes.dedup();
     let labels: Vec<String> = lanes
         .iter()
-        .map(|(track, transpose)| {
-            let name = app
-                .track_registry
-                .index_of(*track)
+        .map(|(track, transpose, variant)| {
+            let index = app.track_registry.index_of(*track);
+            let name = index
                 .and_then(|i| app.tracks.get(i))
                 .map(String::as_str)
                 .unwrap_or("Deleted track");
+            if *variant > 0 {
+                return format!("{name} · {}", pad_variant_label(app, index, *variant));
+            }
             let note = (*transpose as i32 + 60).rem_euclid(12) as usize;
             let octave = (*transpose as i32 + 60).div_euclid(12) - 1;
             let pitch = [
@@ -57,6 +88,7 @@ pub(crate) fn publish(editor: &mut Editor, app: &app::App, draft: &CaptureDraft)
                     pair.0
                         .cmp(&note.track)
                         .then(note.transpose.total_cmp(&pair.1))
+                        .then(pair.2.cmp(&variant_of(note.variant)))
                 })
                 .unwrap(),
             start: note.start,

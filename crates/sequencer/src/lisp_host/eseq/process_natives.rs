@@ -2646,6 +2646,7 @@ fn commit_published_graph_deltas(
                                 delay_steps: Some(value),
                                 quantize: None,
                                 route: None,
+                                route_variant: None,
                                 seed_from: None,
                                 seed_on_reset: None,
                                 duration: None,

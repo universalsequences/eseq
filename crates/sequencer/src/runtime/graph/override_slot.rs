@@ -27,8 +27,9 @@ pub enum GraphNodeField {
     Delay(Option<u32>),
     Quantize(Option<ProjectGraphQuantizeOverride>),
     /// A track route or a generator gate (one field: setting either replaces
-    /// the other).
-    Route(Option<ProjectGraphRouteOverride>),
+    /// the other), with the drum-rack pad variant a track route plays
+    /// (docs/rack-pad-variants-spec.md §7), so a menu pick is one entry.
+    Route(Option<ProjectGraphRouteOverride>, Option<u32>),
     SeedFrom(Option<ProjectGraphSeedFrom>),
     SeedOnReset(Option<f64>),
     Group(Option<u8>),
@@ -43,7 +44,7 @@ impl GraphNodeField {
             Self::Resolution(_) => "resolution",
             Self::Delay(_) => "delay",
             Self::Quantize(_) => "quantize",
-            Self::Route(_) => "route",
+            Self::Route(..) => "route",
             Self::SeedFrom(_) => "seed-from",
             Self::SeedOnReset(_) => "seed-on-reset",
             Self::Group(_) => "group",
@@ -58,7 +59,10 @@ impl GraphNodeField {
             Self::Resolution(_) => Self::Resolution(node.and_then(|n| n.resolution.clone())),
             Self::Delay(_) => Self::Delay(node.and_then(|n| n.delay_steps)),
             Self::Quantize(_) => Self::Quantize(node.and_then(|n| n.quantize.clone())),
-            Self::Route(_) => Self::Route(node.and_then(|n| n.route.clone())),
+            Self::Route(..) => Self::Route(
+                node.and_then(|n| n.route.clone()),
+                node.and_then(|n| n.route_variant),
+            ),
             Self::SeedFrom(_) => Self::SeedFrom(node.and_then(|n| n.seed_from.clone())),
             Self::SeedOnReset(_) => Self::SeedOnReset(node.and_then(|n| n.seed_on_reset)),
             Self::Group(_) => Self::Group(node.and_then(|n| n.neural_group)),
@@ -72,7 +76,10 @@ impl GraphNodeField {
             Self::Resolution(value) => node.resolution.clone_from(value),
             Self::Delay(value) => node.delay_steps = *value,
             Self::Quantize(value) => node.quantize.clone_from(value),
-            Self::Route(value) => node.route.clone_from(value),
+            Self::Route(value, variant) => {
+                node.route.clone_from(value);
+                node.route_variant = *variant;
+            }
             Self::SeedFrom(value) => node.seed_from.clone_from(value),
             Self::SeedOnReset(value) => node.seed_on_reset = *value,
             Self::Group(value) => node.neural_group = *value,
@@ -301,6 +308,7 @@ impl ProjectGraphNodeIntrinsicOverride {
             delay_steps: None,
             quantize: None,
             route: None,
+            route_variant: None,
             seed_from: None,
             seed_on_reset: None,
             duration: None,

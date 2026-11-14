@@ -1409,6 +1409,96 @@ impl App {
         Ok(destination_slot)
     }
 
+    /// Move a track-chain effect into one of the same track's rack slots as
+    /// ONE undo step covering both chains. A failure anywhere restores both.
+    pub fn move_track_effect_to_rack_slot_recorded(
+        &mut self,
+        track: usize,
+        source_slot: usize,
+        rack_slot: usize,
+        target_slot: Option<usize>,
+    ) -> Result<usize, String> {
+        finish_active_gesture(self);
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let rack_slot_id = self.device_registry.rack_slot(track_id, rack_slot);
+        let track_before = self.capture_track_effect_chain_state(track, None)?;
+        let rack_before = self.capture_rack_effect_chain_state(track, rack_slot, None)?;
+        // Neither sync edit below rebinds device identities, so the surviving
+        // effects are recognised by node rather than by chain position.
+        let track_ids_by_node = track_before.instances.iter().enumerate()
+            .map(|(offset, instance)| {
+                let node_id = self.state.pattern.effect_chains[track][BUILTIN_SLOT_COUNT + offset]
+                    .node_id
+                    .load(Ordering::Relaxed);
+                (node_id, instance.id)
+            })
+            .collect::<HashMap<_, _>>();
+        let rack_ids_by_node = rack_before.instances.iter().enumerate()
+            .map(|(slot, instance)| {
+                (rack_before.patterns.live.effect_slots[slot].node_id, instance.id)
+            })
+            .collect::<HashMap<_, _>>();
+
+        let applied = (|| {
+            let effect_slot = self.move_track_effect_to_rack_slot_sync(
+                track, source_slot, rack_slot, target_slot,
+            )?;
+            let track_after_move =
+                self.capture_track_effect_chain_state(track, Some(&track_ids_by_node))?;
+            self.remap_recorded_track_effect_edit(track, &track_before, &track_after_move)?;
+            self.revalidate_live_macro_targets();
+            self.state.publish_scheduler_snapshot();
+            let track_after = self.capture_track_effect_chain_state(track, None)?;
+            let rack_after =
+                self.capture_rack_effect_chain_state(track, rack_slot, Some(&rack_ids_by_node))?;
+            Ok::<_, String>((effect_slot, track_after, rack_after))
+        })();
+        let (effect_slot, track_after, rack_after) = match applied {
+            Ok(applied) => applied,
+            Err(error) => {
+                // Undo order: take the effect back out of the rack slot before
+                // the track chain gets it again.
+                let rollback = (|| {
+                    let current = self.capture_rack_effect_chain_state(
+                        track, rack_slot, Some(&rack_ids_by_node),
+                    )?;
+                    self.restore_rack_effect_chain_state(track, rack_slot, &current, &rack_before)?;
+                    let current =
+                        self.capture_track_effect_chain_state(track, Some(&track_ids_by_node))?;
+                    self.restore_track_effect_chain_state(track, &current, &track_before)
+                })();
+                return match rollback {
+                    Ok(()) => Err(error),
+                    Err(rollback) => Err(format!(
+                        "Moving the effect into the rack slot failed ({error}); restoring both chains also failed ({rollback})"
+                    )),
+                };
+            }
+        };
+
+        let track_patch = EffectChainPatch {
+            track: track_id, before: track_before, after: track_after,
+        };
+        let rack_patch = RackEffectChainPatch {
+            track: track_id, rack_slot: rack_slot_id, before: rack_before, after: rack_after,
+        };
+        let retained_bytes = std::mem::size_of::<Vec<EditPatch>>()
+            + track_patch.retained_bytes() + rack_patch.retained_bytes();
+        // Replay removes the track effect before the rack slot gains it, and
+        // undo runs in reverse, so the effect never exists in both chains.
+        self.history.commit(
+            "Move audio effect into rack slot",
+            None,
+            EditPatch::Composite(vec![
+                EditPatch::EffectChain(track_patch),
+                EditPatch::RackEffectChain(rack_patch),
+            ]),
+            retained_bytes,
+        );
+        Ok(effect_slot)
+    }
+
     pub fn apply_recorded_track_effect_chain_mutation<T>(
         &mut self,
         track: usize,
@@ -2515,6 +2605,38 @@ impl App {
                     track: track_id,
                     pattern,
                     macro_id: id,
+                    before,
+                    after,
+                })
+            },
+        )
+    }
+
+    /// A drum rack pad map edit (docs/rack-pad-variants-spec.md): write
+    /// `after` as `group_id`'s pads and record it as a coalescing gesture
+    /// keyed by `merge_key`, so a variant knob drag on one param joins one
+    /// entry that keeps the pads from before its first write.
+    pub(crate) fn apply_rack_pads_edit(
+        &mut self,
+        group_id: u64,
+        label: &'static str,
+        merge_key: MergeKey,
+        after: super::history::RackPadsState,
+    ) -> Result<EditOutcome, EditError> {
+        stage_field_edit(
+            self,
+            (label, merge_key),
+            (group_id, after),
+            |staged, group_id| match staged {
+                EditPatch::RackPads(staged) if staged.group_id == group_id => {
+                    Some(staged.before.clone())
+                }
+                _ => None,
+            },
+            |app, after| app.write_rack_pads(group_id, after),
+            |group_id, before, after| {
+                EditPatch::RackPads(super::history::RackPadsPatch {
+                    group_id,
                     before,
                     after,
                 })
@@ -8125,6 +8247,10 @@ fn apply_recorded_device_value_commands(
         if patch.before.bit_exact_eq(&patch.after)
             && app.history.discard_active_gesture_entry(&key)
         {
+            // The drag came back to where it began and its gesture is gone,
+            // so no release will publish: a value published mid-drag would
+            // otherwise stay in the scheduler snapshot.
+            app.gesture_scheduler_publish_pending = true;
             return Ok(EditOutcome::NoOp);
         }
         ensure_coalescing_gesture(app, &key);
@@ -8137,6 +8263,7 @@ fn apply_recorded_device_value_commands(
                 retained_bytes,
             )
             .ok_or(EditError::UnsupportedCommand)?;
+        app.gesture_scheduler_publish_pending = true;
         return Ok(EditOutcome::Applied(history_move));
     }
     finish_active_gesture(app);
@@ -11218,6 +11345,20 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             )
             .map_err(EditError::ReplayFailed)
         }
+        EditPatch::RackPads(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "rack pad replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            app.write_rack_pads(patch.group_id, target)
+                .map(|_| ())
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::RackMacro(patch) => {
             let target = match mode {
                 ApplyMode::Undo => &patch.before,
@@ -11433,6 +11574,8 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         // Its writes publish what the scheduler reads (a mapping edit) or
         // reach the runtime values directly (a value).
         EditPatch::RackMacro(_) => false,
+        // `write_rack_pads` republishes the pad runtime itself.
+        EditPatch::RackPads(_) => false,
         EditPatch::SceneStructure(_) => true,
         EditPatch::RackClipAssignment(_) => true,
         // The arrangement's compiled song has no scheduler runtime.
@@ -11812,10 +11955,36 @@ fn finish_gesture_entry(app: &mut App) -> Option<super::history::ActiveGesture> 
         .and_then(|gesture| app.history.active_gesture_patch(&gesture.merge_key))
         .is_some_and(pending_gesture_publishes_scheduler);
     let finished_gesture = app.history.finish_active_gesture();
-    if finished_gesture.is_some() && publish_scheduler {
-        app.state.publish_scheduler_snapshot();
+    if finished_gesture.is_some() {
+        if publish_scheduler {
+            app.state.publish_scheduler_snapshot();
+        }
+        app.gesture_scheduler_publish_pending = false;
     }
     finished_gesture
+}
+
+/// The shortest gap between two scheduler publishes of one open drag.
+const GESTURE_SCHEDULER_PUBLISH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(40);
+
+/// Let sequenced triggers hear an open device-value drag: republish the
+/// scheduler snapshot when the drag has written since the last publish, at
+/// most once per [`GESTURE_SCHEDULER_PUBLISH_INTERVAL`]. The gesture end
+/// still publishes the final values (`finish_gesture_entry`). Returns whether
+/// it published.
+pub fn publish_open_gesture_device_values(app: &mut App) -> bool {
+    if !app.gesture_scheduler_publish_pending
+        || app
+            .last_gesture_scheduler_publish
+            .is_some_and(|at| at.elapsed() < GESTURE_SCHEDULER_PUBLISH_INTERVAL)
+    {
+        return false;
+    }
+    app.gesture_scheduler_publish_pending = false;
+    app.last_gesture_scheduler_publish = Some(Instant::now());
+    app.state.publish_scheduler_snapshot();
+    true
 }
 
 /// Apply `cmd` as an undo entry of its own while leaving the active gesture
@@ -11948,6 +12117,7 @@ fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
         EditPatch::GraphOverride(patch) => patch.retained_bytes(),
         EditPatch::NeuralNetwork(patch) => patch.retained_bytes(),
         EditPatch::RackMacro(patch) => patch.retained_bytes(),
+        EditPatch::RackPads(patch) => patch.retained_bytes(),
     }
 }
 
@@ -12108,7 +12278,8 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         | EditPatch::GraphNodeProcessChain(_)
         | EditPatch::GraphOverride(_)
         | EditPatch::NeuralNetwork(_)
-        | EditPatch::RackMacro(_) => {
+        | EditPatch::RackMacro(_)
+        | EditPatch::RackPads(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::SceneStructure(_) => {
@@ -13094,6 +13265,82 @@ mod tests {
             );
             assert_eq!(data.effect_slots[0].defaults.get(2).copied(), Some(900.0));
         });
+    }
+
+    #[test]
+    fn open_device_value_drag_reaches_the_scheduler_snapshot_before_release() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        state.pattern.effect_chains[0][0].apply_descriptor(&descriptor, 7);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.effect_descriptors = vec![vec![descriptor]];
+        app.state.publish_scheduler_snapshot();
+        let scheduled_cutoff = |app: &App| {
+            app.state.latest_scheduler_snapshot().tracks[0].effect_slots[0]
+                .defaults
+                .get(2)
+                .copied()
+        };
+        let drag = |app: &mut App, cutoff: f32| {
+            let outcome = apply_coalesced_device_value_batch(
+                app,
+                &[AppCommand::SetEffectParam {
+                    track: 0,
+                    slot_idx: 0,
+                    param_idx: 2,
+                    value: cutoff,
+                }],
+                "effect-cutoff",
+                "Set effect cutoff",
+            );
+            assert!(matches!(outcome, Ok(EditOutcome::Applied(_))), "{outcome:?}");
+        };
+
+        assert!(!publish_open_gesture_device_values(&mut app), "nothing is being dragged");
+        drag(&mut app, 300.0);
+        assert_ne!(scheduled_cutoff(&app), Some(300.0), "a drag event alone does not publish");
+        assert!(publish_open_gesture_device_values(&mut app));
+        assert_eq!(scheduled_cutoff(&app), Some(300.0));
+
+        // A second event inside the interval waits for it.
+        drag(&mut app, 900.0);
+        assert!(!publish_open_gesture_device_values(&mut app));
+        assert_eq!(scheduled_cutoff(&app), Some(300.0));
+        app.last_gesture_scheduler_publish = None;
+        assert!(publish_open_gesture_device_values(&mut app));
+        assert_eq!(scheduled_cutoff(&app), Some(900.0));
+
+        // The release publishes the final value and leaves nothing pending.
+        drag(&mut app, 2_400.0);
+        finish_active_gesture(&mut app);
+        assert_eq!(scheduled_cutoff(&app), Some(2_400.0));
+        app.last_gesture_scheduler_publish = None;
+        assert!(!publish_open_gesture_device_values(&mut app));
+
+        // A drag that comes back to where it began drops its gesture, so no
+        // release publishes: the value published mid-drag must not linger.
+        let start = 2_400.0;
+        drag(&mut app, 500.0);
+        app.last_gesture_scheduler_publish = None;
+        assert!(publish_open_gesture_device_values(&mut app));
+        assert_eq!(scheduled_cutoff(&app), Some(500.0));
+        let outcome = apply_coalesced_device_value_batch(
+            &mut app,
+            &[AppCommand::SetEffectParam { track: 0, slot_idx: 0, param_idx: 2, value: start }],
+            "effect-cutoff",
+            "Set effect cutoff",
+        );
+        assert!(matches!(outcome, Ok(EditOutcome::NoOp)), "{outcome:?}");
+        app.last_gesture_scheduler_publish = None;
+        assert!(publish_open_gesture_device_values(&mut app));
+        assert_eq!(scheduled_cutoff(&app), Some(start));
     }
 
     #[test]

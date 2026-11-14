@@ -254,6 +254,37 @@ Structure elements wrap another element:
   regimes, so turning the frame knob can cross from a vowel world into a
   carved mesa into a comb, rather than nudging one shape along.
 
+Transfer-function elements (eseq-dtx.15) are computed from an actual filter
+structure rather than drawn:
+
+- `resonance` — a peaking pole pair: `gain_db` at `center`, returning to 0 dB
+  along `1/(1+d²)` in power with `d = q·(f/f0 − f0/f)`; negative gain is the
+  matching notch. Unlike the Gaussian `peak` it has skirts, which is what
+  survives the runtime's response-length limit and reads as a resonance
+  instead of an EQ bump.
+- `pole-lowpass` — two-pole resonant lowpass (0 dB at DC, a `20·log10(q)` lip,
+  −12 dB/octave). Several in series are a formant cascade: formant levels
+  follow from formant positions, as in a vocal tract.
+- `feedback-comb` — `1/(1 − g·z⁻ᴰ)`: sharp teeth on multiples of `spacing`,
+  broad valleys; negative `feedback` moves the teeth to the half-multiples;
+  `damp` shrinks the feedback with frequency like a lossy string.
+- `parallel` — power sum of its inner elements. Top-level elements multiply
+  (series); `parallel` is how several combs or resonators keep their own
+  peaks. Note the series default bites: a `pole-lowpass` under a `resonance`
+  rolls the resonance off.
+- `modal-bank` — complex second-order (velocity) modes summed before taking
+  the magnitude, so neighbouring modes produce real antiresonances. Each mode
+  has a `from` and `to` frequency ratio blended geometrically by `morph`.
+- `automaton` — an elementary cellular automaton (Wolfram `rule`) with cells
+  as frequency bands between dead walls and generations along the frame
+  axis.
+
+Authoring limit that applies to all of these: the spectral engine cannot
+render a feature narrower than roughly 110–150 Hz (the 768-tap response
+bound), and at Q above that a peak only loses height. Comb teeth and chord
+tones closer than that merge; sub-bin teeth also make the per-frame peak
+normalization flicker. Design at the resolution the runtime has.
+
 ### Layering doctrine
 
 Every factory preset is layered the same way, and this is load-bearing for
@@ -322,13 +353,18 @@ looping presets still count as moving).
   reversals), centroid range > 0.5 octaves, and it must fail the glide
   bounds.
 
+- **figure** — a loop, a progression or an interference pattern, whose motion
+  is in its structure rather than in where the energy centre travels (its
+  centroid may hardly move). Validated only for bounded steps (< 1.0 rms)
+  and excursion > 0.05.
+
 `gulp_and_sprlonk_presets_would_fail_the_glide_bounds` pins the point of the
 class system: `gulp-throat` and `sprlonk` are asserted to violate the glide
 envelope while `comb-bloom` satisfies it.
 
 ### The library
 
-Twenty-five factory presets, all original curves (no third-party preset data
+Thirty-three factory presets, all original curves (no third-party preset data
 was used, measured or transformed):
 
 *Glide* — `comb-bloom` (harmonic comb fading in), `glass-comb` (inharmonic
@@ -363,6 +399,24 @@ a comb re-spaces), `arp-harmonic` (a resonance stepping the harmonic series
 stretch re-thrown eight times), `mosaic` (four worlds on one knob — formant
 pair, carved mesa, inharmonic comb, scattered needles, one per quarter of
 the frame axis).
+
+*Transfer-function generation* (eseq-dtx.15; these deliberately break the
+layering doctrine — deep floors, one strong idea each, features sized to what
+the runtime resolves) — `risset-stair` (glide; nine resonances an octave
+apart climbing one octave under a raised-cosine envelope of their own
+centres while notches descend through them; frame 63 equals frame 0, so a
+looping ramp on `frame` rises forever), `i-owe-you` (wobble; a four-formant
+pole cascade on vowel targets for /a i o u j u/ — the table says the phrase),
+`skin-to-bell` (glide; twelve coupled modes morphing from circular-membrane
+ratios to bell partials as Q rises 7 → 46), `through-zero` (figure; a
+feedback flanger swept through zero delay, returning with inverted
+feedback), `four-chords` (figure; three lossy-string combs in parallel
+retuning through Am–F–C–G, voiced an octave above the reference so the
+engine can separate thirds), `moire` (figure; two cosine combs a hair apart
+whose beat fringes pour down the spectrum), `rule-150` (jump; cellular
+automaton rule 150 on 33 bands, period 30, so the table loops),
+`overtone-singer` (jump; a Q-12 resonance stepping a melody on harmonics
+6–13 with harmonic 8 at the cutoff — set `cutoff` to 8× a drone's pitch).
 
 The retired `glide-low`/`glide-high` pass-filter sweeps were replaced by
 `swoop-low`/`cavity-high`: a linear slope fade reads as a slightly odd static

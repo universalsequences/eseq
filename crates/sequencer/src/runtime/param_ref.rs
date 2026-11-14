@@ -115,6 +115,7 @@ pub fn step_param_from_target_name(name: &str) -> Option<StepParam> {
         StepParam::Chop,
         StepParam::Retrig,
         StepParam::RetrigRate,
+        StepParam::Variant,
     ]
     .into_iter()
     .find(|param| {
@@ -134,6 +135,7 @@ pub fn step_param_from_target_name(name: &str) -> Option<StepParam> {
                 StepParam::Chop => normalized == "chop",
                 StepParam::Retrig => normalized == "retrig",
                 StepParam::RetrigRate => normalized == "retrig-rate" || normalized == "retrig_rate",
+                StepParam::Variant => normalized == "variant" || normalized == "pad-variant",
                 StepParam::Sync | StepParam::Delay => false,
             }
     })

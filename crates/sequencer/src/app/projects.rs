@@ -1429,10 +1429,14 @@ impl App {
     }
 
     pub fn add_bus_channel(&mut self, name: impl Into<String>) -> BusId {
+        // Above every live bus AND every bus a group still names: should a
+        // group ever outlive its bus, a new group must not adopt that id and
+        // end up sharing one bus with it.
         let next_id = self
             .buses
             .iter()
             .map(|bus| bus.id.0)
+            .chain(self.groups.iter().map(|group| group.bus_id))
             .max()
             .unwrap_or(crate::sequencer::DEFAULT_BUS_B_ID)
             .saturating_add(1);
@@ -2081,6 +2085,7 @@ impl App {
                 name: pad.name,
                 sound,
                 modulator,
+                variants: pad.variants,
             });
         }
         let bus_chain = Some(self.capture_kit_bus_chain(bus_id)?);
@@ -2256,11 +2261,15 @@ impl App {
     /// whole load squashes into one undo entry.
     pub fn load_kit_as_rack(&mut self, path: &Path) -> Result<(u64, Vec<String>), String> {
         let history_len = self.history.undo_len();
+        // As a controlled import: the load's patches must all survive until
+        // the squash, whatever the byte budget.
+        self.history.hold_budget();
         let result = self.load_kit_as_rack_inner(path);
         if result.is_ok() {
             crate::app::edit::squash_history_since(self, history_len, "Load kit");
             self.sync_expr_process_classes_after_import();
         }
+        self.history.release_budget();
         result
     }
 
@@ -2576,10 +2585,10 @@ impl App {
                     self.track_registry.id_at(track)
                         .ok_or_else(|| format!("Kit pad {pad_name} has no stable identity"))?
                 };
-                desired.push((pad.pad_note, pad.choke_group, track_id, pad.role));
+                desired.push((pad.pad_note, pad.choke_group, track_id, pad.role, pad.variants.clone()));
             }
 
-            let desired_ids = desired.iter().map(|(_, _, id, _)| *id)
+            let desired_ids = desired.iter().map(|(_, _, id, _, _)| *id)
                 .collect::<std::collections::HashSet<_>>();
             let desired_for_group = desired.clone();
             let kit_name_for_group = kit_name.clone();
@@ -2589,7 +2598,7 @@ impl App {
                 let group_index = app.groups.iter().position(|group| group.id == group_id)
                     .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
                 let bus = BusId(app.groups[group_index].bus_id);
-                let mut members = desired_for_group.iter().map(|(_, _, id, _)| {
+                let mut members = desired_for_group.iter().map(|(_, _, id, _, _)| {
                     app.track_registry.index_of(*id)
                         .ok_or_else(|| "A loaded kit member disappeared".to_string())
                 }).collect::<Result<Vec<_>, String>>()?;
@@ -2605,12 +2614,12 @@ impl App {
                         }
                     }
                 }
-                let pads = desired_for_group.iter().map(|(note, _, id, role)| {
+                let pads = desired_for_group.iter().map(|(note, _, id, role, _)| {
                     let track = app.track_registry.index_of(*id)
                         .ok_or_else(|| "A loaded kit member disappeared".to_string())?;
                     let member = members.binary_search(&track)
                         .map_err(|_| "A loaded kit member was not assigned to the rack".to_string())?;
-                    Ok(crate::project::ProjectRackPad { pad_note: *note, member, role: *role })
+                    Ok(crate::project::ProjectRackPad { role: *role, ..crate::project::ProjectRackPad::new(*note, member) })
                 }).collect::<Result<Vec<_>, String>>()?;
                 let group = &mut app.groups[group_index];
                 group.name.clone_from(&kit_name_for_group);
@@ -2638,7 +2647,7 @@ impl App {
                 let mut rack = crate::project::ProjectRackConfig {
                     sequencers: Vec::new(),
                     pads,
-                    choke_groups: desired_for_group.iter().map(|(_, choke, _, _)| *choke).collect(),
+                    choke_groups: desired_for_group.iter().map(|(_, choke, _, _, _)| *choke).collect(),
                     clips: Vec::new(),
                     next_clip_id: 0,
                     groove,
@@ -2648,6 +2657,21 @@ impl App {
                         old_clip_grooves
                     },
                 };
+                // Variant pads ride on their member's kit pad: land each on
+                // that member (one per plain pad above, same order). A note
+                // already taken drops the variant rather than the load.
+                for (plain_index, (_, _, _, _, variants)) in desired_for_group.iter().enumerate() {
+                    let member = rack.pads[plain_index].member;
+                    for variant in variants {
+                        if variant.variant == 0
+                            || rack.pad_index_for_note(variant.pad_note).is_some()
+                            || rack.pad_index_for_variant(member, variant.variant).is_some()
+                        {
+                            continue;
+                        }
+                        rack.push_pad(variant.to_pad(member));
+                    }
+                }
                 if let Some(kit_groove) = &kit_groove {
                     rack.groove = super::rack_grooves::kit_groove_settings(
                         &mut app.grooves,

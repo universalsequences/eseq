@@ -290,15 +290,26 @@ fn graph_request(app: &app::App, graph: &Graph, map: &Payload) -> Request {
                 None => None,
                 Some(_) => Some(graph.route_index(app, command_track(app, map)?)?),
             };
+            // The pad variant a rack member route plays (0: the plain pad).
+            let variant = if map.contains_key("variant") && route.is_some() {
+                let max = sequencer::sequencer::MAX_PAD_VARIANT as usize;
+                SetValue::of(map, "variant", "variant").integer(0, max)? as u32
+            } else {
+                0
+            };
             let (node, current) = resolved(map)?;
-            if current.route == route && current.gate_target.is_none() {
+            if current.route == route
+                && current.gate_target.is_none()
+                && current.route_variant == variant
+            {
                 return Ok(None);
             }
             let route = route.map_or(
                 ProjectGraphRouteOverride::None,
                 ProjectGraphRouteOverride::Track,
             );
-            graph.node_field(node, GraphNodeField::Route(Some(route)), false)
+            let variant = (variant > 0).then_some(variant);
+            graph.node_field(node, GraphNodeField::Route(Some(route), variant), false)
         }
         "generator" => {
             let id = value.id("a generator instance id")?;
@@ -316,7 +327,7 @@ fn graph_request(app: &app::App, graph: &Graph, map: &Payload) -> Request {
             } else {
                 ProjectGraphRouteOverride::Generator(id)
             };
-            graph.node_field(node, GraphNodeField::Route(Some(route)), false)
+            graph.node_field(node, GraphNodeField::Route(Some(route), None), false)
         }
         "seed-route" => {
             let on = value.flag()?;

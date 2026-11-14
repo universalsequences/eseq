@@ -169,13 +169,28 @@
 (def zero-word? (w)
   (member? w '(left right accent rev stac ghost swap half id none rest)))
 
+;; (rest COND) / (play COND): COND is VALUE data — a number, a per-cycle
+;; list, (seq :clock v…), (cyc v…), (chan …) — so (rest (1 0)) is a
+;; condition, while (rest id id) stays the word alternation above
+(def cond-value? (v)
+  (if (number? v)
+      true
+      (if (or (string? v) (= (nth v 0) nil))
+          false
+          (or (implicit-cyc? v)
+              (or (member? (nth v 0) '(seq chan at))
+                  (and (= (nth v 0) 'cyc) (cond-value? (nth v 1))))))))
+
+(def rest-cond? (w)
+  (and (= (raw-head w) 'rest) (and (= (len w) 2) (cond-value? (nth w 1)))))
+
 (def alt-word? (w)
   (if (= (nth w 0) nil)
       false
       (let ((h (raw-head w)))
         (or (= h 'cyc)
             (or (not (= (nth h 0) nil))
-                (and (zero-word? h) (> (len w) 1)))))))
+                (and (zero-word? h) (and (> (len w) 1) (not (rest-cond? w)))))))))
 
 (def alt-members (w) (if (= (raw-head w) 'cyc) (rest w) w))
 
@@ -1838,6 +1853,9 @@
 ;; `emit` plays (:nset or the route's note) + :nadd
 (def clamp01 (v) (max 0 (min 1 v)))
 
+;; a (rest COND) / (play COND) value reads as on from 0.5 up
+(def cond-on? (v) (and (number? v) (>= v 0.5)))
+
 (def map-events (res f) (merge res :events (map f (get res :events))))
 
 (def apply-event-op (res h v)
@@ -1898,6 +1916,10 @@
       ;; drop every event, keeping the cycle's length/timing: the silent
       ;; alternation member ((left right none)) and (every n none) thinning
       :none (merge res :events (list))
+      ;; (rest COND) / (play COND) with a per-cycle COND: the cycle (or, under
+      ;; `on`, the selection) is silent while COND says so
+      :restif (if (cond-on? (resolve-arg (nth op 1) cycle)) (merge res :events (list)) res)
+      :playif (if (cond-on? (resolve-arg (nth op 1) cycle)) res (merge res :events (list)))
       ;; a note op (snap / scale / harmony), resolved at emit
       :snap (map-events res (lambda (e) (merge e :snap (nth op 1))))
       :noteop (map-events res (lambda (e) (ev-op-apply e (nth op 1) cycle)))
@@ -2058,6 +2080,8 @@
     :nadd (raw-period (nth op 1))
     :nset (raw-period (nth op 1))
     :plock (raw-period (nth op 2))
+    :restif (raw-period (nth op 1))
+    :playif (raw-period (nth op 1))
     :defer 1
     :tag (sel-period* (nth op 1))
     :alt (reduce (lambda (a x) (lcm0 a (post-period* x)))
@@ -2626,6 +2650,9 @@
       :nset (merge acc :nset v)
       :gmul (merge acc :gmul (* (get acc :gmul) (max 0 v)))
       :plock (merge acc :params (plock-set (get acc :params) (nth d 3) v))
+      ;; (rest (seq :hit …)) / (play (seq :fig …)): this hit rests
+      :restif (if (cond-on? v) (merge acc :drop true) acc)
+      :playif (if (cond-on? v) acc (merge acc :drop true))
       _ acc)))
 
 ;; opts stay raw and resolve per event: (every-fig n (note m)) differs per
@@ -2645,8 +2672,18 @@
           (chord-q (let ((raw (or-default (get e :chordv) (get opts :chord))))
                      (if (= raw nil) nil (ev-value p (str rkey "opt:chord") raw e c clen :maj)))))
       (let ((at (* (r->f (r- (get e :off) (r-int u))) unit))
-            (dur (* (* (r->f (get e :gate)) unit) (get a :gmul))))
+            (dur (* (* (r->f (get e :gate)) unit) (get a :gmul)))
+            ;; a gating fire's velocity scales the hit's (trig-modes spec §3)
+            (vel (* (* (get a :vel) opt-vel) (state-get "jaki-gvel" 1)))
+            (rel (r- (get e :off) (r-int u))))
+      ;; a hit that rests ((rest …) / (play …)), has no velocity left, or is
+      ;; taken by a route with priority ((steal …)) sends nothing: no trig, no
+      ;; gate, no mark. A silent trig on a shared track would still retrigger
+      ;; or cut the voice another lane is holding.
+      (if (or (get a :drop) (or (<= vel 0) (stolen? opts track rel)))
+          nil
       (do
+        (steal-log! opts track rel (* (r->f (get e :gate)) (get a :gmul)))
         ;; the row items applied to this hit, lit for its length (§7.3)
         (if (get opts :lights)
             (do (out-mark (lit-mask (or-default (get e :lits) (list))) (get opts :rindex) at)
@@ -2662,7 +2699,7 @@
         ;; (note …) set (docs/jaki-trig-modes-spec.md §3). A (voice) row
         ;; first moves its note to the nearest free declared chord tone.
         (emit-notes chord-q c opts track at dur
-                    (* (* (get a :vel) opt-vel) (state-get "jaki-gvel" 1))
+                    vel
                     (snap-hit e (+ (+ (if (get opts :voice)
                                           (alez.jaki.chords/voice-pick
                                             rkey base (alez.jaki.chords/field-get "chords") (gen-tick)
@@ -2672,7 +2709,122 @@
                                    (state-get "jaki-gnote" 0))
                               c)
                     ;; (plock …) values, a flat label/value list (nil: none)
-                    (get a :params))))))))
+                    (get a :params)))))))))
+
+;; ── priority between routes: (steal [LANE] [:hit|:gate|:cycle]) ────────────
+;; A route with a steal word takes hits away from other routes. Bare (or
+;; `all`) it wins against every route playing the same track; with a lane (a
+;; row number, or a name given by (as NAME)) against that lane wherever it
+;; plays. Scope :hit (default) takes hits that start with one of its own,
+;; :gate also those starting while one of its hits is held, :cycle every hit
+;; of a cycle it plays in at all. When two routes steal from each other the
+;; later one (the lower row) wins. `prepare` works out who takes from whom
+;; (opts :thieves) and an order that plays every thief before its victims,
+;; so a victim only has to look at what its thieves did this tick.
+;; A hit a thief rests or loses itself takes nothing. :cycle reads the
+;; thief's evaluated cycle, so a per-cycle (play …) counts but a hit-clocked
+;; (rest (seq :hit …)) does not empty it.
+
+(def steal-scopes '(:hit :gate :cycle))
+
+(def steal-spec (args)
+  (let ((scope (reduce (lambda (s x) (if (member? x steal-scopes) x s)) :hit args))
+        (tgt (reduce (lambda (g x) (if (and (= g nil) (not (member? x steal-scopes))) x g))
+                     nil args)))
+    (dict :scope scope
+          :target (if (or (= tgt nil) (= tgt 'all))
+                      :all
+                      (if (number? tgt) (round-int tgt) :none)))))
+
+;; this tick's sounding hits of stealing routes: (route track rel end), rel
+;; the exact offset into the tick's unit, end its float end
+(def steal-log (list))
+(def steal-key (ri) (str "jaki-steal:" ri))
+
+(def steal-log! (opts track rel gate)
+  (if (= (get opts :steals) nil)
+      nil
+      (let ((ri (get opts :ri)) (now (play-pos)) (relf (r->f rel)))
+        (do (set! steal-log (cons (list ri track rel (+ relf gate)) steal-log))
+            (if (get opts :steal-gate)
+                (steal-hold! (steal-key ri) track now (+ (+ now relf) gate))
+                nil)))))
+
+;; how long the route's hits hold, for :gate across ticks: :u up to and
+;; including tick :t, :pu before it (what a victim in tick :t reads)
+(def steal-hold! (k track now until)
+  (let ((ct (state-get (str k ":t") -1)) (u0 (state-get (str k ":u") 0)))
+    (do (if (= ct now)
+            (state-set! (str k ":u") (max u0 until))
+            (if (and (>= ct 0) (< ct now))
+                (do (state-set! (str k ":pu") u0)
+                    (state-set! (str k ":pk") (state-get (str k ":k") -1))
+                    (state-set! (str k ":u") (max u0 until)))
+                ;; first hit, or the clock went back: start over
+                (do (state-set! (str k ":pu") 0)
+                    (state-set! (str k ":u") until))))
+        (state-set! (str k ":t") now)
+        (state-set! (str k ":k") track))))
+
+(def thief-track-ok? (th track k) (or (not (get th :bare)) (= k track)))
+
+(def log-hit? (th track rel)
+  (reduce (lambda (hit x)
+            (or hit (and (= (nth x 0) (get th :ri))
+                         (and (thief-track-ok? th track (nth x 1)) (= (nth x 2) rel)))))
+          false steal-log))
+
+(def log-holds? (th track rel)
+  (let ((f (r->f rel)))
+    (reduce (lambda (hit x)
+              (or hit (and (= (nth x 0) (get th :ri))
+                           (and (thief-track-ok? th track (nth x 1))
+                                (and (r<= (nth x 2) rel) (< f (nth x 3)))))))
+            false steal-log)))
+
+(def carry-holds? (th track at now)
+  (let ((k (steal-key (get th :ri))))
+    (let ((ct (state-get (str k ":t") -1)))
+      (if (or (< ct 0) (> ct now))
+          false
+          (let ((u (state-get (str k (if (= ct now) ":pu" ":u")) 0))
+                (kt (state-get (str k (if (= ct now) ":pk" ":k")) -1)))
+            (and (> u (+ at 0.000001)) (thief-track-ok? th track kt)))))))
+
+;; A thief's cycle is the same for every hit it is asked about in a tick:
+;; (route track sounds?), worked out once and dropped with the log.
+(def steal-cycles (list))
+
+(def thief-cycle (th now)
+  (let ((ri (get th :ri)))
+    (let ((hit (reduce (lambda (a e) (if (and (= a nil) (= (first e) ri)) e a)) nil steal-cycles)))
+      (if hit
+          hit
+          (let ((p (get th :p)))
+            (let ((c (first (locate p now))))
+              (let ((e (list ri
+                             (round-int (resolve-arg (get th :track) c))
+                             (not (empty? (get (eval-cycle p c (n->hand (state-get (cell p "jaki-hand") 0))
+                                                           (load-state p))
+                                               :events))))))
+                (do (set! steal-cycles (cons e steal-cycles)) e))))))))
+
+(def thief-cycle? (th track now)
+  (let ((e (thief-cycle th now)))
+    (and (thief-track-ok? th track (nth e 1)) (nth e 2))))
+
+(def thief-takes? (th track rel now)
+  (match (get th :scope)
+    :cycle (thief-cycle? th track now)
+    :gate (or (log-holds? th track rel) (carry-holds? th track (+ now (r->f rel)) now))
+    _ (log-hit? th track rel)))
+
+(def stolen? (opts track rel)
+  (let ((ts (get opts :thieves)))
+    (if (or (= ts nil) (empty? ts))
+        false
+        (let ((now (play-pos)))
+          (reduce (lambda (hit th) (if hit true (thief-takes? th track rel now))) false ts)))))
 
 ;; A (chord X) value: chord words (Am7, iv7, V7/iv) become codes
 ;; (alez.jaki.chords/chord-code) so seq / per-cycle lists carry them;
@@ -2833,6 +2985,11 @@
 ;;   (harmony :track n :amount a) — hold every note to track n's chord/key
 ;;   (snap "chan") — snap every hit's note to the pitch classes the channel
 ;;   holds (alez.jaki.harmony publishes a track's chord there)
+;;   (rest COND) (play COND) — rest / play where COND is 1: a per-cycle
+;;   list (rest (1 0)), or (seq :hit …) / (seq :fig …) per hit / figure
+;;   (as NAME) names the lane; (like LANE) stands for another lane's words;
+;;   (steal [LANE] [:hit|:gate|:cycle]) takes hits from other lanes; a
+;;   destination `off` is a lane that plays nothing (spec §7.6)
 ;;   (rule TRIGGER STAGE… ACTION…) — a rule run on the hits TRIGGER selects
 ;;   (docs/jaki-row-processes-spec.md; `proc` is the old name); (seed n)
 ;;   rerolls its coins
@@ -2901,7 +3058,8 @@
           'stac   (list :stac)
           'id     (list :id)
           'none   (list :none)
-          'rest   (list :none)
+          'rest   (if (empty? args) (list :none) (cond-op :restif (nth args 0) v))
+          'play   (if (empty? args) (list :id) (cond-op :playif (nth args 0) v))
           'gate   (defer-or :gmul :gate v)
           'dur    (defer-or :gmul :gate v)
           'quant  (list :quant (quant-units (nth args 0)))
@@ -2923,6 +3081,12 @@
                         nil
                         (list :every (nth args 0) inner)))
           _ nil))))
+
+;; (rest COND) / (play COND): a hit-clocked COND waits for the hit (:defer);
+;; any other resolves per cycle as a post op that really removes the events,
+;; so a resting cycle has none ((steal :cycle) reads that)
+(def cond-op (kind raw v)
+  (if (needs-ev? raw) (list :defer kind v nil) (list kind raw)))
 
 (def split-arrows (l cur acc)
   (if (empty? l)
@@ -2986,7 +3150,16 @@
       'rev    (merge acc :p (rev (get acc :p)))
       'stac   (merge acc :p (add-post (get acc :p) (list :stac) "stac"))
       'none   (merge acc :p (add-post (get acc :p) (list :none) "none"))
-      'rest   (merge acc :p (add-post (get acc :p) (list :none) "none"))
+      'rest   (if (empty? args)
+                  (merge acc :p (add-post (get acc :p) (list :none) "none"))
+                  (add-route-post acc (route-post-op-at w (get acc :wpath)) w))
+      'play   (if (empty? args)
+                  acc
+                  (add-route-post acc (route-post-op-at w (get acc :wpath)) w))
+      ;; (steal [LANE] [:hit|:gate|:cycle]): this route's hits take priority
+      'steal  (merge acc :opts (merge (get acc :opts)
+                                 :steals (append (or-default (get (get acc :opts) :steals) (list))
+                                                 (list (steal-spec args)))))
       'ghost  (merge acc :p (ghost (get acc :p)))
       'swap   (merge acc :p (swap (get acc :p)))
       'rot    (merge acc :p (rot (get acc :p) (nth args 0)))
@@ -3136,8 +3309,19 @@
 
 ;; words stepped with :widx, the word's index in the route (= the row item
 ;; index in the jaki kind), which tag ops report
+;; A voice with lane links (prepare-voice) hands its words wrapped,
+;; (jk-w IDX word): IDX is the word's own item index, nil for a word a
+;; (like LANE) brought in (it lights nothing on this row).
+(def wrapped-word? (x) (and (not (= (nth x 0) nil)) (= (nth x 0) 'jk-w)))
+(def unwrap-word (x) (if (wrapped-word? x) (nth x 2) x))
+
 (def route-steps (acc words)
-  (reduce (lambda (a i) (route-step (merge a :widx i :wpath (list i)) (nth words i)))
+  (reduce (lambda (a i)
+            (let ((w (nth words i)))
+              (if (wrapped-word? w)
+                  (let ((ix (nth w 1)))
+                    (route-step (merge a :widx ix :wpath (if (= ix nil) nil (list ix))) (nth w 2)))
+                  (route-step (merge a :widx i :wpath (list i)) w))))
           acc (range 0 (len words))))
 
 ;; (:tag sel idx): hits sel matches report item idx as applied (§7.3)
@@ -3283,8 +3467,8 @@
 (def split-control-seg (seg)
   (reduce
     (lambda (acc x)
-      (if (and (= (get acc :target) nil) (control-route-head? x))
-          (merge acc :target x)
+      (if (and (= (get acc :target) nil) (control-route-head? (unwrap-word x)))
+          (merge acc :target (unwrap-word x))
           (merge acc :words (append (get acc :words) (list x)))))
     (dict :target nil :words (list))
     seg))
@@ -3295,12 +3479,170 @@
         (prepare-route p seg)
         (prepare-control-route p (get split :target) (get split :words)))))
 
-(def prepare-voice (l)
-  (let ((segs (split-arrows l (list) (list))))
-    (let ((p (from-list (first segs))))
-      (if (empty? (rest segs))
+;; ── lanes: (as NAME), (like LANE), `-> off` ────────────────────────────────
+;; A voice's segments are its lanes, numbered from 0. (as NAME) names one.
+;; (like LANE) stands for that lane's whole word chain — its rules and seed
+;; with it, so a linked lane rolls the same coins — and the words after it add
+;; on. Only the destination and the lane's own priority (steal) stay behind.
+;; The link is live: it is resolved here, from the body, every prepare. A lane
+;; routed `off` plays nothing and is still a lane: a template to link to.
+;; Links reach lanes of the same voice only (they share its figures); a link
+;; to itself, to a missing lane, or round in a circle is dropped.
+
+(def off-seg? (seg) (= (first seg) 'off))
+
+(def seg-linked? (seg)
+  (reduce (lambda (a w) (or a (member? (raw-head w) '(like as steal)))) false (rest seg)))
+
+(def lane-name (seg)
+  (reduce (lambda (n w)
+            (if (and (= n nil) (and (= (raw-head w) 'as) (not (empty? (raw-args w)))))
+                (str (nth w 1))
+                n))
+          nil (rest seg)))
+
+;; a lane reference (number or name) → its index, -1 when there is none
+(def lane-index (segs ref)
+  (if (number? ref)
+      (let ((k (round-int ref))) (if (and (>= k 0) (< k (len segs))) k -1))
+      (if (= ref nil)
+          -1
+          (index-of* (map lane-name segs) (str ref) 0))))
+
+(def words-have? (ws heads)
+  (reduce (lambda (a w) (or a (member? (raw-head (unwrap-word w)) heads))) false ws))
+
+;; the seed lane k's route plays its rules with when it has no (seed n): its
+;; route index (seed-route) — the lanes before it that play, after `base`
+;; routes of earlier voices
+(def lane-seed (segs k base)
+  (if (off-seg? (nth segs k))
+      (+ (+ base 500) k)
+      (+ base (reduce (lambda (n j) (if (off-seg? (nth segs j)) n (+ n 1))) 0 (range 0 k)))))
+
+;; (steal kick :gate) → (steal 0 :gate): lane names become lane numbers
+(def steal-resolved (segs w)
+  (if (= (nth w 0) nil)
+      w
+      (cons 'steal
+            (map (lambda (x)
+                   (if (or (number? x) (or (member? x steal-scopes) (= x 'all)))
+                       x
+                       (let ((k (lane-index segs x))) (if (< k 0) x k))))
+                 (rest w)))))
+
+;; lane i's words with its links resolved, each wrapped (jk-w IDX word)
+(def lane-words (segs i seen base)
+  (let ((ws (rest (nth segs i))))
+    (reduce
+      (lambda (acc j)
+        (let ((w (nth ws j)))
+          (let ((h (raw-head w)))
+            (if (= h 'as)
+                acc
+                (if (= h 'like)
+                    (let ((k (lane-index segs (nth w 1))))
+                      (if (or (< k 0) (or (= k i) (member? k seen)))
+                          acc
+                          (append acc (inherited-words segs k (cons i seen) base))))
+                    (append acc (list (list 'jk-w j (if (= h 'steal) (steal-resolved segs w) w)))))))))
+      (list) (range 0 (len ws)))))
+
+(def inherited-words (segs k seen base)
+  (let ((ws (map (lambda (x) (list 'jk-w nil (nth x 2)))
+                 (keep (lambda (x) (not (= (raw-head (nth x 2)) 'steal)))
+                       (lane-words segs k seen base)))))
+    (if (and (words-have? ws '(rule proc)) (not (words-have? ws '(seed))))
+        (append ws (list (list 'jk-w nil (list 'seed (lane-seed segs k base)))))
+        ws)))
+
+;; `base`: routes prepared before this voice; `vi`: the voice's index
+(def prepare-voice (l base vi)
+  (let ((segs0 (split-arrows l (list) (list))))
+    (let ((p (from-list (first segs0))) (segs (rest segs0)))
+      (if (empty? segs)
           (list (dict :kind :note :p (with-period p) :track 0 :opts (dict)))
-          (map (lambda (seg) (prepare-seg p seg)) (rest segs))))))
+          (let ((linked (reduce (lambda (a seg) (or a (seg-linked? seg))) false segs)))
+            (reduce
+              (lambda (acc i)
+                (let ((seg (nth segs i)))
+                  (if (off-seg? seg)
+                      acc
+                      (append acc
+                        (list (merge (prepare-seg p (if linked
+                                                        (cons (first seg) (lane-words segs i (list) base))
+                                                        seg))
+                                     :lane i :voice vi))))))
+              (list) (range 0 (len segs))))))))
+
+;; ── who steals from whom ────────────────────────────────────────────────────
+
+(def route-steals (r) (or-default (get (get r :opts) :steals) (list)))
+
+(def steal-party? (r)
+  (and (= (get r :kind) :note) (not (declares? r))))
+
+;; s's steal word that covers v, or nil
+(def steal-spec-for (s v)
+  (reduce (lambda (hit sp)
+            (if (not (= hit nil))
+                hit
+                (let ((tg (get sp :target)))
+                  (if (or (= tg :all)
+                          (and (number? tg)
+                               (and (= (get s :voice) (get v :voice)) (= tg (get v :lane)))))
+                      sp
+                      nil))))
+          nil (route-steals s)))
+
+;; route si takes from route vi: it has a steal word for it, and vi has none
+;; back or sits above it
+(def steals-from? (routes si vi)
+  (let ((s (nth routes si)) (v (nth routes vi)))
+    (and (not (= si vi))
+         (and (steal-party? s)
+              (and (steal-party? v)
+                   (and (not (= (steal-spec-for s v) nil))
+                        (or (= (steal-spec-for v s) nil) (> si vi))))))))
+
+;; an order with every thief before its victims; a ring breaks at the last
+(def steal-order-walk (routes left acc)
+  (if (empty? left)
+      acc
+      (let ((free (keep (lambda (vi)
+                          (not (reduce (lambda (a si) (or a (steals-from? routes si vi))) false left)))
+                        left)))
+        (let ((pick (if (empty? free) (last* left) (first free))))
+          (steal-order-walk routes (keep (lambda (i) (not (= i pick))) left)
+                            (append acc (list pick)))))))
+
+(def route-thieves (routes vi)
+  (let ((v (nth routes vi)))
+    (reduce (lambda (acc si)
+              (if (steals-from? routes si vi)
+                  (let ((s (nth routes si)))
+                    (let ((sp (steal-spec-for s v)))
+                      (append acc (list (dict :ri si :scope (get sp :scope)
+                                              :bare (= (get sp :target) :all)
+                                              :p (get s :p) :track (get s :track))))))
+                  acc))
+            (list) (range 0 (len routes)))))
+
+;; routes → routes with opts :thieves (and :steal-gate for a route some
+;; victim reads holds from); route 0 carries the play order
+(def with-steals (routes)
+  (if (not (reduce (lambda (a r) (or a (not (empty? (route-steals r))))) false routes))
+      routes
+      (let ((out (map (lambda (vi)
+                        (let ((v (nth routes vi)))
+                          (merge v :opts
+                            (merge (get v :opts)
+                                   :thieves (route-thieves routes vi)
+                                   :steal-gate (member? :gate (map (lambda (sp) (get sp :scope))
+                                                                   (route-steals v)))))))
+                      (range 0 (len routes)))))
+        (set-nth out 0 (merge (first out)
+                              :play-order (steal-order-walk routes (range 0 (len routes)) (list)))))))
 
 ;; a voice line is a list whose own top level contains a `->`
 (def voice-line? (x)
@@ -3312,13 +3654,16 @@
 ;; per route even when routes share a pattern and words.
 (def prepare (body)
   (let ((routes (if (voice-line? (first body))
-                    (reduce (lambda (acc l) (append acc (prepare-voice l))) (list) body)
-                    (prepare-voice body))))
-    (map (lambda (i)
-           (let ((r (seed-route (nth routes i) i)))
-             (merge r :opts (merge (or-default (get r :opts) (dict))
-                                   :rkey (str "r" i ":") :rindex (str i)))))
-         (range 0 (len routes)))))
+                    (reduce (lambda (acc vi)
+                              (append acc (prepare-voice (nth body vi) (len acc) vi)))
+                            (list) (range 0 (len body)))
+                    (prepare-voice body 0 0))))
+    (with-steals
+      (map (lambda (i)
+             (let ((r (seed-route (nth routes i) i)))
+               (merge r :opts (merge (or-default (get r :opts) (dict))
+                                     :rkey (str "r" i ":") :rindex (str i) :ri i))))
+           (range 0 (len routes))))))
 
 ;; a route with row processes and no (seed n) word seeds its hash with its
 ;; index; the seed joins the id so equal routes keep their own coins and cells
@@ -3353,9 +3698,16 @@
 (def declares? (r) (string? (get (get r :opts) :declare)))
 
 (def play-routes (body)
-  (let ((routes (prepared body)))
-    (sum* (map play-route (append (keep declares? routes)
-                                  (keep (lambda (r) (not (declares? r))) routes))))))
+  (let ((all (prepared body)))
+    (if (empty? all)
+        0
+        ;; with steal words: every thief before its victims (with-steals)
+        (let ((order (get (first all) :play-order)))
+          (let ((routes (if (= order nil) all (map (lambda (i) (nth all i)) order))))
+            (do (set! steal-log (list))
+                (set! steal-cycles (list))
+                (sum* (map play-route (append (keep declares? routes)
+                                              (keep (lambda (r) (not (declares? r))) routes))))))))))
 
 ;; one tick in `mode` (docs/jaki-trig-modes-spec.md §2); 0 when gated shut
 (def run-in (mode body)

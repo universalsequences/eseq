@@ -300,7 +300,8 @@ name) (label detail :color :dim)))"
             "selected", "selected-background-color", "selected-border-color", "muted",
             "muted-background-color", "muted-border-color", "drop-hover-background-color",
             "drop-hover-border-color", "drag-type", "drag-payload", "drag-modifier",
-            "capture-pointer", "focusable", "key", "on-click", "on-right-click",
+            "capture-pointer", "hidden-drag", "focusable", "focus-decoration", "focus-color",
+            "key", "on-click", "on-right-click",
             "on-double-click", "on-drag", "on-drop", "on-mouse-down", "on-mouse-up",
             "drop-types", "drop-meta", "macro-owned", "plock-any",
         ]
@@ -478,6 +479,22 @@ name) (label detail :color :dim)))"
             })
             .into_iter()
             .collect()
+    }
+
+    /// `:focus-decoration :corners` marks a focused box with the corner
+    /// brackets knobs use (`:focus-color` tints them) instead of the default
+    /// container highlight: the box is one control made of several widgets.
+    fn focus_decoration(&self, node: &LayoutNode) -> super::FocusDecoration {
+        match node.props.get("focus-decoration") {
+            Some(Value::Keyword(kind) | Value::String(kind)) if kind == "corners" => {
+                super::FocusDecoration::Corners(super::FocusCornerStyle::new(resolve_named_color(
+                    &node.props,
+                    "focus-color",
+                    super::FocusCornerStyle::DEFAULT_COLOR,
+                )))
+            }
+            _ => super::FocusDecoration::None,
+        }
     }
 
     fn begin_gesture(

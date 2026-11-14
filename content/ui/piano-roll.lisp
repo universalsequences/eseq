@@ -25,6 +25,7 @@
 (import eseq.seq-step-tabs)
 (import eseq.track-collapse)
 (import eseq.audio-clip)
+(import eseq.effects.pad-variants)
 (import eseq.view-kit :refer (nothing listed? color-rgba))
 (import eseq.kinds :refer (track piano-roll pitch-min pitch-max focus-step-params
                            focus-step-value set-focus-step! lock-param! unlock-param!
@@ -43,6 +44,12 @@
 ;; The note grid's view: the time window (start, duration, in steps), the
 ;; first lane shown and the lane height (cells), the cursor, the marquee
 ;; being drawn (the timeline's event), the length a new note gets.
+;; `lane-center`: a fit's target lane, which the timeline centers in its
+;; real height (the pane is ratio-sized and its divider remembered, so this
+;; file cannot know it); the first scroll or lane zoom adopts the scroll the
+;; timeline actually shows and clears it.
+;; `pressed-lane`: the keyboard-gutter key held down (sounding, and drawn
+;; pressed), -1 for none: a bound float, which has no nil.
 ;; `arrangement`: the piano roll was entered from arrangement clip gestures,
 ;; so it shows the selected clip (or that none is). `fit`: the track whose
 ;; notes the view fits to once the piano roll shows them. Re-evaluating this
@@ -52,20 +59,24 @@
   :state ((start 0)
           (duration 10.6667)
           (lane-scroll 36)
+          (lane-center :number :default nil)
           (lane-height 0.5)
           (cursor 0)
           (marquee :any :default nil)
           (create-duration 1)
           (arrangement false)
-          (fit track :default nil)))
+          (fit track :default nil)
+          (pressed-lane -1)))
 
 ;; The automation lane's parameter: a step param by name (`step`), or a
 ;; device param (`param`) or rack macro (`macro`) of the piano roll's track,
 ;; which shows instead while set and still on that track. `edit-value`: the
-;; value being dragged (the axis readout).
+;; value being dragged (the axis readout). `shown`: whether the lane shows
+;; above its footer (the footer's lane toggle).
 (def-kind lane-view
   :key ()
-  :state ((step "velocity")
+  :state ((shown true)
+          (step "velocity")
           (param param :default nil)
           (macro rack-macro :default nil)
           (edit-value :number :default nil)))
@@ -78,8 +89,16 @@
 (def header-height 2)
 ;; Automation lane row under the note grid (bead eseq-2k9p.21): a border
 ;; line over the lane's body.
-(def automation-height 3.5)
+(def automation-height 3.0)
 (def lane-body-height (- automation-height 0.08))
+;; The low-key row under it (Ableton's): the lane toggle and the picker.
+(def lane-footer-height 1.0)
+;; The note grid's keyboard strip (its :sidebar-width), which the lane's
+;; axis and the footer's leading space match.
+(def lane-gutter-width 5)
+;; What sits under the note grid: the footer, and the lane while shown.
+(def lower-height ()
+  (+ lane-footer-height (if lane-view.shown automation-height 0)))
 (def view-padding 1)
 (def min-view-duration 4)
 (def max-view-duration 256)
@@ -118,7 +137,7 @@
   (max 1
     (- eseq.seq-step-tabs/piano-roll-default-pane-height
       header-height
-      automation-height)))
+      (lower-height))))
 
 (def visible-lane-count ()
   (/ (content-height) piano-roll-view.lane-height))
@@ -127,7 +146,15 @@
   (max 0 (- (len lanes) (visible-lane-count))))
 
 (def set-lane-scroll (scroll)
+  (set! piano-roll-view.lane-center nil)
   (set! piano-roll-view.lane-scroll (clamp scroll 0 (max-lane-scroll))))
+
+;; The scroll the timeline was showing when it sent `event` (it differs from
+;; lane-scroll while a lane-center is set).
+(def shown-lane-scroll (event)
+  (if (= piano-roll-view.lane-center nil)
+    piano-roll-view.lane-scroll
+    (event-num event :lane-scroll piano-roll-view.lane-scroll)))
 
 (def action-duration (event)
   (max 0.03125
@@ -164,11 +191,12 @@
 
 (def zoom-lanes (event)
   (let ((v piano-roll-view)
-        (anchor (event-num event :anchor-lane v.lane-scroll))
+        (shown (shown-lane-scroll event))
+        (anchor (event-num event :anchor-lane shown))
         (height v.lane-height)
         (next (clamp (* height (event-num event :factor 1)) 0.5 6)))
     (set! v.lane-height next)
-    (set-lane-scroll (- anchor (* (- anchor v.lane-scroll) (/ height next))))))
+    (set-lane-scroll (- anchor (* (- anchor shown) (/ height next))))))
 
 ;; To an absolute position (`:view-start`, `:lane-scroll`) or by a delta.
 (def scroll-view (event)
@@ -176,8 +204,12 @@
     (set-view-start
       (event-num event :view-start (+ v.start (event-num event :delta-time 0)))
       v.duration)
-    (set-lane-scroll
-      (event-num event :lane-scroll (+ v.lane-scroll (event-num event :delta-lanes 0))))))
+    ;; A purely horizontal scroll leaves the lanes (and a fit's lane-center)
+    ;; alone, so it stays a repaint.
+    (unless (and (= (get event :lane-scroll) nil) (= (event-num event :delta-lanes 0) 0))
+      (set-lane-scroll
+        (event-num event :lane-scroll
+          (+ (shown-lane-scroll event) (event-num event :delta-lanes 0)))))))
 
 (def note-end (n) (+ n.start n.length))
 (def note-lane (n) (- pitch-max n.pitch))
@@ -195,7 +227,8 @@
 
 (def fit-vertical (min-lane max-lane)
   (let ((center (/ (+ min-lane max-lane 1) 2)))
-    (set-lane-scroll (- center (/ (visible-lane-count) 2)))))
+    (set-lane-scroll (- center (/ (visible-lane-count) 2)))
+    (set! piano-roll-view.lane-center center)))
 
 (def fit-notes-to-view ()
   (let ((notes piano-roll.notes))
@@ -256,12 +289,51 @@
   (when (= piano-roll.focus-kind "pattern")
     (focus-command "focus-finish-num-steps" (dict))))
 
+;; ── Keyboard gutter audition ──────────────────────────────────────────────
+;; Pressing a piano key sounds the track at that pitch until the release;
+;; gliding along the keys moves the held note, like a keyboard glissando.
+;; The pitch is the note's own (semitones from C4), which is the live
+;; keyboard's transpose, so a drum rack plays the pad on that row.
+(def audition-note (pitch on)
+  (let ((t piano-roll.track))
+    (when t
+      (host-command "audition-track-note" (dict :track t.index :pitch pitch :on on)))))
+
+(def release-audition ()
+  (let ((held piano-roll-view.pressed-lane))
+    (when (>= held 0)
+      (audition-note (- pitch-max held) false)
+      (set! piano-roll-view.pressed-lane -1))))
+
+(def press-audition (lane)
+  (unless (= lane piano-roll-view.pressed-lane)
+    (release-audition)
+    (audition-note (- pitch-max lane) true)
+    (set! piano-roll-view.pressed-lane lane)))
+
+;; BS / Delete in the piano roll: the selected notes, whether or not the note
+;; grid has keyboard focus (Cmd+A selects them from any panel and focuses
+;; the piano roll's window, not its grid). No selection declines the key so
+;; the inherited step keymap still gets it.
+(def delete-selected-notes ()
+  (let ((ids (map |n| n.item (filter |n| n.selected piano-roll.notes))))
+    (if (empty? ids)
+      false
+      (do (piano-roll-action (dict :type :delete-items :ids ids))
+          true))))
+
 (def piano-roll-action (event)
   (match event.type
     :scroll-view (scroll-view event)
     :zoom-view (zoom-view event)
     :zoom-lanes (zoom-lanes event)
-    :set-cursor (set! piano-roll-view.cursor event.time)
+    ;; A press on the keyboard gutter carries a lane, not a time: it plays
+    ;; the key and leaves the cursor where it was.
+    :set-cursor (if event.sidebar
+                  (press-audition event.lane)
+                  (set! piano-roll-view.cursor event.time))
+    :drag-sidebar (press-audition event.lane)
+    :release-sidebar (release-audition)
     ;; A take's band is read-only here (its Length picker edits it).
     :resize-content-length (unless (take-focus?) (set-focus-length event.length))
     :finish-resize-content-length (unless (take-focus?) (finish-focus-length))
@@ -295,10 +367,16 @@
       (set! piano-roll-view.marquee nil)
       (seq-piano-roll-action (dict :type :select :ids items)))))
 
-;; A note as the timeline draws it, by the id the editor addresses.
+;; A note as the timeline draws it, by the id the editor addresses. A note
+;; on a step that plays a drum-rack pad variant takes the variant's colour
+;; and names it (docs/rack-pad-variants-spec.md §6.3).
 (def note-item (n)
-  (dict :id n.item :lane (note-lane n) :start n.start :end (note-end n)
-        :selected n.selected :label n.label))
+  (if (> n.pad-variant 0)
+    (dict :id n.item :lane (note-lane n) :start n.start :end (note-end n)
+          :selected n.selected :label (str n.label " v" n.pad-variant)
+          :color (eseq.effects.pad-variants/pad-variant-rgb n.pad-variant))
+    (dict :id n.item :lane (note-lane n) :start n.start :end (note-end n)
+          :selected n.selected :label n.label)))
 
 (def piano-roll-timeline (t)
   (let ((v piano-roll-view))
@@ -308,10 +386,11 @@
       ;; :width 0 :flex 1 an h-stack child lays out against an INFINITE max
       ;; width.
       (timeline
+        :key "note-grid-timeline"
         :width :fill
         :height :fill
         :focusable true
-        :sidebar-width 5
+        :sidebar-width lane-gutter-width
         :sidebar-style :piano
         :header-height header-height
         :time-ruler (dict :mode :bars-beats :beats-per-bar 4)
@@ -320,6 +399,7 @@
         :tool :pointer
         :playhead-time #'piano-roll.playhead
         :cursor-time #'piano-roll-view.cursor
+        :pressed-lane #'piano-roll-view.pressed-lane
         :lanes lanes
         :items (map note-item piano-roll.notes)
         :selection-rect v.marquee
@@ -337,16 +417,21 @@
         :window-span piano-roll.window-span
         :window-repeat piano-roll.window-repeat
         :lane-scroll v.lane-scroll
+        :lane-center v.lane-center
         :lane-height v.lane-height
         :scroll-viewport-height (- eseq.seq-step-tabs/piano-roll-default-pane-height
-                                  automation-height)
+          (lower-height))
         :snap 1
+        ;; Twice the readable zoom-adaptive grid at every zoom (drawing and
+        ;; snapping); :grid-density alone is undone by the readability floor.
+        :grid-subdivide 2
         :min-duration 0.03125
         :create-duration v.create-duration
-        :move-snap-mode :alignment-helper
+        :move-snap-mode :mouse-delta
         :resize-snap :grid
         :snap-mode :floor
         :resize-snap-mode :alignment-helper
+        :resize-direction-lock true
         :scroll-mode :smooth
         :on-action piano-roll-action))))
 
@@ -360,7 +445,7 @@
 ;; "piano-roll-" prefix is dropped: "panel-start" renders as
 ;; "eseq.piano-roll/panel-start".
 
-(def clip-panel-width 24)
+(def clip-panel-width 17)
 
 ;; A dim caption left of its control.
 (def panel-row (name body &key (gap 0.3))
@@ -398,13 +483,12 @@
 
 (def clip-panel-rows (c)
   (v-stack :gap 0.2
-    (h-stack
       (panel-row "Start"
         (clip-picker "panel-start" c.start 0 512
           |v| (unless (= v c.start) (resize-clip v c.end))))
       (panel-row "End"
         (clip-picker "panel-end" c.end 0 512
-          |v| (unless (= v c.end) (resize-clip c.start v)))))
+          |v| (unless (= v c.end) (resize-clip c.start v))))
     (panel-row "Offset"
       (clip-picker "panel-offset" (shown-offset c.offset)
         (if (pinned-pattern?) -256 0) 256
@@ -421,9 +505,9 @@
   (box :height :fill
     (v-stack
       :height :fill
-      :padding 0 :width clip-panel-width
+      :width clip-panel-width
       (box
-        :height 1
+        :height 1.2
         :width :fill
         (h-stack
           :gap 0
@@ -431,7 +515,7 @@
             :key (str "pianoroll-label-content-" t.index)
             :icon (eseq.track-collapse/instrument-icon t.instrument-type)
             :width clip-panel-width
-            :height 1.0
+            :height 1.2
             :padding 0
             :corner-radius 0
             :font-size 10
@@ -442,14 +526,15 @@
             :shadow-color :transparent
             :color :black
             :bg :transparent)))
-      (box :width :fill :height 1.0
+      (box :width :fill :height 1.2
         :background-color :mixer-strip-selected-bg
-        (h-stack (box :width 0.5)
+        (h-stack :height 1.2 (box :width 0.5)
           (label piano-roll.focus-label
             :key "panel-source"
+            :height 1.2
+            :v-align :center
             :font-size 10 :color :white :bg :transparent)))
-      (box :padding 1 :height 5
-        :background-color :mixer-strip-bg
+      (box :padding 1 :height 6
         :width clip-panel-width
         (v-stack :gap 0.25
           (let ((c piano-roll.clip))
@@ -638,50 +723,81 @@
 (def lane-border ()
   (box :width :fill :height 0.08 :background-color :mixer-strip-border))
 
-;; Lane header: mirrors the clip panel's column (dim caption, white value)
-;; so the picker reads as part of the panel rather than a floating control.
-(def automation-header (t lane)
-  (box :width (+ clip-panel-width 5) :height automation-height
+;; Left of the lane, under the keyboard: the range axis.
+(def automation-header (lane)
+  (box :width lane-gutter-width :height automation-height
     :background-color :mixer-strip-bg
     (v-stack :gap 0 :height :fill :width :fill
       (lane-border)
-      (h-stack :gap 0 :height lane-body-height :width :fill
-        (box :padding 1 :height lane-body-height :width clip-panel-width
-          :v-align :center
-          (panel-row "Lane"
-            (dropdown
-              :key "automation-param"
-              :value (get lane :label)
-              :options (map |o| (get o :label) (lane-options t))
-              :on-change |label| (select-lane t label)
-              :badge-color :transparent
-              :background-color :buffer-bg
-              :width 12 :height 1.3 :font-size 10)
-            :gap 0.5))
-        (automation-axis lane)))))
+      (automation-axis lane))))
+
+(def automation-lane-row (t lane)
+  (h-stack :width :fill :gap 0.0 :height automation-height
+    (automation-header lane)
+    (box 
+      :height automation-height :flex 1 :width 0
+      (v-stack :gap 0 :height :fill :width :fill
+        (lane-border)
+        (automation-lane
+          :key "automation-lane"
+          :width :fill
+          :height lane-body-height
+          :points (get lane :points)
+          :min (get lane :min)
+          :max (get lane :max)
+          :default (get lane :default)
+          :increment (get lane :increment)
+          :view-start #'piano-roll-view.start
+          :view-duration #'piano-roll-view.duration
+          :color t.color
+          :base-color (list 0.55 0.55 0.55)
+          :on-change automation-action)))))
+
+;; Under the lane, Ableton-style: a small toggle that shows or hides the
+;; lane (lit in the track color while shown), then the lane's parameter as
+;; plain text with a chevron.
+(def lane-footer (t lane)
+  (box :width :fill :height lane-footer-height :background-color :mixer-strip-bg
+    (v-stack :gap 0 :width :fill :height lane-footer-height
+      (lane-border)
+      (h-stack :gap 0 :width :fill :height (- lane-footer-height 0.08) :align :center
+        ;; Under the keyboard/axis, so the toggle starts where the lane does.
+        (box :width lane-gutter-width :height 1)
+        (button ""
+          :key "automation-lane-toggle"
+          :icon :lane
+          ;; Clicking either footer control keeps the keys on the note grid.
+          :focusable false
+          :width 2.2 :height 1.05 :corner-radius 4 :padding 0
+          :background-color :transparent :color :dim
+          :border-color :mixer-strip-selected-bg
+          :highlight-color :transparent :shadow-color :transparent
+          :active lane-view.shown
+          :active-background-color t.color
+          :active-color (rgba 0.1 0.1 0.1 1)
+          :on-click |e| (set! lane-view.shown (not lane-view.shown)))
+        (box :width 0.4 :height 1)
+        (dropdown
+          :key "automation-param"
+          :focusable false
+          :value (get lane :label)
+          :options (map |o| (get o :label) (lane-options t))
+          :on-change |label| (select-lane t label)
+          :badge false
+          :bg-color :transparent
+          :border-color :transparent
+          :text-color :fg
+          :chevron-color :dim
+          :height 1.05 :font-size 9)))))
 
 (def automation-row (t)
-  (let ((lane (current-lane t)))
-    (h-stack :width :fill :gap 0.0 :height automation-height
-      (automation-header t lane)
-      (box :height automation-height :flex 1 :width 0
-        (v-stack :gap 0 :height :fill :width :fill
-          (lane-border)
-          (automation-lane
-            :key "automation-lane"
-            :width :fill
-            :height lane-body-height
-            :points (get lane :points)
-            :min (get lane :min)
-            :max (get lane :max)
-            :default (get lane :default)
-            :increment (get lane :increment)
-            :view-start #'piano-roll-view.start
-            :view-duration #'piano-roll-view.duration
-            :color t.color
-            :base-color (list 0.55 0.55 0.55)
-            :background :buffer-bg
-            :on-change automation-action))))))
+  ;; The footer needs only the label: a hidden lane computes no points.
+  (let ((target (lane-target t)))
+    (v-stack :width :fill :gap 0.0 :height (lower-height)
+      (if lane-view.shown
+        (automation-lane-row t (merge target :points (lane-points target)))
+        (nothing))
+      (lane-footer t target))))
 
 ;; The clip panel, the note grid and the automation row are subtrees: a note
 ;; edit re-renders the grid (and the lane), a lane pick the row alone.
@@ -691,27 +807,40 @@
     ;; (docs/audio-tracks-spec.md §8.2) in the piano roll's place.
     (if (eseq.audio-clip/audio-track? t)
       (subtree :key "audio-clip" (eseq.audio-clip/editor t))
-    (if (and piano-roll-view.arrangement (not piano-roll.clip))
-      (box
-        :key "no-clip-selected"
-        :width :fill :height :fill
-        :h-align :center :v-align :center
-        (label "No clip selected"
-          :key "no-clip-selected-label"
-          :font-size 11 :color :dim :bg :transparent))
-      (if t
-        (v-stack :width :fill :gap 0.0 :height :fill
-          (box :width :fill :flex 1 :height 0
-            (h-stack :width :fill :gap 0.0 :height :fill
-              (subtree :key "clip-panel" (clip-panel t))
-              (subtree :key "note-grid" (piano-roll-timeline t))))
-          (subtree :key "automation-row" (automation-row t)))
-        (nothing))))))
+      (if (and piano-roll-view.arrangement (not piano-roll.clip))
+        (box
+          :key "no-clip-selected"
+          :width :fill :height :fill
+          :h-align :center :v-align :center
+          (label "No clip selected"
+            :key "no-clip-selected-label"
+            :font-size 11 :color :dim :bg :transparent))
+        (if t
+          ;; The clip panel runs the buffer's full height; the grid, the
+          ;; lane and its footer stack to its right.
+          (h-stack :width :fill :gap 0.0 :height :fill
+            (subtree :key "clip-panel" (clip-panel t))
+            (box :width 0.2 :height :fill :background-color :border-active)
+            (box :flex 1 :width 0 :height :fill
+              (v-stack :width :fill :gap 0.0 :height :fill
+                (box :width :fill :flex 1 :height 0
+                  (h-stack :width :fill :gap 0.0 :height :fill
+                    (subtree :key "note-grid" (piano-roll-timeline t))))
+                (subtree :key "automation-row" (automation-row t)))))
+          (nothing))))))
 
-;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
-;; The audio clip editor's mode: sequencer keys plus the arrangement region
-;; keys while an audio track is being edited (eseq.audio-clip).
-(set-buffer-mode-for "*piano-roll*" "audio-clip-mode")
+;; Widget-only buffer: the piano roll's own keys over the audio clip editor's
+;; mode (sequencer keys plus the arrangement region keys while an audio track
+;; is being edited, eseq.audio-clip).
+;; Spelled qualified: a bare mode name auto-qualifies to THIS module
+;; (eseq.piano-roll/…), and a mode that does not exist left the buffer with
+;; no keymap at all — no musical typing, no arrows, no Backspace.
+(define-mode "piano-roll-mode" :read-only true :live-keys true
+  :inherit "eseq.audio-clip/audio-clip-mode")
+(mode-bind-key "piano-roll-mode" "BS" "delete-selected-notes")
+(mode-bind-key "piano-roll-mode" "Delete" "delete-selected-notes")
+(set-buffer-mode-for "*piano-roll*" "piano-roll-mode")
 (effect-buffer "*piano-roll*"
-  (box :key "piano-roll-panel" :width :fill :height :fill
+  ;; Opaque, so the buffer's status text never shows through a gap.
+  (box :key "piano-roll-panel" :width :fill :height :fill :background-color :buffer-bg
     (buffer-content)))

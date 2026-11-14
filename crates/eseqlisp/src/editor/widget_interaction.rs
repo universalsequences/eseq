@@ -1586,7 +1586,7 @@ impl Editor {
         });
         crate::widget_render::scroll::set_current_event_scroll_offset(None);
         if let Some((node, gesture_data)) = gesture_node {
-            let hidden_drag = widget_render::widget_hidden_drag(&node.widget_type);
+            let hidden_drag = widget_render::node_hidden_drag(&node);
             self.active_leaf_mut().active_widget_gesture = Some(WidgetGesture {
                 widget_id: node.widget_id,
                 node,
@@ -2225,6 +2225,27 @@ impl Editor {
             callback,
             args: vec![drop_event(&target, &drag_type, payload, hit_col, hit_row)],
         })
+    }
+
+    /// Apply a `grab-pointer` a handler asked for during the event just
+    /// dispatched: the gesture in progress becomes a captured one (drags go
+    /// to its widget instead of hit-testing across boxes) and, when asked,
+    /// a hidden-cursor one (the app loop starts the hidden drag on its next
+    /// pass). Without a gesture the request is dropped.
+    pub(super) fn apply_pointer_grab_request(&mut self) {
+        let Some(hide) = widget_render::take_pointer_grab_request() else {
+            return;
+        };
+        if let Some(gesture) = self.active_leaf_mut().active_widget_gesture.as_mut() {
+            let box_pointer = matches!(
+                gesture.gesture_data.as_ref(),
+                Some(Value::String(kind)) if kind == "box-pointer"
+            );
+            if box_pointer {
+                gesture.gesture_data = Some(Value::String("capture-pointer".to_string()));
+            }
+            gesture.hidden_drag |= hide;
+        }
     }
 
     /// True while a pointer gesture on a hidden-cursor-drag widget (knob,

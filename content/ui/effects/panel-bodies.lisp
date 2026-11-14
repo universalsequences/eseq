@@ -329,11 +329,15 @@
           (h-stack :debug-name "instrument-keys-inline-body" :height :fill :gap 0.45 :align :stretch
             (instrument-key-lock-control-panel inst)
             body)
+          (if (eseq.effects.pad-variants/pads-tab-active?)
+          (h-stack :debug-name "instrument-pads-inline-body" :height :fill :gap 0.45 :align :stretch
+            (eseq.effects.pad-variants/pads-tab-panel inst)
+            body)
           (if instrument-view.mods-open
           (h-stack :debug-name "instrument-mods-inline-body" :height :fill :gap 0.45 :align :stretch
             (im/mod-control-panel inst)
             body)
-          body))))))
+          body)))))))
 
 (def midi-fx-panel-body (fx)
   (do

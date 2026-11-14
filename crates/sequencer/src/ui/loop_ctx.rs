@@ -143,6 +143,17 @@ pub(crate) struct MeterCache {
     pub(crate) last_voice_count_log_at: Instant,
 }
 
+/// When the last backend input event arrived. A newtype only so
+/// `FrameDiffState` can keep its test-only `Default` (`Instant` has none).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LastInputAt(pub(crate) Instant);
+
+impl Default for LastInputAt {
+    fn default() -> Self {
+        Self(Instant::now())
+    }
+}
+
 /// Previous-frame values the reactive tick diffs against to decide which
 /// reactives to republish.
 #[cfg_attr(test, derive(Default))]
@@ -202,6 +213,9 @@ pub(crate) struct FrameDiffState {
     /// preset index generation, and the project's engines.
     pub(crate) palette_search_library: (u64, u64),
     pub(crate) palette_search_engines: Vec<String>,
+    /// The last backend event (key, pointer, scroll): the palette's search
+    /// walk is warmed only once input has been quiet for a moment.
+    pub(crate) last_input_at: LastInputAt,
     /// Arming/clearing a delete target republishes only the delete-target
     /// read surfaces (version reactive + mixer/rack binding fields) off this
     /// counter — it deliberately does NOT ride `ui_epoch`.
@@ -307,7 +321,7 @@ pub(crate) struct SharedHandles {
     pub(crate) roll_record: Arc<Mutex<RollRecordBuffer>>,
     /// Live step-param printing latch (bead eseq-jc9): *step* buffer param
     /// touches while playing+recording arm it; the reactive tick prints the
-    /// latched values onto passing trigger steps.
+    /// values the scheduler played on each latched step (heard log).
     pub(crate) step_print: Arc<Mutex<StepPrintState>>,
     pub(crate) keyboard_octave: Arc<std::sync::atomic::AtomicI32>,
     pub(crate) sample_browser: Rc<RefCell<DebouncedSampleBrowser>>,

@@ -68,7 +68,14 @@ jobs:
         # optional: glyph metrics come from `fontdb`'s system font database and
         # several layout tests measure against that exact family.
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned, not `stable`: Rust 1.100.0 (2026-11-09) rejects objc2 0.4.1,
+      # which winit 0.29 still pulls in on macOS (winit -> icrate -> block2
+      # 0.3), so `stable` broke the macOS job with no change on our side.
+      # 1.93.1 is the toolchain the suite is developed and validated on.
+      # Unpin once winit is past 0.29.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.1
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -92,7 +99,9 @@ jobs:
         run: cargo check --workspace --all-targets --features eseqlisp/wgpu,eseqlisp/capture-harness
 
       - name: Test
-        run: cargo nextest run --workspace --features eseqlisp/wgpu,eseqlisp/capture-harness
+        run: cargo nextest run --workspace --no-fail-fast --features eseqlisp/wgpu,eseqlisp/capture-harness
+        # --no-fail-fast: one failing test used to cancel the other 7,500, so
+        # a run reported the first Linux problem and hid the rest.
         # RUST_MIN_STACK comes from .cargo/config.toml; do not set it here.
 
   macos-check:
@@ -103,7 +112,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned, not `stable`: Rust 1.100.0 (2026-11-09) rejects objc2 0.4.1,
+      # which winit 0.29 still pulls in on macOS (winit -> icrate -> block2
+      # 0.3), so `stable` broke the macOS job with no change on our side.
+      # 1.93.1 is the toolchain the suite is developed and validated on.
+      # Unpin once winit is past 0.29.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.1
 
       - uses: Swatinem/rust-cache@v2
         with:

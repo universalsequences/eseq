@@ -51,6 +51,7 @@
 (export processes-buffer-auto-split
         dock-target
         showing?
+        full-width-tab-showing?
         docks?
         register-node-inspector
         inspected-slot-id
@@ -90,6 +91,15 @@
 
 (def showing? ()
   (if (and processes-buffer-auto-split (not (= (dock-target) nil))) true false))
+
+;; A full-width kind's tab (eseq.seq-step-tabs/full-width-kinds) with no
+;; node editor open: there is no dock, and *step*/*track* go too, so the
+;; tab takes the whole column. The dock wins while a node editor is open.
+(def full-width-tab-showing? ()
+  (let ((inst (if (and eseq.seq-step-tabs/full-width-instance-tabs (not (showing?)))
+                (visible-instance)
+                nil)))
+    (if (and inst (eseq.seq-step-tabs/full-width-kind? inst.kind)) true false)))
 
 (def same-target? (graph node)
   (let ((target (dock-target)))
@@ -172,9 +182,9 @@
       nil)))
 
 ;; Re-lay the right column when the dock appears, goes, or its code tile
-;; changes: a node expanded or collapsed, the main tab switched (its
-;; :on-select moves step-panel-buffer), a card selected, code shown or
-;; hidden. `showing-seen` is a plain global so the write does not re-trigger
+;; changes, or a full-width tab comes or goes: a node expanded or collapsed,
+;; the main tab switched (its :on-select moves step-panel-buffer), a card
+;; selected, code shown or hidden. `showing-seen` is a plain global so the write does not re-trigger
 ;; this observer; the first run (at load, before a layout exists) only
 ;; records.
 (def showing-seen nil)
@@ -184,7 +194,7 @@
     (let ((target (dock-target)))
       (let ((inst (nth target 0)))
         (str "dock|" inst.id "|" (nth target 1) "|" (or (code-slot-id) ""))))
-    "plain"))
+    (if (full-width-tab-showing?) "wide" "plain")))
 
 (def relayout ()
   (eseq.seq-layout/refresh-current-layout))

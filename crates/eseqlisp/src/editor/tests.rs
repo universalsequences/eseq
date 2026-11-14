@@ -6304,6 +6304,29 @@ fn edit_menu_copy_paste_delete_reach_a_focused_patcher() {
     );
 }
 
+/// The clipboard chord off macOS is Ctrl-Shift-C/V, which is what Edit >
+/// Copy/Paste send there; the patcher has to bind it on every platform.
+#[test]
+fn ctrl_shift_copy_paste_reach_a_focused_patcher() {
+    let path = temp_file_path("patcher-ctrl-shift-clipboard");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+    let mut editor = real_patcher_lisp_editor(&[&path]);
+    let patcher = patcher_layout_nodes(&editor).remove(0);
+    editor.set_focused_widget(patcher.clone());
+    crate::widget_render::patcher::select_first_patcher_node_for_test(&patcher)
+        .expect("a node to select");
+    let before = crate::widget_render::patcher::patcher_visible_node_count_for_test(&patcher);
+    let chord = KeyModifiers::CONTROL.union(KeyModifiers::SHIFT);
+
+    assert!(editor.deliver_key_to_focused_widget(KeyEvent::new(KeyCode::Char('c'), chord)));
+    assert!(editor.deliver_key_to_focused_widget(KeyEvent::new(KeyCode::Char('v'), chord)));
+    assert_eq!(
+        crate::widget_render::patcher::patcher_visible_node_count_for_test(&patcher),
+        before + 1,
+        "Ctrl-Shift-V pastes the copied node"
+    );
+}
+
 /// Escape dismisses an error bubble through the Lisp ESC binding. The patcher
 /// refuses Escape outside text entry, so the editor's Escape path must offer
 /// it to :on-focus-key before blurring.
@@ -18073,6 +18096,82 @@ fn knob_number_drag_keeps_changing_past_window_bounds() {
         far < near,
         "out-of-bounds drag must keep moving the knob: {far} vs {near}"
     );
+}
+
+/// A `box` wrapping a composite control (a fader handle beside its meter) opts
+/// into the same hidden-cursor drag with `:hidden-drag`, takes focus as one
+/// region, and — given the press position — nudges its value from where it
+/// was instead of jumping to the pointer.
+#[test]
+fn hidden_drag_box_is_one_focusable_relative_drag_region() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def level (state 0.75))
+                (def press nil)
+                (effect
+                  (box :key "fader" :width 4 :height 4
+                    :capture-pointer true :hidden-drag true
+                    :focusable true :focus-decoration :corners
+                    :on-mouse-down (lambda (e) (set! press (dict :level level :row e.row)))
+                    :on-drag (lambda (e)
+                      (set! level (- (get press :level)
+                                     (/ (- e.row (get press :row)) 4))))
+                    (label "meter")))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 10);
+    editor.update_tile_rects(40, 10);
+
+    assert!(!editor.hidden_drag_gesture_active());
+    // Press near the bottom of the box: an absolute fader would drop to ~0.1.
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 3),
+        1.5,
+        3.5,
+        0,
+    );
+    assert!(
+        editor.hidden_drag_gesture_active(),
+        "pressing a :hidden-drag box should arm the hidden-cursor drag"
+    );
+    assert_eq!(numeric_state(&mut editor, "level"), 0.75, "a press must not move the value");
+    let focused = editor
+        .focused_widget_node()
+        .expect("the press focuses the box");
+    assert_eq!(focused.widget_type, "box");
+
+    // One row down, far outside the box horizontally and vertically later.
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 1, 4),
+        1.5,
+        4.5,
+        0,
+    );
+    assert_eq!(numeric_state(&mut editor, "level"), 0.5);
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 30, 60),
+        30.5,
+        5.5,
+        0,
+    );
+    assert_eq!(
+        numeric_state(&mut editor, "level"),
+        0.25,
+        "the drag stays with the box past its bounds"
+    );
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 5),
+        1.5,
+        5.5,
+        0,
+    );
+    assert!(!editor.hidden_drag_gesture_active());
 }
 
 /// A number picker's default travel is "distance to the content-area top",

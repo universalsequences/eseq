@@ -67,6 +67,13 @@ change. Verify the prerequisite with `cargo nextest --version`; install it with
 reserved for explicitly exhaustive work such as eseq-4tl; see `AGENTS.md` for
 selection examples and runtime policy.
 
+The dev profile is lightly optimized (`[profile.dev]` in `Cargo.toml`) because
+the suite is dominated by tests that boot the real Lisp UI. As of 2026-11-13
+the full workspace runs in 3m41s warm on this Mac (46 minutes unoptimized);
+`docs/test-suite-performance.md` has the numbers. To run the app while
+developing, use `cargo run --profile fast -p sequencer --bin metal_seq`: a
+one-function edit rebuilds in 4-20 s against 1.5-4 minutes for `--release`.
+
 Local environment limitation verified 2026-09-18 against clean `1941c385`:
 `ui::metal_backend::inner::render_dispatch_tests::queued_value_updates_keep_each_frames_pixels_after_cache_eviction`
 fails at `device.newSharedEvent().expect("shared event")` before its ownership

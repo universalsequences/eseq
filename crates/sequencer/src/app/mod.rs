@@ -62,6 +62,7 @@ pub mod project_import;
 #[cfg(test)]
 mod launch_benchmark;
 pub mod rack_grooves;
+pub mod rack_pad_variants;
 mod rack_sequencers;
 mod rack_swap;
 #[cfg(test)]
@@ -1277,6 +1278,14 @@ pub struct App {
     /// during a coalescing drag records its pool pattern here and the
     /// gesture end re-preflights once, instead of per drag frame.
     pub(crate) pending_song_row_invalidation: Option<(usize, crate::sequencer::PatternId)>,
+    /// An open device-value drag has written values the scheduler snapshot
+    /// does not hold yet. Sounding voices hear a drag through the direct
+    /// engine push, but a sequenced trigger resolves its params from the
+    /// snapshot, so the event loop republishes it at a bounded rate
+    /// (`edit::publish_open_gesture_device_values`) instead of only when the
+    /// gesture ends.
+    pub(crate) gesture_scheduler_publish_pending: bool,
+    pub(crate) last_gesture_scheduler_publish: Option<Instant>,
     /// An in-flight drag whose writes go straight to state, committed as one
     /// history entry when its gesture finishes: a process lane slider drag
     /// (the scene structure captured before its first write, see
@@ -2967,6 +2976,10 @@ impl App {
         // their own groove publish a variant each; scenes pick among them by
         // the clip they point at, so a clip launch needs no republish.
         self.state.set_rack_groove_variants(self.rack_groove_variants());
+        // Pad variants ride the same funnel: every pad edit (add, move,
+        // value change) and every membership change lands here
+        // (docs/rack-pad-variants-spec.md §3.3).
+        self.state.set_rack_pad_variants(self.rack_pad_variant_runtime());
         let keys = &self.state.runtime.rack_choke_keys;
         for key in keys.iter() {
             key.store(0, Ordering::Release);
@@ -2976,6 +2989,11 @@ impl App {
                 continue;
             };
             for (pad_idx, pad) in rack.pads.iter().enumerate() {
+                // The runtime choke key is per member track: a member chokes
+                // by its plain pad's group, whatever its variants say.
+                if !pad.is_plain() {
+                    continue;
+                }
                 let Some(choke) = rack.choke_group(pad_idx) else {
                     continue;
                 };
@@ -2991,6 +3009,35 @@ impl App {
                 );
             }
         }
+    }
+
+    /// Every rack member's variant pads as the sequencer state mirrors them:
+    /// member track, variant id and values by param name. Plain pads layer
+    /// nothing and are left out.
+    pub(crate) fn rack_pad_variant_runtime(
+        &self,
+    ) -> Vec<crate::sequencer::pad_variants::RackPadVariantRuntime> {
+        let mut out = Vec::new();
+        for group in &self.groups {
+            let Some(rack) = group.rack.as_ref() else {
+                continue;
+            };
+            for pad in rack.pads.iter().filter(|pad| !pad.is_plain()) {
+                let Some(track) = group.members.get(pad.member).copied() else {
+                    continue;
+                };
+                out.push(crate::sequencer::pad_variants::RackPadVariantRuntime {
+                    track,
+                    variant: pad.variant,
+                    values: pad
+                        .values
+                        .iter()
+                        .map(|(name, value)| (name.clone(), *value))
+                        .collect(),
+                });
+            }
+        }
+        out
     }
 
     pub fn publish_bus_effect_runtime(&self) {
@@ -3229,6 +3276,8 @@ impl App {
             song_held_sources: Vec::new(),
             sound_binding_monitored: Vec::new(),
             pending_song_row_invalidation: None,
+            gesture_scheduler_publish_pending: false,
+            last_gesture_scheduler_publish: None,
             pending_drag: None,
             history_replays: 0,
             focus_step_edits: 0,
