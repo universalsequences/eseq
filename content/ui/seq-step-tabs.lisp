@@ -1,7 +1,7 @@
 ;; Main-panel step-tab registry: layout states, tab records, register/unregister.
 ;; Extracted from ui/main.lisp (module-system spec slice S2), converted in S3b.
 ;;
-;; This is a state/accessor hub: its nine `defstate`s and its tab accessors are
+;; This is a state/accessor hub: its `defstate`s and its tab accessors are
 ;; read and written by flat spelling from ui/seq-panels.lisp, ui/seq-layout.lisp,
 ;; ui/seq-script-picker.lisp, ui/arrangement.lisp, ui/sequencer.lisp,
 ;; ui/transport.lisp and from production Rust (`eval_str` by name in
@@ -39,6 +39,9 @@
         seq-patcher-source-buffer
         seq-patcher-learn-buffer
         seq-registered-step-tabs
+        full-width-instance-tabs
+        def-full-width-kind
+        full-width-kind?
         piano-roll-default-pane-height
         lower-fx-layout-height
         seq-tile-border-width
@@ -82,6 +85,33 @@
 (defstate seq-patcher-source-buffer "")
 (defstate seq-patcher-learn-buffer "")
 (defstate seq-registered-step-tabs '())
+
+;; Full-width kinds: an instance kind whose tab has no use for *step* and
+;; *track* (it edits its own document, not the selected step or track)
+;; takes their column while its tab is the one showing
+;; (eseq.processes-buffer/full-width-tab-showing?). Kinds are named by
+;; their full kind id. The factory ones are listed here rather than
+;; registered by their packages: a package importing this hub drags the
+;; sequencer's state into harnesses that load the package alone. Another
+;; kind joins at event time, late-bound, with no import:
+;;
+;;   (eseq.seq-step-tabs/def-full-width-kind "me/pkg:kind")
+;;
+;; A `defstate`: re-evaluating this file keeps the registrations, and a new
+;; one re-lays the main area (the eseq.processes-buffer observer reads it).
+(defcustom full-width-instance-tabs true
+  :type :bool
+  :doc "Hide *step* and *track* while the main tile shows a tab that does not use them (jaki, neural), giving it the full width.")
+
+(defstate full-width-kinds (list "alez/jaki:jaki" "alez/neural:neural"))
+
+(def def-full-width-kind (kind)
+  (set! full-width-kinds
+    (append (list kind)
+            (filter (lambda (k) (not (= k kind))) full-width-kinds))))
+
+(def full-width-kind? (kind)
+  (> (len (filter (lambda (k) (= k kind)) full-width-kinds)) 0))
 
 ;; Moved home from eseq.piano-roll (eseq-mods.12): the layout hub owning
 ;; this constant lets piano-roll import it instead of this hub reading a

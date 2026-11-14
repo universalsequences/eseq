@@ -95,15 +95,19 @@
 (def border-width eseq.seq-step-tabs/seq-tile-border-width)
 
 ;; The right column: *step* over *track* — or, while a node editor is open
-;; in the main tile, the *processes* dock (processes-dock-layout-spec).
+;; in the main tile, the *processes* dock (processes-dock-layout-spec). A
+;; full-width kind's tab (eseq.seq-step-tabs/full-width-kinds) drops the
+;; column and takes its space.
 (def step-and-track-panel-layout-spec ()
-  (list :cols :gap tile-gap
-    0.78 (eseq.seq-step-tabs/seq-main-step-tile-layout-spec)
-    0.22 (if (procs/showing?)
-      (processes-dock-layout-spec)
-      (list :rows :gap tile-gap
-        0.48 (list :buf "*step*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-width 28 :max-width 28)
-        0.52 (list :buf "*track*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :max-height (track-tile-height) :min-height (track-tile-height) :min-width 28 :max-width 28)))))
+  (if (procs/full-width-tab-showing?)
+    (eseq.seq-step-tabs/seq-main-step-tile-layout-spec)
+    (list :cols :gap tile-gap
+      0.78 (eseq.seq-step-tabs/seq-main-step-tile-layout-spec)
+      0.22 (if (procs/showing?)
+        (processes-dock-layout-spec)
+        (list :rows :gap tile-gap
+          0.48 (list :buf "*step*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-width 28 :max-width 28)
+          0.52 (list :buf "*track*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :max-height (track-tile-height) :min-height (track-tile-height) :min-width 28 :max-width 28))))))
 
 ;; *track* is a fixed 7 rows; the scale editor needs 13 while it is open.
 (def track-tile-height ()
