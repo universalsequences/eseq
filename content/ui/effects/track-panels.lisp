@@ -419,9 +419,6 @@
   (let ((t selection.track))
     (box :debug-name "track-plocks-panel" :padding 0.72
       (v-stack :gap 0.30
-        (if t
-          (label "parameter locks" :height 1 :bg :transparent :color :dim :font-size 8)
-          )
         (if (and t (> (len selection.steps) 0))
           (plock-selection-bar)
           (box :height 0))
