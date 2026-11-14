@@ -126,8 +126,7 @@
     (set! rack-panel-view.views '())
     (set! collapsed-devices.keys '())))
 
-;; The effect panels folded to a thin strip (the header's – button, or a
-;; double-click on its title bar),
+;; The effect panels folded to a thin strip (the header's – button),
 ;; by each panel dict's :collapse-key (eseq.effects.panel-data): the device's
 ;; stable identity, so a fold follows its effect through a reorder.
 (def-kind collapsed-devices

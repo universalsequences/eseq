@@ -69,7 +69,7 @@ Each effect in the device panel has a header strip across its top. From left to 
 
 ![Str8 Delay in a track chain. The header holds the enable dot, the name, mods and the ••• menu; the panel below holds the effect's own controls.](images/delay.png)
 
-To save room in a long chain, **collapse** an effect: click the **–** button in its header, or double-click the header. The panel folds to a thin strip that keeps the enable dot, with the **–** button under it, and shows the name down its length. The effect keeps processing; only its controls are hidden. The strip still selects, drags and takes drops like a header, and the **–** button or a double-click on the name unfolds the panel. Collapsing is a view setting for the session: it is not saved with the project.
+To save room in a long chain, **collapse** an effect: click the **–** button in its header. The panel folds to a thin strip that keeps the enable dot, with the **–** button under it, and shows the name down its length. The effect keeps processing; only its controls are hidden. The strip still selects, drags and takes drops like a header, and its **–** button unfolds the panel. Collapsing is a view setting for the session: it is not saved with the project.
 
 Below the header each effect draws its own panel. Many built-ins have custom displays, such as the Str8 Delay filter curve, the compressor meter and the EQ8 response.
 

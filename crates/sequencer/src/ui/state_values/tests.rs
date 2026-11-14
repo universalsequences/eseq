@@ -32446,9 +32446,9 @@ use panel_kinds_seed::*;
         let strip = find_layout_node_by_debug_name(&layout, "audio-fx-panel-collapsed")
             .expect("folded strip should render");
         assert_finite_nonzero_rect(strip, "folded strip");
-        let name = find_layout_node_by_debug_name(&layout, "fx-collapsed-title")
-            .expect("folded strip should show the name");
-        assert!(name.props.contains_key("on-double-click"));
+        // A click on the strip selects the effect; only the button folds.
+        assert!(strip.props.contains_key("on-click"));
+        assert!(!strip.props.contains_key("on-double-click"));
         assert!(layout_contains_debug_name(&layout, "fx-collapse-button"));
         assert!(
             !layout_contains_debug_name(&layout, "audio-fx-panel-header")

@@ -125,24 +125,26 @@
         (fx-copy-values-to-all-scenes fx)))))
 
 ;; The header's fold button, beside the ••• menu: folds the panel to its
-;; thin strip (a double-click on the header does the same).
+;; thin strip, and unfolds it from the strip. The only fold gesture: a click
+;; on the header (or the strip) selects the effect.
 (def fx-toggle-collapsed (fx)
   (st/toggle-device-collapsed! (get fx :collapse-key)))
 
 (defwidget fx-collapse-icon
-  :width 1.85 :height 1.0
+  ;; The enable dot's size (ep/fx-enabled-dot).
+  :width 1.55 :height 1.0
   :paint-margin 0.1
   :shader
   (sdf/layer
-    (sdf/fill (sdf/circle 1.0)
+    (sdf/fill (sdf/circle 0.86)
       (material :color :mixer-control-bg))
-    (sdf/fill (sdf/rounded-rect 0.54 0.10 0.045)
+    (sdf/fill (sdf/rounded-rect 0.46 0.09 0.04)
       (material :color :fg))))
 
 (def fx-collapse-button (fx)
   (box :key (str "fx-collapse-" (get fx :collapse-key))
     :debug-name "fx-collapse-button"
-    :width 1.85 :height 0.99 :padding 0 :h-align :center :v-align :center
+    :width 1.55 :height 0.99 :padding 0 :h-align :center :v-align :center
     (v-stack :gap 0 :align :center
       (fx-collapse-icon
         :on-click |x y r| (fx-toggle-collapsed fx)))))
@@ -273,7 +275,7 @@
 
 ;; A folded effect panel's content: the enable dot and the fold button in
 ;; its double-height header, then the name down the strip. The whole strip
-;; is the header: it selects and drags, and a double-click on the name
+;; is the header: it selects (for delete, copy) and drags; the fold button
 ;; unfolds it.
 (def fx-collapsed-strip (title params fx)
   (box :width :fill :height :fill :padding 0 :v-align :start :h-align :center
@@ -287,12 +289,8 @@
       (ep/enabled-toggle (ep/enabled-param params) fx (fx-enabled-toggle-key fx))
       (box :width :fill :height 1 :padding 0 :h-align :center :v-align :center
         (fx-collapse-button fx))
-      ;; A double-click on the name unfolds (not on the controls above it).
-      (box :debug-name "fx-collapsed-title"
-        :width :fill :height (- st/fx-fixed-panel-height 2.1)
-        :padding 0.25 :v-align :start :h-align :center
-        :on-double-click (lambda (info) (fx-toggle-collapsed fx))
-        (fx-collapsed-title title)))))
+      (box :width 0.1 :height 0.25)
+      (fx-collapsed-title title))))
 
 (def fx-panel-header (title params fx)
   (box :width :fill :height 1 :padding 0 :v-align :center :h-align :start
@@ -303,16 +301,11 @@
     (h-stack :gap 0.5 :align :center :width :fill
       (fx-panel-header-leading-spacer)
       (ep/enabled-toggle (ep/enabled-param params) fx (fx-enabled-toggle-key fx))
-      ;; Ableton's fold: double-click the title bar. The handler sits on the
-      ;; title and the empty bar only, so two quick clicks on a control (the
-      ;; enable dot, the fold button) never fold the panel.
-      (label title :v-align :center :font-size 11 :color :fg :bg :transparent
-        :on-double-click (lambda (info) (fx-toggle-collapsed fx)))
+      (label title :v-align :center :font-size 11 :color :fg :bg :transparent)
       (if (pc/fx-has-modulators? fx)
         (ep/effect-mods-toggle-button fx)
         (box))
-      (box :flex 1 :height 0.9
-        :on-double-click (lambda (info) (fx-toggle-collapsed fx)))
+      (box :flex 1 :height 0.15)
       (fx-collapse-button fx)
       (if (get fx :rack-fx) (box) (fx-header-actions-menu fx title))
       (box :width 0.1 :height 0.2))))
