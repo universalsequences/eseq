@@ -1278,6 +1278,14 @@ pub struct App {
     /// during a coalescing drag records its pool pattern here and the
     /// gesture end re-preflights once, instead of per drag frame.
     pub(crate) pending_song_row_invalidation: Option<(usize, crate::sequencer::PatternId)>,
+    /// An open device-value drag has written values the scheduler snapshot
+    /// does not hold yet. Sounding voices hear a drag through the direct
+    /// engine push, but a sequenced trigger resolves its params from the
+    /// snapshot, so the event loop republishes it at a bounded rate
+    /// (`edit::publish_open_gesture_device_values`) instead of only when the
+    /// gesture ends.
+    pub(crate) gesture_scheduler_publish_pending: bool,
+    pub(crate) last_gesture_scheduler_publish: Option<Instant>,
     /// An in-flight drag whose writes go straight to state, committed as one
     /// history entry when its gesture finishes: a process lane slider drag
     /// (the scene structure captured before its first write, see
@@ -3268,6 +3276,8 @@ impl App {
             song_held_sources: Vec::new(),
             sound_binding_monitored: Vec::new(),
             pending_song_row_invalidation: None,
+            gesture_scheduler_publish_pending: false,
+            last_gesture_scheduler_publish: None,
             pending_drag: None,
             history_replays: 0,
             focus_step_edits: 0,

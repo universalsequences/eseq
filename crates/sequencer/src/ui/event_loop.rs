@@ -1631,6 +1631,8 @@ pub(crate) fn run_event_loop(
         } else if !pointer_is_down {
             app::edit::finish_active_gesture_if_idle(&mut app);
         }
+        // A drag still held: sequenced triggers hear it from the snapshot.
+        app::edit::publish_open_gesture_device_values(&mut app);
         ui_loop_stats.note_host_commands(host_commands_started.elapsed());
 
         if let Some(completed_load) =

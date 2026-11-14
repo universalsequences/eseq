@@ -8247,6 +8247,10 @@ fn apply_recorded_device_value_commands(
         if patch.before.bit_exact_eq(&patch.after)
             && app.history.discard_active_gesture_entry(&key)
         {
+            // The drag came back to where it began and its gesture is gone,
+            // so no release will publish: a value published mid-drag would
+            // otherwise stay in the scheduler snapshot.
+            app.gesture_scheduler_publish_pending = true;
             return Ok(EditOutcome::NoOp);
         }
         ensure_coalescing_gesture(app, &key);
@@ -8259,6 +8263,7 @@ fn apply_recorded_device_value_commands(
                 retained_bytes,
             )
             .ok_or(EditError::UnsupportedCommand)?;
+        app.gesture_scheduler_publish_pending = true;
         return Ok(EditOutcome::Applied(history_move));
     }
     finish_active_gesture(app);
@@ -11950,10 +11955,36 @@ fn finish_gesture_entry(app: &mut App) -> Option<super::history::ActiveGesture> 
         .and_then(|gesture| app.history.active_gesture_patch(&gesture.merge_key))
         .is_some_and(pending_gesture_publishes_scheduler);
     let finished_gesture = app.history.finish_active_gesture();
-    if finished_gesture.is_some() && publish_scheduler {
-        app.state.publish_scheduler_snapshot();
+    if finished_gesture.is_some() {
+        if publish_scheduler {
+            app.state.publish_scheduler_snapshot();
+        }
+        app.gesture_scheduler_publish_pending = false;
     }
     finished_gesture
+}
+
+/// The shortest gap between two scheduler publishes of one open drag.
+const GESTURE_SCHEDULER_PUBLISH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(40);
+
+/// Let sequenced triggers hear an open device-value drag: republish the
+/// scheduler snapshot when the drag has written since the last publish, at
+/// most once per [`GESTURE_SCHEDULER_PUBLISH_INTERVAL`]. The gesture end
+/// still publishes the final values (`finish_gesture_entry`). Returns whether
+/// it published.
+pub fn publish_open_gesture_device_values(app: &mut App) -> bool {
+    if !app.gesture_scheduler_publish_pending
+        || app
+            .last_gesture_scheduler_publish
+            .is_some_and(|at| at.elapsed() < GESTURE_SCHEDULER_PUBLISH_INTERVAL)
+    {
+        return false;
+    }
+    app.gesture_scheduler_publish_pending = false;
+    app.last_gesture_scheduler_publish = Some(Instant::now());
+    app.state.publish_scheduler_snapshot();
+    true
 }
 
 /// Apply `cmd` as an undo entry of its own while leaving the active gesture
@@ -13234,6 +13265,82 @@ mod tests {
             );
             assert_eq!(data.effect_slots[0].defaults.get(2).copied(), Some(900.0));
         });
+    }
+
+    #[test]
+    fn open_device_value_drag_reaches_the_scheduler_snapshot_before_release() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        state.pattern.effect_chains[0][0].apply_descriptor(&descriptor, 7);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.effect_descriptors = vec![vec![descriptor]];
+        app.state.publish_scheduler_snapshot();
+        let scheduled_cutoff = |app: &App| {
+            app.state.latest_scheduler_snapshot().tracks[0].effect_slots[0]
+                .defaults
+                .get(2)
+                .copied()
+        };
+        let drag = |app: &mut App, cutoff: f32| {
+            let outcome = apply_coalesced_device_value_batch(
+                app,
+                &[AppCommand::SetEffectParam {
+                    track: 0,
+                    slot_idx: 0,
+                    param_idx: 2,
+                    value: cutoff,
+                }],
+                "effect-cutoff",
+                "Set effect cutoff",
+            );
+            assert!(matches!(outcome, Ok(EditOutcome::Applied(_))), "{outcome:?}");
+        };
+
+        assert!(!publish_open_gesture_device_values(&mut app), "nothing is being dragged");
+        drag(&mut app, 300.0);
+        assert_ne!(scheduled_cutoff(&app), Some(300.0), "a drag event alone does not publish");
+        assert!(publish_open_gesture_device_values(&mut app));
+        assert_eq!(scheduled_cutoff(&app), Some(300.0));
+
+        // A second event inside the interval waits for it.
+        drag(&mut app, 900.0);
+        assert!(!publish_open_gesture_device_values(&mut app));
+        assert_eq!(scheduled_cutoff(&app), Some(300.0));
+        app.last_gesture_scheduler_publish = None;
+        assert!(publish_open_gesture_device_values(&mut app));
+        assert_eq!(scheduled_cutoff(&app), Some(900.0));
+
+        // The release publishes the final value and leaves nothing pending.
+        drag(&mut app, 2_400.0);
+        finish_active_gesture(&mut app);
+        assert_eq!(scheduled_cutoff(&app), Some(2_400.0));
+        app.last_gesture_scheduler_publish = None;
+        assert!(!publish_open_gesture_device_values(&mut app));
+
+        // A drag that comes back to where it began drops its gesture, so no
+        // release publishes: the value published mid-drag must not linger.
+        let start = 2_400.0;
+        drag(&mut app, 500.0);
+        app.last_gesture_scheduler_publish = None;
+        assert!(publish_open_gesture_device_values(&mut app));
+        assert_eq!(scheduled_cutoff(&app), Some(500.0));
+        let outcome = apply_coalesced_device_value_batch(
+            &mut app,
+            &[AppCommand::SetEffectParam { track: 0, slot_idx: 0, param_idx: 2, value: start }],
+            "effect-cutoff",
+            "Set effect cutoff",
+        );
+        assert!(matches!(outcome, Ok(EditOutcome::NoOp)), "{outcome:?}");
+        app.last_gesture_scheduler_publish = None;
+        assert!(publish_open_gesture_device_values(&mut app));
+        assert_eq!(scheduled_cutoff(&app), Some(start));
     }
 
     #[test]
